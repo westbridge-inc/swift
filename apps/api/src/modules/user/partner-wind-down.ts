@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { formatMoney } from '../../utils/currency-amount';
+import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
 
 /** Account closure preserves financial history. Earnings describe direct payments
  * between participants; Swift holds no balance to pay out. Open cash obligations
@@ -131,7 +132,8 @@ export async function partnerObligations(
  *  row, which every fee checkout and credit also takes first (the fee payer
  *  lock), so no checkout can start or settle between this census and cutoff.
  *  EXPIRED and NOT_PAID checkouts are final only once no further MMG check is
- *  due: a late MMG confirmation is still credited [MMG-CHECKOUT-API]. */
+ *  due and their late-reply window has closed: a late MMG reply re-arms them
+ *  and a confirmation is still credited [MMG-CHECKOUT-API, DS782]. */
 async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
   const subscriptions = await tx.subscription.findMany({
     where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },
@@ -139,10 +141,18 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
   });
   if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmount: 0 };
   const subscriptionId = { in: subscriptions.map((sub) => sub.id) };
+  const lateHorizon = new Date(Date.now() - LATE_WINDOW_MS);
   const [checkouts, payments, holds, credit] = await Promise.all([
     tx.mmgCheckoutIntent.count({ where: { subscriptionId, OR: [
       { status: { in: ['OPEN', 'CONFIRMING', 'HELD'] } },
-      { status: { in: ['EXPIRED', 'NOT_PAID'] }, nextCheckAt: { not: null } },
+      // [DS782 S2] A late MMG reply re-arms an EXPIRED or NOT_PAID checkout and
+      // a confirmation is still credited, so it is final only once no check is
+      // due AND its late-reply window has closed.
+      { status: { in: ['EXPIRED', 'NOT_PAID'] }, OR: [
+        { nextCheckAt: { not: null } },
+        { createdAt: { gt: lateHorizon } },
+        { replyAt: { gt: lateHorizon } },
+      ] },
     ] } }),
     // The weekly MMG prompt and any other fee payment not yet settled.
     tx.subscriptionPayment.count({ where: { subscriptionId, status: { in: ['PENDING', 'AUTHORIZED', 'UNKNOWN'] } } }),

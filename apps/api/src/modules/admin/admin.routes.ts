@@ -1395,7 +1395,12 @@ export async function adminRoutes(app: FastifyInstance) {
       // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
       // suspension source survives it for a later heal or payment to act on.
       const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' }, OR: [{ suspensionSource: null }, { suspensionSource: { not: 'WIND_DOWN' } }] }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
-      if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+      if (won.count === 0) {
+        // The store changed after the check above: say which way.
+        const now = await tx.vendor.findUnique({ where: { id }, select: { suspensionSource: true } });
+        if (now?.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
+        throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+      }
       return tx.vendor.findUniqueOrThrow({ where: { id } });
     });
 

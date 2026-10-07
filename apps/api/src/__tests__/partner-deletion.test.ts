@@ -412,7 +412,7 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
     } });
   }
   let mtx = 0;
-  async function checkout(subscriptionId: string, userId: string, data: { status: string; nextCheckAt?: Date | null }) {
+  async function checkout(subscriptionId: string, userId: string, data: { status: string; nextCheckAt?: Date | null; createdAt?: Date }) {
     mtx += 1;
     return app.prisma.mmgCheckoutIntent.create({ data: {
       subscriptionId, merchantTransactionId: `${String(Date.now()).slice(-13)}${String(mtx).padStart(5, '0')}`,
@@ -423,10 +423,15 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
   const refused = async (userId: string, blocker: 'FEE_PAYMENT_PENDING' | 'FEE_CREDIT') => {
     const error = await new AccountService(app).deleteAccount(userId).then(() => null, (e: unknown) => e);
     expect(error, 'deletion must be refused while fee money is unsettled').toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
-    expect((error as Error).message).toContain((BLOCKER_MESSAGE as Record<string, string>)[blocker].split('{amount}').at(-1));
+    // The fixed words after any amount the person's message fills in.
+    const words = (BLOCKER_MESSAGE as Record<string, string>)[blocker]!;
+    expect((error as Error).message).toContain(words.slice(words.indexOf('{amount}') + 1 ? words.indexOf('{amount}') + '{amount}'.length : 0));
   };
-  // A settled checkout: MMG proved it unpaid and no further check is due.
-  const settledUnpaid = { status: 'NOT_PAID', nextCheckAt: null };
+  // A settled checkout: MMG proved it unpaid, no further check is due, and its
+  // late-reply window (seven days, in which a late MMG reply can still re-arm
+  // and credit it) has closed.
+  const longAgo = new Date(Date.now() - 8 * 86_400_000);
+  const settledUnpaid = { status: 'NOT_PAID', nextCheckAt: null, createdAt: longAgo };
   const untouched = async (userId: string) =>
     expect(await app.prisma.user.findUniqueOrThrow({ where: { id: userId } })).toMatchObject({ status: 'ACTIVE', firstName: 'Part' });
   const inAnHour = new Date(Date.now() + 3_600_000);
@@ -459,8 +464,24 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
   it('a checkout MMG can no longer confirm does not block', async () => {
     const p = await makePartner(['CUSTOMER', 'MOVER']);
     const sub = await feeSubscription(p.riderId);
-    await checkout(sub.id, p.userId, { status: 'EXPIRED', nextCheckAt: null });
-    await checkout(sub.id, p.userId, { status: 'NOT_PAID', nextCheckAt: null });
+    await checkout(sub.id, p.userId, { status: 'EXPIRED', nextCheckAt: null, createdAt: longAgo });
+    await checkout(sub.id, p.userId, { status: 'NOT_PAID', nextCheckAt: null, createdAt: longAgo });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it.each(['EXPIRED', 'NOT_PAID'] as const)('a %s checkout with no check due still blocks while a late MMG reply could re-arm and credit it', async (status) => {
+    // [DS782 S2] A reply arriving after expiry re-arms the checkout and a
+    // confirmation is still credited, so "no check due" is not final.
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    const c = await checkout(sub.id, p.userId, { status, nextCheckAt: null });
+    await refused(p.userId, 'FEE_PAYMENT_PENDING');
+    await untouched(p.userId);
+    // The window runs from MMG's last reply too: an old checkout answered recently still blocks.
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: c.id }, data: { createdAt: longAgo, replyAt: new Date() } });
+    await refused(p.userId, 'FEE_PAYMENT_PENDING');
+    // Once its late-reply window has closed, it no longer blocks.
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: c.id }, data: { replyAt: longAgo } });
     await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
   });
 
