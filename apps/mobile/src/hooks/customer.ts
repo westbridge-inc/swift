@@ -935,6 +935,12 @@ export function useTipOrder(orderId: string) {
 export function useDecideSubstitution(orderId: string) {
   const qc = useQueryClient();
   return useMutation({
+    // A 409 means the swap moved on (the store withdrew it, or another device
+    // decided first): show the line as it is now instead of a stale card.
+    onError: (error: { response?: { status?: number } } | null | undefined) => {
+      if (error?.response?.status === 409) return qc.invalidateQueries({ queryKey: customerKeys.order(orderId) });
+      return undefined;
+    },
     mutationFn: ({ lineId, approve }: { lineId: string; approve: boolean }) =>
       customerApi.decideSubstitution(orderId, lineId, approve),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
