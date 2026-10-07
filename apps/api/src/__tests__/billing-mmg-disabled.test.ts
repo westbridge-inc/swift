@@ -896,7 +896,8 @@ describe('[PROD-PATH] resume ordering: on resume only the current week is billed
     // Its own fee waits alone, on a record naming the pause start, and an admin is told.
     expect((await app.prisma.platformConfig.findUnique({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${orphan}` } }))?.value).toEqual({ since: t0.toISOString() });
     expect(await feePauseHoldsBilling(app.prisma, orphan)).toBe(true);
-    expect((await feePauseStatus(app.prisma)).awaitingRepair).toBe(1);
+    // Counted for the admin: this case's two fees, one waiting (other suites' rows may wait too).
+    expect((await feePauseStatus(app.prisma, { id: { in: [orphan, other] } })).awaitingRepair).toBe(1);
     await syncMmgPauseClock(app.prisma, new Date(), ON);
     expect(await feePauseHoldsBilling(app.prisma, orphan)).toBe(true);
   });
@@ -933,7 +934,7 @@ describe('[PROD-PATH] resume ordering: on resume only the current week is billed
     expect(await feePauseHoldsBilling(app.prisma, stuck)).toBe(false);
     expect(activeOverdueMs((await clockOf(stuck))!, released)).toBe(FULL_FEE_GRACE_MS - 60_000);
     expect((await sub(stuck)).billingEnforcementDueAt).toEqual(new Date(released.getTime() + 60_000));
-    expect((await feePauseStatus(app.prisma)).awaitingRepair).toBe(0);
+    expect((await feePauseStatus(app.prisma, { id: stuck })).awaitingRepair).toBe(0);
   });
 
   it('billing that runs BEFORE the resume tick bills nothing; after it, ONE fee covers the off weeks and the current week (cash, prepaid)', async () => {

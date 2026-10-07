@@ -52,10 +52,12 @@ export const MMG_REACTIVATED_PREFIX = 'billing.mmg_pause.reactivated:';
  *  waits until a tick pauses its clock from there (see the header). */
 export const FEE_PAUSE_REPAIR_PREFIX = 'billing.mmg_pause.repair:';
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-/** Include expired trials even when the conversion job is backlogged: their
- * original due date survives conversion, so they need the same pause and
- * reactivation record before billing can collect that obligation. */
-const ENFORCED: SubscriptionStatus[] = ['TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED'];
+/** The statuses whose weekly fee falls due and is enforced: what the pause
+ * holds. NOT the operate rule (subscription/operate-gate.ts owns that): this
+ * set includes SUSPENDED, and it includes TRIAL so an expired trial whose
+ * conversion is late (its original due date survives conversion) gets the
+ * same pause and reactivation record before billing can collect it. */
+const ENFORCED: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE', 'SUSPENDED', 'TRIAL'];
 const dueWhere = (now: Date): Prisma.SubscriptionWhereInput => ({ autoRenew: true, status: { in: ENFORCED }, nextBillingDate: { lte: now } });
 
 type Tx = Prisma.TransactionClient;
