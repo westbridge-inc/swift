@@ -1,6 +1,6 @@
 import type { PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
 import { log } from '../../utils/logger';
-import { cardEnrollEnabled, cardRailKilled, cardRailV2Enabled, cardSimulatorLiveEnabled, cardSimulatorSubscriptions } from '../../utils/card-rail';
+import { cardEnrollEnabled, cardRailKilled, cardRailV2Enabled, cardSimulatorLiveEnabled, cardTestSubscriptions } from '../../utils/card-rail';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import { subscriptionPayer } from '../subscription/mover-fee-authority';
 import { weeklyFeeAmount } from './subscription-fee';
@@ -118,8 +118,9 @@ type PayableSub = Pick<Subscription, 'id' | 'status' | 'feeWaived' | 'weeklyRate
  * (an unknown platform counts only when every platform is on), a payable
  * subscription with a fee above zero, and a payer in a production tenant (the
  * store-review demo and the crawler never reach a card page, test or real).
- * [Review S2] The simulator — no real money, yet its "Approve" books a week —
- * serves only the TEST subscriptions listed in CARD_RAIL_SIMULATOR_SUBSCRIPTIONS.
+ * [Reviews S2 / S2-1] A TEST card system — the simulator or a provider's
+ * sandbox: no real money, yet an approval books a week — serves only the TEST
+ * subscriptions listed in CARD_RAIL_TEST_SUBSCRIPTIONS.
  */
 export async function cardSessionsAllowed(
   prisma: PrismaClient,
@@ -136,7 +137,7 @@ export async function cardSessionsAllowed(
     log().error({ err }, '[PT-2] the card rail configuration could not be loaded; card payment is off');
     return { allowed: false, reason: 'NO_PROVIDER' };
   }
-  if (provider.simulator && !cardSimulatorSubscriptions().has(sub.id)) return { allowed: false, reason: 'NOT_TEST_SUBSCRIPTION' };
+  if ((provider.simulator || provider.binding.environment !== 'live') && !cardTestSubscriptions().has(sub.id)) return { allowed: false, reason: 'NOT_TEST_SUBSCRIPTION' };
   const switches = await cardCheckoutPlatforms(prisma);
   const platformOn = platform === 'unknown' ? switches.ios && switches.android && switches.web : switches[platform];
   if (!platformOn) return { allowed: false, reason: 'PLATFORM_OFF' };

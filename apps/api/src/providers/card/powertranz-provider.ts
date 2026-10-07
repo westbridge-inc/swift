@@ -154,6 +154,8 @@ function httpsOrigin(raw: string, what: string): string {
 
 /** Looks like a test system: never acceptable for live money. */
 const TEST_HOST = /staging|sandbox|test|uat|dev\.|localhost/i;
+/** [Review S4] The guide's API lives under ptranz.com (sec. 2.3: staging.ptranz.com, production <TBD>.ptranz.com). */
+const PTRANZ_HOST = /^(?:[a-z0-9-]+\.)*ptranz\.com$/i;
 
 export function powerTranzConfigFromEnv(env: Record<string, string | undefined> = process.env): PowerTranzConfig {
   const environment = env['CARD_RAIL_ENVIRONMENT'];
@@ -163,6 +165,11 @@ export function powerTranzConfigFromEnv(env: Record<string, string | undefined> 
   if (isProduction(env) && environment !== 'live') {
     throw new PowerTranzConfigError('Production takes real cards only: CARD_RAIL_ENVIRONMENT must be live');
   }
+  // [Review S3] Live cards run only on the production server: a test server
+  // never charges real cards, whatever it is told.
+  if (environment === 'live' && !isProduction(env)) {
+    throw new PowerTranzConfigError('Live cards run only on the production server: CARD_RAIL_ENVIRONMENT must be sandbox here');
+  }
   const account = env['CARD_RAIL_ACCOUNT'] ?? '';
   if (!ACCOUNT_LABEL.test(account)) {
     throw new PowerTranzConfigError('CARD_RAIL_ACCOUNT must be a short label (letters, digits, dot, dash, underscore; at most 64)');
@@ -170,6 +177,9 @@ export function powerTranzConfigFromEnv(env: Record<string, string | undefined> 
   const rawRoot = env['POWERTRANZ_API_URL'] || (environment === 'sandbox' ? POWERTRANZ_SANDBOX_ROOT : '');
   if (!rawRoot) throw new PowerTranzConfigError('POWERTRANZ_API_URL is required for live cards (the guide gives production its own address, sec. 2.3)');
   const apiRoot = httpsOrigin(rawRoot, 'POWERTRANZ_API_URL');
+  if (!PTRANZ_HOST.test(new URL(apiRoot).hostname)) {
+    throw new PowerTranzConfigError('POWERTRANZ_API_URL must be the card provider\'s own address (a ptranz.com host, sec. 2.3)');
+  }
   if (environment === 'live' && TEST_HOST.test(apiRoot)) {
     throw new PowerTranzConfigError('POWERTRANZ_API_URL points at a test system, but CARD_RAIL_ENVIRONMENT is live');
   }
@@ -323,7 +333,9 @@ export function serverAuthentication(json: Record<string, unknown>): { authentic
   const rm = isObject(json['RiskManagement']) ? json['RiskManagement'] : null;
   const tds = rm && isObject(rm['ThreeDSecure']) ? rm['ThreeDSecure'] : null;
   const status = str(tds?.['AuthenticationStatus']);
-  const eci = str(tds?.['Eci'])?.trim();
+  // [Review S4] An ECI may arrive as a number (5) or text ("05").
+  const rawEci = tds?.['Eci'];
+  const eci = typeof rawEci === 'number' && Number.isInteger(rawEci) ? String(rawEci).padStart(2, '0') : str(rawEci)?.trim();
   if (status !== 'Y' && status !== 'A') return { authenticated: false, note: `SERVER_3DS_${status ?? 'ABSENT'}` };
   if (eci !== undefined && UNAUTHENTICATED_ECI.has(eci)) return { authenticated: false, note: `SERVER_ECI_${eci}` };
   return { authenticated: true, note: `SERVER_3DS_${status}` };
@@ -343,45 +355,56 @@ function errorCodes(json: Record<string, unknown>): string[] {
 export type CompletionReading =
   | { status: 'succeeded'; amountMinor: number; currencyCode: string }
   | { status: 'failed'; reason: string }
-  | { status: 'unknown'; reason: string };
+  /** [Review S2-2] Money may have been taken (an approval, or an answer that
+   *  may be one) and Swift cannot book it: it is voided at once (sec. 5.2,
+   *  7.6 — before the Sale settles, sec. 7.4), or held for a person. */
+  | { status: 'unbookable'; reason: string };
+
+/** What Swift asked for, to check an approval against. */
+export interface HeldCompletion { txnId: string; orderId: string; amountMinor: number; currencyCode: string }
 
 /**
  * The completion answer (sec. 6, 7.3, Appendix 1), read for money:
- *   - Approved true AND IsoResponseCode "00" AND naming THIS transaction AND
- *     its own 3-D Secure fields proving authentication (serverAuthentication)
- *     AND a readable amount and currency: succeeded (the service still
- *     compares the amount with its price and HOLDS a difference);
- *   - Approved true with anything else: unknown (money may have moved; a
- *     person looks — never booked, never dropped);
- *   - Approved false: failed, UNLESS the code says the call may have been a
- *     duplicate or the outcome is not the bank's (timeouts, system errors):
- *     unknown;
- *   - no Approved flag: unknown.
+ *   - succeeded ONLY on Approved true AND IsoResponseCode "00" AND naming THIS
+ *     page (its TransactionIdentifier — ours or as the original —, its
+ *     OrderIdentifier SWIFT-<session>, and TransactionType 2, a Sale, sec. 6)
+ *     AND its own 3-D Secure proof (serverAuthentication) AND exactly the
+ *     amount and currency Swift asked for;
+ *   - any other approval, a contradictory answer (Approved false with "00"),
+ *     a possible duplicate (787 / 788 / 387), a code that is not the bank's
+ *     answer (timeouts, system errors), or no Approved flag at all: money may
+ *     have been taken that cannot be booked — unbookable (void it);
+ *   - Approved false with any other code: the bank declined — failed.
  */
-export function readCompletion(json: unknown, held: { txnId: string }): CompletionReading {
-  if (!isObject(json)) return { status: 'unknown', reason: 'COMPLETION_UNREADABLE' };
+export function readCompletion(json: unknown, held: HeldCompletion): CompletionReading {
+  const unbookable = (reason: string): CompletionReading => ({ status: 'unbookable', reason });
+  if (!isObject(json)) return unbookable('COMPLETION_UNREADABLE');
   const approved = json['Approved'];
   const iso = str(json['IsoResponseCode']) ?? '';
   const codes = errorCodes(json);
   if (approved === true) {
-    if (iso !== '00') return { status: 'unknown', reason: `APPROVED_WITH_${iso || 'NO_CODE'}` };
+    if (iso !== '00') return unbookable(`APPROVED_WITH_${iso || 'NO_CODE'}`);
+    const mine = held.txnId.toLowerCase();
     const txn = str(json['TransactionIdentifier'])?.toLowerCase();
     const original = str(json['OriginalTrxnIdentifier'])?.toLowerCase();
-    const mine = held.txnId.toLowerCase();
-    if (txn !== undefined && txn !== mine && original !== mine) return { status: 'unknown', reason: 'APPROVAL_NAMES_ANOTHER_TRANSACTION' };
+    if (txn !== mine && original !== mine) return unbookable('APPROVAL_DOES_NOT_NAME_THIS_TRANSACTION');
+    if (str(json['OrderIdentifier'])?.trim() !== held.orderId) return unbookable('APPROVAL_DOES_NOT_NAME_THIS_ORDER');
+    if (String(json['TransactionType'] ?? '') !== '2') return unbookable('APPROVAL_IS_NOT_A_SALE');
     const auth = serverAuthentication(json);
-    if (!auth.authenticated) return { status: 'unknown', reason: `APPROVED_UNAUTHENTICATED_${auth.note}` };
+    if (!auth.authenticated) return unbookable(`APPROVED_UNAUTHENTICATED_${auth.note}`);
     const currencyCode = alphaOfCurrency(json['CurrencyCode']);
     const amountMinor = currencyCode ? minorOfTotalAmount(json['TotalAmount'], currencyCode) : null;
-    if (!currencyCode || amountMinor === null) return { status: 'unknown', reason: 'APPROVED_AMOUNT_UNREADABLE' };
+    if (!currencyCode || amountMinor === null) return unbookable('APPROVED_AMOUNT_UNREADABLE');
+    if (amountMinor !== held.amountMinor || currencyCode !== held.currencyCode) return unbookable('APPROVED_AMOUNT_MISMATCH');
     return { status: 'succeeded', amountMinor, currencyCode };
   }
   if (approved === false) {
-    if (codes.some((c) => DUPLICATE_CODES.has(c))) return { status: 'unknown', reason: `POSSIBLE_DUPLICATE_${codes.join('_')}` };
-    if (AMBIGUOUS_ISO.has(iso)) return { status: 'unknown', reason: `NOT_THE_BANKS_ANSWER_${iso}` };
+    if (iso === '00') return unbookable('DECLINED_WITH_APPROVAL_CODE');
+    if (codes.some((c) => DUPLICATE_CODES.has(c))) return unbookable(`POSSIBLE_DUPLICATE_${codes.join('_')}`);
+    if (AMBIGUOUS_ISO.has(iso)) return unbookable(`NOT_THE_BANKS_ANSWER_${iso}`);
     return { status: 'failed', reason: `DECLINED_${iso || 'NO_CODE'}${codes.length ? `_${codes.join('_')}` : ''}` };
   }
-  return { status: 'unknown', reason: 'NO_APPROVED_FLAG' };
+  return unbookable('NO_APPROVED_FLAG');
 }
 
 // ---------------------------------------------------------------------------
@@ -526,13 +549,21 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
       return { status: 'failed', reason: `NOT_PREPROCESSED_${str(json['IsoResponseCode']) ?? 'NO_CODE'}${errorCodes(json).length ? `_${errorCodes(json).join('_')}` : ''}`, rawSha256 };
     }
     const k = this.key.session(providerSessionRef);
-    await this.redis.hset(k, {
-      sessionRef: input.sessionRef, purpose: input.purpose, txnId, orderId,
-      amountMinor: String(input.amountMinor), currencyCode,
-      expiresAtMs: String(input.expiresAt.getTime()), createdAtMs: String(this.now().getTime()),
-      spiToken, redirectData,
-    });
-    await this.redis.pexpireat(k, input.expiresAt.getTime() + RECORD_RETAIN_MS);
+    try {
+      await this.redis.hset(k, {
+        sessionRef: input.sessionRef, purpose: input.purpose, txnId, orderId,
+        amountMinor: String(input.amountMinor), currencyCode,
+        expiresAtMs: String(input.expiresAt.getTime()), createdAtMs: String(this.now().getTime()),
+        spiToken, redirectData,
+      });
+      await this.redis.pexpireat(k, input.expiresAt.getTime() + RECORD_RETAIN_MS);
+    } catch {
+      // [Review S4] The page could not be kept: its SpiToken is gone, so Swift
+      // can never send the completion — and until it does, nothing is
+      // authorized and no funds are held (sec. 7.3). Definitively no page.
+      await this.redis.del(k).catch(() => 0);
+      return { status: 'failed', reason: 'PAGE_NOT_KEPT', rawSha256 };
+    }
     return { status: 'succeeded', providerSessionRef, hostedUrl: this.hostedUrlFor(providerSessionRef), rawSha256 };
   }
 
@@ -596,7 +627,9 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
       if (rec['purpose'] !== input.purpose) return { status: 'failed', reason: 'PURPOSE_MISMATCH', rawSha256: digest({ purpose: rec['purpose'] }) };
       if (rec['completion'] === 'done') return this.outcomeOf(rec);
       if (rec['completion'] === 'sending') {
-        return { status: 'unknown', reason: 'COMPLETION_SENT_ANSWER_LOST', rawSha256: digest({ completion: 'sending' }) };
+        // Sent, and its answer never recorded (a crash mid-call): money may
+        // have been taken. Never sent again; voided by the service.
+        return { status: 'unknown', reason: 'COMPLETION_SENT_ANSWER_LOST', voidable: { providerRef: rec['txnId'] ?? '' }, rawSha256: digest({ completion: 'sending' }) };
       }
       if (rec['completion'] === 'abandoned') return { status: 'failed', reason: rec['abandonReason'] || 'NOT_COMPLETED', rawSha256: digest({ completion: 'abandoned', why: rec['abandonReason'] }) };
 
@@ -608,6 +641,12 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
           return { status: 'failed', reason: 'PAGE_NOT_FINISHED', rawSha256: digest({ completion: 'abandoned', why: 'PAGE_NOT_FINISHED' }) };
         }
         continue; // another process decided first: read its decision
+      }
+      // [Review S4] sec. 2.2 1.7: the completion must be sent within 5 minutes,
+      // after which the SpiToken is unavailable: never sent late.
+      if (now - Number(rec['returnedAtMs']) > SPI_TOKEN_LIFETIME_MS) {
+        if (await this.abandon(k, 'SPI_TOKEN_EXPIRED')) return { status: 'failed', reason: 'SPI_TOKEN_EXPIRED', rawSha256: digest({ completion: 'abandoned', why: 'SPI_TOKEN_EXPIRED' }) };
+        continue;
       }
       if (rec['authDecision'] !== 'proceed') {
         const why = `NOT_AUTHENTICATED:${rec['authNote'] ?? ''}`;
@@ -642,19 +681,24 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
     });
     let reading: CompletionReading;
     let rawSha256: string;
+    const held: HeldCompletion = {
+      txnId: rec['txnId'] ?? '', orderId: rec['orderId'] ?? '', amountMinor: Number(rec['amountMinor']), currencyCode: rec['currencyCode'] ?? '',
+    };
     if (answer.shape === 'json') {
       rawSha256 = blindedDigest(answer.json);
       reading = answer.status >= 500 || answer.status === 408 || answer.status === 429
-        ? { status: 'unknown', reason: `HTTP_${answer.status}` }
+        ? { status: 'unbookable', reason: `COMPLETION_HTTP_${answer.status}` }
         : answer.status >= 400 && !isObject(answer.json)
           ? { status: 'failed', reason: `HTTP_${answer.status}` }
-          : readCompletion(answer.json, { txnId: rec['txnId'] ?? '' });
+          : readCompletion(answer.json, held);
     } else if (answer.shape === 'http' && answer.status >= 400 && answer.status < 500 && answer.status !== 408 && answer.status !== 429) {
       rawSha256 = rawDigest({ completionHttp: answer.status });
       reading = { status: 'failed', reason: `HTTP_${answer.status}` };
     } else {
-      // No answer, or an answer that cannot be read: the bank may have taken it. Never repeated.
-      return { status: 'unknown', reason: answer.shape === 'transport' ? `COMPLETION_${answer.reason.toUpperCase()}` : 'COMPLETION_UNREADABLE', rawSha256: rawDigest({ completion: answer.shape }) };
+      // No answer, or an answer that cannot be read: the bank may have taken
+      // it. Never repeated; recorded so every later read asks for the void.
+      rawSha256 = rawDigest({ completion: answer.shape });
+      reading = { status: 'unbookable', reason: answer.shape === 'transport' ? `COMPLETION_${answer.reason.toUpperCase()}` : 'COMPLETION_UNREADABLE' };
     }
     await this.redis.hset(k, { completion: 'done', result: JSON.stringify({ ...reading, rawSha256 }), completedAtMs: String(this.now().getTime()) });
     await this.redis.hdel(k, 'spiToken', 'redirectData');
@@ -675,8 +719,10 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
         return { status: 'succeeded', purpose: 'PAY_NOW', providerRef: rec['txnId'] ?? '', amountMinor: stored.amountMinor, currencyCode: stored.currencyCode, rawSha256 };
       case 'failed':
         return { status: 'failed', reason: stored.reason, rawSha256 };
+      case 'unbookable':
+        return { status: 'unknown', reason: stored.reason, voidable: { providerRef: rec['txnId'] ?? '' }, rawSha256 };
       default:
-        return { status: 'unknown', reason: stored.reason, rawSha256 };
+        return { status: 'unknown', reason: (stored as { reason?: string }).reason ?? 'COMPLETION_RECORD_UNREADABLE', rawSha256 };
     }
   }
 
@@ -711,17 +757,30 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
       TransactionIdentifier: input.providerRef,                          // sec. 5.2: of the ORIGINAL transaction
       TotalAmount: totalAmountOf(input.amountMinor, input.currencyCode), // sec. 5.2: required for refund
       CurrencyCode: CURRENCY_NUMERIC[input.currencyCode],                // sec. 7.5 example
-    });
+    }, { ref: input.providerRef, amountMinor: input.amountMinor, currencyCode: input.currencyCode });
   }
 
   /** sec. 5.2, 7.6: cancel an approved payment before it settles — the whole amount only ("partial voids are not supported"). */
   async voidPayment(input: { binding: CardRailBinding; providerRef: string; idempotencyKey: string }): Promise<CardRefundOutcome> {
     assertBinding(this.binding, input.binding);
     if (!GUID.test(input.providerRef)) return { status: 'failed', reason: 'VOID_REQUEST_INVALID', rawSha256: rawDigest({ refused: 'void' }) };
-    return this.adjust('void', input.idempotencyKey, { TransactionIdentifier: input.providerRef });
+    return this.adjust('void', input.idempotencyKey, { TransactionIdentifier: input.providerRef }, { ref: input.providerRef });
   }
 
-  private async adjust(action: 'refund' | 'void', idempotencyKey: string, body: Record<string, unknown>): Promise<CardRefundOutcome> {
+  /**
+   * One void or refund call per key. [Review S2-2 · S3] An approval counts
+   * only when it is about THIS transaction: the answer names it (as the
+   * original, or as itself — sec. 6 OriginalTrxnIdentifier / sec. 7.6), its
+   * TransactionType is a Void (4) or a Refund (5) (sec. 6), and a refund's
+   * TotalAmount is the amount asked. Anything else is unknown, never done:
+   * a void that "succeeded" closes the payment as not taken.
+   */
+  private async adjust(
+    action: 'refund' | 'void',
+    idempotencyKey: string,
+    body: Record<string, unknown>,
+    expect: { ref: string; amountMinor?: number; currencyCode?: string },
+  ): Promise<CardRefundOutcome> {
     const k = this.key.refund(`${action}:${idempotencyKey}`);
     if (Number(await this.redis.hsetnx(k, 'state', 'sending')) !== 1) {
       const rec = await this.redis.hgetall(k);
@@ -738,7 +797,15 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
       const iso = str(json['IsoResponseCode']) ?? '';
       const codes = errorCodes(json);
       if (json['Approved'] === true && iso === '00') {
-        outcome = { status: 'succeeded', providerRef: str(json['TransactionIdentifier']) ?? '', rawSha256 };
+        const mine = expect.ref.toLowerCase();
+        const namesIt = str(json['OriginalTrxnIdentifier'])?.toLowerCase() === mine || str(json['TransactionIdentifier'])?.toLowerCase() === mine;
+        const typeIt = String(json['TransactionType'] ?? '') === (action === 'void' ? '4' : '5');
+        const amountIt = action === 'void' || (expect.currencyCode !== undefined
+          && alphaOfCurrency(json['CurrencyCode']) === expect.currencyCode
+          && minorOfTotalAmount(json['TotalAmount'], expect.currencyCode) === expect.amountMinor);
+        outcome = namesIt && typeIt && amountIt
+          ? { status: 'succeeded', providerRef: str(json['TransactionIdentifier']) ?? '', rawSha256 }
+          : { status: 'unknown', reason: `${action.toUpperCase()}_APPROVAL_NOT_FOR_THIS_${!namesIt ? 'TRANSACTION' : !typeIt ? 'TYPE' : 'AMOUNT'}`, rawSha256 };
       } else if (json['Approved'] === false && !AMBIGUOUS_ISO.has(iso) && !codes.some((c) => DUPLICATE_CODES.has(c))) {
         outcome = { status: 'failed', reason: `${action.toUpperCase()}_REFUSED_${iso || 'NO_CODE'}${codes.length ? `_${codes.join('_')}` : ''}`, rawSha256 };
       } else {
