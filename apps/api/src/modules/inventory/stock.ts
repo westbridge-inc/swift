@@ -1,4 +1,4 @@
-import type { Prisma, StockMovementReason } from '@prisma/client';
+import { Prisma, type StockMovementReason } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
@@ -207,5 +207,134 @@ export async function recordOpeningBalance(
       actorId: actorId ?? null,
       note: 'Stock on hand when the item was created',
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// [POS-SYNC] THE SAME WRITER, FOR A BATCH.
+//
+// A till export can change thousands of counts at once. Done one item at a
+// time (4–5 statements each) the store's lock was held for as long as that
+// took, and a checkout waiting on the same lock timed out. These are the set
+// versions of the two writes above: one UPDATE moves every counter and one
+// INSERT writes every ledger row, in the caller's transaction, so the counter
+// and the ledger still move together and the single-writer rule still holds —
+// they live here, in the one file allowed to move the counter.
+// ---------------------------------------------------------------------------
+
+/**
+ * Lock items in ONE order — by id — before moving more than one of them.
+ *
+ * Two transactions that each move several items deadlock when they take the
+ * same rows in different orders (a cancel restocking lines B then A while a
+ * till sync holds A and waits for B). Every path that moves several items
+ * takes their locks through here first, so all of them queue the same way.
+ */
+export async function lockItemsInIdOrder(tx: Prisma.TransactionClient, itemIds: Array<string | null | undefined>): Promise<void> {
+  const ids = [...new Set(itemIds.filter((id): id is string => !!id))].sort();
+  if (ids.length === 0) return;
+  await tx.$queryRaw`SELECT id FROM "items" WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
+}
+
+export interface StockBatchEntry {
+  itemId: string;
+  /** Signed, as for applyStockMovement. */
+  delta: number;
+}
+
+/**
+ * Move many counters and write their ledger rows: one UPDATE, one INSERT.
+ *
+ * MUST run inside the caller's transaction, after the caller has locked the
+ * rows and computed each delta from the locked counts. The same guard as the
+ * single move holds for every row (an untracked item is never moved; no
+ * counter goes below zero) — and if ANY row fails it, the whole batch throws
+ * and the caller's transaction unwinds: a batch is all or nothing.
+ *
+ * Returns each moved item's balance after the move.
+ */
+export async function applyStockMovements(
+  tx: Prisma.TransactionClient,
+  input: {
+    vendorId: string;
+    tenantId: string;
+    entries: StockBatchEntry[];
+    reason: StockMovementReason;
+    actorId?: string | null;
+    note?: string | null;
+  },
+): Promise<Map<string, number>> {
+  const entries = input.entries.filter((e) => e.delta !== 0);
+  for (const e of entries) {
+    if (!Number.isInteger(e.delta)) {
+      throw new AppError(500, 'STOCK_DELTA_INVALID', `Stock delta must be a whole number (got ${e.delta})`);
+    }
+  }
+  if (entries.length === 0) return new Map();
+  if (new Set(entries.map((e) => e.itemId)).size !== entries.length) {
+    throw new AppError(500, 'STOCK_BATCH_DUPLICATE', 'A stock batch names the same item twice');
+  }
+
+  const values = Prisma.join(entries.map((e) => Prisma.sql`(${e.itemId}::text, ${e.delta}::int)`));
+  const moved = await tx.$queryRaw<Array<{ id: string; balance: number }>>`
+    UPDATE "items" AS i
+       SET "stockQuantity" = i."stockQuantity" + v.delta, "updatedAt" = now()
+      FROM (VALUES ${values}) AS v(id, delta)
+     WHERE i.id = v.id
+       AND i."vendorId" = ${input.vendorId}
+       AND i."stockQuantity" IS NOT NULL
+       AND i."stockQuantity" + v.delta >= 0
+    RETURNING i.id AS id, i."stockQuantity" AS balance`;
+  if (moved.length !== entries.length) {
+    throw new AppError(409, 'STOCK_MOVED', 'Stock changed while these counts were being saved. Nothing was saved; try again.');
+  }
+
+  const balances = new Map(moved.map((m) => [m.id, Number(m.balance)]));
+  await tx.stockMovement.createMany({
+    data: entries.map((e) => ({
+      itemId: e.itemId,
+      delta: e.delta,
+      balanceAfter: balances.get(e.itemId)!,
+      reason: input.reason,
+      tenantId: input.tenantId,
+      actorId: input.actorId ?? null,
+      note: input.note ?? null,
+    })),
+  });
+  return balances;
+}
+
+/**
+ * Opening balances for many newly created items: one UPDATE sets the counters,
+ * one INSERT writes the OPENING_BALANCE rows. Same rule as recordOpeningBalance —
+ * the caller creates the items WITHOUT a count and this sets it — in the same
+ * transaction as the creates.
+ */
+export async function recordOpeningBalances(
+  tx: Prisma.TransactionClient,
+  input: { vendorId: string; tenantId: string; entries: Array<{ itemId: string; quantity: number }>; actorId?: string | null },
+): Promise<void> {
+  const entries = input.entries;
+  if (entries.length === 0) return;
+  const values = Prisma.join(entries.map((e) => Prisma.sql`(${e.itemId}::text, ${e.quantity}::int)`));
+  const set = await tx.$queryRaw<Array<{ id: string }>>`
+    UPDATE "items" AS i
+       SET "stockQuantity" = v.quantity, "updatedAt" = now()
+      FROM (VALUES ${values}) AS v(id, quantity)
+     WHERE i.id = v.id AND i."vendorId" = ${input.vendorId} AND v.quantity >= 0
+    RETURNING i.id AS id`;
+  if (set.length !== entries.length) {
+    throw new AppError(500, 'OPENING_BALANCE_MISMATCH', 'Opening balances did not match the items created');
+  }
+  await tx.stockMovement.createMany({
+    data: entries.map((e) => ({
+      itemId: e.itemId,
+      delta: e.quantity,
+      balanceAfter: e.quantity,
+      reason: 'OPENING_BALANCE' as const,
+      tenantId: input.tenantId,
+      actorId: input.actorId ?? null,
+      note: 'Stock on hand when the item was created',
+    })),
   });
 }

@@ -33,7 +33,11 @@ import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGI
 import { DECLARATION_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
-import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
+import {
+  applyMapping, toImportCsv, toSourceCsv, planColumns, unknownOverrideHeaders, missingForSync,
+  TillStoreChoiceError, REQUIRED_FIELDS, MAPPABLE_FIELDS, type ColumnMapping,
+} from '../../utils/catalogue-map';
+import { previewSync, confirmSync, skuKey } from '../inventory/pos-sync';
 import { scanXlsxZip, XlsxZipGuardError, XLSX_IMPORT_ZIP_BUDGET } from '../../utils/xlsx-zip-guard';
 import { parseMenuText } from '../../utils/menu-text-parse';
 import { extractMenuPdf } from '../../utils/menu-pdf-process';
@@ -280,6 +284,25 @@ const importCsvSchema = z.object({
   csv: z.string().min(1).max(2_000_000),
 });
 
+/** [POS-SYNC] How the columns are read: 'sync' (a till re-upload, matched by
+ *  SKU) or the default add-new import; a multi-store Loyverse export's store;
+ *  and any column the store chose itself in the preview ('' = not used). */
+const columnChoiceSchema = z.object({
+  mode: z.enum(['add', 'sync']).optional(),
+  tillStore: z.string().trim().min(1).max(100).optional(),
+  mapping: z.record(z.enum(MAPPABLE_FIELDS as unknown as [string, ...string[]]), z.string().max(200)).optional(),
+});
+const automapBodySchema = importCsvSchema.merge(columnChoiceSchema);
+
+const syncPreviewSchema = importCsvSchema.extend({
+  missing: z.enum(['LEAVE', 'SOLD_OUT']).default('LEAVE'),
+});
+const syncConfirmSchema = syncPreviewSchema.extend({
+  uploadId: z.string().regex(/^[A-Za-z0-9_-]{16,64}$/),
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/),
+  planDigest: z.string().regex(/^[0-9a-f]{64}$/),
+});
+
 const MAX_IMPORT_ROWS = 5000;
 // Excel-import guards (audit DS107 High #5): the zip-bomb budget lives in
 // utils/xlsx-zip-guard; these bound the workbook shape once exceljs has parsed
@@ -294,7 +317,9 @@ const csvRowSchema = z.object({
   category: z.string().trim().min(1).max(100),
   name: z.string().trim().min(1).max(150),
   description: z.string().max(2000).optional().default(''),
-  basePrice: z.coerce.number().min(0).max(10_000_000),
+  // [POS-SYNC] A blank price used to coerce to 0 and import a free item. A
+  // price is required; it is never invented.
+  basePrice: z.string().trim().min(1, 'A price is required').pipe(z.coerce.number().min(0).max(10_000_000)),
   sku: z.string().max(64).optional().default(''),
   unit: z.string().max(30).optional().default(''),
   stockQuantity: z
@@ -507,16 +532,26 @@ async function requireListingAllowed(
   verification: VerificationService,
   vendorId: string,
 ): Promise<void> {
+  if (await listingAllowed(app, verification, vendorId)) return;
+  throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
+}
+
+/** The listing gate's answer without throwing: a till sync still updates the
+ *  items a store already has, and lists the new ones as needing verification. */
+async function listingAllowed(
+  app: FastifyInstance,
+  verification: VerificationService,
+  vendorId: string,
+): Promise<boolean> {
   const vendorRecord = await app.prisma.vendor.findUniqueOrThrow({
     where: { id: vendorId },
     select: { isVerified: true, vendorType: true, status: true },
   });
   const verified = vendorRecord.isVerified
     || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
-  if (verified) return;
+  if (verified) return true;
   const draftableStatus = vendorRecord.status !== 'ACTIVE' && vendorRecord.status !== 'SUSPENDED';
-  if (process.env['PREVIEW_MODE'] === '1' && draftableStatus) return;
-  throw new AppError(403, 'VERIFICATION_REQUIRED', 'Complete document verification before listing items');
+  return process.env['PREVIEW_MODE'] === '1' && draftableStatus;
 }
 
 /** The selected store from the `x-vendor-id` header (multi-store switch). */
@@ -2579,46 +2614,75 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** Shared automap core: raw header->value rows in, confirm-ready preview out.
-   *  Never imports; only relabels columns, never invents prices (spec §4.5). */
-  async function automapRows(rows: Record<string, string>[]) {
+   *  Never imports; only relabels columns, never invents prices (spec §4.5).
+   *  [POS-SYNC] A recognised till export is read by its exact profile; the
+   *  store's own column choices go on top; `mode: 'sync'` asks only for what a
+   *  re-upload needs (a SKU, and a price or a count). `sourceCsv` (a workbook's
+   *  own columns) rides along so the store can re-map an Excel file. */
+  async function automapRows(
+    rows: Record<string, string>[],
+    choice: z.infer<typeof columnChoiceSchema>,
+    sourceCsv?: string | null,
+  ) {
     if (rows.length === 0) {
       throw new AppError(400, 'EMPTY_CSV', 'No data rows found');
     }
     const headers = Object.keys(rows[0]!);
+    const extra = sourceCsv !== undefined ? { sourceCsv } : {};
+    const unknown = unknownOverrideHeaders(headers, choice.mapping as ColumnMapping | undefined);
+    if (unknown.length > 0) {
+      throw new AppError(400, 'UNKNOWN_COLUMN', `This file has no column called "${unknown[0]}".`, { headers, ...extra });
+    }
 
-    // [NO-AI] The synonym table in `utils/catalogue-map.ts` is the whole
-    // mapper now. A model used to be asked for the columns the synonyms
-    // missed; when it cannot be asked, the honest answer is to say WHICH
-    // columns were not recognised and let the vendor rename them or use the
-    // template — which is what the 422 below already does, and which is the
-    // manual confirmation the removal requires. Nothing is guessed.
-    const mapping: ColumnMapping = guessColumnMapping(headers);
+    // [NO-AI] The synonym table and the till-export profiles in
+    // `utils/catalogue-map.ts` are the whole mapper. When a required column is
+    // not recognised the honest answer is to say WHICH, and let the vendor pick
+    // the column or use the template — the 422 below. Nothing is guessed.
+    let plan: ReturnType<typeof planColumns>;
+    try {
+      plan = planColumns(headers, { tillStore: choice.tillStore, override: choice.mapping as ColumnMapping | undefined });
+    } catch (err) {
+      if (err instanceof TillStoreChoiceError) {
+        throw new AppError(422, 'CHOOSE_TILL_STORE',
+          err.asked
+            ? `"${err.asked}" is not one of the till stores in this file. Choose one of: ${err.stores.join(', ')}.`
+            : 'This file has columns for more than one till store. Choose which one is this Swift store.',
+          { stores: err.stores, headers, ...extra });
+      }
+      throw err;
+    }
+    const mapping: ColumnMapping = plan.mapping;
 
-    const missing = REQUIRED_FIELDS.filter((f) => !mapping[f]);
+    const missing = choice.mode === 'sync' ? missingForSync(mapping) : REQUIRED_FIELDS.filter((f) => !mapping[f]);
     if (missing.length > 0) {
       throw new AppError(422, 'UNMAPPED_COLUMNS',
         `Could not map required columns (${missing.join(', ')}). Rename them or use the template.`,
-        { mapping, headers });
+        { mapping, headers, profile: plan.profile, ...extra });
     }
 
     const normalized = applyMapping(rows, mapping);
     return {
       mapping,
+      profile: plan.profile,
+      headers,
+      tillStores: plan.tillStores,
+      tillStore: plan.tillStore,
       rowCount: normalized.length,
       preview: normalized.slice(0, 10),
       normalizedCsv: toImportCsv(normalized),
+      ...extra,
     };
   }
 
   /** POST /items/import/automap — map a messy store CSV's columns to Swift
-   *  fields (a deterministic synonym table; unmapped columns go to the vendor).
-   *  Returns a preview + a canonical
-   *  CSV to confirm via POST /items/import. */
+   *  fields (a deterministic synonym table plus exact till-export profiles;
+   *  unmapped columns go to the vendor). Returns a preview + a canonical
+   *  CSV to confirm via POST /items/import or the till sync. */
   app.post('/items/import/automap', auth, async (request) => {
     await requireVendor(app, request, 'MANAGER');
-    const { csv } = importCsvSchema.parse(request.body);
-    const rows = parseCsvWithHeader(csv);
-    return { success: true, data: await automapRows(rows) };
+    const body = automapBodySchema.parse(request.body);
+    const rows = parseCsvWithHeader(body.csv);
+    return { success: true, data: await automapRows(rows, body) };
   });
 
   /** POST /items/import/xlsx — Excel upload (master plan §3.1 "CSV/Excel").
@@ -2696,6 +2760,16 @@ export async function vendorRoutes(app: FastifyInstance) {
       return text;
     };
 
+    // [POS-SYNC] A code typed as a number in a zero-padded format ("00123",
+    // a barcode) is stored as 123 and shown as 00123. Read such a cell as the
+    // digits the store sees, or the SKU loses its leading zeros and never matches.
+    const readCell = (cell: { value: unknown; numFmt?: string }): unknown => {
+      const fmt = cell.numFmt ?? '';
+      return typeof cell.value === 'number' && /^0+$/.test(fmt) && Number.isSafeInteger(cell.value) && cell.value >= 0
+        ? String(cell.value).padStart(fmt.length, '0')
+        : cell.value;
+    };
+
     const headerRow = sheet.getRow(1);
     const headers: string[] = [];
     headerRow.eachCell({ includeEmpty: false }, (cell, col) => { headers[col - 1] = cellText(cell.value, `header column ${col}`).trim(); });
@@ -2707,14 +2781,18 @@ export async function vendorRoutes(app: FastifyInstance) {
       let hasValue = false;
       headers.forEach((h, i) => {
         if (!h) return;
-        const value = cellText(row.getCell(i + 1).value, `row ${rowNumber}, column ${i + 1}`).trim();
+        const value = cellText(readCell(row.getCell(i + 1)), `row ${rowNumber}, column ${i + 1}`).trim();
         record[h] = value;
         if (value) hasValue = true;
       });
       if (hasValue) rows.push(record);
     });
 
-    return { success: true, data: await automapRows(rows) };
+    // The workbook's own columns as CSV, so the store can re-map it through
+    // the JSON automap route (when it fits that route's size cap).
+    const sourceCsv = toSourceCsv(headers.filter(Boolean), rows);
+    const choice = columnChoiceSchema.pick({ mode: true, tillStore: true }).parse(request.query ?? {});
+    return { success: true, data: await automapRows(rows, choice, sourceCsv.length <= 2_000_000 ? sourceCsv : null) };
   });
 
   /** POST /items/import/menu-parse — a restaurant's PDF menu becomes draft
@@ -2820,8 +2898,22 @@ export async function vendorRoutes(app: FastifyInstance) {
     const categories = await app.prisma.category.findMany({ where: { vendorId } });
     const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
 
+    // [POS-SYNC] This route only ADDS. A row whose SKU the store already has
+    // (trimmed, any case) used to become a second copy of that item on every
+    // re-upload; it is refused now and pointed at the update flow. Rows
+    // without a SKU cannot be checked and import as before.
+    const knownSkus = new Set(
+      (await app.prisma.item.findMany({ where: { vendorId, sku: { not: null } }, select: { sku: true } }))
+        .map((i) => skuKey(i.sku)).filter(Boolean),
+    );
+
     let imported = 0;
     for (const { rowNumber, data } of valid) {
+      const sku = skuKey(data.sku);
+      if (sku && knownSkus.has(sku)) {
+        failures.push({ row: rowNumber, errors: ['This SKU is already in your store, so it was not added again. To update items from a file, use "Import or update your items" on the web dashboard.'] });
+        continue;
+      }
       const key = data.category.toLowerCase();
       let categoryId = categoryIds.get(key);
       if (!categoryId) {
@@ -2833,23 +2925,30 @@ export async function vendorRoutes(app: FastifyInstance) {
       }
 
       try {
-        await app.prisma.item.create({
-          data: {
-            vendorId,
-            categoryId,
-            name: data.name,
-            description: data.description || undefined,
-            basePrice: data.basePrice,
-            sku: data.sku || undefined,
-            unit: data.unit || undefined,
-            stockQuantity: data.stockQuantity === '' ? undefined : data.stockQuantity,
-            isAvailable: data.isAvailable === '' ? true : data.isAvailable === 'true',
-            fulfillment: data.fulfillment === '' ? 'DELIVERY' : data.fulfillment,
-            imageUrl: data.imageUrl || undefined,
-            dietaryTags: [],
-            allergens: [],
-          },
+        // [MKT-2 · POS-SYNC F2] The count an item is born with is written by
+        // the ledger's opening balance, in the same transaction as the item —
+        // never assigned here — so the ledger explains it from day one.
+        await app.prisma.$transaction(async (tx) => {
+          const created = await tx.item.create({
+            data: {
+              vendorId,
+              categoryId,
+              name: data.name,
+              description: data.description || undefined,
+              basePrice: data.basePrice,
+              sku: data.sku || undefined,
+              unit: data.unit || undefined,
+              isAvailable: data.isAvailable === '' ? true : data.isAvailable === 'true',
+              fulfillment: data.fulfillment === '' ? 'DELIVERY' : data.fulfillment,
+              imageUrl: data.imageUrl || undefined,
+              dietaryTags: [],
+              allergens: [],
+            },
+            select: { id: true },
+          });
+          await recordOpeningBalance(tx, created.id, data.stockQuantity === '' ? null : data.stockQuantity, request.user.userId);
         });
+        if (sku) knownSkus.add(sku);
         imported += 1;
       } catch {
         failures.push({ row: rowNumber, errors: ['Database rejected this row'] });
@@ -2867,6 +2966,78 @@ export async function vendorRoutes(app: FastifyInstance) {
         failures: failures.slice(0, 100),
       },
     };
+  });
+
+  // -------------------------------------------------------------------------
+  // [POS-SYNC] Re-uploading a till export updates the store. The file arrives
+  // already relabelled (automap / xlsx with mode=sync). Preview writes nothing;
+  // confirm applies exactly what was previewed, once. See inventory/pos-sync.ts.
+  // -------------------------------------------------------------------------
+
+  /** The store a sync acts on: the caller must be its OWNER or a MANAGER, and a
+   *  store named in x-vendor-id must be one of the caller's own. (Elsewhere an
+   *  unknown x-vendor-id falls back to the caller's first store; for a sync that
+   *  would apply a file to a store nobody chose.) */
+  async function requireSyncStore(request: { user: { userId: string }; headers: Record<string, string | string[] | undefined> }) {
+    const requested = selectedVendorId(request);
+    const access = await requireVendor(app, request, 'MANAGER');
+    if (requested && access.vendorId !== requested) {
+      throw new AppError(403, 'STORE_NOT_YOURS', 'That store is not one of yours. Choose your store and upload the file again.');
+    }
+    const store = await app.prisma.vendor.findUniqueOrThrow({
+      where: { id: access.vendorId },
+      select: { id: true, name: true, tenantId: true },
+    });
+    return store;
+  }
+
+  function syncRows(csv: string) {
+    const rows = parseCsvWithHeader(csv);
+    if (rows.length === 0) {
+      throw new AppError(400, 'EMPTY_CSV', 'No data rows found in that file.');
+    }
+    if (rows.length > MAX_IMPORT_ROWS) {
+      throw new AppError(400, 'TOO_MANY_ROWS', `Import is limited to ${MAX_IMPORT_ROWS} rows per file (got ${rows.length})`);
+    }
+    if (!('sku' in rows[0]!)) {
+      throw new AppError(422, 'UNMAPPED_COLUMNS', 'This file has no SKU column, so Swift cannot match it to your items.');
+    }
+    return rows;
+  }
+
+  /** POST /items/import/sync/preview — what confirming this till export would
+   *  change, item by item. Reads only. */
+  app.post('/items/import/sync/preview', { ...auth, config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (request) => {
+    const store = await requireSyncStore(request);
+    const body = syncPreviewSchema.parse(request.body);
+    const rows = syncRows(body.csv);
+    const canAddNew = await listingAllowed(app, verification, store.id);
+    const preview = await previewSync(app.prisma, {
+      vendorId: store.id, csv: body.csv, rows, missingPolicy: body.missing, canAddNew,
+    });
+    return { success: true, data: { storeId: store.id, storeName: store.name, ...preview } };
+  });
+
+  /** POST /items/import/sync/confirm — apply the previewed till export. */
+  app.post('/items/import/sync/confirm', { ...auth, config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request) => {
+    const store = await requireSyncStore(request);
+    const body = syncConfirmSchema.parse(request.body);
+    const rows = syncRows(body.csv);
+    const canAddNew = await listingAllowed(app, verification, store.id);
+    const result = await confirmSync(app.prisma, {
+      vendorId: store.id,
+      tenantId: store.tenantId,
+      actorId: request.user.userId,
+      uploadId: body.uploadId,
+      contentHash: body.contentHash,
+      planDigest: body.planDigest,
+      csv: body.csv,
+      rows,
+      missingPolicy: body.missing,
+      canAddNew,
+    });
+    if (!result.replayed) scheduleVendorSearchSync(app, store.id);
+    return { success: true, data: { storeId: store.id, storeName: store.name, ...result } };
   });
 
   /** POST /items/:id/image — upload behind the StorageProvider interface */
@@ -3031,10 +3202,32 @@ export async function vendorRoutes(app: FastifyInstance) {
     const body = itemAvailabilitySchema.parse(request.body ?? {});
     const newAvailability = body.isAvailable !== undefined ? body.isAvailable : !existing.isAvailable;
 
-    const item = await app.prisma.item.update({
-      where: { id: request.params.id },
-      data: { isAvailable: newAvailability },
-      select: { id: true, name: true, isAvailable: true },
+    // [POS-SYNC F5] The owner's own switch always wins. It clears the engine's
+    // auto-hide marker (as the item editor does): otherwise switching off an
+    // item the engine had already hidden at zero left the marker behind, and
+    // the next restock — a till re-upload, a cancelled order — switched it
+    // back on. Each switch leaves an audit row naming who flipped it.
+    const item = await app.prisma.$transaction(async (tx) => {
+      const updated = await tx.item.update({
+        where: { id: request.params.id },
+        data: { isAvailable: newAvailability, autoHiddenAt: null },
+        select: { id: true, name: true, isAvailable: true },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId: request.user.userId,
+          action: 'ITEM_AVAILABILITY_SET',
+          entity: 'Item',
+          entityId: existing.id,
+          changes: {
+            vendorId,
+            from: existing.isAvailable,
+            to: newAvailability,
+            wasAutoHidden: existing.autoHiddenAt !== null,
+          },
+        },
+      });
+      return updated;
     });
 
     scheduleVendorSearchSync(app, vendorId);

@@ -33,6 +33,8 @@ export const TENANT_TABLES = [
   'sos_escalations',
   // [MKT-2] the stock ledger: one operator's inventory movements.
   'stock_movements',
+  // [POS-SYNC] A till export a store confirmed, walled like the store.
+  'pos_imports',
   // [R048-007] money-surface commands: one operator's decided money changes.
   'money_surface_commands',
   // [E02] MMG refund obligations and the sends that answer them, walled like their order.
@@ -243,6 +245,8 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'payout_requests', trigger: 'payout_requests_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'payout_schedules', trigger: 'payout_schedules_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'settlements', trigger: 'settlements_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+  // [POS-SYNC] one hop: an applied till export inherits the tenant of its store
+  { table: 'pos_imports', trigger: 'pos_imports_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'delivery_cash_settlements', trigger: 'delivery_cash_settlements_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [E02] an MMG refund obligation and a refund send belong to the tenant of their order
   { table: 'mmg_refund_obligations', trigger: 'mmg_refund_obligations_tenant_matches_order', parent: 'orders', fk: 'orderId' },

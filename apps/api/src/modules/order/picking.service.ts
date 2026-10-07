@@ -3,7 +3,7 @@ import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
 import { FloatService } from '../dispatch/float.service';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { applyStockMovement } from '../inventory/stock';
+import { applyStockMovement, lockItemsInIdOrder } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
 
@@ -397,6 +397,9 @@ export class PickingService {
         throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
       }
 
+      // Two items move here (the substitute off the shelf, the original back):
+      // lock them in id order first, as every multi-item stock path does.
+      await lockItemsInIdOrder(tx, [fresh.substituteItemId, fresh.itemId]);
       if (fresh.substituteItemId) {
         const sub = await tx.item.findUnique({
           where: { id: fresh.substituteItemId },
@@ -533,7 +536,7 @@ export class PickingService {
       // original is restocked twice while the substitute strands decremented
       // (possibly auto-hidden at zero) with the wrong RETURN audit row.
       const restockItemId = line.subStatus === 'APPROVED' ? line.substituteItemId : line.itemId;
-      await this.restockLine({ itemId: restockItemId, quantity: line.quantity }, subStatus.toLowerCase(), tx);
+      await this.restockLine({ itemId: restockItemId, quantity: line.quantity, orderId: line.order.id }, subStatus.toLowerCase(), tx);
       return true;
     });
     if (!closed) return false;
@@ -544,20 +547,43 @@ export class PickingService {
 
   /** Put a line's units back on the shelf (tracked items only) + log it. */
   private async restockLine(
-    line: { itemId: string | null; quantity: number },
+    line: { itemId: string | null; quantity: number; orderId: string },
     note: string,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ) {
     if (!line.itemId) return;
     // [MKT-2] Through the single writer. It no-ops on an untracked item, which
     // is the same rule the `stockQuantity: { not: null }` guard enforced here.
-    const restock = await applyStockMovement(db, {
-      itemId: line.itemId,
-      delta: line.quantity,
-      reason: 'PICK_REFUND',
-      note: `picking: ${note}`,
+    // The movement names its order, like the sale it gives back, so the units
+    // an open order still holds net to zero for this line (POS-SYNC
+    // unitsHeldByOpenOrders).
+    // [POS-SYNC · Sol S2] Only units this order actually took are given back
+    // in its name. An order placed before the item tracked stock took nothing
+    // from the count; naming it on a return would cancel another open order's
+    // hold. Whatever it did not take is still put back, as before, but not in
+    // its name. The item lock serializes this read with every stock writer.
+    await lockItemsInIdOrder(db, [line.itemId]);
+    const taken = await db.stockMovement.aggregate({
+      where: { itemId: line.itemId, orderId: line.orderId },
+      _sum: { delta: true },
     });
-    if (restock.applied) {
+    const ownUnits = Math.min(line.quantity, Math.max(0, -(taken._sum.delta ?? 0)));
+    const parts = [
+      { delta: ownUnits, orderId: line.orderId },
+      { delta: line.quantity - ownUnits, orderId: null },
+    ].filter((part) => part.delta > 0);
+    let applied = false;
+    for (const part of parts) {
+      const restock = await applyStockMovement(db, {
+        itemId: line.itemId,
+        delta: part.delta,
+        reason: 'PICK_REFUND',
+        orderId: part.orderId,
+        note: `picking: ${note}`,
+      });
+      applied = applied || restock.applied;
+    }
+    if (applied) {
       await db.item.updateMany({
         where: { id: line.itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
         data: { isAvailable: true, autoHiddenAt: null },

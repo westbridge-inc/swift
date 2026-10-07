@@ -51,7 +51,7 @@ import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
-import { applyStockMovement } from '../inventory/stock';
+import { applyStockMovement, lockItemsInIdOrder } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { newRidePin } from '../rides/ride-pin';
@@ -128,6 +128,14 @@ interface CheckoutStaged {
   orders: CheckoutCreatedOrder[];
   answer: CheckoutAnswer;
   receiptId: string | null;
+}
+
+/** Postgres gave up waiting for a row lock (`lock_timeout`, SQLSTATE 55P03). */
+function isLockTimeout(err: unknown): boolean {
+  const e = err as { code?: unknown; meta?: { code?: unknown } | null; message?: unknown } | null;
+  if (!e) return false;
+  if (e.meta?.code === '55P03' || e.code === '55P03') return true;
+  return typeof e.message === 'string' && /55P03|lock timeout/i.test(e.message);
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -1232,7 +1240,19 @@ export class OrderService {
       // availability are re-read on THIS transaction. The pre-transaction
       // checks above remain the friendly fast-fail; they authorize nothing.
       const planVendorIds = [...new Set(plans.map((p) => p.vendor.id))].sort();
-      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(planVendorIds)}) ORDER BY id FOR UPDATE`;
+      // [POS-SYNC] A store applying a till export holds this lock while it
+      // writes. The wait is bounded below this transaction's own time limit,
+      // and a store that is still busy is a plain "try again" (409), never a
+      // server error.
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      try {
+        await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(planVendorIds)}) ORDER BY id FOR UPDATE`;
+      } catch (err) {
+        if (isLockTimeout(err)) {
+          throw new AppError(409, 'STORE_BUSY', 'This store is updating its menu — try again in a moment.');
+        }
+        throw err;
+      }
       for (const planVendorId of planVendorIds) {
         const lockedVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: planVendorId },
@@ -1343,6 +1363,17 @@ export class OrderService {
       //   - [M-32] per component, by funder: goods first, then (platform code
       //     only) the delivery fee, never the tip — snapshotted on the order's
       //     redemption below, so every discounted dollar names who funds it.
+      // Every tracked item this checkout will move is locked in id order first,
+      // the order every multi-item stock path uses (lockItemsInIdOrder), so a
+      // checkout and a cancellation or a till sync can never deadlock.
+      try {
+        await lockItemsInIdOrder(tx, plans.flatMap((p) => p.orderItems.filter((oi) => oi.tracksStock).map((oi) => oi.itemId)));
+      } catch (err) {
+        if (isLockTimeout(err)) {
+          throw new AppError(409, 'STORE_BUSY', 'This store is updating its menu — try again in a moment.');
+        }
+        throw err;
+      }
       for (const [index, plan] of plans.entries()) {
         const sequence = await nextSequence();
         const pricedPlan = priced.perPlan[index]!;
@@ -1736,6 +1767,10 @@ export class OrderService {
       where: { orderId },
       select: { itemId: true, quantity: true, subStatus: true, substituteItemId: true },
     });
+    // [POS-SYNC] Lock the lines' items in id order before moving any of them
+    // (lockItemsInIdOrder): restocking line B then line A while a till sync
+    // held A and waited for B was a deadlock.
+    await lockItemsInIdOrder(db, items.map((oi) => (oi.subStatus === 'APPROVED' ? oi.substituteItemId : oi.itemId)));
     for (const oi of items) {
       // [REPORT-006 F-006-05] Picking already restocked refunded/rejected
       // lines when it closed them — restocking again here doubles stock. An

@@ -127,15 +127,18 @@ afterAll(async () => {
 
 describe('Retail — CSV column mapping (deterministic core)', () => {
   it('maps messy headers to Swift fields by synonym, copying values verbatim', () => {
-    const headers = ['Product Name', 'Cost (GYD)', 'Dept', 'Qty on Hand', 'Notes'];
+    // [POS-SYNC F1] "Cost" is what the store pays, never the selling price: a
+    // cost column sits beside the price and is left unmapped.
+    const headers = ['Product Name', 'Cost (GYD)', 'Price (GYD)', 'Dept', 'Qty on Hand', 'Notes'];
     const mapping = guessColumnMapping(headers);
     expect(mapping.name).toBe('Product Name');
-    expect(mapping.basePrice).toBe('Cost (GYD)');
+    expect(mapping.basePrice).toBe('Price (GYD)');
+    expect(Object.values(mapping)).not.toContain('Cost (GYD)');
     expect(mapping.category).toBe('Dept');
     expect(mapping.stockQuantity).toBe('Qty on Hand');
     expect(mapping.description).toBe('Notes');
 
-    const rows = [{ 'Product Name': 'Rice 5kg', 'Cost (GYD)': '3500', Dept: 'Groceries', 'Qty on Hand': '40', Notes: 'aged' }];
+    const rows = [{ 'Product Name': 'Rice 5kg', 'Cost (GYD)': '2800', 'Price (GYD)': '3500', Dept: 'Groceries', 'Qty on Hand': '40', Notes: 'aged' }];
     const normalized = applyMapping(rows, mapping);
     expect(normalized[0]).toMatchObject({ name: 'Rice 5kg', basePrice: '3500', category: 'Groceries', stockQuantity: '40' });
 

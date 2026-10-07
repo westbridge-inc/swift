@@ -100,13 +100,16 @@ export class ApiRequestError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly details?: { ref?: string };
+  /** The server's whole `error.details` object, for screens that act on it (e.g. a file's columns). */
+  readonly errorDetails?: Record<string, unknown>;
 
-  constructor(message: string, status: number, code?: string, details?: { ref?: string }) {
+  constructor(message: string, status: number, code?: string, details?: { ref?: string }, errorDetails?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
     this.details = details;
     if (code !== undefined) this.code = code;
+    if (errorDetails !== undefined) this.errorDetails = errorDetails;
   }
 }
 
@@ -327,6 +330,9 @@ export async function apiFetch(
       res.status,
       typeof json?.error?.code === 'string' ? json.error.code : undefined,
       typeof json?.error?.details?.ref === 'string' ? { ref: json.error.details.ref } : undefined,
+      json?.error?.details && typeof json.error.details === 'object' && !Array.isArray(json.error.details)
+        ? (json.error.details as Record<string, unknown>)
+        : undefined,
     );
   }
   return json;
