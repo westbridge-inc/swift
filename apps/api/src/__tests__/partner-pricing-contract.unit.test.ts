@@ -1046,7 +1046,8 @@ describe('activation — a market that cannot price a partner refuses to activat
     };
     // Atomic wrapper resolves pricing and trial authority before invoking the
     // activation callback; the callback cannot escape its transaction.
-    before(handler('/vendors/:id/approve'), 'withActivation({ vendorId: id }', "status: 'ACTIVE'");
+    before(handler('/vendors/:id/approve'), 'withActivation({ vendorId: id }', 'tx.vendor.updateMany(');
+    before(handler('/vendors/:id/approve'), 'lockBillingAuthority(tx, subscription.id)', 'tx.vendor.updateMany(');
     for (const role of ['rider', 'driver']) {
       const block = handler(`/${role}s/:id/verify-documents`);
       expect(block).toContain(`withActivation({ ${role}Id: id }, (tx) => project(tx))`);
