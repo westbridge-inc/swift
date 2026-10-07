@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
-import { sendOtp } from '@/lib/auth';
+import { sendOtp, sessionProbe } from '@/lib/auth';
+import { LEGAL_URL } from '@/lib/api';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
@@ -30,6 +31,24 @@ const ROLES: { role: Role; title: string; desc: string; Icon: any }[] = [
 ];
 
 
+/** The partner agreement clickwrap: unticked until the person ticks it. */
+function PartnerAgreement({ kind, doc, agree, onChange }: {
+  kind: 'Vendor' | 'Driver';
+  doc: 'vendor-agreement' | 'driver-agreement';
+  agree: boolean;
+  onChange: (_next: boolean) => void;
+}) {
+  return (
+    <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+      <input type="checkbox" checked={agree} onChange={(e) => onChange(e.target.checked)} />
+      <span>
+        I agree to the{' '}
+        <a href={LEGAL_URL(doc)} target="_blank" rel="noreferrer" className={styles.inlineLink}>{kind} Partner Agreement</a>
+      </span>
+    </label>
+  );
+}
+
 export default function SignupPage() {
   const router = useRouter();
   const continueJourney = useStorefrontAuthJourney();
@@ -54,6 +73,32 @@ export default function SignupPage() {
   }, [placingStore]);
   const closeStorePicker = () => { restorePinFocus.current = true; setPlacingStore(false); };
   const [veh, setVeh] = useState({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
+  // The partner agreement: an explicit, unticked clickwrap. The API records the
+  // consent and refuses a partner sign-up without it (AGREEMENT_REQUIRED).
+  const [agree, setAgree] = useState(false);
+  // A tick is given to the agreement on screen: it is cleared whenever the role
+  // or the step changes, so it never carries from one agreement to the other,
+  // nor survives leaving the step (reset during render, so no frame shows it).
+  const agreementScope = `${role}:${step}`;
+  const [agreeScope, setAgreeScope] = useState(agreementScope);
+  if (agreeScope !== agreementScope) {
+    setAgreeScope(agreementScope);
+    setAgree(false);
+  }
+  // A signed-in business account whose store was never created comes back
+  // here from the console (/signup?resume=business) straight to that step.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('resume') !== 'business') return;
+    let cancelled = false;
+    void sessionProbe().then((session) => {
+      if (cancelled || !session.ok) return;
+      const accountPhone = session.user?.['phone'];
+      if (typeof accountPhone === 'string') setPhone(accountPhone);
+      setRole('VENDOR');
+      setStep('business');
+    });
+    return () => { cancelled = true; };
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busyNow = useRef(false);
@@ -110,7 +155,8 @@ export default function SignupPage() {
   const doBusiness = () => wrap(async () => {
     if (!storePin || placingStore) throw new Error('Place your store on the map');
     if (!storePinInMarket(storePin)) throw new Error(STORE_PIN_OUTSIDE);
-    await becomePartner({ role: 'VENDOR', business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } });
+    if (!agree) throw new Error('Tick the Vendor Partner Agreement to continue');
+    await becomePartner({ role: 'VENDOR', acceptAgreement: true, business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } });
     router.replace('/dashboard');
   });
   const editBusinessAddress = (patch: Partial<typeof biz>) => {
@@ -120,7 +166,8 @@ export default function SignupPage() {
     setError(null);
   };
   const doVehicle = () => wrap(async () => {
-    await becomePartner({ role: 'MOVER', vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } });
+    if (!agree) throw new Error('Tick the Driver Partner Agreement to continue');
+    await becomePartner({ role: 'MOVER', acceptAgreement: true, vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } });
     router.replace('/portal');
   });
 
@@ -227,7 +274,8 @@ export default function SignupPage() {
                 {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed: {storePin.address ?? biz.addressLine1}.</p>}
               </>
             )}
-            <button type="button" onClick={() => void doBusiness()} disabled={busy || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
+            <PartnerAgreement kind="Vendor" doc="vendor-agreement" agree={agree} onChange={setAgree} />
+            <button type="button" onClick={() => void doBusiness()} disabled={busy || !agree || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
             <p className={styles.smallCopy}>You’ll finish verification (documents) in your dashboard before going live.</p>
           </div>
         )}
@@ -242,7 +290,8 @@ export default function SignupPage() {
             <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} /></div>
-            <button type="button" onClick={() => void doVehicle()} disabled={busy || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || !Number.isInteger(Number(veh.year)) || Number(veh.year) < 1900} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
+            <PartnerAgreement kind="Driver" doc="driver-agreement" agree={agree} onChange={setAgree} />
+            <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || !Number.isInteger(Number(veh.year)) || Number(veh.year) < 1900} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
             <p className={styles.smallCopy}>You’ll upload your documents in your earner dashboard before going online.</p>
           </div>
         )}

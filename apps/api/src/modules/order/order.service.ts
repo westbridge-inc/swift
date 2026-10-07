@@ -1,6 +1,7 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import { Prisma } from '@prisma/client';
 import type {
   PrismaClient,
@@ -36,6 +37,7 @@ import {
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
+import { canonicalSlotStart } from '../booking/availability';
 import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, COURIER_CASH_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
@@ -298,7 +300,8 @@ export function assertMmgFulfilmentAllowed(
   }
   // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
   if (order.mmgClaimMismatchAt) {
-    throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim. A person must resolve it before the order moves.');
+    // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
+    throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim, so this order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don\'t hand anything over until then.');
   }
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
@@ -945,7 +948,9 @@ export class OrderService {
           throw new AppError(400, 'MIXED_FULFILLMENT', 'Book appointments separately from goods');
         }
         const only = appointmentItems[0]!;
-        const slot = requestedSlots.get(only.itemId);
+        const requested = requestedSlots.get(only.itemId);
+        // [L09 · M017] One slot is one instant: stray seconds never name a second slot.
+        const slot = requested ? canonicalSlotStart(requested) : undefined;
         if (!slot) {
           throw new AppError(400, 'SLOT_REQUIRED', `Pick a time slot for ${only.item.name}`);
         }
@@ -2032,6 +2037,14 @@ export class OrderService {
     // different order owned by the same mover.
     const cancellationLike = operationalCancellation;
     let cancelledSearches = 0;
+    // [L09 · M018] An appointment that completes completes its booking in the
+    // same transaction, so a finished appointment cannot be moved or re-held.
+    if (input.target === 'COMPLETED') {
+      await tx.booking.updateMany({
+        where: { orderId: input.orderId, status: { in: ['RESERVED', 'CONFIRMED'] } },
+        data: { status: 'COMPLETED' },
+      });
+    }
     if (cancellationLike) {
       await tx.booking.updateMany({
         where: { orderId: input.orderId, status: { not: 'CANCELLED' } },
@@ -2403,7 +2416,7 @@ export class OrderService {
         type: 'ORDER_UPDATE',
         title: 'Ride cancelled',
         body: 'The passenger cancelled this ride. You can stop and go back online.',
-        data: { orderId, status: 'CANCELLED' },
+        data: taxiNotificationData(orderId, { status: 'CANCELLED' }, 'earner'),
       });
     }
 
@@ -2531,7 +2544,7 @@ export class OrderService {
         break;
       }
       case 'DELIVERED':
-        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId);
+        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
         break;
     }
 

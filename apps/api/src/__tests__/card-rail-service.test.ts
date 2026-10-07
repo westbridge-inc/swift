@@ -515,6 +515,7 @@ function watched(inner: CardRailProvider, hooks: { beforeCharge?: () => Promise<
   const provider: CardRailProvider = {
     binding: inner.binding,
     simulator: inner.simulator,
+    savesCards: inner.savesCards,
     createSession: (i) => inner.createSession(i),
     parseReturn: (params) => inner.parseReturn(params),
     confirm: (i) => inner.confirm(i),

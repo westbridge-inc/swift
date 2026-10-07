@@ -1,3 +1,4 @@
+import { grantStepUp } from '../helpers/step-up';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { nanoid } from 'nanoid';
 import { createGolden, DAY } from './gold-7-helpers';
@@ -46,6 +47,7 @@ describe('GOLD-7 · AUTH-04 — completed-order erasure retry', () => {
       { 'idempotency-key': `g7-delete-${nanoid(8)}` });
     expect(placed.statusCode).toBe(200);
     const id = placed.json().data.order.id as string;
+    await h.sys(() => grantStepUp(h.app, customer.token));
     const blocked = await h.call('DELETE', '/api/v1/customer/account', customer.token);
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json().error.code).toBe('ACTIVE_ORDERS');

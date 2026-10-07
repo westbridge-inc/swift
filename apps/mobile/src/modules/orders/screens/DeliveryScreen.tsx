@@ -1171,25 +1171,18 @@ export function DeliveryScreen() {
             />
           ) : null}
 
-          {/* [B9] The recipient's half of Send. GET /courier/track/:token has
-              been public since launch and NOTHING generated the link — the
-              sender had no way to hand tracking to the person waiting for the
-              parcel. Web twin: /track/[token]. Sender-scoped token, in-flight
-              only (the token never expires, so a settled parcel stops
-              advertising it). */}
-          {!terminal && o?.orderType === 'COURIER' && o?.courierTrackingToken ? (
-            <PillButton
-              label="Share tracking with the recipient"
-              variant="soft"
-              icon="share-2"
-              style={{ marginTop: space.md }}
-              onPress={() => {
-                const who = o?.courierRecipientName ? `${o.courierRecipientName}, track` : 'Track';
-                void Share.share({
-                  message: `${who} your Swift parcel live: ${WEB_URL}/track/${o.courierTrackingToken}`,
-                }).catch(() => toast.show("Couldn't open the share sheet."));
-              }}
-            />
+          {!terminal && o?.orderType === 'COURIER' ? (
+            <View style={{ marginTop: space.md, gap: space.sm }}>
+              <PillButton label="Share a new tracking link" variant="soft" icon="share-2"
+                onPress={() => {
+                  void courierApi.rotateTracking(o.id).then((res) => Share.share({
+                    message: `Track your Swift parcel live: ${WEB_URL}/track/${res.data.data.trackingToken}`,
+                  })).catch(() => toast.show("Couldn't share tracking. Try again."));
+                }} />
+              <T variant="caption" tone="muted">A new link replaces the previous link. Tracking expires 12 hours after booking.</T>
+              <PillButton label="Stop tracking sharing" variant="outline"
+                onPress={() => { void courierApi.revokeTracking(o.id).then(() => toast.show('Tracking sharing stopped.')).catch(() => toast.show('Could not stop sharing. Try again.')); }} />
+            </View>
           ) : null}
 
           {cancelled || failed ? (
