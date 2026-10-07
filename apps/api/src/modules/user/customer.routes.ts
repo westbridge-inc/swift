@@ -2574,7 +2574,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // response — which the app discards on navigation — so "Share
         // tracking" had nothing durable to build a link from. Customer-scoped
         // read (this route already proves ownership); null on non-courier rows.
-        courierTrackingToken: order.courierTrackingToken,
+        courierTrackingToken: null,
         deliveryAddress: order.deliveryAddress,
         deliveryLat: order.deliveryLat,
         deliveryLng: order.deliveryLng,
