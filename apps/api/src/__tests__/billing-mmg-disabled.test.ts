@@ -894,7 +894,7 @@ describe('[PROD-PATH] resume ordering: on resume only the current week is billed
     expect(payments).toHaveLength(1);
     expect(payments[0]).toMatchObject({ status: 'CAPTURED', periodStart: due, periodEnd: new Date(due.getTime() + 21 * DAY) });
     // Its own fee waits alone, on a record naming the pause start, and an admin is told.
-    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${orphan}` } })).value).toEqual({ since: t0.toISOString() });
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${orphan}` } }))?.value).toEqual({ since: t0.toISOString() });
     expect(await feePauseHoldsBilling(app.prisma, orphan)).toBe(true);
     expect((await feePauseStatus(app.prisma)).awaitingRepair).toBe(1);
     await syncMmgPauseClock(app.prisma, new Date(), ON);
@@ -921,7 +921,7 @@ describe('[PROD-PATH] resume ordering: on resume only the current week is billed
     if (when === 'after') {
       await syncMmgPauseClock(app.prisma, at(6), ON, failStuck);
       // The second resume keeps the record's FIRST start.
-      expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${stuck}` } })).value).toEqual({ since: t0.toISOString() });
+      expect((await app.prisma.platformConfig.findUnique({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${stuck}` } }))?.value).toEqual({ since: t0.toISOString() });
       released = new Date();
       await syncMmgPauseClock(app.prisma, released, ON);
     } else {
