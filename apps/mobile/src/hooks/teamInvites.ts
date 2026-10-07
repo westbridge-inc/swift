@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { vendorApi } from '../services/api';
+import { customerApi } from '../services/api';
 
 // [Row 55] A store owner's "add to team" sends an invite; the person joins
 // only by accepting it here. Nothing about them reaches the store before that.
@@ -27,7 +27,7 @@ export function teamInviteSentence(invite: Pick<TeamInvite, 'storeName' | 'role'
 export function useTeamInvites() {
   return useQuery<TeamInvite[]>({
     queryKey: teamInviteKeys.mine,
-    queryFn: async () => (await unwrap<TeamInvite[]>(vendorApi.teamInvites())) ?? [],
+    queryFn: async () => (await unwrap<TeamInvite[]>(customerApi.teamInvites())) ?? [],
   });
 }
 
@@ -36,7 +36,7 @@ export function useAnswerTeamInvite() {
   return useMutation({
     mutationFn: ({ id, decision }: { id: string; decision: 'ACCEPT' | 'DECLINE' }) =>
       unwrap<{ decision: 'ACCEPTED' | 'DECLINED'; storeName?: string; role?: 'MANAGER' | 'STAFF' }>(
-        decision === 'ACCEPT' ? vendorApi.acceptTeamInvite(id) : vendorApi.declineTeamInvite(id),
+        decision === 'ACCEPT' ? customerApi.acceptTeamInvite(id) : customerApi.declineTeamInvite(id),
       ),
     // Answered either way (or already answered elsewhere): the card must go.
     onSettled: () => {

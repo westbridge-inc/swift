@@ -18,7 +18,7 @@ import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/ob
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
-import { decideStaffInvite, deliverStaffInvite, listMyStaffInvites, staffAddReply, staffInviteAcceptEnabled } from './staff-invites';
+import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -805,25 +805,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     return reply;
   });
 
-  /** GET /team-invites — the caller's own live store-team invites. [Row 55] */
-  app.get('/team-invites', auth, async (request) => {
-    return { success: true, data: await listMyStaffInvites(app.prisma, request.user.userId, new Date()) };
-  });
-
-  /** POST /team-invites/:id/accept | /decline — answer one invite. [Row 55] */
-  app.post<{ Params: IdParam }>('/team-invites/:id/accept', auth, async (request) => {
-    if (!staffInviteAcceptEnabled()) throw new AppError(404, 'NOT_FOUND', 'Invite not found');
-    const result = await decideStaffInvite(app.prisma, {
-      inviteId: request.params.id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
-    });
-    return { success: true, data: result };
-  });
-  app.post<{ Params: IdParam }>('/team-invites/:id/decline', auth, async (request) => {
-    const result = await decideStaffInvite(app.prisma, {
-      inviteId: request.params.id, userId: request.user.userId, decision: 'DECLINE', now: new Date(),
-    });
-    return { success: true, data: result };
-  });
+  // The person invited answers under /customer/team-invites (customer.routes):
+  // they are not on a store team yet, so the /vendor prefix is not theirs.
 
   /** PUT /staff/:id — change a member's role. */
   app.put<{ Params: IdParam }>('/staff/:id', auth, async (request) => {

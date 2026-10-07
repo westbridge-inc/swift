@@ -7,6 +7,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
+import { customerRoutes } from '../modules/user/customer.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
@@ -83,6 +84,7 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
+  await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
 
@@ -159,7 +161,7 @@ describe('[row 55] switch OFF (build without the Accept card): added at once, as
     await add(known.phone);
     const [invite] = await waitForInvites(known.userId, 1);
     delete process.env['STAFF_INVITE_ACCEPT'];
-    const res = await inject('POST', `/api/v1/vendor/team-invites/${invite!.id}/accept`, known.token);
+    const res = await inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token);
     expect(res.statusCode).toBe(404);
     expect(await memberOf(known.userId)).toBeNull();
   });
@@ -180,18 +182,18 @@ describe('[row 55] switch ON: invite, then the person accepts', () => {
     const listed = await inject('GET', '/api/v1/vendor/staff', owner.token);
     expect(listed.body).not.toContain(known.userId);
 
-    const mine = await inject('GET', '/api/v1/vendor/team-invites', known.token);
+    const mine = await inject('GET', '/api/v1/customer/team-invites', known.token);
     expect(mine.json().data).toEqual([expect.objectContaining({ id: invites[0]!.id, storeName, role: 'MANAGER' })]);
 
-    const accepted = await inject('POST', `/api/v1/vendor/team-invites/${invites[0]!.id}/accept`, known.token);
+    const accepted = await inject('POST', `/api/v1/customer/team-invites/${invites[0]!.id}/accept`, known.token);
     expect(accepted.statusCode).toBe(200);
     expect(accepted.json().data).toEqual({ decision: 'ACCEPTED', storeName, role: 'MANAGER' });
     expect((await memberOf(known.userId))?.role).toBe('MANAGER');
     expect((await inject('GET', '/api/v1/vendor/staff', owner.token)).body).toContain(known.userId);
 
-    const twice = await inject('POST', `/api/v1/vendor/team-invites/${invites[0]!.id}/accept`, known.token);
+    const twice = await inject('POST', `/api/v1/customer/team-invites/${invites[0]!.id}/accept`, known.token);
     expect(twice.statusCode).toBe(409);
-    expect((await inject('GET', '/api/v1/vendor/team-invites', known.token)).json().data).toEqual([]);
+    expect((await inject('GET', '/api/v1/customer/team-invites', known.token)).json().data).toEqual([]);
   });
 
   it('declining grants nothing, and a declined invite cannot be accepted afterwards', async () => {
@@ -199,8 +201,8 @@ describe('[row 55] switch ON: invite, then the person accepts', () => {
     const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await add(known.phone);
     const [invite] = await waitForInvites(known.userId, 1);
-    expect((await inject('POST', `/api/v1/vendor/team-invites/${invite!.id}/decline`, known.token)).json().data).toEqual({ decision: 'DECLINED' });
-    expect((await inject('POST', `/api/v1/vendor/team-invites/${invite!.id}/accept`, known.token)).statusCode).toBe(409);
+    expect((await inject('POST', `/api/v1/customer/team-invites/${invite!.id}/decline`, known.token)).json().data).toEqual({ decision: 'DECLINED' });
+    expect((await inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token)).statusCode).toBe(409);
     expect(await memberOf(known.userId)).toBeNull();
   });
 
@@ -210,7 +212,7 @@ describe('[row 55] switch ON: invite, then the person accepts', () => {
     const stranger = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await add(known.phone);
     const [invite] = await waitForInvites(known.userId, 1);
-    expect((await inject('POST', `/api/v1/vendor/team-invites/${invite!.id}/accept`, stranger.token)).statusCode).toBe(404);
+    expect((await inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, stranger.token)).statusCode).toBe(404);
     expect(await memberOf(stranger.userId)).toBeNull();
     expect(await memberOf(known.userId)).toBeNull();
   });
@@ -231,9 +233,9 @@ describe('[row 55] switch ON: invite, then the person accepts', () => {
       where: { id: orphanInvite!.id },
       data: { data: { ...(orphanInvite!.data as Record<string, unknown>), invitedBy: late.userId } },
     });
-    const expired = await inject('POST', `/api/v1/vendor/team-invites/${lateInvite!.id}/accept`, late.token);
+    const expired = await inject('POST', `/api/v1/customer/team-invites/${lateInvite!.id}/accept`, late.token);
     expect(expired.statusCode).toBe(410);
-    const revoked = await inject('POST', `/api/v1/vendor/team-invites/${orphanInvite!.id}/accept`, orphan.token);
+    const revoked = await inject('POST', `/api/v1/customer/team-invites/${orphanInvite!.id}/accept`, orphan.token);
     expect(revoked.statusCode).toBe(409);
     expect(await memberOf(late.userId)).toBeNull();
     expect(await memberOf(orphan.userId)).toBeNull();
@@ -245,8 +247,8 @@ describe('[row 55] switch ON: invite, then the person accepts', () => {
     await add(known.phone);
     const [invite] = await waitForInvites(known.userId, 1);
     const [a, d] = await Promise.all([
-      inject('POST', `/api/v1/vendor/team-invites/${invite!.id}/accept`, known.token),
-      inject('POST', `/api/v1/vendor/team-invites/${invite!.id}/decline`, known.token),
+      inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token),
+      inject('POST', `/api/v1/customer/team-invites/${invite!.id}/decline`, known.token),
     ]);
     expect([a.statusCode, d.statusCode].sort()).toEqual([200, 409]);
     const state = ((await app.prisma.notification.findUniqueOrThrow({ where: { id: invite!.id } })).data as { state: string }).state;

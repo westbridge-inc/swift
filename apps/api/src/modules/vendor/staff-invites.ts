@@ -1,5 +1,6 @@
 import type { PrismaClient, Prisma } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 
 // ---------------------------------------------------------------------------
 // [Row 55] Store team invites.
@@ -94,7 +95,9 @@ export async function deliverStaffInvite(
   prisma: PrismaClient,
   sender: InviteSender,
   input: { vendorId: string; targetUserId: string; role: StaffInviteRole; inviterId: string; now: Date },
-): Promise<'SENT' | 'ALREADY_MEMBER' | 'ALREADY_INVITED'> {
+): Promise<'SENT' | 'ALREADY_MEMBER' | 'ALREADY_INVITED' | 'NOT_INVITABLE'> {
+  // [REVIEW-PARTNER] A demo account never receives a store membership invite.
+  if (await isReviewAccount(prisma, input.targetUserId)) return 'NOT_INVITABLE';
   const member = await prisma.vendorStaff.findUnique({
     where: { vendorId_userId: { vendorId: input.vendorId, userId: input.targetUserId } },
     select: { id: true },
@@ -155,6 +158,8 @@ export async function decideStaffInvite(
   prisma: PrismaClient,
   input: { inviteId: string; userId: string; decision: 'ACCEPT' | 'DECLINE'; now: Date },
 ) {
+  // [REVIEW-PARTNER] Accepting is a membership grant: never to a demo account.
+  if (input.decision === 'ACCEPT') await refuseReviewAccountRoleGrant(prisma, input.userId);
   return prisma.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM "notifications" WHERE id = ${input.inviteId} AND "userId" = ${input.userId} FOR UPDATE`;

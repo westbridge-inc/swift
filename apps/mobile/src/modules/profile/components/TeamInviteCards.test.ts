@@ -83,8 +83,8 @@ describe('[row 55] the team invite card', () => {
     const inbox = readFileSync(join(process.cwd(), 'src/modules/profile/screens/NotificationsScreen.tsx'), 'utf8');
     expect(inbox).toMatch(/<TeamInviteCards \/>/);
     const client = readFileSync(join(process.cwd(), 'src/services/api.ts'), 'utf8');
-    expect(client).toContain("teamInvites: () => api.get('/vendor/team-invites')");
-    expect(client).toContain('acceptTeamInvite: (id: string) => api.post(`/vendor/team-invites/${id}/accept`, {})');
-    expect(client).toContain('declineTeamInvite: (id: string) => api.post(`/vendor/team-invites/${id}/decline`, {})');
+    expect(client).toContain("teamInvites: () => api.get('/customer/team-invites')");
+    expect(client).toContain('acceptTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/accept`, {})');
+    expect(client).toContain('declineTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/decline`, {})');
   });
 });
