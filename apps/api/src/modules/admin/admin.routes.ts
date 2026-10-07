@@ -1,3 +1,4 @@
+import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
@@ -1174,7 +1175,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // [DS110 #12] Who may suspend whom is decided inside the transition, from
     // the database's view of both accounts (see mover-authority.ts).
@@ -1198,7 +1199,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/users/:id/unsuspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // Restoration obeys the same hierarchy as the act it reverses: an ordinary
     // ADMIN cannot lift a suspension a SUPER_ADMIN imposed on another ADMIN.
@@ -1223,7 +1224,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // [DS110 #12] The role hierarchy — not an ADMIN-string check — decides who
     // may ban whom, inside the transition: the seed mints the SUPER_ADMIN as
@@ -1252,7 +1253,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // nothing could reverse one. Lifting a ban is SUPER_ADMIN-only; the
     // transition enforces that whichever route asks, so an ordinary ADMIN can
     // never walk a ban back, through this route or /unsuspend.
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
       actorUserId: request.user.userId,
@@ -1389,7 +1390,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // the store stays pending — never ACTIVE and searchable with no
     // subscription, which a failure after the CAS below used to leave behind.
     const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true } });
+      // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
+      // suspension source survives it for a later heal or payment to act on.
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
       if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
       return tx.vendor.findUniqueOrThrow({ where: { id } });
     });
@@ -6435,4 +6438,17 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'DISCOVERY_CATEGORY_MERGE', 'DiscoveryCategory', request.params.id, { targetId, ...result.dedupes }, request);
     return { success: true, data: result };
   });
+
+  // [PT-2] Card rail v2 read views (CARD-CHECKOUT-API.md section 8): sessions,
+  // their evidence (hashes, never payloads) and a subscription's cards. No
+  // vault token, state, page address or provider reference is ever returned.
+  app.get('/billing/card-sessions', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminCardSessions(app.prisma, request.query),
+  }));
+  app.get<{ Params: { id: string } }>('/billing/card-sessions/:id', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminCardSession(app.prisma, request.params.id),
+  }));
+  app.get<{ Params: { subscriptionId: string } }>('/billing/subscriptions/:subscriptionId/cards', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminSubscriptionCards(app.prisma, request.params.subscriptionId),
+  }));
 }

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import type Redis from 'ioredis';
 import type { NotificationChannels } from '../../providers/notifications/channels';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -10,6 +10,7 @@ import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { tripShareCounter, tripShareGauge } from '../../plugins/observability';
 import { parseEmergencyPolicy } from '../country/emergency-policy';
 import { runWithoutTenant } from '../../plugins/tenant-context';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import type { NotificationService } from '../notification/notification.service';
 
 // Trip Share (safety spec §6) — a tokenized PUBLIC live-trip page. The token
@@ -25,6 +26,10 @@ import type { NotificationService } from '../notification/notification.service';
 // trip by more than the grace even if the ceiling is generous.
 
 const MINT_CEILING_HOURS = 12;
+
+/** [M062] Live links one person may hold for one trip at a time. Minting is
+ *  serialized per trip, so racing taps can never exceed it. */
+export const MAX_LIVE_SHARES_PER_TRIP = 5;
 
 /**
  * [S-16] The bearer secret is returned ONCE at mint and never stored: the
@@ -103,30 +108,55 @@ export class TripShareService {
     // link exists: nothing is written, counted or sent for it.
     if (opts.sendToPhone && !smsDestinationAllowed(opts.sendToPhone)) throw tripLinkTextRefused('destination_country');
 
-    // [S-16] 256-bit URL-safe secret, returned once; only its digest is stored.
-    const token = randomBytes(32).toString('base64url');
-    const row = await this.prisma.tripShareToken.create({
-      data: {
-        tenantId: order.tenantId,
-        orderId: order.id,
-        createdByUserId: userId,
-        token: null,
-        tokenDigest: tripShareDigest(token),
-        tokenPrefix: token.slice(0, 6),
-        sharedToPhone: opts.sendToPhone ?? null,
-        expiresAt: new Date(Date.now() + MINT_CEILING_HOURS * 3_600_000),
-      },
-    });
-    tripShareCounter.labels('minted').inc();
-
-    const url = `${process.env['APP_PUBLIC_URL'] ?? 'https://swiftgy.com'}/trip/${token}`;
+    // [M062] The text is RESERVED before any link exists: the per-number
+    // minute and the safety budget are claimed first, so a refused text leaves
+    // no orphaned link behind and a link can never be minted past them.
+    let budget: Awaited<ReturnType<typeof checkSafetySmsBudget>> | null = null;
     if (opts.sendToPhone) {
       const allowed = await checkOtpRateLimit(this.redis, `tripshare:${opts.sendToPhone}`);
       if (!allowed) throw new AppError(429, 'RATE_LIMITED', 'That number was just sent a link. Try again in a minute.');
       // [AUD-L4-008] The safety budget, never the login one: no flood of login
       // codes can refuse this text, and it spends nobody's login allowance.
-      const budget = await checkSafetySmsBudget(this.redis, opts.sendToPhone, { senderId: userId });
+      budget = await checkSafetySmsBudget(this.redis, opts.sendToPhone, { senderId: userId });
       if (!budget.allowed) throw tripLinkTextRefused(budget.reason);
+    }
+
+    // [S-16] 256-bit URL-safe secret, returned once; only its digest is stored.
+    const token = randomBytes(32).toString('base64url');
+    let row: { expiresAt: Date };
+    try {
+      // [M062] One mint per trip at a time (the order row lock): the live-link
+      // allowance is counted and the link inserted under it, atomically.
+      row = await this.prisma.$transaction(async (tx) => {
+        await bindTenantTransaction(tx);
+        await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${order.id} FOR UPDATE`;
+        const live = await tx.tripShareToken.count({ where: { orderId: order.id, createdByUserId: userId, revokedAt: null, expiresAt: { gt: new Date() } } });
+        if (live >= MAX_LIVE_SHARES_PER_TRIP) {
+          throw new AppError(429, 'TOO_MANY_SHARE_LINKS', `You already have ${MAX_LIVE_SHARES_PER_TRIP} live links for this trip. Stop sharing before you share again.`);
+        }
+        return tx.tripShareToken.create({
+          data: {
+            tenantId: order.tenantId,
+            orderId: order.id,
+            createdByUserId: userId,
+            token: null,
+            tokenDigest: tripShareDigest(token),
+            tokenPrefix: token.slice(0, 6),
+            sharedToPhone: opts.sendToPhone ?? null,
+            expiresAt: new Date(Date.now() + MINT_CEILING_HOURS * 3_600_000),
+          },
+          select: { expiresAt: true },
+        });
+      });
+    } catch (err) {
+      // No link, no text: give the reserved budget back.
+      await budget?.refund?.().catch(() => {});
+      throw err;
+    }
+    tripShareCounter.labels('minted').inc();
+
+    const url = `${process.env['APP_PUBLIC_URL'] ?? 'https://swiftgy.com'}/trip/${token}`;
+    if (opts.sendToPhone) {
       const plate = order.driver ? ` Vehicle: ${order.driver.vehicleColor} ${order.driver.vehicleMake} ${order.driver.vehicleModel}, plate ${order.driver.licensePlate}.` : '';
       await this.channels.sms.sendSms(
         opts.sendToPhone,
@@ -134,11 +164,35 @@ export class TripShareService {
       ).catch(async (err: unknown) => {
         // The share still works via the link the app shows — log, don't fail.
         // A text that never left gives back the budget it counted.
-        await budget.refund?.().catch(() => {});
+        await budget?.refund?.().catch(() => {});
         log().warn({ err, orderId }, 'trip-share SMS send failed');
       });
     }
     return { token, url, expiresAt: row.expiresAt };
+  }
+
+  /** Owner controls use record metadata, never recovered bearer secrets. */
+  async listOwned(userId: string, orderId: string) {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, customerId: userId, orderType: 'TAXI' }, select: { tenantId: true } });
+    if (!order) throw new NotFoundError('Trip', orderId);
+    return this.prisma.tripShareToken.findMany({
+      where: { orderId, tenantId: order.tenantId, createdByUserId: userId, revokedAt: null, expiresAt: { gt: new Date() } },
+      select: { id: true, createdAt: true, expiresAt: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: 100,
+    });
+  }
+
+  /** Stop ALL links for this owned trip, including links forgotten by a client. */
+  async revokeAll(userId: string, orderId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.findFirst({ where: { id: orderId, customerId: userId, orderType: 'TAXI' }, select: { tenantId: true } });
+      if (!order) throw new NotFoundError('Trip', orderId);
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "orders" WHERE "id" = ${orderId} AND "customerId" = ${userId} AND "tenantId" = ${order.tenantId} FOR UPDATE`);
+      await tx.tripShareToken.updateMany({
+        where: { orderId, tenantId: order.tenantId, createdByUserId: userId, revokedAt: null }, data: { revokedAt: new Date() },
+      });
+      return { revoked: true };
+    });
   }
 
   /** Revoke — sharer only. Idempotent. */
@@ -174,7 +228,6 @@ export class TripShareService {
               select: {
                 currentLat: true, currentLng: true, lastLocationUpdate: true,
                 vehicleMake: true, vehicleModel: true, vehicleColor: true, licensePlate: true,
-                profilePhotoUrl: true, vehiclePhotoUrl: true,
                 user: { select: { firstName: true } },
               },
             },
@@ -208,8 +261,12 @@ export class TripShareService {
       driver: d
         ? {
             firstName: d.user.firstName,
-            photoUrl: d.profilePhotoUrl,
-            vehiclePhotoUrl: d.vehiclePhotoUrl,
+            // [M053] A profile photo field is whatever the mover's record holds —
+            // a third-party URL, or another file's storage key. A public page
+            // shows neither: the recipient identifies the car by its plate,
+            // colour and model below.
+            photoUrl: null,
+            vehiclePhotoUrl: null,
             vehicle: `${d.vehicleColor} ${d.vehicleMake} ${d.vehicleModel}`,
             plate: d.licensePlate,
           }
