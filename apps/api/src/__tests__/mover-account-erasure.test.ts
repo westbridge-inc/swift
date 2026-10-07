@@ -49,6 +49,23 @@ async function mover(role: 'rider' | 'driver') {
   return { userId: user.id, profileId: profile.id, urls, read };
 }
 
+describe('driver vehicle inspection document erasure', () => {
+  it('purges the vehicle inspection document with the account, as every other mover document', async () => {
+    const p = await mover('driver');
+    const { url } = await storage.upload({ buffer: bytes, filename: 'test.enc', mimeType: 'application/octet-stream', folder: `verification/${p.userId}` });
+    objects.push(url);
+    await app.prisma.encryptedObject.create({ data: { fileKey: url, createdBy: p.userId, iv: Buffer.alloc(12), authTag: Buffer.alloc(16), wrappedDek: Buffer.alloc(60), sha256: createHash('sha256').update(bytes).digest('hex'), sizeBytes: bytes.length, mimeType: 'image/jpeg' } });
+    await app.prisma.driver.update({ where: { id: p.profileId }, data: { vehicleInspectionUrl: url } });
+    expect(await service().deleteAccount(p.userId)).toMatchObject({ deleted: true });
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: p.profileId } })).vehicleInspectionUrl).toBeNull();
+    await expect(storage.getObject(url)).rejects.toMatchObject({ code: 'ENOENT' });
+    const envelope = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: url } });
+    expect(envelope.wrappedDek).toBeNull();
+    expect(envelope.shreddedAt).not.toBeNull();
+    expect(await app.prisma.deletionReceipt.count({ where: { subjectId: p.userId, verificationProbeResult: 'CONFIRMED_ABSENT' } })).toBe(6);
+  });
+});
+
 for (const role of ['rider', 'driver'] as const) describe(`${role} legacy document and photo erasure`, () => {
   it('purges all five stored objects, clears pointers, shreds document keys and records purge evidence', async () => {
     const p = await mover(role);

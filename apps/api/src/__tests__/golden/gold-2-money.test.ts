@@ -14,6 +14,7 @@ import { registerEmptyJsonBodyParser } from '../../plugins/empty-json';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { rateLimitKey } from '../../utils/rate-limit-key';
 import { customerRoutes } from '../../modules/user/customer.routes';
+import { BLOCKER_MESSAGE } from '../../modules/user/partner-wind-down';
 import { AccountService } from '../../modules/user/account.service';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
@@ -706,34 +707,40 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
     expect(await countEvents(p.subId, 'PREPAID_TOPUP')).toBe(1);
   });
 
-  it('an approval that arrives after the owner closed the account banks the money once and never reopens billing (E13, fixed by #1280)', async () => {
+  it('an approval that arrives while the owner asks to close the account pays the live week once; the closure completes after and billing never reopens (E13, #1280; GUARDRAILS §1)', async () => {
     const p = await makePartner('Cyd');
     await chooseMmg(p, `${PAYER_PREFIX}804`);
     const { request } = await mmgRequestPending(p);
 
-    await closeBusinessAccount(p);
-    expect((await subRow(p.subId)).status).toBe('CANCELLED');
-    const titlesBefore = await noticesTo(p.owner.userId);
+    // The owner asks to close the account. Support cannot complete it while
+    // the MMG request can still be approved: the money would otherwise land on
+    // a closed, de-identified account with no one to tell.
+    await grantStepUp(app, p.owner.token);
+    const requested = await call('DELETE', '/api/v1/customer/account?receipts=v2', p.owner.token);
+    expect(requested.statusCode, requested.body).toBe(202);
+    await expect(sys(() => new AccountService(app).deleteAccount(p.owner.userId)))
+      .rejects.toMatchObject({ code: 'PARTNER_OBLIGATIONS', message: BLOCKER_MESSAGE.FEE_PAYMENT_PENDING });
+    expect(await sys(() => app.prisma.user.findUnique({ where: { id: p.owner.userId } }))).toMatchObject({ status: 'ACTIVE' });
 
-    // The payer approves the old request on their phone after leaving.
+    // The payer approves on their phone: the live week is paid, exactly once,
+    // and nothing is banked.
     sandboxSetTxStatus(request.externalRef!, 'approved');
     await pollBackoffPasses(request.id);
     await billing.pollPendingMmgCharges();
     expect((await mmgPayments(p.subId)).map((r) => r.status)).toEqual(['CAPTURED']);
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
+    expect(await countEvents(p.subId, 'PREPAID_TOPUP')).toBe(0);
+
+    // Support then completes the closure: nothing of the person's money is left
+    // with Swift, the store is wound down, and billing never reopens.
+    expect(await sys(() => new AccountService(app).deleteAccount(p.owner.userId))).toEqual({ deleted: true });
     const after = await subRow(p.subId);
     expect({ status: after.status, autoRenew: after.autoRenew }).toEqual({ status: 'CANCELLED', autoRenew: false });
-    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(0);
-    // Banked exactly once, keyed to that payment, as the payer's balance.
-    const banked = (await eventsOf(p.subId)).filter((e) => e.type === 'PREPAID_TOPUP');
-    expect(banked).toEqual([{ type: 'PREPAID_TOPUP', amount: RATE_CARD_SMALL_VENDOR, key: `bank:${request.id}` }]);
-    expect(await wallet(p.subId)).toBe(RATE_CARD_SMALL_VENDOR);
-    // A deleted account is not messaged about it.
-    expect(await noticesTo(p.owner.userId)).toEqual(titlesBefore);
-
     await pollBackoffPasses(request.id);
     await billing.pollPendingMmgCharges();
     await billing.runBillingCycle();
-    expect(await countEvents(p.subId, 'PREPAID_TOPUP')).toBe(1);
+    expect(await countEvents(p.subId, 'PREPAID_TOPUP')).toBe(0);
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
     expect(await countEvents(p.subId, 'CHARGE_ATTEMPT')).toBe(1);
     expect((await subRow(p.subId)).status).toBe('CANCELLED');
   });

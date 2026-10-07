@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -13,6 +13,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { AccountService, ACCOUNT_CLOSURE_SUBJECT } from '../modules/user/account.service';
 import { SupportService } from '../modules/support/support.service';
 import { NotificationService } from '../modules/notification/notification.service';
+import { VerificationService } from '../modules/verification/verification.service';
 import { runWithoutTenant, runWithTenant } from '../plugins/tenant-context';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
@@ -198,6 +199,24 @@ describe('[DELETION-INTEGRITY] support completes an in-app closure request', () 
     const again = await complete(b.ticketId);
     expect(again.statusCode, again.payload).toBe(409);
     expect(again.json().error.code).toBe('ALREADY_RESOLVED');
+  });
+
+  it('a closed account\u2019s store cannot be reopened by the admin approve button', async () => {
+    const b = await makeBusiness();
+    expect((await complete(b.ticketId)).statusCode).toBe(200);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: b.vendorId } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' });
+    // Even if the owner's documents still read as verified (kept under a legal
+    // hold, say), approving must not bring the closed account's store back.
+    const verified = vi.spyOn(VerificationService.prototype, 'isRoleVerified').mockResolvedValue(true);
+    try {
+      const res = await app.inject({
+        method: 'PUT', url: `/api/v1/admin/vendors/${b.vendorId}/approve`,
+        headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' }, payload: { reason: TEST_ADMIN_REASON },
+      });
+      expect(res.statusCode, res.payload).toBe(409);
+      expect(res.json().error.code).toBe('ACCOUNT_CLOSED');
+    } finally { verified.mockRestore(); }
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: b.vendorId } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN', acceptingOrders: false });
   });
 
   it('an admin cannot complete a closure request from another operator', async () => {

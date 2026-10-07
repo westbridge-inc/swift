@@ -1366,6 +1366,8 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+    // [DELETION-INTEGRITY] A store wound down with its owner's closed account never reopens.
+    if (vendor.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
 
     // [ACTIVATION AUTHORITY / EV-ACT-11] This button is no longer a
     // checklist-free ACTIVE writer. The founder invariant is: submit owner ID
@@ -1392,7 +1394,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
       // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
       // suspension source survives it for a later heal or payment to act on.
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' }, OR: [{ suspensionSource: null }, { suspensionSource: { not: 'WIND_DOWN' } }] }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
       if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
       return tx.vendor.findUniqueOrThrow({ where: { id } });
     });

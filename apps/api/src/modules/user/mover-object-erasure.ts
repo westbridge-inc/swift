@@ -6,7 +6,9 @@ import { resolveLocalStorageKey, storageProviderKind } from '../../providers/sto
 import { deleteStorageObjectAndConfirmAbsent } from '../../lib/storage-orphans';
 import { writeDeletionReceipt } from '../verification/purge-receipt';
 
-const FIELDS = ['nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl', 'profilePhotoUrl', 'vehiclePhotoUrl'] as const;
+// Every mover row field that points at a stored object. A rider row has no
+// vehicleInspectionUrl, so that field is simply absent there.
+const FIELDS = ['nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl', 'vehicleInspectionUrl', 'profilePhotoUrl', 'vehiclePhotoUrl'] as const;
 type Field = typeof FIELDS[number];
 type Pointer = { role: 'rider' | 'driver'; id: string; field: Field; key: string };
 const AUTHORITY_REASONS = new Set(['Unproven mover object', 'Filtered mover object census', 'Shared or held mover object', 'Unproven mover envelope']);
@@ -80,7 +82,7 @@ export async function eraseMoverObjects(db: PrismaClient, storage: StorageProvid
     ]);
     const pointers: Pointer[] = [];
     for (const [role, row] of [['rider', rider], ['driver', driver]] as const) {
-      if (row) for (const field of FIELDS) { const key = row[field]; if (key) pointers.push({ role, id: row.id, field, key }); }
+      if (row) for (const field of FIELDS) { const key = (row as Partial<Record<Field, string | null>>)[field]; if (key) pointers.push({ role, id: row.id, field, key }); }
     }
     if (!pointers.length) return { pending: 0, held: 0 };
     const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { phone: true, tenantId: true } });
