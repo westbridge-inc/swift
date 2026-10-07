@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { isProduction } from '../../utils/runtime-mode';
-import { cardRailV2DrainEnabled, cardRailV2Enabled } from '../../utils/card-rail';
+import { cardEnrollEnabled, cardRailV2DrainEnabled, cardRailV2Enabled } from '../../utils/card-rail';
 import { formatAmount, fromMinor } from '../../utils/currency-amount';
 import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import { requireStepUp } from '../auth/step-up';
@@ -110,18 +110,35 @@ export interface PartnerCardRouteOptions {
   subscriptionFor: (request: FastifyRequest) => Promise<Subscription | null>;
 }
 
+/** What GET /subscription carries from the card rail. */
+export interface CardSubscriptionFields {
+  /** The CARD entry of payActions. */
+  payAction: CardPayAction;
+  /** The partner's most recent card session of the last 24 hours, as the
+   *  session view (never its page address), or null. */
+  latestCardSession: CardSessionView | null;
+}
+
 export interface PartnerCardRoutes {
   /** The CARD entry for this family's GET /subscription payActions. */
   payAction: (sub: Subscription, headers: Record<string, unknown>) => Promise<CardPayAction>;
+  /** Everything GET /subscription carries from the card rail. Never fails. */
+  subscriptionFields: (sub: Subscription, request: FastifyRequest) => Promise<CardSubscriptionFields>;
 }
+
+const LATEST_CARD_SESSION_MS = 24 * 3_600_000;
 
 /**
  * The subscription payload's payActions with the card rail's own CARD entry in
- * place of the placeholder (fee-pay-actions.ts keeps CARD `off`). Order and
- * every other entry are unchanged.
+ * place of the placeholder (fee-pay-actions.ts keeps CARD `off`), and
+ * `latestCardSession`. Order and every other entry are unchanged.
  */
-export function withCardPayAction<T extends { payActions: PayAction[] }>(payload: T, card: CardPayAction): T {
-  return { ...payload, payActions: payload.payActions.map((action) => (action.id === 'CARD' ? card : action)) };
+export function withCardPayAction<T extends { payActions: PayAction[] }>(payload: T, card: CardSubscriptionFields): T & { latestCardSession: CardSessionView | null } {
+  return {
+    ...payload,
+    payActions: payload.payActions.map((a) => (a.id === 'CARD' ? card.payAction : a)),
+    latestCardSession: card.latestCardSession,
+  };
 }
 
 export interface CardSessionView {
@@ -135,6 +152,8 @@ export interface CardSessionView {
   /** PAY_NOW that SUCCEEDED: the paid week moved (`advanced`), or the money
    *  went to the balance because that week was already covered (`banked`). */
   settlement?: 'advanced' | 'banked';
+  /** FAILED, EXPIRED or CANCELLED: why, in one plain category the screen can word. */
+  failure?: CardSessionFailure;
   subscriptionStatus: string;
   testMode: boolean;
   testModeLabel?: string;
@@ -224,8 +243,9 @@ export function registerPartnerCardRoutes(app: FastifyInstance, options: Partner
       throw new AppError(409, 'PAY_ACTION_OFF', 'Paying by card is not available for this account here.');
     }
     // Saving a card needs a provider that can charge it each week without the
-    // partner present; otherwise only Pay now exists (`addCard: false`).
-    if (purpose === 'ENROLL' && !decision.provider.savesCards) {
+    // partner present, and saving switched on (the consent wording awaits the
+    // owner); otherwise only Pay now exists (`addCard: false`).
+    if (purpose === 'ENROLL' && (!decision.provider.savesCards || !cardEnrollEnabled())) {
       throw new AppError(409, 'ADD_CARD_OFF', 'Saving a card is not available. You can pay this week by card instead.');
     }
     if (purpose === 'ENROLL' && consentVersion !== CARD_ON_FILE_CONSENT_VERSION) {
@@ -257,7 +277,39 @@ export function registerPartnerCardRoutes(app: FastifyInstance, options: Partner
     return { success: true, data: view };
   });
 
-  return { payAction };
+  const subscriptionFields = async (sub: Subscription, request: FastifyRequest): Promise<CardSubscriptionFields> => {
+    const action = await payAction(sub, request.headers);
+    if (!cardRailV2Enabled() && !cardRailV2DrainEnabled()) return { payAction: action, latestCardSession: null };
+    try {
+      const latest = await app.prisma.cardSession.findFirst({
+        where: { subscriptionId: sub.id, userId: request.user.userId, createdAt: { gte: new Date(Date.now() - LATEST_CARD_SESSION_MS) } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { id: true },
+      });
+      const view = latest ? await cardSessionView(app.prisma, { sessionId: latest.id, subscription: sub, userId: request.user.userId }) : null;
+      return { payAction: action, latestCardSession: view };
+    } catch (err) {
+      log().error({ err, subscriptionId: sub.id }, '[PT-2] the latest card session could not be read; it is left out');
+      return { payAction: action, latestCardSession: null };
+    }
+  };
+
+  return { payAction, subscriptionFields };
+}
+
+export type CardSessionFailure = 'DECLINED' | 'NOT_AUTHENTICATED' | 'CARD_EXPIRED' | 'NOT_FINISHED' | 'PAGE_UNAVAILABLE';
+
+/** The plain category of a closed session's failure code (never the provider's own words). */
+export function cardSessionFailure(status: CardSessionStatus, failureCode: string | null): CardSessionFailure | undefined {
+  if (status !== 'FAILED' && status !== 'EXPIRED' && status !== 'CANCELLED') return undefined;
+  switch (failureCode) {
+    case 'DECLINED': return 'DECLINED';
+    case 'NOT_AUTHENTICATED': case 'EXPIRED_UNAUTHENTICATED': return 'NOT_AUTHENTICATED';
+    case 'CARD_EXPIRED': return 'CARD_EXPIRED';
+    case 'EXPIRED_UNUSED': case 'PROVIDER_UNKNOWN': return 'NOT_FINISHED';
+    case 'PROVIDER_PAGE_UNAVAILABLE': return 'PAGE_UNAVAILABLE';
+    default: return undefined;
+  }
 }
 
 /** A session as its own partner may see it: no page address, no state, no provider reference. */
@@ -267,7 +319,7 @@ async function cardSessionView(
 ): Promise<CardSessionView | null> {
   const s = await prisma.cardSession.findFirst({
     where: { id: input.sessionId, subscriptionId: input.subscription.id, userId: input.userId },
-    select: { id: true, purpose: true, status: true, expiresAt: true, amount: true, currencyCode: true, instrumentId: true, paymentId: true, provider: true },
+    select: { id: true, purpose: true, status: true, expiresAt: true, amount: true, currencyCode: true, instrumentId: true, paymentId: true, provider: true, failureCode: true },
   });
   if (!s) return null;
   const card = s.instrumentId
@@ -286,6 +338,7 @@ async function cardSessionView(
     ...(s.purpose === 'PAY_NOW' ? { amount: Number(s.amount), currencyCode: s.currencyCode ?? undefined } : {}),
     ...(card ? { card } : {}),
     ...(settlement ? { settlement } : {}),
+    ...(cardSessionFailure(s.status, s.failureCode) ? { failure: cardSessionFailure(s.status, s.failureCode)! } : {}),
     subscriptionStatus: input.subscription.status,
     testMode,
     ...(testMode ? { testModeLabel: SIMULATOR_PAGE.testModeLabel } : {}),

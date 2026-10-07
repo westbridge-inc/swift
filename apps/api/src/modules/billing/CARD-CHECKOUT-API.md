@@ -59,12 +59,14 @@ type CardPayAction =
       payNow: { amount: number; currencyCode: string };  // exactly what a Pay-now session charges right now
       addCard: boolean;                                   // may the partner save a card for the weekly fee?
       cardOnFile: CardView | null;                        // the ACTIVE card, if any
+      testMode: boolean;                                  // a test card choice (see "Testing" below): show testModeLabel
+      testModeLabel?: string;
     };
 ```
 
 `CARD` is `live` only when **all** of these hold:
 - card payments are switched on on the server (`CARD_RAIL_V2=1`) and not paused (`CARD_RAIL_KILL`);
-- the server's card provider is the real one with a complete configuration (PT-4). The simulator never makes `CARD` live;
+- the server's card provider is the real one with a complete configuration (PT-4). The simulator makes `CARD` live only on a test server switched to show it (`CARD_RAIL_SIMULATOR_LIVE=1`; production refuses to start with it), and then with `testMode: true`;
 - the per-platform switch allows the caller's platform (section 9);
 - the subscription can be paid: `TRIAL`, `ACTIVE`, `PAST_DUE`, `SUSPENDED` or `CHURNED`, not waived, with a fee above zero;
 - the partner is a real partner (the store-review demo never sees a card button);
@@ -72,18 +74,20 @@ type CardPayAction =
 
 Otherwise it is `off`. Reading the subscription never fails because of the card rail: if the server cannot decide, `CARD` is `off`.
 
-**`addCard`** is `true` only when the server's provider can charge a saved card each week without the partner present. The real provider's guide documents no such charge, so it is `false` (section 11). When `addCard` is `false`:
+**`addCard`** is `true` only when the server's provider can charge a saved card each week without the partner present **and** saving cards is switched on (`CARD_RAIL_ENROLL=1`, off until the owner signs off the consent words). The real provider's guide documents no such charge, so it is `false` (section 11). When `addCard` is `false`:
 - the app shows **Pay now by card** only: no Add card, no saved-card screens;
 - `cardOnFile` is `null`;
 - an Add card session is refused with `409 ADD_CARD_OFF` (section 5).
 
-**Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. `payActions` still shows `CARD` as `off` there, so a normal build shows no card button. To exercise the screens, a debug build may call the routes directly. Every screen must show `testModeLabel` whenever `testMode` is true.
+**Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. `payActions` shows `CARD` as `off` there unless the server also sets `CARD_RAIL_SIMULATOR_LIVE=1`: then `CARD` is `live` with `testMode: true` and `testModeLabel`, so a normal build shows the whole card choice end to end. Every screen must show `testModeLabel` whenever `testMode` is true. The store-review demo never sees a card choice, test or real.
 
 **`payNow`** buttons read `Pay <currency> <amount, grouped> by card`.
 - When a week is owed, the amount is that week.
 - When nothing is due, it is the next week, paid ahead.
 
 ## 4. Cards
+
+**`GET /api/v1/{family}/subscription`** also carries **`latestCardSession`**: the partner's newest card session of the last 24 hours as a `CardSessionView` (section 6; never its page address), or `null`.
 
 **`GET /api/v1/{family}/subscription/cards`** returns every card the subscription ever had, newest first, and the same `CARD` entry as `payActions`:
 
@@ -103,7 +107,7 @@ type CardView = {
 At most one card is `ACTIVE`: the weekly fee is charged to it.
 
 **`DELETE /api/v1/{family}/subscription/cards/{cardId}`** removes a card.
-- It needs a fresh step-up (the same confirmation as changing the billing method): without one the answer is `403 STEP_UP_REQUIRED`.
+- It needs a fresh step-up (the same confirmation as changing the billing method): without one the answer is `403 STEP_UP_REQUIRED`, whose `details.stepUp` names the two calls. The phone and the web use the same ones: `POST /api/v1/auth/step-up` texts a code to the phone on the account, `POST /api/v1/auth/step-up/verify` with `{ code }` confirms it for ten minutes on this session; then repeat the removal.
 - The card becomes `REVOKED` at once and is never charged again.
 - Nothing falls back silently: the weekly fee stays due until the partner adds a card or chooses another way to pay.
 - The answer is `{ success: true, data: { card: CardView; paymentInProgress: boolean } }`. `paymentInProgress: true` means a weekly charge on this card had already been sent to the bank before the removal: it finishes and is checked, and it is never repeated. Say: "A payment already on its way will finish. Nothing more will be charged to this card."
@@ -127,7 +131,7 @@ At most one card is `ACTIVE`: the weekly fee is charged to it.
 - **ENROLL (Add card)** needs the partner to accept the weekly-charge consent on screen first. Send the version they accepted. The words live with the screen; the version is `card-on-file-v1`.
 - **PAY_NOW** is priced by the server. The body carries no amount.
 
-**Success:** `201` for a new session; `200` when the same `Idempotency-Key` asks again.
+**Success:** `201` for a new session; `200` when the same `Idempotency-Key` asks again. A repeat answers the same session **with its `hostedUrl` while the page can still be used** (open and inside its window), so "Continue on the card page" opens it again; once the page is finished or expired, `hostedUrl` is `null`.
 
 ```ts
 { success: true, data: CardSession }
@@ -196,6 +200,7 @@ type CardSessionView = {
   currencyCode?: string;                  // PAY_NOW
   card?: CardView;                        // ENROLL that SUCCEEDED
   settlement?: 'advanced' | 'banked';     // PAY_NOW that SUCCEEDED
+  failure?: 'DECLINED' | 'NOT_AUTHENTICATED' | 'CARD_EXPIRED' | 'NOT_FINISHED' | 'PAGE_UNAVAILABLE'; // FAILED, EXPIRED or CANCELLED: why
   subscriptionStatus: string;             // the subscription now, so the screen updates in place
   testMode: boolean;
   testModeLabel?: string;                 // when testMode is true
@@ -220,6 +225,8 @@ type CardSessionView = {
 | `HELD` | the provider's answer does not match (amount, currency or wallet); a person reviews it | "We're checking this payment by hand. Don't pay again. Support will contact you." |
 
 Never say "paid" or "added" before `SUCCEEDED`.
+
+**`failure`** (plain categories, never the bank's or the provider's own words): `DECLINED` "Your bank declined the card." · `NOT_AUTHENTICATED` "Your bank's check (3-D Secure) didn't go through. Nothing was charged." · `CARD_EXPIRED` "This card has expired." · `NOT_FINISHED` "The card page wasn't finished. Nothing was charged." · `PAGE_UNAVAILABLE` "The card page couldn't open. Try again in a moment."
 
 ## 7. The return page (public)
 

@@ -2284,7 +2284,7 @@ export async function riderRoutes(app: FastifyInstance) {
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.payAction(sub, request.headers)),
+        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)

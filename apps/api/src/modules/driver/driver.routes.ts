@@ -1766,7 +1766,7 @@ export async function driverRoutes(app: FastifyInstance) {
         moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
-        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers), await cardRail.payAction(sub, request.headers)),
+        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers), await cardRail.subscriptionFields(sub, request)),
       },
     };
   });
