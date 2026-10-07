@@ -13,6 +13,7 @@ import { RatingService } from '../modules/rating/rating.service';
 import { RatingStatsService } from '../modules/rating/rating-stats.service';
 import { seedRatingTags } from '../modules/rating/tag-taxonomy.seed';
 import { actorStandingView, runActorFold } from '../modules/rating/rating-standing';
+import { withSuiteCapability } from '../lib/test-target-lock';
 
 // ---------------------------------------------------------------------------
 // Movement R — R9: the Standing view. THE law here is RAT-G: everything the
@@ -153,7 +154,10 @@ describe('RAT-G — the daily fold', () => {
     expect(bd.trend.reduce((s: number, w: { count: number }) => s + w.count, 0)).toBe(2);
 
     // The fold stamps everyone; now the actor view advances.
-    const stamped = await runActorFold(app.prisma);
+    // This scheduled operation is deliberately global. The test guard still
+    // refuses it until this one invocation receives the explicit capability.
+    await expect(runActorFold(app.prisma)).rejects.toMatchObject({ code: 'UNSCOPED_MUTATION_REFUSED' });
+    const stamped = await withSuiteCapability('unscoped-mutation', () => runActorFold(app.prisma));
     expect(stamped).toBeGreaterThan(0);
     const after = await app.inject({
       method: 'GET', url: '/api/v1/vendor/standing',

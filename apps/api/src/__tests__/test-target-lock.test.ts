@@ -101,7 +101,10 @@ describe('the bootstrap exits before opening a socket', () => {
   it('the locked test target passes the gate and prints a fingerprint without a credential', () => {
     const r = spawn({ NODE_ENV: 'test', DATABASE_URL: process.env['DATABASE_URL'] ?? GOOD.DATABASE_URL, REDIS_URL: process.env['REDIS_URL'] ?? GOOD.REDIS_URL });
     expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
-    expect(r.stdout).toMatch(/^locked localhost:\d+\/swift_test\S* redis db \d+ run [0-9a-f-]{36}/);
+    const database = new URL(process.env['DATABASE_URL']!);
+    const redis = new URL(process.env['REDIS_URL']!);
+    expect(r.stdout).toContain(`locked ${database.hostname}:${database.port}${database.pathname} redis db ${redis.pathname.slice(1)} run `);
+    expect(r.stdout).toMatch(/ run [0-9a-f-]{36}\s*$/);
     expect(r.stdout).not.toContain('swift:swift');
   });
 });
