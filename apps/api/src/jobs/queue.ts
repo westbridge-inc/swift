@@ -921,6 +921,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
+        const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
+        await retryAccountErasures(ctx);
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
@@ -1453,6 +1455,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { NotificationService: ShareNS } = await import('../modules/notification/notification.service');
           const rot = await rotateLegacyTripShareTokens(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch(() => null);
           if (rot && rot.rotated > 0) ctx.log.warn(rot, '[S-16] legacy plaintext trip-share tokens rotated');
+          // [L10 §2] A guardian who is a Swift user hears, in-app, how the monitoring they were given ended.
+          const { notifyTripShareGuardians } = await import('../modules/safety/trip-share.service');
+          await notifyTripShareGuardians(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch((err) => ctx.log.error({ err }, '[L10 §2] guardian outcome sweep failed'));
         }
         // [S-02] The retrigger log: import any legacy JSON history as rows,
         // then report lost sequences and oversized hot rows.

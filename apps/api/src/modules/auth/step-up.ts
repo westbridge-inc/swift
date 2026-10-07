@@ -169,11 +169,43 @@ export async function hasStepUp(redis: Redis, sessionId: string): Promise<boolea
  * The gate a money surface calls first. 403 STEP_UP_REQUIRED tells the client
  * exactly how to earn it, so the screen can run the code sheet and retry.
  */
-export async function requireStepUp(app: FastifyInstance, request: { user: { userId: string }; authSessionId: string | null }): Promise<void> {
+export async function requireStepUp(app: FastifyInstance, request: { user: { userId: string }; authSessionId: string | null }, options: { consume?: boolean } = {}): Promise<void> {
   const sessionId = request.authSessionId;
   if (!sessionId) throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
-  if (await hasStepUp(app.redis, sessionId)) return;
+  // Credential changes consume the proof BEFORE the write. Redis DEL is
+  // atomic: concurrent changes cannot both spend the same proof. A failed
+  // database change requires fresh proof; we never restore spent authority.
+  const confirmed = options.consume
+    ? (await app.redis.del(stepUpKey(sessionId))) === 1
+    : await hasStepUp(app.redis, sessionId);
+  if (confirmed) return;
   throw new AppError(403, 'STEP_UP_REQUIRED', 'Confirm it’s you first — we’ll text a code to the phone on this account.', {
     stepUp: { send: 'POST /auth/step-up', verify: 'POST /auth/step-up/verify', validForSeconds: STEP_UP_TTL_S },
   });
 }
+
+/**
+ * [DELETION-INTEGRITY · coordinator ruling 2026-10-05, Q3b] Account deletion
+ * and closure requests only: a session that an OTP sign-in created within the
+ * step-up window already carries what a step-up proves — a code reached the
+ * phone on the account, on THIS session, minutes ago. App builds without the
+ * step-up sheet (and a store reviewer who just signed in with a code) can
+ * therefore still delete. Any older session, or one not created by an OTP
+ * sign-in, still needs the step-up. Refresh rotation keeps createdAt, so a
+ * refreshed session never looks fresh.
+ */
+export async function requireRecentOtpOrStepUp(
+  app: FastifyInstance,
+  request: { user: { userId: string }; authSessionId: string | null },
+): Promise<void> {
+  const sessionId = request.authSessionId;
+  if (sessionId) {
+    const session = await app.prisma.session.findUnique({
+      where: { id: sessionId }, select: { userId: true, authMethod: true, createdAt: true },
+    });
+    if (session && session.userId === request.user.userId && session.authMethod === 'OTP'
+      && Date.now() - session.createdAt.getTime() <= STEP_UP_TTL_S * 1000) return;
+  }
+  await requireStepUp(app, request);
+}
+
