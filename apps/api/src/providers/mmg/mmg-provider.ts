@@ -1,3 +1,4 @@
+import { mmgHistoryQueryFor, mmgHistoryTruncated } from './mmg-history';
 import { fromMajor, fromMinor, toMajorString as majorStringOf } from '../../utils/currency-amount';
 import { nanoid } from 'nanoid';
 import { isProduction } from '../../utils/runtime-mode';
@@ -691,17 +692,12 @@ export class LiveMmgProvider implements MmgMerchantProvider {
     const now = new Date();
     const from = req?.from ?? new Date(now.getTime() - 7 * 24 * 3_600_000);
     const to = req?.to ?? now;
-    const headers = await this.wssHeaders(`hist-${from.getTime()}`);
-    const qs = new URLSearchParams({
-      offset: '1',
-      fromdate: from.toISOString(),
-      todate: to.toISOString(),
-      msisdn: this.cfg.merchantMsisdn,
-    });
-    const res = await this.call(`/e-merchant-initiated-transactions/txn-history?${qs}`, { method: 'GET', headers });
-    if (!res.ok) throw new Error(`MMG history failed (HTTP ${res.status})`);
-    const body: any = await res.json();
-    const list: any[] = Array.isArray(body?.TransactionList) ? body.TransactionList : [];
+    // MMG reads query stamps as Guyana wall clock, as established for checkout.
+    const query = mmgHistoryQueryFor(from, to, 'GUYANA_WALL_CLOCK', now);
+    const answer = await this.transactionHistoryRows(query);
+    if (answer.outcome !== 'rows') throw new Error('MMG history unavailable');
+    if (mmgHistoryTruncated(answer.rows.length, query)) throw new Error('MMG history incomplete');
+    const list: any[] = answer.rows;
     const mapped = list.map((t) => ({
       transactionId: String(t?.transactionReference ?? ''),
       status: mapMmgStatus(t?.transactionStatus),

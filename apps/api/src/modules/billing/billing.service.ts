@@ -3078,7 +3078,7 @@ export class BillingService {
       // ── UNKNOWN with no provider id: initiate timed out [tollgate 6.6] ──
       if (!payment.externalRef) {
         try {
-          const recent = await mmg.transactionHistory({ from: payment.createdAt, limit: 100 });
+          const recent = await mmg.transactionHistory({ from: payment.createdAt, to: ttlAt, limit: 100 });
           const match = payment.clientKey ? recent.find((t) => t.reference === payment.clientKey) : undefined;
           if (match) {
             // Positive history must become durable BEFORE a later lookup can
