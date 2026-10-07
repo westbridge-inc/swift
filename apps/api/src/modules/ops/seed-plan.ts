@@ -234,21 +234,6 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
     if (!opts.approvals?.length) throw new SeedRefused('APPROVALS_REQUIRED', 'a production configuration change needs two independent approvals');
     verified = verifyApprovals(opts.approvals, parseApproverKeys(opts.approverKeys), planRequestFacts(plan, opts.request), opts.now);
   }
-  const approvers = verified.map((v) => v.approver);
-  if (plan.changes.length === 0) {
-    // [PROD-PATH] Nothing to change is still a use of the approvals: they are
-    // consumed under the same lock (never reusable), and a first admin the
-    // signed plan names is minted here too.
-    const firstAdmin = await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('swift:seed-plan'))`;
-      if (plan.target.environment === 'production') await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor });
-      const minted = await mintSignedFirstAdmin(tx, plan, verified, opts);
-      await audit(tx, plan, 'NOOP', { configVersion: plan.configVersion, approvers, firstAdmin: !!minted }, opts.actor);
-      return minted;
-    });
-    seedPlanCounter.labels('noop').inc();
-    return { applied: 0, noop: true, configVersion: plan.configVersion, digest: plan.digest, firstAdmin };
-  }
   let applied: { count: number; firstAdmin: { userId: string } | null };
   try {
     applied = await runPlanTransaction(prisma, desired, plan, verified, opts);
@@ -260,8 +245,9 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
     }
     throw err;
   }
-  seedPlanCounter.labels('applied').inc();
-  return { applied: applied.count, noop: false, configVersion: plan.configVersion, digest: plan.digest, firstAdmin: applied.firstAdmin };
+  const noop = plan.changes.length === 0;
+  seedPlanCounter.labels(noop ? 'noop' : 'applied').inc();
+  return { applied: applied.count, noop, configVersion: plan.configVersion, digest: plan.digest, firstAdmin: applied.firstAdmin };
 }
 
 /** The account a SUPER_ADMIN promotion sets: roles SUPER_ADMIN and CUSTOMER. */
@@ -330,7 +316,7 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
       }
     }
     const firstAdmin = await mintSignedFirstAdmin(tx, plan, verified, opts);
-    await audit(tx, plan, 'APPLIED', { configVersion: plan.configVersion, configDigest: plan.configDigest, approvers, changes: plan.changes.length, tables: [...new Set(plan.changes.map((c) => c.table))], firstAdmin: !!firstAdmin }, opts.actor);
+    await audit(tx, plan, plan.changes.length === 0 ? 'NOOP' : 'APPLIED', { configVersion: plan.configVersion, configDigest: plan.configDigest, approvers, changes: plan.changes.length, tables: [...new Set(plan.changes.map((c) => c.table))], firstAdmin: !!firstAdmin }, opts.actor);
     return { count: plan.changes.length, firstAdmin };
   });
 }

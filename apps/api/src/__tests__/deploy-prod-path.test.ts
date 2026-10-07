@@ -80,11 +80,17 @@ sys.exit(0)
 // getent ahostsv6 NAME → the AAAA addresses DNS6_MAP gives it ("name=a,b;…"),
 // and, as glibc does, the IPv4-mapped form of its A address besides.
 const FAKE_GETENT = String.raw`import os, sys
+no_addrconfig = "-A" in sys.argv or "--no-addrconfig" in sys.argv
+sys.argv = [arg for arg in sys.argv if arg not in ("-A", "--no-addrconfig")]
 pairs = dict(p.split("=", 1) for p in os.environ.get("DNS_MAP", "").split(";") if "=" in p)
 pairs6 = dict(p.split("=", 1) for p in os.environ.get("DNS6_MAP", "").split(";") if "=" in p)
 if sys.argv[1:2] == ["ahostsv4"]:
     found = [pairs[sys.argv[2]]] if sys.argv[2] in pairs else []
 elif sys.argv[1:2] == ["ahostsv6"]:
+    if os.environ.get("GETENT6_STATUS"):
+        sys.exit(int(os.environ["GETENT6_STATUS"]))
+    if os.environ.get("IPV4_ONLY") == "1" and not no_addrconfig:
+        sys.exit(2)
     found = [a for a in pairs6.get(sys.argv[2], "").split(",") if a] + (["::ffff:" + pairs[sys.argv[2]]] if sys.argv[2] in pairs else [])
 else:
     sys.exit(2)
@@ -434,6 +440,23 @@ describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the produc
     const here = runPilot(PRODUCTION, { env: { DNS6_MAP: `${PROD_HOST}=2001:DB8::10`, HOST_IPS: `${HOST_IP} 10.10.0.5 2001:db8::10 ` } });
     expect(here.status, here.stderr).toBe(0);
   });
+
+  it('an IPv4-only host still detects stale AAAA records without address-family filtering', () => {
+    const stale = runPilot(PRODUCTION, { env: { IPV4_ONLY: '1', DNS6_MAP: `${PROD_HOST}=2001:db8::99` } });
+    expect(stale.status, stale.stdout).not.toBe(0);
+    expect(stale.stderr).toContain(`${PROD_HOST} resolves to 2001:db8::99, which is not this host`);
+    expect(stale.calls).toEqual([]);
+    writeFileSync(log, '');
+    const noAAAA = runPilot(PRODUCTION, { env: { IPV4_ONLY: '1', DNS6_MAP: '' } });
+    expect(noAAAA.status, noAAAA.stderr).toBe(0);
+  });
+
+  it('refuses when the unfiltered IPv6 query cannot run', () => {
+    const r = runPilot(PRODUCTION, { env: { GETENT6_STATUS: '1' } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('cannot check');
+    expect(r.calls).toEqual([]);
+  });
 });
 
 describe('[PROD-PATH] pilot-up.sh --data-only: the database without the API', () => {
@@ -483,6 +506,7 @@ function runSeed(settings: Record<string, string>, env: Record<string, string> =
   shim('docker', [
     'line="$*"',
     'echo "docker $line [approvals=${SEED_PLAN_APPROVALS:-}] [promotion=${SEED_PROMOTION_APPROVALS:-}] [keyfile=${SEED_APPROVER_KEYS_FILE:-}]" >> "$CALL_LOG"',
+    'case "$line" in "context show") echo "${DOCKER_CURRENT_CONTEXT:-default}"; exit 0;; esac',
     'case "$line" in *"exec -T postgres"*) echo "$IDENTITY_ROW"; exit 0;; esac',
     'exit 0',
   ].join('\n'));
@@ -503,6 +527,12 @@ const STG_SEED = { PILOT_ENV: 'staging', NODE_ENV: 'development' };
 const seeded = (lines: string[]) => lines.some((l) => l.includes('run --rm --no-TTY seed'));
 
 describe('[PROD-PATH] seed-production.sh: the host and the database must agree', () => {
+  it('standalone production seed refuses a persisted remote Docker context before querying the database', () => {
+    const r = runSeed(PROD_SEED, { DOCKER_CURRENT_CONTEXT: 'remote-box' });
+    expect(r.status, r.stdout).not.toBe(0);
+    expect(r.stderr).toContain("docker's current context is not this host's own daemon");
+    expect(r.calls).toEqual(['docker context show [approvals=] [promotion=] [keyfile=]']);
+  });
   it('seeds a production database from the production host', () => {
     const r = runSeed(PROD_SEED);
     expect(r.status, r.stderr).toBe(0);

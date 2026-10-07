@@ -93,6 +93,10 @@ SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 [[ "$SEED_ADMIN_PHONE" != +592600* ]] ||
   die "SEED_ADMIN_PHONE must not start with +592600 — that range is the demo-seed/purge classification, never a real admin"
 for tool in git docker; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
+if [ "$PILOT_ENV" = production ]; then
+  [ "$(docker context show 2>/dev/null || true)" = default ] ||
+    die "docker's current context is not this host's own daemon (default); run: docker context use default"
+fi
 
 # The two-person ceremony (runbook §6b and §12): approvals are signatures
 # by pinned approver keys. When approvals are given, the pinned keys must be in

@@ -811,7 +811,8 @@ explicitly off. Beyond the earlier guards:
   "due soon" reminder or trial fee notice names a fee, and nobody's grace
   runs (each due fee's dunning clock is paused). The pause follows the
   server's switches only (the MMG driver, and the card rail: CARD_RAIL_V2=1,
-  not killed, with a real provider; the card simulator never counts), never
+  not killed, with a real provider accepted by this build's factory; unknown
+  provider names and the card simulator never count), never
   anything a partner sets, so a partner can neither
   cause it nor dodge it. When a way to pay comes back, only the current week
   is billed: one fee covers the weeks nobody could pay and the week in

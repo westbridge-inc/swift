@@ -262,8 +262,16 @@ if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ]; then
   for served_name in "${served_names[@]}"; do
     resolved="$(getent ahostsv4 "$served_name" 2>/dev/null | awk '{print $1}' | sort -u || true)"
     [ -n "$resolved" ] || die "$served_name does not resolve yet; point its DNS at this host before the production stack starts (the database-only stage needs none: --data-only)"
-    # Its IPv6 addresses (AAAA), without the IPv4-mapped forms getent adds.
-    resolved6="$(getent ahostsv6 "$served_name" 2>/dev/null | awk '{print tolower($1)}' | grep -v '^::ffff:' | sort -u || true)"
+    # Query AAAA even on IPv4-only hosts: getent otherwise uses AI_ADDRCONFIG
+    # and hides the stale IPv6 answers this guard must detect. A missing name
+    # (2) is allowed; an unsupported option/resolver command failure is not.
+    dns6_status=0
+    resolved6="$(getent --no-addrconfig ahostsv6 "$served_name" 2>/dev/null)" || dns6_status=$?
+    case "$dns6_status" in
+      0 | 2) ;;
+      *) die "cannot check $served_name IPv6 addresses without address-family filtering; getent --no-addrconfig is required" ;;
+    esac
+    resolved6="$(printf '%s\n' "$resolved6" | awk '{print tolower($1)}' | grep -v '^::ffff:' | sort -u || true)"
     for address in $resolved $resolved6; do
       case "$host_addresses" in
         *" $address "*) ;;

@@ -548,6 +548,59 @@ describe('[PROD-PATH] the seed ceremony is bound to what the approvers read', ()
     }
   });
 
+  it('a signed NOOP seeder waiting behind a config change refuses drift before consuming approvals or minting the first admin', async () => {
+    const supers = await prisma.user.findMany({ where: { roles: { has: 'SUPER_ADMIN' } }, select: { id: true, roles: true, activeRole: true } });
+    const phone = '+5926155998'; // synthetic, suite-owned
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let locked!: () => void;
+    const firstLocked = new Promise<void>((resolve) => { locked = resolve; });
+    let attempted!: () => void;
+    const secondLock = new Promise<void>((resolve) => { attempted = resolve; });
+    const secondClient = prisma.$extends({ query: { $executeRaw({ args, query }) { attempted(); return query(args); } } });
+    let first: Promise<unknown> | undefined;
+    let second: Promise<unknown> | undefined;
+    await setIdentity('production');
+    try {
+      for (const u of supers) await prisma.user.update({ where: { id: u.id }, data: { roles: { set: ['CUSTOMER'] }, activeRole: 'CUSTOMER' } });
+      await prisma.platformConfig.upsert({ where: { key: KEY }, create: { key: KEY, value: 72 }, update: { value: 72 } });
+      const desired = desiredFor(72);
+      const noop = await buildSeedPlan(prisma, URL_, desired);
+      expect(noop.changes).toEqual([]);
+      const request = { fxGydPerUsd: 209, adminPhone: phone };
+      const approvals = both(planApprovalRequest(noop, request));
+      const changing = desiredFor(73);
+      const change = await buildSeedPlan(prisma, URL_, changing);
+      first = applySeedPlan(prisma, URL_, changing, change, {
+        approvals: both(planApprovalRequest(change)), approverKeys: PINNED,
+        failpoint: async () => { locked(); await held; },
+      });
+      await firstLocked;
+      // Another independent signed seeder still rebuilds an empty diff while
+      // the first owns the lock, before that transaction writes its change.
+      expect((await buildSeedPlan(prisma, URL_, desired)).changes).toEqual([]);
+      second = applySeedPlan(secondClient as unknown as PrismaClient, URL_, desired, noop, { approvals, approverKeys: PINNED, request });
+      const result = Promise.allSettled([first, second]);
+      await secondLock;
+      release();
+      const [winner, loser] = await result;
+      expect(winner.status).toBe('fulfilled');
+      expect(loser).toMatchObject({ status: 'rejected', reason: { code: 'PLAN_DRIFT' } });
+      expect((await prisma.platformConfig.findUniqueOrThrow({ where: { key: KEY } })).value).toBe(73);
+      expect(await prisma.user.count({ where: { phone } })).toBe(0);
+      const nonce = parseRequest(Buffer.from(approvals[0]!.request, 'base64').toString('utf8')).nonce;
+      expect(await prisma.privilegedChangeAudit.count({ where: { action: 'SEED_APPROVAL_CONSUMED', detail: { path: ['nonce'], equals: nonce } } })).toBe(0);
+      expect(await auditEvents(noop.digest)).toEqual(['REFUSED_DRIFT']);
+    } finally {
+      release();
+      await Promise.allSettled([first, second]);
+      const minted = await prisma.user.findUnique({ where: { phone }, select: { id: true } });
+      if (minted) { userIds.push(minted.id); await prisma.user.update({ where: { id: minted.id }, data: { roles: { set: ['CUSTOMER'] }, activeRole: 'CUSTOMER' } }); }
+      for (const u of supers) await prisma.user.update({ where: { id: u.id }, data: { roles: { set: u.roles }, activeRole: u.activeRole } });
+      await setIdentity('test');
+    }
+  });
+
   it('on production the first SUPER_ADMIN is minted only by the signed plan that names its phone', async () => {
     // A production database with no SUPER_ADMIN yet: the suite's database has
     // some, so their role is set aside for this case and put back after.
@@ -590,4 +643,3 @@ describe('[PROD-PATH] the seed ceremony is bound to what the approvers read', ()
     }
   });
 });
-

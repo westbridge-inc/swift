@@ -15,7 +15,7 @@ import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerR
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider, mmgDisabled } from '../../providers/mmg/mmg-provider';
 import { noLivePayPath } from './fee-pause';
-import { consumeMmgReactivation, feePauseHoldsBilling, mmgReactivationPeriodEnd } from './mmg-pause';
+import { consumeMmgReactivation, feePauseHoldsBilling, feePauseSpanOpen, mmgReactivationPeriodEnd } from './mmg-pause';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { restoreBillingAccess } from './billing-access';
@@ -4027,7 +4027,7 @@ export class BillingService {
           // [PROD-PATH] No live way to pay: nobody is nudged to pay or
           // churned for not paying; their dunning clock is paused for the
           // span (mmg-pause.ts).
-          if (noLivePayPath()) return null;
+          if (await feePauseHoldsBilling(tx, sub.id)) return null;
           const suspendedSince = sub.suspendedAt ?? sub.updatedAt;
           const clock = await currentDunningClock(tx, sub.id, now);
           const elapsed = activeOverdueMs(clock, now);
@@ -4486,7 +4486,7 @@ export class BillingService {
     // [PROD-PATH] No live way to pay: the fee is paused, so "due soon" would
     // name a fee nobody can pay. Nothing is written, so the reminder still
     // goes out if a way to pay comes back before the due date.
-    if (noLivePayPath()) return 0;
+    if (await feePauseSpanOpen(this.prisma)) return 0;
     const dayAhead = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const upcoming = await this.prisma.subscription.findMany({
       where: { status: 'ACTIVE', autoRenew: true, nextBillingDate: { gt: now, lte: dayAhead } },
@@ -4518,6 +4518,7 @@ export class BillingService {
       try {
         const allowed = await this.prisma.$transaction(async (tx) => {
           if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+          if (await feePauseHoldsBilling(tx, sub.id)) return false;
           await tx.billingEvent.create({
           data: {
             subscriptionId: sub.id,

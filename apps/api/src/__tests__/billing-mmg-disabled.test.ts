@@ -23,10 +23,12 @@ import { subscriptionOperability, inoperableSubscriptionWhere, type OperabilityS
 type GateRow = OperabilitySubscription & { billingMethod: PaymentMethod };
 const gate = (row: GateRow, now: Date, env: Record<string, string>) => subscriptionOperability(row, { missingRow: 'BLOCK' }, now, env);
 import { MMG_PAUSE_CLOCKS_KEY, syncMmgPauseClock } from '../modules/billing/mmg-pause';
-import { activeOverdueMs, FULL_FEE_GRACE_MS } from '../modules/billing/dunning-clock';
+import { activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS } from '../modules/billing/dunning-clock';
 import { mmgTerminalProof } from '../modules/billing/mmg-terminal-evidence';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { enqueueFeeDemand, handOffFeeDemand, persistFeeDemandInbox } from '../modules/billing/fee-demand-delivery';
+import * as cardFactory from '../providers/card/card-rail-factory';
 
 // ---------------------------------------------------------------------------
 // [PROD-PATH] MMG fully OFF (MMG_DRIVER=disabled), the owner's ruling for a
@@ -168,11 +170,13 @@ async function whileOff<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Run `fn` with MMG switched off but the card rail live: partners have a live way to pay (a card). */
-// A real card provider (this build has none yet; the name stands for the first one).
+// This build has no real provider yet. These positive-path cases explicitly
+// supply future factory support; merely configuring an unknown name must fail.
 const CARD_LIVE = { MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', CARD_RAIL_KILL: '0', PAYMENT_PROVIDER: 'sandbox', CARD_RAIL_PROVIDER: 'powertranz' };
 async function whileCardLive<T>(fn: () => Promise<T>): Promise<T> {
+  const supported = vi.spyOn(cardFactory, 'cardRailProviderNames').mockReturnValue(['simulator', 'powertranz']);
   for (const [k, v] of Object.entries(CARD_LIVE)) vi.stubEnv(k, v);
-  try { return await fn(); } finally { vi.unstubAllEnvs(); }
+  try { return await fn(); } finally { supported.mockRestore(); vi.unstubAllEnvs(); }
 }
 
 /** Start from no pause: close any pause an earlier case left open. */
@@ -555,6 +559,25 @@ describe('[PROD-PATH · 6 Oct ruling] no live way to pay pauses every partner\'s
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, idempotencyKey: { startsWith: 'trialedu:' } } })).toBe(1);
   });
 
+  it('a delayed trial conversion AFTER resume pays only ONE fee through the current week', async () => {
+    await noPauseOpen();
+    const resumedAt = new Date();
+    const trialEnd = new Date(resumedAt.getTime() - 20 * DAY);
+    const subId = await makeVendorSub(trialEnd, { method: 'CASH', status: 'TRIAL', extra: { isTrialActive: true, trialEndDate: trialEnd } });
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: subId, balance: 50000, currencyCode: 'GYD' } });
+    // Conversion is backlogged for the entire outage, including the resume tick.
+    await syncMmgPauseClock(app.prisma, new Date(trialEnd.getTime() - DAY), OFF);
+    await syncMmgPauseClock(app.prisma, resumedAt, ON);
+    expect((await sub(subId)).status).toBe('TRIAL');
+    await new SubscriptionService(app.prisma).convertExpiredTrials(resumedAt);
+    for (let i = 0; i < 3; i += 1) await billing.runBillingCycle();
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({ status: 'CAPTURED', periodStart: trialEnd, periodEnd: new Date(trialEnd.getTime() + 21 * DAY) });
+    expect(await balanceOf(subId)).toBe(38000);
+    expect((await sub(subId)).nextBillingDate.getTime()).toBeGreaterThan(resumedAt.getTime());
+  });
+
   it('a trial that ends during the pause converts and operates, owes nothing while paused, then pays ONE fee through the current week', async () => {
     await noPauseOpen();
     const trialEnd = new Date(Date.now() - 10 * DAY);
@@ -583,12 +606,23 @@ describe('[PROD-PATH · 6 Oct ruling] no live way to pay pauses every partner\'s
 });
 
 describe('[PROD-PATH] the pause is decided by server facts only: nothing a partner sets pauses their fee', () => {
+  it.each(['powertranz', 'typo-provider'])('a provider rejected by the card factory (%s) never unpauses fees', async (provider) => {
+    const { noLivePayPath } = await import('../modules/billing/fee-pause');
+    const env = { ...CARD_LIVE, CARD_RAIL_PROVIDER: provider };
+    expect(() => cardFactory.getCardRailProvider({ redis: app.redis }, env)).toThrow('Unknown CARD_RAIL_PROVIDER');
+    expect(noLivePayPath(env)).toBe(true);
+  });
   it('the predicate reads only the server\'s MMG driver and card-rail switches', async () => {
     const { noLivePayPath } = await import('../modules/billing/fee-pause');
     expect(noLivePayPath({ MMG_DRIVER: 'disabled' })).toBe(true);
     expect(noLivePayPath({ MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', CARD_RAIL_KILL: '1' })).toBe(true);
     expect(noLivePayPath({ MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1' })).toBe(true);
-    expect(noLivePayPath(CARD_LIVE)).toBe(false);
+    await whileCardLive(async () => {
+      expect(noLivePayPath(CARD_LIVE)).toBe(false);
+      expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_KILL: '1' })).toBe(true);
+      expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_V2: '0' })).toBe(true);
+      expect(noLivePayPath({ ...CARD_LIVE, PAYMENT_PROVIDER: 'disabled' })).toBe(true);
+    });
     // The card simulator (test pages for listed test subscriptions, no money) or no provider at all is no way to pay.
     expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_PROVIDER: 'simulator' })).toBe(true);
     expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_PROVIDER: '' })).toBe(true);
@@ -642,23 +676,79 @@ describe('[PROD-PATH] the pause is decided by server facts only: nothing a partn
     expect((await sub(subId)).status).toBe('PAST_DUE');
   });
 
-  it('MMG off but the card rail live: the operate gate enforces a lapsed grace for every billing method', () => {
+  it('MMG off but the card rail live: the operate gate enforces a lapsed grace for every billing method', async () => {
     const now = new Date('2026-10-05T12:00:00.000Z');
     const lapsed: GateRow = {
       status: 'PAST_DUE', gracePeriodEnd: new Date('2026-10-04T12:00:00.000Z'), billingEnforcementDueAt: new Date('2026-10-04T12:00:00.000Z'),
       billingConfirmationPausedAt: null, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date('2026-10-10T00:00:00.000Z'), billingMethod: 'MOBILE_MONEY',
     };
-    for (const billingMethod of ['MOBILE_MONEY', 'CASH', 'CARD'] as const) {
-      expect(gate({ ...lapsed, billingMethod }, now, CARD_LIVE), billingMethod).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
-    }
+    await whileCardLive(async () => {
+      for (const billingMethod of ['MOBILE_MONEY', 'CASH', 'CARD'] as const) {
+        expect(gate({ ...lapsed, billingMethod }, now, CARD_LIVE), billingMethod).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
+      }
+    });
   });
 
   it('MMG off but the card rail live: the pause tick pauses nobody', async () => {
     await noPauseOpen();
     const t0 = new Date();
     const id = await makeVendorSub(new Date(t0.getTime() - 3_600_000), { method: 'CASH', status: 'PAST_DUE', extra: { failedAttempts: 1 } });
-    expect(await syncMmgPauseClock(app.prisma, t0, CARD_LIVE)).toMatchObject({ paused: false, pausedNow: 0 });
+    expect(await whileCardLive(() => syncMmgPauseClock(app.prisma, t0, CARD_LIVE))).toMatchObject({ paused: false, pausedNow: 0 });
     expect((await clockOf(id))?.pausedAt ?? null).toBeNull();
+  });
+});
+
+describe('[PROD-PATH] queued demands respect the platform pause at delivery', () => {
+  it.each(['billing_reminder', 'trial_fee_education'] as const)('holds an already queued %s before the pause tick and throughout a pending resume', async (kind) => {
+    await noPauseOpen();
+    const due = new Date(Date.now() + 12 * 3_600_000);
+    const id = await makeVendorSub(due, { method: 'CASH', status: kind === 'trial_fee_education' ? 'TRIAL' : 'ACTIVE', extra: kind === 'trial_fee_education' ? { isTrialActive: true, trialEndDate: due } : {} });
+    const row = await subWithRelations(id);
+    const userId = row.vendor!.owner.userId;
+    const notice = await enqueueFeeDemand(app.prisma, { userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Weekly fee', body: 'Synthetic queued fee notice', data: { kind, subscriptionId: id }, feeStageKey: `queued:${kind}` });
+    const delivery = vi.fn(async () => 'local handoff');
+    const assertHeld = async () => {
+      expect(await persistFeeDemandInbox(app.prisma, notice.id)).toBeNull();
+      expect(await handOffFeeDemand(app.prisma, notice.id, 'sms', 'body', delivery)).toBeUndefined();
+      expect(delivery).not.toHaveBeenCalled();
+      expect(await app.prisma.notification.count({ where: { userId, dedupeKey: `fee-demand:${notice.id}` } })).toBe(0);
+      expect((await app.prisma.billingFeeNotice.findUniqueOrThrow({ where: { id: notice.id } })).status).toBe('PENDING');
+    };
+    await whileOff(async () => {
+      await assertHeld(); // flags changed; no tick has run yet
+      await syncMmgPauseClock(app.prisma, new Date(), OFF);
+      expect((await clockOf(id))!.pausedAt).toBeNull(); // future due: no per-clock pause
+      await assertHeld();
+    });
+    await assertHeld(); // pay path live, but the open span has not been closed
+    await syncMmgPauseClock(app.prisma, new Date(), ON);
+    expect(await persistFeeDemandInbox(app.prisma, notice.id)).toEqual(expect.any(String));
+    expect(await handOffFeeDemand(app.prisma, notice.id, 'sms', 'body', delivery)).toBe('local handoff');
+    await handOffFeeDemand(app.prisma, notice.id, 'sms', 'body', delivery);
+    expect(delivery).toHaveBeenCalledTimes(1);
+  });
+
+  it('an open span holds churn, upcoming reminders and trial education until resume completes', async () => {
+    await noPauseOpen();
+    await syncMmgPauseClock(app.prisma, new Date(), OFF);
+    // These subscriptions were not visited by the pause tick.
+    const longAgo = new Date(Date.now() - 40 * DAY);
+    const suspended = await makeVendorSub(longAgo, { method: 'CASH', status: 'SUSPENDED', extra: { suspendedAt: longAgo, failedAttempts: 3 } });
+    const upcoming = await makeVendorSub(new Date(Date.now() + 12 * 3_600_000), { method: 'CASH' });
+    const trialEnd = new Date(Date.now() + 2 * DAY);
+    const trial = await makeVendorSub(trialEnd, { method: 'CASH', status: 'TRIAL', extra: { isTrialActive: true, trialEndDate: trialEnd } });
+    await billing.sweepSuspended();
+    await billing.sendUpcomingReminders();
+    await sweepTrialFeeEducation(app.prisma, new NotificationService(app.prisma, app.io));
+    expect((await sub(suspended)).status).toBe('SUSPENDED');
+    for (const id of [suspended, upcoming, trial]) expect(await events(id)).toBe(0);
+    await syncMmgPauseClock(app.prisma, new Date(), ON);
+    await billing.sweepSuspended();
+    await billing.sendUpcomingReminders();
+    await sweepTrialFeeEducation(app.prisma, new NotificationService(app.prisma, app.io));
+    expect((await sub(suspended)).status).toBe('CHURNED');
+    expect(await events(upcoming, 'REMINDER')).toBe(1);
+    expect(await events(trial, 'REMINDER')).toBe(1);
   });
 });
 
@@ -755,6 +845,42 @@ describe('[PROD-PATH] each pause and resume is on the record, and admins see it'
 });
 
 describe('[PROD-PATH] resume ordering: on resume only the current week is billed, whatever runs first', () => {
+  it.each(['paused retry', 'resume'] as const)('a failed clock pause repaired on %s preserves the minute of grace that remained', async (repair) => {
+    await noPauseOpen();
+    const t0 = new Date(Date.now() - 120_000);
+    const due = new Date(t0.getTime() - FULL_FEE_GRACE_MS + 60_000);
+    const subId = await makeVendorSub(due, { method: 'CASH', status: 'PAST_DUE', extra: { failedAttempts: 3 } });
+    await app.prisma.$transaction((tx) => currentDunningClock(tx, subId, t0));
+    await syncMmgPauseClock(app.prisma, t0, OFF, async (boundary) => {
+      if (boundary === 'after-read') throw new Error('injected: clock pause rolled back');
+    });
+    expect((await clockOf(subId))?.pausedAt ?? null).toBeNull();
+    const resume = new Date(t0.getTime() + 120_000);
+    if (repair === 'paused retry') await syncMmgPauseClock(app.prisma, new Date(t0.getTime() + 90_000), OFF);
+    await syncMmgPauseClock(app.prisma, resume, ON);
+    const clock = (await clockOf(subId))!;
+    expect(clock).not.toBeNull();
+    expect(activeOverdueMs(clock, resume)).toBe(FULL_FEE_GRACE_MS - 60_000);
+    expect((await sub(subId)).billingEnforcementDueAt).toEqual(new Date(resume.getTime() + 60_000));
+    expect(await (billing as any).finishExhaustedGrace(await subWithRelations(subId), new Date(resume.getTime() + 1))).toBe('pending');
+    expect((await sub(subId)).status).toBe('PAST_DUE');
+    expect(await events(subId, 'SUSPENDED')).toBe(0);
+  });
+
+  it('a failed pause repair during resume leaves the span open until grace can be repaired', async () => {
+    await noPauseOpen();
+    const t0 = new Date(Date.now() - 120_000);
+    const subId = await makeVendorSub(new Date(t0.getTime() - FULL_FEE_GRACE_MS + 60_000), { method: 'CASH', status: 'PAST_DUE', extra: { failedAttempts: 3 } });
+    const fail = async (boundary: string) => { if (boundary === 'after-read') throw new Error('injected: clock storage unavailable'); };
+    await syncMmgPauseClock(app.prisma, t0, OFF, fail);
+    await syncMmgPauseClock(app.prisma, new Date(), ON, fail);
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_pause.open' } })).not.toBeNull();
+    expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
+    const resume = new Date();
+    await syncMmgPauseClock(app.prisma, resume, ON);
+    expect(activeOverdueMs((await clockOf(subId))!, resume)).toBe(FULL_FEE_GRACE_MS - 60_000);
+  });
+
   it('billing that runs BEFORE the resume tick bills nothing; after it, ONE fee covers the off weeks and the current week (cash, prepaid)', async () => {
     await noPauseOpen();
     const due = new Date(Date.now() - 20 * DAY);
@@ -900,4 +1026,3 @@ describe('[PROD-PATH] resume ordering: on resume only the current week is billed
     expect(payments[0]).toMatchObject({ periodStart: due, periodEnd: new Date(due.getTime() + 21 * DAY) });
   });
 });
-

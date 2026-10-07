@@ -38,8 +38,10 @@ export const FEE_PAUSE_OPEN_KEY = 'billing.mmg_pause.open';
 /** Per subscription: the instant a way to pay came back for it (owner ruling, 5 Oct). */
 export const MMG_REACTIVATED_PREFIX = 'billing.mmg_pause.reactivated:';
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-/** The statuses whose fee falls due and is enforced: what the pause holds. */
-const ENFORCED: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE', 'SUSPENDED'];
+/** Include expired trials even when the conversion job is backlogged: their
+ * original due date survives conversion, so they need the same pause and
+ * reactivation record before billing can collect that obligation. */
+const ENFORCED: SubscriptionStatus[] = ['TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED'];
 const dueWhere = (now: Date): Prisma.SubscriptionWhereInput => ({ autoRenew: true, status: { in: ENFORCED }, nextBillingDate: { lte: now } });
 
 type Tx = Prisma.TransactionClient;
@@ -116,6 +118,12 @@ function openSince(value: unknown): string | null {
   return typeof since === 'string' ? since : null;
 }
 
+/** The global pause also holds during a pending/failed resume, including
+ * subscriptions whose individual clock has never been visited. */
+export async function feePauseSpanOpen(db: ConfigReader, env: Record<string, string | undefined> = process.env): Promise<boolean> {
+  return noLivePayPath(env) || !!await db.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } });
+}
+
 /**
  * [S2] May billing for this subscription run now? Not while:
  *   - no partner has a live way to pay (fee-pause.ts);
@@ -130,8 +138,7 @@ export async function feePauseHoldsBilling(
   subscriptionId: string,
   env: Record<string, string | undefined> = process.env,
 ): Promise<boolean> {
-  if (noLivePayPath(env)) return true;
-  if (await db.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } })) return true;
+  if (await feePauseSpanOpen(db, env)) return true;
   const held = (await db.platformConfig.findUnique({ where: { key: MMG_PAUSE_CLOCKS_KEY }, select: { value: true } }))?.value;
   if (!Array.isArray(held) || held.length === 0) return false;
   const clock = await db.billingDunningClock.findUnique({ where: { subscriptionId }, select: { id: true } });
@@ -167,33 +174,47 @@ export async function syncMmgPauseClock(
       return true;
     });
     if (opened) log().warn({ since: now.toISOString() }, '[PROD-PATH] fee pause STARTED: MMG is off and no card rail is live, so no partner can pay; every weekly fee is paused (no charge, no dunning, no suspension, no churn)');
+  }
+  // The persisted start is authoritative even if a tick/clock transaction
+  // failed. Repair every due clock BEFORE closing the span, including clocks
+  // that fell due after the last pause tick. Separate transactions bound the
+  // work per clock; the final locked census refuses any unvisited newcomer.
+  const span = await prisma.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } });
+  const since = span ? instant(openSince(span.value)) : null;
+  const repaired = new Set<string>();
+  if (span && !since) throw new Error('Invalid fee pause start; billing remains held');
+  if (since) {
     const due = await prisma.subscription.findMany({ where: dueWhere(now), select: { id: true } });
     for (const { id } of due) {
       try {
         pausedNow += await prisma.$transaction(async (tx) => {
           await tickLock(tx);
-          // The canonical accessor: payer -> subscription -> clock locks, the
-          // clock created from the subscription when it has none yet.
-          const clock = await currentDunningClock(tx, id, now);
+          const current = await tx.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } });
+          if (!current || openSince(current.value) !== since.toISOString()) throw new Error('Fee pause span changed; retry the tick');
+          // Canonical payer -> subscription -> clock locks. Use the ORIGINAL
+          // pause time, never the retry/resume time, so retries consume no grace.
+          const clock = await currentDunningClock(tx, id, since);
           await failpoint?.('after-read');
-          if (clock.pausedAt) return 0; // already paused, by this pause or by a confirmation
-          const overdueMs = activeOverdueMs(clock, now);
+          if (clock.pausedAt) return 0; // an existing pause/confirmation owns it
+          const overdueMs = activeOverdueMs(clock, since);
           const pausedClock = await tx.billingDunningClock.update({ where: { id: clock.id }, data: {
-            elapsedMs: BigInt(overdueMs), runningSince: null, pausedAt: now, version: { increment: 1 },
+            elapsedMs: BigInt(overdueMs), runningSince: null, pausedAt: since, version: { increment: 1 },
           } });
           await projectDunningClock(tx, pausedClock, now);
           await writeHeld(tx, [...await heldClocks(tx), clock.id]);
           await tx.auditLog.create({ data: {
             action: 'BILLING_FEE_PAUSED', entity: 'Subscription', entityId: id,
-            changes: { clockId: clock.id, reason: 'NO_LIVE_PAY_PATH', overdueMs, at: now.toISOString() },
+            changes: { clockId: clock.id, reason: 'NO_LIVE_PAY_PATH', overdueMs, at: since.toISOString() },
           } });
           return 1;
         });
+        repaired.add(id);
       } catch (err) {
-        log().error({ err, subscriptionId: id }, '[PROD-PATH] fee pause: could not pause this billing clock; the billing entry points still refuse to enforce, and the next tick retries');
+        log().error({ err, subscriptionId: id }, '[PROD-PATH] fee pause: clock pause failed; the open span holds billing until a tick repairs it from the original pause time');
       }
     }
-  } else {
+  }
+  if (!paused) {
     let stillOpen = false;
     try {
       reactivated = await prisma.$transaction(async (tx) => {
@@ -205,6 +226,9 @@ export async function syncMmgPauseClock(
         // covers only the week in progress. A record left by an earlier pause
         // is replaced, so the latest return is the one that counts.
         const due = await tx.subscription.findMany({ where: dueWhere(now), select: { id: true } });
+        if (openSince(open.value) !== since?.toISOString() || due.some(({ id }) => !repaired.has(id))) {
+          throw new Error('Fee pause clocks still need repair; keep the span open');
+        }
         const keys = due.map(({ id }) => `${MMG_REACTIVATED_PREFIX}${id}`);
         if (keys.length > 0) {
           await tx.platformConfig.deleteMany({ where: { key: { in: keys } } });

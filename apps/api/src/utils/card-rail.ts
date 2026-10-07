@@ -1,3 +1,5 @@
+import { cardRailProviderNames } from '../providers/card/card-rail-factory';
+
 /** Explicit provider disablement and the operational kill switch both stop new
  * card instructions. A live provider may still reconcile while killed. */
 export function cardRailKilled(env: Record<string, string | undefined> = process.env): boolean {
@@ -22,7 +24,7 @@ export function cardRailV2Enabled(env: Record<string, string | undefined> = proc
  * method, their app) enters it. */
 export function weeklyFeeCardLive(env: Record<string, string | undefined> = process.env): boolean {
   const provider = env['CARD_RAIL_PROVIDER'] ?? '';
-  return cardRailV2Enabled(env) && !cardRailKilled(env) && provider !== '' && provider !== 'simulator';
+  return cardRailV2Enabled(env) && !cardRailKilled(env) && provider !== 'simulator' && cardRailProviderNames().includes(provider);
 }
 
 /** [PT-1 · AX297 F5] With CARD_RAIL_V2 off, drain what v2 left in flight:
