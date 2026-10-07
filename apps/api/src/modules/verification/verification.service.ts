@@ -1762,14 +1762,15 @@ export class VerificationService {
       }
       // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
       await this.propagateVehicleLapse(doc, 'expired');
-      // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the badge — say so.
+      // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
+      // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
       const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
       await this.notifications.send({
         userId: doc.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Document expired',
         body: optional
-          ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' Your Police-cleared badge is off until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
+          ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
           : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expired', docId: doc.id },
@@ -1807,7 +1808,7 @@ export class VerificationService {
         type: 'SYSTEM_ANNOUNCEMENT',
         title: n.daysLeft <= 1 ? 'Document expires tomorrow' : 'Document expiring soon',
         body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${n.expiresOn.toISOString().slice(0, 10)} — ${n.daysLeft} day${n.daysLeft === 1 ? '' : 's'} left. ${optional
-          ? (doc.docType === POLICE_CLEARANCE_DOC_TYPE ? 'Renew it to keep your Police-cleared badge. It is optional and does not affect your work.' : 'It is optional and does not affect your work.')
+          ? (doc.docType === POLICE_CLEARANCE_DOC_TYPE ? 'Renew it to stay recorded as police-cleared. It is optional and does not affect your work.' : 'It is optional and does not affect your work.')
           : 'Renew it to avoid suspension.'}`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expiry_reminder', docId: n.documentId, daysLeft: n.daysLeft },

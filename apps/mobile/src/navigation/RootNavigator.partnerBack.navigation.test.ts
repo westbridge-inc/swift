@@ -807,7 +807,8 @@ describe('optional documents are offered, never counted as required', () => {
     expect(text()).toContain('0 of 3 approved');
     expect(text()).toContain('Optional');
     expect(text()).toContain('You can add these any time. You do not need them to go live.');
-    expect(card('Police Clearance Certificate').textContent).toContain('Police-cleared badge');
+    expect(card('Police Clearance Certificate').textContent).toContain('your account is recorded as police-cleared');
+    expect(card('Police Clearance Certificate').textContent).not.toMatch(/badge/i);
     // The national ID the rider already sent shows its review state in the optional list.
     expect(card('National ID or Digital ID card').textContent).toContain('In review');
     expect(text().indexOf('Optional')).toBeGreaterThan(text().indexOf('Vehicle Insurance'));

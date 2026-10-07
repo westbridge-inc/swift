@@ -44,7 +44,8 @@ export function optionalDocTypes(status: { optional?: unknown; checklist?: unkno
 
 /** What an optional document is for, in the person's words. */
 export function optionalDocHint(docType: string): string {
-  if (docType === 'police_clearance') return 'Optional. An approved, current one shows a Police-cleared badge on your profile.';
+  // [VERIFY-DOCS] Say what really happens: no screen shows a Police-cleared badge yet, so promise none.
+  if (docType === 'police_clearance') return 'Optional. If Swift approves a current one, your account is recorded as police-cleared.';
   if (docType === 'national_id') return 'Optional. Your driver’s licence already proves who you are.';
   return 'Optional. Not needed to start working.';
 }
