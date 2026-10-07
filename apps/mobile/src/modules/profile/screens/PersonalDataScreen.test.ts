@@ -15,6 +15,7 @@ vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({}),
   useMutation: (options: { mutationFn: () => unknown }) => ({ mutate: options.mutationFn }),
 }));
+vi.mock('../../../hooks/useStepUp', () => ({ useStepUp: () => ({ withStepUp: (fn: unknown) => fn, sheet: null, active: false }) }));
 vi.mock('../../../hooks/customer', () => ({ useProfile: () => ({ data: { firstName: 'Synthetic', lastName: 'Subject' } }) }));
 vi.mock('../../../services/api', () => ({ customerApi: { deleteAccount: mocks.deleteAccount } }));
 vi.mock('../../../stores/authStore', () => ({

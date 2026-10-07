@@ -170,6 +170,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // [L04 · MASTER-003] "Your password was changed" — if it wasn't the owner,
   // support is the way back, so the notice opens the help screen (mounted in
   // every navigator) already filed as an account problem.
+  if (kind === 'email_changed') {
+    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'I did not change my email address' } };
+  }
   if (kind === 'password_changed') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'I did not change my password' } };
   }
