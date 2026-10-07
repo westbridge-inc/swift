@@ -14,6 +14,8 @@ import { registerEmptyJsonBodyParser } from '../../plugins/empty-json';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { rateLimitKey } from '../../utils/rate-limit-key';
 import { customerRoutes } from '../../modules/user/customer.routes';
+import { BLOCKER_MESSAGE } from '../../modules/user/partner-wind-down';
+import { AccountService } from '../../modules/user/account.service';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { agentCashRoutes } from '../../modules/billing/agent-cash.routes';
@@ -85,6 +87,20 @@ const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 
 type Actor = { userId: string; token: string; sessionId: string };
 type Partner = { owner: Actor; vendorId: string; subId: string; san: string };
+
+/** Business self-service starts the support flow; its completion performs the
+ * permanent wind-down whose money invariants these journeys exercise. */
+async function closeBusinessAccount(p: Partner) {
+  await grantStepUp(app, p.owner.token);
+  const requested = await call('DELETE', '/api/v1/customer/account?receipts=v2', p.owner.token);
+  expect(requested.statusCode, requested.body).toBe(202);
+  expect(requested.json().data).toMatchObject({ deleted: false, status: 'CLOSURE_REQUESTED', ticketId: expect.any(String) });
+  expect(await sys(() => app.prisma.supportTicket.findUnique({ where: { id: requested.json().data.ticketId } })))
+    .toMatchObject({ userId: p.owner.userId, category: 'ACCOUNT', status: 'OPEN' });
+  expect(await sys(() => app.prisma.user.findUnique({ where: { id: p.owner.userId } }))).toMatchObject({ status: 'ACTIVE' });
+  expect((await call('GET', '/api/v1/vendor/subscription', p.owner.token, undefined, { 'x-vendor-id': p.vendorId })).statusCode).toBe(200);
+  expect(await sys(() => new AccountService(app).deleteAccount(p.owner.userId))).toEqual({ deleted: true });
+}
 let admin: Actor;
 let approver: Actor;
 let outsider: Actor;
@@ -312,6 +328,7 @@ async function purgeFixtures() {
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.customer.deleteMany({ where: { userId: { in: without(ids, kept.userIds) } } });
+    await app.prisma.supportTicket.deleteMany({ where: { userId: { in: without(ids, kept.userIds) } } });
     await app.prisma.user.deleteMany({ where: { id: { in: without(ids, kept.userIds) } } });
     // What stays is taken out of service: its stores close and its subscriptions are cancelled without renewal.
     await retireKeptScaffolding(app.prisma, kept);
@@ -489,9 +506,7 @@ describe('GOLD-2 · VEND-04 — the weekly fee and agent cash', () => {
 
     // Closing the account is the PERMANENT stop (the self-serve pause, E12, is
     // pinned in its own describe below).
-    const closed = await call('DELETE', '/api/v1/customer/account', p.owner.token);
-    expect(closed.statusCode, closed.body).toBe(200);
-    expect(closed.json().data).toEqual({ deleted: true });
+    await closeBusinessAccount(p);
     const cancelled = await subRow(p.subId);
     expect({ status: cancelled.status, autoRenew: cancelled.autoRenew, nextRetryAt: cancelled.nextRetryAt }).toEqual({ status: 'CANCELLED', autoRenew: false, nextRetryAt: null });
     expect(await vendorRow(p.vendorId)).toEqual({ status: 'SUSPENDED', acceptingOrders: false });
@@ -692,35 +707,40 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
     expect(await countEvents(p.subId, 'PREPAID_TOPUP')).toBe(1);
   });
 
-  it('an approval that arrives after the owner closed the account banks the money once and never reopens billing (E13, fixed by #1280)', async () => {
+  it('an approval that arrives while the owner asks to close the account pays the live week once; the closure completes after and billing never reopens (E13, #1280; GUARDRAILS §1)', async () => {
     const p = await makePartner('Cyd');
     await chooseMmg(p, `${PAYER_PREFIX}804`);
     const { request } = await mmgRequestPending(p);
 
-    const closed = await call('DELETE', '/api/v1/customer/account', p.owner.token);
-    expect(closed.statusCode, closed.body).toBe(200);
-    expect((await subRow(p.subId)).status).toBe('CANCELLED');
-    const titlesBefore = await noticesTo(p.owner.userId);
+    // The owner asks to close the account. Support cannot complete it while
+    // the MMG request can still be approved: the money would otherwise land on
+    // a closed, de-identified account with no one to tell.
+    await grantStepUp(app, p.owner.token);
+    const requested = await call('DELETE', '/api/v1/customer/account?receipts=v2', p.owner.token);
+    expect(requested.statusCode, requested.body).toBe(202);
+    await expect(sys(() => new AccountService(app).deleteAccount(p.owner.userId)))
+      .rejects.toMatchObject({ code: 'PARTNER_OBLIGATIONS', message: BLOCKER_MESSAGE.FEE_PAYMENT_PENDING });
+    expect(await sys(() => app.prisma.user.findUnique({ where: { id: p.owner.userId } }))).toMatchObject({ status: 'ACTIVE' });
 
-    // The payer approves the old request on their phone after leaving.
+    // The payer approves on their phone: the live week is paid, exactly once,
+    // and nothing is banked.
     sandboxSetTxStatus(request.externalRef!, 'approved');
     await pollBackoffPasses(request.id);
     await billing.pollPendingMmgCharges();
     expect((await mmgPayments(p.subId)).map((r) => r.status)).toEqual(['CAPTURED']);
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
+    expect(await countEvents(p.subId, 'PREPAID_TOPUP')).toBe(0);
+
+    // Support then completes the closure: nothing of the person's money is left
+    // with Swift, the store is wound down, and billing never reopens.
+    expect(await sys(() => new AccountService(app).deleteAccount(p.owner.userId))).toEqual({ deleted: true });
     const after = await subRow(p.subId);
     expect({ status: after.status, autoRenew: after.autoRenew }).toEqual({ status: 'CANCELLED', autoRenew: false });
-    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(0);
-    // Banked exactly once, keyed to that payment, as the payer's balance.
-    const banked = (await eventsOf(p.subId)).filter((e) => e.type === 'PREPAID_TOPUP');
-    expect(banked).toEqual([{ type: 'PREPAID_TOPUP', amount: RATE_CARD_SMALL_VENDOR, key: `bank:${request.id}` }]);
-    expect(await wallet(p.subId)).toBe(RATE_CARD_SMALL_VENDOR);
-    // A deleted account is not messaged about it.
-    expect(await noticesTo(p.owner.userId)).toEqual(titlesBefore);
-
     await pollBackoffPasses(request.id);
     await billing.pollPendingMmgCharges();
     await billing.runBillingCycle();
-    expect(await countEvents(p.subId, 'PREPAID_TOPUP')).toBe(1);
+    expect(await countEvents(p.subId, 'PREPAID_TOPUP')).toBe(0);
+    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
     expect(await countEvents(p.subId, 'CHARGE_ATTEMPT')).toBe(1);
     expect((await subRow(p.subId)).status).toBe('CANCELLED');
   });

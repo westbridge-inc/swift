@@ -244,6 +244,12 @@ describe('[MC-PR2] the activation refusals (admin.routes.ts PUT /vendors/:id/app
     expect(o.serverMessage).toMatch(/operator details/);
   });
 
+  it('409 OWNER_ACCOUNT_RESTRICTED explains the account must be reinstated first', () => {
+    const o = outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'OWNER_ACCOUNT_RESTRICTED' }));
+    expect(o.tone).toBe('refused');
+    expect(o.next).toMatch(/owner.*account.*reinstated.*first/i);
+  });
+
   it('409 ACCOUNT_CLOSED: the owner closed their account; nothing reopens it', async () => {
     replyWith(409, { success: false, error: { code: 'ACCOUNT_CLOSED', message: "Target Store's owner has closed their Swift account, so the store stays closed. It cannot be reopened from the console." } });
     const o = outcomeOf(await thrownBy(() => approveVendor('vnd_1', REASON)));

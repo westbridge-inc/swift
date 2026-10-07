@@ -43,6 +43,7 @@ export type VendorActivationNext =
   | 'CAN_REINSTATE'
   /** The owner closed their Swift account; the store stays closed. */
   | 'ACCOUNT_CLOSED'
+  | 'OWNER_ACCOUNT_RESTRICTED'
   /** Suspended while its weekly fee is unpaid (or billing stopped): it comes back when billing confirms a payment, not from the console. */
   | 'FEE_UNPAID'
   /** A closed store is not reopened from the console. */
@@ -71,6 +72,7 @@ export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick
   if (vendor.status === 'ACTIVE') return 'LIVE';
   if (vendor.status === 'CLOSED') return 'CLOSED';
   if (vendor.suspensionSource === 'WIND_DOWN' || vendor.ownerAccountStatus === 'DEACTIVATED') return 'ACCOUNT_CLOSED';
+  if (vendor.ownerAccountStatus === 'BANNED' || vendor.ownerAccountStatus === 'SUSPENDED') return 'OWNER_ACCOUNT_RESTRICTED';
   if (vendor.status === 'SUSPENDED' && !feeOperable(vendor.subscription)) return 'FEE_UNPAID';
   if (!goLive.checklist.complete) return 'NEEDS_DOCUMENTS';
   if (goLive.disclosure.engaged && goLive.disclosure.complete !== true) return 'NEEDS_DISCLOSURE';
@@ -106,11 +108,13 @@ export function vendorActivationRefusal(
       return new AppError(409, 'STORE_CLOSED', `${name} is closed. A closed store is not reopened from the console.`);
     case 'ACCOUNT_CLOSED':
       return new AppError(409, 'ACCOUNT_CLOSED', `${name}'s owner has closed their Swift account, so the store stays closed. It cannot be reopened from the console.`);
+    case 'OWNER_ACCOUNT_RESTRICTED':
+      return new AppError(409, 'OWNER_ACCOUNT_RESTRICTED', `${name} cannot be reinstated until its owner's banned or suspended account is reinstated first.`);
     case 'FEE_UNPAID':
       return new AppError(
         409,
         'FEE_UNPAID',
-        `${name} cannot be reinstated while its weekly fee is unpaid or its weekly billing is stopped. It comes back by itself when the fee is paid through the MMG checkout page; the console cannot lift a fee hold.`,
+        `${name} cannot be reinstated while its weekly fee is unpaid or its weekly billing is stopped. The fee must be paid through the MMG checkout page first. Billing suspensions lift automatically after confirmed payment; admin suspensions still need Reinstate. The console cannot lift a fee hold.`,
       );
     case 'NEEDS_DOCUMENTS':
       return new AppError(

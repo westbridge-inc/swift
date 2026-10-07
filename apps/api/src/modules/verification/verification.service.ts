@@ -1316,10 +1316,10 @@ export class VerificationService {
    * Driver is a taxi (CAR); a Rider carries its own vehicleType. Callers that
    * gate apply a stricter MOTORCYCLE default for the null case.
    */
-  private async getMoverVehicleType(userId: string): Promise<VehicleType | null> {
-    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } });
+  private async getMoverVehicleType(userId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VehicleType | null> {
+    const driver = await db.driver.findUnique({ where: { userId }, select: { vehicleType: true } });
     if (driver) return driver.vehicleType;
-    const rider = await this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } });
+    const rider = await db.rider.findUnique({ where: { userId }, select: { vehicleType: true } });
     return rider?.vehicleType ?? null;
   }
 
@@ -1335,10 +1335,11 @@ export class VerificationService {
     countryCode: string,
     roleKey: ChecklistRole,
     vehicleHint?: VehicleType,
+    db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
-      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
-      return this.countryConfig.getMoverChecklist(countryCode, vehicleType);
+      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId, db)) ?? 'MOTORCYCLE';
+      return this.countryConfig.getMoverChecklist(countryCode, vehicleType, db);
     }
     if (roleKey === 'SERVICE_PROVIDER') {
       // The standalone services marketplace is not a SERVICE vendor. Its gate
@@ -1346,16 +1347,16 @@ export class VerificationService {
       // extension (for example Guyana's GEI electrician licence). Reuse the
       // exact projection that controls public listability.
       const { providerChecklist } = await import('../services/services.service');
-      return providerChecklist(this.prisma, userId);
+      return providerChecklist(db, userId);
     }
     // [DOC-1 §3.6 · P3-2] A store owner on the UNREGISTERED tier reads the role's
     // unregistered requirement set; everyone else the standard one.
-    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId));
+    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, db), db);
   }
 
   /** UNREGISTERED when any store the owner holds is on that tier; otherwise undefined (standard). */
-  private async vendorTierOf(userId: string): Promise<string | undefined> {
-    const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { tier: 'UNREGISTERED' }, select: { id: true }, take: 1 } } });
+  private async vendorTierOf(userId: string, db: Prisma.TransactionClient | PrismaClient): Promise<string | undefined> {
+    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { tier: 'UNREGISTERED' }, select: { id: true }, take: 1 } } });
     return owner && owner.vendors.length > 0 ? 'UNREGISTERED' : undefined;
   }
 
@@ -1438,7 +1439,7 @@ export class VerificationService {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
 
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
     return this.isVerifiedForList(userId, checklist, db);
   }
 
@@ -1495,7 +1496,7 @@ export class VerificationService {
   ): Promise<Date | null> {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return null;
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
     return this.evidenceValidUntilForList(userId, checklist, db);
   }
 
@@ -1546,9 +1547,19 @@ export class VerificationService {
     const db = options.db ?? this.prisma;
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return { checklist: [], items: [], complete: false };
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType, db);
     const evidence = await this.approvedEvidence(db, userId, checklist, new Date());
     const approved = new Set(evidence.map((e) => e.docType));
+    const approvedUntil = new Map<string, string | null>();
+    for (const docType of checklist) {
+      const ends = evidence.filter((e) => e.docType === docType).map((e) => {
+        if (!e.expiresAt) return e.retentionExpiresAt;
+        if (!e.retentionExpiresAt) return e.expiresAt;
+        return e.expiresAt < e.retentionExpiresAt ? e.expiresAt : e.retentionExpiresAt;
+      });
+      approvedUntil.set(docType, ends.length && ends.every((end) => end != null)
+        ? new Date(Math.max(...ends.map((end) => end!.getTime()))).toISOString() : null);
+    }
     const submissions = (await db.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist] } },
       orderBy: { createdAt: 'desc' },
@@ -1566,7 +1577,7 @@ export class VerificationService {
         state,
         documentId: latest?.id ?? null,
         submittedAt: latest ? latest.createdAt.toISOString() : null,
-        expiresAt: latest?.expiresAt ? latest.expiresAt.toISOString() : null,
+        expiresAt: state === 'APPROVED' ? approvedUntil.get(docType) ?? null : latest?.expiresAt ? latest.expiresAt.toISOString() : null,
         note: state === 'REJECTED' ? latest?.reviewNote ?? null : null,
         renewalPending: state === 'APPROVED' && latest?.status === 'PENDING',
       };
@@ -1616,7 +1627,17 @@ export class VerificationService {
    * other stores are left to the document path and the daily belt.
    */
   async activateStore(userId: string, vendorId: string): Promise<void> {
-    await this.projectVendorActivation(this.prisma, userId, { vendorId });
+    await this.projectionTransaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR NO KEY UPDATE`;
+      await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${vendorId} FOR UPDATE`;
+      const before = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true, owner: { select: { user: { select: { status: true } } } } } });
+      if (before.status !== 'PENDING_APPROVAL' || before.owner.user.status !== 'ACTIVE') {
+        throw new AppError(409, 'ACTIVATION_HELD', 'The store or owner changed while approving. Refresh its checklist.');
+      }
+      await this.projectVendorActivation(tx, userId, { vendorId });
+      const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true } });
+      if (after.status !== 'ACTIVE') throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
+    });
   }
 
   /**

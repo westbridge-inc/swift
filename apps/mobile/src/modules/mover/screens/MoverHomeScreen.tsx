@@ -9,6 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
+import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
 import {
   useMoverKind,
   useMoverStats,
@@ -525,12 +526,10 @@ export function MoverHomeScreen({ navigation }: any) {
   // 428 wants a selfie check (there's a screen for that now); 423 means only
   // support can help. Every other gate keeps the plain banner.
   const errCode = (goOnline.error as any)?.response?.data?.error?.code as string | undefined;
-  const livenessAction =
-    errCode === 'LIVENESS_CHECK_REQUIRED'
-      ? { label: 'Take the selfie check', go: () => navigation?.navigate?.('LivenessCheck', { profile: kind }) }
-      : errCode === 'LIVENESS_LOCKED'
-        ? { label: 'Contact support', go: () => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Identity check locked my account' }) }
-        : null;
+  // [NO-DEAD-ENDS] Every refusal that has a fix comes with its button:
+  // documents, the weekly fee, a safety review, as well as the two liveness
+  // doors (lib/goOnlineDoor).
+  const goDoor = goOnlineDoorFor(errCode, kind);
   // [E12 §7.2] A pending mid-shift prompt, surfaced IN the app: the push is
   // the primary nudge, but a mover with notifications off would otherwise be
   // forced offline in silence. The deadline is the server's column, verbatim.
@@ -793,12 +792,12 @@ export function MoverHomeScreen({ navigation }: any) {
                   {errMsg}
                 </T>
               </View>
-              {livenessAction ? (
+              {goDoor ? (
                 <PillButton
-                  label={livenessAction.label}
+                  label={goDoor.label}
                   size="sm"
                   style={{ marginTop: space.sm, alignSelf: 'flex-start' }}
-                  onPress={livenessAction.go}
+                  onPress={() => navigation?.navigate?.(goDoor.route, goDoor.params)}
                 />
               ) : null}
             </View>

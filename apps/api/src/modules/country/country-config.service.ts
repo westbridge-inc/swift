@@ -365,7 +365,7 @@ export class CountryConfigService {
   }
 
   /** Required-document checklist for a role key (drives verification). */
-  async getDocumentChecklist(code: string, roleKey: string, tier?: string): Promise<string[]> {
+  async getDocumentChecklist(code: string, roleKey: string, tier?: string, db: Db = this.prisma): Promise<string[]> {
     // [DOC-1 §4.2] The registry speaks first — but only for a requirement set
     // whose every document type is ACTIVE (legal facts verified). Until then
     // the answer is the JSON these lists have always come from: same
@@ -374,9 +374,9 @@ export class CountryConfigService {
     // <ROLE>_UNREGISTERED list (the registry set at that tier, else the JSON key);
     // a role with no such list is not offered the tier and keeps its standard set.
     const unregistered = tier === UNREGISTERED_TIER;
-    const fromRegistry = await registryChecklist(this.prisma, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : undefined);
+    const fromRegistry = await registryChecklist(db, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : undefined);
     if (fromRegistry) return fromRegistry;
-    const config = await this.getByCode(code);
+    const config = await this.getByCode(code, db);
     const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
     if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!;
     return lists[roleKey] ?? [];

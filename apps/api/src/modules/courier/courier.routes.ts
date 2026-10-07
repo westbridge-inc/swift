@@ -3,7 +3,8 @@ import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
-import { nanoid } from 'nanoid';
+import { createHash, randomBytes } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
 import { readCourierRates } from '../country/pricing-config';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
@@ -29,6 +30,13 @@ import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '..
 // dispatched to the shared rider pool. 100% of the fee is the rider's earning;
 // Swift's revenue is the rider's weekly subscription. Cash, recorded only.
 // ---------------------------------------------------------------------------
+
+// A grant never outlives 12 hours from order placement, including rotation.
+// Terminal status removes personal data immediately; status-only grace is 1 hour.
+const TRACKING_TTL_MS = 12 * 3_600_000;
+const TRACKING_GRACE_MS = 3_600_000;
+const trackingDigest = (token: string) => createHash('sha256').update(token).digest('hex');
+const trackingUnavailable = () => new NotFoundError('Tracking link');
 
 const pointSchema = z.object({
   lat: z.number().min(-90).max(90),
@@ -208,6 +216,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     today.setHours(0, 0, 0, 0);
     const todayCount = await app.prisma.order.count({ where: { placedAt: { gte: today } } });
 
+    const trackingToken = randomBytes(32).toString('base64url');
     const order = await app.prisma.$transaction(async (tx) => {
       await lockActiveOrderCustomer(tx, userId, customer.tenantId);
       return tx.order.create({
@@ -238,7 +247,7 @@ export default async function courierRoutes(app: FastifyInstance) {
           courierRecipientName: body.recipientName,
           courierRecipientPhone: body.recipientPhone,
           courierPayer: body.payer,
-          courierTrackingToken: nanoid(16),
+          courierTrackingToken: trackingDigest(trackingToken),
           subtotalBase: 0,
           subtotalMarkup: 0,
           subtotalCustomer: 0,
@@ -283,8 +292,9 @@ export default async function courierRoutes(app: FastifyInstance) {
         orderNumber: order.orderNumber,
         fee: estimate.totalFee,
         distanceKm: Math.round(distanceKm * 10) / 10,
-        trackingToken: order.courierTrackingToken,
-        trackingUrl: `/courier/track/${order.courierTrackingToken}`,
+        trackingToken,
+        trackingUrl: `/track/${trackingToken}`,
+        expiresAt: new Date(order.placedAt.getTime() + TRACKING_TTL_MS),
       },
     };
   });
@@ -296,7 +306,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       orderBy: { placedAt: 'desc' },
       take: 50,
     });
-    return { success: true, data: orders };
+    return { success: true, data: orders.map((order) => ({ ...order, courierTrackingToken: null })) };
   });
 
   /** GET /order/:id — sender's courier job detail. */
@@ -314,37 +324,56 @@ export default async function courierRoutes(app: FastifyInstance) {
     // licence to keep watching the courier.
     // [S1 response-shaping] the sender's past parcel is not a licence to keep
     // the courier's coordinates — nor their personal phone.
-    return { success: true, data: redactCounterpartyPhone(redactLiveLocation(order)) };
+    return { success: true, data: { ...redactCounterpartyPhone(redactLiveLocation(order)), courierTrackingToken: null } };
   });
 
-  /** GET /track/:token — public recipient tracking link (no auth, opaque token). */
+  /** Sender controls rotate/revoke without recovering bearer secrets. */
+  async function changeTracking(userId: string, id: string, rotate: boolean) {
+    const token = rotate ? randomBytes(32).toString('base64url') : null;
+    return app.prisma.$transaction(async (tx) => {
+      const owned = await tx.order.findFirst({ where: { id, customerId: userId, orderType: 'COURIER' }, select: { tenantId: true } });
+      if (!owned) throw trackingUnavailable();
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "orders" WHERE "id" = ${id} AND "customerId" = ${userId} AND "tenantId" = ${owned.tenantId} FOR UPDATE`);
+      const order = await tx.order.findUniqueOrThrow({ where: { id }, select: { status: true, placedAt: true } });
+      const expiresAt = new Date(order.placedAt.getTime() + TRACKING_TTL_MS);
+      if (rotate && ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status) || expiresAt.getTime() <= Date.now())) throw trackingUnavailable();
+      await tx.order.update({ where: { id }, data: { courierTrackingToken: token ? trackingDigest(token) : null } });
+      return token ? { trackingToken: token, trackingUrl: `/track/${token}`, expiresAt } : { revoked: true };
+    });
+  }
+
+  app.post<{ Params: { id: string } }>('/order/:id/tracking', auth, async (request) => {
+    return { success: true, data: await changeTracking(request.user.userId, request.params.id, true) };
+  });
+  app.delete<{ Params: { id: string } }>('/order/:id/tracking', auth, async (request) => {
+    return { success: true, data: await changeTracking(request.user.userId, request.params.id, false) };
+  });
+
+  /** Public tracking: digest-only, bounded authority and an explicit projection. */
   app.get('/track/:token', async (request) => {
     const { token } = request.params as { token: string };
-    // [STA-1 4.1] An unauthenticated recipient has no tenant; the token IS the
-    // authority. Audited system work under a named capability, so `deny` allows
-    // it and counts it — never an unbound read that `log` quietly widens.
+    if (token.length < 16 || token.length > 128) throw trackingUnavailable();
     const order = await runAsSystem('public-track', () => app.prisma.order.findUnique({
-      where: { courierTrackingToken: token },
+      where: { courierTrackingToken: trackingDigest(token) },
       select: {
-        orderNumber: true,
-        status: true,
-        courierRecipientName: true,
-        pickupAddress: true,
-        deliveryAddress: true,
-        estimatedDeliveryTime: true,
-        // [W-47] the position's OWN timestamp travels with it: the page used to
-        // show the age of its own fetch, so a ten-minute-old point read "just now"
+        orderType: true, placedAt: true, updatedAt: true, deliveredAt: true,
+        orderNumber: true, status: true, courierRecipientName: true,
+        pickupAddress: true, deliveryAddress: true, estimatedDeliveryTime: true,
         rider: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true, user: { select: { firstName: true } } } },
       },
     }));
-    if (!order) throw new NotFoundError('CourierOrder', token);
-    // [F-028-11] The token is opaque but it never expires and it is
-    // unauthenticated, so it outlives the parcel. Rider.currentLat/currentLng
-    // is the mover's PROFILE position — it keeps updating whenever they are
-    // online, on any later job — so a recipient who kept the link from a
-    // delivered parcel could watch that courier's day, indefinitely. The
-    // position is only anyone's business while THIS delivery is in flight.
-    return { success: true, data: redactLiveLocation(order) };
+    const now = Date.now();
+    if (!order || order.orderType !== 'COURIER' || now >= order.placedAt.getTime() + TRACKING_TTL_MS) throw trackingUnavailable();
+    if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
+      if (now >= (order.deliveredAt ?? order.updatedAt).getTime() + TRACKING_GRACE_MS) throw trackingUnavailable();
+      return { success: true, data: { orderNumber: order.orderNumber, status: order.status, rider: null } };
+    }
+    return { success: true, data: redactLiveLocation({
+      orderNumber: order.orderNumber, status: order.status,
+      courierRecipientName: order.courierRecipientName,
+      pickupAddress: order.pickupAddress, deliveryAddress: order.deliveryAddress,
+      estimatedDeliveryTime: order.estimatedDeliveryTime, rider: order.rider,
+    }) };
   });
 
   /** POST /order/:id/cancel — sender cancels before rider pickup. */
