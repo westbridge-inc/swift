@@ -139,7 +139,7 @@ export function AddAddressScreen() {
               <T variant="body" weight="medium">
                 Set as default address
               </T>
-              <BrandSwitch value={isDefault} onChange={setIsDefault} />
+              <BrandSwitch label="Set as default address" value={isDefault} onChange={setIsDefault} />
             </View>
           )}
 

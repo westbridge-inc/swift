@@ -4,7 +4,7 @@
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
 import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
-import { formatMoney } from './money';
+import { formatAmount } from './money';
 import type { StorefrontDetail } from './api';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
@@ -419,4 +419,11 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
 // [W-13] `Math.round(n ?? 0)` printed "GY$0" for a price the server never sent
 // and "GY$NaN" for a broken one. Free and unknown are different facts, and a
 // customer must never be shown either as the other.
-export const money = (n: unknown) => formatMoney(n);
+/**
+ * [WEB-REDESIGN] Customer prices read the way the phone app writes them
+ * (apps/mobile/src/lib/money.ts): `$2,500`. Every price on Swift is in Guyana
+ * dollars, which the footer states on every page ("Prices in GYD"); the
+ * partner consoles keep their `GY$` (lib/money.ts formatMoney). Unparseable
+ * money is still the em-dash, never a zero.
+ */
+export const money = (n: unknown) => formatAmount(n, '$');
