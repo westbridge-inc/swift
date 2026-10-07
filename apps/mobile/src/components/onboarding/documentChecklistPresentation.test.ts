@@ -53,7 +53,9 @@ describe('[VERIFY-DOCS] optional documents follow the server', () => {
   });
 
   it('says what the optional police clearance is for, and never that it is required', () => {
-    expect(optionalDocHint('police_clearance')).toMatch(/Optional.*Police-cleared badge/);
+    // [VERIFY-DOCS] No screen shows a Police-cleared badge yet: the hint says what really happens, and promises no badge.
+    expect(optionalDocHint('police_clearance')).toMatch(/^Optional\. If Swift approves a current one, your account is recorded as police-cleared\./);
+    expect(optionalDocHint('police_clearance')).not.toMatch(/badge|profile/i);
     for (const t of ['police_clearance', 'national_id', 'anything']) expect(optionalDocHint(t)).not.toMatch(/required|must/i);
   });
 });

@@ -2,7 +2,8 @@
  * [VERIFY-DOCS · owner rulings of 6 Oct 2026, items 1, 2, 4 and 5] What each mover must hand Swift.
  *
  *  - Police clearance is OPTIONAL for every mover (taxi, motorbike, bicycle). It stays a document
- *    a mover may add; an approved, current one is the "Police-cleared" flag the apps can badge.
+ *    a mover may add; an approved, current one sets the "Police-cleared" flag (no screen shows a badge yet,
+ *    so no copy may promise one).
  *  - A motorised mover's driver's licence is their photo ID, so the national ID is OPTIONAL for
  *    them. A bicycle rider has no licence and keeps the national ID as a requirement.
  *  - The separate plate photo is gone: the car photo shows the plate. Nothing judged the plate
@@ -258,10 +259,12 @@ describe('[VERIFY-DOCS] optional documents can be added, never gate, and set the
     const data = (await status(m.token)).json().data;
     expect(data.policeCleared).toBe(false);
     expect(data.roleVerified).toBe(true);
-    // ... and the person is told the truth: optional, keep working, the badge is off.
+    // ... and the person is told the truth: optional, keep working, no longer recorded as police-cleared.
+    // No screen shows a "Police-cleared" badge yet, so no notice may promise one (GUARDRAILS §4).
     const note = await app.prisma.notification.findFirstOrThrow({ where: { userId: m.userId, data: { path: ['kind'], equals: 'verification_expired' } } });
     expect(note.body).toMatch(/optional/i);
-    expect(note.body).toMatch(/Police-cleared badge/);
+    expect(note.body).toMatch(/no longer recorded as police-cleared until you upload a current one/);
+    expect(note.body).not.toMatch(/badge/i);
     expect(note.body).not.toMatch(/keep operating/);
   });
 
@@ -276,6 +279,8 @@ describe('[VERIFY-DOCS] optional documents can be added, never gate, and set the
     const notes = await app.prisma.notification.findMany({ where: { userId: m.userId, data: { path: ['kind'], equals: 'verification_expiry_reminder' } } });
     const about = (t: string) => notes.find((n) => n.body.startsWith(`Your ${t.replace(/_/g, ' ')} `))!;
     expect(about('police_clearance').body).toMatch(/optional and does not affect your work/);
+    expect(about('police_clearance').body).toMatch(/Renew it to stay recorded as police-cleared/);
+    expect(about('police_clearance').body).not.toMatch(/badge/i);
     expect(about('police_clearance').body).not.toMatch(/suspension/);
     expect(about('drivers_licence').body).toMatch(/Renew it to avoid suspension/);
   });
