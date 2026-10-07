@@ -3,7 +3,7 @@ import React from 'react';
 import { Pressable, View } from 'react-native';
 import { color, space } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
-import { Card, T } from '../../../kit';
+import { Card, PillButton, T } from '../../../kit';
 import { useVendorOrders } from '../../../hooks/vendorops';
 import { heldStoreOrders } from '../../../lib/vendorProfile';
 import { OrderStatusPill } from '../shared';
@@ -29,8 +29,16 @@ export function HeldStoreOrders({ canFinishAccepted, navigation }: { canFinishAc
       <Card testID="held-orders-unavailable" style={{ marginBottom: space.lg }}>
         <T variant="label" weight="semibold">Your orders couldn’t load</T>
         <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-          This is not an empty queue. Pull down to try again.
+          This is not an empty queue. Check your connection and try again.
         </T>
+        <PillButton
+          testID="held-orders-retry"
+          label="Try again"
+          variant="soft"
+          size="md"
+          style={{ marginTop: space.md, alignSelf: 'flex-start' }}
+          onPress={() => { void ordersQ.refetch(); }}
+        />
       </Card>
     );
   }
@@ -45,8 +53,10 @@ export function HeldStoreOrders({ canFinishAccepted, navigation }: { canFinishAc
           </T>
           <T variant="caption" tone="muted" style={{ marginTop: space.xs, marginBottom: space.sm }}>
             {canFinishAccepted
-              ? 'The pause stops new orders only. Open each order to mark it ready and hand it over.'
-              : 'This store can’t move orders right now. Open an order to decline it, so the customer isn’t left waiting.'}
+              ? 'The pause stops new orders only. Open each order to finish it.'
+              // [DS781 S2] The board offers Reject only for new orders, so an
+              // order already in progress has no decline here: a person does.
+              : 'This store can’t move these orders right now. Use Ask Swift support above so a person can sort them out with you, and no customer is left waiting.'}
           </T>
           {accepted.map((order) => <HeldOrderRow key={order.id} order={order} onPress={() => open(order)} />)}
         </View>

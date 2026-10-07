@@ -26,6 +26,8 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
   const pull = usePullToRefresh(() => Promise.all([
     isOwner ? subQ.refetch() : undefined,
     qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    // The accepted orders listed below reload with the pull too.
+    qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   ]));
   const sub = subQ.data ?? (isOwner ? store?.subscription : null);
   const blockedSub = ['SUSPENDED', 'CHURNED'].includes(String(sub?.status ?? '').toUpperCase());

@@ -215,6 +215,7 @@ const fx = vi.hoisted(() => {
     navigation: { navigate: vi.fn(), goBack: vi.fn() },
     /** [NO-DEAD-ENDS] The vendor order board read (['vendor','orders']); undefined = not served. */
     orders: undefined as unknown,
+    ordersRefetch: vi.fn(async () => undefined),
   };
 });
 
@@ -248,7 +249,10 @@ vi.mock('@tanstack/react-query', () => ({
       }
     }
     if (options.queryKey[0] === 'vendor' && options.queryKey[1] === 'orders' && options.queryKey.length === 2 && enabled && fx.orders !== undefined) {
-      return { data: fx.orders, error: null, isLoading: false, isFetched: true, isError: false, isRefetching: false, refetch: vi.fn() };
+      if (fx.orders === 'FAILED') {
+        return { data: undefined, error: new Error('Network Error'), isLoading: false, isFetched: true, isError: true, isRefetching: false, refetch: fx.ordersRefetch };
+      }
+      return { data: fx.orders, error: null, isLoading: false, isFetched: true, isError: false, isRefetching: false, refetch: fx.ordersRefetch };
     }
     if (options.queryKey[0] === 'pricing' && enabled) {
       return { data: fx.server.pricing, error: null, isLoading: false, isPending: false, isFetched: true, isError: false, isRefetching: false, dataUpdatedAt: Date.now(), refetch: vi.fn() };
@@ -982,5 +986,48 @@ describe('[NO-DEAD-ENDS] a held store is told the real reason and keeps its door
     expect(fx.navigation.navigate).toHaveBeenCalledWith('VendorOrderDetail', { orderId: 'o-cooking', orderNumber: 'C1' });
     expect(JSON.stringify(list.output)).toContain('Finish the orders you already accepted');
     expect(JSON.stringify(list.output)).toContain('New orders waiting');
+  });
+});
+
+// [DS781] Review of the held-store screen: (S2) a store Swift holds cannot
+// decline an order already in progress (the board offers Reject only for new
+// orders), so the screen must not promise it; (S4) the failed-orders card
+// promised "pull down" where the pull did not reload the orders.
+describe('[NO-DEAD-ENDS · DS781] the held-store doors are the ones that exist', () => {
+  const inProgress = [{ id: 'o-cooking', orderNumber: 'C1', status: 'PREPARING', items: [{}] }];
+
+  it('under a hold only Swift lifts, in-progress orders point to a person, never to a decline the board does not offer', () => {
+    fx.orders = inProgress;
+    const list = fx.mount(HeldStoreOrders, { canFinishAccepted: false, navigation: fx.navigation });
+    const said = JSON.stringify(list.output);
+    expect(said).toContain('Orders already in progress');
+    expect(said).not.toMatch(/decline it/);
+    expect(said).toContain('Ask Swift support');
+  });
+
+  it('control: new orders waiting still say they can be declined (the board offers Reject for them)', () => {
+    fx.orders = [{ id: 'o-new', orderNumber: 'N1', status: 'PENDING', items: [{}] }];
+    const list = fx.mount(HeldStoreOrders, { canFinishAccepted: false, navigation: fx.navigation });
+    expect(JSON.stringify(list.output)).toContain('Open each one to decline it');
+  });
+
+  it('a failed order read is not an empty queue, and its own Try again reloads the orders', () => {
+    fx.orders = 'FAILED';
+    const list = fx.mount(HeldStoreOrders, { canFinishAccepted: true, navigation: fx.navigation });
+    expect(JSON.stringify(list.output)).toContain('This is not an empty queue');
+    const retry = ofType(list.output, 'PillButton').find((el) => el.props.testID === 'held-orders-retry');
+    expect(retry, 'a retry that exists').toBeDefined();
+    retry!.props.onPress();
+    expect(fx.ordersRefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('pulling down on the fee-hold screen reloads the orders it lists', async () => {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    serveProfile(ownerOf(pausedStore));
+    const root = fx.mount(vendorRoot(), {});
+    const paused = fx.mount(VendorBillingSuspended, only(root.output, VendorBillingSuspended).props);
+    only(paused.output, 'RefreshControl').props.onRefresh();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['vendor', 'orders'] });
   });
 });
