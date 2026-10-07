@@ -1,3 +1,4 @@
+import { publicVendorReviewId } from '../modules/rating/vendor-review-visibility';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -128,6 +129,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (createdUserIds.length > 0) {
+    await app.prisma.ratingReport.deleteMany({ where: { reporterId: { in: createdUserIds } } });
+    await app.prisma.contentReport.deleteMany({ where: { reporterId: { in: createdUserIds } } });
     await app.prisma.rating.deleteMany({ where: { raterId: { in: createdUserIds } } });
     await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
@@ -164,7 +167,7 @@ describe('Operator replies to a review', () => {
   it('the reply shows on the customer-facing reviews feed', async () => {
     const res = await inject('GET', `/api/v1/customer/vendors/${vendorId}/reviews`, undefined, customer.token);
     expect(res.statusCode).toBe(200);
-    const review = res.json().data.reviews.find((r: any) => r.id === ratingId);
+    const review = res.json().data.reviews.find((r: any) => r.id === publicVendorReviewId(ratingId));
     expect(review.response).toContain('faster now');
     expect(review.respondedAt).toBeTruthy();
   });
@@ -236,7 +239,7 @@ describe('Store review list projection', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json() as { data: Array<Record<string, unknown>>; summary: { totalReviews: number } };
 
-    expect(body.data.map((r) => r['id'])).toEqual([ratingId]);
+    expect(body.data.map((r) => r['id'])).toEqual([publicVendorReviewId(ratingId)]);
     expect(body.summary.totalReviews).toBe(1);
     for (const row of body.data) {
       expect(Object.keys(row).sort()).toEqual(ALLOWED_KEYS);
@@ -277,7 +280,7 @@ describe('Store review list projection', () => {
       expect(res.statusCode).toBe(200);
       const data = res.json().data as Record<string, unknown>;
       expect(Object.keys(data).sort()).toEqual(REPLY_KEYS);
-      expect(data['id']).toBe(review.id);
+      expect(data['id']).toBe(publicVendorReviewId(review.id));
       expect(data['respondedBy']).toBe(owner.userId);
       expect(res.body).not.toContain(author.userId);
       expect(res.body).not.toContain(order.id);
@@ -394,12 +397,86 @@ describe('Store review privacy across blocks and dates', () => {
       await app.prisma.rating.update({ where: { id: ratingId }, data: { createdAt: new Date(instant) } });
       const list = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
       expect(list.statusCode).toBe(200);
-      expect(list.json().data.find((r: { id: string }) => r.id === ratingId).createdAt).toBe(day);
+      expect(list.json().data.find((r: { id: string }) => r.id === publicVendorReviewId(ratingId)).createdAt).toBe(day);
       const reply = await inject('POST', `/api/v1/vendor/reviews/${ratingId}/respond`, { response: 'Thanks again.' }, owner.token);
       expect(reply.statusCode, reply.body).toBe(200);
       expect(reply.json().data.createdAt).toBe(day);
       const stored = await app.prisma.rating.findUniqueOrThrow({ where: { id: ratingId }, select: { createdAt: true } });
       expect(stored.createdAt.toISOString()).toBe(instant);
     }
+  });
+});
+
+describe('Anonymous reviews across every public entry point', () => {
+  it('the customer and guest feed cannot identify a reviewer through blocks, names, avatars or exact times', async () => {
+    const url = `/api/v1/customer/vendors/${vendorId}/reviews`;
+    const read = (token?: string) => inject('GET', url, undefined, token);
+    const before = await read(owner.token);
+    expect(before.statusCode).toBe(200);
+    const block = await inject('POST', '/api/v1/blocks', { blockedUserId: customer.userId }, owner.token);
+    expect(block.statusCode).toBe(201);
+    try {
+      const during = await read(owner.token);
+      expect(during.statusCode).toBe(200);
+      expect(during.json()).toEqual(before.json());
+      const guest = await read();
+      expect(guest.json()).toEqual(before.json());
+      for (const row of guest.json().data.reviews) {
+        expect(row.reviewer).toEqual({ firstName: 'Customer', avatar: null });
+        expect(new Date(row.createdAt).toISOString().slice(11)).toBe('04:00:00.000Z');
+      }
+      expect(guest.body).not.toContain(customer.userId);
+      expect(guest.body).not.toContain('Reply');
+    } finally {
+      await inject('PUT', `/api/v1/blocks/${customer.userId}`, undefined, owner.token);
+    }
+    expect((await read(owner.token)).json()).toEqual(before.json());
+    // Another account or another active role is not an anonymity bypass.
+    const other = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const alternateBefore = await read(other.token);
+    expect((await inject('POST', '/api/v1/blocks', { blockedUserId: customer.userId }, other.token)).statusCode).toBe(201);
+    try { expect((await read(other.token)).json()).toEqual(alternateBefore.json()); }
+    finally { await inject('PUT', `/api/v1/blocks/${customer.userId}`, undefined, other.token); }
+  });
+
+  it('existing timestamp-bearing rating IDs are opaque on list, customer feed and reply, and the returned ID is usable', async () => {
+    const instant = new Date('2026-10-07T14:07:31.123Z');
+    const oldId = `c${instant.getTime().toString(36)}0123456789abcdef`;
+    expect(new Date(parseInt(oldId.slice(1, 9), 36))).toEqual(instant);
+    const author = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const existing = await app.prisma.rating.findUniqueOrThrow({ where: { id: ratingId } });
+    await app.prisma.rating.create({ data: {
+      id: oldId, orderId: existing.orderId, raterId: author.userId, vendorId,
+      type: 'CUSTOMER_TO_VENDOR', score: 2, comment: 'Opaque identifier fixture', visibleAt: instant, createdAt: instant,
+    } });
+    const store = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
+    const row = store.json().data.find((r: { comment: string }) => r.comment === 'Opaque identifier fixture');
+    expect(row.id).toMatch(/^rv_[A-Za-z0-9_-]{43}$/);
+    expect(row.id).not.toBe(oldId);
+    expect(new Date(parseInt(row.id.slice(1, 9), 36))).not.toEqual(instant);
+    expect(row.createdAt).toBe('2026-10-07T04:00:00.000Z');
+    const publicFeed = await inject('GET', `/api/v1/customer/vendors/${vendorId}/reviews`);
+    expect(publicFeed.json().data.reviews.find((r: { comment: string }) => r.comment === 'Opaque identifier fixture')).toMatchObject({ id: row.id, createdAt: row.createdAt });
+    expect(store.body).not.toContain(oldId);
+    expect(publicFeed.body).not.toContain(oldId);
+    const reply = await inject('POST', `/api/v1/vendor/reviews/${row.id}/respond`, { response: 'Thanks for the feedback.' }, owner.token);
+    expect(reply.statusCode, reply.body).toBe(200);
+    expect(reply.json().data.id).toBe(row.id);
+    expect(reply.body).not.toContain(oldId);
+    expect((await app.prisma.rating.findUniqueOrThrow({ where: { id: oldId } })).response).toBe('Thanks for the feedback.');
+    // Build 9 may have a cached old ID: accept it as an input, never emit it.
+    const legacy = await inject('POST', `/api/v1/vendor/reviews/${oldId}/respond`, { response: 'Thanks again.' }, owner.token);
+    expect(legacy.statusCode, legacy.body).toBe(200);
+    expect(legacy.json().data.id).toBe(row.id);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const report = await inject('POST', `/api/v1/customer/ratings/${row.id}/report`, { reason: 'PRIVATE_INFO' }, owner.token);
+      expect(report.statusCode, report.body).toBe(200);
+      expect(report.json().data.ratingId).toBe(row.id);
+      expect(report.body).not.toContain(oldId);
+    }
+    const generic = await inject('POST', '/api/v1/reports', { targetType: 'RATING', targetId: row.id, reason: 'OTHER' }, owner.token);
+    expect(generic.statusCode, generic.body).toBe(201);
+    expect(generic.body).not.toContain(oldId);
+    expect(await app.prisma.contentReport.findFirst({ where: { reporterId: owner.userId, targetType: 'RATING', targetId: oldId } })).not.toBeNull();
   });
 });

@@ -1,3 +1,4 @@
+import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -1599,9 +1600,9 @@ export async function customerRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: {
-        // The profile's materialized score includes ratings this viewer may
-        // not see. Keep this review page's headline consistent with its
-        // viewer-scoped rows and distribution; other storefront surfaces
+        // The profile's materialized score also includes unreleased ratings.
+        // Keep this page's headline consistent with its published anonymous
+        // rows and distribution; other storefront surfaces
         // retain the platform-wide vendor score.
         vendor: {
           id: vendor.id,
@@ -1613,7 +1614,7 @@ export async function customerRoutes(app: FastifyInstance) {
           score: r.score,
           comment: r.comment,
           tags: r.tags,
-          reviewer: r.rater,
+          reviewer: { firstName: 'Customer', avatar: null },
           createdAt: r.createdAt,
           // The store's public reply (§4.1)
           response: r.response,
@@ -3009,8 +3010,9 @@ export async function customerRoutes(app: FastifyInstance) {
       note: z.string().trim().max(300).optional(),
     }).parse(request.body);
 
+    const canonicalId = await resolveVendorReviewId(app.prisma, id);
     const rating = await app.prisma.rating.findFirst({
-      where: { id, type: { in: ['CUSTOMER_TO_VENDOR', 'CUSTOMER_TO_PROVIDER'] }, isPublic: true },
+      where: { id: canonicalId, type: { in: ['CUSTOMER_TO_VENDOR', 'CUSTOMER_TO_PROVIDER'] }, isPublic: true },
       select: { id: true, orderId: true, rater: { select: { tenantId: true } } },
     });
     if (!rating) throw new NotFoundError('Review', id);
@@ -3025,13 +3027,13 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new NotFoundError('Review', id);
     }
 
-    const existing = await app.prisma.ratingReport.findFirst({ where: { ratingId: id, reporterId: userId } });
-    if (existing) return { success: true, data: existing }; // calm idempotence
+    const existing = await app.prisma.ratingReport.findFirst({ where: { ratingId: rating.id, reporterId: userId } });
+    if (existing) return { success: true, data: { ...existing, ratingId: publicVendorReviewId(existing.ratingId) } }; // calm idempotence
 
     const report = await app.prisma.ratingReport.create({
-      data: { ratingId: id, reporterId: userId, reason, note: note ?? null },
+      data: { ratingId: rating.id, reporterId: userId, reason, note: note ?? null },
     });
-    return { success: true, data: report };
+    return { success: true, data: { ...report, ratingId: publicVendorReviewId(report.ratingId) } };
   });
 
   /** POST /orders/:id/tip — post-delivery tipping FAILS CLOSED

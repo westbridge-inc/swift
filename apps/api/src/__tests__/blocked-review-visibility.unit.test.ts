@@ -55,7 +55,7 @@ function fakePrisma(
 }
 
 describe('vendor review visibility for a user block', () => {
-  it('hides only authors blocked by the signed-in viewer from rows, total and distribution', async () => {
+  it('an anonymous storefront feed ignores viewer blocks on rows, total and distribution', async () => {
     const db = fakePrisma(['blocked-author']);
     const service = new RatingService(db.prisma);
 
@@ -64,21 +64,13 @@ describe('vendor review visibility for a user block', () => {
       userId: 'viewer-1',
     });
 
-    expect(db.userBlockFindMany).toHaveBeenCalledWith({
-      where: {
-        tenantId: 'tenant-1',
-        blockerId: 'viewer-1',
-        unblockedAt: null,
-      },
-      select: { blockedId: true },
-    });
+    expect(db.userBlockFindMany).not.toHaveBeenCalled();
     const where = {
       vendorId: 'vendor-1',
       type: 'CUSTOMER_TO_VENDOR',
       state: 'ACTIVE',
       isPublic: true,
       visibleAt: { not: null },
-      raterId: { notIn: ['blocked-author'] },
     };
     expect(db.ratingFindMany).toHaveBeenCalledWith(expect.objectContaining({ where, take: 20, skip: 40 }));
     expect(db.ratingGroupBy).toHaveBeenCalledWith({ by: ['score'], where, _count: true });

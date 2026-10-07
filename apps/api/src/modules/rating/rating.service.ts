@@ -10,7 +10,8 @@ import { log } from '../../utils/logger';
 import {
   publishedVendorReviewWhere,
   summarizeRatingDistribution,
-  vendorReviewWhereForViewer,
+  STORE_REVIEW_PROJECTION,
+  storeVisibleReview,
 } from './vendor-review-visibility';
 
 // Safety spec ("Rating flags: reuse the ratings/quality engine — safety-tagged
@@ -362,24 +363,16 @@ export class RatingService {
     return { ratings, message: 'Thank you for your feedback!' };
   }
 
-  async getVendorReviews(vendorId: string, limit = 20, offset = 0, viewer?: ReviewViewer) {
-    // [STORE-002] A block is directional for public content: the blocker no
-    // longer sees reviews written by the person they blocked, while guests
-    // and every other viewer still see the same published review. Keep one
-    // predicate for rows, count and distribution so pagination and the score
-    // bars cannot disclose content that the list itself withheld.
-    const visibleWhere = viewer
-      ? await vendorReviewWhereForViewer(
-        this.prisma,
-        viewer.tenantId,
-        viewer.userId,
-        vendorId,
-      )
-      : publishedVendorReviewWhere(vendorId);
+  async getVendorReviews(vendorId: string, limit = 20, offset = 0, _viewer?: ReviewViewer) {
+    // Anonymous storefront reviews cannot use person-specific content blocks:
+    // any customer token (including another role/account held by an operator)
+    // could toggle a block and compare rows to identify an anonymous author.
+    // Contact/matching blocks keep their separate directional rules.
+    const visibleWhere = publishedVendorReviewWhere(vendorId);
     const [reviews, scoreBuckets] = await Promise.all([
       this.prisma.rating.findMany({
         where: visibleWhere,
-        include: { rater: { select: { firstName: true, avatar: true } } },
+        select: STORE_REVIEW_PROJECTION,
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
@@ -393,7 +386,7 @@ export class RatingService {
     const summary = summarizeRatingDistribution(scoreBuckets);
 
     return {
-      reviews,
+      reviews: reviews.map(storeVisibleReview),
       total: summary.totalReviews,
       averageRating: summary.averageRating,
       distribution: summary.distribution,
