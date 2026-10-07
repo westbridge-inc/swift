@@ -8,6 +8,7 @@ import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-ca
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { isDuplicateOn } from '../money/evidence';
@@ -909,6 +910,11 @@ export async function customerRoutes(app: FastifyInstance) {
   app.put('/profile', async (request: AuthRequest, _reply: FastifyReply) => {
     const { userId } = request.user;
     const body = updateProfileSchema.parse(request.body);
+    if (body.firstName !== undefined) {
+      // [MC-PR3] "TEST-" names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
+      const me = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, firstName: true } });
+      assertNameNotReserved(body.firstName, me?.phone, me?.firstName);
+    }
     // [OWNER #13 · Opus S2] An admin account's email change takes a fresh
     // sign-in code and tells the old address; every change is dated.
     const user = await updateCustomerProfile(app, userId, request.authSessionId, body);
