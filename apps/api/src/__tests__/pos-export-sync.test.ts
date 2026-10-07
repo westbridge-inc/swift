@@ -942,7 +942,15 @@ describe('availability: a big file never turns a checkout into a server error (S
     ]);
     expect(applied.r.statusCode, applied.r.body).toBe(200);
     expect([200, 409]).toContain(checkout.statusCode);
-    if (checkout.statusCode === 409) expect(checkout.json().error.code).toBe('STORE_BUSY');
+    // A checkout that meets the file is refused, never charged unseen: STORE_BUSY
+    // when it waited past its bound, or CART_CHANGED when it waited for the file
+    // and then found the price it was about to charge had changed (100 -> 110).
+    if (checkout.statusCode === 409) expect(['STORE_BUSY', 'CART_CHANGED']).toContain(checkout.json().error.code);
+    // A checkout that committed first is placed at the price the customer saw.
+    if (checkout.statusCode === 200) {
+      const placed = await app.prisma.orderItem.findFirstOrThrow({ where: { order: { customerId: customer.userId } } });
+      expect(Number(placed.markedUpPrice)).toBe(100);
+    }
     // The whole file landed set-based (about 1.7 s end to end locally; row by
     // row it took over 20 s). Whatever the runner's speed, a checkout that meets
     // it waits a bounded time and is answered 409 at worst — asserted above.
