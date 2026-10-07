@@ -60,6 +60,10 @@ const TENANT_B = `${TENANT_SLUG_PREFIX}${nanoid(6).toLowerCase()}`;
 const REASON = { 'x-swift-reason': 'GOLD-5 golden journey: reviewing a partner document' };
 const UPLOAD_DIR = mkdtempSync(path.join(os.tmpdir(), 'swift-gold5-review-'));
 const DOC_TYPE = 'business_registration';
+// [VERIFY-DOCS V3] Opening, approving and rejecting a document need the explicit
+// document reviewer grant, which neither `*` nor a preset confers: every
+// reviewer in this journey holds it; the support operator does not.
+const REVIEWER_GRANT = 'documents.review';
 
 let app: FastifyInstance;
 let seq = 0;
@@ -300,10 +304,10 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
   beforeAll(async () => {
     // The pilot's operators hold the ADMIN default grant; the narrower
     // presets appear where their limits are the point.
-    rev1 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*'], firstName: 'Rhea' });
-    rev2 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*'], firstName: 'Ravi' });
+    rev1 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*', REVIEWER_GRANT], firstName: 'Rhea' });
+    rev2 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*', REVIEWER_GRANT], firstName: 'Ravi' });
     support = await makeUser(['ADMIN'], 'ADMIN', { grant: SUPPORT_OPERATOR_CAPABILITIES, firstName: 'Suki' });
-    revB = await makeUser(['ADMIN'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, tenantId: TENANT_B, firstName: 'Bram' });
+    revB = await makeUser(['ADMIN'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], tenantId: TENANT_B, firstName: 'Bram' });
     partner = await makeApplicant('Priya');
   }, 60_000);
 
@@ -438,7 +442,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
   it('RECUSAL: a reviewer cannot claim or decide their own document, nor one whose subject shares an identity node with them', async () => {
     // Their own: a reviewer who is also applying for a store.
-    const moonlighter = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, firstName: 'Mona' });
+    const moonlighter = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], firstName: 'Mona' });
     const own = await uploadAndSubmit(moonlighter, documentBytes());
     const ownCase = await openCaseOf(rev1, own.docId);
     const selfClaim = await admin({ method: 'POST', url: `/api/v1/admin/verification/cases/${ownCase.caseId}/claim`, token: moonlighter.token, payload: {} });
@@ -452,7 +456,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
     // Linked: a reviewer whose own paperwork is byte-identical to an applicant's
     // (the same registration on two accounts — one identity-graph node).
-    const relative = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, firstName: 'Lionel' });
+    const relative = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], firstName: 'Lionel' });
     const applicant = await makeApplicant('Lorna');
     const shared = documentBytes();
     const first = await upload(relative, shared);
