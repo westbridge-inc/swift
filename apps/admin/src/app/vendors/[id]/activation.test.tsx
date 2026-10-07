@@ -107,6 +107,7 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     const { user } = page();
     await user.click(await screen.findByRole('button', { name: 'Activate now…' }));
     const dialog = screen.getByRole('dialog', { name: 'Activate Target Store now?' });
+    expect(dialog.textContent).toContain("Only this store is activated; the owner's other stores are not changed.");
     await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
     await user.click(within(dialog).getByRole('button', { name: 'Activate store' }));
     expect((await screen.findByRole('status')).textContent).toContain('Target Store is live and can take orders.');
@@ -122,11 +123,38 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     expect(screen.getByText('Suspended. Its documents are approved and current, so it can be reinstated.')).toBeTruthy();
   });
 
-  it('a store suspended for an unpaid fee is not reinstated from here: it comes back when the fee is paid through MMG', async () => {
-    serve('SUSPENDED', checklistOf('CAN_REINSTATE', { storeStatus: 'SUSPENDED', suspensionSource: 'BILLING' }));
+  it('a store held for an unpaid weekly fee is not reinstated from here: it comes back when the fee is paid through MMG', async () => {
+    serve('SUSPENDED', checklistOf('FEE_UNPAID', { storeStatus: 'SUSPENDED', suspensionSource: 'BILLING', subscriptionStatus: 'SUSPENDED', feeOperable: false, ready: true }));
     page();
-    expect(await screen.findByText(/comes back by itself when the fee is paid through MMG checkout/)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Reinstate…' })).toBeNull();
+    expect(await screen.findByText(/Suspended, and its weekly fee is unpaid or its billing is stopped\. It comes back by itself when the fee is paid through MMG checkout/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
+  });
+
+  it('[MC-AD2] the same holds when an admin suspension was laid over the unpaid fee: the server says FEE_UNPAID, the page offers nothing', async () => {
+    serve('SUSPENDED', checklistOf('FEE_UNPAID', { storeStatus: 'SUSPENDED', suspensionSource: 'ADMIN', subscriptionStatus: 'CHURNED', feeOperable: false, ready: true }));
+    page();
+    expect(await screen.findByText(/its weekly fee is unpaid or its billing is stopped/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
+  });
+
+  it('[MC-AD2] a fee paid up but a billing mark left on the store: the server says CAN_REINSTATE, and the page offers it', async () => {
+    serve('SUSPENDED', checklistOf('CAN_REINSTATE', { storeStatus: 'SUSPENDED', suspensionSource: 'BILLING', subscriptionStatus: 'ACTIVE', feeOperable: true }));
+    page();
+    expect(await screen.findByRole('button', { name: 'Reinstate…' })).toBeTruthy();
+  });
+
+  it('[MC-AD2] a reinstate the server refuses for an unpaid fee keeps the reason in the panel and says, in words, what lifts it', async () => {
+    serve('SUSPENDED', checklistOf('CAN_REINSTATE', { storeStatus: 'SUSPENDED', suspensionSource: 'ADMIN', subscriptionStatus: 'ACTIVE', feeOperable: true }), () => ({
+      status: 409,
+      body: { success: false, error: { code: 'FEE_UNPAID', message: 'Target Store cannot be reinstated while its weekly fee is unpaid or its weekly billing is stopped. It comes back by itself when the fee is paid through the MMG checkout page; the console cannot lift a fee hold.' } },
+    }));
+    const { user } = page();
+    await user.click(await screen.findByRole('button', { name: 'Reinstate…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Reinstate Target Store?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Reinstate store' }));
+    expect(await screen.findByText('This store is held by its weekly fee')).toBeTruthy();
+    expect(screen.getAllByText(/paid through the MMG checkout page/).length).toBeGreaterThan(0);
   });
 
   it('the store of an owner who closed their account offers nothing and says why', async () => {

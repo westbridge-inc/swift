@@ -93,7 +93,7 @@ describe('vendor suspension mutation', () => {
     await user.click(suspendButton);
     let dialog = screen.getByRole('dialog', { name: 'Suspend Target Store?' });
     expect(dialog.textContent).toContain('It stops taking orders immediately');
-    expect(dialog.textContent).toContain('The console cannot undo a suspension yet.');
+    expect(dialog.textContent).toContain('You can reinstate it from this page later, once its required documents are approved and current.');
     // [ADM-006] the operator is asked why; the reason is theirs, not a template
     await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Repeated no-shows after three written warnings');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));

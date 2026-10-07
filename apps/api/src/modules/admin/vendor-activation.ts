@@ -1,4 +1,6 @@
 import type { VendorGoLive } from '../verification/verification.service';
+import { subscriptionOperability, type OperabilitySubscription } from '../subscription/operate-gate';
+import { AppError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
 // [MC-PR2] WHAT THE CONSOLE MAY DO WITH A STORE, decided once.
@@ -16,6 +18,16 @@ import type { VendorGoLive } from '../verification/verification.service';
 // gates. A store whose owner closed their Swift account (the partner
 // wind-down, or a closed account) is never reopened from the console: a
 // deletion request is honoured end to end.
+//
+// [MC-AD2] A weekly-fee hold is billing's to lift — by a payment the provider
+// confirmed (BillingService.reinstateRows) or the nightly wrongful-suspension
+// heal — never the console's. While the store's subscription cannot operate
+// (the vendor gate's own rule, subscriptionOperability: unpaid and suspended,
+// churned, past its grace, or billing stopped), a reinstate would clear the
+// hold without a payment, push the owner a false "your store is back", and
+// leave a store the subscription gates still refuse. That holds whatever the
+// store's suspension source says: an admin suspension laid over an unpaid fee
+// does not turn the debt into an admin matter.
 // ---------------------------------------------------------------------------
 
 export type VendorActivationNext =
@@ -31,6 +43,8 @@ export type VendorActivationNext =
   | 'CAN_REINSTATE'
   /** The owner closed their Swift account; the store stays closed. */
   | 'ACCOUNT_CLOSED'
+  /** Suspended while its weekly fee is unpaid (or billing stopped): it comes back when billing confirms a payment, not from the console. */
+  | 'FEE_UNPAID'
   /** A closed store is not reopened from the console. */
   | 'CLOSED';
 
@@ -38,12 +52,26 @@ export interface VendorActivationFacts {
   status: string;
   suspensionSource: string | null;
   ownerAccountStatus: string | null;
+  /** The store's weekly-fee subscription (the operability fields); null when it has none yet. */
+  subscription: OperabilitySubscription | null;
+}
+
+/** The subscription fields the operability rule reads — select these wherever the verdict is decided. */
+export const OPERABILITY_SELECT = {
+  status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true,
+  billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true,
+} as const;
+
+/** May this store's subscription operate now? The vendor gate's rule and missing-row policy (vendor.routes.ts). */
+export function feeOperable(subscription: OperabilitySubscription | null, now = new Date()): boolean {
+  return subscriptionOperability(subscription, { missingRow: 'GRANDFATHER' }, now).operable;
 }
 
 export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick<VendorGoLive, 'checklist' | 'disclosure'>): VendorActivationNext {
   if (vendor.status === 'ACTIVE') return 'LIVE';
   if (vendor.status === 'CLOSED') return 'CLOSED';
   if (vendor.suspensionSource === 'WIND_DOWN' || vendor.ownerAccountStatus === 'DEACTIVATED') return 'ACCOUNT_CLOSED';
+  if (vendor.status === 'SUSPENDED' && !feeOperable(vendor.subscription)) return 'FEE_UNPAID';
   if (!goLive.checklist.complete) return 'NEEDS_DOCUMENTS';
   if (goLive.disclosure.engaged && goLive.disclosure.complete !== true) return 'NEEDS_DISCLOSURE';
   return vendor.status === 'SUSPENDED' ? 'CAN_REINSTATE' : 'CAN_ACTIVATE';
@@ -61,4 +89,46 @@ const DISCLOSURE_WORDS: Record<string, string> = {
 export function disclosureMissingWords(missing: readonly string[]): string {
   const words = missing.map((m) => DISCLOSURE_WORDS[m] ?? m);
   return words.length ? words.join(', ') : 'an element';
+}
+
+/**
+ * The refusal for a verdict the console may not act on, in plain words — or null when the verdict allows the
+ * action (CAN_ACTIVATE / CAN_REINSTATE). One place, so the first read and the re-decision inside the reinstate
+ * transaction refuse identically. LIVE is answered by the caller (400 ALREADY_ACTIVE) before any verdict.
+ */
+export function vendorActivationRefusal(
+  next: VendorActivationNext,
+  name: string,
+  goLive: Pick<VendorGoLive, 'disclosure'>,
+): AppError | null {
+  switch (next) {
+    case 'CLOSED':
+      return new AppError(409, 'STORE_CLOSED', `${name} is closed. A closed store is not reopened from the console.`);
+    case 'ACCOUNT_CLOSED':
+      return new AppError(409, 'ACCOUNT_CLOSED', `${name}'s owner has closed their Swift account, so the store stays closed. It cannot be reopened from the console.`);
+    case 'FEE_UNPAID':
+      return new AppError(
+        409,
+        'FEE_UNPAID',
+        `${name} cannot be reinstated while its weekly fee is unpaid or its weekly billing is stopped. It comes back by itself when the fee is paid through the MMG checkout page; the console cannot lift a fee hold.`,
+      );
+    case 'NEEDS_DOCUMENTS':
+      return new AppError(
+        409,
+        'CHECKLIST_INCOMPLETE',
+        `${name}'s required documents are not all approved and current — review them in the Verification queue first.`,
+      );
+    case 'NEEDS_DISCLOSURE':
+      return new AppError(
+        409,
+        'DISCLOSURE_INCOMPLETE',
+        `${name}'s documents are complete, but its storefront supplier information is not: missing ${disclosureMissingWords(goLive.disclosure.missing)}. It goes live by itself once that is complete.`,
+        { missing: goLive.disclosure.missing },
+      );
+    case 'LIVE':
+      return new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+    case 'CAN_ACTIVATE':
+    case 'CAN_REINSTATE':
+      return null;
+  }
 }

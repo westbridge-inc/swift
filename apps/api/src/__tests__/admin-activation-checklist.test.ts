@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
+import type { Prisma } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -83,6 +84,43 @@ async function makeStore(ownerUserId: string, status: 'PENDING_APPROVAL' | 'SUSP
       status, isVerified: false, acceptingOrders: false, ...extra,
     },
   });
+}
+
+/** A weekly-fee subscription for a store, in the given billing state (the period ended a week ago when unpaid). */
+async function feeSubscription(vendorId: string, status: 'ACTIVE' | 'SUSPENDED' | 'CHURNED') {
+  const now = Date.now();
+  const paid = status === 'ACTIVE';
+  return app.prisma.subscription.create({
+    data: {
+      vendorId, type: 'SUPERMARKET', status, weeklyRate: 5000, currencyCode: 'GYD',
+      currentPeriodStart: new Date(now - (paid ? 1 : 14) * DAY), currentPeriodEnd: new Date(now + (paid ? 6 : -7) * DAY),
+      nextBillingDate: new Date(now + (paid ? 6 : -7) * DAY), suspendedAt: paid ? null : new Date(now - 5 * DAY),
+    },
+  });
+}
+
+/**
+ * The race shape: a competing writer holds the owner's account row (as account deletion and document decisions do)
+ * and has written, but not committed, when the reinstate arrives. The writer commits once the reinstate is either
+ * finished (the old route never waited) or plainly blocked behind the lock; then the reinstate's answer is returned.
+ */
+async function raceAgainstAccountLock<T>(userId: string, write: (tx: Prisma.TransactionClient) => Promise<unknown>, act: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let held!: () => void;
+  const holding = new Promise<void>((r) => { held = r; });
+  const writer = app.prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE`;
+    await write(tx);
+    held();
+    await gate;
+  }, { timeout: 30_000 });
+  await holding;
+  const acting = act();
+  await Promise.race([acting, new Promise((r) => setTimeout(r, 1500))]);
+  release();
+  await writer;
+  return acting;
 }
 
 const approve = (vendorId: string) => app.inject({
@@ -175,6 +213,20 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
     expect(live.activationValidUntil?.toISOString()).toBe(bound!.toISOString());
   });
 
+  // [DS816 S3] "Activate now" names one store. The projection it runs used to sweep every store the owner holds, so a
+  // second store of the same owner, never shown on the page, went live and started its trial too.
+  it('"Activate now" activates the named store only — another store of the same owner is left as it was', async () => {
+    const owner = await makeUser('TwoStores');
+    const named = await makeStore(owner.id);
+    const sibling = await makeStore(owner.id);
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    const res = await approve(named.id);
+    expect(res.statusCode).toBe(200);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: named.id } })).status).toBe('ACTIVE');
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: sibling.id } })).toMatchObject({ status: 'PENDING_APPROVAL', isVerified: false });
+    expect(await app.prisma.subscription.count({ where: { vendorId: sibling.id } })).toBe(0);
+  });
+
   it('a reinstated (admin-suspended) store passes the same gates and carries the same expiry', async () => {
     const owner = await makeUser('Reinstate');
     const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
@@ -209,6 +261,72 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
     const res = await approve(store.id);
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('ACCOUNT_CLOSED');
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).status).toBe('SUSPENDED');
+  });
+
+  // [MC-AD2] A weekly-fee hold is lifted by billing (a payment the provider confirmed), never by the console:
+  // reinstating the store row while its subscription stays suspended would show a live store that cannot take
+  // orders, and would clear the hold without a payment.
+  it('never lifts a weekly-fee hold: a store suspended by billing, its fee unpaid, is refused and nothing changes', async () => {
+    const owner = await makeUser('FeeHeld');
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'BILLING', isVerified: true });
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    const sub = await feeSubscription(store.id, 'SUSPENDED');
+    const res = await approve(store.id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('FEE_UNPAID');
+    expect(res.json().error.message).toMatch(/weekly fee/);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'BILLING' });
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe('SUSPENDED');
+    // no false "your store is back" push
+    expect(await app.prisma.notification.count({ where: { userId: owner.id } })).toBe(0);
+  });
+
+  it('…nor when the store was later suspended by an admin over the same unpaid fee (the source changed, the debt did not)', async () => {
+    const owner = await makeUser('FeeAdmin');
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    await feeSubscription(store.id, 'CHURNED');
+    const res = await approve(store.id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('FEE_UNPAID');
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).status).toBe('SUSPENDED');
+  });
+
+  it('a store whose fee is paid up is reinstated, even if a stale billing mark is left on it', async () => {
+    const owner = await makeUser('FeePaid');
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'BILLING', isVerified: true });
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    await feeSubscription(store.id, 'ACTIVE');
+    const res = await approve(store.id);
+    expect(res.statusCode).toBe(200);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: 'ACTIVE', suspensionSource: null });
+  });
+
+  // [Opus S3-1] The reinstate decides again under the owner's account lock — the lock account deletion and every
+  // document decision take — so a writer that commits while the reinstate is in flight is honoured, not undone.
+  it('a deletion that commits while a reinstate is in flight wins: the deleted owner’s store stays closed', async () => {
+    const owner = await makeUser('RaceDelete');
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
+    await feeSubscription(store.id, 'ACTIVE'); // paid up: the reinstate itself is not otherwise held
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    const res = await raceAgainstAccountLock(owner.id, (tx) => tx.user.update({ where: { id: owner.id }, data: { status: 'DEACTIVATED' } }), () => approve(store.id));
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('ACCOUNT_CLOSED');
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'ADMIN' });
+    expect(await app.prisma.notification.count({ where: { userId: owner.id } })).toBe(0);
+  });
+
+  it('a document revoked while a reinstate is in flight wins: the store stays suspended', async () => {
+    const owner = await makeUser('RaceRevoke');
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
+    await feeSubscription(store.id, 'ACTIVE'); // paid up: the reinstate itself is not otherwise held
+    const docs: Array<{ id: string }> = [];
+    for (const t of SUPERMARKET_DOCS) docs.push(await doc(owner.id, t, 'APPROVED'));
+    // the revocation's own transition (VerificationService.revokeDocument): COMMITTED → REVOKED, legacy status REJECTED
+    const res = await raceAgainstAccountLock(owner.id, (tx) => tx.verificationDocument.update({ where: { id: docs[0]!.id }, data: { state: 'REVOKED', status: 'REJECTED', reviewNote: 'REVOKED: the photo is unreadable' } as never }), () => approve(store.id));
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('CHECKLIST_INCOMPLETE');
     expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).status).toBe('SUSPENDED');
   });
 });
@@ -260,6 +378,14 @@ describe('[MC-PR2] GET /vendors/:id/activation-checklist — the per-document tr
     const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'WIND_DOWN' });
     expect((await read(`/api/v1/admin/vendors/${store.id}/activation-checklist`)).json().data.next).toBe('ACCOUNT_CLOSED');
     expect((await read('/api/v1/admin/vendors/no-such-store/activation-checklist')).statusCode).toBe(404);
+  });
+
+  it('a store held for its unpaid weekly fee reads FEE_UNPAID (no reinstate offered), with the fee state shown', async () => {
+    const owner = await makeUser('FeeRead');
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'BILLING', isVerified: true });
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    await feeSubscription(store.id, 'SUSPENDED');
+    expect((await read(`/api/v1/admin/vendors/${store.id}/activation-checklist`)).json().data).toMatchObject({ next: 'FEE_UNPAID', subscriptionStatus: 'SUSPENDED', feeOperable: false });
   });
 
   it('opening a checklist is a recorded sensitive read naming the store', async () => {
