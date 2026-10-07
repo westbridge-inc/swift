@@ -3,7 +3,7 @@ import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
-import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
+import { PREVIEW_VERIFICATION, previewMutation, previewQuery } from '../lib/moverPreviewData';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -112,6 +112,9 @@ export function useBecomePartner() {
  * wrapper (hooks/useStepUp): a verified mover confirms it is them first.
  */
 export function useChangeVehicle(guard?: MutationGuard) {
+  // Earner preview: a signed-in mover looking at the sample dashboard can open
+  // "Change vehicle", but it never changes their real one.
+  const preview = useMoverPreview((s) => s.preview);
   const qc = useQueryClient();
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   const run = async (data: {
@@ -147,7 +150,8 @@ export function useChangeVehicle(guard?: MutationGuard) {
     void qc.invalidateQueries({ queryKey: ['mover'] });
     return result;
   };
-  return useMutation({ mutationFn: guard ? guard(run) : run });
+  const m = useMutation({ mutationFn: guard ? guard(run) : run });
+  return preview ? (previewMutation() as typeof m) : m;
 }
 
 /** Upload a single picked file to storage; resolves to its fileUrl. */
@@ -190,8 +194,10 @@ export function useSubmitIdentity() {
 
 /** Upload a picked file to storage, then submit it as a checklist document. */
 export function useUploadDocument(role: string) {
+  // Earner preview: nothing is uploaded from the sample dashboard.
+  const preview = useMoverPreview((s) => s.preview);
   const qc = useQueryClient();
-  return useMutation({
+  const m = useMutation({
     mutationFn: async ({ docType, file, authSession }: {
       docType: string;
       file: { uri: string; name: string; type: string };
@@ -217,4 +223,5 @@ export function useUploadDocument(role: string) {
       return result;
     },
   });
+  return preview ? (previewMutation() as typeof m) : m;
 }

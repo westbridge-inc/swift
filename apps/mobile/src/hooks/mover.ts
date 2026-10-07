@@ -11,7 +11,7 @@ import {
   startMoverLocation,
   stopMoverLocation,
 } from '../services/backgroundLocation';
-import { useMoverPreview } from '../stores/moverPreview';
+import { useMoverPreview, type MoverPreviewKind } from '../stores/moverPreview';
 import { useLocationStore } from '../stores/locationStore';
 import {
   AuthSessionBoundaryError,
@@ -68,12 +68,16 @@ function svc(kind: MoverKind) {
 }
 
 // Earner PREVIEW (R3): a prospective mover sees the REAL screens fed sample data.
-// Every DATA hook returns a resolved preview query (with its real query disabled
-// so no auth-less request fires); every MUTATION hook returns a no-op — preview
-// is strictly read-only. `usePreview()` is called unconditionally in each hook so
-// hook order is stable (rules of hooks).
-function usePreview() {
-  return useMoverPreview((s) => s.preview);
+// Every DATA hook returns a resolved preview query carrying the sample for the
+// face being previewed (a delivery RIDER or a taxi DRIVER), with its real query
+// disabled so nothing about the account is read; every MUTATION hook returns a
+// no-op — preview is strictly read-only (and the app client refuses writes while
+// it is on screen). `usePreview()` is called unconditionally in each hook so hook
+// order is stable (rules of hooks). It answers the previewed face, or null.
+function usePreview(): MoverPreviewKind | null {
+  const on = useMoverPreview((s) => s.preview);
+  const kind = useMoverPreview((s) => s.kind);
+  return on ? kind : null;
 }
 
 /** Resolve both operational profiles. A missing profile is a successful 404;
@@ -82,7 +86,6 @@ function usePreview() {
  * ever treating a network error as permission to cross into the other app. */
 export function useMoverKind() {
   const pv = usePreview();
-  const pvKind = useMoverPreview((s) => s.kind);
   const authority = useAuthStore((s) => s.user) as (Parameters<ReturnType<typeof useAuthStore.getState>['setUserIfCurrent']>[1] & {
     activeRole?: string;
     lastMoverRole?: string | null;
@@ -142,8 +145,8 @@ export function useMoverKind() {
 
   if (pv) {
     return {
-      kind: pvKind as MoverKind,
-      profile: PV.PREVIEW_PROFILE as any,
+      kind: pv as MoverKind,
+      profile: PV.previewSample(pv).profile as any,
       loading: false,
       refetching: false,
       error: null,
@@ -209,7 +212,7 @@ export function useEarningsToday(kind: MoverKind | null) {
     queryFn: () => unwrap(svc(kind as MoverKind).earningsToday()),
     enabled: !!kind && !pv,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS_TODAY) : q;
+  return pv ? PV.previewQuery(PV.previewSample(pv).earningsToday) : q;
 }
 export function useEarningsSummary<T = any>(kind: MoverKind | null) {
   const pv = usePreview();
@@ -218,7 +221,7 @@ export function useEarningsSummary<T = any>(kind: MoverKind | null) {
     queryFn: () => unwrap<T>(svc(kind as MoverKind).earningsSummary()),
     enabled: !!kind && !pv,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS_SUMMARY) : q;
+  return pv ? PV.previewQuery(PV.previewSample(pv).earningsSummary) : q;
 }
 export function useEarnings<T = any>(kind: MoverKind | null) {
   const pv = usePreview();
@@ -227,7 +230,7 @@ export function useEarnings<T = any>(kind: MoverKind | null) {
     queryFn: () => unwrap<T>(svc(kind as MoverKind).earnings()),
     enabled: !!kind && !pv,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS) : q;
+  return pv ? PV.previewQuery(PV.previewSample(pv).earnings) : q;
 }
 /** [DOC-1 §31.4] The mover's guarantee claims — status, the evidence bundle as filed, the pay-out SLA, suspension. */
 export function useMoverClaims<T = any>(kind: MoverKind | null) {
@@ -259,7 +262,7 @@ export function useDailyEarnings<T = any>(kind: MoverKind | null, days = 7) {
     queryFn: () => unwrap<T>(svc(kind as MoverKind).earningsDaily(days)),
     enabled: !!kind && !pv,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_DAILY_EARNINGS) : q;
+  return pv ? PV.previewQuery(PV.previewSample(pv).daily) : q;
 }
 /** Nearby REAL demand for the dashboard (plan Phase A): waiting taxi
  *  requests + watchers for drivers; unassigned orders by store for riders. */
@@ -271,7 +274,7 @@ export function useDemand<T = any>(kind: MoverKind | null, point?: { lat: number
     enabled: !!kind && !!point && !pv,
     refetchInterval: 20_000,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_DEMAND) : q;
+  return pv ? PV.previewQuery(PV.previewSample(pv).demand) : q;
 }
 
 export function useAvailableJobs(kind: MoverKind | null, online: boolean) {
@@ -282,7 +285,7 @@ export function useAvailableJobs(kind: MoverKind | null, online: boolean) {
     enabled: !!kind && online && !pv,
     refetchInterval: online ? 10000 : false,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_AVAILABLE) : q;
+  return pv ? PV.previewQuery(PV.previewSample(pv).available) : q;
 }
 export function useActiveJob(kind: MoverKind | null) {
   const pv = usePreview();
@@ -292,10 +295,11 @@ export function useActiveJob(kind: MoverKind | null) {
     enabled: !!kind && !pv,
     refetchInterval: 12000,
   });
-  // A sample in-progress trip in preview: Home shows the active-trip banner (its
-  // "tap to manage" is the only path to the nav-grade Active-trip screen, which
-  // R3 requires be previewable) while the map still renders demand behind it.
-  return pv ? PV.previewQuery(PV.PREVIEW_ACTIVE_JOB) : q;
+  // A sample job in progress in preview (a ride for a driver, a delivery for a
+  // rider): Home shows the active-job banner (its "tap to manage" is the only
+  // path to the nav-grade Active-job screen, which R3 requires be previewable)
+  // while the map still renders demand behind it.
+  return pv ? PV.previewQuery(PV.previewSample(pv).activeJob) : q;
 }
 /** [B6] The run summary the server computes for a stacked rider. Rendered,
  *  never re-derived: the strip shows `cashToCollect`, it does not add it. */
@@ -617,7 +621,8 @@ export function useMoverStats(kind: MoverKind | null) {
     enabled: kind === 'RIDER' && !pv,
     refetchInterval: 60000,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_STATS) : q;
+  // A driver has no /stats route, so the driver face has none either.
+  return pv ? PV.previewQuery(PV.previewSample(pv).stats) : q;
 }
 
 /** Finished-job history: driver rides (status-filterable) / rider deliveries. */
@@ -635,7 +640,7 @@ export function useJobHistory(kind: MoverKind | null, page: number, status?: str
     enabled: !!kind && !pv,
     placeholderData: (prev) => prev,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS) : q;
+  return pv ? PV.previewQuery(PV.previewSample(pv).history) : q;
 }
 
 /** The mover's own weekly flat-fee subscription (trial/grace/rate/next bill). */
@@ -646,10 +651,12 @@ export function useMoverSubscription(kind: MoverKind | null) {
     queryFn: () => tryUnwrap<any>(svc(kind as MoverKind).subscription()),
     enabled: !!kind && !pv,
   });
-  // Preview bills the sample driver the live quote for the sample car — the
-  // public price list, read only in preview — never a number frozen in the app.
-  const pricing = usePartnerPricing(PV.PREVIEW_MARKET, pv);
-  const sample = useMemo(() => (pv ? PV.previewSubscription(pricing.data) : null), [pv, pricing.data]);
+  // Preview bills the sample the live quote for its face's sample vehicle — a
+  // rider the rider rate for a motorbike, a driver the taxi rate for a car —
+  // from the public price list, read only in preview; never a number frozen in
+  // the app.
+  const pricing = usePartnerPricing(PV.PREVIEW_MARKET, pv !== null);
+  const sample = useMemo(() => (pv ? PV.previewSubscription(pricing.data, pv) : null), [pv, pricing.data]);
   if (!pv) return q;
   // [H7] While the price list is still loading or has failed, the preview
   // query says so and the screen shows its own loading or error state — never

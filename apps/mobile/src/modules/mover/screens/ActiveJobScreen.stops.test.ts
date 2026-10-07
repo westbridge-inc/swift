@@ -27,7 +27,10 @@ describe('the singular case is the old code path', () => {
   it('useActiveJob itself is untouched — the same query key, the same preview sample', () => {
     const single = HOOK.slice(HOOK.indexOf('export function useActiveJob('), HOOK.indexOf('export type RunSummary'));
     expect(single).toContain("queryKey: ['mover', 'active', kind],");
-    expect(single).toContain('return pv ? PV.previewQuery(PV.PREVIEW_ACTIVE_JOB) : q;');
+    // [Owner, 1 Oct 2026] The preview sample is the previewed face's own (a
+    // ride for a driver, a delivery for a rider) — still one sample, read the
+    // same way, never a second code path.
+    expect(single).toContain('return pv ? PV.previewQuery(PV.previewSample(pv).activeJob) : q;');
   });
 
   it('the legs query exists only for riders — taxi is one-at-a-time by law', () => {

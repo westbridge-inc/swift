@@ -36,6 +36,8 @@ import {
   captureRiderCashSettlementConfirmation,
   requireCurrentCashSettlementConfirmation,
 } from '../../../hooks/cashSettlement';
+import { useMoverPreview } from '../../../stores/moverPreview';
+import { previewMutation } from '../../../lib/moverPreviewData';
 
 /** Thin domain wrapper over the kit's StatTile [Wave 3 part 2]: this screen's
  *  tiles always show money-or-dash with a job-count detail line. */
@@ -391,7 +393,7 @@ export function EarningsScreen({ navigation }: any) {
   const ledgerQ = useCashSettlements(kind);
 
   // Signed short-lived link (the JWT can't ride an in-app browser).
-  const statement = useMutation({
+  const statementLive = useMutation({
     mutationFn: async () => {
       const owner = requireAuthSessionSnapshot();
       const r = await (kind === 'DRIVER'
@@ -408,6 +410,10 @@ export function EarningsScreen({ navigation }: any) {
       if (opened === false) throw new Error("Couldn't open the statement on this phone.");
     },
   });
+  // The preview's statement would be the signed-in account's real one: in the
+  // preview the button answers "read-only" and nothing is minted.
+  const preview = useMoverPreview((s) => s.preview);
+  const statement = preview ? (previewMutation() as typeof statementLive) : statementLive;
 
   const summary = serverRecord(summaryQ.data);
   const statsData = serverRecord(stats.data);

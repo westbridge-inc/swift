@@ -13,6 +13,7 @@ import { useBookingStore } from './bookingStore';
 import { useBusinessSetupDraft } from './businessSetupDraft';
 import { useStoreSwitcher } from './storeSwitcher';
 import { useVendorPreview } from './vendorPreview';
+import { useMoverPreview } from './moverPreview';
 import {
   sameAuthSession,
   samePrincipalBoundary,
@@ -112,9 +113,12 @@ function nextLoggedOutState(state: Pick<AuthState, 'sessionGeneration'>) {
 /** Business-entry UI state is principal-scoped too. A sample-dashboard type
  * swaps every vendor hook to canned data (real orders hidden, every action a
  * no-op), and a half-typed List-your-business form holds a business phone and
- * address; neither may reach the next session. */
+ * address; neither may reach the next session. The earner preview is the same
+ * kind of state: a rider's "Preview your dashboard" swaps every mover hook to
+ * sample data and blocks writes, so it ends with the session that opened it. */
 function clearBusinessEntryState(): void {
   useVendorPreview.getState().exitPreview();
+  useMoverPreview.getState().exitPreview();
   useBusinessSetupDraft.getState().clear();
 }
 

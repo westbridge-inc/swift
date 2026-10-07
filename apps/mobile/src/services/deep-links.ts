@@ -1,6 +1,7 @@
 import { Linking } from 'react-native';
 import { api } from './api';
 import { safeNavigate } from '../navigation/navigationRef';
+import { leaveMoverPreview } from '../stores/moverPreviewExit';
 
 // The QR/link DEEP-LINK ROUTER [qr spec Part 6]. Universal links hand the app
 // a full https URL for /store/{slug} or /s/{code}; this module turns it into
@@ -100,11 +101,21 @@ function handleUrl(url: string | null): boolean {
     // A newer fee return supersedes pending scans and discards all parameters.
     latestRequest += 1;
     pendingUrl = null;
-    if (!safeNavigate('WeeklyFee') && !navReady) pendingUrl = 'swift://pay/mmg/return';
+    const open = () => { if (!safeNavigate('WeeklyFee') && !navReady) pendingUrl = 'swift://pay/mmg/return'; };
+    // [DS624 S2] A payment return is about a real payment, never the earner
+    // preview's sample: the preview ends first, and the route waits one tick
+    // so the mover stack's reset (its preview key) lands before WeeklyFee does.
+    if (leaveMoverPreview()) setTimeout(open, 0);
+    else open();
     return true;
   }
   const dest = destinationForUrl(url);
   if (!dest) return false; // not ours — the app opens normally
+  // [DS624 S2] A store link always opens a customer screen (the storefront or
+  // the QR outcome). The earner preview ends HERE, before the resolver's own
+  // APP_OPEN report, so the preview's write guard never refuses anything on
+  // the customer side — that report, the cart, checkout or a tip.
+  leaveMoverPreview();
   const request = ++latestRequest;
   if (!navReady) {
     pendingUrl = url;

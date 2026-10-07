@@ -27,9 +27,17 @@ import { mediaUrl } from '../../../lib/images';
 import { BillingStatusBlock, BillingStopControl } from '../../../components/billing/BillingSurfaces';
 import { resumeBillingMethod } from '../../../lib/billing';
 import { useMoverPreview } from '../../../stores/moverPreview';
+import { previewMutation } from '../../../lib/moverPreviewData';
+import { PREVIEW_COPY, useLeaveMoverPreview } from '../preview';
 
 export function MoverAccountScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
+  // [Owner, 1 Oct] A rider or driver previewing from their documents is signed
+  // in for real. In the preview this screen acts on the sample only: the pay
+  // link never saves, and the rows that act on the real account (get help,
+  // switch app, log out) give way to the one exit that matters here — back out
+  // of the preview.
+  const { fromDocuments, leave: leavePreview } = useLeaveMoverPreview();
   const { user } = useAuthStore();
   // What the server does when a mover logs out (mover-authority.ts): the mover
   // goes offline, and a job not yet picked up is released back to dispatch. A
@@ -52,7 +60,7 @@ export function MoverAccountScreen({ navigation }: any) {
   // session to confirm it holds the phone (the code sheet), then STAGES the
   // change behind a cool-off with the old link live.
   const [mmgError, setMmgError] = React.useState<string | null>(null);
-  const saveMmgLink = useMutation({
+  const saveMmgLinkLive = useMutation({
     mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => driverApi.updateProfile({ mmgPayUrl })),
     onMutate: () => setMmgError(null),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'driverProfile'] }),
@@ -60,7 +68,7 @@ export function MoverAccountScreen({ navigation }: any) {
       if (!isStepUpDismissed(e)) setMmgError(serverMessage(e, 'That link could not be saved. Check it and try again.'));
     },
   });
-  const cancelPendingMmgLink = useMutation({
+  const cancelPendingMmgLinkLive = useMutation({
     mutationFn: () => driverApi.cancelPendingMmgLink(),
     onSuccess: () => {
       toast.success('Change cancelled', 'Your current link stays. Other devices were signed out.');
@@ -68,6 +76,8 @@ export function MoverAccountScreen({ navigation }: any) {
     },
     onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
   });
+  const saveMmgLink = preview ? (previewMutation() as typeof saveMmgLinkLive) : saveMmgLinkLive;
+  const cancelPendingMmgLink = preview ? (previewMutation() as typeof cancelPendingMmgLinkLive) : cancelPendingMmgLinkLive;
 
   const name = [user?.firstName, user?.lastName].filter(Boolean).join(' ') || 'Your account';
   const initial = (user?.firstName ?? 'S').charAt(0).toUpperCase();
@@ -227,8 +237,21 @@ export function MoverAccountScreen({ navigation }: any) {
             sub="View your fee and recent payments"
             onPress={() => navigation?.navigate?.('WeeklyFee')}
           />
-          <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
-          <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
+          {preview ? (
+            // A support request is a write, so the preview's way to a human is
+            // out of the preview first.
+            <SettingsRow
+              icon="arrow-left"
+              label={fromDocuments ? PREVIEW_COPY.backToDocuments : PREVIEW_COPY.exit}
+              sub={fromDocuments ? 'Leave the preview' : 'Back to the welcome screen'}
+              onPress={leavePreview}
+            />
+          ) : (
+            <>
+              <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
+              <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
+            </>
+          )}
         </Card>
 
         {/* Honest billing status — wallet balance, grace deadline, or the
@@ -263,7 +286,7 @@ export function MoverAccountScreen({ navigation }: any) {
           </T>
         </Card>
 
-        <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={requestLogout} />
+        {preview ? null : <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={requestLogout} />}
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />

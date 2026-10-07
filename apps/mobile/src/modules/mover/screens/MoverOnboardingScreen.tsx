@@ -17,8 +17,10 @@ import { moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPric
 import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useAuthStore } from '../../../stores/authStore';
+import { useMoverPreview } from '../../../stores/moverPreview';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { GUTTER } from '../shared';
+import { PREVIEW_COPY, previewFaceForVehicle } from '../preview';
 
 // The full Guyana fleet, small → large. Order matches the vehicle-class
 // taxonomy on the server (config/vehicle-classes). Cars, wagon cars and buses
@@ -257,6 +259,11 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
   const savedLabel = VTYPES.find((v) => v.key === (savedVehicle ?? vt))?.label ?? 'Your vehicle';
   const { data: preview, isLoading: statusLoading, isError: statusError, refetch: refetchStatus } = useVerificationStatus<any>('MOVER', vt);
   const checklistStatus = preview ?? status;
+  // [Owner, 1 Oct] While the documents are checked, the mover can look around
+  // their own dashboard — the face their vehicle registers (a car → taxi
+  // driver, a motorbike → delivery rider) — with sample numbers, read-only.
+  const enterPreview = useMoverPreview((s) => s.enterPreview);
+  const previewFace = previewFaceForVehicle(vt);
 
   return (
     <BackToSwiftScreen onBack={back.leave}>
@@ -337,6 +344,17 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
             onRetry={refetchStatus}
           />
         </View>
+
+        <PillButton
+          testID="mover-documents-preview"
+          label={PREVIEW_COPY.entry}
+          variant="soft"
+          style={{ marginTop: space.lg }}
+          onPress={() => enterPreview(previewFace, 'documents')}
+        />
+        <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+          {PREVIEW_COPY.entryCaption[previewFace]}
+        </T>
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />

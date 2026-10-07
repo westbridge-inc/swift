@@ -45,6 +45,7 @@ import { FareSlider } from '../../../kit';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 import { dk, withAlpha, DCard, DemandBand, DStat, DWeekBars } from '../surface';
 import { useMoverPreview } from '../../../stores/moverPreview';
+import { PREVIEW_COPY, useLeaveMoverPreview } from '../preview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { useBackgroundLocationDisclosure } from './BackgroundLocationDisclosure';
 import { fareLockedFor, fareToSubmit } from './fare-locked';
@@ -332,6 +333,32 @@ function StoreBadge({ ready, soon }: { ready: number; soon: number }) {
         {hot ? ready : soon}
       </T>
     </View>
+  );
+}
+
+/** [Owner, 1 Oct] The preview says what it is, in plain words, first thing on
+ *  the sheet — and, opened from the documents, offers the way back to them. */
+function PreviewNotice() {
+  const { fromDocuments, leave } = useLeaveMoverPreview();
+  return (
+    <DCard style={{ marginBottom: space.md, borderColor: dk.accentBorder }}>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm }}>
+        <Feather name="eye" size={15} color={dk.accent} style={{ marginTop: 2 }} />
+        <T variant="label" weight="semibold" style={{ flex: 1, color: dk.text }}>
+          {PREVIEW_COPY.notice} {fromDocuments ? PREVIEW_COPY.fromDocuments : PREVIEW_COPY.fromWelcome}
+        </T>
+      </View>
+      {fromDocuments ? (
+        <PillButton
+          testID="mover-preview-back-to-documents"
+          label={PREVIEW_COPY.backToDocuments}
+          size="md"
+          variant="soft"
+          style={{ marginTop: space.sm, alignSelf: 'flex-start' }}
+          onPress={leave}
+        />
+      ) : null}
+    </DCard>
   );
 }
 
@@ -748,6 +775,7 @@ export function MoverHomeScreen({ navigation }: any) {
       >
         <MapCredits />
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}>
+          {preview ? <PreviewNotice /> : null}
           {/* Status header */}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
             <View style={{ flex: 1, paddingRight: space.md }}>

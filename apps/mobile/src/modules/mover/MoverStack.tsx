@@ -10,8 +10,8 @@ import { ConversationScreen } from '../chat/screens/ConversationScreen';
 import { useActiveJob, useBroadcastLocation, useMoverKind, useVerificationStatus } from '../../hooks';
 import { shouldTrackMoverLocation } from '../../lib/moverLocation';
 import { useMoverPreview } from '../../stores/moverPreview';
-import { useAuthStore } from '../../stores/authStore';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
+import { PREVIEW_COPY, useLeaveMoverPreview } from './preview';
 import { MoverHomeScreen } from './screens/MoverHomeScreen';
 import { ActiveJobScreen } from './screens/ActiveJobScreen';
 import { EarningsScreen } from './screens/EarningsScreen';
@@ -41,8 +41,9 @@ function MoverRoot({ navigation }: any) {
   const { data: status, isLoading } = useVerificationStatus<any>('MOVER', undefined, { poll: true });
   const live = useWentLive(preview ? undefined : status ? !!status.roleVerified : undefined);
 
-  // Preview (R3): a prospective mover lands straight on the REAL dashboard home
-  // fed sample data — no verification gate, no onboarding, no went-live popup.
+  // Preview (R3): the REAL dashboard home fed sample data — no verification
+  // gate, no onboarding, no went-live popup. Opened from the documents, the
+  // real status query is paused (not changed), so leaving lands on them again.
   if (preview) return <MoverHomeScreen navigation={navigation} />;
 
   if (isLoading) {
@@ -75,29 +76,26 @@ function MoverLocationSupervisor() {
   return null;
 }
 
-/** A persistent, unmissable "Preview" strip while a prospective mover explores
- *  the earner app read-only — tap to leave preview and return to the role picker. */
+/** A persistent, unmissable "Preview" strip while a mover explores the earner
+ *  app read-only — tap to leave the preview the way it was entered: back to
+ *  the documents, or back to the role picker. */
 function MoverPreviewBanner() {
   const insets = useSafeAreaInsets();
-  const exitPreview = useMoverPreview((s) => s.exitPreview);
-  const setIntent = useAuthStore((s) => s.setIntent);
+  const { fromDocuments, leave } = useLeaveMoverPreview();
   return (
     <View pointerEvents="box-none" style={{ position: 'absolute', top: 0, left: 0, right: 0, paddingTop: insets.top + 4, alignItems: 'center' }}>
       <Pressable
         testID="mover-preview-exit"
         accessibilityRole="button"
-        accessibilityLabel="Exit driver preview"
-        accessibilityHint="Return to the Swift role picker"
-        onPress={() => {
-          exitPreview();
-          setIntent(null); // back to "How will you use Swift?"
-        }}
+        accessibilityLabel={fromDocuments ? PREVIEW_COPY.backToDocuments : 'Exit driver preview'}
+        accessibilityHint={fromDocuments ? 'Leave the preview and go back to your documents' : 'Return to the Swift role picker'}
+        onPress={leave}
         style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: color.brand[500], paddingHorizontal: 14, paddingVertical: 6, borderRadius: 999 }}
         hitSlop={10}
       >
         <Feather name="eye" size={13} color={color.white} />
         <T variant="caption" style={{ color: color.white, fontWeight: '700' }}>
-          Preview — tap to exit
+          {fromDocuments ? 'Preview · Back to documents' : 'Preview — tap to exit'}
         </T>
       </Pressable>
     </View>
@@ -110,24 +108,31 @@ export function MoverStack() {
     <View style={{ flex: 1 }}>
       <MoverLocationSupervisor />
       <Stack.Navigator screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="MoverRoot" component={MoverRoot} />
-        <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />
-        <Stack.Screen name="Earnings" component={EarningsScreen} />
-        {/* [DOC-1 §31.4] The guarantee claims a mover filed — status, evidence, settlement SLA. */}
-        <Stack.Screen name="Claims" component={ClaimsScreen} />
-        <Stack.Screen name="JobHistory" component={JobHistoryScreen} />
-        <Stack.Screen name="Account" component={MoverAccountScreen} />
-        <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
-        {/* [VEHICLES] Change the vehicle: offline until the new one's papers are approved. */}
-        <Stack.Screen name="MoverVehicle" component={MoverVehicleScreen} />
-        <Stack.Screen name="WeeklyFee" component={WeeklyFeeRouteScreen} />
-        <Stack.Screen name="Conversation" component={ConversationScreen} />
-        <Stack.Screen name="GetHelp" component={GetHelpScreen} />
-        <Stack.Screen name="LivenessCheck" component={LivenessCheckScreen} />
-        {/* [TST-001] The driver's half of a Trip Guardian check. The push that
-            asks for it used to route to Delivery — a screen this stack never
-            mounts — so a safety question had nowhere to be answered. */}
-        <Stack.Screen name="GuardianDriverConfirm" component={GuardianDriverConfirmScreen} />
+        {/* The preview and the real app never share a screen: entering or
+            leaving the preview replaces every route with a fresh MoverRoot, so
+            no sample screen outlives the preview (leaving from Earnings lands on
+            the documents, not on a real Earnings) and nothing typed before it
+            leaks in. */}
+        <Stack.Group navigationKey={preview ? 'mover-preview' : 'mover-live'}>
+          <Stack.Screen name="MoverRoot" component={MoverRoot} />
+          <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />
+          <Stack.Screen name="Earnings" component={EarningsScreen} />
+          {/* [DOC-1 §31.4] The guarantee claims a mover filed — status, evidence, settlement SLA. */}
+          <Stack.Screen name="Claims" component={ClaimsScreen} />
+          <Stack.Screen name="JobHistory" component={JobHistoryScreen} />
+          <Stack.Screen name="Account" component={MoverAccountScreen} />
+          <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
+          {/* [VEHICLES] Change the vehicle: offline until the new one's papers are approved. */}
+          <Stack.Screen name="MoverVehicle" component={MoverVehicleScreen} />
+          <Stack.Screen name="WeeklyFee" component={WeeklyFeeRouteScreen} />
+          <Stack.Screen name="Conversation" component={ConversationScreen} />
+          <Stack.Screen name="GetHelp" component={GetHelpScreen} />
+          <Stack.Screen name="LivenessCheck" component={LivenessCheckScreen} />
+          {/* [TST-001] The driver's half of a Trip Guardian check. The push that
+              asks for it used to route to Delivery — a screen this stack never
+              mounts — so a safety question had nowhere to be answered. */}
+          <Stack.Screen name="GuardianDriverConfirm" component={GuardianDriverConfirmScreen} />
+        </Stack.Group>
       </Stack.Navigator>
       {preview ? <MoverPreviewBanner /> : null}
     </View>

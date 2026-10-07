@@ -4,6 +4,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
 import { useMoverPreview } from '../stores/moverPreview';
+import { leaveMoverPreview } from '../stores/moverPreviewExit';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
 import { registerIfGranted } from '../services/push';
@@ -98,6 +99,15 @@ export function RootNavigator() {
   const Main = mainForIntent(intent);
   const entryGate = rootEntryGate({ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie, hasUser: !!user });
 
+  // [DS624 S2] The earner preview lives only inside the mover app: while it is
+  // on screen the API client refuses every write. Another app taking over ends
+  // it here; any root screen but the mover app opening over it (a storefront,
+  // a QR outcome) ends it in onStateChange below. (Links and notification taps
+  // end it before they route — services/deep-links, services/notification-router.)
+  React.useEffect(() => {
+    if (intent && intent !== 'mover') leaveMoverPreview();
+  }, [intent]);
+
   const resumeAuthContinuation = React.useCallback(() => {
     flushAuthContinuation(
       { isAuthenticated, entryGate, intent },
@@ -136,6 +146,10 @@ export function RootNavigator() {
         flushPendingDeepLink();
         flushAttributedDestination();
         resumeAuthContinuation();
+      }}
+      onStateChange={(state) => {
+        const focused = state?.routes[state.index]?.name;
+        if (focused !== undefined && focused !== 'Main') leaveMoverPreview();
       }}
     >
       <Stack.Navigator

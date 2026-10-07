@@ -7,6 +7,8 @@ import {
   useAuthStore,
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
+import { moverPreviewShowing } from '../stores/moverPreviewExit';
+import { installPreviewWriteGuard } from '../lib/previewWriteGuard';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
@@ -150,6 +152,22 @@ api.interceptors.request.use((config) => {
   }
   return config;
 }, undefined, { synchronous: true });
+
+// [Earner preview] While a rider's or driver's preview is on screen, no write
+// leaves the phone — not even one a screen forgot to make a no-op. "On screen"
+// is the preview flag AND the mover app being the one open
+// (stores/moverPreviewExit), and the preview ENDS whenever something takes the
+// person out of it — a store link, a QR code, a notification tap, a payment
+// return, any root screen but the mover app, another app [DS624 S2] — so the
+// guard never refuses a real cart, checkout, tip or support request.
+// Four writes deliberately do not use this client, so the guard never sees them:
+//   1. token refresh — AuthRefreshCoordinator below, raw POST /auth/refresh;
+//   2. logout revocation — revokeAuthSession below, raw POST /auth/logout/refresh;
+//   3. push-device registration — services/push.ts, raw POST /customer/notifications/devices;
+//   4. signed-out ad events — lib/ads.ts, raw POST /ads/events. (A signed-in
+//      device's ad events do use this client; one refused while the preview is
+//      on screen stays queued and is retried — lib/adsCore applyVerdicts.)
+installPreviewWriteGuard(api, moverPreviewShowing);
 
 // Response interceptor for token refresh. The coordinator single-flights an
 // exact session, but lets a newly logged-in account start its own flight. Every

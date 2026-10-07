@@ -1,6 +1,7 @@
 import * as Notifications from 'expo-notifications';
 import { navigationRef, safeNavigate } from '../navigation/navigationRef';
 import { getAuthSessionSnapshot } from '../stores/authStore';
+import { leaveMoverPreview } from '../stores/moverPreviewExit';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { selectionStillCurrent } from '../lib/storeSelection';
 
@@ -327,7 +328,13 @@ function routeTap(data: Record<string, unknown>) {
   pending = null;
   if (!dest) return;
   const { selectedStoreId, storeGeneration } = useStoreSwitcher.getState();
-  void go({ dest, data, attempt, owner: getAuthSessionSnapshot(), selection: { selectedStoreId, storeGeneration } }).catch(() => undefined);
+  const tap: Tap = { dest, data, attempt, owner: getAuthSessionSnapshot(), selection: { selectedStoreId, storeGeneration } };
+  // [DS624 S2] A tap is about the real account, never the earner preview's
+  // sample — and while the preview is on screen the API client refuses every
+  // write. The preview ends first; the route then waits one tick so the mover
+  // stack's reset (its preview key) lands before the destination does.
+  if (leaveMoverPreview()) setTimeout(() => { void go(tap).catch(() => undefined); }, 0);
+  else void go(tap).catch(() => undefined);
 }
 
 /** RootNavigator calls this from onReady — delivers a cold-start tap that
