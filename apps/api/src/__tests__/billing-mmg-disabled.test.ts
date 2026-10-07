@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { PaymentMethod, SubscriptionStatus } from '@prisma/client';
@@ -10,6 +10,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { sweepTrialFeeEducation } from '../modules/billing/trial-fee-education';
+import { inJobContext, QUEUE_NAMES } from '../jobs/queue';
+import type { Job } from 'bullmq';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
@@ -118,6 +120,20 @@ beforeAll(async () => {
   billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
 });
 
+// Each case's stores leave billing when the case ends (the shared retire:
+// cancelled, no renewal), so no later case bills or duns them. A case that
+// runs the billing job (runBillingCycle, which bills EVERY due subscription
+// in the database) must see only its own fixtures: otherwise the first run
+// after a pause dunned the past-due stores earlier cases left due, and each
+// final warning pages every admin in the database, so the case's time grew
+// with the admins other suites had left behind, past the timeout.
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  if (subIds.length > 0) {
+    await app.prisma.subscription.updateMany({ where: { id: { in: subIds }, status: { not: 'CANCELLED' } }, data: { status: 'CANCELLED', autoRenew: false } });
+  }
+});
+
 afterAll(async () => {
   vi.unstubAllEnvs();
   // Close any pause this file opened (resuming every clock it held) so no
@@ -152,7 +168,8 @@ async function whileOff<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Run `fn` with MMG switched off but the card rail live: partners have a live way to pay (a card). */
-const CARD_LIVE = { MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', CARD_RAIL_KILL: '0', PAYMENT_PROVIDER: 'sandbox' };
+// A real card provider (this build has none yet; the name stands for the first one).
+const CARD_LIVE = { MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', CARD_RAIL_KILL: '0', PAYMENT_PROVIDER: 'sandbox', CARD_RAIL_PROVIDER: 'powertranz' };
 async function whileCardLive<T>(fn: () => Promise<T>): Promise<T> {
   for (const [k, v] of Object.entries(CARD_LIVE)) vi.stubEnv(k, v);
   try { return await fn(); } finally { vi.unstubAllEnvs(); }
@@ -572,6 +589,10 @@ describe('[PROD-PATH] the pause is decided by server facts only: nothing a partn
     expect(noLivePayPath({ MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', CARD_RAIL_KILL: '1' })).toBe(true);
     expect(noLivePayPath({ MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1' })).toBe(true);
     expect(noLivePayPath(CARD_LIVE)).toBe(false);
+    // The card simulator (test pages for listed test subscriptions, no money) or no provider at all is no way to pay.
+    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_PROVIDER: 'simulator' })).toBe(true);
+    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_PROVIDER: '' })).toBe(true);
+    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_PROVIDER: undefined })).toBe(true);
     expect(noLivePayPath({ MMG_DRIVER: 'live' })).toBe(false);
     expect(noLivePayPath({ MMG_DRIVER: 'live', CARD_RAIL_KILL: '1', PAYMENT_PROVIDER: 'disabled' })).toBe(false);
     expect(noLivePayPath({})).toBe(false);
@@ -659,6 +680,30 @@ describe('[PROD-PATH] each pause and resume is on the record, and admins see it'
     expect(ended).toHaveLength(1);
     expect(ended[0]!.changes).toMatchObject({ since: t0.toISOString(), until: t1.toISOString() });
     expect(await audit('BILLING_FEE_RESUMED', id)).toHaveLength(1);
+  });
+
+  it('the pause tick runs as the poll job\'s named system work: where unbound access is refused, the job still pauses and resumes', async () => {
+    await noPauseOpen();
+    const t0 = new Date();
+    const id = await makeVendorSub(new Date(t0.getTime() - 3_600_000), { method: 'CASH', status: 'PAST_DUE', extra: { failedAttempts: 1 } });
+    const asPollJob = (env: Record<string, string>, at: Date) => inJobContext(QUEUE_NAMES.SUBSCRIPTION, async () => { await syncMmgPauseClock(app.prisma, at, env); });
+    vi.stubEnv('TENANT_UNSCOPED_ACCESS', 'deny');
+    try {
+      // Not vacuous: unbound, the tenant wall refuses the clock, so nothing is paused.
+      expect(await syncMmgPauseClock(app.prisma, t0, OFF)).toMatchObject({ pausedNow: 0 });
+      await asPollJob(OFF, t0)({ name: 'poll-mmg-billing', data: {} } as Job);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect((await clockOf(id))?.pausedAt?.getTime()).toBe(t0.getTime());
+    vi.stubEnv('TENANT_UNSCOPED_ACCESS', 'deny');
+    try {
+      await asPollJob(ON, new Date(t0.getTime() + 60_000))({ name: 'poll-mmg-billing', data: {} } as Job);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect((await clockOf(id))!.pausedAt).toBeNull();
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_pause.open' } })).toBeNull();
   });
 
   it('GET /admin/billing/fee-pause tells an admin whether fees are paused, since when, and how many fees the pause holds', async () => {

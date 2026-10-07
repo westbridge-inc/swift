@@ -18,8 +18,15 @@ import { weeklyFeeCardLive } from '../../utils/card-rail';
 // partner on this server, and a partner can neither cause nor dodge it.
 //
 // The card rail counts as a live way to pay only when a partner can open it
-// (weeklyFeeCardLive: v2 on, not killed). With it live, a partner without a
-// card can add one, so nobody is paused, MMG on or off.
+// (weeklyFeeCardLive: v2 on, not killed, a real provider; never the
+// simulator, which serves only listed test subscriptions). With it live, a
+// partner can pay now by card, so nobody is paused, MMG on or off. When the
+// first real provider lands, its per-platform switch (card-pay-action.ts;
+// iOS off unless switched on) decides which apps show the card, so switch
+// the provider on only once every partner can reach a card page.
+//
+// The rule reads only the environment, so the operate gate and its database
+// form (which cannot wait on a query) apply exactly the same answer.
 // ---------------------------------------------------------------------------
 
 export function noLivePayPath(env: Record<string, string | undefined> = process.env): boolean {

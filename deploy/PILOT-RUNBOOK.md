@@ -810,8 +810,9 @@ explicitly off. Beyond the earlier guards:
   even prepaid balance), failed, dunned, suspended, nudged or churned, no
   "due soon" reminder or trial fee notice names a fee, and nobody's grace
   runs (each due fee's dunning clock is paused). The pause follows the
-  server's switches only (the MMG driver and the card rail: CARD_RAIL_V2=1
-  and not killed), never anything a partner sets, so a partner can neither
+  server's switches only (the MMG driver, and the card rail: CARD_RAIL_V2=1,
+  not killed, with a real provider; the card simulator never counts), never
+  anything a partner sets, so a partner can neither
   cause it nor dodge it. When a way to pay comes back, only the current week
   is billed: one fee covers the weeks nobody could pay and the week in
   progress (owner ruling, 5 Oct), whatever job runs first (billing waits
@@ -822,8 +823,9 @@ explicitly off. Beyond the earlier guards:
   untouched, and any MMG call refuses with MMG_DISABLED.
   To switch MMG on, set `MMG_DRIVER=live` and `MMG_CHECKOUT_ENABLED=1`
   together (cash partners pay through the checkout page) and redeploy;
-  turning the card rail on also ends the pause, so do it only when partners
-  can open the card pages.
+  turning a real card provider on also ends the pause, so do it only when
+  partners can open the card pages (note the per-platform card switch: iOS
+  is off unless switched on).
 - **OPS_ONCALL_PHONES.** One or more E.164 numbers, comma-separated. An
   unacknowledged SOS escalates to them by SMS.
 - **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,

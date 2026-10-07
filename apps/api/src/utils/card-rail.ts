@@ -13,13 +13,16 @@ export function cardRailV2Enabled(env: Record<string, string | undefined> = proc
 }
 
 /** [PROD-PATH] A partner can pay the weekly fee by card on this server: card
- * rail v2 (hosted enrolment and hosted Pay now, the only card paths a partner
- * can open) is on, and neither the kill switch nor a disabled provider stops
- * it. Exactly the gate CardRailService.startSession applies before it opens
- * a hosted card page. Server switches only: nothing about a partner (their
- * card on file, their billing method) enters it. */
+ * rail v2 (hosted Pay now and enrolment, the only card paths a partner can
+ * open) is on, neither the kill switch nor a disabled provider stops it, and
+ * a REAL provider is configured. The simulator never counts: it serves only
+ * the test subscriptions it lists and moves no money, so it is no way for a
+ * real partner to pay (card-pay-action.ts cardSessionsAllowed). Server
+ * switches only: nothing about a partner (their card on file, their billing
+ * method, their app) enters it. */
 export function weeklyFeeCardLive(env: Record<string, string | undefined> = process.env): boolean {
-  return cardRailV2Enabled(env) && !cardRailKilled(env);
+  const provider = env['CARD_RAIL_PROVIDER'] ?? '';
+  return cardRailV2Enabled(env) && !cardRailKilled(env) && provider !== '' && provider !== 'simulator';
 }
 
 /** [PT-1 · AX297 F5] With CARD_RAIL_V2 off, drain what v2 left in flight:
