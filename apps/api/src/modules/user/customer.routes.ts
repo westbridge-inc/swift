@@ -1,3 +1,4 @@
+import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -44,7 +45,7 @@ import { scheduleVendorSearchSync } from '../search/search-sync';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
-import { AccountService } from './account.service';
+import { AccountService, closesByRequest } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
@@ -813,6 +814,9 @@ export async function customerRoutes(app: FastifyInstance) {
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
         roles: user.roles,
+        // [DELETION-INTEGRITY] What Delete starts for this person: erasure, or a
+        // closure request the support team completes (store or advertiser).
+        accountClosure: await closesByRequest(app.prisma, userId, user.roles) ? 'REQUEST' : 'DELETE',
         customer: {
           id: customer.id,
           totalOrders: customer.totalOrders,
@@ -874,8 +878,37 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
+  app.post('/account/closure-request', async (request: AuthRequest, reply) => {
+    await requireRecentOtpOrStepUp(app, request);
+    const result = await account.requestClosure(request.user.userId);
+    reply.code(202);
+    return { success: true, data: result };
+  });
+
   app.delete('/account', async (request: AuthRequest, reply) => {
-    const result = await account.deleteAccount(request.user.userId);
+    // [DELETION-INTEGRITY] Build 9 (in store review, frozen) says "Your account
+    // has been deleted." and signs out on every success except
+    // PENDING_DOCUMENT_ERASURE, where it shows this server's message. Newer
+    // builds show every receipt by its own message and say so with
+    // ?receipts=v2. Without it the answer uses build 9's words, so build 9
+    // never reports an open account, or an unfinished erasure, as deleted.
+    const modernReceipts = (request.query as Record<string, unknown> | undefined)?.['receipts'] === 'v2';
+    await requireRecentOtpOrStepUp(app, request).catch((error: unknown) => {
+      // Build 9 has no code sheet on this screen and shows the message as is:
+      // name the step it can take (a fresh code sign-in counts as step-up).
+      if (!modernReceipts && error instanceof AppError && error.code === 'STEP_UP_REQUIRED') {
+        throw new AppError(403, 'STEP_UP_REQUIRED',
+          'For your security, sign out and sign back in with a code sent to your phone, then delete your account within 10 minutes.', error.details);
+      }
+      throw error;
+    });
+    const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
+      const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
+      if (user?.phone !== `deleted:${request.user.userId}`) throw error;
+      app.log.error({ err: error, userId: request.user.userId }, 'Account erasure pending automatic retry');
+      return { deleted: false, status: 'PENDING_ACCOUNT_ERASURE' as const,
+        message: 'Your account is closed. Personal-data erasure is pending and will be retried automatically; no further sign-in is needed.' };
+    });
     if (!result.deleted) reply.code(202);
     // Leave an audit trail (the de-identified row is retained, so its id stays a
     // valid FK). Best-effort; a pending document obligation is not completion.
@@ -883,11 +916,13 @@ export async function customerRoutes(app: FastifyInstance) {
       .create({
         data: {
           userId: request.user.userId,
-          action: result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
+          action: result.status === 'CLOSURE_REQUESTED' ? 'ACCOUNT_CLOSURE_REQUESTED'
+            : result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
           entity: 'User',
           entityId: request.user.userId,
           changes: {
             reason: 'DPA right to erasure (self-serve)',
+            ...(result.status && { status: result.status }),
             ...(result.status === 'PENDING_DOCUMENT_ERASURE' && {
               status: result.status,
               pendingDocuments: result.pendingDocuments,
@@ -897,6 +932,15 @@ export async function customerRoutes(app: FastifyInstance) {
         },
       })
       .catch(() => {});
+    if (!modernReceipts && result.status === 'CLOSURE_REQUESTED') {
+      // Not a success to build 9: the account stays open and signed in, and the
+      // request (already recorded) is described in the server's own words.
+      throw new AppError(409, 'ACCOUNT_CLOSURE_REQUESTED', result.message, { status: result.status, ticketId: result.ticketId });
+    }
+    if (!modernReceipts && !result.deleted && result.status !== 'PENDING_DOCUMENT_ERASURE') {
+      // Closed, with some erasure still pending: build 9's own word for that.
+      return { success: true, data: { ...result, status: 'PENDING_DOCUMENT_ERASURE' as const, pendingReason: result.status } };
+    }
     return { success: true, data: result };
   });
 
