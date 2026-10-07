@@ -30,24 +30,9 @@ const STOCK_HOSTS = [
   'shutterstock.com',
 ];
 
-/**
- * The ONE exemption, and why it is not a loophole.
- *
- * The first-run carousel is Swift talking about ITSELF — three marketing
- * slides, not merchandise. No customer is choosing a product from those
- * images, so the misrepresentation the law exists to prevent cannot happen
- * there. It still should not ship on someone else's photographs: the file's
- * own comment already says the art wants to be "local, unmistakably ours",
- * and that needs brand art nobody has produced yet. It is registered as a
- * founder item rather than silently deleted, because removing the images
- * would leave three blank slides on the very first screen of the app.
- *
- * Anything else added here needs the same two things: a reason the goods
- * cannot be misrepresented, and an owner.
- */
-const EXEMPT = new Map<string, string>([
-  ['src/modules/onboarding/OnboardingScreen.tsx', 'first-run marketing carousel, not merchandise — awaiting brand art (founder item)'],
-]);
+/** No exemptions remain. Any future exception needs both a reason the goods
+ * cannot be misrepresented and a named owner. */
+const EXEMPT = new Map<string, string>();
 
 const SRC = path.join(__dirname, '..');
 
