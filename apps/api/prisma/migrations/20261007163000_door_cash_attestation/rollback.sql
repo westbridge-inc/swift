@@ -1,4 +1,4 @@
--- ROLLBACK for 20261007010000_door_cash_attestation.
+-- ROLLBACK for 20261007163000_door_cash_attestation.
 --
 -- Roll the application back first: the previous application never reads or
 -- writes these columns. Dropping them discards every stated door-cash amount

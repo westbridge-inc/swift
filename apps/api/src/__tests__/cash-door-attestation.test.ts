@@ -17,6 +17,8 @@ import { CashRulesService } from '../modules/cash/cash-rules.service';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { doorCashHoldAudience, stageDoorCashHoldPage } from '../modules/cash/door-cash-hold';
+import { AccountService } from '../modules/user/account.service';
+import { partnerObligations, verdictFor } from '../modules/user/partner-wind-down';
 
 // ---------------------------------------------------------------------------
 // [L02 · row 34] CASH AT THE DOOR IS RECORDED AS THE REAL AMOUNT.
@@ -758,6 +760,88 @@ describe('[row 34] partial cash and its operations page are one durable generati
 
 
 describe('[row 34] cash-return retries and operations scope', () => {
+  it.each(['rider', 'customer'])('keeps the %s account open while partial cash remains held after goods return', async (role) => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    await app.prisma.order.update({ where: { id: order.id }, data: {
+      status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(),
+    } });
+    // The goods and the store's fronted cash have come back. The customer's
+    // separate partial cash is still with the rider, held for operations.
+    await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
+    const userId = role === 'rider' ? holder.user.id : customer.user.id;
+    const obligations = await app.prisma.$transaction((tx) => partnerObligations(tx, userId));
+    expect(verdictFor(obligations).clear).toBe(false);
+    expect(verdictFor(obligations).blockers).toContain('PARTIAL_CASH_RETURN');
+    await expect(new AccountService(app).deleteAccount(userId)).rejects.toMatchObject({
+      code: 'PARTNER_OBLIGATIONS',
+      message: expect.stringMatching(/partial cash.*returned to the customer.*Get help.*confirm/i),
+    });
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: userId } })).status).toBe('ACTIVE');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).doorCashReturnStatus).toBe('HELD');
+  });
+
+  it.each(['rider', 'customer'])('keeps the %s account open when goods return between deletion reads', async (role) => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
+    const userId = role === 'rider' ? holder.user.id : customer.user.id;
+    const realTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    let crossed = false;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (work: unknown, options?: unknown) => {
+      if (typeof work !== 'function') return realTransaction(work, options);
+      return realTransaction(async (tx: Prisma.TransactionClient) => {
+        const orders = new Proxy(tx.order, { get(target, property) {
+          if (property !== 'count') return Reflect.get(target, property);
+          return async (args: Prisma.OrderCountArgs) => {
+            if (!crossed && args.where?.status) {
+              crossed = true;
+              // Deterministic interleaving: goods return commits before the
+              // active-work read, after any earlier cash census. The cash
+              // still belongs to the customer and is still with this rider.
+              await tx.order.update({ where: { id: order.id }, data: {
+                status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(),
+              } });
+            }
+            return target.count(args);
+          };
+        } });
+        return work(new Proxy(tx, { get(target, property) {
+          return property === 'order' ? orders : Reflect.get(target, property);
+        } }));
+      }, options);
+    }) as never);
+    try {
+      await expect(new AccountService(app).deleteAccount(userId)).rejects.toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
+      expect(crossed).toBe(true);
+    } finally { spy.mockRestore(); }
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: userId } })).status).toBe('ACTIVE');
+  });
+
+  it('counts held partial cash only for its customer and holder, until cash is returned', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const unrelated = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    await app.prisma.order.update({ where: { id: order.id }, data: {
+      status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(),
+    } });
+    await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
+    const census = (userId: string) => app.prisma.$transaction((tx) => partnerObligations(tx, userId));
+    expect(verdictFor(await census(unrelated.user.id)).clear).toBe(true);
+    // No operations acknowledgement can settle this: the cash fact itself
+    // must show RETURNED. Goods status is already RETURNED throughout.
+    for (const userId of [holder.user.id, customer.user.id]) {
+      expect(verdictFor(await census(userId)).blockers).toContain('PARTIAL_CASH_RETURN');
+    }
+    await app.prisma.order.update({ where: { id: order.id }, data: { doorCashReturnStatus: 'RETURNED' } });
+    for (const userId of [holder.user.id, customer.user.id]) {
+      expect(verdictFor(await census(userId)).clear).toBe(true);
+    }
+  });
+
   it.each(['failed', 'missing'])('refuses to resolve a cash page when tenant classification is %s', async (state) => {
     const unavailable = new Error('tenant lookup unavailable');
     const findUnique = state === 'failed' ? vi.fn().mockRejectedValue(unavailable) : vi.fn().mockResolvedValue(null);
