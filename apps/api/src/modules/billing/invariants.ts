@@ -69,14 +69,14 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
         const sub = await tx.subscription.findUniqueOrThrow({ where: { id: candidate.id }, include: { vendor: true } });
         const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: `suspended:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}` } });
         if (sub.status !== 'SUSPENDED' || !sub.autoRenew || authority.userStatus !== 'ACTIVE'
-          || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded
-          || (sub.vendor && sub.vendor.suspensionSource !== 'BILLING')) return false;
+          || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded) return false;
         await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null, failedAttempts: 0 } });
         // [SUSPENSION-HEAL · AUD-L8b-003 · owner ruling] The heal gives back
         // everything the billing suspension took, in this transaction: the
         // store's ACTIVE status AND its order intake (the same restore a real
-        // payment runs, billing-access.ts). An admin/safety/moderation hold is
-        // never a BILLING suspension and is refused above.
+        // payment runs, billing-access.ts). A store held for another reason
+        // (admin, safety, wind-down, or none recorded) keeps that hold: the
+        // subscription is healed and reported, the store is not opened.
         if (sub.vendor) await restoreBillingAccess(tx, sub.vendor.id);
         await tx.billingEvent.create({ data: { subscriptionId: sub.id, type: 'REINSTATED',
           idempotencyKey: `wrongful-heal:${sub.id}:${now.toISOString().slice(0, 10)}`,

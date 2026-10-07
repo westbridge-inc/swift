@@ -88,6 +88,17 @@ describe('SUSPENSION-HEAL — the wrongful-suspension heal reopens the store it 
     expect(v.acceptingOrders).toBe(false);
   });
 
+  it.each(['ADMIN', null] as const)('a paid-through subscription is healed even when its store is held for another reason (source %s); the store stays held', async (source) => {
+    // [#1516 review S3] The heal used to skip these silently: the subscription
+    // stayed SUSPENDED although paid, and nothing was reported.
+    const s = await wronglySuspendedStore({ suspensionSource: source });
+    const report = await runBillingInvariants(prisma);
+    expect(report.wrongfulSuspensions).toContain(s.subId);
+    expect((await prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).status).toBe('ACTIVE');
+    expect(await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } }))
+      .toMatchObject({ status: 'SUSPENDED', suspensionSource: source, acceptingOrders: false });
+  });
+
   it('a store whose documents lapsed comes back ACTIVE but NOT taking orders', async () => {
     const s = await wronglySuspendedStore({ isVerified: false });
     await runBillingInvariants(prisma);
