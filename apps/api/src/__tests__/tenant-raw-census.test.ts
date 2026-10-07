@@ -54,6 +54,8 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/order/refund-review.ts': { sites: 1, role: 'SHARED' },
   'modules/promo/promo-terms.ts': { sites: 3, role: 'SHARED' },
   'modules/qr/qr-analytics.service.ts': { sites: 2, role: 'SHARED' },
+  // Public-ID lookup is only at authenticated report/reply doors; the feeds hash without SQL.
+  'modules/rating/vendor-review-id.service.ts': { sites: 2, role: 'REQUEST' },
   'modules/rides/queue.service.ts': { sites: 2, role: 'SHARED' },
   'modules/safety/guardian-delivery.ts': { sites: 4, role: 'JOB_PENDING' },
   'modules/safety/incident.service.ts': { sites: 2, role: 'SHARED' },
@@ -65,6 +67,8 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   // isFiction (store-review demo check): reached only from authenticated requests — document
   // submission (vendor, verification routes) and an admin's approval (admin routes).
   'modules/subscription/subscription.service.ts': { sites: 1, role: 'REQUEST' },
+  // Account erasure runs at the authenticated request and tenant-bound retry seams.
+  'modules/user/account.service.ts': { sites: 1, role: 'SHARED' },
   'modules/user/partner-wind-down.ts': { sites: 2, role: 'SHARED' },
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },
   'modules/verification/mover-document-authority.ts': { sites: 2, role: 'SHARED' },
