@@ -37,13 +37,27 @@ export interface StockMovementInput {
   note?: string | null;
   /** Tenancy comes from the item's vendor; pass it when the caller already knows. */
   tenantId?: string;
+  /**
+   * [L02 · row 36] What to do when the item row no longer exists (a store
+   * deleted it while an order still held it). 'throw' (the default) refuses,
+   * as every movement always did. `record` is for putting goods BACK
+   * (delta > 0) only: nothing can be restocked onto an item that is gone, so
+   * the ledger records that, with a zero-delta row whose note says how many
+   * units could not go back, and the caller carries on. Never a silent drop.
+   * The tenant is the caller's (the order's): a missing item has no vendor
+   * to take it from.
+   */
+  ifItemMissing?: 'throw' | { record: true; tenantId: string };
 }
 
 export interface StockApplyResult {
-  /** false = the item does not track stock; nothing moved and nothing was logged. */
+  /** false = the item does not track stock (nothing moved, nothing logged), or
+   *  the item is gone and the skip was recorded (`skipped`). */
   applied: boolean;
   balanceAfter: number | null;
   movementId: string | null;
+  /** [L02 · row 36] Set when the item no longer exists and the skip was recorded. */
+  skipped?: 'ITEM_MISSING';
 }
 
 /**
@@ -81,6 +95,27 @@ export async function applyStockMovement(
     select: { id: true, name: true, stockQuantity: true, vendor: { select: { tenantId: true } } },
   });
   if (!item) {
+    // [L02 · row 36] A cancellation must still complete after the store deleted
+    // an item the order held: there is no shelf to put the goods back on, and
+    // the ledger says so instead of the whole cancellation failing. Only a
+    // restock may ask for this; taking stock off a missing item stays refused.
+    const missing = input.ifItemMissing;
+    if (missing !== undefined && missing !== 'throw' && missing.record && delta > 0) {
+      const skipped = await tx.stockMovement.create({
+        data: {
+          itemId,
+          delta: 0,
+          balanceAfter: 0,
+          reason,
+          tenantId: missing.tenantId,
+          orderId: input.orderId ?? null,
+          actorId: input.actorId ?? null,
+          note: `${input.note ? `${input.note} — ` : ''}item no longer exists: ${delta} unit(s) could not be put back on the shelf`,
+        },
+        select: { id: true },
+      });
+      return { applied: false, balanceAfter: null, movementId: skipped.id, skipped: 'ITEM_MISSING' };
+    }
     throw new AppError(404, 'ITEM_NOT_FOUND', `Item ${itemId} does not exist`);
   }
 

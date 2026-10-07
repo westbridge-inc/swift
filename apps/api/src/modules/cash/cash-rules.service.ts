@@ -2,9 +2,12 @@ import type { AuditFacts, OnAudit } from '../../lib/audit-writer';
 import type { Prisma, PrismaClient, ReimbursementClaim, Order } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { assertClaimAmountAttested, isDuplicateReferenceError, normaliseClaimPaymentRef } from './claim-payout';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { OrderService, assertMmgFulfilmentAllowed } from '../order/order.service';
+import { handoverVersionMatches } from '../order/handover-authority';
+import { assertGenuinelyShort, decideDoorCash, shortHandoverPage, shortPaymentNote, type DoorCashDecision } from './door-cash';
+import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
 import { identityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
@@ -222,15 +225,32 @@ export class CashRulesService {
     orderId: string,
     moverUserId: string,
     input: {
-      outcome: 'paid' | 'no_show' | 'refused';
+      /** [L02 · row 34] 'short_payment' = the customer cannot pay in full: no
+       *  handover, the order goes back to the store (owner ruling, 5 Oct 2026). */
+      outcome: 'paid' | 'no_show' | 'refused' | 'short_payment';
       gps: { lat: number; lng: number };
       photoUrl?: string;
       courierProofPhotoUrl?: string;
       sessionId?: string;
       /** [MKT-F057] The customer-held door PIN for a goods delivery ('paid' only). */
       ridePin?: string;
+      /** [L02 · row 34] The cash the mover actually took (whole units). On
+       *  'short_payment' it is what the customer could offer. Absent = an older
+       *  client: the full amount is assumed, as before. See door-cash.ts. */
+      collectedAmount?: number;
+      /** [L02 · row 34] The door authority version the screen rendered; a
+       *  stale one is refused before anything is recorded. */
+      handoverVersion?: string;
+      /** [L02 · row 34] The mover handed the goods over for less than due. */
+      handedOverShort?: boolean;
     },
-  ) {
+  ): Promise<{
+    order: Order;
+    claim: ReimbursementClaim | null;
+    doorCash?: DoorCashDecision;
+    /** True only for the call that committed a short-payment return: the caller announces it, once. */
+    returnStarted?: boolean;
+  }> {
     // [M-29] The mover is a rider (a delivery at the door) or a driver (a ride
     // at the destination): one rail, one golden rule, one claim shape. A user
     // may hold both profiles, so the order decides which one is acting.
@@ -284,9 +304,20 @@ export class CashRulesService {
     if (order.status === 'DELIVERED' && input.outcome === 'paid' && order.paymentStatus === 'CAPTURED') {
       return { order, claim: null };
     }
-    if (order.status === 'FAILED' && input.outcome !== 'paid') {
+    if (order.status === 'FAILED' && (input.outcome === 'no_show' || input.outcome === 'refused')) {
       const claim = await this.prisma.reimbursementClaim.findFirst({ where: { orderId } });
       return { order, claim };
+    }
+    // [L02 · row 34] A retried "cannot pay in full" (a lost answer) answers the
+    // return it already started; it never starts a second one.
+    if (order.status === 'RETURNING' && input.outcome === 'short_payment') {
+      return { order, claim: null };
+    }
+    // [L02 · row 34] The screen's version, checked before anything is recorded
+    // or a PIN attempt is spent, and again on the locked row below. An older
+    // client that echoes nothing is not refused for it.
+    if (!handoverVersionMatches(order, input.handoverVersion)) {
+      throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
     }
     // A delivery is handed over at the door (ARRIVED); a ride's fare is settled
     // at the destination with the passenger aboard (RIDE_IN_PROGRESS); a
@@ -301,6 +332,14 @@ export class CashRulesService {
     }
 
     const gpsNote = gpsEvidence(input.gps.lat, input.gps.lng);
+    if (input.outcome === 'short_payment') {
+      return this.shortPaymentReturn(order, mover, { ...input, changedBy: moverUserId }, gpsNote, { isRide, isCourier });
+    }
+    // [L02 · row 34] The stated cash, checked on this read first so a refusal
+    // (over, or short with the goods still in hand) spends no PIN attempt;
+    // decided again on the LOCKED row inside the commit, which is what counts.
+    if (input.outcome === 'paid') decideDoorCash(order, input);
+    let doorCash: DoorCashDecision | undefined;
     if (input.outcome === 'paid') {
       // [MKT-F057] The door proof for a GOODS delivery: the customer holds a
       // 6-digit PIN and the rider enters it before the money is captured. Rides
@@ -347,7 +386,24 @@ export class CashRulesService {
             throw new AppError(409, 'PROOF_NOT_ISSUED', 'An unpaid courier handover needs its issued proof and recipient payment authority.');
           }
         }
-        await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
+        // [L02 · row 34] On the locked row: the screen's version, then the
+        // stated cash against the authoritative total. The real amount is what
+        // is recorded; a short handover also records the shortfall and holds
+        // the mismatch for a person (the commit carries all of it or none).
+        if (!handoverVersionMatches(lockedSource, input.handoverVersion)) {
+          throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
+        }
+        doorCash = decideDoorCash(lockedSource, input);
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            paymentStatus: 'CAPTURED',
+            ...(doorCash.kind === 'UNSTATED' ? {} : { doorCashCollectedAmount: doorCash.collected }),
+            ...(doorCash.kind === 'SHORT_HANDED_OVER'
+              ? { doorCashShortfallAmount: doorCash.shortfall, doorCashMismatchAt: new Date() }
+              : {}),
+          },
+        });
         // The seam mints a delivery's earnings itself; this call is a no-op
         // when it already did and the minting call when the capture above
         // was what the earnings were waiting for (every cash ride). Either
@@ -389,8 +445,22 @@ export class CashRulesService {
       for (const notice of earningNotices) {
         await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type).catch(() => {});
       }
+      // [L02 · row 34] A short handover pages operations, after the commit (a
+      // lost page is a lost page, never a lost record: the held mismatch is
+      // on the order either way).
+      const settled = doorCash as DoorCashDecision | undefined;
+      if (settled?.kind === 'SHORT_HANDED_OVER') {
+        const page = shortHandoverPage(order.orderNumber, settled);
+        await notifyAdmins(this.prisma, this.notifications, {
+          tenantId: order.tenantId ?? null,
+          title: page.title,
+          body: page.body,
+          // The kind is a literal on purpose: the mobile notification census scans for it.
+          data: { kind: 'ops_cash_door_short', orderId, due: settled.due, collected: settled.collected, shortfall: settled.shortfall },
+        }).catch((err) => log().warn({ err, orderId }, 'cash door short page failed'));
+      }
       await this.maybePromoteToL3(order.customer.id, order.customer.countryCode).catch(() => {});
-      return { order: updated, claim: null };
+      return { order: updated, claim: null, ...(settled ? { doorCash: settled } : {}) };
     }
     // [M-24] ONE terminal generation for a failed handover: FAILED, the
     // payment status, the customer's strike and the mover's guarantee claim
@@ -494,6 +564,50 @@ export class CashRulesService {
     }).catch(() => {});
     if (staged.riderNotice) await this.notifications.send(staged.riderNotice).catch(() => {});
     return { order: failed, claim: staged.claim };
+  }
+
+  /**
+   * [L02 · row 34] The customer cannot pay in full: NO HANDOVER (owner ruling,
+   * 5 Oct 2026). The order goes back to the store through the one return path:
+   * the canonical transition into RETURNING, which opens the order's recovery
+   * case (or moves the one already open: one case, one outcome) in the same
+   * commit. Nothing is captured, nobody is struck and no guarantee claim is
+   * staged, because the goods were never handed over. When the store confirms
+   * it has them back it gives the rider the cash they fronted (4 Oct custody
+   * rulings); the rider keeps the float until then. The caller pages operations
+   * and tells the customer and the store after the commit.
+   */
+  private async shortPaymentReturn(
+    order: Order,
+    mover: ClaimMover,
+    input: { collectedAmount?: number; handoverVersion?: string; changedBy: string },
+    gpsNote: string,
+    kind: { isRide: boolean; isCourier: boolean },
+  ): Promise<{ order: Order; claim: null; returnStarted: true }> {
+    if (kind.isRide || kind.isCourier || !mover.riderId) {
+      throw new AppError(409, 'SHORT_PAYMENT_NOT_AVAILABLE',
+        'This outcome is for goods deliveries. For a ride or a parcel, record the outcome the job offers or contact support.');
+    }
+    const stated = assertGenuinelyShort(order, input.collectedAmount);
+    const committed = await this.orders.transitionOrderAtomically({
+      orderId: order.id,
+      target: 'RETURNING',
+      allowedFrom: ['ARRIVED'],
+      expectedRiderId: mover.riderId,
+      changedBy: input.changedBy,
+      note: shortPaymentNote(stated, gpsNote),
+      withinTransaction: async (_tx, locked) => {
+        if (!handoverVersionMatches(locked, input.handoverVersion)) {
+          throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
+        }
+        if (locked.paymentStatus !== 'PENDING') {
+          throw new AppError(409, 'CASH_ALREADY_RECORDED', 'A payment is already recorded on this order, so it cannot be sent back as unpaid. Contact support.');
+        }
+        assertGenuinelyShort(locked, input.collectedAmount);
+      },
+      invalidStatus: (current) => new AppError(409, 'NOT_AT_DOOR', `Handover is only available at the delivery point (order is ${current})`),
+    });
+    return { order: committed.order, claim: null, returnStarted: true };
   }
 
   /** [M-28] A courier job whose SENDER pays: the fee is collected before the
