@@ -4,9 +4,10 @@ import { use } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Phone } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, settleOrderRefund, errorStatus } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
@@ -47,7 +48,7 @@ function Party({ label, name, phone, href }: { label: string; name?: string | nu
 export default function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const queryClient = useQueryClient();
-  const { data, isLoading, isError } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
   // [MC-MONEY] Cancelling, recording a refund owed and settling it are each one
   // in-page panel ([ADM-006] the operator's words, not a template); the
   // server's answer — done, sent for a second admin's approval, or refused —
@@ -63,12 +64,16 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
   }
   if (isError || !o) {
+    // [DS768 D3] Only a 404 is "not found"; an outage is a failed read with a Retry.
+    const missing = !isError || errorStatus(error) === 404;
     return (
       <div>
         <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
           <ArrowLeft size={16} /> Orders
         </Link>
-        <p className="text-[var(--muted)]">Order not found.</p>
+        {missing
+          ? <p className="text-[var(--muted)]">Order not found.</p>
+          : <QueryFailed error={error} what="this order" onRetry={() => void refetch()} retrying={isFetching} />}
       </div>
     );
   }

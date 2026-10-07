@@ -6,13 +6,15 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchReturns, resolveReturn, settleReturnRefund } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const FILTERS = ['REQUESTED', 'APPROVED', 'REFUND_DUE', 'REJECTED', 'REFUNDED'] as const;
 
 export default function ReturnsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('REQUESTED');
-  const { data, isLoading } = useQuery({ queryKey: ['returns', filter], queryFn: () => fetchReturns(filter) });
+  const returnsQ = useQuery({ queryKey: ['returns', filter], queryFn: () => fetchReturns(filter) });
+  const { data, isLoading } = returnsQ;
   // [MC-MONEY] Each decision is one in-page panel and its answer stays on
   // screen — the old page showed nothing at all when the server refused.
   const actions = useActionRunner(() => void qc.invalidateQueries({ queryKey: ['returns'] }));
@@ -77,6 +79,9 @@ export default function ReturnsPage() {
       <div className="space-y-3">
         {isLoading ? (
           <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+        ) : returnsQ.isError ? (
+          // [DS768 E4] refunds owed never look "clear" because a read failed
+          <QueryFailed error={returnsQ.error} what="the returns" onRetry={() => void returnsQ.refetch()} retrying={returnsQ.isFetching} />
         ) : rows.length === 0 ? (
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             No {filter.toLowerCase()} returns.

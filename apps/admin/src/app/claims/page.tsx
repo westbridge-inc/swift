@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics, fetchRlpReserve, adjustRlpReserve } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
 
@@ -23,7 +24,8 @@ const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTE
 export default function ClaimsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('PENDING_REVIEW');
-  const { data, isLoading } = useQuery({ queryKey: ['claims', filter], queryFn: () => fetchClaims(filter) });
+  const claimsQ = useQuery({ queryKey: ['claims', filter], queryFn: () => fetchClaims(filter) });
+  const { data, isLoading } = claimsQ;
   const metricsQ = useQuery({ queryKey: ['cash-metrics'], queryFn: fetchCashMetrics });
   const actions = useActionRunner(() => {
     void qc.invalidateQueries({ queryKey: ['claims'] });
@@ -154,6 +156,9 @@ export default function ClaimsPage() {
       <div className="space-y-3">
         {isLoading ? (
           <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+        ) : claimsQ.isError ? (
+          // [DS768 E4] unpaid guarantee claims never look "clear" because a read failed
+          <QueryFailed error={claimsQ.error} what="the claims" onRetry={() => void claimsQ.refetch()} retrying={claimsQ.isFetching} />
         ) : rows.length === 0 ? (
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             No {filter.replaceAll('_', ' ').toLowerCase()} claims.

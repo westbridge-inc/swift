@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchSubscriptions, waiveSubscriptionFee, fetchBillingEvents } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -41,7 +42,7 @@ export default function SubscriptionsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('ALL');
   const [openTrail, setOpenTrail] = useState<string | null>(null);
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['subscriptions', filter],
     queryFn: () => fetchSubscriptions(filter === 'ALL' ? 'limit=50' : `limit=50&status=${filter}`),
   });
@@ -104,6 +105,9 @@ export default function SubscriptionsPage() {
           <tbody>
             {isLoading ? (
               <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+            ) : isError ? (
+              // [DS768 E2] an outage is not "no subscriptions" — this queue is the revenue
+              <tr><td colSpan={5} className="p-4"><QueryFailed error={error} what="the subscriptions" onRetry={() => void refetch()} retrying={isFetching} /></td></tr>
             ) : rows.length === 0 ? (
               <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">No subscriptions match.</td></tr>
             ) : (
