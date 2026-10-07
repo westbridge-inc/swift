@@ -11,6 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
+import { grantStepUp } from './helpers/step-up';
 
 // ---------------------------------------------------------------------------
 // RIDES CHARACTERIZATION [rides spec 17.1/17.4] — pins the CURRENT customer
@@ -360,6 +361,9 @@ describe('the current taxi contract (characterization — must stay green all en
   it('self-serve profile writes cannot change class or capacity [REPORT-014 F-014-01]', async () => {
     const d = await makeDriver();
     const before = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    // Vehicle colour is identity: authenticate the change, while class and
+    // capacity remain outside self-serve taxonomy authority.
+    await grantStepUp(app, d.token);
     const res = await app.inject({
       method: 'PUT', url: '/api/v1/driver/profile',
       headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' },
@@ -369,7 +373,8 @@ describe('the current taxi contract (characterization — must stay green all en
     const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
     expect(after.rideClass).toBe(before.rideClass); // taxonomy authority — ignored
     expect(after.vehicleCapacity).toBe(before.vehicleCapacity);
-    expect(after.vehicleColor).toBe('Black'); // ordinary fields still update
+    expect(after.vehicleColor).toBe('Black');
+    expect(after).toMatchObject({ documentsVerified: false, isOnline: false });
   });
 
   it('driver BOARD accept with fare 0 means NO price choice — the market fare applies, never the floor [REPORT-012 proof gap]', async () => {
