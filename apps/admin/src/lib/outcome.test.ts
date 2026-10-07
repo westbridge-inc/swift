@@ -251,6 +251,12 @@ describe('[MC-PR2] the activation refusals (admin.routes.ts PUT /vendors/:id/app
     expect(o.next).toMatch(/Nothing was changed/);
   });
 
+  it('[MC-AD2] 409 FEE_UNPAID: the console cannot lift a weekly-fee hold; a confirmed payment does', () => {
+    const o = outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'FEE_UNPAID' }));
+    expect(o).toMatchObject({ tone: 'refused', title: 'This store is held by its weekly fee' });
+    expect(o.next).toMatch(/Nothing was changed\..*MMG checkout/);
+  });
+
   it('409 ACTIVATION_HELD and STORE_CLOSED have words too', () => {
     expect(outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'ACTIVATION_HELD' })).title).toMatch(/changed while you were acting/);
     expect(outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'STORE_CLOSED' })).title).toBe('This store is closed');
