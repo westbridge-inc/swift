@@ -54,6 +54,7 @@ import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integr
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { normalizeRegistrationMark } from '../verification/subjects';
+import { registerPartnerCardRoutes } from '../billing/card-rail.routes';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -1739,5 +1740,16 @@ export async function driverRoutes(app: FastifyInstance) {
       ? await billing.stopBilling(sub.id, request.user.userId)
       : await billing.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
     return { success: true, data: { billingMethod: updated.billingMethod, mmgPayerMsisdn: updated.mmgPayerMsisdn } };
+  });
+
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the driver
+  // lists, removes, adds and pays by card for their own subscription, the one
+  // GET /subscription shows. Card rail v2 stays behind CARD_RAIL_V2 (default off).
+  registerPartnerCardRoutes(app, {
+    subscriptionFor: async (request) => {
+      const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+      return app.prisma.subscription.findFirst({ where: { driverId: found!.id } });
+    },
   });
 }

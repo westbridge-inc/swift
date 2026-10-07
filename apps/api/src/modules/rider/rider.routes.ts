@@ -65,6 +65,7 @@ import {
   RIDER_IN_CUSTODY_STATUSES,
   RIDER_PICKUP_FROM,
 } from '../order/order-status';
+import { registerPartnerCardRoutes } from '../billing/card-rail.routes';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -2225,5 +2226,16 @@ export async function riderRoutes(app: FastifyInstance) {
         todayEarnings: Number(todayEarnings._sum.amount ?? 0),
       },
     };
+  });
+
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the rider
+  // lists, removes, adds and pays by card for their own subscription, the one
+  // GET /subscription shows. Card rail v2 stays behind CARD_RAIL_V2 (default off).
+  registerPartnerCardRoutes(app, {
+    subscriptionFor: async (request) => {
+      const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+      return app.prisma.subscription.findFirst({ where: { riderId: found!.id } });
+    },
   });
 }

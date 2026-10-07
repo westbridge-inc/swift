@@ -1,3 +1,4 @@
+import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
@@ -6044,4 +6045,17 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'DISCOVERY_CATEGORY_MERGE', 'DiscoveryCategory', request.params.id, { targetId, ...result.dedupes }, request);
     return { success: true, data: result };
   });
+
+  // [PT-2] Card rail v2 read views (CARD-CHECKOUT-API.md section 8): sessions,
+  // their evidence (hashes, never payloads) and a subscription's cards. No
+  // vault token, state, page address or provider reference is ever returned.
+  app.get('/billing/card-sessions', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminCardSessions(app.prisma, request.query),
+  }));
+  app.get<{ Params: { id: string } }>('/billing/card-sessions/:id', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminCardSession(app.prisma, request.params.id),
+  }));
+  app.get<{ Params: { subscriptionId: string } }>('/billing/subscriptions/:subscriptionId/cards', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminSubscriptionCards(app.prisma, request.params.subscriptionId),
+  }));
 }

@@ -159,6 +159,23 @@ export class SimulatorCardRailProvider implements CardRailProvider {
     this.keyPrefix = keyPrefix;
   }
 
+  /** [PT-2] What the scenario page shows for one session: its purpose and,
+   *  for a Pay now, the server's price. Null when the simulator holds no such
+   *  session. Never the return address, Swift's state or a token. */
+  async pageFor(providerSessionRef: string, now = new Date()): Promise<{
+    purpose: CardSessionPurpose; amountMinor?: number; currencyCode?: string; expired: boolean; chosen: SimulatorScenario | null;
+  } | null> {
+    const facts = await this.redis.hgetall(this.key.session(providerSessionRef));
+    if (!facts['sessionRef'] || (facts['purpose'] !== 'ENROLL' && facts['purpose'] !== 'PAY_NOW')) return null;
+    const chosen = facts['scenario'];
+    return {
+      purpose: facts['purpose'],
+      ...(facts['purpose'] === 'PAY_NOW' ? { amountMinor: Number(facts['amountMinor']), currencyCode: facts['currencyCode'] ?? '' } : {}),
+      expired: now.getTime() > Number(facts['expiresAtMs']),
+      chosen: isSimulatorScenario(chosen) ? chosen : null,
+    };
+  }
+
   /** The address of the scenario page for one session (served in PT-2). */
   hostedUrlFor(providerSessionRef: string): string {
     return `${this.publicBaseUrl}/api/v1/billing/card/simulator/${providerSessionRef}`;

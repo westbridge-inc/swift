@@ -60,6 +60,7 @@ import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice }
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
+import { registerPartnerCardRoutes } from '../billing/card-rail.routes';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -3682,5 +3683,17 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     return { success: true, data: updated };
+  });
+
+  // =========================================================================
+  // [PT-2] CARD PAYMENT FOR THE WEEKLY FEE (CARD-CHECKOUT-API.md): the store's
+  // OWNER lists, removes, adds and pays by card for the selected store's
+  // subscription. Card rail v2 stays behind CARD_RAIL_V2 (default off).
+  // =========================================================================
+  registerPartnerCardRoutes(app, {
+    subscriptionFor: async (request) => {
+      const { vendorId } = await requireVendor(app, request, 'OWNER');
+      return app.prisma.subscription.findFirst({ where: { vendorId } });
+    },
   });
 }
