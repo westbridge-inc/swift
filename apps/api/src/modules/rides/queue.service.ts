@@ -153,7 +153,7 @@ export async function scanRideQueue(
     });
     if (claimed.count === 0) continue;
     expired += 1;
-    const offered = SERVED_RIDE_CLASSES.some((rideClass) => rideClass === e.rideClass);
+    const offered = [...SERVED_RIDE_CLASSES].some((rideClass) => rideClass === e.rideClass);
     await notifications
       .send({
         userId: e.customerId,
