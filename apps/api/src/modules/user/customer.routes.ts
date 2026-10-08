@@ -40,6 +40,7 @@ import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCo
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
+import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { NotificationService } from '../notification/notification.service';
@@ -107,6 +108,16 @@ const itemSlotsQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
 });
 
+/** [M023] Cart add/update validation: the shared validator, refused as a 400 naming the reason. */
+function validatedSelection(item: Parameters<typeof validateSelectedOptions>[0], selected: unknown): OptionSelection {
+  try {
+    return validateSelectedOptions(item, selected).selection;
+  } catch (error) {
+    if (error instanceof OptionSelectionError) throw new ValidationError(error.message, { selectedOptions: [error.reason] });
+    throw error;
+  }
+}
+
 const addCartItemSchema = z.object({
   vendorId: z.string().min(1),
   itemId: z.string().min(1),
@@ -161,6 +172,17 @@ const checkoutSchema = z.object({
       }),
     )
     .max(10)
+    .optional(),
+  // [L09 · price lock] What the customer saw: the quote's total and each cart
+  // line's unit price. Optional: an older app sends neither.
+  expectedTotal: z.number().nonnegative().max(1_000_000_000).optional(),
+  // No count cap of its own: a cart has no line cap and the apps send every
+  // line, so a cap here would refuse a cart the customer can build. The
+  // request body limit bounds the list, and checkout only looks each entry up
+  // in the cart it already loaded (no query per entry).
+  expectedLines: z
+    .array(z.object({ lineId: z.string().min(1).max(64), unitPrice: z.number().nonnegative().max(1_000_000_000) }))
+    .refine((lines) => new Set(lines.map((line) => line.lineId)).size === lines.length, 'Expected-price line IDs must be unique')
     .optional(),
 });
 
@@ -335,8 +357,13 @@ async function buildCartResponse(
             select: {
               id: true, name: true, basePrice: true, imageUrl: true,
               isAvailable: true, vendorId: true, fulfillment: true,
+              // [F4] Everything the one option validator reads, so the quote
+              // marks a line whose choice sold out exactly as checkout refuses it.
               optionGroups: {
-                select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
+                select: {
+                  id: true, name: true, isRequired: true, minSelect: true, maxSelect: true,
+                  options: { select: { id: true, name: true, additionalPrice: true, isAvailable: true } },
+                },
               },
               // [E01] Each line prices against ITS OWN vendor — the tracked
               // `cart.vendor` is only the most recently added store.
@@ -444,8 +471,13 @@ async function buildCartResponse(
 
   const itemDetails = cart.items.map((ci) => {
     const line = priceCartLine(ci);
+    // [F4] A line is orderable only if its item AND its choices still are: a
+    // sold-out choice marks the line the way a sold-out item does (every app
+    // blocks the order button on it and offers Remove), with the reason.
+    const optionsIssue = ci.item.isAvailable ? lineOptionsIssue(ci.item, ci.selectedOptions) : null;
+    const lineAvailable = ci.item.isAvailable && optionsIssue === null;
 
-    if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
+    if (!lineAvailable) unavailableItemIds.push(ci.id);
 
     return {
       id: ci.id,
@@ -459,7 +491,8 @@ async function buildCartResponse(
       selectedOptionNames: line.options.map((o) => o.optionName),
       specialInstructions: ci.specialInstructions,
       lineTotal: line.lineTotal,
-      isAvailable: ci.item.isAvailable,
+      isAvailable: lineAvailable,
+      unavailableReason: optionsIssue,
       fulfillment: ci.item.fulfillment,
       // [E01] Which store's order this line joins at checkout.
       vendorId: ci.item.vendorId,
@@ -1869,24 +1902,9 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'VENDOR_UNAVAILABLE', 'This vendor is not currently available');
     }
 
-    // Validate selected options against option groups
-    const selectedOptions = body.selectedOptions ?? {};
-    for (const group of item.optionGroups) {
-      const raw = (selectedOptions as Record<string, unknown>)[group.id];
-      const chosen = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
-      const validIds = new Set(group.options.map((o) => o.id));
-      for (const id of chosen) {
-        if (typeof id !== 'string' || !validIds.has(id)) {
-          throw new ValidationError(`That option isn't available for "${group.name}"`);
-        }
-      }
-      if (group.isRequired && chosen.length < Math.max(1, group.minSelect)) {
-        throw new ValidationError(`Please choose an option for "${group.name}"`);
-      }
-      if (chosen.length > group.maxSelect) {
-        throw new ValidationError(`Choose at most ${group.maxSelect} for "${group.name}"`);
-      }
-    }
+    // [M023] The one option validator (cart add, cart update and checkout).
+    const selectedOptions = validatedSelection(item, body.selectedOptions);
+    const note = normalizeItemNote(body.specialInstructions);
 
     // Get or create cart. Multi-vendor carts are allowed: checkout
     // splits per vendor; cart.vendorId just tracks the most recent vendor.
@@ -1910,10 +1928,14 @@ export async function customerRoutes(app: FastifyInstance) {
       });
     }
 
-    // Merge if same item + same options already in cart
-    const optionsKey = JSON.stringify(selectedOptions);
+    // [row 70] A line is the item, its options AND its note: the same item
+    // with a different note is its own line (a second note is never dropped);
+    // the same item, options and note merges into the existing line.
+    const optionsKey = selectionKey(selectedOptions);
     const existing = cart.items.find(
-      (ci) => ci.itemId === body.itemId && JSON.stringify(ci.selectedOptions) === optionsKey,
+      (ci) => ci.itemId === body.itemId
+        && selectionKey(ci.selectedOptions) === optionsKey
+        && normalizeItemNote(ci.specialInstructions) === note,
     );
 
     if (existing) {
@@ -1928,7 +1950,7 @@ export async function customerRoutes(app: FastifyInstance) {
           itemId: body.itemId,
           quantity,
           selectedOptions: selectedOptions as never,
-          specialInstructions: body.specialInstructions,
+          specialInstructions: note,
         },
       });
     }
@@ -1963,6 +1985,16 @@ export async function customerRoutes(app: FastifyInstance) {
     if (!cartItem || cartItem.cart.customerId !== userId) {
       throw new NotFoundError('CartItem', id);
     }
+    // [M023] An edited selection passes the same validator as an added one.
+    const editedSelection = body.selectedOptions === undefined || body.quantity <= 0
+      ? undefined
+      : validatedSelection(
+        await app.prisma.item.findUniqueOrThrow({
+          where: { id: cartItem.itemId },
+          select: { optionGroups: { include: { options: true } } },
+        }),
+        body.selectedOptions,
+      );
 
     if (body.quantity <= 0) {
       await app.prisma.cartItem.delete({ where: { id } });
@@ -1980,8 +2012,8 @@ export async function customerRoutes(app: FastifyInstance) {
         where: { id },
         data: {
           quantity,
-          ...(body.selectedOptions !== undefined && { selectedOptions: body.selectedOptions as never }),
-          ...(body.specialInstructions !== undefined && { specialInstructions: body.specialInstructions }),
+          ...(editedSelection !== undefined && { selectedOptions: editedSelection as never }),
+          ...(body.specialInstructions !== undefined && { specialInstructions: normalizeItemNote(body.specialInstructions) }),
         },
       });
     }
@@ -2227,6 +2259,9 @@ export async function customerRoutes(app: FastifyInstance) {
         fulfillmentSelections: body.fulfillmentSelections,
         express: body.express,
         appointments: body.appointments,
+        ...(body.expectedTotal != null || body.expectedLines
+          ? { expectedPrices: { total: body.expectedTotal, lines: body.expectedLines } }
+          : {}),
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
         onCommitted: (committed) => { commit = committed; },
       });
