@@ -60,6 +60,7 @@ import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
+import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -3204,6 +3205,30 @@ export async function customerRoutes(app: FastifyInstance) {
     ]);
 
     return { success: true, ...paginatedResponse(notifications, total, { page, limit, skip }) };
+  });
+
+  /** [Row 55] GET /team-invites — the caller's own live store-team invites.
+   *  The person invited is not on a store team yet, so these live here, under
+   *  the inbox, not under the /vendor prefix. */
+  app.get('/team-invites', async (request: AuthRequest) => {
+    return { success: true, data: await listMyStaffInvites(app.prisma, request.user.userId, new Date()) };
+  });
+
+  /** [Row 55] POST /team-invites/:id/accept | /decline — answer one invite. */
+  app.post('/team-invites/:id/accept', async (request: AuthRequest) => {
+    if (!staffInviteAcceptEnabled()) throw new AppError(404, 'NOT_FOUND', 'Invite not found');
+    const { id } = request.params as { id: string };
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
+    });
+    return { success: true, data: result };
+  });
+  app.post('/team-invites/:id/decline', async (request: AuthRequest) => {
+    const { id } = request.params as { id: string };
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: id, userId: request.user.userId, decision: 'DECLINE', now: new Date(),
+    });
+    return { success: true, data: result };
   });
 
   /** PUT /notifications/prefs — per-user channel switches. */

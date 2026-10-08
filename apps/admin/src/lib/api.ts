@@ -503,7 +503,9 @@ export const updateZoneFare = (id: string, body: { fromZoneId: string; toZoneId:
 export const deleteZoneFare = (id: string, pair: { fromZoneId: string; toZoneId: string }, reason: string) =>
   apiFetch(`/api/v1/admin/zone-fares/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(pair), reason });
 
-export const fetchConfig = (): Promise<Envelope<ConfigRow[]>> => apiFetch('/api/v1/admin/config');
+/** Launch switches the API reads from its server environment (read-only). */
+export interface LaunchSwitches { staffInviteAccept?: boolean }
+export const fetchConfig = (): Promise<Envelope<ConfigRow[]> & { switches?: LaunchSwitches }> => apiFetch('/api/v1/admin/config');
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
 export const approveVendor = (id: string, reason: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT', reason });

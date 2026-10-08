@@ -8,7 +8,7 @@ import { AdsLifecycleService } from './lifecycle.service';
 import { AdStatsService } from './stats.service';
 import { mondayOfDate, weekSpan, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { refuseReviewAccountRoleGrant } from '../review/demo-policy';
+import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { adsEnabled } from './ads-enabled';
 
 // Advertiser-facing ads routes (ads-platform spec §4.2/§4.3). Registration and
@@ -355,15 +355,21 @@ export async function adsRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     await advertisers.assertMember(request.params.id, request.user.userId, true); // OWNER only
     const invited = await app.prisma.user.findUnique({ where: { phone: body.phone }, select: { id: true } });
-    if (!invited) throw new NotFoundError('User', body.phone);
-    // [REVIEW-PARTNER] No membership is granted by, or to, a demo account.
-    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, invited.id);
-    const member = await app.prisma.advertiserMember.upsert({
-      where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
-      create: { advertiserId: request.params.id, userId: invited.id, role: body.role },
-      update: { role: body.role },
-    });
-    return { success: true, data: { userId: member.userId, role: member.role } };
+    // [REVIEW-PARTNER] No membership is granted by a demo account (about the
+    // caller alone, so it says nothing about the number typed).
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId);
+    // [Row 55] One reply for every number: an unknown phone is no longer a
+    // 404 and a known one no longer hands back its user id. (Invite + accept
+    // for advertiser teams follows after launch; ads are off at launch.)
+    // A demo account is never granted one either; same reply.
+    if (invited && !(await isReviewAccount(app.prisma, invited.id))) {
+      await app.prisma.advertiserMember.upsert({
+        where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
+        create: { advertiserId: request.params.id, userId: invited.id, role: body.role },
+        update: { role: body.role },
+      });
+    }
+    return { success: true, data: { status: 'SENT_IF_ACCOUNT', role: body.role } };
   });
 
   /** §14.4 — the EXACT refund the advertiser will get if they cancel now,

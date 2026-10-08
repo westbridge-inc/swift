@@ -12,7 +12,7 @@
  *   4. fees: no subscription is ever born for the fiction, and billing-rail changes refuse it.
  * Production subjects keep sending and keep being billed exactly as before.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -24,6 +24,7 @@ import { beginRequestTenantContext, runWithoutTenant, runWithTenant } from '../p
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adsRoutes } from '../modules/ads/ads.routes';
+import { decideStaffInvite, deliverStaffInvite } from '../modules/vendor/staff-invites';
 import { provisionReviewTenant } from '../modules/review/provision';
 import { seedReviewContentPack, planReviewContentPack } from '../modules/review/content-pack';
 import { sealReviewChannels, sendOnBehalfOf, resetReviewSealCache } from '../providers/notifications/review-seal';
@@ -275,10 +276,13 @@ describe('[seal 3] role grants: refused inside every authority', () => {
 
   it('a store membership is never granted to a demo account, even by a real store owner; an advertiser membership neither', async () => {
     const customerPhone = (await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: ids.customer }, select: { phone: true } }))).phone;
-    // The production owner's request cannot see the demo account at all (tenant wall) — a 404, never a grant.
+    // The production owner's request cannot see the demo account at all (tenant wall). [Row 55] It
+    // gets the one reply every number gets (the same as a number with no account), never a grant.
     await grantStepUp(app, tokens.prodOwner);
     const staff = await call('POST', '/api/v1/vendor/staff', tokens.prodOwner, { phone: customerPhone, role: 'STAFF' });
-    expect([403, 404]).toContain(staff.statusCode);
+    const noAccount = await call('POST', '/api/v1/vendor/staff', tokens.prodOwner, { phone: `${base}79`, role: 'STAFF' });
+    expect(staff.statusCode, staff.body).toBe(200);
+    expect(staff.json()).toEqual(noAccount.json());
     // A demo store owner (state a pre-seal /partner/become could leave) cannot grant a membership.
     await system(async () => {
       await app.prisma.user.update({ where: { id: ids.customer }, data: { roles: ['CUSTOMER', 'VENDOR_OWNER'] } });
@@ -315,6 +319,28 @@ describe('[seal 3] role grants: refused inside every authority', () => {
       await app.prisma.vendorOwner.deleteMany({ where: { userId: ids.customer } });
       await app.prisma.user.update({ where: { id: ids.customer }, data: { roles: ['CUSTOMER'] } });
     });
+  });
+
+  it('[row 55] a store-team invite is never sent to a demo account, and a demo account cannot accept one', async () => {
+    const send = vi.fn().mockResolvedValue('never');
+    const outcome = await system(() => deliverStaffInvite(app.prisma, { publishPersisted: send }, {
+      vendorId: ids.prodVendor, targetUserId: ids.rider, role: 'STAFF', inviterId: ids.prodOwner, now: new Date(), revocationVersion: 0,
+    }));
+    expect(outcome).toBe('NOT_INVITABLE');
+    expect(send).not.toHaveBeenCalled();
+
+    // An invite row planted in a demo inbox (no path writes one) still grants nothing.
+    const planted = await system(() => app.prisma.notification.create({ data: {
+      userId: ids.rider, type: 'SYSTEM_ANNOUNCEMENT', title: 'Team invite', body: 'planted',
+      data: { kind: 'staff_invite', vendorId: ids.prodVendor, storeName: 'Real Store', role: 'STAFF', invitedBy: ids.prodOwner,
+        expiresAt: new Date(Date.now() + DAY).toISOString(), state: 'PENDING' },
+    } }));
+    await expect(system(() => decideStaffInvite(app.prisma, { inviteId: planted.id, userId: ids.rider, decision: 'ACCEPT', now: new Date() })))
+      .rejects.toMatchObject({ statusCode: 403, code: REVIEW_DEMO_NO_NEW_ROLES });
+    expect(await system(() => app.prisma.vendorStaff.count({ where: { userId: ids.rider } }))).toBe(0);
+    const after = await system(() => app.prisma.notification.findUniqueOrThrow({ where: { id: planted.id }, select: { data: true } }));
+    expect((after.data as { state: string }).state).toBe('PENDING');
+    await system(() => app.prisma.notification.delete({ where: { id: planted.id } }));
   });
 });
 

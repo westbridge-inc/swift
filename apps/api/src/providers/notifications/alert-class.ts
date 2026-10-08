@@ -83,7 +83,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // password sign-in paused after many wrong attempts
     'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
-    'low_stock', 'staff_added', 'review_response', 'rating_removed', 'category_request_resolved',
+    'low_stock', 'staff_added', 'staff_invite', 'review_response', 'rating_removed', 'category_request_resolved',
     'category_backfill_review', 'vendor_tier_promoted', 'support_update', 'store_pin_moved',
     'ad_campaign_paused', 'ad_campaign_cancelled', 'ad_campaign_killed', 'ad_campaign_auto_cancelled',
     'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture',

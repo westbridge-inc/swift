@@ -470,6 +470,10 @@ export const customerApi = {
   checkoutReceipt: (idempotencyKey: string, session?: AuthSessionSnapshot) =>
     api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`, capturedAuthConfig(session)),
   getNotifications: () => api.get('/customer/notifications'),
+  // [Row 55] Store team invites this signed-in person has received
+  teamInvites: () => api.get('/customer/team-invites'),
+  acceptTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/accept`, {}),
+  declineTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/decline`, {}),
   reorder: (id: string, session?: AuthSessionSnapshot) => api.post(`/customer/orders/${id}/reorder`, {}, capturedAuthConfig(session)),
   ratingTags: () => api.get('/customer/rating-tags'),
   itemFeedback: (id: string, body: { itemId: string; verdict: 'UP' | 'DOWN' }) =>

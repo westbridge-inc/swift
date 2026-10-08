@@ -18,6 +18,7 @@ import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/ob
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
+import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -39,7 +40,7 @@ import { parseMenuText } from '../../utils/menu-text-parse';
 import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
-import { ReviewDemoMoneyRefusedError, refuseReviewAccountRoleGrant } from '../review/demo-policy';
+import { ReviewDemoMoneyRefusedError, isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
@@ -795,8 +796,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: staff };
   });
 
-  /** POST /staff — add an EXISTING Swift account by phone (no ghost invites:
-   *  they must have signed up + done the selfie like everyone else). */
+  /** POST /staff — invite a Swift account to the team by phone. [Row 55]
+   *  Every number gets the SAME reply (staffAddReply): known, unknown, already
+   *  on the team or already invited. With STAFF_INVITE_ACCEPT on, a known
+   *  account gets an invite and joins only when it accepts; with it off (the
+   *  app build without the Accept card) it is added at once, as before. */
   app.post('/staff', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     await requireStepUp(app, request); // [ALG-34] a grant hands the store's board to a phone
@@ -804,38 +808,54 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     const target = await app.prisma.user.findUnique({
       where: { phone: body.phone },
-      select: { id: true, firstName: true, lastName: true },
+      select: { id: true, status: true },
     });
-    if (!target) {
-      throw new AppError(404, 'USER_NOT_FOUND', 'No Swift account with that phone — ask them to download Swift and sign up first');
-    }
-    if (target.id === request.user.userId) {
+    // The owner's own number tells them nothing they do not know.
+    if (target && target.id === request.user.userId) {
       throw new AppError(400, 'SELF_STAFF', 'You already own this store');
     }
-    // [REVIEW-PARTNER] No store membership is granted by, or to, a demo account.
-    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, target.id);
+    // [REVIEW-PARTNER] No store membership is granted by a demo account. This
+    // answers about the caller alone, so it says nothing about the number.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId);
+    const reply = staffAddReply(body.role);
+    // The same read runs for every number. Capture authority before scheduling
+    // delivery, without waiting for invitation persistence or publication.
+    const revocationVersion = staffInviteAcceptEnabled()
+      ? await staffInviteRevocationVersion(app.prisma, vendorId, target?.id ?? 'unresolved-recipient') : 0;
+    if (!target || target.status !== 'ACTIVE') return reply;
+
+    if (staffInviteAcceptEnabled()) {
+      // Off the request path: the reply never waits on whether an invite was due
+      // (deliverStaffInvite also sends nothing to a demo account).
+      void deliverStaffInvite(app.prisma, notifications, {
+        vendorId, targetUserId: target.id, role: body.role, inviterId: request.user.userId, now: new Date(), revocationVersion,
+      }).catch((err: unknown) => request.log.error({ err, vendorId }, '[row 55] staff invite not delivered'));
+      return reply;
+    }
+    // [REVIEW-PARTNER] ...nor granted to one: the same reply as any number, nothing granted.
+    if (await isReviewAccount(app.prisma, target.id)) return reply;
+
     const existing = await app.prisma.vendorStaff.findUnique({
       where: { vendorId_userId: { vendorId, userId: target.id } },
+      select: { id: true },
     });
-    if (existing) {
-      throw new AppError(409, 'ALREADY_STAFF', `${target.firstName} is already on this store's team`);
+    if (!existing) {
+      await app.prisma.vendorStaff.create({
+        data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
+      });
+      void notifications.send({
+        userId: target.id,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'You joined a store team',
+        body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
+        data: { kind: 'staff_added', vendorId },
+      }).catch((err: unknown) => request.log.error({ err, vendorId }, 'staff added notice failed'));
     }
-
-    const member = await app.prisma.vendorStaff.create({
-      data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
-      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
-    });
-
-    await notifications.send({
-      userId: target.id,
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'You joined a store team',
-      body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
-      data: { kind: 'staff_added', vendorId },
-    });
-
-    return { success: true, data: member };
+    return reply;
   });
+
+  // The person invited answers under /customer/team-invites (customer.routes):
+  // they are not on a store team yet, so the /vendor prefix is not theirs.
 
   /** PUT /staff/:id — change a member's role. */
   app.put<{ Params: IdParam }>('/staff/:id', auth, async (request) => {
@@ -861,7 +881,14 @@ export async function vendorRoutes(app: FastifyInstance) {
     const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
 
-    await app.prisma.vendorStaff.delete({ where: { id: request.params.id } });
+    await app.prisma.$transaction(async (tx) => {
+      await lockStaffInviteGrant(tx, vendorId, existing.userId);
+      const current = await tx.vendorStaff.findFirst({ where: { id: request.params.id, vendorId, userId: existing.userId } });
+      if (!current) throw new NotFoundError('StaffMember', request.params.id);
+      await recordStaffInviteRevocation(tx, vendorId, current.userId, request.user.userId);
+      await closePendingStaffInvites(tx, vendorId, current.userId, new Date());
+      await tx.vendorStaff.delete({ where: { id: current.id } });
+    });
     return { success: true, data: { deleted: true } };
   });
 
