@@ -72,8 +72,9 @@ describe('vehicle-class taxonomy', () => {
 
   // ── Document profiles: preserved for the base three, commercial for the fleet.
   describe('document profiles per vehicle (verification checklist source)', () => {
-    it('bicycle needs no vehicle documents; car keeps motor + taxi-extra', () => {
-      expect(docProfilesFor('BICYCLE')).toEqual([]);
+    it('bicycle needs no vehicle documents (only the no-licence identity profile); car keeps motor + taxi-extra', () => {
+      // [VERIFY-DOCS · ruling 4] a bicycle rider has no licence, so its one profile is the national ID
+      expect(docProfilesFor('BICYCLE')).toEqual(['MOVER_NO_LICENCE']);
       expect(docProfilesFor('MOTORCYCLE')).toEqual(['MOVER_MOTOR']);
       expect(docProfilesFor('CAR')).toEqual(['MOVER_MOTOR', 'MOVER_TAXI_EXTRA']);
     });

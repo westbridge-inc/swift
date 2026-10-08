@@ -207,7 +207,9 @@ describe('Signup — OTP mandatory, role + country aware', () => {
     expect(body.data.user.countryCode).toBe('GY');
     expect(body.data.tokens.accessToken).toBeDefined();
     expect(body.data.onboarding.next).toBe('VERIFICATION');
-    expect(body.data.onboarding.requiredDocuments).toContain('national_id');
+    // [VERIFY-DOCS] The MOVER base list from config: nothing is required of every vehicle (identity
+    // comes with the vehicle chosen next — the licence, or the national ID on a bicycle).
+    expect(body.data.onboarding.requiredDocuments).toEqual([]);
   });
 
   it('signs up a VENDOR: vendor owner record + setup onboarding', async () => {

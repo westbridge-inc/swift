@@ -22,7 +22,7 @@ import type { PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getKeyProvider } from '../../providers/storage/envelope';
 import { unpackAndDecrypt } from './extraction-ledger';
-import { registryCode } from './doc-registry';
+import { isRetiredPlaceholder, registryCode, RETIRED_FIELDS } from './doc-registry';
 import { notifyAdmins, tenantOfUser, type NotificationService } from '../notification/notification.service';
 import { REVIEW_SLA_HOURS, type VerificationService } from './verification.service';
 
@@ -59,6 +59,8 @@ export async function exportDocumentsFor(prisma: PrismaClient, userId: string) {
     for (const run of d.extractionRuns) {
       const dek = run.wrappedDek && kp ? await kp.unwrapDek(Buffer.from(run.wrappedDek)) : null;
       for (const f of run.fields) {
+        // [VERIFY-DOCS] An empty placeholder for a field Swift no longer collects is not data about anyone.
+        if (isRetiredPlaceholder(d.docType, f.fieldCode, f.valueCt)) continue;
         fieldCount += 1;
         const value = f.valueCt ? (dek ? unpackAndDecrypt(Buffer.from(f.valueCt), dek).toString('utf8') : null) : null;
         fields.push({ fieldCode: f.fieldCode, value, valueUnavailable: Boolean(f.valueCt) && !dek, isIllegible: f.isIllegible, source: f.source, readAt: run.startedAt });
@@ -140,6 +142,7 @@ export async function requestRectification(
 ) {
   const doc = await prisma.verificationDocument.findFirst({ where: { id: input.documentId, userId }, select: { id: true, docType: true, user: { select: { tenantId: true, countryCode: true } } } });
   if (!doc) throw new NotFoundError('VerificationDocument', input.documentId);
+  if (RETIRED_FIELDS[doc.docType]?.includes(input.fieldCode)) throw new AppError(400, 'UNKNOWN_FIELD', 'This field is no longer collected.');
   const known = (await prisma.extractedField.count({ where: { submissionId: doc.id, fieldCode: input.fieldCode } })) > 0
     || (await prisma.docField.count({ where: { docTypeCode: registryCode(doc.user.countryCode, doc.docType), fieldCode: input.fieldCode } })) > 0;
   if (!known) throw new AppError(400, 'UNKNOWN_FIELD', `${input.fieldCode} is not a field of this document`);
