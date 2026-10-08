@@ -17,11 +17,15 @@ import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, re
 import { hashReviewCode } from '../modules/review/credentials';
 
 const RUN = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 6)();
-// +592 plus this ten-digit run block and the provisioner's two-digit suffix
-// stays inside E.164's 15-digit maximum. Parallel test processes therefore
-// never share the synthetic identifier pool they exercise.
-const PHONE_RUN_BLOCK = String(Number.parseInt(RUN, 36)).padStart(10, '0');
-const PHONE_PREFIX = `+592${PHONE_RUN_BLOCK}`;
+// +592 plus a ten-digit namespace and the provisioner's two-digit suffix
+// stays inside E.164's 15-digit maximum. The three pools are injective across
+// a run id and pool number, so normal and racing provisions cannot collide.
+const PHONE_RUN_NUMBER = Number.parseInt(RUN, 36) * 3;
+const phonePrefixFor = (pool: 0 | 1 | 2) => `+592${String(PHONE_RUN_NUMBER + pool).padStart(10, '0')}`;
+const PHONE_RUN_BLOCK = String(PHONE_RUN_NUMBER).padStart(10, '0');
+const PHONE_PREFIX = phonePrefixFor(0);
+const RACE_PHONE_PREFIX_A = phonePrefixFor(1);
+const RACE_PHONE_PREFIX_B = phonePrefixFor(2);
 const SLUG = `review-prov-${RUN}`;
 let app: FastifyInstance;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'review-provision-test');
@@ -70,13 +74,15 @@ describe('[STA-1] review:provision and friends', () => {
 
   it('two provisions racing on a fresh slug settle on ONE review tenant, each with its own session and logins', async () => {
     const [a, b] = await Promise.all([
-      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: PHONE_PREFIX })),
-      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: PHONE_PREFIX })),
+      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: RACE_PHONE_PREFIX_A })),
+      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: RACE_PHONE_PREFIX_B })),
     ]);
     expect([a.tenantId, b.tenantId]).toEqual([RACE, RACE]);
+    expect(new Set([...a.credentials, ...b.credentials].map((credential) => credential.identifier)).size).toBe(6);
     const t = await system(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: RACE } }));
     expect([t.kind, t.purgeProtected, t.isActive]).toEqual(['REVIEW', true, true]);
     expect(await system(() => app.prisma.reviewSession.count({ where: { tenantId: RACE } }))).toBe(2);
+    expect(await system(() => app.prisma.reviewCredential.count({ where: { tenantId: RACE } }))).toBe(6);
   });
 
   it('refuses a slug that does not name the fiction', async () => {
