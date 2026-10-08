@@ -3,7 +3,7 @@
 import { use } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Phone } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
@@ -35,12 +35,8 @@ function Party({ label, name, phone, href }: { label: string; name?: string | nu
           <p className="text-sm font-medium">{name}</p>
         )}
       </div>
-      {phone ? (
-        <a href={`tel:${phone}`} className="flex items-center gap-1.5 text-xs text-[var(--muted)] hover:text-white">
-          <Phone size={13} />
-          {phone}
-        </a>
-      ) : null}
+      {/* [MC shell] No click-to-call: calls are not a console feature (owner ruling, 6 Oct). */}
+      {phone ? <span className="text-xs text-[var(--muted)]">{phone}</span> : null}
     </div>
   );
 }
