@@ -1,3 +1,4 @@
+import { registerMoverPush } from '../helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -102,6 +103,7 @@ async function login(userId: string, role: UserRole, deviceId: string): Promise<
  *  test brings it online through the real route. */
 async function makeMover(firstName: string, opts: { selfie?: boolean; verified?: boolean } = {}) {
   const u = await makeUser(firstName, ['RIDER', 'CUSTOMER'], 'RIDER', { selfie: opts.selfie });
+  await sys(() => registerMoverPush(app.prisma, u.userId));
   const rider = await sys(() => app.prisma.rider.create({
     data: {
       userId: u.userId,

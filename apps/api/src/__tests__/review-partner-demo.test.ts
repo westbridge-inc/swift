@@ -1,3 +1,4 @@
+import { registerMoverPush } from './helpers/mover-push';
 /**
  * [REVIEW-PARTNER · lane row 53] The store-review fiction's demo RIDER and taxi
  * DRIVER: two logins an App Store / Play reviewer uses to reach the partner
@@ -489,6 +490,7 @@ describe('[REVIEW-PARTNER] going online works for both, exactly as in production
   });
 
   it('the rider goes online, streams location, sees an honestly EMPTY board and no offer, and goes offline', async () => {
+    await system(() => registerMoverPush(app.prisma, app.jwt.verify<{ userId: string }>(tokens.rider).userId));
     const on = await post('/api/v1/rider/go-online', tokens.rider, { latitude: SPOT.lat, longitude: SPOT.lng });
     expect(on.statusCode, on.body).toBe(200);
     expect(on.json().data).toEqual({ isOnline: true, isAvailable: true });
@@ -505,6 +507,7 @@ describe('[REVIEW-PARTNER] going online works for both, exactly as in production
   });
 
   it('the taxi driver goes online with NO weekly plan (the fiction holds none), streams location, sees an EMPTY board, and goes offline', async () => {
+    await system(() => registerMoverPush(app.prisma, app.jwt.verify<{ userId: string }>(tokens.driver).userId));
     const on = await post('/api/v1/driver/go-online', tokens.driver, { latitude: SPOT.lat, longitude: SPOT.lng });
     expect(on.statusCode, on.body).toBe(200);
     expect(on.json().data.isOnline).toBe(true);

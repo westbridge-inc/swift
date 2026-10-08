@@ -1,3 +1,4 @@
+import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
@@ -681,6 +682,7 @@ export async function riderRoutes(app: FastifyInstance) {
       if (!sessions[0]) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
+      await assertMoverPushReady(tx, request.user.userId);
 
       const snapshots = await tx.$queryRaw<Array<{ currentOrderId: string | null; documentsVerified: boolean; updatedAt: Date }>>`
         SELECT "currentOrderId", "documentsVerified", "updatedAt"

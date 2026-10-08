@@ -1,3 +1,4 @@
+import { registerMoverPush } from './helpers/mover-push';
 import { PrismaClient } from '@prisma/client';
 import * as documentAuthority from '../modules/verification/mover-document-authority';
 import { resolveSubject } from '../modules/verification/subjects';
@@ -71,6 +72,7 @@ async function fixture(legacyVerified = true) {
     isPhoneVerified: true, selfieCapturedAt: new Date(),
   } });
   users.push(user.id);
+  await registerMoverPush(app.prisma, user.id);
   const rider = await app.prisma.rider.create({ data: {
     userId: user.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE',
     documentsVerified: legacyVerified, isOnline: false, isAvailable: false,

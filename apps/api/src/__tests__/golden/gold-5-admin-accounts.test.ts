@@ -1,3 +1,4 @@
+import { registerMoverPush } from '../helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -80,6 +81,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, opts: { tenantI
 
 async function makeRider(firstName: string, at: { lat: number; lng: number }) {
   const user = await makeUser(['RIDER', 'CUSTOMER'], 'RIDER', { firstName });
+  await sys(() => registerMoverPush(app.prisma, user.userId));
   const rider = await sys(() => app.prisma.rider.create({ data: { userId: user.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 1_000_000 } }));
   const go = await call('POST', '/api/v1/rider/go-online', user.token, { latitude: at.lat, longitude: at.lng });
   expect(go.statusCode, go.body).toBe(200);

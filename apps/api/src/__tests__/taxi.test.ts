@@ -1,3 +1,4 @@
+import { registerMoverPush } from './helpers/mover-push';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -85,6 +86,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
     },
   });
   createdUserIds.push(user.id);
+  if (roles.includes('DRIVER')) await registerMoverPush(app.prisma, user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
   const session = await app.prisma.session.create({
     data: {

@@ -1,3 +1,4 @@
+import { registerMoverPush } from '../helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -367,6 +368,7 @@ describe('GOLD-5 · ADMIN-02 — held orders, retry dispatch and the food-age ho
   it('the doors are shut to everyone but this tenant’s ops: customer, store, rider and another tenant’s admin are refused; retry is honest', async () => {
     rider = await makeUser(['RIDER', 'CUSTOMER'], 'RIDER', { firstName: 'Rayan' });
     riderId = (await sys(() => app.prisma.rider.create({ data: { userId: rider.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 1_000_000 } }))).id;
+    await sys(() => registerMoverPush(app.prisma, rider.userId));
     const go = await call('POST', '/api/v1/rider/go-online', rider.token, { latitude: STORE_AT.lat, longitude: STORE_AT.lng });
     expect(go.statusCode, go.body).toBe(200);
 
