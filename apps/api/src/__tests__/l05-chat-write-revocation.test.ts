@@ -15,11 +15,11 @@ afterAll(async () => { await f?.close(); });
 describe('message persistence rechecks current participation', () => {
   it('a reassignment that commits during the contact check refuses the former mover without writing or sending', async () => {
     const read = f.app.prisma.userBlock.findFirst.bind(f.app.prisma.userBlock);
-    const spy = vi.spyOn(f.app.prisma.userBlock, 'findFirst').mockImplementationOnce(async (args) => {
+    const spy = vi.spyOn(f.app.prisma.userBlock, 'findFirst').mockImplementationOnce((async (args?: Prisma.UserBlockFindFirstArgs) => {
       const result = await read(args);
       await f.revoke();
       return result;
-    });
+    }) as never);
     const before = await f.app.prisma.chatMessage.count({ where: { chatRoomId: f.room.id } });
     const emit = vi.spyOn(f.app.io, 'to');
     const res = await f.inject('POST', `/rooms/${f.room.id}/messages`, f.oldMover.token, { message: 'stale writer fixture' });
@@ -32,11 +32,11 @@ describe('message persistence rechecks current participation', () => {
 
   it('closing the room during the contact check refuses persistence', async () => {
     const read = f.app.prisma.userBlock.findFirst.bind(f.app.prisma.userBlock);
-    vi.spyOn(f.app.prisma.userBlock, 'findFirst').mockImplementationOnce(async (args) => {
+    vi.spyOn(f.app.prisma.userBlock, 'findFirst').mockImplementationOnce((async (args?: Prisma.UserBlockFindFirstArgs) => {
       const result = await read(args);
       await f.app.prisma.chatRoom.update({ where: { id: f.room.id }, data: { isActive: false } });
       return result;
-    });
+    }) as never);
     const res = await f.inject('POST', `/rooms/${f.room.id}/messages`, f.oldMover.token, { message: 'closed writer fixture' });
     expect(res.statusCode, res.body).toBe(409);
     expect(await f.app.prisma.chatMessage.count({ where: { chatRoomId: f.room.id, message: 'closed writer fixture' } })).toBe(0);
