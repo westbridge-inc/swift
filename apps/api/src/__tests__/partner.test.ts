@@ -1,3 +1,4 @@
+import { registerMoverPush } from './helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
@@ -245,6 +246,7 @@ describe('partner provisioning — happy paths', () => {
 
   it('customer → join mover activates server authority so verified GO succeeds', async () => {
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: BIKE_PHONE } });
+    await registerMoverPush(app.prisma, user.id);
     await app.prisma.user.update({ where: { id: user.id }, data: { selfieCapturedAt: new Date() } });
     const rider = await app.prisma.rider.update({
       where: { userId: user.id },

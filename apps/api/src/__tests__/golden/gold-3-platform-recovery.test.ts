@@ -1,3 +1,4 @@
+import { registerMoverPush } from '../helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll, vi, type WorkerGlobalState } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
@@ -172,6 +173,7 @@ async function makeCourier(firstName: string, fix: { lat: number; lng: number })
   const rider = await sys(() => app.prisma.rider.create({
     data: { userId: u.userId, riderType: 'COURIER', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 1_000_000 },
   }));
+  await sys(() => registerMoverPush(app.prisma, u.userId));
   const go = await call('POST', '/api/v1/rider/go-online', u.token, { latitude: fix.lat, longitude: fix.lng });
   expect(go.statusCode, go.body).toBe(200);
   return { ...u, riderId: rider.id };

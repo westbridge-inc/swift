@@ -1,3 +1,4 @@
+import { registerMoverPush } from './helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
@@ -262,6 +263,7 @@ describe('Transact gates refuse a selfie-less account', () => {
     expect(blocked.json().error.code).toBe('SELFIE_REQUIRED');
 
     await postSelfie(u.token);
+    await registerMoverPush(app.prisma, u.userId);
     const allowed = await inject('POST', '/api/v1/rider/go-online', {
       latitude: 6.8013,
       longitude: -58.1551,

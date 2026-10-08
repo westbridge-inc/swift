@@ -1,3 +1,4 @@
+import { registerMoverPush } from './helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -53,6 +54,7 @@ async function makeUser(): Promise<{ userId: string; token: string }> {
   users.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
   await system(() => app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'vehicle-change', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
+  await system(() => registerMoverPush(app.prisma, user.id));
   return { userId: user.id, token };
 }
 

@@ -1,3 +1,4 @@
+import { registerMoverPush } from './helpers/mover-push';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { activeOverdueMs, currentDunningClock, projectDunningClock } from '../modules/billing/dunning-clock';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -46,6 +47,7 @@ async function person(role: UserRole = 'MOVER', tenantId = 'swift-default', perm
       ...(role === 'SUPER_ADMIN' ? { admin: { create: { permissions } } } : {}),
     } });
     ids.push(user.id);
+    await registerMoverPush(app.prisma, user.id);
     const token = app.jwt.sign({ userId: user.id, role, jti: nanoid(8) });
     await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `fee-${run}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
     return { userId: user.id, token };

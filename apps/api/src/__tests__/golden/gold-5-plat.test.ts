@@ -1,3 +1,4 @@
+import { registerMoverPush } from '../helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
@@ -342,6 +343,7 @@ describe('GOLD-5 · PLAT-01 — tenant isolation and the IDOR denial matrix', ()
     riderB = await makeUser(['RIDER', 'CUSTOMER'], 'RIDER', { tenantId: TENANT_B });
     await sys(() => app.prisma.rider.create({ data: { userId: riderB.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, floatLimit: 1_000_000 } }));
     for (const r of [rider, riderB]) {
+      await sys(() => registerMoverPush(app.prisma, r.userId));
       const go = await call('POST', '/api/v1/rider/go-online', r.token, { latitude: STORE_AT.lat, longitude: STORE_AT.lng });
       expect(go.statusCode, go.body).toBe(200);
     }

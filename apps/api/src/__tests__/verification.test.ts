@@ -1,3 +1,4 @@
+import { registerMoverPush } from './helpers/mover-push';
 import { readFileSync } from 'node:fs';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { join } from 'node:path';
@@ -157,6 +158,7 @@ beforeAll(async () => {
   const mover = await signup(MOVER_PHONE, 'MOVER');
   moverToken = mover.tokens.accessToken;
   moverUserId = mover.user.id;
+  await registerMoverPush(app.prisma, moverUserId);
   await app.prisma.rider.create({
     data: { userId: moverUserId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' },
   });

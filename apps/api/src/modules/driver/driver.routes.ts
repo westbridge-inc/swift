@@ -1,3 +1,4 @@
+import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -401,6 +402,7 @@ export async function driverRoutes(app: FastifyInstance) {
       if (!sessions[0]) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
+      await assertMoverPushReady(tx, request.user.userId);
       const retiredRiderId = await lockAndRetireRiderSupply(tx, request.user.userId);
 
       // Lock and re-read the profile after the User lock. This makes the active
