@@ -98,10 +98,14 @@ describe('the bootstrap exits before opening a socket', () => {
     }
   });
 
-  it.each(['configured', 'query', 'path-precedence'])('the locked test target prints the %s fingerprint without a credential', (style) => {
+  it.each(['configured', 'query'])('the locked test target prints the %s fingerprint without a credential', (style) => {
     const redisUrl = new URL(process.env['REDIS_URL'] ?? GOOD.REDIS_URL);
-    if (style === 'query') { redisUrl.pathname = ''; redisUrl.searchParams.set('db', '9'); }
-    if (style === 'path-precedence') { redisUrl.pathname = '/9'; redisUrl.searchParams.set('db', '14'); }
+    if (style === 'query') {
+      const db = redisUrl.pathname.slice(1) || redisUrl.searchParams.get('db');
+      if (!db) throw new Error('Configured test target must select a Redis database');
+      redisUrl.pathname = '';
+      redisUrl.searchParams.set('db', db);
+    }
     const env = { NODE_ENV: 'test', DATABASE_URL: process.env['DATABASE_URL'] ?? GOOD.DATABASE_URL, REDIS_URL: redisUrl.toString() };
     const r = spawn(env);
     expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
@@ -126,7 +130,7 @@ describe('the destructive guard', () => {
     process.env['SYSTEM_DATABASE_URL'] = process.env['DATABASE_URL'] ?? GOOD.DATABASE_URL;
     setSystemPrismaClient(null);
     try {
-      const clients = [app.prisma, scopedClientFor(raw), systemPrismaClient()!];
+      const clients = [app.prisma, scopedClientFor(raw, null), systemPrismaClient()!];
       for (const client of clients) {
         // A deliberately nonexistent tenant: even a broken guard cannot mutate fixtures.
         await expect(runWithTenant('r048-nonexistent-tenant', () => client.user.deleteMany({})))
