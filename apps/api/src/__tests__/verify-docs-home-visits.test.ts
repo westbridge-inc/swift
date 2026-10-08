@@ -218,8 +218,25 @@ describe('[home visits] booking', () => {
   it('concurrent refusals give the owner one daily notice', async () => {
     const store = await serviceStore('MOBILE');
     const notifications = new NotificationService(app.prisma, app.io);
-    await Promise.all(Array.from({ length: 4 }, () => homeVisits.tellOwnerHomeVisitsPaused(app.prisma, notifications, store.userId, store.vendorName)));
-    expect(await homeVisitNotices(store.userId)).toBe(1);
+    let reached = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const finder = app.prisma.notification as unknown as {
+      findFirst: (args?: Parameters<typeof app.prisma.notification.findFirst>[0]) => Promise<{ id: string } | null>;
+    };
+    const original = finder.findFirst.bind(finder);
+    const probe = vi.spyOn(finder, 'findFirst').mockImplementation(async (args) => {
+      if (args?.where?.userId !== store.userId) return original(args);
+      reached += 1;
+      if (reached === 4) release();
+      await barrier;
+      return null;
+    });
+    try {
+      await Promise.all(Array.from({ length: 4 }, () => homeVisits.tellOwnerHomeVisitsPaused(app.prisma, notifications, store.userId, store.vendorName)));
+      expect(reached).toBe(4);
+      expect(await homeVisitNotices(store.userId)).toBe(1);
+    } finally { probe.mockRestore(); }
   });
   it('a home visit is refused at checkout while the owner holds no approved police clearance; the customer and the owner are told plainly', async () => {
     const store = await serviceStore('MOBILE');
