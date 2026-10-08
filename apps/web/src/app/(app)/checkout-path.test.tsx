@@ -185,6 +185,46 @@ describe('[F4] a sold-out choice is never pre-selected or sent', () => {
   });
 });
 
+describe('[F4] a sold-out choice is never pre-selected or sent', () => {
+  const storeWith = (options: Array<Record<string, unknown>>) => ({
+    ...STORE,
+    categories: [{ id: 'c1', name: 'Mains', items: [{ ...ITEM, optionGroups: [{ ...ITEM.optionGroups[0]!, options }] }] }],
+  });
+  // Priced, so a sold-out default chosen behind the customer's back would show
+  // in the Add button's total even though its choice is hidden.
+  const SMALL_SOLD_OUT = { id: 'small', name: 'Small', additionalPrice: '200', isDefault: true, isAvailable: false };
+  const LARGE = { id: 'large', name: 'Large', additionalPrice: '400', isDefault: false, isAvailable: true };
+
+  it('a sold-out default is neither offered nor chosen for the customer; their own choice is what is sent', async () => {
+    api = ({ url }) => (url.pathname === '/api/v1/customer/vendors/v1' ? ok(storeWith([SMALL_SOLD_OUT, LARGE])) : null);
+    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
+    const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
+    expect(within(sheet).queryByRole('radio', { name: /^Small/ })).toBeNull();
+    expect((within(sheet).getByRole('radio', { name: /^Large/ }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
+    await screen.findByText('Choose an option for “Size”.');
+    expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
+
+    fireEvent.click(within(sheet).getByRole('radio', { name: /^Large/ }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $2,200' }));
+    await screen.findByText('Added to your cart');
+    const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
+    expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
+  });
+
+  it('a required group with every choice sold out says so and sends nothing', async () => {
+    api = ({ url }) => (url.pathname === '/api/v1/customer/vendors/v1' ? ok(storeWith([SMALL_SOLD_OUT, { ...LARGE, isAvailable: false }])) : null);
+    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
+    const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
+    expect(within(sheet).queryAllByRole('radio')).toHaveLength(0);
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
+    await screen.findByText('“Size” is sold out right now.');
+    expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
+  });
+});
+
 describe('[Q7b] cart → checkout → tracking', () => {
   it('places a cash order against the server quote, once, and opens its tracking', async () => {
     at('/cart', {}, <CartPage />);
