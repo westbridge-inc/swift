@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { log } from '../../utils/logger';
+import { runWithTenant } from '../../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // [ALGO Band 0.2] READING A TUNABLE.
@@ -220,11 +221,15 @@ export async function algoConfig<K extends AlgoConfigKey>(
 
   let resolved: ResolvedConfig<(typeof ALGO_DEFAULTS)[K]> = { value: fallback, version: 0, source: 'default' };
   try {
-    const row = await prisma.algoConfig.findFirst({
+    // The read runs bound to the tenant it NAMES. The tenant wall replaces a
+    // query's tenantId with the ambient one (a request's, or a job's bound to
+    // its object's tenant), which would read another operator's dial and cache
+    // it under this tenant's key.
+    const row = await runWithTenant(tenantId, () => prisma.algoConfig.findFirst({
       where: { tenantId, key },
       orderBy: { version: 'desc' },
       select: { value: true, version: true },
-    });
+    }));
     // A row whose value is JSON `null` is not a configured value — it is a row
     // that says nothing. Treat it as absent rather than handing an algorithm a
     // null where it expects a number.

@@ -456,6 +456,27 @@ export function inJobContext(queue: string, processor: (job: Job) => Promise<voi
   return (job: Job) => runAsSystem(jobCapability(queue, job?.name), () => processor(job));
 }
 
+/** [L01 · tenant wall · job PR-2] A job that works for ONE tenant's object
+ *  runs AS that tenant: the object's tenant is read first (as the job's named
+ *  system work), then the handler runs bound to it, so every tenant-owned read
+ *  and write it makes — candidates, notifications, the order itself — stays
+ *  inside that tenant. An object that no longer exists has no tenant: the
+ *  handler then runs as the named system work it already is, and finds
+ *  nothing. */
+export async function inTenantOf<T>(
+  prisma: PrismaClient,
+  entity: { order: string } | { vendor: string },
+  fn: () => Promise<T>,
+): Promise<T> {
+  const id = 'order' in entity ? entity.order : entity.vendor;
+  const tenantId = typeof id !== 'string' || id === ''
+    ? null
+    : 'order' in entity
+      ? (await prisma.order.findUnique({ where: { id }, select: { tenantId: true } }))?.tenantId ?? null
+      : (await prisma.vendor.findUnique({ where: { id }, select: { tenantId: true } }))?.tenantId ?? null;
+  return tenantId ? runWithTenant(tenantId, fn) : fn();
+}
+
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
   const constructedWorkers: Worker[] = [];
@@ -496,11 +517,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     async (job: Job) => {
       switch (job.name) {
         case 'auto-cancel': {
-          await autoCancelUnresponsiveOrder(ctx, job.data.orderId);
+          await inTenantOf(ctx.prisma, { order: job.data.orderId }, () => autoCancelUnresponsiveOrder(ctx, job.data.orderId));
           break;
         }
         case 'auto-complete': {
-          await autoCompleteDeliveredOrder(ctx, job.data.orderId);
+          await inTenantOf(ctx.prisma, { order: job.data.orderId }, () => autoCompleteDeliveredOrder(ctx, job.data.orderId));
           break;
         }
       }
@@ -1192,7 +1213,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { getChannels } = await import('../providers/notifications/channels');
 
       const { orderId, level = 0 } = job.data;
-      const outcome = await escalateVendorAlert(ctx.prisma, ctx.io, getChannels(), orderId, level);
+      const outcome = await inTenantOf(ctx.prisma, { order: orderId }, () => escalateVendorAlert(ctx.prisma, ctx.io, getChannels(), orderId, level));
 
       if (outcome === 'realerted') {
         await enqueueVendorAlertFollowup(queues, orderId);
@@ -1741,7 +1762,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // actual distance beside the planned one. Idempotent; a missing trace
         // is recorded as no match, never as a straight line.
         const { matchOrderRoute } = await import('../modules/dispatch/route-match');
-        const res = await matchOrderRoute({ prisma: ctx.prisma, redis: ctx.redis }, (job.data as { orderId: string }).orderId);
+        const routeOrderId = (job.data as { orderId: string }).orderId;
+        const res = await inTenantOf(ctx.prisma, { order: routeOrderId }, () => matchOrderRoute({ prisma: ctx.prisma, redis: ctx.redis }, routeOrderId));
         if (res.outcome === 'matched' || res.outcome === 'unmatched') ctx.log.info(res, 'route-match');
         return;
       }
@@ -2031,9 +2053,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // redispatch) can be re-added for a NEW episode once the old job left
         // BullMQ retention — so the job's creation time is part of it: a
         // redelivery keeps both, a re-created job does not (DS215 F1).
-        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined);
+        // [L01] Bound to the ORDER's tenant (the job's own tenantId stays a
+        // provenance check inside dispatchOrder): candidates are this tenant's.
+        await inTenantOf(ctx.prisma, { order: job.data.orderId }, () =>
+          dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined));
       } else if (job.name === 'offer-timeout') {
-        await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId);
+        await inTenantOf(ctx.prisma, { order: job.data.orderId }, () => dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId));
       } else if (job.name === 'supply-watch-scan') {
           // Availability spec §5: tell waiting customers when supply returns.
           const { scanSupplyWatches, scanStrugglingDeliveries } = await import('../modules/dispatch/supply-watch.service');
@@ -2074,8 +2099,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       try {
         const { SearchService } = await import('../modules/search/search.service');
         const svc = new SearchService(ctx.prisma);
-        await svc.syncVendor(vendorId);
-        const items = await svc.syncVendorItems(vendorId);
+        const items = await inTenantOf(ctx.prisma, { vendor: vendorId }, async () => {
+          await svc.syncVendor(vendorId);
+          return svc.syncVendorItems(vendorId);
+        });
         ctx.log.info({ vendorId, items }, 'Search index synced for vendor');
       } catch (err) {
         ctx.log.warn({ err, vendorId }, 'Search sync failed — boot/manual reindex remains the reconciler');
