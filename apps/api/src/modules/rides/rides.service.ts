@@ -1,3 +1,4 @@
+import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { RideClass } from '@prisma/client';
@@ -291,6 +292,7 @@ export async function createRideRequest(
   // [TAXI multi-stop] Validated and numbered by the caller (planTaxiStops);
   // none for a ride without stops, which takes exactly the path it always has.
   const stops = body.stops ?? [];
+  if (stops.length === 0) assertRoadTripInMarket(body);
   const user = await assertRideGates(app, userId,
     availabilityPreCheck ? { dispatch, pickup: body.pickup } : {});
   if (expectedTenantId && user.tenantId !== expectedTenantId) {

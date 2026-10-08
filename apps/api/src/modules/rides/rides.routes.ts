@@ -1,3 +1,4 @@
+import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
 import { z } from 'zod';
@@ -168,6 +169,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     // Refused while TAXI_MAX_STOPS is 0, else validated and numbered here,
     // before anything is read or priced.
     const stops = planTaxiStops(body);
+    if (stops.length === 0) assertRoadTripInMarket(body);
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },
       select: { countryCode: true, tenantId: true },
@@ -202,6 +204,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     // count, each stop and where the route lies, then the quoted fare a ride
     // with stops must carry. A malformed request never consumes a key.
     const stops = planTaxiStops(body);
+    if (stops.length === 0) assertRoadTripInMarket(body);
     assertQuotedFare(stops.length, body.expectedFare);
     const ride: RideRequestBody = {
       pickup: body.pickup,
@@ -305,6 +308,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] The queue never holds a trip with stops (v1): its entry
     // has no place for them, and the trip would be booked later without them.
     refuseQueuedStops(body.stops);
+    assertRoadTripInMarket(body);
     const user = await assertRideGates(app, request.user.userId);
     assertL2(user);
 

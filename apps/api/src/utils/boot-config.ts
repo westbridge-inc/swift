@@ -1,3 +1,4 @@
+import { assertPlacesConfig } from '../providers/places/places-config';
 import { runtimeMode } from './runtime-mode';
 import { malformedAllowlistPositions } from '../providers/notifications/sms-recipient-allowlist';
 import { firstInvalidTwilioConfig } from './twilio-identity';
@@ -306,6 +307,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     console.warn('WARN: CONSENT_IP_PEPPER is unset or under 32 characters — consent-ledger IP attribution is OFF (hashIp() returns null). Set a 32+ char pepper to record peppered IP evidence.');
   }
   assertQrConfig(env);
+  assertPlacesConfig(env);
 }
 
 /**

@@ -1,3 +1,4 @@
+import { launchMarketAt } from '../auth/launch-market';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { SearchService } from './search.service';
@@ -58,6 +59,12 @@ const nearbyQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
   type: z.enum(['RESTAURANT', 'SUPERMARKET']).optional(),
 });
+
+/** Judge the committed pin, never a stale index coordinate. */
+function inLaunchMarket(pin: { latitude?: number | null; longitude?: number | null } | null): boolean {
+  return pin != null && typeof pin.latitude === 'number' && typeof pin.longitude === 'number'
+    && launchMarketAt(pin.latitude, pin.longitude) !== null;
+}
 
 export async function searchRoutes(app: FastifyInstance) {
   let searchService: SearchService | null = null;
@@ -133,15 +140,15 @@ export async function searchRoutes(app: FastifyInstance) {
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
             where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), id: { in: vendors.map((v) => v.id) }, isCurrentlyOpen: true },
-            select: { id: true }, take: parsedLimit,
+            select: { id: true, latitude: true, longitude: true }, take: parsedLimit,
           }),
           app.prisma.item.findMany({
             where: { id: { in: items.map((i) => i.id) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)) },
-            select: { id: true, vendorId: true }, take: parsedLimit,
+            select: { id: true, vendorId: true, vendor: { select: { latitude: true, longitude: true } } }, take: parsedLimit,
           }),
         ]);
-        const vendorIds = new Set(liveVendors.map((v) => v.id));
-        const itemIds = new Set(liveItems.map((i) => i.id));
+        const vendorIds = new Set(liveVendors.filter(inLaunchMarket).map((v) => v.id));
+        const itemIds = new Set(liveItems.filter((i) => inLaunchMarket(i.vendor)).map((i) => i.id));
         const visibleVendors = vendors.filter((v) => vendorIds.has(v.id));
         const visibleItems = items.filter((i) => itemIds.has(i.id));
         return {
@@ -222,7 +229,7 @@ export async function searchRoutes(app: FastifyInstance) {
         },
         // The shared select, so the fallback cannot quietly serve fewer fields
         // than the fast path and make the engine visible to the client.
-        select: ITEM_HIT_SELECT,
+        select: { ...ITEM_HIT_SELECT, vendor: { select: { ...ITEM_HIT_SELECT.vendor.select, latitude: true, longitude: true } } },
         take: parsedLimit,
         orderBy: { totalOrdered: 'desc' },
       }),
@@ -232,7 +239,7 @@ export async function searchRoutes(app: FastifyInstance) {
     // both engines speak the same displayRating/topRated contract.
     const surfaces = await ratingSurfaces(app.prisma, 'VENDOR', vendors.map((v) => v.id));
 
-    const shapedVendors: VendorHit[] = vendors.map((v) => ({
+    const shapedVendors: VendorHit[] = vendors.filter(inLaunchMarket).map((v) => ({
       id: v.id,
       name: v.name,
       slug: v.slug,
@@ -262,9 +269,10 @@ export async function searchRoutes(app: FastifyInstance) {
       sortedVendors = [...sortByDistance(locatable, userLat, userLng), ...unlocatable];
     }
 
+    const marketItems = items.filter((item) => inLaunchMarket(item.vendor));
     const listable = request.publicTenantId
-      ? await listableItemsForVendors(app.prisma, tenantId, items)
-      : items;
+      ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
+      : marketItems;
     const shapedItems: ItemHit[] = listable.map(toItemHit);
 
     return {
@@ -272,7 +280,7 @@ export async function searchRoutes(app: FastifyInstance) {
       data: {
         vendors: sortedVendors,
         items: shapedItems,
-        meta: { vendorCount: vendors.length, itemCount: shapedItems.length },
+        meta: { vendorCount: sortedVendors.length, itemCount: shapedItems.length },
       },
     };
   });
