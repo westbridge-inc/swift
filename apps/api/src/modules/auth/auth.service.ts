@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
@@ -557,6 +558,10 @@ export class AuthService {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
 
+      // This service remains authoritative if another caller is added later.
+      const authority = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenant: { select: { kind: true } } } });
+      if (authority.tenant.kind === 'REVIEW') throw new ReviewDemoCredentialRefusedError();
+
       const sessions = await tx.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
         SELECT "id", "expiresAt"
         FROM "sessions"
@@ -855,9 +860,13 @@ export class AuthService {
       throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
     }
 
-    // [L04 · R1] Who, and which tenant — the reset itself runs bound to it.
+    // Resolve the principal first; the tenant policy is read in that context.
     const candidate = await resolveIdentityByPhone(this.app.prisma, phone);
-    if (!candidate) {
+    const tenant = candidate ? await runWithTenant(candidate.tenantId, () =>
+      this.app.prisma.tenant.findUnique({ where: { id: candidate.tenantId }, select: { kind: true } })) : null;
+    // Shared store-review accounts never reset their password, even with a
+    // planted valid OTP. Preserve the same refusal as an unknown account.
+    if (!candidate || !tenant || tenant.kind === 'REVIEW') {
       // Do NOT reveal account existence on password reset — return the same
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.
