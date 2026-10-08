@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../utils/errors';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
@@ -65,6 +66,11 @@ export async function partnerRoutes(app: FastifyInstance) {
     // [TA-S1-008] Acceptance is a precondition of the authority, not a courtesy of the client.
     if (body.acceptAgreement !== true) {
       throw new AppError(400, AGREEMENT_REQUIRED, `Accept the ${body.role === 'VENDOR' ? 'vendor' : 'driver'} agreement to continue — Swift records that you agreed, and cannot record what you did not.`);
+    }
+    if (body.business?.name) {
+      // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only.
+      const me = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
+      assertNameNotReserved(body.business.name, me?.phone);
     }
     const { result, authorityCleanup } = await service.becomePartnerWithAuthority(
       request.user.userId,

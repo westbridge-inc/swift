@@ -15,7 +15,7 @@ import {
   type DiscoveryRequest,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 // ---------------------------------------------------------------------------
 // The taxonomy, and the two decisions nobody could make.
@@ -88,9 +88,15 @@ export default function DiscoveryPage() {
       updateDiscoveryCategory(c.id, { status: c.status === 'ACTIVE' ? 'HIDDEN' : 'ACTIVE' }),
     onSuccess: done, onError: setMutationError,
   });
-  const merge = useMutation({
-    mutationFn: ({ id, targetId, reason }: { id: string; targetId: string; reason: string }) => mergeDiscoveryCategory(id, targetId, reason),
-    onSuccess: done, onError: setMutationError,
+  // [MC-PR3b] A merge redirects a category for every store and shopper: it
+  // asks why in the page, and its answer (or refusal) stays on screen.
+  const actions = useActionRunner(done);
+  const merge = (c: DiscoveryCategory, target: DiscoveryCategory) => void actions.run({
+    title: `Merge ${c.name} into ${target.name}?`,
+    body: <p>Every store and item tagged {c.name} moves to {target.name}, and the old link keeps working by redirecting. A merge is not undone from here.</p>,
+    confirmLabel: 'Merge categories',
+    submit: ({ reason }) => mergeDiscoveryCategory(c.id, target.id, reason),
+    success: () => `${c.name} is merged into ${target.name}.`,
   });
   const backfill = useMutation({
     mutationFn: runDiscoveryBackfill,
@@ -155,6 +161,7 @@ export default function DiscoveryPage() {
       </nav>
 
       <MutationError error={mutationError} label="discovery action" />
+      {actions.banner}
 
       {tab === 'requests' ? (
         <section className="space-y-4">
@@ -324,8 +331,7 @@ export default function DiscoveryPage() {
                           const targetId = e.target.value;
                           if (!targetId) return;
                           const target = cats.find((o) => o.id === targetId);
-                          const reason = askReason({ action: 'merge this category', subject: `${c.name} into ${target?.name ?? targetId}` });
-                          if (reason) merge.mutate({ id: c.id, targetId, reason });
+                          if (target) merge(c, target);
                         }}
                         className="rounded border border-neutral-200 px-1 py-0.5 text-xs"
                       >
