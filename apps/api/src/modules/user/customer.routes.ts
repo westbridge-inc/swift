@@ -4,6 +4,7 @@ import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/id
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
+import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
 import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
@@ -3174,6 +3175,13 @@ export async function customerRoutes(app: FastifyInstance) {
         orderId: id, customerId: userId, reason, refundKind: refund.kind, refundAmount: refund.amount, refundSentence: refund.sentence,
         refundBasis: refund.basis, refundInferredAmount: refund.inferredAmount, refundFunder: refund.funder,
       },
+    }).catch((error: unknown) => {
+      // The earlier read preserves the normal retry response; the database
+      // also arbitrates simultaneous requests that both observed no return.
+      if (isDuplicateOn(error, 'orderId')) {
+        throw new AppError(409, 'RETURN_EXISTS', 'A return has already been requested for this order');
+      }
+      throw error;
     });
     reply.code(201);
     return { success: true, data: created };
