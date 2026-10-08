@@ -48,7 +48,7 @@ import {
   selectionPrice,
   validateSelectedOptions,
 } from '@/lib/menu-options';
-import { useCustomerSession } from '@/components/customer-session';
+import { useOptionalCustomerSession } from '@/components/customer-session';
 import { Photo } from '@/components/order-ui';
 import { Sheet } from '@/components/sheet';
 import { StoreActions } from './store-actions';
@@ -190,7 +190,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // session). Its session can renew an expired access cookie before sending a
   // guest to sign in, and its cart count is refreshed after every change made
   // here. Rendered on its own (tests), both are simply absent.
-  const shellSession = useCustomerSession();
+  const shellSession = useOptionalCustomerSession();
   const shellQueries = useContext(QueryClientContext);
   const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
   const diningNoticeDismissed = dismissedDiningStore === store.id;
@@ -291,7 +291,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     // only once the server has attested — so a signed-out visitor never fires
     // the two authenticated loads, exactly as the token check used to prevent.
     setSignedIn(false);
-    void sessionProbe().then((session) => {
+    void (shellSession ? Promise.resolve({ ok: shellSession.status === 'signed-in' }) : sessionProbe()).then((session) => {
       if (!alive || !session.ok) return;
       setSignedIn(true);
       setLoadingCart(true);
@@ -446,7 +446,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     if (restoringSession.current) return false;
     restoringSession.current = true;
     const toSignIn = () => router.push(`/login?next=${encodeURIComponent(returnPath)}`);
-    void shellSession.ensureSignedIn().then((restored) => {
+    void (shellSession?.ensureSignedIn() ?? Promise.resolve(false)).then((restored) => {
       restoringSession.current = false;
       if (restored) setCartLoadVersion((version) => version + 1);
       else toSignIn();
@@ -498,13 +498,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: {}, returnPath });
     }
     if (!requireCustomerSession()) return;
-    const existing = cartItems.find((line) => line.itemId === item.id);
+    // The server matches the complete selection and note identity. A base
+    // Add must never increment another configuration of the same item.
     void mutateItem(
       item.id,
-      () =>
-        existing
-          ? updateCartLine(existing.id, existing.quantity + 1)
-          : addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1 }),
+      () => addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1 }),
       `${item.name} added to your order.`,
       true,
     );
@@ -540,7 +538,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       (intent.selectedOptions[group.id] ?? []).filter(id => group.options.some(option => option.id === id && option.isAvailable)).slice(0, group.maxSelect),
     ]));
     setSelectedOptions(choices);
-    setItemQuantity(1);
+    setItemQuantity(intent.quantity ?? 1);
     setModalError(null);
     setModalItem(item);
   }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
@@ -577,6 +575,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
 
   const confirmOptions = () => {
     if (!modalItem) return;
+    if (cartHydrationPending) { setModalError('Your cart is still loading. Keep this item open and try again.'); return; }
     const liveItem = categoryItems.find((item) => item.id === modalItem.id);
     if (!orderable || !liveItem?.isAvailable || liveItem.fulfillment !== 'DELIVERY' || optionPrice(liveItem, selectedOptions) === null) {
       setModalError('This item is no longer verified as orderable on the live menu. Close this panel and check the menu again.');
@@ -601,7 +600,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       return;
     }
     if (!signedIn) {
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: modalItem.id, selectedOptions, returnPath });
+      queueStorefrontContinuation({ storeSlug: store.slug, itemId: modalItem.id, selectedOptions, quantity: itemQuantity, returnPath });
       requireCustomerSession();
       return;
     }
@@ -1309,7 +1308,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
               <button
                 type="button"
                 className={`${styles.primaryButton} ${styles.sheetAdd}`}
-                disabled={busyItem !== null || modalUnitPrice === null}
+                disabled={cartHydrationPending || busyItem !== null || modalUnitPrice === null}
                 aria-describedby={modalError ? 'menu-options-error' : undefined}
                 onClick={confirmOptions}
               >
