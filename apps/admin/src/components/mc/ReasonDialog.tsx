@@ -29,17 +29,18 @@ import type { ReasonPrompt } from '@/lib/ask-reason';
 //   const answer = await dialog.askWith({ title, confirmLabel, fields });
 //       → collects { reason, values } only (the caller sends it).
 //   const ask = useAskReason();  const reason = await ask({ action, subject });
-//       → the drop-in for lib/ask-reason `askReason` (same argument, a Promise of
-//         the same string | null). Migrating a page is mechanical:
-//           `const reason = askReason(p); if (reason) m.mutate(reason);`
-//         becomes
-//           `const reason = await ask(p); if (reason) m.mutate(reason);`
-//         Prefer `run` where the refusal should stay in the panel.
+//       → resolves the reason, or null when the operator cancels (the caller
+//         then does nothing). It replaced the retired browser-prompt helper;
+//         prefer `run` (or components/mc/useActionRunner) where the refusal
+//         should stay in the panel.
 // ---------------------------------------------------------------------------
 
 export type ReasonField =
-  | { kind: 'amount'; name: string; label: string; hint?: string; /** The route takes cents (default: whole GYD). */ cents?: boolean }
-  | { kind: 'reference'; name: string; label: string; hint?: string };
+  | { kind: 'amount'; name: string; label: string; hint?: string; /** The route takes cents (default: whole GYD). */ cents?: boolean;
+      /** Amounts that may go below zero (a correcting entry). */ signed?: boolean }
+  | { kind: 'reference'; name: string; label: string; hint?: string }
+  /** Free text: a short note, or an identifier typed by hand. Optional unless `required`. */
+  | { kind: 'text'; name: string; label: string; hint?: string; required?: boolean; minLength?: number; maxLength?: number; pattern?: RegExp };
 
 export interface ReasonAnswer {
   /** The reason as it is sent: trimmed, smart punctuation made plain. Empty when none was asked. */
@@ -135,13 +136,25 @@ export function useActionDialog(): ActionDialogApi {
   }), [ctx]);
 }
 
-/** The drop-in for `askReason`: same argument, a Promise of the same `string | null`. */
+/** Asks for a reason in the panel: resolves it, or null when the operator cancels. */
 export function useAskReason(): (_prompt: ReasonPrompt) => Promise<string | null> {
   const dialog = useActionDialog();
   return dialog.ask;
 }
 
 function checkField(field: ReasonField, raw: string): FieldCheck<string | number> {
+  if (field.kind === 'text') {
+    const value = raw.trim();
+    if (field.required && !value) return { ok: false, message: `Enter ${field.label.toLowerCase()}.` };
+    if (value && field.minLength && value.length < field.minLength) return { ok: false, message: `Enter at least ${field.minLength} characters.` };
+    if (value && field.pattern && !field.pattern.test(value)) return { ok: false, message: 'Use letters, numbers, dots, underscores, colons, slashes or hyphens; no spaces.' };
+    if (value.length > (field.maxLength ?? 500)) return { ok: false, message: `Keep it under ${field.maxLength ?? 500} characters.` };
+    return { ok: true, value };
+  }
+  if (field.kind === 'amount' && field.signed && raw.trim().startsWith('-')) {
+    const magnitude = parseAmountGyd(raw.trim().slice(1), { cents: field.cents });
+    return magnitude.ok ? { ok: true, value: -magnitude.value } : magnitude;
+  }
   return field.kind === 'amount' ? parseAmountGyd(raw, { cents: field.cents }) : checkReference(raw);
 }
 
@@ -207,7 +220,7 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
                 value={values[field.name] ?? ''}
                 onChange={(e) => setValues((v) => ({ ...v, [field.name]: e.target.value }))}
                 onBlur={() => setShown((s) => ({ ...s, [field.name]: true }))}
-                inputMode={field.kind === 'amount' ? 'decimal' : 'text'}
+                inputMode={field.kind === 'amount' ? (field.signed ? 'text' : 'decimal') : 'text'}
                 autoCapitalize={field.kind === 'reference' ? 'characters' : undefined}
                 autoComplete="off"
                 disabled={busy}
@@ -215,7 +228,7 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
                 aria-describedby={`${id}-help${showError ? ` ${id}-error` : ''}`}
               />
               <p id={`${id}-help`} className="mc-field-help">
-                <span>{field.hint ?? (field.kind === 'amount' ? (field.cents ? 'In GYD, e.g. 4500 or 4500.50' : 'In whole GYD, e.g. 4500') : 'As written on the receipt or transfer')}</span>
+                <span>{field.hint ?? (field.kind === 'amount' ? (field.cents ? 'In GYD, e.g. 4500 or 4500.50' : 'In whole GYD, e.g. 4500') : field.kind === 'reference' ? 'As written on the receipt or transfer' : field.required ? 'Required' : 'Optional')}</span>
               </p>
               {showError && !check.ok ? <p id={`${id}-error`} className="mc-field-error">{check.message}</p> : null}
             </div>

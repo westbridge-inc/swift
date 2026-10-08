@@ -1,143 +1,106 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SubscriptionsPage from './page';
 import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
-
-// ---------------------------------------------------------------------------
-// [M-08] The console's top-up carries an Idempotency-Key the ATTEMPT owns.
-//
-// The server refuses a top-up without a key (a retry after a lost response
-// used to be able to credit twice). The route's comment claimed "the admin
-// console sends one per top-up action" — it never did. These pin that the
-// key is sent, that a retry of the SAME attempt reuses it (so the server
-// replays instead of crediting again), and that the next attempt is new.
-// ---------------------------------------------------------------------------
 
 const subscription = {
   id: 'sub-1', status: 'ACTIVE', type: 'RESTAURANT', weeklyRate: 2100, feeWaived: false,
   nextBillingDate: '2026-09-09T00:00:00.000Z', vendor: { id: 'v1', name: 'Shanta Kitchen' },
 };
 
-function handler(onTopUp: (_r: ApiRequest, _n: number) => { body: unknown; status?: number }) {
-  let n = 0;
+function handler(onWaive: (_r: ApiRequest) => { body: unknown; status?: number } = () => ({ body: { success: true, data: {} } })) {
   return (request: ApiRequest) => {
     if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [subscription] } };
-    if (request.method === 'POST' && request.url.pathname === '/api/v1/admin/subscriptions/sub-1/topup') { n += 1; return onTopUp(request, n); }
-    if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/subscriptions/sub-1/waive-fee') {
-      return { body: { success: true, data: {} } };
-    }
+    if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/subscriptions/sub-1/waive-fee') return onWaive(request);
     throw new Error(`Unexpected request: ${request.method} ${request.url}`);
   };
 }
-const keyOf = (init: RequestInit | undefined) => (init?.headers as Record<string, string> | undefined)?.['Idempotency-Key'];
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe('the top-up key belongs to the attempt', () => {
-  it('sends an Idempotency-Key, reuses it when the same attempt is retried after an error, and mints a new one for the next attempt', async () => {
-    // [A-12] A top-up now names the transfer it is evidence of, and confirms the
-    // target and the delta before it credits anything.
-    vi.stubGlobal('prompt', vi.fn((msg: string) => {
-      if (String(msg).includes('reference')) return 'BANK-9001';
-      if (String(msg).includes('Why are you about to')) return 'Amount and reference match the deposit slip';
-      return '5000';
-    }));
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    const fetchMock = mockApi(handler((_r, n) => (n === 1
-      ? { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'lost' } } }
-      : { body: { success: true, replayed: false, data: { balance: 5000, currencyCode: 'GYD' } } })));
+// ---------------------------------------------------------------------------
+// [MC-MONEY · coordinator ruling under GUARDRAILS] No manual top-up.
+//
+// A partner pays the weekly fee only through the MMG checkout page, and a
+// payment is credited only after the provider's own lookup confirms it. The
+// console's "Top up" credited a subscription from an amount and a reference an
+// operator typed, so it is gone — not disabled, not hidden behind a flag.
+// ---------------------------------------------------------------------------
+describe('[MC-MONEY] the console cannot credit a weekly fee', () => {
+  it('offers no top-up, says how partners pay, and nothing on the page can send a top-up', async () => {
+    const fetchMock = mockApi(handler());
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
-    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
-    const first = requestsByMethod(fetchMock, 'POST')[0]!;
-    expect(first[0]).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/topup`);
-    expect(JSON.parse(String(first[1]?.body))).toEqual({ amount: 5000, reference: 'BANK-9001' });
-    const key = keyOf(first[1]);
-    expect(key).toMatch(/^[0-9a-f-]{36}$/);
-
-    // The same attempt again (the admin retries after the error): the same key.
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Top up' }) as HTMLButtonElement).disabled).toBe(false));
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
-    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(2));
-    expect(keyOf(requestsByMethod(fetchMock, 'POST')[1]![1])).toBe(key);
-
-    // Answered — the next top-up is a new attempt with a new key.
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Top up' }) as HTMLButtonElement).disabled).toBe(false));
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
-    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(3));
-    const third = keyOf(requestsByMethod(fetchMock, 'POST')[2]![1]);
-    expect(third).toMatch(/^[0-9a-f-]{36}$/);
-    expect(third).not.toBe(key);
+    expect(screen.queryByRole('button', { name: /top.?up/i })).toBeNull();
+    expect(screen.getByText(/through the\s+MMG checkout page/)).toBeTruthy();
+    // every control on the row, pressed: still no top-up request
+    for (const button of screen.getAllByRole('button')) await user.click(button);
+    const dialog = screen.queryByRole('dialog');
+    if (dialog) await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(requestsByMethod(fetchMock, 'POST').filter(([u]) => String(u).includes('/topup'))).toHaveLength(0);
   });
 });
-
 
 // ---------------------------------------------------------------------------
 // [A-12] The server requires evidence. A console that satisfies that with a
 // constant defeats it entirely — which is exactly what the waiver did, sending
 // the literal 'Waived by admin' as the "reason" on every call.
+// [MC-MONEY] The reason is asked in the page's own panel.
 // ---------------------------------------------------------------------------
-describe('[A-12] the console cannot satisfy the evidence requirement by itself', () => {
-  it('abandoning the reference prompt credits nothing', async () => {
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('reference') ? null : '5000')));
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
-    const { user } = renderWithQuery(<SubscriptionsPage />);
-    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
-    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
-  });
-
-  it('declining the target-and-delta confirmation credits nothing', async () => {
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('reference') ? 'BANK-9002' : '5000')));
-    const confirm = vi.fn(() => false);
-    vi.stubGlobal('confirm', confirm);
-    const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
-    const { user } = renderWithQuery(<SubscriptionsPage />);
-    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('GY$5,000'));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('BANK-9002'));
-    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
-  });
-
-  it('a fractional amount is not a top-up', async () => {
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('reference') ? 'BANK-9003' : '5000.5')));
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
-    const { user } = renderWithQuery(<SubscriptionsPage />);
-    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
-    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
-  });
-});
-
 describe('[A-12] a waived fee carries the operator’s own words', () => {
-  it('sends what the operator typed — never the constant the console used to hard-code', async () => {
+  it('sends what the operator typed — never the constant the console used to hard-code — and says it went to a second admin', async () => {
+    vi.stubGlobal('prompt', vi.fn(() => { throw new Error('window.prompt was called'); }));
     const reason = 'Outage on 2 Sep — vendor could not trade for three days';
-    vi.stubGlobal('prompt', vi.fn(() => reason));
-    const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
+    const fetchMock = mockApi(handler(() => ({ status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this.', details: { approvalId: 'apr_1' } } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
-    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    await user.click(await screen.findByRole('button', { name: 'Waive fee for Shanta Kitchen…' }));
+    const dialog = screen.getByRole('dialog', { name: "Waive this period's fee for Shanta Kitchen?" });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), reason);
+    await user.click(within(dialog).getByRole('button', { name: 'Waive fee' }));
 
-    await user.click(screen.getByRole('button', { name: 'Waive fee' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/waive-fee`);
-    expect(JSON.parse(String(init?.body))).toEqual({ reason });
+    // the panel sends the reason as the header can carry it: smart punctuation made plain
+    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Outage on 2 Sep - vendor could not trade for three days' });
     expect(JSON.parse(String(init?.body)).reason).not.toBe('Waived by admin');
+    expect((await screen.findByRole('status')).textContent).toContain("Sent for a second admin's approval");
   });
 
-  it('an abandoned or empty reason waives nothing', async () => {
+  it('a cancelled, empty or one-word reason waives nothing', async () => {
     for (const answer of [null, '   ', 'ok']) {
-      vi.stubGlobal('prompt', vi.fn(() => answer));
-      const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
-      const { user } = renderWithQuery(<SubscriptionsPage />);
-      expect(await screen.findAllByText('Shanta Kitchen')).toBeTruthy();
-      await user.click(screen.getAllByRole('button', { name: 'Waive fee' })[0]!);
+      const fetchMock = mockApi(handler());
+      const { user, unmount } = renderWithQuery(<SubscriptionsPage />);
+      await user.click(await screen.findByRole('button', { name: 'Waive fee for Shanta Kitchen…' }));
+      const dialog = screen.getByRole('dialog');
+      if (answer === null) {
+        await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      } else {
+        await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), answer);
+        await user.click(within(dialog).getByRole('button', { name: 'Waive fee' }));
+        await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      }
       expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+      unmount();
     }
   });
+
+  it('a refusal stays in the panel — the old page swallowed it', async () => {
+    mockApi(handler(() => ({ status: 409, body: { success: false, error: { code: 'ALREADY_WAIVED', message: 'This period is already waived.' } } })));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Waive fee for Shanta Kitchen…' }));
+    const dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), 'Outage on 2 Sep — vendor could not trade');
+    await user.click(within(dialog).getByRole('button', { name: 'Waive fee' }));
+    expect((await within(dialog).findByRole('alert')).textContent).toContain('This period is already waived.');
+  });
+});
+
+it('a failed billing-trail read offers Retry instead of empty history', async () => {
+  const fallback = handler();
+  mockApi((request) => request.url.pathname.endsWith('/billing-events') ? { status: 500, body: { success: false } } : fallback(request));
+  const { user } = renderWithQuery(<SubscriptionsPage />);
+  await user.click(await screen.findByRole('button', { name: /Billing trail/i }));
+  expect(await screen.findByText("Couldn't load the billing trail")).toBeTruthy();
+  expect(screen.queryByText('No billing events.')).toBeNull();
 });

@@ -2,12 +2,12 @@
 
 import { use } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Phone } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, settleOrderRefund, errorStatus } from '@/lib/api';
 import { statusClass } from '@/lib/status';
-import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
@@ -48,24 +48,14 @@ function Party({ label, name, phone, href }: { label: string; name?: string | nu
 export default function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const queryClient = useQueryClient();
-  const { data, isLoading, isError } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
-  const cancelMutation = useMutation({
-    // [ADM-006] the operator's words, not a template
-    mutationFn: ({ refund, reason }: { refund: boolean; reason: string }) => cancelOrder(id, { refund }, reason),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['order', id] });
-      queryClient.invalidateQueries({ queryKey: ['orders'] });
-    },
-  });
-  // [A-14] Closing a refund is a separate act from deciding one is owed, and it
-  // needs what a refund actually is: a reference and the amount handed back.
-  const settleRefundMutation = useMutation({
-    mutationFn: ({ reference, amount, reason }: { reference: string; amount: string; reason: string }) =>
-      settleOrderRefund(id, reference, amount, reason),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['order', id] });
-      queryClient.invalidateQueries({ queryKey: ['orders'] });
-    },
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
+  // [MC-MONEY] Cancelling, recording a refund owed and settling it are each one
+  // in-page panel ([ADM-006] the operator's words, not a template); the
+  // server's answer — done, sent for a second admin's approval, or refused —
+  // stays on screen.
+  const actions = useActionRunner(() => {
+    void queryClient.invalidateQueries({ queryKey: ['order', id] });
+    void queryClient.invalidateQueries({ queryKey: ['orders'] });
   });
 
   const o: any = data?.data;
@@ -74,12 +64,16 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
   }
   if (isError || !o) {
+    // [DS768 D3] Only a 404 is "not found"; an outage is a failed read with a Retry.
+    const missing = !isError || errorStatus(error) === 404;
     return (
       <div>
         <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
           <ArrowLeft size={16} /> Orders
         </Link>
-        <p className="text-[var(--muted)]">Order not found.</p>
+        {missing
+          ? <p className="text-[var(--muted)]">Order not found.</p>
+          : <QueryFailed error={error} what="this order" onRetry={() => void refetch()} retrying={isFetching} />}
       </div>
     );
   }
@@ -90,6 +84,37 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   const refundingStore = o.vendor?.name ?? 'the store';
   const timeline: any[] = o.statusHistory ?? [];
+
+  const cancel = (refund: boolean) => void actions.run({
+    title: refund ? `Cancel order ${o.orderNumber} and record a refund owed?` : `Cancel order ${o.orderNumber}?`,
+    body: refund ? (
+      <p>
+        This records that {refundingStore} OWES the customer a refund. It does not mark anything refunded — the order
+        stays in the outstanding list until someone records the reference and the amount actually handed back.
+      </p>
+    ) : isMmg ? (
+      <p>MMG payment stays between customer and store. If paid, it is refunded by {refundingStore}; Swift cannot refund it.</p>
+    ) : (
+      <p>The customer and {refundingStore} are told the order is cancelled.</p>
+    ),
+    confirmLabel: refund ? 'Cancel and record refund owed' : 'Cancel order',
+    reason: { hint: 'The customer is owed the real reason; it is kept on the permanent record.' },
+    submit: ({ reason }) => cancelOrder(id, { refund }, reason),
+    success: () => (refund ? `Order ${o.orderNumber} is cancelled; ${refundingStore} owes the customer a refund.` : `Order ${o.orderNumber} is cancelled.`),
+  });
+  // [A-14] Closing a refund is a separate act from deciding one is owed, and it
+  // needs what a refund actually is: a reference and the amount handed back.
+  const settleRefund = () => void actions.run({
+    title: `Record the refund handed back for order ${o.orderNumber}?`,
+    body: <p>The order owes GY${Number(o.refundOwedAmount ?? 0).toLocaleString()}. Record what was actually handed back; the server checks it against what is owed.</p>,
+    confirmLabel: 'Record refund',
+    fields: [
+      { kind: 'reference', name: 'reference', label: 'Reference', hint: 'Receipt or handover number' },
+      { kind: 'amount', name: 'amount', label: 'Amount handed back', hint: 'In GYD, as handed back', cents: true },
+    ],
+    submit: ({ reason, values }) => settleOrderRefund(id, String(values['reference']), Number(values['amount']), reason),
+    success: () => `The refund for order ${o.orderNumber} is recorded as handed back.`,
+  });
 
   return (
     <div>
@@ -117,41 +142,25 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           {!TERMINAL.includes(o.status) && (
             <>
               <button
-                onClick={() => {
-                  const mmgNote = isMmg
-                    ? `\n\nMMG payment stays between customer and store. If paid, it is refunded by ${refundingStore}; Swift cannot refund it.`
-                    : '';
-                  if (!window.confirm(`Cancel order ${o.orderNumber}?${mmgNote}`)) return;
-                  const reason = askReason({ action: 'cancel this order', subject: o.orderNumber });
-                  if (reason) cancelMutation.mutate({ refund: false, reason });
-                }}
-                disabled={cancelMutation.isPending}
+                onClick={() => cancel(false)}
                 className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
               >
-                Cancel order
+                Cancel order…
               </button>
               {o.paymentMethod === 'CASH' && (
                 <button
-                  onClick={() => {
-                    if (window.confirm(
-                      `Cancel ${o.orderNumber} and record that ${refundingStore} OWES the customer a refund?`
-                      + '\n\nThis does not mark anything refunded. The order stays in the outstanding'
-                      + ' list until someone records the reference and the amount actually handed back.',
-                    )) {
-                      const reason = askReason({ action: 'cancel this order and record a refund owed', subject: o.orderNumber });
-                      if (reason) cancelMutation.mutate({ refund: true, reason });
-                    }
-                  }}
-                  disabled={cancelMutation.isPending}
+                  onClick={() => cancel(true)}
                   className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
                 >
-                  Record refund owed
+                  Record refund owed…
                 </button>
               )}
             </>
           )}
         </div>
       </div>
+
+      {actions.banner}
 
       {/* [A-14] An obligation nobody has settled is money the customer is still
           waiting for. It says so, with its age, until evidence closes it. */}
@@ -163,28 +172,11 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             {new Date(o.refundOwedAt).toLocaleString()}. Nothing here says the money moved.
           </p>
           <button
-            onClick={() => {
-              const reference = window.prompt(
-                'Reference for the refund that was handed back (receipt or handover number):',
-              );
-              if (!reference) return;
-              const amount = window.prompt(
-                `Amount actually handed back (the order owes GY$${Number(o.refundOwedAmount ?? 0).toLocaleString()}):`,
-              );
-              if (!amount) return;
-              const reason = askReason({ action: 'record this refund as handed back', subject: `order ${o.orderNumber}` });
-              if (reason) settleRefundMutation.mutate({ reference, amount, reason });
-            }}
-            disabled={settleRefundMutation.isPending}
+            onClick={settleRefund}
             className="mt-3 px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
           >
-            Record refund handed back
+            Record refund handed back…
           </button>
-          {settleRefundMutation.isError && (
-            <p className="mt-2 text-sm text-red-400" role="alert">
-              {(settleRefundMutation.error as Error).message}
-            </p>
-          )}
         </div>
       )}
 
@@ -198,11 +190,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
         </div>
       )}
 
-      {cancelMutation.error && (
-        <div className="mb-4">
-          <MutationError error={cancelMutation.error} label="Order cancellation failed" />
-        </div>
-      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Left column — what + who */}

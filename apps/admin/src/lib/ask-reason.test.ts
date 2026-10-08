@@ -1,60 +1,27 @@
-import { describe, it, expect, vi } from 'vitest';
-import { askReason, REASON_MIN } from '@/lib/ask-reason';
+import { describe, it, expect } from 'vitest';
+import * as askReasonModule from '@/lib/ask-reason';
+import { reasonTooShort, REASON_MIN } from '@/lib/ask-reason';
 
 // ---------------------------------------------------------------------------
 // [ADM-006] THE OPERATOR STATES WHY, OR NOTHING HAPPENS.
 //
-// The server now refuses a consequential action without a reason. That alone
-// would not have fixed this console, because it DID send one — the literal
-// string 'Suspended by admin', hard-coded at the call site, on every ban and
-// every suspension. A reason nobody was asked for is a field, not an
-// explanation.
-//
-// So the failure mode to guard is not "no reason sent". It is "a reason
-// invented on the operator's behalf". A cancelled prompt must return NOTHING,
-// so the caller does nothing — never a default, which is exactly the shape
-// that produced the canned strings.
+// The failure mode to guard was never "no reason sent" — it was "a reason
+// invented on the operator's behalf" ('Suspended by admin', hard-coded on every
+// ban). [MISSION CONTROL · MONEY] The browser prompt that asked is retired: the
+// in-page panel asks, and a cancelled panel resolves nothing and runs nothing
+// (graded as behaviour in components/mc/primitives.test.tsx). What is left here
+// is the length rule screens with their own reason input share with the server.
 // ---------------------------------------------------------------------------
 
-const REAL = 'Three written warnings, then a no-show on a paid booking';
-
-describe('[ADM-006] askReason', () => {
-  it('returns the operator’s own words, trimmed', () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(`  ${REAL}  `));
-    expect(askReason({ action: 'ban this account' })).toBe(REAL);
+describe('[ADM-006] the reason length rule', () => {
+  it('matches the server: fewer than REASON_MIN characters, after trimming, is not a reason', () => {
+    expect(REASON_MIN).toBe(12);
+    expect(reasonTooShort('ok')).toBe(true);
+    expect(reasonTooShort('   too short   ')).toBe(true);
+    expect(reasonTooShort('Three written warnings, then a no-show')).toBe(false);
   });
 
-  it('a CANCELLED prompt returns nothing — it never invents a reason', () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(null));
-    vi.stubGlobal('alert', vi.fn());
-    expect(askReason({ action: 'ban this account' })).toBeNull();
-  });
-
-  it('a word is not a reason: too short returns nothing, and says so, rather than sending it', () => {
-    const alert = vi.fn();
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('bad'));
-    vi.stubGlobal('alert', alert);
-    expect(askReason({ action: 'ban this account' })).toBeNull();
-    expect(alert).toHaveBeenCalledTimes(1);
-    expect(String(alert.mock.calls[0]![0])).toMatch(/Nothing was changed/);
-  });
-
-  it('an empty or whitespace answer is a cancellation too — not an empty reason', () => {
-    vi.stubGlobal('alert', vi.fn());
-    for (const answer of ['', '   ', '\n']) {
-      vi.stubGlobal('prompt', vi.fn().mockReturnValue(answer));
-      expect(askReason({ action: 'ban this account' })).toBeNull();
-    }
-  });
-
-  it('the question names the action and the subject, and states the length the server wants', () => {
-    const prompt = vi.fn().mockReturnValue(REAL);
-    vi.stubGlobal('prompt', prompt);
-    askReason({ action: 'suspend this account', subject: 'Ravi Persaud' });
-    const asked = String(prompt.mock.calls[0]![0]);
-    expect(asked).toContain('suspend this account');
-    expect(asked).toContain('Ravi Persaud');
-    expect(asked).toContain(String(REASON_MIN));
-    expect(asked).toMatch(/permanent record/);
+  it('[MC-MONEY] the browser-prompt helper is gone — no page can fall back to it', () => {
+    expect('askReason' in askReasonModule).toBe(false);
   });
 });

@@ -68,6 +68,8 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
+import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
+import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 
@@ -1066,8 +1068,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/users', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { role, status, search } = usersQuerySchema.parse(request.query);
+    // [MC-PR3] test data is left out unless asked for, in the query, so the total stays true
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(role && { activeRole: role }),
       ...(status && { status }),
       ...(search && {
@@ -1079,8 +1083,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_USER, excludeFixtures);
 
-    const [users, total] = await Promise.all([
+    const [users, total, hiddenTestRecords] = await Promise.all([
       app.prisma.user.findMany({
         where,
         select: {
@@ -1099,12 +1104,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.user.count({ where }),
+      hiddenWhere ? app.prisma.user.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(users, total, { page, limit, skip }) };
+    const result = paginatedResponse(users, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** [S1 response-shaping] The mover slice `GET /users/:id` needs: identity
@@ -1282,8 +1289,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/vendors', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = vendorsQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { vendorType: type }),
       ...(search && {
@@ -1293,8 +1301,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_VENDOR, excludeFixtures);
 
-    const [vendors, total] = await Promise.all([
+    const [vendors, total, hiddenTestRecords] = await Promise.all([
       app.prisma.vendor.findMany({
         where,
         include: {
@@ -1304,12 +1313,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.vendor.count({ where }),
+      hiddenWhere ? app.prisma.vendor.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(vendors, total, { page, limit, skip }) };
+    const result = paginatedResponse(vendors, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
@@ -1359,65 +1370,141 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  /**
+   * [MC-PR2] The store's activation checklist: every required document with its
+   * state in the gate's own terms, the storefront disclosure verdict (missing
+   * element names only, never values), and what the console may do next — the
+   * same verdict the approve route below enforces. Read-only; no file reference.
+   */
+  app.get('/vendors/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id },
+      select: { id: true, status: true, suspensionSource: true, isVerified: true, activationValidUntil: true, owner: { select: { userId: true, user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    const goLive = await verification.vendorGoLive(id);
+    if (!goLive) throw new NotFoundError('Vendor', id);
+    const subscription = vendor.subscription ?? null;
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription }, goLive);
+    return {
+      success: true,
+      data: {
+        vendorId: vendor.id,
+        applicantId: goLive.ownerUserId,
+        storeStatus: vendor.status,
+        suspensionSource: vendor.suspensionSource,
+        ownerAccountStatus: vendor.owner.user.status,
+        subscriptionStatus: subscription?.status ?? null,
+        feeOperable: feeOperable(subscription),
+        isVerified: vendor.isVerified,
+        activationValidUntil: vendor.activationValidUntil,
+        role: goLive.role,
+        checklist: { items: goLive.checklist.items, complete: goLive.checklist.complete },
+        disclosure: goLive.disclosure,
+        ready: goLive.ready,
+        next,
+      },
+    };
+  });
+
+  /**
+   * [ACTIVATION AUTHORITY / EV-ACT-11 · MC-PR2] Activate a store that is waiting
+   * for approval, or reinstate a suspended one — never past a gate the single
+   * activation projection enforces.
+   *
+   * This route used to be its own activation authority: it checked the document
+   * checklist and wrote ACTIVE, skipping the storefront-disclosure go-live gate
+   * (DOC-INV-27) and leaving no activation expiry, and it would reopen the store
+   * of a partner who had closed their account. Now one verdict
+   * (vendorActivationNext, shared with the checklist read) decides:
+   *  - waiting for approval with every rule met → the projection itself makes it
+   *    live (checklist, disclosure, pricing and trial, expiry, tier promotion);
+   *  - suspended with every rule met → reinstated by CAS, carrying the same
+   *    expiry the projection would write [Fable #1481 S4-2: the suspension
+   *    source is cleared, so no stale BILLING survives for a later heal];
+   *  - suspended while its subscription cannot operate (the vendor gate's
+   *    rule: fee unpaid or billing stopped) → refused 409 FEE_UNPAID [MC-AD2]:
+   *    only a confirmed payment (or billing's own heal) lifts a fee hold, and
+   *    the owner is pushed nothing;
+   *  - the reinstate decides again inside its transaction, under the owner's
+   *    account lock and the store row lock [Opus S3-1], so a deletion or a
+   *    document decision racing it cannot be undone by it;
+   *  - otherwise refused with what is missing, and nothing changes.
+   */
   app.put('/vendors/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
-      include: { owner: true },
+      include: { owner: { include: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
     // [DELETION-INTEGRITY] A store wound down with its owner's closed account never reopens.
     if (vendor.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
 
-    // [ACTIVATION AUTHORITY / EV-ACT-11] This button is no longer a
-    // checklist-free ACTIVE writer. The founder invariant is: submit owner ID
-    // + required business documents → restricted per-document review →
-    // activation. Approval here CONFIRMS that evidence; it cannot substitute
-    // for it — a store whose checklist is incomplete, expired, or purged
-    // stays pending and the reviewer is pointed at the Verification queue.
-    const checklistComplete = await verification.isRoleVerified(
-      vendor.owner.userId,
-      vendor.vendorType as Parameters<typeof verification.isRoleVerified>[1],
-    );
-    if (!checklistComplete) {
-      throw new AppError(
-        409,
-        'CHECKLIST_INCOMPLETE',
-        `${vendor.name}'s required documents are not all approved and current — review them in the Verification queue first.`,
-      );
-    }
+    const goLive = await verification.vendorGoLive(id);
+    if (!goLive) throw new NotFoundError('Vendor', id);
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription: vendor.subscription ?? null }, goLive);
+    const refused = vendorActivationRefusal(next, vendor.name, goLive);
+    if (refused) throw refused;
 
-    // [PR1270-S2-03] Price BEFORE the activation write. A market that cannot
-    // price this store refuses the approval here, with the config error, and
-    // the store stays pending — never ACTIVE and searchable with no
-    // subscription, which a failure after the CAS below used to leave behind.
-    const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
-      // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
-      // suspension source survives it for a later heal or payment to act on.
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' }, OR: [{ suspensionSource: null }, { suspensionSource: { not: 'WIND_DOWN' } }] }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
-      if (won.count === 0) {
-        // The store changed after the check above: say which way.
-        const now = await tx.vendor.findUnique({ where: { id }, select: { suspensionSource: true } });
-        if (now?.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
-        throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+    let updated;
+    if (next === 'CAN_ACTIVATE') {
+      // The one authority that makes a store live, on every path (review,
+      // auto-approval, the reconcile belt — and now this button), run for this
+      // store only [DS816 S3]. It prices the store and starts its trial in the
+      // same transaction, or refuses with the config error and leaves it pending.
+      await verification.activateStore(goLive.ownerUserId, id);
+      updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
+      if (updated.status !== 'ACTIVE') {
+        throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
-      return tx.vendor.findUniqueOrThrow({ where: { id } });
-    });
+    } else {
+      // CAN_REINSTATE. [PR1270-S2-03] Price BEFORE the activation write: a
+      // market that cannot price this store refuses here and it stays suspended.
+      updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
+        // [MC-PR2 · Opus S3-1] Decide again under the locks the competing writers take, so nothing that
+        // commits after the first read can be reopened: the owner's account row (account deletion and the
+        // partner wind-down take it; so do document decisions, revocations and expiry), then the store row.
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-reinstate-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-reinstate-store */`;
+        const fresh = await tx.vendor.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, suspensionSource: true, owner: { select: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+        });
+        const freshGoLive = await verification.vendorGoLive(id, tx);
+        if (!freshGoLive) throw new NotFoundError('Vendor', id);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null }, freshGoLive);
+        const refusedNow = again === 'CAN_REINSTATE' ? null
+          : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
+        if (refusedNow) throw refusedNow;
+        const activationValidUntil = await verification.checklistEvidenceValidUntil(freshGoLive.ownerUserId, freshGoLive.role, tx);
+        // [Fable #1481 S4-2] A reinstatement ends whatever suspension the store was under: no stale
+        // suspension source survives it for a later heal or payment to act on. The CAS names the exact
+        // suspension decided above, under the lock.
+        const won = await tx.vendor.updateMany({
+          where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
+          data: { status: 'ACTIVE', isVerified: true, suspensionSource: null, activationValidUntil },
+        });
+        if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
+        return tx.vendor.findUniqueOrThrow({ where: { id } });
+      });
+    }
 
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
 
-    await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status }, request);
-
-    // A subscription is born as a 14-day trial the moment the vendor goes live.
+    await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status, previousSuspensionSource: vendor.suspensionSource, verdict: next }, request);
 
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Vendor Approved!',
-      body: `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
+      title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
+      body: next === 'CAN_REINSTATE'
+        ? `${vendor.name} has been reinstated and can take orders again once you open it.`
+        : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
       data: { vendorId: id },
     });
 
@@ -1482,8 +1569,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1500,8 +1588,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [riders, total] = await Promise.all([
+    const [riders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.rider.findMany({
         where,
         include: {
@@ -1510,12 +1599,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.rider.count({ where }),
+      hiddenWhere ? app.prisma.rider.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(riders, total, { page, limit, skip }) };
+    const result = paginatedResponse(riders, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1535,6 +1626,50 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!rider) throw new NotFoundError('Rider', id);
 
     return { success: true, data: rider };
+  });
+
+  /**
+   * [MC-PR2] A mover's activation checklist: every required document for their
+   * PERSISTED vehicle class with its state, and the live-operation gate the
+   * Verify button obeys (the same call the verify routes make). The per-item
+   * states are the document picture; `live` is the verdict — a vehicle
+   * document can be approved yet belong to a previous vehicle, and only the
+   * gate decides. Read-only; no file reference.
+   */
+  const moverActivationChecklist = async (
+    kind: 'RIDER' | 'DRIVER',
+    profile: { id: string; userId: string; vehicleType: Parameters<typeof verification.getLiveOperationStatus>[1]['vehicleType']; documentsVerified: boolean },
+  ) => {
+    const checklist = await verification.activationChecklist(profile.userId, 'MOVER', { vehicleType: profile.vehicleType });
+    const live = await verification.getLiveOperationStatus(
+      profile.userId,
+      kind === 'RIDER' ? { vehicleType: profile.vehicleType, kind: 'RIDER' } : { vehicleType: profile.vehicleType },
+    );
+    const next = profile.documentsVerified ? 'VERIFIED'
+      : live.allowed ? 'CAN_VERIFY'
+        : live.reason === 'insurance' ? 'NEEDS_INSURANCE' : 'NEEDS_DOCUMENTS';
+    return {
+      moverId: profile.id,
+      kind,
+      applicantId: profile.userId,
+      vehicleType: profile.vehicleType,
+      documentsVerified: profile.documentsVerified,
+      checklist: { items: checklist.items, complete: checklist.complete },
+      live,
+      next,
+    };
+  };
+
+  app.get('/riders/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const rider = await app.prisma.rider.findFirst({
+      where: { id, user: { tenantId } },
+      select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+    });
+    if (!rider) throw new NotFoundError('Rider', id);
+    return { success: true, data: await moverActivationChecklist('RIDER', rider) };
   });
 
   app.put('/riders/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
@@ -1620,8 +1755,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1637,8 +1773,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [drivers, total] = await Promise.all([
+    const [drivers, total, hiddenTestRecords] = await Promise.all([
       app.prisma.driver.findMany({
         where,
         include: {
@@ -1647,12 +1784,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.driver.count({ where }),
+      hiddenWhere ? app.prisma.driver.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(drivers, total, { page, limit, skip }) };
+    const result = paginatedResponse(drivers, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1672,6 +1811,18 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!driver) throw new NotFoundError('Driver', id);
 
     return { success: true, data: driver };
+  });
+
+  app.get('/drivers/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const driver = await app.prisma.driver.findFirst({
+      where: { id, user: { tenantId } },
+      select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+    });
+    if (!driver) throw new NotFoundError('Driver', id);
+    return { success: true, data: await moverActivationChecklist('DRIVER', driver) };
   });
 
   app.put('/drivers/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
@@ -1801,8 +1952,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/orders', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, dateFrom, dateTo, search } = adminOrdersQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { orderType: type }),
       ...(dateFrom || dateTo
@@ -1820,8 +1972,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_ORDER, excludeFixtures);
 
-    const [orders, total] = await Promise.all([
+    const [orders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.order.findMany({
         where,
         // [A-15] The handover secrets never enter the admin DTO. `include`
@@ -1837,14 +1990,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.order.count({ where }),
+      hiddenWhere ? app.prisma.order.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // 13 Decimal columns on the order + 7 more on every included OrderItem,
     // all of which the admin client types as `number`. Coerce at the seam.
-    return { success: true, ...paginatedResponse(coerceMoney(orders), total, { page, limit, skip }) };
+    const result = paginatedResponse(coerceMoney(orders), total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** Live ops snapshot for the command map: every online mover's position +

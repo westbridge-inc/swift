@@ -15,6 +15,23 @@ const REASON_HEADER = 'x-swift-reason';
 export const BROWSER_CLIENT = 'admin-web';
 const clientHeaders = { 'X-Swift-Client': BROWSER_CLIENT } as const;
 
+/** Bound the whole exchange, including response-body reads. A timeout never proves a write failed. */
+async function withRequestTimeout<T>(work: (_signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal | null): Promise<T> {
+  const controller = new AbortController();
+  const abort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) abort();
+  else callerSignal?.addEventListener('abort', abort, { once: true });
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new DOMException('The request timed out. Check whether it went through before trying again.', 'TimeoutError'));
+      controller.abort();
+    }, 30_000);
+  });
+  try { return await Promise.race([work(controller.signal), timeout]); }
+  finally { clearTimeout(timer!); callerSignal?.removeEventListener('abort', abort); }
+}
+
 let refreshFlight: Promise<boolean> | null = null;
 
 /** One refresh at a time: concurrent 401s share the flight, so a rotated refresh cookie is never replayed. */
@@ -22,7 +39,7 @@ async function tryRefresh(): Promise<boolean> {
   if (!refreshFlight) {
     refreshFlight = (async () => {
       try {
-        const res = await fetch(`${API_URL}/api/v1/auth/refresh`, { method: 'POST', credentials: 'include', headers: { ...clientHeaders } });
+        const res = await withRequestTimeout((signal) => fetch(`${API_URL}/api/v1/auth/refresh`, { method: 'POST', credentials: 'include', headers: { ...clientHeaders }, signal }));
         return res.ok;
       } catch {
         return false;
@@ -76,9 +93,11 @@ async function apiFetch(path: string, options?: RequestInit & { reason?: string 
     error.code = 'REASON_UNSENDABLE';
     throw error;
   }
+  return withRequestTimeout(async (signal) => {
   const doFetch = () =>
     fetch(`${API_URL}${path}`, {
       ...requestOptions,
+      signal,
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
@@ -102,7 +121,9 @@ async function apiFetch(path: string, options?: RequestInit & { reason?: string 
       throw expired;
     }
   }
-  const json = await res.json().catch(() => ({}));
+  const unreadable = () => Object.assign(new Error('Swift returned an unreadable answer. Refresh and check whether the action went through before retrying.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+  const json = await res.json().catch(() => { throw unreadable(); });
+  if (res.status === 202 && json?.error?.code !== 'APPROVAL_REQUIRED') throw unreadable();
   if (!res.ok || json?.success === false) {
     // Carry the server's error CODE, not just its prose. A page that has to
     // tell "the queues are not running on this server" apart from "no jobs have
@@ -123,6 +144,7 @@ async function apiFetch(path: string, options?: RequestInit & { reason?: string 
     throw error;
   }
   return json;
+  }, requestOptions.signal);
 }
 
 /** The HTTP status of a thrown apiFetch error. 202 is not a failure — see
@@ -272,12 +294,19 @@ export interface Promo {
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
-export const fetchUsers = (params?: string): Promise<Envelope<AdminUser[]>> =>
+/** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
+export interface ListEnvelope<T> {
+  success: boolean;
+  data: T[];
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+}
+// [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
+export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
   apiFetch(`/api/v1/admin/users?${params || ''}`);
-export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
+export const fetchVendors = (params?: string) => apiFetch(`/api/v1/admin/vendors?${params || ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
-export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
-export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
+export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?${params || ''}`);
+export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 
@@ -286,6 +315,55 @@ export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${i
 export const fetchVendorDetail = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}`);
 export const fetchRiderDetail = (id: string) => apiFetch(`/api/v1/admin/riders/${id}`);
 export const fetchDriverDetail = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}`);
+
+// ── [MC-PR2] Activation checklists: the per-document truth, in the gate's own terms ──
+export type ActivationItemState = 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | 'MISSING';
+export interface ActivationChecklistItem {
+  docType: string;
+  state: ActivationItemState;
+  documentId: string | null;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  /** The reviewer's note on a rejection — what the applicant was told. */
+  note: string | null;
+  /** Approved, and a newer submission of the same type is waiting for review. */
+  renewalPending: boolean;
+}
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
+export interface VendorActivationChecklist {
+  vendorId: string;
+  /** The owner's user id: the Review Center's applicant. */
+  applicantId: string;
+  storeStatus: string;
+  suspensionSource: string | null;
+  ownerAccountStatus: string | null;
+  /** The store's weekly-fee subscription state (null before it has one). */
+  subscriptionStatus?: string | null;
+  /** May the store's subscription operate now (the vendor gate's rule)? A suspended store whose fee cannot operate reads FEE_UNPAID. */
+  feeOperable?: boolean;
+  isVerified: boolean;
+  activationValidUntil: string | null;
+  role: string;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
+  ready: boolean;
+  next: VendorActivationNext;
+}
+export type MoverActivationNext = 'VERIFIED' | 'CAN_VERIFY' | 'NEEDS_INSURANCE' | 'NEEDS_DOCUMENTS';
+export interface MoverActivationChecklist {
+  moverId: string;
+  kind: 'RIDER' | 'DRIVER';
+  applicantId: string;
+  vehicleType: string;
+  documentsVerified: boolean;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  live: { allowed: boolean; reason: 'ok' | 'docs' | 'insurance' };
+  next: MoverActivationNext;
+}
+export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<VendorActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
+export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const suspendVendor = (id: string, reason: string) =>
