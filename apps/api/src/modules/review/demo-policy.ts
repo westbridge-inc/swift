@@ -53,6 +53,19 @@ export class ReviewDemoOrderRefusedError extends AppError {
   }
 }
 
+/** [REVIEW-PARTNER] A demo login is SHARED by every reviewer who reads the store notes: setting
+ *  or changing its password would lock the others out (and a new credential ends their sessions). */
+export const REVIEW_DEMO_NO_CREDENTIALS = 'REVIEW_DEMO_NO_CREDENTIALS';
+export const REVIEW_DEMO_NO_CREDENTIALS_MESSAGE =
+  "This is Swift's App Review demo: its logins are shared with every reviewer, so their password can't be set or changed here. Nothing was changed and nobody was contacted.";
+
+export class ReviewDemoCredentialRefusedError extends AppError {
+  constructor() {
+    super(403, REVIEW_DEMO_NO_CREDENTIALS, REVIEW_DEMO_NO_CREDENTIALS_MESSAGE);
+    this.name = 'ReviewDemoCredentialRefusedError';
+  }
+}
+
 export const REVIEW_DEMO_NO_SOS = 'REVIEW_DEMO_NO_SOS';
 export const REVIEW_DEMO_NO_SOS_MESSAGE =
   "This is Swift's App Review demo, so nobody was alerted: no safety team, operator or emergency contact. In a real emergency, call your local emergency number.";
