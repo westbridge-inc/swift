@@ -7,7 +7,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
 import { createHash } from 'node:crypto';
-import { looksLikeDocument } from '../../utils/images';
+import { looksLikeDocument, stripImageMetadata } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 
@@ -147,8 +147,12 @@ export async function verificationRoutes(app: FastifyInstance) {
         select: { sha256: true },
       });
 
+      // Storage receives ciphertext and cannot inspect photo metadata. Use
+      // the shared image parser before sealing, retaining the existing raw
+      // digest for duplicate-document detection and the upload response shape.
+      const cleanBuffer = stripImageMetadata(buffer, file.mimetype);
       const dek = generateDek();
-      const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
+      const { ciphertext, iv, authTag } = encryptBuffer(cleanBuffer, dek);
       const { url } = await storage.upload({
         buffer: ciphertext,
         // Multipart normalizes empty/path-only names to ''. Appending .enc
@@ -165,7 +169,7 @@ export async function verificationRoutes(app: FastifyInstance) {
           authTag: new Uint8Array(authTag),
           wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
           mimeType: file.mimetype,
-          sizeBytes: buffer.length,
+          sizeBytes: cleanBuffer.length,
           sha256,
           createdBy: request.user.userId,
         },
