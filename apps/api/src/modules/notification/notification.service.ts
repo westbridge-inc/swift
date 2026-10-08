@@ -492,7 +492,8 @@ export class NotificationService {
    * persisted. This is the post-commit half for liability-sensitive workflows:
    * socket/push failures cannot roll back the domain fact, and retrying this
    * method never inserts a duplicate inbox notification. */
-  async publishPersisted(notificationId: string): Promise<boolean> {
+  async publishPersisted(notificationId: string, options: { requirePush?: boolean } = {}): Promise<boolean> {
+    let pushSubmitted = !options.requirePush;
     let notification: Notification | null;
     try {
       notification = await this.prisma.notification.findUnique({ where: { id: notificationId } });
@@ -542,7 +543,10 @@ export class NotificationService {
           const effect = () => this.channels.push.sendPush(tokens.map((t) => t.token), notification!.title, notification!.body, data,
             { ...options, ...(this.channels.push.supportsHandoff ? { handoff } : {}) });
           await (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
-            .then((r) => deactivateDeadTokens(this.prisma, r?.invalidTokens))
+            .then(async (r) => {
+              if (r && r.sent > 0) pushSubmitted = true;
+              await deactivateDeadTokens(this.prisma, r?.invalidTokens);
+            })
             .catch((err) => {
               log().warn(
                 { err, userId: notification.userId, type: notification.type },
@@ -559,7 +563,7 @@ export class NotificationService {
       );
       notificationFailuresCounter.inc({ channel: 'fanout', stage: 'send' });
     }
-    return true;
+    return pushSubmitted;
   }
 
   /** Direct SMS through the interface (OTPs, vendor-alert fallbacks). */
