@@ -48,7 +48,7 @@ describe('the quote is priced for exactly what the order button submits (E01)', 
     // The old single-store pickup selection is gone, from the order and the retry.
     expect(src).not.toContain("{ [c.vendor.id]: 'PICKUP' }");
     expect(src).not.toMatch(/const vendorId = c\?\.vendor\?\.id;/);
-    expect(src).toContain("onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });");
+    expect(src).toContain("onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])), ...confirmedPrices });");
   });
 
   it('money is committed only against a settled quote: priced for the current choices and not mid-refresh', () => {
@@ -108,7 +108,7 @@ describe('the no-riders pickup retry shows the new total before placing (E01-B)'
     expect(src).toContain('const pickupTotal = Number(pickupQuote.data.totalAmount);');
     expect(src).toContain('`Your pickup total is ${money(pickupTotal)}. The order is only placed when you confirm.`');
     expect(src).toContain("text: 'Confirm pickup order'");
-    expect(src).toContain('onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, \'PICKUP\'])) });');
+    expect(src).toContain('onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, \'PICKUP\'])), ...confirmedPrices });');
     expect(src).toContain("Alert.alert('Couldn’t price pickup', 'Try again in a moment.');");
     expect(src).toContain('const pickupQuote = useCart<any>(latitude ?? undefined, longitude ?? undefined, retryPricing, confirmPickup);');
   });
@@ -147,6 +147,20 @@ describe('an unavailable line recovers on the phone (E07)', () => {
     const unavailableBranch = src.slice(src.indexOf('{!it.isAvailable ? ('), src.indexOf(') : (', src.indexOf('{!it.isAvailable ? (')));
     expect(unavailableBranch).toContain('No longer available — remove to continue');
     expect(unavailableBranch).not.toContain('<AddMorph');
+  });
+
+  it('[F4] an unavailable line says why when the server said (a sold-out choice), else the sold-out item wording', () => {
+    const unavailableBranch = src.slice(src.indexOf('{!it.isAvailable ? ('), src.indexOf(') : (', src.indexOf('{!it.isAvailable ? (')));
+    expect(unavailableBranch).toContain("{it.unavailableReason || 'No longer available — remove to continue'}");
+  });
+
+  it('[L09 · price lock] Place order sends the prices on screen; a pickup retry sends the pickup total it confirmed', () => {
+    const order = src.slice(src.indexOf('const onOrder = (extra?: Record<string, unknown>) => {'), src.indexOf('tipAmount: submittedTip,'));
+    expect(order).toContain('...pricesAsSeen(pickupRetry ? pickupQuote.data : c),\n        ...(extra ?? {}),');
+  });
+
+  it('[row 70] a line\'s small print comes from the one helper that shows its note', () => {
+    expect(src).toContain('const meta = cartLineMeta(it, ');
   });
 
   it('a failed background re-quote keeps the cart on screen — only a cart that never loaded is an error (DS222 R1)', () => {
