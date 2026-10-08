@@ -40,6 +40,13 @@ const vendor = {
   _count: { items: 0, orders: 0 },
 };
 
+const liveChecklist = {
+  vendorId: 'vendor-target', applicantId: 'owner-1', storeStatus: 'ACTIVE', suspensionSource: null, ownerAccountStatus: 'ACTIVE',
+  isVerified: true, activationValidUntil: null, role: 'RESTAURANT',
+  checklist: { complete: true, items: [{ docType: 'owner_national_id', state: 'APPROVED', documentId: 'd1', submittedAt: null, expiresAt: null, note: null, renewalPending: false }] },
+  disclosure: { engaged: false, complete: true, missing: [] }, ready: true, next: 'LIVE',
+};
+
 function vendorHandler(mutation: (_request: ApiRequest) => { body: unknown; status?: number }) {
   return (request: ApiRequest) => {
     if (
@@ -47,6 +54,10 @@ function vendorHandler(mutation: (_request: ApiRequest) => { body: unknown; stat
       request.url.pathname === '/api/v1/admin/vendors/vendor-target'
     ) {
       return { body: { success: true, data: vendor } };
+    }
+    // [MC-PR2] the page also reads the store's activation checklist
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target/activation-checklist') {
+      return { body: { success: true, data: liveChecklist } };
     }
     return mutation(request);
   };
@@ -82,7 +93,7 @@ describe('vendor suspension mutation', () => {
     await user.click(suspendButton);
     let dialog = screen.getByRole('dialog', { name: 'Suspend Target Store?' });
     expect(dialog.textContent).toContain('It stops taking orders immediately');
-    expect(dialog.textContent).toContain('The console cannot undo a suspension yet.');
+    expect(dialog.textContent).toContain('You can reinstate it from this page later, once its required documents are approved and current.');
     // [ADM-006] the operator is asked why; the reason is theirs, not a template
     await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Repeated no-shows after three written warnings');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
@@ -146,7 +157,8 @@ describe('vendor suspension mutation', () => {
     expect(screen.getByRole('heading', { name: 'Target Store' })).toBeTruthy();
     expect(screen.getByText('Live')).toBeTruthy();
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
-    expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(1);
+    // two reads on load — the store and its activation checklist [MC-PR2]; the refusal re-read nothing
+    expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(2);
 
     // closing the panel does not make the refusal vanish: the page keeps it
     await user.click(within(dialog).getByRole('button', { name: 'Close' }));

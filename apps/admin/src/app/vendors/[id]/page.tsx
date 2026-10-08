@@ -4,8 +4,8 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchVendorDetail, approveVendor, suspendVendor, featureVendor } from '@/lib/api';
-import { label, ratingText } from '@/lib/labels';
+import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, type VendorActivationChecklist } from '@/lib/api';
+import { label, ratingText, type Tone } from '@/lib/labels';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -13,6 +13,7 @@ import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
+import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-1 pilot] One store, the whole story — and every action
@@ -24,6 +25,12 @@ import { DataTable } from '@/components/mc/DataTable';
 // CHECKLIST_INCOMPLETE — is shown in plain words with the next step. The old
 // page dropped every answer but the suspension's: approving a store whose
 // documents were not all approved "silently didn't work".
+//
+// [MC-PR2] The page now shows the store's required documents and what each one
+// is waiting for, with the server's verdict. There is no "Approve" decision of
+// its own any more: a store goes live by itself when its last required
+// document is approved. "Activate now" and "Reinstate" appear only when the
+// server says every go-live rule is met, and run the same gates.
 // ---------------------------------------------------------------------------
 
 const when = (iso: string | null | undefined) =>
@@ -49,6 +56,42 @@ function Row({ label: name, children }: { label: string; children: React.ReactNo
   );
 }
 
+const DISCLOSURE_WORDS: Record<string, string> = {
+  legalName: 'the legal or trading name', address: 'the business address', contact: "the owner's verified phone",
+  operator: "Swift's own operator details (a server setting the tech team fixes)", vendor: 'the store record',
+};
+
+/** [MC-PR2] Where this store stands, in one sentence, from the server's verdict. */
+function vendorVerdict(c: VendorActivationChecklist, name: string): { tone: Tone; text: string } {
+  switch (c.next) {
+    case 'LIVE':
+      return c.isVerified
+        ? { tone: 'good', text: c.activationValidUntil ? `Live. Its documents are approved and current until ${when(c.activationValidUntil)}.` : 'Live. Its documents are approved and current.' }
+        : { tone: 'bad', text: 'Live, but its documents are no longer all current, so it cannot take orders until they are renewed.' };
+    case 'NEEDS_DOCUMENTS':
+      return c.storeStatus === 'SUSPENDED'
+        ? { tone: 'warn', text: 'Suspended. It can be reinstated only when every required document below is approved and current.' }
+        : { tone: 'warn', text: `Waiting for documents. When the last required one is approved in the Review Center, Swift makes ${name} live by itself.` };
+    case 'NEEDS_DISCLOSURE':
+      return { tone: 'warn', text: `Documents complete, but its storefront supplier information is missing ${c.disclosure.missing.map((m) => DISCLOSURE_WORDS[m] ?? m).join(', ')}. It goes live by itself once that is complete.` };
+    case 'CAN_ACTIVATE':
+      return { tone: 'info', text: 'Every required document is approved, but the store is not live yet. You can activate it now.' };
+    case 'CAN_REINSTATE':
+      return { tone: 'info', text: 'Suspended. Its documents are approved and current, so it can be reinstated.' };
+    case 'FEE_UNPAID':
+      // [MC-AD2] Billing lifts a fee hold when a payment is confirmed; the console never does.
+      return { tone: 'warn', text: c.suspensionSource === 'BILLING'
+        ? 'Suspended, and its weekly fee is unpaid or its billing is stopped. It comes back by itself when the fee is paid through MMG checkout.'
+        : 'Suspended, and its weekly fee is unpaid or its billing is stopped. Pay through MMG checkout first. After payment, refresh this checklist and reinstate the admin suspension.' };
+    case 'OWNER_ACCOUNT_RESTRICTED':
+      return { tone: 'bad', text: "The owner's account is banned or suspended. Reinstate the owner's account first, then refresh this store's checklist." };
+    case 'ACCOUNT_CLOSED':
+      return { tone: 'bad', text: 'The owner closed their Swift account. The store stays closed and cannot be reopened from the console.' };
+    case 'CLOSED':
+      return { tone: 'neutral', text: 'Closed. A closed store is not reopened from the console.' };
+  }
+}
+
 interface RecentOrder { id: string; orderNumber: string; status: string; totalAmount: number; paymentMethod: string }
 interface Sibling { id: string; name: string; status: string }
 
@@ -58,9 +101,12 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
   const dialog = useActionDialog();
   const [result, setResult] = useState<Outcome | null>(null);
   const store = useQuery({ queryKey: ['vendor', id], queryFn: () => fetchVendorDetail(id) });
+  // [MC-PR2] The activation checklist decides what this page offers: the same verdict the approve route enforces.
+  const checklist = useQuery({ queryKey: ['vendor-checklist', id], queryFn: () => fetchVendorActivationChecklist(id) });
 
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ['vendor', id] });
+    void qc.invalidateQueries({ queryKey: ['vendor-checklist', id] });
     void qc.invalidateQueries({ queryKey: ['vendors'] });
   };
   /** Whatever the server said, it stays on the page — and the record is re-read. */
@@ -101,27 +147,46 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
   const sub = v.subscription;
   const context = { applicantId: owner?.id };
 
-  const approve = async () => show(await dialog.run({
-    title: `Approve ${v.name}?`,
+  const c: VendorActivationChecklist | undefined = checklist.data?.data;
+
+  // [MC-PR2] "Approve" is no longer a decision of its own: the store goes live by itself when its last required
+  // document is approved. These two buttons appear only when the server's verdict says the rules are met.
+  const activate = async () => show(await dialog.run({
+    title: `Activate ${v.name} now?`,
     body: (
       <p>
-        The store goes live and can take orders. Swift first checks that every required document is approved; if one is
-        not, nothing changes and you are told what is missing.
+        Every required document is approved. Swift runs the same activation it runs when the last document is approved:
+        the store goes live and its free trial starts. Only this store is activated. A valid business registration also promotes the owner&apos;s other stores to registered sellers and lifts their unregistered-seller limits.
       </p>
     ),
-    confirmLabel: 'Approve store',
+    confirmLabel: 'Activate store',
     reason: { hint: 'Kept on the permanent record; not sent to the owner.' },
     context,
     submit: ({ reason }) => approveVendor(id, reason),
     success: () => `${v.name} is live and can take orders.`,
   }));
 
+  const reinstate = async () => show(await dialog.run({
+    title: `Reinstate ${v.name}?`,
+    body: (
+      <p>
+        It is no longer suspended and can take orders again once the owner opens it. Its required documents are approved
+        and current.
+      </p>
+    ),
+    confirmLabel: 'Reinstate store',
+    reason: { hint: 'Kept on the permanent record. The owner is told the store is back, not your reason.' },
+    context,
+    submit: ({ reason }) => approveVendor(id, reason),
+    success: () => `${v.name} is reinstated.`,
+  }));
+
   const suspend = async () => show(await dialog.run({
     title: `Suspend ${v.name}?`,
     body: (
       <p>
-        It stops taking orders immediately and leaves search. The owner is sent your reason. The console cannot undo a
-        suspension yet.
+        It stops taking orders immediately and leaves search. The owner is sent your reason. You can reinstate it from
+        this page later, once its required documents are approved and current.
       </p>
     ),
     confirmLabel: 'Suspend store',
@@ -178,8 +243,11 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
           {v.status === 'ACTIVE' ? (
             <button type="button" className="mc-btn mc-btn-danger" onClick={suspend}>Suspend…</button>
           ) : null}
-          {v.status === 'PENDING_APPROVAL' ? (
-            <button type="button" className="mc-btn mc-btn-primary" onClick={approve}>Approve…</button>
+          {c?.next === 'CAN_ACTIVATE' ? (
+            <button type="button" className="mc-btn mc-btn-primary" onClick={activate}>Activate now…</button>
+          ) : null}
+          {c?.next === 'CAN_REINSTATE' ? (
+            <button type="button" className="mc-btn mc-btn-primary" onClick={reinstate}>Reinstate…</button>
           ) : null}
         </div>
       </header>
@@ -188,6 +256,18 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4 min-w-0">
+          {c ? (
+            <ActivationChecklist
+              title={`Required documents · ${label('VendorType', c.role)}`}
+              items={c.checklist.items}
+              applicantId={c.applicantId}
+              verdict={vendorVerdict(c, v.name)}
+            />
+          ) : checklist.isLoading ? (
+            <div className="mc-card" aria-busy="true">Loading the document checklist…</div>
+          ) : (
+            <QueryFailed error={checklist.error} what="the document checklist" onRetry={() => void checklist.refetch()} retrying={checklist.isFetching} />
+          )}
           <section aria-labelledby="recent-orders" className="space-y-2">
             <h2 id="recent-orders" className="mc-label">Recent orders</h2>
             <DataTable<RecentOrder>
