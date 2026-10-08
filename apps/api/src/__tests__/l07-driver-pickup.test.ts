@@ -1,5 +1,5 @@
 import { withSuiteCapability } from '../lib/test-target-lock';
-import { drainDriverPickupNotices } from '../modules/rides/driver-pickup';
+import { advanceDriverPickup, drainDriverPickupNotices } from '../modules/rides/driver-pickup';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -70,15 +70,33 @@ function pauseOwnershipRead() {
   const waiting = new Promise<void>((resolve) => { entered = resolve; });
   const gate = new Promise<void>((resolve) => { resume = resolve; });
   const original = app.prisma.order.findFirst.bind(app.prisma.order);
-  vi.spyOn(app.prisma.order, 'findFirst').mockImplementationOnce(async (args) => {
+  vi.spyOn(app.prisma.order, 'findFirst').mockImplementationOnce((args) => (async () => {
     const snapshot = await original(args);
     entered(); await gate;
     return snapshot;
-  });
+  })() as ReturnType<typeof original>);
   return { waiting, resume };
 }
 
 describe('driver pickup authority survives no assignment change', () => {
+  it('requires the assigned actor even when the submitted generation is current', async () => {
+    const { order } = await fixture('en-route');
+    const stranger = await actor(true);
+    await expect(advanceDriverPickup(app.prisma, {
+      orderId: order.id, driverId: stranger.driver!.id, assignmentVersion: order.driverAssignmentVersion,
+      changedBy: stranger.id, from: 'DRIVER_ASSIGNED', target: 'DRIVER_EN_ROUTE', note: 'Synthetic attempt',
+    })).rejects.toMatchObject({ code: 'ACTOR_NOT_ASSIGNED' });
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id } })).toBe(0);
+  });
+  it('advances the database generation through release and reassignment and rejects rewrites', async () => {
+    const { mover, order } = await fixture('en-route');
+    const released = await app.prisma.order.update({ where: { id: order.id }, data: { driverId: null, driverAssignmentVersion: 0 } });
+    expect(released.driverAssignmentVersion).toBe(order.driverAssignmentVersion + 1);
+    const assigned = await app.prisma.order.update({ where: { id: order.id }, data: { driverId: mover.driver!.id } });
+    expect(assigned.driverAssignmentVersion).toBe(order.driverAssignmentVersion + 2);
+    const rewritten = await app.prisma.order.update({ where: { id: order.id }, data: { driverAssignmentVersion: 0 } });
+    expect(rewritten.driverAssignmentVersion).toBe(assigned.driverAssignmentVersion);
+  });
   for (const endpoint of ['en-route', 'arrived'] as const) {
     it.each(['replacement', 'same-driver-again'] as const)(`${endpoint} refuses %s after the ownership read`, async (replacement) => {
       const { mover, order } = await fixture(endpoint);
@@ -96,6 +114,19 @@ describe('driver pickup authority survives no assignment change', () => {
       expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id } })).toBe(0);
       expect(emit).not.toHaveBeenCalled();
       expect(notices).not.toHaveBeenCalled();
+    });
+    it(`${endpoint} commits one history record when two requests share the ownership preview`, async () => {
+      const { mover, order } = await fixture(endpoint);
+      const pause = pauseOwnershipRead();
+      const input = { method: 'PUT' as const, url: `/driver/rides/${order.id}/${endpoint}`, headers: { 'test-actor': mover.id } };
+      const pending = app.inject(input).then((r) => r);
+      await pause.waiting;
+      let winner;
+      try { winner = await app.inject(input); } finally { pause.resume(); }
+      expect(winner.statusCode, winner.body).toBe(200);
+      const loser = await pending;
+      expect(loser.statusCode, loser.body).toBe(409);
+      expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id } })).toBe(1);
     });
     it(`${endpoint} rolls the pickup fact back if the database refuses its history`, async () => {
       const { mover, order } = await fixture(endpoint);
@@ -140,6 +171,7 @@ describe('driver pickup authority survives no assignment change', () => {
       expect(response.statusCode, response.body).toBe(200);
       expect(response.json().data).toMatchObject({ id: order.id, driverId: mover.driver!.id, status: endpoint === 'arrived' ? 'DRIVER_ARRIVED' : 'DRIVER_EN_ROUTE' });
       expect(response.json().data).not.toHaveProperty('ridePin');
+      if (endpoint === 'arrived') expect(response.json().data.driverArrivedAt).toEqual(expect.any(String));
       expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id } })).toBe(1);
     });
   }
