@@ -43,7 +43,7 @@ const PRODUCTION = 'swift-default';
 const WEB_ORIGIN = 'http://localhost:3001';
 const PASSWORD = 'correct horse battery';
 const REVIEW_CODE = '864213';
-const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND', 'CORS_ORIGIN', 'SOCKET_AUTH_RECHECK_MS'] as const;
+const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND', 'CORS_ORIGIN', 'SOCKET_AUTH_RECHECK_MS', 'SOCKET_AUTH_RECHECK_TIMEOUT_MS'] as const;
 const priorEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 const PHONE_BASE = 9000 + Math.floor(Math.random() * 900);
 let phoneSeq = 0;
@@ -121,6 +121,9 @@ beforeAll(async () => {
   process.env['TENANT_RLS_BIND'] = '1';
   process.env['CORS_ORIGIN'] = WEB_ORIGIN;
   process.env['SOCKET_AUTH_RECHECK_MS'] = '100';
+  // Accelerate the timer, preserving the production read deadline. A healthy
+  // 300ms query must fit the 4s deadline while exceeding the 250ms pool wait.
+  process.env['SOCKET_AUTH_RECHECK_TIMEOUT_MS'] = '4000';
   const Fastify = (await import('fastify')).default;
   prismaModule = await import('../plugins/prisma');
   const { prismaPlugin } = prismaModule;
@@ -296,6 +299,7 @@ describe('[L04 · R1 · OTA-016] sign-in under the production CONTRACT posture',
     let peak = 0;
     const completed = new Set<string>();
     const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (...args: unknown[]) => {
+      expect(args[1]).toMatchObject({ maxWait: 250, timeout: 3750 });
       const tenantId = getTenantContext()?.tenantId;
       active += 1;
       peak = Math.max(peak, active);
