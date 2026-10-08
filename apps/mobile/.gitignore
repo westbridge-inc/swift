@@ -2,3 +2,5 @@
 # Do not commit; they are derived from app.json + config plugins.
 /ios/
 /android/
+# Local Vitest cache (release worktrees borrow a dependency install).
+.vitest-cache/

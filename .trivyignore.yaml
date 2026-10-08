@@ -1,0 +1,69 @@
+# Trivy ignore list for the CI "Security Scan" job (trivy fs ... pnpm-lock.yaml).
+#
+# Rules (enforced by scripts/trivy-ignore-gate.mjs, which runs before Trivy):
+#   - one entry per advisory ID, scoped by `purls` to the exact package@version it
+#     covers, so a different version of the same package is still reported;
+#   - every entry carries `expired_at` no more than 31 days ahead. Once it passes,
+#     Trivy stops honouring the entry and the scan goes red again, so the reason
+#     has to be re-checked and the date renewed (or the entry dropped);
+#   - every entry carries a `statement`: who pulls the package in, why it is not
+#     reachable with untrusted input in what we ship, and what ends the entry;
+#   - only `vulnerabilities` may be listed: no secret, licence or misconfiguration
+#     suppressions, no wildcard IDs, no severity changes.
+# A fixed version is always preferred: bump it (or add a pnpm override) instead.
+
+vulnerabilities:
+  - id: CVE-2026-93687
+    purls:
+      - pkg:npm/braces@3.0.3
+    expired_at: 2026-11-03
+    statement: >-
+      GHSA-vfj7-8cjw-p6xm, braces 3.0.3 (denial of service on crafted glob
+      patterns). No fixed release exists (3.0.3 is the latest braces). Its only
+      parent is micromatch 4.0.8 (also the latest), pulled in by metro-file-map
+      and @expo/metro-file-map (the mobile bundler, run on build machines) and by
+      fast-glob 3.3.1 under eslint-config-next (a web/admin devDependency for
+      lint). It is not in the dependency closure of apps/api, so it is absent
+      from the API and worker image, and the patterns it expands are written in
+      our own build and lint config, never taken from a request. Added
+      2026-10-04. Tracking: drop as soon as braces publishes a fix (bump it);
+      re-check `pnpm why braces` before renewing.
+
+  - id: CVE-2026-85393
+    purls:
+      - pkg:npm/node-forge@1.4.0
+    expired_at: 2026-11-03
+    statement: >-
+      GHSA-86w9-cpqp-85rv, node-forge 1.4.0 (RSA PKCS#1 v1.5 signature
+      verification weakness). No fixed release exists (1.4.0 is the latest
+      node-forge). Its only parents are @expo/cli and
+      @expo/code-signing-certificates: the Expo developer CLI on developer and
+      build machines (development manifest signing, local signing-identity
+      lookup). It is not in the closure of apps/api, apps/web or apps/admin, no
+      app source imports it, so it is not in the shipped mobile bundle, and the
+      app does not use expo-updates code signing. Added 2026-10-04. Tracking:
+      bump as soon as node-forge publishes a fix; re-check `pnpm why node-forge`
+      before renewing.
+
+  - id: CVE-2025-71329
+    purls:
+      - pkg:npm/image-size@1.2.1
+    expired_at: 2026-11-03
+    statement: >-
+      image-size 1.2.1 (denial of service on a crafted image buffer). The fix
+      exists only in the 2.x major (2.0.3+), whose API changed; the sole parent
+      is metro 0.84.4, which requires image-size ^1.0.2, so forcing 2.x under
+      the bundler would break it. metro sizes repo-authored assets at bundle
+      time on our build machines; production never passes untrusted images
+      through it, and it is not in the API, web or admin images. Added
+      2026-08-17, re-checked 2026-10-04. Tracking: drops when an Expo/metro
+      upgrade moves off image-size 1.x (metro 0.87 no longer depends on it).
+
+  - id: CVE-2025-71330
+    purls:
+      - pkg:npm/image-size@1.2.1
+    expired_at: 2026-11-03
+    statement: >-
+      Same package, path and reasoning as CVE-2025-71329 above (image-size
+      1.2.1 under metro 0.84.4, bundle-time only, fix only in the 2.x major).
+      Added 2026-08-17, re-checked 2026-10-04. Tracking: as above.

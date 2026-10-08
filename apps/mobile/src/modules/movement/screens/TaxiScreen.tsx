@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, Share, StyleSheet, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, MarkerAnimated, PROVIDER_DEFAULT } from 'react-native-maps';
+import { RouteAttribution } from '../../../components/RouteAttribution';
 import Reanimated from 'react-native-reanimated';
 import { rideMapProps } from '../../../kit/map-style';
 import { shareMessage, shareStatusLine, failureOf, linkStillWorks, SHARE_FAILURE_COPY, type MintedShare } from '../../../lib/tripShare';
@@ -496,6 +497,7 @@ function TaxiBooking({ navigation }: any) {
             ))
           : null}
       </MapView>
+      <RouteAttribution top={insets.top + 56} />
 
       <FloatingBack navigation={navigation} insets={insets} />
 
@@ -1288,6 +1290,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
       {hasMapContext ? (
+        <>
         <MapView
           ref={mapRef}
           provider={PROVIDER_DEFAULT}
@@ -1331,6 +1334,8 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
           </Marker>
         ) : null}
         </MapView>
+        <RouteAttribution top={insets.top + 56} />
+        </>
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space['3xl'], backgroundColor: color.surface.sunken }}>
           <IconChip icon="map-pin" size={48} />
