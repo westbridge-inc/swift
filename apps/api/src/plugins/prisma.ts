@@ -236,11 +236,17 @@ export function setSystemPrismaClient(client: PrismaClient | null): void { syste
  *  connection — the append-only evidence rule, the tenant predicate for any
  *  tenant-bound query run on it, and (in tests) the destructive guard — because
  *  a system transaction now runs every one of its queries there. */
+/** The test-mode destructive guard (a no-op extension outside tests). Installed FIRST, so it is the outermost layer. */
+const testGuardOutermost = () => (isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' });
+
 function systemConnection(raw: PrismaClient): PrismaClient {
   return raw
+  // [R048-001 · S3-2] In test mode the destructive guard is the OUTERMOST layer: the
+  // scoping layers inside it then see exactly what production sees (their inner query
+  // is the engine's own), so tests exercise production's transaction routing.
+    .$extends(testGuardOutermost())
     .$extends(orderStatusLogAppendOnly)
-    .$extends({ name: 'tenantScope', query: SYSTEM_TENANT_QUERY_EXTENSIONS as typeof TENANT_QUERY_EXTENSIONS })
-    .$extends(isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' }) as unknown as PrismaClient;
+    .$extends({ name: 'tenantScope', query: SYSTEM_TENANT_QUERY_EXTENSIONS as typeof TENANT_QUERY_EXTENSIONS }) as unknown as PrismaClient;
 }
 
 /** [MASTER-019] A system query that could only run by leaving the caller's
@@ -275,6 +281,18 @@ export class TenantSwitchInTransactionError extends Error {
   readonly statusCode = 500;
   constructor(what: string) {
     super(`[R5] ${what} asked for another tenant inside a transaction bound to one tenant; start that work in its own transaction`);
+  }
+}
+
+/** [R5 follow-up · S3-1] A tenant query inside a caller's transaction that did
+ *  NOT begin bound. Binding it would need a batch on another connection: it
+ *  would commit outside the caller's transaction, survive its rollback and queue
+ *  behind its locks. Refused by name; begin the transaction under the tenant. */
+export class TenantInUnboundTransactionError extends Error {
+  readonly code = 'TENANT_IN_UNBOUND_TRANSACTION';
+  readonly statusCode = 500;
+  constructor(what: string) {
+    super(`[R5] ${what} asked for a tenant inside a transaction that began without one; begin the transaction under that tenant`);
   }
 }
 
@@ -357,6 +375,12 @@ function tenantScope(params: ScopeParams, connection: Connection, wiring: ScopeW
     }
     return query(args);
   }
+  // [R5 follow-up · S3-1] Never bind a query of a caller's transaction from
+  // outside it: that batch would run on another connection.
+  if (inCallerTransaction(params)) {
+    tenantBindCounter.labels('tenant_in_unbound_tx_refused').inc();
+    return Promise.reject(new TenantInUnboundTransactionError(`${model}.${operation}`));
+  }
   return bindTenant(query, args, tenantId, wiring.batch());
 }
 
@@ -400,7 +424,8 @@ const TENANT_BIND_STATEMENT = Symbol.for('swift.tenantBindStatement');
  *  these two internals on every Prisma upgrade. */
 const ITX_ID = Symbol.for('prisma.client.transaction.id');
 
-type RawParams = { args: unknown; query: (a: unknown) => Promise<unknown>; __internalParams?: { transaction?: unknown } };
+type RawOperation = '$queryRaw' | '$executeRaw';
+type RawParams = { args: unknown; query: (a: unknown) => Promise<unknown>; operation: RawOperation; __internalParams?: { transaction?: unknown } };
 /** [L04 · R5 auto-bind] Top-level raw SQL ($queryRaw/$executeRaw) is bound
  *  exactly like a model query: under a request tenant it runs in one batch
  *  after set_config; inside a bound transaction it runs on that transaction
@@ -409,9 +434,17 @@ type RawParams = { args: unknown; query: (a: unknown) => Promise<unknown>; __int
  *  forms are not bound here: production source may not use them at all
  *  (sql-safety-surface.test.ts), and unbound they too read nothing. */
 function rawTenantBinding(params: RawParams, wiring: ScopeWiring): Promise<unknown> {
-  const { args, query } = params;
-  if (!rlsBindEnabled()) return query(args);
+  const { args, query, operation } = params;
   const ctx = getTenantContext();
+  if (!ctx.tenantId) {
+    // [R5 follow-up · S3-3] Raw SQL with no tenant is counted (and logged)
+    // exactly like an unscoped model query, so the shadow run sees it. It is
+    // not refused under deny: boot, health and readiness read the catalog
+    // with raw SQL before any tenant exists.
+    tenantUnscopedAccessCounter.labels('$raw', operation, ctx.mode, ctx.mode === 'system' ? ctx.capability ?? 'unnamed' : 'none').inc();
+    if (ctx.mode !== 'system' && unscopedLogBudget > 0) { unscopedLogBudget -= 1; console.warn(`[TEN-01] unscoped raw ${operation} (${ctx.mode}) — no tenant bound; counted, allowed`); }
+  }
+  if (!rlsBindEnabled()) return query(args);
   if (!ctx.tenantId) {
     // System work on a bound transaction's client would run on that tenant's
     // connection while claiming to be system work: refused by name, as a
@@ -420,7 +453,22 @@ function rawTenantBinding(params: RawParams, wiring: ScopeWiring): Promise<unkno
       tenantBindCounter.labels('tenant_switch_refused').inc();
       return Promise.reject(new TenantSwitchInTransactionError('raw SQL (no tenant)'));
     }
-    tenantBindCounter.labels(ctx.mode === 'system' ? 'raw_system' : 'raw_unbound').inc();
+    if (ctx.mode === 'system') {
+      // [R5 follow-up · S3-3] System work belongs on the system login, raw SQL
+      // included — on the walled login it would see ZERO rows (an SOS outbox
+      // the worker could never claim). Outside a transaction it is re-issued
+      // there; it never leaves a caller's transaction (refused by name).
+      const sys = wiring.system();
+      if (!sys) { tenantBindCounter.labels('system_no_client').inc(); return query(args); }
+      if (params.__internalParams?.transaction) {
+        tenantBindCounter.labels('system_refused_in_tx').inc();
+        return Promise.reject(new SystemWorkOutsideTransactionError('$raw', operation));
+      }
+      tenantBindCounter.labels('raw_system').inc();
+      const systemRaw = sys as unknown as Record<RawOperation, (a: unknown) => Promise<unknown>>;
+      return systemRaw[operation](args);
+    }
+    tenantBindCounter.labels('raw_unbound').inc();
     return query(args);
   }
   const txTenant = boundTransactionTenant(params);
@@ -435,8 +483,8 @@ function rawTenantBinding(params: RawParams, wiring: ScopeWiring): Promise<unkno
   return bindTenant(query as (a: Record<string, unknown>) => Promise<unknown>, args as Record<string, unknown>, ctx.tenantId, wiring.batch());
 }
 function rawTenantBindingExtension(wiring: ScopeWiring) {
-  const bind = (params: RawParams) => rawTenantBinding(params, wiring);
-  return { name: 'rawTenantBinding', query: { $queryRaw: bind, $executeRaw: bind } } as never;
+  const bind = (operation: RawOperation) => (params: Omit<RawParams, 'operation'>) => rawTenantBinding({ ...params, operation }, wiring);
+  return { name: 'rawTenantBinding', query: { $queryRaw: bind('$queryRaw'), $executeRaw: bind('$executeRaw') } } as never;
 }
 
 /** [TEN-03] The bound query: `set_config` and the operation in ONE batch
@@ -611,15 +659,19 @@ const extendedPrisma = new PrismaClient({
   // addresses. `poolRoleForApiProcess` reads the same variable server.ts reads,
   // so the two cannot disagree about which topology is running.
   datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], poolRoleForApiProcess()),
-}).$extends(orderStatusLogAppendOnly).$extends({
-  name: 'tenantScope',
-  query: TENANT_QUERY_EXTENSIONS,
-}).$extends(rawTenantBindingExtension(PROCESS_WIRING))
+})
   // [R048-001] In test mode a deleteMany/updateMany with no predicate and any
   // raw DDL are refused unless the suite granted itself the capability: cleanup
   // is namespace-owned or it does not run. Outside tests the extension is not
   // installed at all.
-  .$extends(isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' });
+  // [R048-001 · S3-2] In test mode the destructive guard is the OUTERMOST layer: the
+  // scoping layers inside it then see exactly what production sees (their inner query
+  // is the engine's own), so tests exercise production's transaction routing.
+  .$extends(testGuardOutermost())
+  .$extends(orderStatusLogAppendOnly).$extends({
+    name: 'tenantScope',
+    query: TENANT_QUERY_EXTENSIONS,
+  }).$extends(rawTenantBindingExtension(PROCESS_WIRING));
 const prisma = routeSystemTransactions(extendedPrisma, systemPrismaClient);
 /** The process's one extended client — the plugin decorates it; tests reach it here. */
 export const scopedPrisma = prisma;
@@ -640,11 +692,13 @@ export function tenantScopeExtensionFor(client: PrismaClient, system: PrismaClie
  *  topology can be exercised under real, distinct database roles. */
 export function scopedClientFor(raw: PrismaClient, systemRaw: PrismaClient | null): PrismaClient {
   const system = systemRaw ? systemConnection(systemRaw) : null;
-  const guarded = raw.$extends(orderStatusLogAppendOnly) as unknown as PrismaClient;
+  // [R048-001 · S3-2] In test mode the destructive guard is the OUTERMOST layer: the
+  // scoping layers inside it then see exactly what production sees (their inner query
+  // is the engine's own), so tests exercise production's transaction routing.
+  const guarded = raw.$extends(testGuardOutermost()).$extends(orderStatusLogAppendOnly) as unknown as PrismaClient;
   const extended = guarded
     .$extends(tenantScopeExtensionFor(guarded, system))
-    .$extends(rawTenantBindingExtension({ batch: () => guarded as unknown as BatchClient, system: () => system }))
-    .$extends(isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' }) as unknown as PrismaClient;
+    .$extends(rawTenantBindingExtension({ batch: () => guarded as unknown as BatchClient, system: () => system })) as unknown as PrismaClient;
   return routeSystemTransactions(extended, () => system);
 }
 

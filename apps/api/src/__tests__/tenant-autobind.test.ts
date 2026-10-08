@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
-import { scopedPrisma as prisma, scopedClientFor, TenantSwitchInTransactionError } from '../plugins/prisma';
+import { scopedPrisma as prisma, scopedClientFor, TenantSwitchInTransactionError, TenantInUnboundTransactionError, SystemWorkOutsideTransactionError } from '../plugins/prisma';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
-import { tenantBindCounter } from '../plugins/observability';
+import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
+import { tenantBindCounter, tenantUnscopedAccessCounter } from '../plugins/observability';
 
-// [R048-001] the same NOLOGIN probe group and logins the tenant-wall suites use, by raw DDL.
+// [R048-001] creates only this suite's temporary request/system LOGIN roles, by raw DDL.
 grantSuiteCapability('ddl');
 
 // ---------------------------------------------------------------------------
@@ -26,12 +27,7 @@ grantSuiteCapability('ddl');
 // ---------------------------------------------------------------------------
 
 const TEST_URL = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
-const PROBE_LOGIN = 'swift_rls_probe_login';
-const SYSTEM_LOGIN = 'swift_rls_system_login';
-const withLogin = (login: string, extra = '') => {
-  const url = TEST_URL.replace(/\/\/[^@]+@/, `//${login}:probe@`);
-  return extra ? `${url}${url.includes('?') ? '&' : '?'}${extra}` : url;
-};
+let logins: Awaited<ReturnType<typeof createTenantProbeLogins>> | undefined;
 const T = `ab-t-${nanoid(6)}`;
 const U = `ab-u-${nanoid(6)}`;
 let userT = '';
@@ -46,27 +42,17 @@ const countUser = (db: { $queryRaw: PrismaClient['$queryRaw'] }, id: string) =>
   db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM "users" WHERE "id" = ${id}`.then((r) => r[0]!.n);
 
 beforeAll(async () => {
-  for (const sql of [
-    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_rls_probe') THEN CREATE ROLE swift_rls_probe NOLOGIN NOBYPASSRLS; END IF; END $$`,
-    `GRANT USAGE ON SCHEMA public TO swift_rls_probe`,
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_rls_probe`,
-    `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_rls_probe`,
-    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${SYSTEM_LOGIN}') THEN CREATE ROLE ${SYSTEM_LOGIN} LOGIN PASSWORD 'probe' NOBYPASSRLS; END IF; END $$`,
-    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_LOGIN}') THEN CREATE ROLE ${PROBE_LOGIN} LOGIN PASSWORD 'probe' NOBYPASSRLS; END IF; END $$`,
-    `GRANT swift_rls_probe TO ${PROBE_LOGIN}`,
-    `GRANT swift_rls_probe TO ${SYSTEM_LOGIN}`,
-    `GRANT swift_bypass_rls TO ${SYSTEM_LOGIN}`,
-  ]) await prisma.$executeRawUnsafe(sql);
+  logins = await createTenantProbeLogins(prisma, TEST_URL);
   await runAsSystem('test-setup', async () => {
     for (const t of [T, U]) await prisma.tenant.create({ data: { id: t, name: `Autobind ${t}`, slug: t } });
     userT = (await prisma.user.create({ data: { phone: `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, firstName: 'Bound', lastName: 'T', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: T } })).id;
     userU = (await prisma.user.create({ data: { phone: `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, firstName: 'Bound', lastName: 'U', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: U } })).id;
   });
-  probeRaw = new PrismaClient({ datasourceUrl: withLogin(PROBE_LOGIN) });
+  probeRaw = new PrismaClient({ datasourceUrl: logins.requestUrl });
   // ONE pooled connection, so the reuse probe sees the very connection the
   // bound transaction ran on (an extended client shares its base's pool).
-  probeOne = new PrismaClient({ datasourceUrl: withLogin(PROBE_LOGIN, 'connection_limit=1') });
-  sysRaw = new PrismaClient({ datasourceUrl: withLogin(SYSTEM_LOGIN) });
+  probeOne = new PrismaClient({ datasourceUrl: logins.singleConnectionUrl });
+  sysRaw = new PrismaClient({ datasourceUrl: logins.systemUrl });
   walled = scopedClientFor(probeRaw, sysRaw);
   walledOne = scopedClientFor(probeOne, sysRaw);
   process.env['TENANT_RLS_BIND'] = '1';
@@ -78,13 +64,17 @@ afterEach(async () => {
 
 afterAll(async () => {
   delete process.env['TENANT_RLS_BIND'];
-  await runAsSystem('test-teardown', async () => {
-    await prisma.user.deleteMany({ where: { id: { in: [userT, userU].filter(Boolean) } } });
-    await prisma.tenant.deleteMany({ where: { id: { in: [T, U] } } });
-  });
-  await probeRaw?.$disconnect().catch(() => {});
-  await probeOne?.$disconnect().catch(() => {});
-  await sysRaw?.$disconnect().catch(() => {});
+  try {
+    await runAsSystem('test-teardown', async () => {
+      await prisma.user.deleteMany({ where: { id: { in: [userT, userU].filter(Boolean) } } });
+      await prisma.tenant.deleteMany({ where: { id: { in: [T, U] } } });
+    });
+  } finally {
+    await probeRaw?.$disconnect().catch(() => {});
+    await probeOne?.$disconnect().catch(() => {});
+    await sysRaw?.$disconnect().catch(() => {});
+    await logins?.cleanup();
+  }
 });
 
 describe('[R5 auto-bind] a transaction that begins under a tenant is bound for its whole life', () => {
@@ -144,6 +134,39 @@ describe('[R5 auto-bind] a transaction that begins under a tenant is bound for i
     const attempt = runWithTenant(T, () => walled.$transaction(async (tx) =>
       runWithTenant(U, () => tx.user.findUnique({ where: { id: userU }, select: { id: true } }))));
     await expect(attempt).rejects.toBeInstanceOf(TenantSwitchInTransactionError);
+  });
+});
+
+describe('[R5 follow-up · S3-1] a tenant query on a transaction that did NOT begin bound', () => {
+  it('is refused by name — never bound on another connection, where it would commit outside the transaction and survive its rollback', async () => {
+    const firstName = () => runAsSystem('test-read', async () => (await prisma.user.findUniqueOrThrow({ where: { id: userT }, select: { firstName: true } })).firstName);
+    const outcome = walled.$transaction(async (tx) => {
+      await runWithTenant(T, () => tx.user.update({ where: { id: userT }, data: { firstName: 'Escaped' } }));
+      throw new Error('ROLLBACK');
+    });
+    const error = await outcome.then(() => null, (e: unknown) => e);
+    expect(await firstName()).toBe('Bound'); // nothing escaped the rolled-back transaction
+    expect(error).toBeInstanceOf(TenantInUnboundTransactionError);
+  });
+});
+
+describe('[R5 follow-up · S3-3] raw SQL with no tenant is seen, and system raw SQL runs on the system login', () => {
+  const unscoped = async (mode: string, capability: string) => (await tenantUnscopedAccessCounter.get()).values
+    .filter((v) => v.labels['model'] === '$raw' && v.labels['operation'] === '$queryRaw' && v.labels['mode'] === mode && v.labels['capability'] === capability)
+    .reduce((n, v) => n + v.value, 0);
+
+  it('unbound raw SQL is counted like an unscoped model query; system raw SQL is counted under its capability and reads on the system login', async () => {
+    const unboundBefore = await unscoped('unbound', 'none');
+    expect(await countUser(walled, userT)).toBe(0); // the walled login, unbound: nothing (fail closed)
+    expect(await unscoped('unbound', 'none')).toBe(unboundBefore + 1);
+    const systemBefore = await unscoped('system', 'raw-system-probe');
+    expect(await runAsSystem('raw-system-probe', () => countUser(walled, userT))).toBe(1); // re-issued on the system login
+    expect(await unscoped('system', 'raw-system-probe')).toBe(systemBefore + 1);
+  });
+
+  it('system raw SQL inside a caller’s request transaction is refused by name — it never leaves that transaction', async () => {
+    const outcome = walled.$transaction(async (tx) => runAsSystem('raw-system-probe', () => countUser(tx, userT)));
+    await expect(outcome).rejects.toBeInstanceOf(SystemWorkOutsideTransactionError);
   });
 });
 
