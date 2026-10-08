@@ -428,7 +428,8 @@ export const customerApi = {
   // without it and checkout stops sending it. (The web cart cannot remove a
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`),
+  // This client renders the server's swap permissions and refusal guidance.
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v1' } }),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message, cancellationFee } } inside the axios
   // body — reading one level short silently discarded the authoritative

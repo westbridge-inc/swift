@@ -1,3 +1,6 @@
+import { AppError } from '../../utils/errors';
+import { assertMmgFulfilmentAllowed } from './order.service';
+
 /**
  * [L09 · M026 · M028] One place for what an out-of-stock swap does to an order
  * line, read by the approval itself (picking.service), the customer's order
@@ -48,8 +51,9 @@ export const MMG_SWAP_SETTLES_DIRECTLY =
 /**
  * The swap as the customer decides it. While it is open: the line as ordered
  * (unit price with its options, and those options), the proposal, the exact
- * change approving makes to the total, and the decisions the server will
- * accept. An MMG order's total can't change in-app (picking.service
+ * change approving makes to the total, and decisions allowed by the current
+ * total and payment snapshot. The locked decision still checks live stock,
+ * lifecycle and rider float, which can change after this response. An MMG order's total can't change in-app (picking.service
  * assertMmgMoneyAdjustable), so only a same-price approval is open there and
  * the store settles anything else with the customer directly. Once decided,
  * the line itself is the record (an approved line IS the substitute), so only
@@ -64,11 +68,25 @@ export function substitutionView(line: {
   substituteName: string | null;
   substitutePrice: unknown;
   selectedOptions: readonly OptionSnapshot[];
-}, paymentMethod: string | null) {
+}, order: Parameters<typeof assertMmgFulfilmentAllowed>[0] & { totalAmount: unknown }) {
   if (line.subStatus === 'NONE') return null;
   if (line.subStatus !== 'PENDING') return { state: line.subStatus, original: null, proposed: null, priceDelta: null, decisions: null, settlementGuidance: null };
   const delta = substitutionLineChange(line).delta;
-  const mmg = paymentMethod === 'MOBILE_MONEY';
+  const mmg = order.paymentMethod === 'MOBILE_MONEY';
+  // Use the existing approval guard verbatim: a proposal may outlive the
+  // customer's payment denial. Required context prevents a missing projection
+  // from silently enabling a same-price swap on a disputed order.
+  let approvalHold: string | null = null;
+  try {
+    assertMmgFulfilmentAllowed(order, 'PREPARING');
+  } catch (error) {
+    if (!(error instanceof AppError)) throw error;
+    approvalHold = error.message;
+  }
+  const negativeTotal = Number(order.totalAmount) + delta < 0;
+  const settlementGuidance = approvalHold
+    ?? (mmg ? MMG_SWAP_SETTLES_DIRECTLY : negativeTotal
+      ? 'That substitute would drop the order total below zero — refund the line instead.' : null);
   return {
     state: line.subStatus,
     original: {
@@ -78,7 +96,7 @@ export function substitutionView(line: {
     },
     proposed: { itemId: line.substituteItemId, name: line.substituteName, unitPrice: Number(line.substitutePrice ?? 0) },
     priceDelta: delta,
-    decisions: { approve: !mmg || delta === 0, reject: !mmg },
-    settlementGuidance: mmg ? MMG_SWAP_SETTLES_DIRECTLY : null,
+    decisions: { approve: !approvalHold && !negativeTotal && (!mmg || delta === 0), reject: !mmg },
+    settlementGuidance,
   };
 }

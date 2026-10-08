@@ -676,7 +676,7 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
     const line = order.items[0]!;
     expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: substitute.id })).statusCode).toBe(200);
 
-    const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
     expect(pending).toMatchObject({
       subStatus: 'PENDING',
       substituteName: substitute.name,
@@ -690,7 +690,7 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
     });
 
     expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true })).statusCode).toBe(200);
-    const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
     // Decided: the line itself is now the substitute; "original" would name the
     // substitute (approval rewrites the line), so a decided swap carries its state only.
     expect(decided).toMatchObject({ subStatus: 'APPROVED', substitution: { state: 'APPROVED', original: null, proposed: null, priceDelta: null } });
@@ -706,7 +706,7 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
 
     // Pending: the customer is shown the line as ordered (options included) and
     // what approving moves: 1150 replaces 1450, so the total goes DOWN by 300.
-    const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
     expect(pending.substitution).toEqual({
       state: 'PENDING',
       original: { name: original.name, unitPrice: 1450, options: chosen },
@@ -727,7 +727,7 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
 
     // Approved: the line is the substitute at 1150 with no options, for the
     // customer and for the store alike, so nothing unpaid-for is made.
-    const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
     expect(decided).toMatchObject({ subStatus: 'APPROVED', lineTotal: 1150, options: [], substitution: { state: 'APPROVED', original: null, proposed: null, priceDelta: null } });
     const storeDetail = (await inject('GET', `/api/v1/vendor/orders/${order.id}`, owner.token)).json().data.items[0];
     expect(storeDetail).toMatchObject({ subStatus: 'APPROVED', options: [] });
@@ -735,7 +735,7 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
     const row = (board.json().data as Array<{ id: string; items: Array<{ options: unknown[] }> }>).find((o) => o.id === order.id);
     expect(row?.items[0]?.options).toEqual([]);
     expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/refund-line`, owner.token)).statusCode).toBe(200);
-    const refunded = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    const refunded = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
     expect(refunded).toMatchObject({ subStatus: 'REFUNDED', options: [] });
     expect(await app.prisma.orderItemOption.count({ where: { orderItemId: line.id } })).toBe(2);
   });
@@ -750,7 +750,7 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
     await app.prisma.order.update({ where: { id: order.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus } });
     const line = order.items[0]!;
     expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
-    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0].substitution;
+    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
     expect(view.decisions).toEqual({ approve: canApprove, reject: false });
     expect(view.settlementGuidance).toMatch(/store.*directly/i);
     const rejected = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: false });
@@ -766,7 +766,7 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
   it('a line with no substitution says so', async () => {
     const item = await makeItem({ name: `Plain Salt ${seq}`, price: 200 });
     const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 200 }]);
-    const line = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    const line = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
     expect(line).toMatchObject({ subStatus: 'NONE', substitution: null });
   });
 });
@@ -802,5 +802,72 @@ describe('[L09 · M026] the store sees the options the customer chose', () => {
     const board = await inject('GET', '/api/v1/vendor/orders?limit=50', owner.token);
     const row = (board.json().data as Array<{ id: string; items: Array<{ options: unknown[] }> }>).find((o) => o.id === order.id);
     expect(row?.items[0]?.options).toEqual(expect.arrayContaining(expected));
+  });
+});
+
+// Ruling A: only a client that renders server decision permissions may opt in.
+describe('swap capability and current money holds', () => {
+  it.each(['', '?swapDecisions=v0', '?swapDecisions=v2', '?swapDecisions=v1&swapDecisions=v0'])(
+    'legacy/unknown capability %s preserves the old item response', async (query) => {
+      const original = await makeItem({ name: `Legacy original ${seq}`, price: 500, group: `legacy-${seq}` });
+      const replacement = await makeItem({ name: `Legacy replacement ${seq}`, price: 900, group: `legacy-${seq}` });
+      const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 500 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'CAPTURED' });
+      const line = order.items[0]!;
+      expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+      const response = await inject('GET', `/api/v1/customer/orders/${order.id}${query}`, customer.token);
+      expect(response.statusCode).toBe(200);
+      // Exactly the pre-feature fields: build 9 and vc5 cannot activate a card.
+      expect(response.json().data.items[0]).toEqual({
+        id: line.id, itemId: original.id, name: original.name, quantity: 1,
+        basePrice: 500, customerPrice: 500, lineTotal: 500, specialInstructions: null,
+      });
+      const supported = await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token);
+      expect(supported.json().data.items[0]).toMatchObject({ subStatus: 'PENDING', substitution: { decisions: { approve: false, reject: false } } });
+    },
+  );
+
+  it('a discounted cash pickup disables a negative-total approval but permits the clamped rejection', async () => {
+    const original = await makeItem({ name: `Discount original ${seq}`, price: 1000, group: `discount-${seq}` });
+    const replacement = await makeItem({ name: `Discount replacement ${seq}`, price: 100, group: `discount-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1000 }]);
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillment: 'PICKUP', deliveryFee: 0, discount: 900, totalAmount: 100 } });
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    const refused = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.code).toBe('SUBSTITUTE_NEGATIVE_TOTAL');
+    const unchanged = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: { items: true } });
+    expect(Number(unchanged.totalAmount)).toBe(100);
+    expect(unchanged.items[0]!.subStatus).toBe('PENDING');
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: replacement.id } })).stockQuantity).toBe(10);
+    expect(view).toMatchObject({ priceDelta: -900, decisions: { approve: false, reject: true } });
+    expect(view.settlementGuidance).toBe(refused.json().error.message);
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: false })).statusCode).toBe(200);
+    expect(Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount)).toBe(0);
+  });
+
+  it('a payment denial after a same-price proposal disables approval and explains the persisted hold', async () => {
+    const original = await makeItem({ name: `Dispute original ${seq}`, price: 500, group: `dispute-${seq}` });
+    const replacement = await makeItem({ name: `Dispute replacement ${seq}`, price: 500, group: `dispute-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 500 }]);
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgAttestedRef: 'TESTCLAIM1' } });
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const before = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    expect(before.decisions.approve).toBe(true);
+    const denial = await inject('POST', `/api/v1/customer/orders/${order.id}/payment-claim`, customer.token, { paid: false });
+    expect(denial.statusCode, denial.body).toBe(200);
+    expect(denial.json().data.mismatch).toBe(true);
+    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    const refused = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe('MMG_CLAIM_MISMATCH');
+    const unchanged = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: { items: true } });
+    expect(unchanged.mmgClaimMismatchAt).not.toBeNull();
+    expect(Number(unchanged.totalAmount)).toBe(800);
+    expect(unchanged.items[0]!.subStatus).toBe('PENDING');
+    expect(view.decisions).toEqual({ approve: false, reject: false });
+    expect(view.settlementGuidance).toBe(refused.json().error.message);
   });
 });

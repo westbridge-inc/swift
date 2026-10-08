@@ -37,7 +37,7 @@ vi.mock('../lib/checkoutAttemptStore', () => ({ checkoutAttempt: {} }));
 vi.mock('../lib/checkoutAttempt', () => ({ recordCheckoutOutcome: vi.fn(), stableBodyHash: vi.fn() }));
 vi.mock('../lib/marketDepthMemory', () => ({ rememberedMarketDepth: () => null, rememberMarketDepth: () => {} }));
 
-import { api } from '../services/api';
+import { api, customerApi } from '../services/api';
 import { customerKeys, useDecideSubstitution } from './customer';
 
 const originalAdapter = api.defaults.adapter;
@@ -70,4 +70,10 @@ describe('[L09 · M028] deciding a substitute refreshes the order the screen sho
     expect(env.invalidated).toContainEqual({ queryKey: customerKeys.order('order-7') });
     expect(customerKeys.order('order-7')).toEqual(['customer', 'order', 'order-7']);
   });
+});
+
+it('only the permission-aware client opts into the swap response', async () => {
+  await customerApi.getOrder('order-7');
+  expect(seen[0]?.url).toBe('/customer/orders/order-7');
+  expect(seen[0]?.params).toEqual({ swapDecisions: 'v1' });
 });
