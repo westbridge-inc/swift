@@ -54,6 +54,7 @@ import type { MmgDirectPaymentAction } from '@swift/types';
 import { CartPaymentOptions } from '../CartPaymentOptions';
 import { checkoutTipAmount } from '../checkout-tip';
 import {
+  cartLineMeta,
   cartStaleCheckoutCode,
   cartPricingChoices,
   checkoutErrorMessage,
@@ -62,6 +63,7 @@ import {
   pickupRetryChoices,
   pickupStoreNames,
   pricedTip,
+  pricesAsSeen,
   quoteStoreIds,
   quotedRiderTip,
   shortStores,
@@ -401,6 +403,9 @@ export function CartScreen() {
         ...(pricing.fulfillmentSelections ? { fulfillmentSelections: pricing.fulfillmentSelections } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
+        // [L09 · price lock] The total and line prices the customer saw: the
+        // cart's quote, or for a pickup retry the pickup quote they confirmed.
+        ...pricesAsSeen(pickupRetry ? pickupQuote.data : c),
         ...(extra ?? {}),
         tipAmount: submittedTip,
       },
@@ -478,6 +483,9 @@ export function CartScreen() {
     if (pickupQuote.isFetching || pickupQuote.isPlaceholderData || !pickupQuote.data || pickupConfirmShown.current) return;
     const pickupTotal = Number(pickupQuote.data.totalAmount);
     if (!Number.isFinite(pickupTotal)) return;
+    // Capture the quote the alert displays before a reconnect can replace it.
+    const confirmedPrices = pricesAsSeen(pickupQuote.data);
+    const storeIds = quoteStoreIds(pickupQuote.data.items);
     pickupConfirmShown.current = true;
     Alert.alert(
       'Order for pickup instead?',
@@ -491,9 +499,8 @@ export function CartScreen() {
             // [E01] Every store in the basket collects — not just the one
             // `cart.vendor` happens to track (the rest would still wait for a
             // rider).
-            const storeIds = quoteStoreIds(c?.items);
             if (storeIds.length === 0) return;
-            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });
+            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])), ...confirmedPrices });
           },
         },
       ],
@@ -738,12 +745,7 @@ export function CartScreen() {
               const hasTotal = Number.isFinite(shownTotal);
               // The unit price is not lost: it moves to the muted meta line,
               // where it is labelled and unambiguous.
-              const meta = [
-                it.selectedOptionNames?.length ? it.selectedOptionNames.join(', ') : null,
-                Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null,
-              ]
-                .filter(Boolean)
-                .join(' · ');
+              const meta = cartLineMeta(it, Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null);
               return (
               <View key={it.id}>
                 {idx > 0 ? <View style={RULE} /> : null}
@@ -782,7 +784,8 @@ export function CartScreen() {
                     {!it.isAvailable ? (
                       <>
                         <T variant="caption" tone="error" style={{ marginTop: 2 }}>
-                          No longer available — remove to continue
+                          {/* [F4] The server's reason when a choice sold out. */}
+                          {it.unavailableReason || 'No longer available — remove to continue'}
                         </T>
                         {/* [E07] One tap to recover: the SAME remove-line
                             mutation as the trash glyph, labelled so the path

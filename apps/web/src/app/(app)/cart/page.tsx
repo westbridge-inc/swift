@@ -353,10 +353,19 @@ export default function CartPage() {
         window.requestAnimationFrame(() => errorMessage.current?.focus());
         return;
       }
+      // [L09 · price lock] The total and line prices this page showed: the
+      // server refuses with PRICE_CHANGED (old → new) if the order would
+      // charge anything else, so a price changed since is never charged unseen.
+      const expectedLines = cart.items.flatMap((line) => {
+        const unitPrice = parseAmount(line.customerPrice);
+        return unitPrice === null ? [] : [{ lineId: line.id, unitPrice }];
+      });
       const body = {
         paymentMethod,
         tipAmount: tip,
         ...(liveCart.promoCode?.code ? { promoCode: liveCart.promoCode.code } : {}),
+        ...(total !== null ? { expectedTotal: total } : {}),
+        expectedLines,
       };
       const signature = checkoutAttemptSignature(liveCart, body);
       const storedAttempt = checkoutAttempt.current ?? readCheckoutAttempt();

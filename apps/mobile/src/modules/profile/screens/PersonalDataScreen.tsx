@@ -7,6 +7,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { customerApi } from '../../../services/api';
 import { useProfile } from '../../../hooks/customer';
+import { useStepUp } from '../../../hooks/useStepUp';
+import { isStepUpDismissed } from '../../../lib/stepUp';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -20,9 +22,19 @@ const GUTTER = space['2xl'];
 
 // Kit Personal Data (50): avatar, labeled fields, save. Phone is the account
 // key (read-only); the avatar comes from the mandatory signup selfie.
-export function PersonalDataScreen() {
+export function PersonalDataScreen({ route, navigation }: any = {}) {
   const qc = useQueryClient();
+  const stepUp = useStepUp();
   const profile = useProfile<any>();
+  // A store or advertiser owner closes by a request the support team
+  // completes; anyone else (store staff included) deletes directly. The server
+  // says which on the profile (the same rule its delete applies), and that
+  // answer wins. The business screens' flag is only a fallback for a server
+  // too old to answer.
+  const answer = profile.data?.accountClosure;
+  const closureRequest = answer === 'REQUEST' || answer === 'DELETE'
+    ? answer === 'REQUEST'
+    : route?.params?.closureRequest === true;
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   const logoutIfCurrent = useAuthStore((s) => s.logoutIfCurrent);
 
@@ -92,19 +104,27 @@ export function PersonalDataScreen() {
   const deleteAccount = useMutation({
     mutationFn: async () => {
       const owner = requireAuthSessionSnapshot();
-      const res = await customerApi.deleteAccount(owner);
+      setConfirmDelete(false);
+      const res = await stepUp.withStepUp(() => closureRequest
+        ? customerApi.requestAccountClosure(owner)
+        : customerApi.deleteAccount(owner))();
       const current = requireAuthSessionForPrincipal(owner);
       setConfirmDelete(false);
       const deletion = res.data?.data;
-      toast.success(deletion?.status === 'PENDING_DOCUMENT_ERASURE'
-        ? deletion.message ?? 'Your account is closed. Document erasure is pending; no further sign-in is needed.'
-        : 'Your account has been deleted.');
+      if (deletion?.status === 'CLOSURE_REQUESTED') {
+        toast.success(deletion.message);
+        navigation?.navigate('GetHelp');
+        return res;
+      }
+      toast.success(deletion?.message ?? (deletion?.status === 'PENDING_SAFETY_HOLD'
+        ? 'Your account is closed. Limited safety evidence remains protected while the open case is resolved.'
+        : 'Your account has been deleted.'));
       logoutIfCurrent(current);
       return res;
     },
     onError: (e: any) => {
       setConfirmDelete(false);
-      if (!(e instanceof AuthSessionBoundaryError)) {
+      if (!(e instanceof AuthSessionBoundaryError) && !isStepUpDismissed(e)) {
         toast.error(e?.response?.data?.error?.message ?? 'Couldn’t delete the account. Try again.');
       }
     },
@@ -201,7 +221,8 @@ export function PersonalDataScreen() {
               label={exportData.isPending ? 'Preparing your data…' : 'Download my data'}
               onPress={() => !exportData.isPending && exportData.mutate()}
             />
-            <SettingsRow icon="trash-2" label="Delete my account" tone="error" onPress={() => setConfirmDelete(true)} />
+            <SettingsRow icon="life-buoy" label="Get help with account closure" onPress={() => navigation?.navigate('GetHelp', { category: 'ACCOUNT', subject: 'Help closing my account' })} />
+            <SettingsRow icon="trash-2" label={closureRequest ? "Request account closure" : "Delete my account"} tone="error" onPress={() => setConfirmDelete(true)} />
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -209,15 +230,16 @@ export function PersonalDataScreen() {
       <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
         <IconChip icon="alert-triangle" size={56} tone="error" />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          Delete your account?
+          {closureRequest ? 'Request account closure?' : 'Delete your account?'}
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          This erases your profile, saved addresses and verification documents for good — it can’t be undone. Past orders
-          are kept in de-identified form only where the law requires it.
+          {closureRequest
+            ? 'Send a closure request to our team. You can track it in Get help and keep access while outstanding business obligations are resolved.'
+            : 'This closes your account and starts erasing your personal data. It cannot be undone. Financial records are kept de-identified. Records under a legal or safety hold remain protected until that hold ends.'}
         </T>
         <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
           <PillButton
-            label="Delete my account"
+            label={closureRequest ? "Request account closure" : "Delete my account"}
             variant="primary"
             loading={deleteAccount.isPending}
             onPress={() => deleteAccount.mutate()}
@@ -225,6 +247,7 @@ export function PersonalDataScreen() {
           <PillButton label="Keep my account" variant="soft" onPress={() => setConfirmDelete(false)} />
         </View>
       </PopupCard>
+      {stepUp.sheet}
     </Screen>
   );
 }
