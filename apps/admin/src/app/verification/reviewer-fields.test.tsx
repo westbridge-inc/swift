@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import VerificationPage from './page';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
@@ -58,6 +58,20 @@ describe('PDF approval requires confirmed inline evidence', () => {
   let previous: boolean;
   beforeEach(() => { previous = settings.disableIframePageLoading; settings.disableIframePageLoading = true; });
   afterEach(() => { settings.disableIframePageLoading = previous; });
+  it('a previous PDF frame cannot confirm a replacement view', async () => {
+    const fetch = vi.fn(async (url: string) => url.includes('/document-url')
+      ? new Response(JSON.stringify({ data: { url: '/api/v1/verification/render/synthetic-doc?sig=fixture&expires=1' } }), { headers: { 'content-type': 'application/json' } })
+      : new Response('pdf', { headers: { 'content-type': 'application/pdf' } }));
+    vi.stubGlobal('fetch', fetch);
+    const { user } = renderWithQuery(<DocumentViewer id="synthetic-doc" label="Document" onViewed={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'View document' }));
+    const oldFrame = await screen.findByTitle('Document evidence') as HTMLIFrameElement;
+    const oldLoad = oldFrame.onload;
+    await user.click(screen.getByRole('button', { name: 'View document' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    act(() => { oldLoad?.call(oldFrame, new Event('load')); });
+    expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
+  });
   it.each([false, true])('only an inline load followed by confirmation unlocks the PDF (failed=%s)', async (failed) => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('/document-url')
       ? new Response(JSON.stringify({ data: { url: '/api/v1/verification/render/synthetic-doc?sig=fixture&expires=1' } }), { headers: { 'content-type': 'application/json' } })
