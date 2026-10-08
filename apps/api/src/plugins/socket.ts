@@ -222,57 +222,58 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     if (authorityRecheckClosing || authorityRecheckPromise || activeSocketAuthorities.size === 0) return;
     authorityRecheckPromise = (async () => {
       const snapshot = [...activeSocketAuthorities.values()];
-      const sessionIds = [...new Set(snapshot.map(({ sessionId }) => sessionId))];
-      try {
-        // [L04 · R1] Each socket was authorized in its account's tenant; its
-        // session is re-read bound to that same tenant, one pass per tenant.
-        const byTenant = new Map<string, Set<string>>();
-        for (const { tenantId, sessionId } of snapshot) {
-          if (!byTenant.has(tenantId)) byTenant.set(tenantId, new Set());
-          byTenant.get(tenantId)!.add(sessionId);
-        }
-        const sessions = (await Promise.all([...byTenant].map(([tenantId, ids]) =>
-          runWithTenant(tenantId, () => readAuthoritiesBySessionIds([...ids]))))).flat();
-        const sessionsById = new Map(sessions.map((session) => [session.sessionId, session]));
-        const now = Date.now();
-        for (const authority of snapshot) {
-          const liveSocket = io.sockets.sockets.get(authority.socketId);
-          if (!liveSocket?.connected) continue;
-          const session = sessionsById.get(authority.sessionId);
-          const privilegedAssuranceValid = session
-            ? !requiresPrivilegedSessionAssurance(session.activeRole, session.roles)
-              || hasPrivilegedSessionAssurance(session.authMethod)
-            : false;
-          if (
-            !session
-            || session.token !== authority.token
-            || session.expiresAt.getTime() <= now
-            || session.userId !== authority.userId
-            || session.tenantId !== authority.tenantId
-            || session.activeRole !== authority.role
-            || ['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(session.userStatus)
-            || !privilegedAssuranceValid
-          ) {
-            app.log.warn(
-              {
-                socketId: authority.socketId,
-                userId: authority.userId,
-                sessionId: authority.sessionId,
-              },
-              'Socket authority fallback recheck failed; disconnecting transport',
-            );
-            liveSocket.disconnect(true);
+      // Serialize tenant reads so the fallback needs at most one pool slot.
+      // A failed read invalidates only the tenant whose authority is unknown.
+      const byTenant = new Map<string, typeof snapshot>();
+      for (const authority of snapshot) {
+        if (!byTenant.has(authority.tenantId)) byTenant.set(authority.tenantId, []);
+        byTenant.get(authority.tenantId)!.push(authority);
+      }
+      for (const [tenantId, authorities] of byTenant) {
+        if (authorityRecheckClosing) break;
+        const sessionIds = [...new Set(authorities.map(({ sessionId }) => sessionId))];
+        try {
+          const sessions = await runWithTenant(tenantId, () => readAuthoritiesBySessionIds(sessionIds));
+          const sessionsById = new Map(sessions.map((session) => [session.sessionId, session]));
+          const now = Date.now();
+          for (const authority of authorities) {
+            const liveSocket = io.sockets.sockets.get(authority.socketId);
+            if (!liveSocket?.connected) continue;
+            const session = sessionsById.get(authority.sessionId);
+            const privilegedAssuranceValid = session
+              ? !requiresPrivilegedSessionAssurance(session.activeRole, session.roles)
+                || hasPrivilegedSessionAssurance(session.authMethod)
+              : false;
+            if (
+              !session
+              || session.token !== authority.token
+              || session.expiresAt.getTime() <= now
+              || session.userId !== authority.userId
+              || session.tenantId !== authority.tenantId
+              || session.activeRole !== authority.role
+              || ['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(session.userStatus)
+              || !privilegedAssuranceValid
+            ) {
+              app.log.warn(
+                {
+                  socketId: authority.socketId,
+                  userId: authority.userId,
+                  sessionId: authority.sessionId,
+                },
+                'Socket authority fallback recheck failed; disconnecting transport',
+              );
+              liveSocket.disconnect(true);
+            }
           }
+        } catch (error) {
+          // Redis is the fast revocation path; unavailable DB authority still
+          // closes this tenant's transports reconnectably while others proceed.
+          app.log.error(
+            { err: error, sockets: authorities.length, sessions: sessionIds.length },
+            'Socket authority fallback recheck unavailable; closing tenant transports',
+          );
+          for (const authority of authorities) closeForAuthorityStoreFailure(authority.socketId);
         }
-      } catch (error) {
-        // Redis delivers the fast revocation path; this database pass is the
-        // fail-closed fallback when Pub/Sub is missed. If the authority store
-        // itself cannot be read, no socket from this snapshot may stay active.
-        app.log.error(
-          { err: error, sockets: snapshot.length, sessions: sessionIds.length },
-          'Socket authority fallback recheck unavailable; closing transports',
-        );
-        for (const authority of snapshot) closeForAuthorityStoreFailure(authority.socketId);
       }
     })().catch((error) => {
       app.log.error(

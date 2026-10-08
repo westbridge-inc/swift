@@ -16,7 +16,7 @@
  * refresh credential. Each asserts the database effect through the suite's
  * own privileged connection (never the app's client).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
@@ -29,22 +29,21 @@ import { readRlsFacts } from '../lib/rls-attestation';
 import { hashReviewCode } from '../modules/review/credentials';
 import { storePasswordResetOtp, storeSignupOtp } from '../modules/auth/signup-continuation';
 import { installDdl } from './helpers/install-ddl';
+import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
+import { getTenantContext } from '../plugins/tenant-context';
 
 // [R048-001] this suite creates the NOLOGIN probe group and two LOGIN roles by raw DDL, as review-partner-strict-posture does.
 grantSuiteCapability('ddl');
 
 const TEST_URL = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
-const PROBE_LOGIN = 'swift_rls_probe_login';
-const PROBE_URL = TEST_URL.replace(/\/\/[^@]+@/, `//${PROBE_LOGIN}:probe@`);
-const SYSTEM_LOGIN = 'swift_rls_system_login';
-const SYSTEM_URL = TEST_URL.replace(/\/\/[^@]+@/, `//${SYSTEM_LOGIN}:probe@`);
+let logins: Awaited<ReturnType<typeof createTenantProbeLogins>>;
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
 const REVIEW = `review-preauth-${RUN}`;
 const PRODUCTION = 'swift-default';
 const WEB_ORIGIN = 'http://localhost:3001';
 const PASSWORD = 'correct horse battery';
 const REVIEW_CODE = '864213';
-const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND', 'CORS_ORIGIN'] as const;
+const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND', 'CORS_ORIGIN', 'SOCKET_AUTH_RECHECK_MS'] as const;
 const priorEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 const PHONE_BASE = 9000 + Math.floor(Math.random() * 900);
 let phoneSeq = 0;
@@ -110,27 +109,17 @@ beforeAll(async () => {
   for (const k of ENV_KEYS) priorEnv[k] = process.env[k];
   passwordHash = await bcrypt.hash(PASSWORD, 4);
   owner = new PrismaClient({ datasourceUrl: TEST_URL });
-  await installDdl(owner, [
-    ...appRoleDdl(),
-    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_rls_probe') THEN CREATE ROLE swift_rls_probe NOLOGIN NOBYPASSRLS; END IF; END $$`,
-    `GRANT USAGE ON SCHEMA public TO swift_rls_probe`,
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_rls_probe`,
-    `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_rls_probe`,
-    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_LOGIN}') THEN CREATE ROLE ${PROBE_LOGIN} LOGIN PASSWORD 'probe' NOBYPASSRLS; END IF; END $$`,
-    `GRANT swift_rls_probe TO ${PROBE_LOGIN}`,
-    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${SYSTEM_LOGIN}') THEN CREATE ROLE ${SYSTEM_LOGIN} LOGIN PASSWORD 'probe' NOBYPASSRLS; END IF; END $$`,
-    `GRANT swift_rls_probe TO ${SYSTEM_LOGIN}`,
-    `GRANT swift_bypass_rls TO ${SYSTEM_LOGIN}`,
-  ]);
+  await installDdl(owner, appRoleDdl());
+  logins = await createTenantProbeLogins(owner, TEST_URL);
   // The store-review fiction, as provision leaves it: a REVIEW tenant with a live review session.
   await owner.tenant.create({ data: { id: REVIEW, name: 'Pre-auth posture fiction', slug: REVIEW, kind: 'REVIEW', purgeProtected: true } });
   await owner.reviewSession.create({ data: { tenantId: REVIEW, expiresAt: new Date(Date.now() + 86_400_000) } });
 
-  process.env['DATABASE_URL'] = PROBE_URL;
-  process.env['SYSTEM_DATABASE_URL'] = SYSTEM_URL;
+  process.env['DATABASE_URL'] = logins.requestUrl;
+  process.env['SYSTEM_DATABASE_URL'] = logins.systemUrl;
   process.env['TENANT_UNSCOPED_ACCESS'] = 'deny';
   process.env['TENANT_RLS_BIND'] = '1';
-  process.env['CORS_ORIGIN'] = WEB_ORIGIN;
+  process.env['CORS_ORIGIN', 'SOCKET_AUTH_RECHECK_MS'] = WEB_ORIGIN;
   const Fastify = (await import('fastify')).default;
   prismaModule = await import('../plugins/prisma');
   const { prismaPlugin } = prismaModule;
@@ -176,6 +165,7 @@ afterAll(async () => {
   await owner.reviewSession.deleteMany({ where: { tenantId: REVIEW } });
   await owner.tenant.updateMany({ where: { id: REVIEW }, data: { purgeProtected: false } });
   await owner.tenant.deleteMany({ where: { id: REVIEW } });
+  await logins?.cleanup();
   await owner.$disconnect();
 });
 
@@ -242,8 +232,8 @@ describe('[L04 · R1 · OTA-016] sign-in under the production CONTRACT posture',
     expect(await sessionsOf(who.id)).toBe(1);
   });
 
-  it.each(TENANTS)('%s: password reset — the credential changes and every session ends', async (tenant) => {
-    const who = await account(tenant, { password: true });
+  it('PRODUCTION: password reset — the credential changes and every session ends', async () => {
+    const who = await account('PRODUCTION', { password: true });
     await session(who.id);
     await storePasswordResetOtp(app.redis, who.phone, '975311');
     const res = await post('/password/reset', { phone: who.phone, code: '975311', newPassword: 'a brand new password' });
@@ -251,6 +241,18 @@ describe('[L04 · R1 · OTA-016] sign-in under the production CONTRACT posture',
     const after = await owner.user.findUniqueOrThrow({ where: { id: who.id }, select: { passwordHash: true } });
     expect(after.passwordHash).not.toBe(passwordHash);
     expect(await sessionsOf(who.id)).toBe(0);
+  });
+
+  it.each([false, true])('REVIEW: reset refuses a valid planted OTP (review credential: %s)', async (reviewCredential) => {
+    const who = await account('REVIEW', { password: true, reviewCredential });
+    const existing = await session(who.id);
+    await storePasswordResetOtp(app.redis, who.phone, '975311');
+    const res = await post('/password/reset', { phone: who.phone, code: '975311', newPassword: 'a brand new password' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_OTP');
+    expect((await owner.user.findUniqueOrThrow({ where: { id: who.id } })).passwordHash).toBe(passwordHash);
+    expect(await sessionsOf(who.id)).toBe(1);
+    expect((await owner.session.findUniqueOrThrow({ where: { id: existing.id } })).token).toBe(existing.token);
   });
 
   it.each(TENANTS)('%s: refresh rotates the session’s tokens', async (tenant) => {
@@ -280,6 +282,58 @@ describe('[L04 · R1 · OTA-016] sign-in under the production CONTRACT posture',
     const s = await session(who.id);
     const socket = await connect(s.token);
     expect(socket.connected).toBe(true);
+  });
+
+  it('socket rechecks serialize tenant reads when only one pool slot is available', async () => {
+    for (const socket of sockets) socket.disconnect();
+    const production = await session((await account('PRODUCTION')).id);
+    const review = await session((await account('REVIEW')).id);
+    const a = await connect(production.token);
+    const b = await connect(review.token);
+    const transaction = app.prisma.$transaction.bind(app.prisma);
+    let active = 0;
+    let peak = 0;
+    const completed = new Set<string>();
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (...args: unknown[]) => {
+      const tenantId = getTenantContext()?.tenantId;
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        if (active > 1) throw new Error('single-slot pool acquisition timed out');
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const result = await (transaction as (...args: unknown[]) => Promise<unknown>)(...args);
+        if (tenantId) completed.add(tenantId);
+        return result;
+      } finally { active -= 1; }
+    }) as typeof app.prisma.$transaction);
+    try {
+      await vi.waitFor(() => expect([...completed].sort()).toEqual([PRODUCTION, REVIEW].sort()), { timeout: 5000 });
+      expect(peak).toBe(1);
+      expect([a.connected, b.connected]).toEqual([true, true]);
+    } finally { spy.mockRestore(); a.disconnect(); b.disconnect(); }
+  });
+
+  it('a failed tenant recheck closes only that tenant and still checks healthy tenants', async () => {
+    for (const socket of sockets) socket.disconnect();
+    const review = await session((await account('REVIEW')).id);
+    const production = await session((await account('PRODUCTION')).id);
+    const a = await connect(review.token);
+    const b = await connect(production.token);
+    const transaction = app.prisma.$transaction.bind(app.prisma);
+    let healthyReads = 0;
+    let reason: string | undefined;
+    a.once('disconnect', (value) => { reason = value; });
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (...args: unknown[]) => {
+      if (getTenantContext()?.tenantId === REVIEW) throw new Error('tenant authority temporarily unavailable');
+      const result = await (transaction as (...args: unknown[]) => Promise<unknown>)(...args);
+      healthyReads += 1;
+      return result;
+    }) as typeof app.prisma.$transaction);
+    try {
+      await vi.waitFor(() => { expect(a.connected).toBe(false); expect(healthyReads).toBeGreaterThan(0); });
+      expect(reason).not.toBe('io server disconnect');
+      expect(b.connected).toBe(true);
+    } finally { spy.mockRestore(); a.disconnect(); b.disconnect(); }
   });
 
   it.each(TENANTS)('%s: logout ends this session', async (tenant) => {
