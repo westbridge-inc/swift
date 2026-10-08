@@ -1,3 +1,4 @@
+import { assertDispatchPairEligible, safetyExcludedMovers } from './pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { randomUUID } from 'node:crypto';
@@ -385,7 +386,7 @@ type DispatchOrderAuthority = Pick<Order,
  *   mover-ineligible  THIS mover cannot take it; another mover can
  *   unknown           we do not know, so we charge it to nobody
  */
-export type ClaimRefusal = 'order-held' | 'lost-race' | 'mover-ineligible' | 'unknown';
+export type ClaimRefusal = 'order-held' | 'lost-race' | 'mover-ineligible' | 'pair-excluded' | 'unknown';
 
 const ORDER_HELD_CLAIM_CODES: ReadonlySet<string> = new Set(['ORDER_NOT_READY', 'ORDER_HELD', 'MMG_CLAIM_MISMATCH', 'MMG_PAYMENT_PENDING']);
 const LOST_RACE_CLAIM_CODES: ReadonlySet<string> = new Set(['ALREADY_TAKEN', 'OFFER_TAKEN', 'ORDER_CANCELLED']);
@@ -395,6 +396,7 @@ const MOVER_INELIGIBLE_CLAIM_CODES: ReadonlySet<string> = new Set([
 
 export function classifyClaimRefusal(error: unknown): ClaimRefusal {
   if (!(error instanceof AppError)) return 'unknown';
+  if (error.code === 'JOB_UNAVAILABLE') return 'pair-excluded';
   if (ORDER_HELD_CLAIM_CODES.has(error.code)) return 'order-held';
   if (LOST_RACE_CLAIM_CODES.has(error.code)) return 'lost-race';
   if (MOVER_INELIGIBLE_CLAIM_CODES.has(error.code)) return 'mover-ineligible';
@@ -1181,7 +1183,7 @@ export class DispatchService {
     // excluded from enhanced-monitoring passengers pending review, and either
     // party having blocked the other keeps them apart.
     if (excludeUserId && eligible.length > 0) {
-      const safetyExcluded = await this.safetyExcludedUserIds(excludeUserId, eligible.map((r) => r.userId), pool);
+      const safetyExcluded = await safetyExcludedMovers(this.prisma, excludeUserId, eligible.map((r) => r.userId), pool);
       if (safetyExcluded.size > 0) {
         eligible = eligible.filter((r) => !safetyExcluded.has(r.userId));
         log().warn({ orderId, customerUserId: excludeUserId, excluded: safetyExcluded.size }, 'dispatch: safety or block exclusions removed candidates from the pool');
@@ -1261,77 +1263,6 @@ export class DispatchService {
       log().warn({ err, orderId }, 'dispatch: fairness band skipped — pure ranking used');
       return ranked;
     }
-  }
-
-  /** Safety-driven pool exclusions (spec §8.5 retaliation guard + §8.3
-   *  SHADOW_RESTRICTED) plus the customer's own blocks [STORE-002]. Three
-   *  indexed reads, only when a booking user exists AND candidates survived
-   *  the geo query — never on availability probes. */
-  private async safetyExcludedUserIds(customerUserId: string, candidateUserIds: string[], pool: DispatchPool): Promise<Set<string>> {
-    const excluded = new Set<string>();
-    // §8.5: subject and reporter on ANY shared case (365d, either direction)
-    // are never matched by dispatch again. Retaliation risk doesn't care who
-    // reported whom.
-    const pairs = await this.prisma.incidentCase.findMany({
-      where: {
-        createdAt: { gte: new Date(Date.now() - 365 * 86_400_000) },
-        OR: [
-          { reporterUserId: customerUserId, subjectUserId: { in: candidateUserIds } },
-          { subjectUserId: customerUserId, reporterUserId: { in: candidateUserIds } },
-        ],
-      },
-      select: { subjectUserId: true, reporterUserId: true },
-      take: 100,
-    });
-    for (const p of pairs) {
-      if (p.subjectUserId !== customerUserId) excluded.add(p.subjectUserId);
-      if (p.reporterUserId && p.reporterUserId !== customerUserId) excluded.add(p.reporterUserId);
-    }
-    // §8.3: SHADOW_RESTRICTED movers stay online for the general public but
-    // are kept away from enhanced-monitoring passengers pending review.
-    const passenger = await this.prisma.user.findUnique({
-      where: { id: customerUserId },
-      select: { enhancedSafetyMonitoring: true },
-    });
-    if (passenger?.enhancedSafetyMonitoring) {
-      const restricted =
-        pool === 'DRIVER'
-          ? await this.prisma.driver.findMany({ where: { userId: { in: candidateUserIds }, safetyShadowRestrictedAt: { not: null } }, select: { userId: true } })
-          : await this.prisma.rider.findMany({ where: { userId: { in: candidateUserIds }, safetyShadowRestrictedAt: { not: null } }, select: { userId: true } });
-      for (const r of restricted) excluded.add(r.userId);
-    }
-    // [STORE-002] A block the customer placed themselves. This belongs in the
-    // same set as §8.5 rather than in a filter of its own: the retaliation
-    // guard above already says "these two are never matched again", and a
-    // block is that same policy stated by the person instead of by an incident
-    // case. Symmetric, so a mover who blocked this customer is also kept away
-    // — the mover's refusal is as real as the customer's.
-    //
-    // Bounded to the candidates actually in front of us, so the cost is one
-    // indexed read over a short id list and does not grow with how many people
-    // the customer has ever blocked.
-    //
-    // Deliberately keyed on ids and not on tenantId, unlike the rest of the
-    // moderation module. A user id belongs to exactly one tenant, so an
-    // id-bounded read cannot cross the wall — while THREADING tenantId here
-    // would fail OPEN: dispatch also runs from sockets and workers where
-    // getTenantId() is null, and `where: { tenantId: null }` matches no rows,
-    // which would silently stop excluding anybody. Fail-closed by construction
-    // beats a scope that is only correct on the HTTP path.
-    const blocked = await this.prisma.userBlock.findMany({
-      where: {
-        unblockedAt: null,
-        OR: [
-          { blockerId: customerUserId, blockedId: { in: candidateUserIds } },
-          { blockedId: customerUserId, blockerId: { in: candidateUserIds } },
-        ],
-      },
-      select: { blockerId: true, blockedId: true },
-    });
-    for (const b of blocked) {
-      excluded.add(b.blockerId === customerUserId ? b.blockedId : b.blockerId);
-    }
-    return excluded;
   }
 
   // -------------------------------------------------------------------------
@@ -2706,6 +2637,7 @@ export class DispatchService {
       `;
       const lockedOrder = lockedOrders[0];
       if (!lockedOrder) throw new NotFoundError('Order', orderId);
+      await assertDispatchPairEligible(tx, lockedOrder.customerId, moverAuthority.userId, pool);
       if (lockedOrder.customerId === moverAuthority.userId) {
         throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot accept a request created by your own account');
       }
