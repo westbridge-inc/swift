@@ -148,7 +148,11 @@ describe('the tail is written with the order and published exactly once', () => 
       expect(cancel.claimedAt).toBeNull(); // the claim was released for the sweep
       expect((await orderQueue.getJob(cancel.id))).toBeUndefined();
       // The sweep (here, a second drain once the row's backoff has lapsed).
-      await app.prisma.orderOutbox.update({ where: { id: cancel.id }, data: { availableAt: new Date() } });
+      // The drainer judges due work on the database clock. A host timestamp
+      // milliseconds ahead can leave this retry in the future on a fast run.
+      await app.prisma.$executeRaw`UPDATE "order_outbox" SET "availableAt" = CURRENT_TIMESTAMP WHERE "id" = ${cancel.id}`;
+      const [retry] = await app.prisma.$queryRaw<Array<{ due: boolean }>>`SELECT "availableAt" <= CURRENT_TIMESTAMP AS due FROM "order_outbox" WHERE "id" = ${cancel.id}`;
+      expect(retry?.due).toBe(true);
       const swept = await drainCheckoutOutbox({ prisma: app.prisma, queues: { orderQueue, notificationQueue }, log: app.log }, { orderIds: [orderId] });
       expect(swept.processed).toBe(1);
       expect((await orderQueue.getJob(cancel.id))?.name).toBe('auto-cancel');
