@@ -545,7 +545,7 @@ export function splitChecklistKey(listKey: string): { actorRole: string; tier: s
     : { actorRole: listKey, tier: REGISTRY_TIER };
 }
 
-export async function registryChecklist(prisma: PrismaClient, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
+export async function registryChecklist(prisma: Pick<PrismaClient, 'requirementSet'>, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
   const set = await prisma.requirementSet.findFirst({
     where: {
       countryCode, actorRole, tier,

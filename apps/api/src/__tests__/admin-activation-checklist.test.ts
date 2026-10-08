@@ -18,6 +18,7 @@ import { seedDocRegistry, registryCode } from '../modules/verification/doc-regis
 import { purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { withSuiteCapability } from '../lib/test-target-lock';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
@@ -549,4 +550,30 @@ describe('[MC-PR2] GET /riders|drivers/:id/activation-checklist — the mover ga
     expect(data.checklist.items.every((i: { state: string }) => i.state === 'MISSING')).toBe(true);
     expect((await read('/api/v1/admin/drivers/no-such-driver/activation-checklist')).statusCode).toBe(404);
   });
+});
+
+
+it.each(['PENDING_APPROVAL', 'SUSPENDED'] as const)('an audit failure rolls back a %s store activation and its side effects', async (status) => {
+  const owner = await makeUser('AuditRollback');
+  const store = await makeStore(owner.id, status, status === 'SUSPENDED' ? { suspensionSource: 'ADMIN' } : {});
+  for (const type of SUPERMARKET_DOCS) await doc(owner.id, type, 'APPROVED');
+  const before = await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } });
+  const functionName = `mc_audit_refuse_${marker.replace(/[^a-z0-9]/g, 'x')}`;
+  await withSuiteCapability('ddl', () => system(async () => {
+    await app.prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION ${functionName}() RETURNS trigger AS $fn$
+      BEGIN IF NEW."entityId" = '${store.id}' THEN RAISE EXCEPTION 'fixture audit unavailable'; END IF; RETURN NEW; END; $fn$ LANGUAGE plpgsql`);
+    await app.prisma.$executeRawUnsafe(`CREATE TRIGGER ${functionName} BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+  }));
+  try {
+    const response = await approve(store.id);
+    expect(response.statusCode).toBe(500);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: before.status, suspensionSource: before.suspensionSource, tier: before.tier, activationValidUntil: before.activationValidUntil });
+    expect(await app.prisma.subscription.count({ where: { vendorId: store.id } })).toBe(0);
+    expect(await app.prisma.notification.count({ where: { userId: owner.id } })).toBe(0);
+  } finally {
+    await withSuiteCapability('ddl', () => system(async () => {
+      await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS ${functionName} ON audit_logs`);
+      await app.prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS ${functionName}()`);
+    }));
+  }
 });

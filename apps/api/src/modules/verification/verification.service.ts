@@ -1626,7 +1626,7 @@ export class VerificationService {
    * the named store is projected: the button names one store, so the owner's
    * other stores are left to the document path and the daily belt.
    */
-  async activateStore(userId: string, vendorId: string): Promise<void> {
+  async activateStore(userId: string, vendorId: string, onActivated?: (tx: Prisma.TransactionClient) => Promise<void>): Promise<void> {
     await this.projectionTransaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR NO KEY UPDATE`;
       await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${vendorId} FOR UPDATE`;
@@ -1637,6 +1637,7 @@ export class VerificationService {
       await this.projectVendorActivation(tx, userId, { vendorId });
       const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true } });
       if (after.status !== 'ACTIVE') throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
+      await onActivated?.(tx);
     });
   }
 

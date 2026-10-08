@@ -1446,7 +1446,9 @@ export async function adminRoutes(app: FastifyInstance) {
       // auto-approval, the reconcile belt — and now this button), run for this
       // store only [DS816 S3]. It prices the store and starts its trial in the
       // same transaction, or refuses with the config error and leaves it pending.
-      await verification.activateStore(goLive.ownerUserId, id);
+      await verification.activateStore(goLive.ownerUserId, id, (tx) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        extra: { previousStatus: vendor.status, previousSuspensionSource: vendor.suspensionSource, verdict: next },
+      }));
       updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
       if (updated.status !== 'ACTIVE') {
         throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
@@ -1479,14 +1481,15 @@ export async function adminRoutes(app: FastifyInstance) {
           data: { status: 'ACTIVE', isVerified: true, suspensionSource: null, activationValidUntil },
         });
         if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+          extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },
+        });
         return tx.vendor.findUniqueOrThrow({ where: { id } });
       });
     }
 
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
-
-    await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status, previousSuspensionSource: vendor.suspensionSource, verdict: next }, request);
 
     await notifications.send({
       userId: vendor.owner.userId,
