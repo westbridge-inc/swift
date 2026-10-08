@@ -1,3 +1,4 @@
+import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
@@ -691,9 +692,10 @@ export class OrderService {
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const paymentGate = await tx.order.findUnique({
       where: { id: input.orderId },
-      select: { paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
+      select: { customerId: true, paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
     });
     if (paymentGate) {
+      await assertDispatchPairEligible(tx, paymentGate.customerId, input.moverUserId, 'RIDER');
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
       if (withheldAwaitingReadiness(paymentGate)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(paymentGate)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');

@@ -119,50 +119,30 @@ export async function assertUsersMayContact(
  * `blockedAt`, so the screen dates the block that is actually in force.
  */
 export async function activateUserBlock(
-  db: UserBlockDb,
+  db: Pick<PrismaClient, '$transaction'>,
   input: { tenantId: string; blockerId: string; blockedId: string; reason?: string | null },
 ): Promise<{ block: ActiveUserBlock; alreadyBlocked: boolean }> {
-  if (input.blockerId === input.blockedId) {
-    // Also a CHECK constraint. Refused here so the caller gets a sentence
-    // rather than a database error, and refused there so no other writer can
-    // introduce a row that would make contactBlockedUserIds hand back the
-    // caller's own id — which reads, at the dispatch seam, as "this person may
-    // not be matched with anyone".
-    throw new AppError(400, 'CANNOT_BLOCK_SELF', 'You cannot block your own account.');
-  }
-  const now = new Date();
-  const key = {
-    tenantId_blockerId_blockedId: {
-      tenantId: input.tenantId,
-      blockerId: input.blockerId,
-      blockedId: input.blockedId,
-    },
-  };
-  const existing = await db.userBlock.findUnique({ where: key, select: { unblockedAt: true } });
-  if (existing && existing.unblockedAt === null) {
-    const block = await db.userBlock.findUniqueOrThrow({ where: key, select: ACTIVE_FIELDS });
-    return { block, alreadyBlocked: true };
-  }
-
-  try {
-    const block = await db.userBlock.upsert({
-      where: key,
+  if (input.blockerId === input.blockedId) throw new AppError(400, 'CANNOT_BLOCK_SELF', 'You cannot block your own account.');
+  return db.$transaction(async (tx) => {
+    // Claims lock the mover User before Order. Taking both users in sorted
+    // order also serializes reactivation, whose existing FK takes no new lock.
+    await tx.$queryRaw`SELECT "id" FROM "users"
+      WHERE "id" IN (${Prisma.join([input.blockerId, input.blockedId].sort())})
+      ORDER BY "id" FOR UPDATE`;
+    const where = { tenantId_blockerId_blockedId: { tenantId: input.tenantId, blockerId: input.blockerId, blockedId: input.blockedId } };
+    const existing = await tx.userBlock.findUnique({ where, select: { ...ACTIVE_FIELDS, unblockedAt: true } });
+    if (existing?.unblockedAt === null) {
+      const block: ActiveUserBlock = { id: existing.id, blockerId: existing.blockerId, blockedId: existing.blockedId, blockedAt: existing.blockedAt };
+      return { block, alreadyBlocked: true };
+    }
+    const now = new Date();
+    const block = await tx.userBlock.upsert({ where,
       create: { ...input, reason: input.reason ?? null, blockedAt: now },
-      // A row that exists here was unblocked: re-arm it and re-date it.
       update: { unblockedAt: null, blockedAt: now, reason: input.reason ?? null },
       select: ACTIVE_FIELDS,
     });
     return { block, alreadyBlocked: false };
-  } catch (error) {
-    // Two taps can both pass the read above. The unique index is the race
-    // boundary: one write wins, the loser reports the same outcome rather than
-    // a 500, because from the user's side both taps did block the person.
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const winner = await db.userBlock.findUnique({ where: key, select: ACTIVE_FIELDS });
-      if (winner) return { block: winner, alreadyBlocked: true };
-    }
-    throw error;
-  }
+  });
 }
 
 /**
