@@ -3,8 +3,11 @@ import { readInfrastructureClocks } from '../utils/infrastructure-clock';
 import type { WorkerCheck } from '../utils/scheduler-health';
 import { readinessGauge, readyReasonCounter, routedWhileDegradedCounter } from './observability';
 import { positiveDurationMs, withTimeout } from '../utils/async-lifecycle';
+import type { RoutingProbe } from '../providers/maps/routing-probe';
 
 export interface RuntimeReadinessState {
+  /** Report routing independently: an outage blocks new road quotes, not SOS. */
+  checkRouting?: () => Promise<RoutingProbe>;
   checkQueues: () => boolean | Promise<boolean>;
   checkConsumers?: () => boolean | Promise<boolean>;
   checkRealtime?: () => boolean | Promise<boolean>;
@@ -16,6 +19,7 @@ export interface RuntimeReadinessState {
 
 export interface ReadinessSnapshot {
   ready: boolean;
+  routing?: RoutingProbe;
   deps: {
     database: boolean;
     redis: boolean;
@@ -230,6 +234,7 @@ export async function evaluateReadiness(
     clockResult,
     workerResult,
     bootResult,
+    routingResult,
   ] = await Promise.allSettled([
     bounded(
       hasRequiredSchema(app.prisma),
@@ -264,6 +269,7 @@ export async function evaluateReadiness(
       Promise.resolve().then(() => state.checkBoot?.() ?? true),
       'Readiness boot contract check',
     ),
+    bounded(Promise.resolve().then(() => state.checkRouting?.()), 'Readiness routing report'),
   ]);
 
   const deps = {
@@ -281,6 +287,9 @@ export async function evaluateReadiness(
   for (const r of reasons) readyReasonCounter.labels(r).inc();
   const snapshot: ReadinessSnapshot = {
     ready: reasons.length === 0,
+    ...(state.checkRouting ? { routing: routingResult.status === 'fulfilled' && routingResult.value
+      ? routingResult.value
+      : { status: 'degraded' as const, provider: 'unknown', why: 'The routing probe did not answer.' } } : {}),
     deps,
     reasons,
     timestamp: new Date().toISOString(),

@@ -1,6 +1,6 @@
 import type { PrismaClient, RideClass } from '@prisma/client';
 import { isRideClassServed } from '../../config/vehicle-classes';
-import { getMapsProvider, type MapsProvider, type RouteLegsEstimate, type RouteSource } from '../../providers/maps/maps-provider';
+import { assertRoadQuoteAvailable, getMapsProvider, type MapsProvider, type RouteLegsEstimate, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { AppError } from '../../utils/errors';
 import { type GeoPoint } from '../../utils/geo';
@@ -184,6 +184,7 @@ export class FareService {
     // Real road route when a routing engine (OSRM) is configured; the
     // deterministic estimate otherwise — identical to the historical numbers.
     const route = await this.maps.routeKm(pickup, dropoff);
+    assertRoadQuoteAvailable(route);
     // [ALG-18] Canonical BEFORE pricing: the fare and the frozen number are one number.
     const distanceKm = canonicalBillableKm(route.km);
     const durationMin = Math.ceil(route.minutes ?? (distanceKm / AVG_SPEED_KMH) * 60);

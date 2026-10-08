@@ -1,5 +1,6 @@
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
+import { ROAD_ROUTING_UNAVAILABLE_COPY } from '../../../lib/roadRouting';
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -167,7 +168,9 @@ export function CourierScreen({ navigation }: any) {
   const pickupPoint = pickup ? { lat: pickup.lat, lng: pickup.lng } : undefined;
   const dropoffPoint = dropoff ? { lat: dropoff.lat, lng: dropoff.lng } : undefined;
 
-  const { data: estimate, isFetching: estimating, isError: estimateFailed, refetch: refetchEstimate } = useCourierEstimate<any>(pickupPoint, dropoffPoint, size, speed);
+  const { data: quotedEstimate, isFetching: estimating, isError: estimateFailed, error: estimateError, refetch: refetchEstimate } = useCourierEstimate<any>(pickupPoint, dropoffPoint, size, speed);
+  const routingUnavailable = (estimateError as any)?.response?.data?.error?.code === 'ROUTE_UNAVAILABLE';
+  const estimate = routingUnavailable ? undefined : quotedEstimate;
 
   const valid =
     !!pickupPoint && !!dropoffPoint && recipientName.trim().length >= 2 && recipientPhone.trim().length >= 5 && !!estimate;
@@ -370,7 +373,7 @@ export function CourierScreen({ navigation }: any) {
                 // (the CTA caption) or sit as a blank card.
                 <View>
                   <T variant="body" tone="error">
-                    We couldn't price this trip.
+                    {routingUnavailable ? ROAD_ROUTING_UNAVAILABLE_COPY : "We couldn't price this trip."}
                   </T>
                   <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm, alignSelf: 'flex-start' }} onPress={() => refetchEstimate()} />
                 </View>
