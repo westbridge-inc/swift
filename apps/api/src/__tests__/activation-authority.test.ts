@@ -30,8 +30,9 @@ import { readDunningClock } from '../modules/billing/dunning-clock';
 //             live gate, and can actually SUBMIT them (the old CAR-hard-coded
 //             list made road_service_licence unsubmittable).
 // SUPERMARKET checklist (GY): owner_national_id, business_registration,
-// tin_certificate, storefront_photo. MOTORCYCLE mover checklist: national_id,
-// police_clearance, drivers_licence, vehicle_registration, vehicle_insurance.
+// storefront_photo ([VERIFY-DOCS · ruling 7] no TIN certificate). MOTORCYCLE mover checklist [VERIFY-DOCS, 6 Oct
+// 2026]: drivers_licence, vehicle_registration, vehicle_insurance (national ID and
+// police clearance are optional for a licence holder).
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -41,8 +42,8 @@ const marker = nanoid(6).toLowerCase();
 const userIds: string[] = [];
 let seq = 0;
 
-const SUPERMARKET_DOCS = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
-const MOTORCYCLE_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+const SUPERMARKET_DOCS = ['owner_national_id', 'business_registration', 'storefront_photo'];
+const MOTORCYCLE_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 
 async function makeUser(first: string) {
   seq += 1;
@@ -186,7 +187,7 @@ describe('STRAND-1 — checklist completion IS vendor activation, atomically', (
       data: { purgedAt: new Date(), fileUrl: '' },
     });
     const again = await app.prisma.verificationDocument.create({
-      data: { userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'tin_certificate', fileUrl: `test/${marker}/tin2`, status: 'PENDING' },
+      data: { userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'business_registration', fileUrl: `test/${marker}/reg2`, status: 'PENDING' },
     });
     await svc.approveDocument(again.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
@@ -257,7 +258,8 @@ describe('F-012-05 — one authority generation [REPORT-012]', () => {
     await svc.reconcileVendorActivations();
 
     await app.prisma.verificationDocument.updateMany({
-      where: { userId: owner.id, docType: 'tin_certificate' },
+      // [VERIFY-DOCS · ruling 7] the TIN certificate is on no list any more; the registration still has to be current
+      where: { userId: owner.id, docType: 'business_registration' },
       data: { expiresAt: new Date(Date.now() - 60_000) },
     });
     await svc.expireLapsedDocuments();
@@ -433,8 +435,9 @@ describe('STRAND-3 — commercial classes carry their own checklist', () => {
       data: { userId: user.id, vehicleType: 'BUS_9' as never, documentsVerified: false, vehicleMake: 'Toyota', vehicleModel: 'Hiace', vehicleYear: 2022, vehicleColor: 'White', licensePlate: `BUS-${marker}-1`, driverLicenseUrl: 'test/lic1', vehicleInsuranceUrl: 'test/ins1' },
     });
     // Everything a CAR taxi needs, including confirmed HIRE insurance…
-    const carDocs = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
-      'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'];
+    // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
+    const carDocs = ['drivers_licence', 'vehicle_registration',
+      'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'];
     for (const docType of carDocs) await approvedDoc(user.id, docType);
     await approvedDoc(user.id, 'vehicle_insurance', {
       insurerName: 'GY Assure', policyNumber: `P-${marker}`, coverageClass: 'HIRE',

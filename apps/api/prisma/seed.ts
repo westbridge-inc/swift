@@ -701,7 +701,7 @@ async function main() {
   const seededVendorUser = await prisma.user.findUnique({ where: { phone: '+5926002000' } });
   if (seededVendorUser) {
     await ensureApprovedDocs(seededVendorUser.id, 'VENDOR_OWNER', [
-      'owner_national_id', 'business_registration', 'tin_certificate',
+      'owner_national_id', 'business_registration',
       'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo', 'police_clearance',
     ]);
   }
@@ -727,7 +727,7 @@ async function main() {
     if (!drv) continue;
     await ensureApprovedDocs(drv.id, 'MOVER', [
       'national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
-      'vehicle_insurance', 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert',
+      'vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert',
     ], hireInsurance);
   }
 

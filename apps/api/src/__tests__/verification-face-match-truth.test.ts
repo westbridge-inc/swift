@@ -62,7 +62,7 @@ async function status(token: string, role: string, vehicleType?: string) {
     headers: { authorization: `Bearer ${token}` },
   });
   expect(res.statusCode, res.body).toBe(200);
-  return res.json().data as { checklist: string[]; faceMatchDocTypes?: unknown };
+  return res.json().data as { checklist: string[]; optional: string[]; faceMatchDocTypes?: unknown };
 }
 
 const service = (kyc: KycProvider) => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), kyc);
@@ -108,7 +108,8 @@ describe('GET /verification/status names the documents the server compares with 
     expect(business.faceMatchDocTypes).toEqual([]);
 
     const rider = await status(riderToken, 'MOVER', 'MOTORCYCLE');
-    expect(rider.checklist).toContain('national_id');
+    // [VERIFY-DOCS · ruling 4] a licence holder's national ID is optional — still offered, still an identity document
+    expect([...rider.checklist, ...rider.optional]).toContain('national_id');
     expect(rider.faceMatchDocTypes).toEqual([]);
 
     for (const engine of faceEngines()) {

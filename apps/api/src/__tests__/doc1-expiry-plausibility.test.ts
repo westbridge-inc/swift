@@ -52,10 +52,11 @@ describe('the field validators (live the day fields are declared)', () => {
 describe('the manual path — resolveApprovalExpiry', () => {
   const now = new Date();
   it('a reviewer cannot key an expiry beyond the longest validity of the type; a plausible one stands; the past is still refused', () => {
-    expect(AUTO_APPROVE_EXPIRY_DAYS['drivers_licence']).toBe(3 * 365);
+    // [VERIFY-DOCS · ruling 8] a Guyana driver's licence is valid 5 years (was read as 3)
+    expect(AUTO_APPROVE_EXPIRY_DAYS['drivers_licence']).toBe(5 * 365);
     const typo = new Date(now.getTime() + 10 * 365 * DAY);
     expect(() => resolveApprovalExpiry('drivers_licence', typo, null, now)).toThrow(expect.objectContaining({ code: 'IMPLAUSIBLE_EXPIRY' }));
-    const edge = plausibleExpiryCeiling(startOfToday(now), 3 * 365);
+    const edge = plausibleExpiryCeiling(startOfToday(now), 5 * 365);
     expect(resolveApprovalExpiry('drivers_licence', edge, null, now)).toEqual(edge);
     expect(() => resolveApprovalExpiry('drivers_licence', new Date(edge.getTime() + DAY), null, now)).toThrow(expect.objectContaining({ code: 'IMPLAUSIBLE_EXPIRY' }));
     expect(() => resolveApprovalExpiry('drivers_licence', new Date(now.getTime() - DAY), null, now)).toThrow(expect.objectContaining({ code: 'EXPIRY_IN_PAST' }));

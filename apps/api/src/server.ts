@@ -66,6 +66,10 @@ async function start() {
         // are never minted lazily on a request path.
         const { seedDocRegistry } = await import('./modules/verification/doc-registry');
         const registry = await seedDocRegistry(app.prisma);
+        // [VERIFY-DOCS] The hire-car permit split takes effect with this code: its 60-day window starts
+        // at the first boot that runs it on this environment, and no later boot moves it.
+        const { ensureHireSplitStarted } = await import('./modules/verification/hire-permit-grace');
+        await ensureHireSplitStarted(app.prisma);
         app.log.info({ docTypes: registry.docTypes, requirementSets: registry.requirementSets, validators: registry.validators }, 'documents: registry seeded');
         // [DOC-INV-2] An ACTIVE document type the registry cannot validate — no
         // profile, no fields, a required field without a validator, a blocking

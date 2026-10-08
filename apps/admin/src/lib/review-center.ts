@@ -21,6 +21,7 @@ const LABELS: Record<string, string> = {
   business_registration: 'Business registration', police_clearance: 'Police clearance',
   fitness_cert: 'Vehicle fitness certificate', vehicle_insurance: 'Vehicle insurance',
   hire_car_permit: 'Hire car permit', road_service_licence: 'Road service licence',
+  hire_car_driver_licence: "Hire Car Driver's Licence", hire_car_vehicle_licence: "Car's hire licence (yearly)",
   food_handler_cert: 'Food handler certificate', vehicle_registration: 'Vehicle registration',
   liquor_licence: 'Liquor licence', sanitary_certificate: 'Sanitary certificate',
   trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',

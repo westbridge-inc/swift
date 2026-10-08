@@ -23,7 +23,7 @@ import { planExtraction, type RegisteredValidator } from '../modules/verificatio
 const SPEC_VALIDATORS: ReadonlyArray<readonly [string, string, boolean]> = [
   ['V_MRZ_CHECKSUM', 'FIELD', true], ['V_DATE_ORDER', 'FIELD', true], ['V_NOT_EXPIRED', 'FIELD', true], ['V_EXPIRY_PLAUSIBLE', 'FIELD', true] /* ruling 2026-09-06: blocking = review, see the catalogue */,
   ['V_DOB_ADULT', 'FIELD', true], ['V_TIN_FORMAT', 'FIELD', true], ['V_PLATE_FORMAT', 'FIELD', true], ['V_PLATE_CLASS', 'FIELD', true],
-  ['V_VEHICLE_COLOUR', 'FIELD', false] /* owner ruling 2026-10-01: a taxi may be any colour — the row stays declared, blocks nothing, has no implementation */, ['V_LICENCE_CLASS', 'FIELD', true], ['V_INSURANCE_SCOPE', 'FIELD', true], ['V_FIELD_CONFIDENCE', 'FIELD', false],
+  ['V_VEHICLE_COLOUR', 'FIELD', false] /* owner ruling 2026-10-01: a taxi may be any colour — the row stays declared, blocks nothing, has no implementation */, ['V_LICENCE_CLASS', 'FIELD', false] /* [VERIFY-DOCS] owner ruling 2026-10-06 (ruling 8): no "H class" check — retired like the colour row */, ['V_INSURANCE_SCOPE', 'FIELD', true], ['V_FIELD_CONFIDENCE', 'FIELD', false],
   ['V_TYPE_MATCH', 'DOCUMENT', true], ['V_ALL_REQUIRED_PRESENT', 'DOCUMENT', true], ['V_PAGE_COMPLETE', 'DOCUMENT', true], ['V_TAMPER_HEURISTIC', 'DOCUMENT', false],
   ['V_NAME_CONSISTENCY', 'SUBJECT', false], ['V_PLATE_CROSS_MATCH', 'SUBJECT', true], ['V_SELF_REPORTED_MATCH', 'SUBJECT', false], ['V_REQUIREMENT_COMPLETE', 'SUBJECT', true],
   ['V_SHA_COLLISION', 'CROSS_SUBJECT', false], ['V_NUMBER_COLLISION', 'CROSS_SUBJECT', false], ['V_PHASH_NEAR', 'CROSS_SUBJECT', false], ['V_VELOCITY', 'CROSS_SUBJECT', false],

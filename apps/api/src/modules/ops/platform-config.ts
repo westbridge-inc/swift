@@ -36,8 +36,16 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  2026-09-30.1 (#1393): the owner's taxi weekly fee of GY$8,000.
  *  2026-10-04.2: all of these together, as merged; no earlier version
  *  (including 2026-10-04.1, the previous merge of this lane) describes these
- *  values, so none may be reused. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-04.2';
+ *  values, so none may be reused.
+ *  2026-10-06.1 [VERIFY-DOCS]: the owner's document rulings of 6 Oct — movers'
+ *  police clearance optional, national ID optional with a driver's licence,
+ *  no separate taxi plate photo — and the data-protection note corrected
+ *  (the Act is not yet in force).
+ *  2026-10-07.2 [VERIFY-DOCS · rulings 7 and 8]: the taxi's seven documents (the
+ *  person's Hire Car Driver's Licence and the car's yearly hire licence replace
+ *  the single hire-car permit) and no TIN certificate on any store list.
+ *  (2026-10-07.1 is the services home-visit change; the two never share a value.) */
+export const PLATFORM_CONFIG_VERSION = '2026-10-07.2';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -100,15 +108,38 @@ const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
  * founder may edit; readers merge these defaults UNDER the stored JSON so a key added
  * here (the UNREGISTERED tier lists, P3-2) exists on every environment without a reseed,
  * while an edited stored list still wins.
+ *
+ * Every list is REQUIRED: each type in it must be approved and current before the role
+ * goes live. A `<KEY>_OPTIONAL` list (OPTIONAL_LIST_SUFFIX, doc-registry) names documents
+ * the same person MAY add — they never gate, never join `missing`, and are accepted for
+ * upload. [VERIFY-DOCS · owner rulings 6 Oct 2026]
  */
 export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
-    MOVER: ['national_id', 'police_clearance'],
+    // Movers: the base list holds what EVERY vehicle needs — nothing on its own since the
+    // owner's rulings of 6 Oct 2026; each vehicle adds its profiles (config/vehicle-classes).
+    //  - Police clearance is OPTIONAL for every mover (rulings 1, 2): no Guyana law found
+    //    requires it of drivers or riders; an approved one is the "Police-cleared" flag.
+    //  - A driver's licence is photo ID, so a motorised mover's national ID is OPTIONAL;
+    //    a bicycle rider holds no licence and keeps the national ID (ruling 4).
+    //  - The taxi's separate plate photo is merged into the car photo, which shows the
+    //    plate (ruling 5). Nothing read the plate photo; the plate cross-check is the
+    //    insurance review's, unchanged.
+    MOVER: [],
+    MOVER_OPTIONAL: ['national_id', 'police_clearance'],
+    MOVER_NO_LICENCE: ['national_id'],
     MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
-    MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'],
+    // [VERIFY-DOCS · ruling 8] A taxi's seven: the licence, registration and insurance above, plus the
+    // PERSON's Hire Car Driver's Licence (s.80), the CAR's yearly hire licence (s.79), the car photo
+    // with the plate showing, and the certificate of fitness. The two licences replace the single
+    // hire-car permit; an approved permit counts as both for 60 days (verification/hire-permit-grace).
+    MOVER_TAXI_EXTRA: ['hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'],
     MOVER_COMMERCIAL: ['road_service_licence', 'fitness_cert'],
-    RESTAURANT: ['owner_national_id', 'business_registration', 'tin_certificate', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
-    SUPERMARKET: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
-    STORE: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
+    // [VERIFY-DOCS · ruling 7] No TIN certificate: no law found requires Swift to hold it, and the image
+    // pairs a person's name and address with their tax-account login. A VAT-registered store may type its
+    // VAT registration number on its profile instead (vendor.vatRegistrationNumber, for VAT invoices).
+    RESTAURANT: ['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
+    SUPERMARKET: ['owner_national_id', 'business_registration', 'storefront_photo'],
+    STORE: ['owner_national_id', 'business_registration', 'storefront_photo'],
     // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
     // self-declaration, the storefront photo, and — never waived — the food handler permit for food.
     // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
@@ -182,7 +213,7 @@ export function desiredPlatformConfig(): DesiredConfig {
     taxiCredentialName: 'Hire Car Licence',
     insuranceClassName: 'Hire',
     verificationSources: ['ID Analyzer', 'GESW', 'GEI registry', 'Police Clearance'],
-    regulatoryNotes: 'Data Protection Act 2023 in force; the Nevis entity requires a Guyana local representative.',
+    regulatoryNotes: 'Data Protection Act 2023 (Act No. 18 of 2023) is passed but not yet in force: no commencement order found as of 6 Oct 2026. The Nevis entity requires a Guyana local representative.',
     locale: 'en-GY',
   };
   const guyanaPolicy = {

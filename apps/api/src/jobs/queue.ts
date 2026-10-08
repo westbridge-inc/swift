@@ -1027,6 +1027,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           );
           throw err;
         }
+        // Run transition notices after retention so a failed reminder cannot skip the reaper.
+        await verification.hirePermitGraceSweep();
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.

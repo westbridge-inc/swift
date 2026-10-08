@@ -13,7 +13,8 @@ import { documentHarness } from './gold-7-documents';
 const h = createGolden('+5920975', 'gold7-vend01');
 const docs = documentHarness(h, 'vend01');
 const REASON = { 'x-swift-reason': 'Golden vendor onboarding document review' };
-const CHECKLIST = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
+// [VERIFY-DOCS · ruling 7] no TIN certificate on the store list
+const CHECKLIST = ['owner_national_id', 'business_registration', 'storefront_photo'];
 beforeAll(() => docs.start());
 afterAll(() => docs.close());
 
@@ -87,7 +88,7 @@ describe('GOLD-7 · VEND-01 — join, documents and approval', () => {
     const early = await h.call('PUT', `/api/v1/admin/vendors/${vendorId}/approve`, admin.token, {}, REASON);
     expect(early.statusCode).toBe(409);
     expect(early.json().error.code).toBe('CHECKLIST_INCOMPLETE');
-    for (const type of ['owner_national_id', 'tin_certificate', 'storefront_photo', 'business_registration']) {
+    for (const type of ['owner_national_id', 'storefront_photo', 'business_registration']) {
       const document = await submit(applicant, type);
       const before = await h.sys(() => h.app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: document.id } }));
       const wrongRole = await h.call('PUT', `/api/v1/admin/verification/${document.id}/approve`, outsider.token, {}, REASON);

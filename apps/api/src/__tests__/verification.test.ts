@@ -48,8 +48,11 @@ const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
 const FACE_MATCH_PHONE = `+${runBase + 9}`;
 const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
 
-// Base (incl. police clearance — required of every courier) + motor docs.
-const MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+// [VERIFY-DOCS · owner rulings 6 Oct 2026] A motorbike courier's REQUIRED documents are the motor
+// documents; the licence is their photo ID, so the national ID — and, for every mover, the police
+// clearance — are OPTIONAL: accepted for upload, never a gate.
+const MOVER_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+const MOVER_OPTIONAL_DOCS = ['national_id', 'police_clearance'];
 
 let app: FastifyInstance;
 let sweepService: VerificationService;
@@ -201,6 +204,7 @@ describe('Checklists drive from config', () => {
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
     expect(data.missing).toEqual(MOVER_DOCS);
+    expect(data.optional).toEqual(MOVER_OPTIONAL_DOCS);
     expect(data.roleVerified).toBe(false);
   });
 
@@ -216,21 +220,23 @@ describe('Checklists drive from config', () => {
     expect(res.json().error.code).toBe('INVALID_DOC_TYPE');
   });
 
-  it('commerce checklists carry the Guyana-real docs (TIN, GRA licence, storefront)', async () => {
+  // [VERIFY-DOCS · owner ruling 7, 6 Oct 2026 — a DELIBERATE change] no TIN certificate on any list:
+  // no law found requires Swift to hold it; a VAT-registered store types its VAT number instead.
+  it('commerce checklists carry the Guyana-real docs (registration, GRA licence, storefront) — no TIN certificate', async () => {
     const restaurant = await inject('GET', '/api/v1/verification/status?role=RESTAURANT', undefined, vendorToken);
     expect(restaurant.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate',
+      'owner_national_id', 'business_registration',
       'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo',
     ]);
 
     const supermarket = await inject('GET', '/api/v1/verification/status?role=SUPERMARKET', undefined, vendorToken);
     expect(supermarket.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+      'owner_national_id', 'business_registration', 'storefront_photo',
     ]);
 
     const store = await inject('GET', '/api/v1/verification/status?role=STORE', undefined, vendorToken);
     expect(store.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+      'owner_national_id', 'business_registration', 'storefront_photo',
     ]);
 
     const service = await inject('GET', '/api/v1/verification/status?role=SERVICE', undefined, vendorToken);
@@ -260,7 +266,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   let rejectedDocId: string;
 
   it('submitted documents land in the admin queue as PENDING', async () => {
-    for (const docType of MOVER_DOCS) {
+    // Required and optional alike: an optional document is reviewed like any other.
+    for (const docType of [...MOVER_DOCS, ...MOVER_OPTIONAL_DOCS]) {
       const res = await inject('POST', '/api/v1/verification/documents', {
         role: 'MOVER',
         docType,
@@ -277,7 +284,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     const docTypes = queue.json().data
       .filter((d: { userId: string }) => d.userId === moverUserId)
       .map((d: { docType: string }) => d.docType);
-    for (const docType of MOVER_DOCS) expect(docTypes).toContain(docType);
+    for (const docType of [...MOVER_DOCS, ...MOVER_OPTIONAL_DOCS]) expect(docTypes).toContain(docType);
   });
 
   it('rejection notifies the applicant with the reason (resubmit path)', async () => {
@@ -591,10 +598,11 @@ describe('Document storage & DPA compliance', () => {
 
 describe('Taxi checklist merge + auto-KYC audit', () => {
   it('a mover can submit a taxi-only document and the auto-approval is audited', async () => {
-    // hire_car_permit lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    // hire_car_vehicle_licence lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    // ([VERIFY-DOCS · ruling 8] it and the person's licence replace the single hire-car permit)
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'hire_car_permit',
+      docType: 'hire_car_vehicle_licence',
       fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'auto-approve-hire-permit'),
       consent: true,
       privacyNoticeVersion: 'v1',
@@ -612,9 +620,11 @@ describe('Taxi checklist merge + auto-KYC audit', () => {
 describe('Taxi movers are shown — and gated on — the taxi-extra checklist', () => {
   // The dead-end this prevents: a taxi driver was only ever shown the base
   // mover docs, uploaded them, saw "verified" — then go-online silently failed
-  // because the live gate ALSO requires hire permit / plate photo / exterior
-  // photo / fitness cert. What onboarding shows must equal what gates.
-  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'];
+  // because the live gate ALSO requires hire permit / exterior photo / fitness
+  // cert. What onboarding shows must equal what gates. [VERIFY-DOCS] The plate
+  // photo is merged into the exterior photo (it shows the plate).
+  // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
+  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'];
   let taxiToken: string;
   let bicycleToken: string;
 
@@ -640,12 +650,14 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     });
   });
 
-  it('surfaces police clearance + the taxi extras in the onboarding checklist', async () => {
+  it('surfaces the taxi extras in the onboarding checklist; police clearance is offered, not required', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, taxiToken);
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
     expect(data.checklist).toEqual(TAXI_DOCS);
-    expect(data.missing).toContain('police_clearance');
+    expect(data.missing).toEqual(TAXI_DOCS);
+    expect(data.missing).not.toContain('police_clearance');
+    expect(data.optional).toContain('police_clearance');
     expect(data.roleVerified).toBe(false);
   });
 
@@ -653,16 +665,18 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, moverToken);
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
-    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('hire_car_driver_licence');
+    expect(data.checklist).not.toContain('hire_car_vehicle_licence');
     expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
-  it('asks a bicycle courier for identity + character only — no vehicle docs', async () => {
+  it('asks a bicycle courier for identity only — no vehicle docs; police clearance optional', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, bicycleToken);
     const data = res.json().data;
-    // Police clearance applies to EVERY courier (cash + home visits) — only
-    // the vehicle documents scale away for a bicycle (master plan §3.2).
-    expect(data.checklist).toEqual(['national_id', 'police_clearance']);
+    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required;
+    // the police clearance is optional for every mover. The vehicle documents scale away.
+    expect(data.checklist).toEqual(['national_id']);
+    expect(data.optional).toEqual(['police_clearance']);
     expect(data.checklist).not.toContain('drivers_licence');
     expect(data.checklist).not.toContain('vehicle_insurance');
     expect(data.vehicleType).toBe('BICYCLE');
@@ -682,13 +696,13 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const data = res.json().data;
     // A box truck is a commercial goods vehicle, not a hire car.
     expect(data.checklist).toEqual([...MOVER_DOCS, 'road_service_licence', 'fitness_cert']);
-    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('hire_car_vehicle_licence');
   });
 
   it('asks a bus for the hire extras AND commercial docs — fitness cert only once', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER&vehicleType=BUS_15', undefined, taxiToken);
     const data = res.json().data;
-    expect(data.checklist).toContain('hire_car_permit'); // it carries passengers
+    expect(data.checklist).toContain('hire_car_vehicle_licence'); // it carries passengers
     expect(data.checklist).toContain('road_service_licence'); // it is commercial
     // fitness_cert is in both the taxi and commercial profiles — deduped to one.
     expect(data.checklist.filter((d: string) => d === 'fitness_cert')).toHaveLength(1);
@@ -937,8 +951,8 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
 describe('Taxi hire-class insurance — the manual 5-point check is enforced', () => {
   let taxiUserId: string;
   const TAXI_CHECKLIST = [
-    'national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
-    'vehicle_insurance', 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert',
+    'drivers_licence', 'vehicle_registration',
+    'vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert',
   ];
 
   beforeAll(async () => {
@@ -1020,14 +1034,23 @@ describe('Lapsed documents force movers offline (daily sweep)', () => {
     expect((note!.data as any)?.audience).toBe('earner');
   });
 
-  it('an online courier is pulled offline when their police clearance lapses — others untouched', async () => {
+  it('an online courier is pulled offline when a required document lapses — never for an optional one; others untouched', async () => {
     // A bystander who stays online through someone else's expiry
     const cyclist = await app.prisma.user.findUniqueOrThrow({ where: { phone: BICYCLE_MOVER_PHONE } });
     await app.prisma.rider.updateMany({ where: { userId: cyclist.id }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
 
     await app.prisma.rider.updateMany({ where: { userId: moverUserId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
+    // [VERIFY-DOCS] The police clearance is optional: its lapse leaves the courier online.
     await app.prisma.verificationDocument.updateMany({
       where: { userId: moverUserId, docType: 'police_clearance', status: 'APPROVED' },
+      data: { expiresAt: new Date(Date.now() - 60 * 1000) },
+    });
+    await sweepService.expireLapsedDocuments();
+    expect((await app.prisma.rider.findFirstOrThrow({ where: { userId: moverUserId } })).isOnline).toBe(true);
+
+    // A required one (the licence) takes the courier offline at once.
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: moverUserId, docType: 'drivers_licence', status: 'APPROVED' },
       data: { expiresAt: new Date(Date.now() - 60 * 1000) },
     });
 
@@ -1067,7 +1090,7 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
   const past = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   it('knows which types carry a printed expiry, from the one map', () => {
-    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'fitness_cert']) {
+    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'fitness_cert']) {
       expect(docTypeExpires(t), t).toBe(true);
     }
     expect(docTypeExpires('business_registration')).toBe(false);

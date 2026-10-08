@@ -61,6 +61,7 @@ import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 import { assertStorePinInMarket } from './store-pin';
@@ -100,6 +101,9 @@ const updateVendorProfileSchema = z.object({
   // down. Shape is enforced by publicPhoneForWrite, not here, so the write
   // and read boundaries cannot drift apart on what a valid number is.
   publicPhone: z.string().trim().max(32).nullable().optional(),
+  // [VERIFY-DOCS · ruling 7] OPTIONAL VAT registration number, owner only; null/'' takes it off.
+  // Shape is enforced by vatNumberForWrite (utils/vendor-vat-number).
+  vatRegistrationNumber: z.string().trim().max(40).nullable().optional(),
 })
   // [Q8] A store pin is one point. Half of one would move the store along a
   // single axis to a spot nobody chose, so the two travel together or not at all.
@@ -1022,7 +1026,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
-      : safeVendors.map((v) => ({ ...v, subscription: undefined }));
+      : safeVendors.map((v) => ({ ...v, subscription: undefined, vatRegistrationNumber: undefined }));
     return {
       success: true,
       data: { id: access.ownerId, userId: request.user.userId, vendors: visible, myRole: access.role },
@@ -1254,6 +1258,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     const publicPhone = body.publicPhone === undefined
       ? undefined
       : publicPhoneForWrite(body.publicPhone);
+    // [VERIFY-DOCS · ruling 7] The business's tax registration is the owner's to give.
+    const vatRegistrationNumber = body.vatRegistrationNumber === undefined
+      ? undefined
+      : vatNumberForWrite(body.vatRegistrationNumber);
+    if (vatRegistrationNumber !== undefined) requireRole(access, 'OWNER');
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
@@ -1283,6 +1292,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
           ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
           ...(publicPhone !== undefined && { publicPhone }),
+          ...(vatRegistrationNumber !== undefined && { vatRegistrationNumber }),
         },
         include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
       });
@@ -1314,6 +1324,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...vendor,
+        ...(access.role !== 'OWNER' ? { vatRegistrationNumber: undefined } : {}),
         ...link,
         mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
         mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),

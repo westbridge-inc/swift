@@ -34,7 +34,8 @@ import type { KycEngine, KycProvider, KycVerificationResult } from '../providers
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
-const TYPE = 'tin_certificate';
+// [VERIFY-DOCS · ruling 7] the TIN certificate is on no list any more; the restaurant licence (BUSINESS, not AML) stands in
+const TYPE = 'gra_restaurant_licence';
 const CODE = registryCode('GY', TYPE);
 const AML_TYPE = 'business_registration';
 const AML_CODE = registryCode('GY', AML_TYPE);
@@ -178,8 +179,9 @@ describe('[DOC-1 P25] data-subject rights against documents', () => {
   });
 
   it('rectify: re-opens a review case with the request as provenance, touches no record, tells the admins; the SLA watchdog leaves that case open', async () => {
-    const approved = (await submit(me, 'tin_certificate', `TIN ${RUN}-0002`)).id;
-    await runWithTenant('swift-default', () => service.approveDocument(approved, adminId));
+    const approved = (await submit(me, TYPE, `TIN ${RUN}-0002`)).id;
+    // the restaurant licence prints an expiry, which the reviewer keys
+    await runWithTenant('swift-default', () => service.approveDocument(approved, adminId, new Date(Date.now() + 200 * 86_400_000)));
     const before = await docRow(approved);
     expect((await rectify(me, approved, 'not_a_field')).statusCode).toBe(400);
     const res = await rectify(me, approved, 'doc_number');
