@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
-import type { UserRole } from '@prisma/client';
+import { Prisma, type UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -152,6 +153,9 @@ describe('MMG stays blocked — computed for the record, never executable', () =
 describe('POST /customer/orders/:id/return records what the algorithm said', () => {
   const PHONE_PREFIX = '+59200660';
   const DAY = 24 * 60 * 60 * 1000;
+  // Independent runs must not share the IP velocity bucket. Keep the real
+  // guard enabled, including for all four concurrent requests below.
+  const testIp = `2001:db8:${randomBytes(4).toString('hex').match(/.{4}/g)!.join(':')}::1`;
   let app: FastifyInstance;
   const userIds: string[] = [];
   let vendorId: string;
@@ -219,7 +223,7 @@ describe('POST /customer/orders/:id/return records what the algorithm said', () 
   it('a delivered CASH retail order: the store owes the customer the goods less their discount, never the delivery fee', async () => {
     const c = await customer(1);
     const order = await deliveredOrder(c.id, 'CASH');
-    const res = await app.inject({ method: 'POST', url: `/api/v1/customer/orders/${order.id}/return`, payload: { reason: 'The kettle arrived cracked' }, headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json' } });
+    const res = await app.inject({ remoteAddress: testIp, method: 'POST', url: `/api/v1/customer/orders/${order.id}/return`, payload: { reason: 'The kettle arrived cracked' }, headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json' } });
     expect(res.statusCode, res.body).toBe(201);
     const row = res.json().data;
     expect(row.refundKind).toBe('CASH_POST_HANDOVER');
@@ -238,7 +242,7 @@ describe('POST /customer/orders/:id/return records what the algorithm said', () 
   it('a delivered MMG retail order: computed for the record, marked blocked', async () => {
     const c = await customer(2);
     const order = await deliveredOrder(c.id, 'MOBILE_MONEY');
-    const res = await app.inject({ method: 'POST', url: `/api/v1/customer/orders/${order.id}/return`, payload: { reason: 'Wrong size, unopened' }, headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json' } });
+    const res = await app.inject({ remoteAddress: testIp, method: 'POST', url: `/api/v1/customer/orders/${order.id}/return`, payload: { reason: 'Wrong size, unopened' }, headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json' } });
     expect(res.statusCode, res.body).toBe(201);
     expect(res.json().data.refundKind).toBe('MMG_BLOCKED');
     expect(res.json().data.refundSentence).toContain('MMG totals cannot change in-app');
@@ -246,5 +250,75 @@ describe('POST /customer/orders/:id/return records what the algorithm said', () 
     const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { totalAmount: true, status: true } });
     expect(Number(after.totalAmount)).toBe(4370);
     expect(after.status).toBe('DELIVERED');
+  });
+
+  it('four concurrent requests create one return and answer RETURN_EXISTS to the other three', async () => {
+    const c = await customer(3);
+    const order = await deliveredOrder(c.id, 'CASH');
+    const read = app.prisma.returnRequest.findFirst.bind(app.prisma.returnRequest);
+    let arrived = 0;
+    let release!: () => void;
+    const allRead = new Promise<void>((resolve) => { release = resolve; });
+    // The route awaits this delegate; the interceptor delays that await and
+    // returns the same row. Prisma's extra promise branding is not used here.
+    const spy = vi.spyOn(app.prisma.returnRequest, 'findFirst').mockImplementation((async (args?: Prisma.ReturnRequestFindFirstArgs) => {
+      const result = await read(args);
+      if (args?.where?.orderId === order.id) {
+        arrived += 1;
+        if (arrived === 4) release();
+        await allRead;
+      }
+      return result;
+    }) as typeof read);
+    try {
+      const responses = await Promise.all(Array.from({ length: 4 }, () => app.inject({
+        remoteAddress: testIp, method: 'POST', url: `/api/v1/customer/orders/${order.id}/return`,
+        payload: { reason: 'The kettle arrived cracked' },
+        headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json' },
+      }).then((response) => {
+        // An early guard refusal must produce a useful failure, not strand
+        // the other requests at the barrier until the test times out.
+        if (arrived < 4) release();
+        return response;
+      })));
+      expect(arrived).toBe(4);
+      expect(responses.map((res) => res.statusCode).sort(), responses.map((res) => res.body).join('\n'))
+        .toEqual([201, 409, 409, 409]);
+      for (const response of responses.filter((res) => res.statusCode === 409)) {
+        expect(response.json().error.code).toBe('RETURN_EXISTS');
+      }
+      expect(await app.prisma.returnRequest.count({ where: { orderId: order.id } })).toBe(1);
+    } finally { spy.mockRestore(); release(); }
+  });
+
+  it('the database refuses a second return for the same order even outside the route', async () => {
+    const c = await customer(4);
+    const order = await deliveredOrder(c.id, 'CASH');
+    const data = { orderId: order.id, customerId: c.id, reason: 'A damaged fixture item' };
+    await app.prisma.returnRequest.create({ data });
+    await expect(app.prisma.returnRequest.create({ data })).rejects.toMatchObject({
+      code: 'P2002', meta: { target: ['orderId'] },
+    });
+    expect(await app.prisma.returnRequest.count({ where: { orderId: order.id } })).toBe(1);
+  });
+
+  it('does not report an unrelated unique violation as an existing return', async () => {
+    const c = await customer(5);
+    const order = await deliveredOrder(c.id, 'CASH');
+    const spy = vi.spyOn(app.prisma.returnRequest, 'create').mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Synthetic duplicate identifier', {
+        code: 'P2002', clientVersion: Prisma.prismaVersion.client, meta: { target: ['id'] },
+      }),
+    );
+    try {
+      const response = await app.inject({
+        remoteAddress: testIp, method: 'POST', url: `/api/v1/customer/orders/${order.id}/return`,
+        payload: { reason: 'The kettle arrived cracked' },
+        headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json' },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe('DUPLICATE');
+      expect(await app.prisma.returnRequest.count({ where: { orderId: order.id } })).toBe(0);
+    } finally { spy.mockRestore(); }
   });
 });
