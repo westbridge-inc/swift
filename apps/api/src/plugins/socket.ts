@@ -1,3 +1,4 @@
+import { emitToChatRoom } from '../modules/order/order-room-emission.service';
 import fp from 'fastify-plugin';
 import { Server } from 'socket.io';
 import { z } from 'zod';
@@ -616,18 +617,18 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     // handler keyed only on orderId would let any signed-in user broadcast fake
     // positions into someone else's order room.
 
-    // Typing indicators relay only from sockets that were admitted to the room
-    // (`to(room)` itself doesn't require sender membership — socket.rooms does).
-    socket.on('chat:typing', (raw: unknown) => {
+    // A retained subscription cannot restore a former participant's authority.
+    // Recheck the sender and audience for every typing publication.
+    socket.on('chat:typing', async (raw: unknown) => {
       const parsed = chatEvent.safeParse(raw);
       if (!parsed.success || !socket.rooms.has(`chat:${parsed.data.roomId}`)) return;
-      socket.to(`chat:${parsed.data.roomId}`).emit('chat:typing', { userId });
+      await inSocketTenant(() => emitToChatRoom(app.prisma, io, parsed.data.roomId, 'chat:typing', { userId }, { senderId: userId, excludeSocketId: socket.id }));
     });
 
-    socket.on('chat:stop-typing', (raw: unknown) => {
+    socket.on('chat:stop-typing', async (raw: unknown) => {
       const parsed = chatEvent.safeParse(raw);
       if (!parsed.success || !socket.rooms.has(`chat:${parsed.data.roomId}`)) return;
-      socket.to(`chat:${parsed.data.roomId}`).emit('chat:stop-typing', { userId });
+      await inSocketTenant(() => emitToChatRoom(app.prisma, io, parsed.data.roomId, 'chat:stop-typing', { userId }, { senderId: userId, excludeSocketId: socket.id }));
     });
 
     // Vendor order feed — only if the authenticated user owns the vendor

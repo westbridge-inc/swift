@@ -1,3 +1,4 @@
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -39,6 +40,7 @@ const orderIds: string[] = [];
 let seq = 0;
 
 // Socket emission recorder: pins room + event names the client depends on.
+const socketCleanup: Array<() => void> = [];
 const emitted: { room: string; event: string; payload: unknown }[] = [];
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, extra: Record<string, unknown> = {}) {
@@ -105,6 +107,8 @@ async function requestRide(customerToken: string) {
   expect(res.statusCode).toBe(201);
   const ride = res.json().data.ride; // request answers {ride, message}
   orderIds.push(ride.id);
+  const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id }, select: { id: true, tenantId: true, customerId: true } });
+  socketCleanup.push(orderSocketFixture(app.io, order, (event, payload) => emitted.push({ room: `order:${order.id}`, event, payload })));
   return ride;
 }
 
@@ -132,17 +136,11 @@ beforeAll(async () => {
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
 
-  // Record every room emission — event names are the client's contract.
-  const realTo = app.io.to.bind(app.io);
-  (app.io as { to: (room: string) => unknown }).to = (room: string) => ({
-    emit: (event: string, payload: unknown) => {
-      emitted.push({ room, event, payload });
-      return realTo(room).emit(event, payload);
-    },
-  });
+
 });
 
 afterAll(async () => {
+  for (const dispose of socketCleanup) dispose();
   // [ALG-01] Drivers tied at one spot make the fairness band record decisions
   // about these rides; they outlive the rides unless they go with them.
   const rides = await app.prisma.order.findMany({ where: { OR: [{ id: { in: orderIds } }, { customerId: { in: userIds } }] }, select: { id: true } });

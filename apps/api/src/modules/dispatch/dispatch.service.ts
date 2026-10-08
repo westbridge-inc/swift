@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { randomUUID } from 'node:crypto';
@@ -2922,7 +2923,7 @@ export class DispatchService {
 
     const assignedEvent = { orderId, status: assignedStatus, timestamp: new Date().toISOString() };
     try {
-      this.io.to(`order:${orderId}`).emit('order:status_changed', assignedEvent);
+      await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', assignedEvent);
       if (order.vendorId) {
         this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', assignedEvent);
       }
@@ -3131,7 +3132,7 @@ export class DispatchService {
         if (ageMs < TAXI_WAIT_LIMIT_MIN * 60_000) {
           if (await this.scheduleRedispatch(order.id, TAXI_RESCAN_MS, replayTag ? redispatchJobId(order.id, replayTag) : undefined)) {
             // The open screen still needs its honest dead-state card.
-            this.io.to(`order:${order.id}`).emit('dispatch:exhausted', { orderId: order.id, orderNumber: order.orderNumber });
+            await emitToOrderRoom(this.prisma, this.io, order.id, 'dispatch:exhausted', { orderId: order.id, orderNumber: order.orderNumber });
             // Supply drought is still an ops fact — page once per terminal window.
             const { opsPageOnce } = await import('../../jobs/queue');
             await opsPageOnce({ redis: this.redis }, `dispatch_exhausted:${order.id}`, EXHAUST_TERMINAL_TTL_SECONDS, () =>
@@ -3167,7 +3168,7 @@ export class DispatchService {
             await this.prisma.orderStatusLog
               .create({ data: { orderId: order.id, status: 'CANCELLED', changedBy: 'system', note: `Released after ${TAXI_WAIT_LIMIT_MIN} min — no drivers available` } })
               .catch(() => {});
-            this.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: 'CANCELLED', timestamp: new Date().toISOString() });
+            await emitToOrderRoom(this.prisma, this.io, order.id, 'order:status_changed', { orderId: order.id, status: 'CANCELLED', timestamp: new Date().toISOString() });
             await this.notifications.send({
               userId: order.customerId,
               type: 'SYSTEM_ANNOUNCEMENT',
@@ -3208,7 +3209,7 @@ export class DispatchService {
     // emit) — so a taxi rider's ActiveRide can flip from "contacting drivers…"
     // to a real dead state (search again / cancel) instead of spinning forever.
     // The push above reaches a backgrounded app; this reaches the open screen. [taxi #8]
-    this.io.to(`order:${order.id}`).emit('dispatch:exhausted', { orderId: order.id, orderNumber: order.orderNumber });
+    await emitToOrderRoom(this.prisma, this.io, order.id, 'dispatch:exhausted', { orderId: order.id, orderNumber: order.orderNumber });
     if (order.vendor) {
       await this.notifications.send({
         userId: order.vendor.owner.userId,
@@ -3645,7 +3646,7 @@ export async function recoverStrandedTaxiRides(
       continue;
     }
 
-    io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'PENDING', reason: 'driver_dropped' });
+    await emitToOrderRoom(prisma, io, orderId, 'order:status_changed', { orderId, status: 'PENDING', reason: 'driver_dropped' });
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',

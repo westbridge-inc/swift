@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import type { OrderStatus, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
@@ -220,7 +221,7 @@ export async function recoverStrandedDeliveries(
     const declinedKey = dispatchDeclinedKey(orderId, order.fulfillmentModeVersion);
     await redis.sadd(declinedKey, r.id).catch(() => {});
     await redis.expire(declinedKey, 3600).catch(() => {});
-    io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: decision.reopenStatus, reason: 'rider_dropped' });
+    await emitToOrderRoom(prisma, io, orderId, 'order:status_changed', { orderId, status: decision.reopenStatus, reason: 'rider_dropped' });
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',

@@ -1,3 +1,4 @@
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -76,16 +77,19 @@ async function makeLeg(riderId: string, status: 'RIDER_EN_ROUTE_PICKUP' | 'EN_RO
     },
   });
   createdOrderIds.push(order.id);
+  socketCleanup.push(orderSocketFixture(app.io, order, (event, payload) => {
+    if (recording) recordedEmits.push({ room: `order:${order.id}`, event, payload });
+  }));
   return order;
 }
 
 type Emit = { room: string; event: string; payload: any };
+const socketCleanup: Array<() => void> = [];
+const recordedEmits: Emit[] = [];
+let recording = false;
 function spyEmits(): { emits: Emit[]; restore: () => void } {
-  const emits: Emit[] = [];
-  const ioTo = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
-    emit: (event: string, payload: unknown) => { emits.push({ room, event, payload }); return true; },
-  })) as never);
-  return { emits, restore: () => ioTo.mockRestore() };
+  recordedEmits.length = 0; recording = true;
+  return { emits: recordedEmits, restore: () => { recording = false; } };
 }
 
 beforeAll(async () => {
@@ -131,6 +135,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  for (const dispose of socketCleanup) dispose();
   if (createdOrderIds.length) await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   if (createdUserIds.length) {
     await app.prisma.rider.deleteMany({ where: { userId: { in: createdUserIds } } });

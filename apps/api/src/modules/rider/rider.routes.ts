@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
@@ -990,7 +991,7 @@ export async function riderRoutes(app: FastifyInstance) {
         );
         for (const leg of legEtas) {
           if (!stillLive.has(leg.orderId)) continue;
-          app.io.to(`order:${leg.orderId}`).emit('rider:location', {
+          await emitToOrderRoom(app.prisma, app.io, leg.orderId, 'rider:location', {
             // [MOB-024] The event NAMES its order. It is emitted into that
             // order's room, so the server already knows — and without it the
             // customer's screen had nothing to check a fix against, so a
@@ -2041,7 +2042,7 @@ export async function riderRoutes(app: FastifyInstance) {
     const handbackDeclinedKey = dispatchDeclinedKey(id, outcome.order.fulfillmentModeVersion);
     await app.redis.sadd(handbackDeclinedKey, rider.id).catch(() => {});
     await app.redis.expire(handbackDeclinedKey, 3600).catch(() => {});
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
     await new NotificationService(app.prisma, app.io).send({
       userId: outcome.customerId,
       type: 'ORDER_UPDATE',

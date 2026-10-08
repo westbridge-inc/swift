@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
@@ -2819,7 +2820,7 @@ export async function customerRoutes(app: FastifyInstance) {
       .catch(() => {});
 
     // Both sides hear it now.
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: statusAtConvert, fulfillment: 'PICKUP',
     });
     if (order.vendor) {
@@ -2874,7 +2875,7 @@ export async function customerRoutes(app: FastifyInstance) {
     }));
     const facts = outcome.facts;
     if (!outcome.replayed) {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });

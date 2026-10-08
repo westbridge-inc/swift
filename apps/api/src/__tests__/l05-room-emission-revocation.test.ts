@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { io as connect, type Socket } from 'socket.io-client';
 import type { AddressInfo } from 'node:net';
+import type { Prisma } from '@prisma/client';
 import { NotificationService } from '../modules/notification/notification.service';
 import { chatFixture } from './helpers/l05-chat-fixture';
 
@@ -58,10 +59,39 @@ describe('subscribed sockets lose sensitive chat when assignment changes', () =>
     await expect.poll(async () => (await f.app.io.in(`chat:${f.room.id}`).fetchSockets()).some((s) => s.id === customer.id)).toBe(true);
     const typing: unknown[] = []; customer.on('chat:typing', (m: unknown) => typing.push(m));
     old.emit('chat:typing', { roomId: f.room.id });
-    // Receiving an explicit marker proves the old socket's packet was handled.
+    // Eviction is the handler-completion barrier. Only then enqueue a marker
+    // behind any typing packet, so a delayed network flush cannot hide a leak.
+    await expect.poll(async () => (await f.app.io.in(`chat:${f.room.id}`).fetchSockets()).some((s) => s.id === old.id)).toBe(false);
     const drained = new Promise<void>((resolve) => customer.once('test:drained', resolve));
     f.app.io.to(customer.id!).emit('test:drained'); await drained;
-    await expect.poll(async () => (await f.app.io.in(`chat:${f.room.id}`).fetchSockets()).some((s) => s.id === old.id)).toBe(false);
     expect(typing).toEqual([]);
+  });
+
+  it('current participants can still relay typing and stop-typing', async () => {
+    const current = await client(f.newMover.token); const customer = await client(f.customer.token);
+    current.emit('chat:join', { roomId: f.room.id }); customer.emit('chat:join', { roomId: f.room.id });
+    await expect.poll(async () => (await f.app.io.in(`chat:${f.room.id}`).fetchSockets()).some((s) => s.id === current.id)).toBe(true);
+    const typed = new Promise<unknown>((resolve) => current.once('chat:typing', resolve));
+    customer.emit('chat:typing', { roomId: f.room.id });
+    expect(await typed).toEqual({ userId: f.customer.userId });
+    const stopped = new Promise<unknown>((resolve) => customer.once('chat:stop-typing', resolve));
+    current.emit('chat:stop-typing', { roomId: f.room.id });
+    expect(await stopped).toEqual({ userId: f.newMover.userId });
+  });
+
+  it('push recipients are refreshed when assignment changes after the send authorization read', async () => {
+    await f.reset();
+    const send = vi.mocked(NotificationService.prototype.send); send.mockClear();
+    const read = f.app.prisma.order.findUnique.bind(f.app.prisma.order);
+    const spy = vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce((async (args: Prisma.OrderFindUniqueArgs) => {
+      const result = await read(args); await f.revoke(); return result;
+    }) as never);
+    try {
+      const res = await f.inject('POST', `/rooms/${f.room.id}/messages`, f.customer.token, { message: 'current push audience fixture' });
+      expect(res.statusCode, res.body).toBe(200);
+      const recipients = send.mock.calls.map(([params]) => params.userId);
+      expect(recipients).toContain(f.newMover.userId);
+      expect(recipients).not.toContain(f.oldMover.userId);
+    } finally { spy.mockRestore(); }
   });
 });

@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import type { PrismaClient, LivenessOutcome, LivenessPurpose } from '@prisma/client';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
@@ -457,7 +458,7 @@ export class LivenessService {
       return { reDispatched: false, manualReview: true, sosAvailable: true };
     }
     try {
-      this.io.to(`order:${releasedOrder.id}`).emit('order:status_changed', { orderId: releasedOrder.id, status: 'PENDING', reason: 'not_my_driver' });
+      await emitToOrderRoom(this.prisma, this.io, releasedOrder.id, 'order:status_changed', { orderId: releasedOrder.id, status: 'PENDING', reason: 'not_my_driver' });
       this.io.to('ops:war-room').emit('safety:not-my-driver', { orderId: releasedOrder.id, driverUserId: release.driverUserId, at: now.toISOString() });
     } catch { /* advisory only */ }
     await this.notifications.send({
