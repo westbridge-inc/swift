@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import os from 'node:os';
 import path from 'node:path';
+import { inflateSync } from 'node:zlib';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { buildApp } from '../app';
@@ -11,6 +12,7 @@ import { runWithoutTenant } from '../plugins/tenant-context';
 import { windDownPartner } from '../modules/user/partner-wind-down';
 import { stripImageMetadata, stripImageMetadataStrict } from '../utils/images';
 import { PROGRESSIVE_JPEG, PROGRESSIVE_SCAN_OFFSETS, SYNTHETIC_CAMERA_TAG, progressiveWithMetadata } from './fixtures/progressive-jpeg';
+import { ICC_JPEG, ICC_PNG, ICC_NOTE } from './fixtures/icc-images';
 
 // ---------------------------------------------------------------------------
 // [PUBLIC-PHOTOS] Stores' own photos are served by the API, whatever the
@@ -126,6 +128,20 @@ const webp = (fill: number) => {
   return Buffer.concat([Buffer.from('RIFF', 'ascii'), u32le(4 + vp8.length), Buffer.from('WEBP', 'ascii'), vp8]);
 };
 const hasGps = (bytes: Buffer) => bytes.includes(Buffer.from(GPS, 'latin1')) || bytes.includes(Buffer.from('Exif\0\0', 'latin1'));
+function hasIccNote(bytes: Buffer): boolean {
+  const needle = Buffer.from(ICC_NOTE, 'utf16le').swap16();
+  if (bytes.includes(needle)) return true;
+  if (bytes[0] !== 0x89) return false;
+  for (let i = 8; i + 12 <= bytes.length;) {
+    const end = i + 12 + bytes.readUInt32BE(i);
+    if (bytes.toString('ascii', i + 4, i + 8) === 'iCCP') {
+      const data = bytes.subarray(i + 8, end - 4);
+      return inflateSync(data.subarray(data.indexOf(0) + 2)).includes(needle);
+    }
+    i = end;
+  }
+  return false;
+}
 
 let app: FastifyInstance;
 /** The local-provider app (its own describe below); closed last, after the
@@ -456,6 +472,18 @@ describe('[PUBLIC-PHOTOS] only a store a guest may see — the public catalogue\
 });
 
 describe('[PUBLIC-PHOTOS] a shop\'s location never leaves inside a photo', () => {
+  it.each([['JPEG', ICC_JPEG, 'image/jpeg'], ['PNG', ICC_PNG, 'image/png']] as const)('%s ICC metadata is removed from object-storage uploads and legacy reads', async (_label, camera, type) => {
+    expect(hasIccNote(camera)).toBe(true);
+    const item = await addItem(storeA.vendorId, storeA.categoryId, null);
+    const stored = await uploadPhoto(app, storeA, item.id, 'photo.png', 'image/png', camera);
+    expect(hasIccNote(bucket.get(stored)!.body), 'stored ICC description').toBe(false);
+    bucket.set(stored, { body: camera, contentType: type });
+    const res = await get(`/${stored}`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers['content-type']).toBe(type);
+    expect(hasIccNote(res.rawPayload), 'legacy public ICC description').toBe(false);
+  });
+
   it.each([PROGRESSIVE_SCAN_OFFSETS[1], PROGRESSIVE_JPEG.length])('a progressive JPEG tagged at %i is stripped on upload and when serving an older stored photo', async (offset) => {
     const camera = progressiveWithMetadata(offset);
     const item = await addItem(storeA.vendorId, storeA.categoryId, null);
@@ -678,6 +706,22 @@ describe('[PUBLIC-PHOTOS] the local provider answers the same address', () => {
     expect(res.rawPayload.equals(png(11))).toBe(true);
     const orphan = await local!.inject({ method: 'GET', url: `/${orphanKey}` });
     expect(orphan.statusCode).toBe(404);
+  });
+
+  it.each([['JPEG', ICC_JPEG, 'image/jpeg'], ['PNG', ICC_PNG, 'image/png']] as const)('%s ICC metadata is removed from local uploads and both legacy addresses', async (_label, camera, type) => {
+    expect(hasIccNote(camera)).toBe(true);
+    const item = await addItem(storeB.vendorId, storeB.categoryId, null);
+    const stored = await uploadPhoto(local!, storeB, item.id, 'photo.png', 'image/png', camera);
+    const relative = stored.replace(/^\/uploads\//, '');
+    expect(hasIccNote(await readFile(path.join(dir, relative))), 'stored local ICC description').toBe(false);
+    await writeFile(path.join(dir, relative), camera);
+    for (const address of [stored, `/${relative}`]) {
+      await app.prisma.item.update({ where: { id: item.id }, data: { imageUrl: address === stored ? stored : relative } });
+      const res = await local!.inject({ method: 'GET', url: address });
+      expect(res.statusCode, address).toBe(200);
+      expect(res.headers['content-type']).toBe(type);
+      expect(hasIccNote(res.rawPayload), address).toBe(false);
+    }
   });
 
   it.each([PROGRESSIVE_SCAN_OFFSETS[1], PROGRESSIVE_JPEG.length])('the local upload and both photo addresses strip a progressive JPEG tagged at %i', async (offset) => {
