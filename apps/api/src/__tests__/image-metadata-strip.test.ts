@@ -76,11 +76,11 @@ describe('ICC descriptions are metadata, while verified colour transforms surviv
   it('removes profile identity, reserved bytes, and unreferenced payload', () => {
     const profile = Buffer.concat([ICC_PROFILE, Buffer.from('synthetic-unreferenced-location')]);
     profile.writeUInt32BE(profile.length, 0);
-    for (const [start, end] of [[4, 8], [40, 44], [48, 56], [80, 128]]) profile.fill(0x41, start, end);
+    for (const [start, end] of [[4, 8], [40, 44], [48, 56], [80, 128]] as const) profile.fill(0x41, start, end);
     const clean = stripImageMetadataStrict(jpegProfile(profile), 'image/jpeg');
     expect(clean).not.toBeNull();
     const sanitized = embeddedProfile(clean!);
-    for (const [start, end] of [[4, 8], [40, 44], [48, 56], [80, 128]]) expect(sanitized.subarray(start, end)).toEqual(Buffer.alloc(end - start));
+    for (const [start, end] of [[4, 8], [40, 44], [48, 56], [80, 128]] as const) expect(sanitized.subarray(start, end)).toEqual(Buffer.alloc(end - start));
     expect(sanitized.includes('synthetic-unreferenced-location')).toBe(false);
   });
 
