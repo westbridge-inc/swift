@@ -111,6 +111,13 @@ const PUBLISHED: Record<
     driver_agreement: '7e560184f2106df06f56b95888d6dc4e2c5e3db3aeeae193396a75bc4e3b11f7',
     vendor_agreement: '28757aca7ff1309b7c7bb6914b782c1950fb4d353c71ceb5961231f81e33b693',
   },
+  // Account closure: role-independent entry, cash/live-work guards and honest holds.
+  '2026-10-04': {
+    terms: 'cb304527a513e65d4c40ab2589d9bd650d1873cab3755317ddd50dea8f62bedf',
+    privacy: 'b78985eb02c41427eac10445d2935e92cbead3cb600d2e8796d19d28db8407d8',
+    driver_agreement: '36543a0b037d488ff96076092c65a30939fa6adf14825bd80a35120a18097089',
+    vendor_agreement: '8bbbb883fe61443878d3183f615bca68c78d787265954e7ddfb5bd823567d702',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
