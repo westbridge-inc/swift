@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -663,8 +664,8 @@ export async function driverRoutes(app: FastifyInstance) {
           };
         }
 
-        if (current.currentRideId === authorized.currentRideId) {
-          app.io.to(`order:${authorized.currentRideId}`).emit('driver:location', {
+        if (authorized.currentRideId !== null && current.currentRideId === authorized.currentRideId) {
+          await emitToOrderRoom(app.prisma, app.io, authorized.currentRideId, 'driver:location', {
             driverId: driver.id,
             orderId: authorized.currentRideId,
             latitude,
@@ -866,7 +867,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // best-effort. A socket/push outage cannot tell the driver a durable winner
     // failed (a retry would only meet their already-owned ride).
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id,
         status: 'DRIVER_ASSIGNED',
         driver: {
@@ -1051,7 +1052,7 @@ export async function driverRoutes(app: FastifyInstance) {
     await app.redis.expire(cancelledDeclinedKey, 3600).catch(() => {});
 
     // Tell the rider honestly, then re-dispatch so their ride survives.
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',
@@ -1102,7 +1103,7 @@ export async function driverRoutes(app: FastifyInstance) {
       etaMinutes = estimateDeliveryMinutes(dist);
     }
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'DRIVER_EN_ROUTE',
       eta: etaMinutes,
@@ -1179,7 +1180,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'DRIVER_ARRIVED',
     });
@@ -1256,7 +1257,7 @@ export async function driverRoutes(app: FastifyInstance) {
     }
     const updatedOrder = verification.order;
 
-    app.io.to(`order:${id}`).emit('ride:pin_verified', { orderId: id });
+    await emitToOrderRoom(app.prisma, app.io, id, 'ride:pin_verified', { orderId: id });
 
     return { success: true, data: updatedOrder, message: 'PIN verified successfully. You may now start the ride.' };
   });
@@ -1292,7 +1293,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     const updatedOrder = order;
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'RIDE_IN_PROGRESS',
       estimatedDuration: previous.taxiDuration,
@@ -1356,7 +1357,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     if (!replayed) {
       try {
-        app.io.to(`order:${id}`).emit('order:status_changed', {
+        await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
           orderId: id,
           status: data.status,
           fare: {
@@ -1422,7 +1423,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
 
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id,
         status: 'DELIVERED',
         fare: {

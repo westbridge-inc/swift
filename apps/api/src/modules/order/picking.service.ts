@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from './order-room-emission.service';
 import type { Prisma, PrismaClient, SubstitutionStatus } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
@@ -246,7 +247,7 @@ export class PickingService {
       });
     });
     // Only the committed winner speaks.
-    this.io.to(`order:${orderId}`).emit('order:substitution', {
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:substitution', {
       orderId,
       lineId,
       originalName: line.name,
@@ -538,7 +539,7 @@ export class PickingService {
     });
     if (!closed) return false;
     this.emitPickState(line.order.vendorId, line.order.id, line.id, { subStatus });
-    this.io.to(`order:${line.order.id}`).emit('order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
+    await emitToOrderRoom(this.prisma, this.io, line.order.id, 'order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
     return true;
   }
 

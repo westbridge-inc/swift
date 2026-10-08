@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from './order-room-emission.service';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
@@ -811,7 +812,7 @@ export class OrderService {
       timestamp: new Date().toISOString(),
     };
     try {
-      this.io.to(`order:${order.id}`).emit('order:status_changed', statusEvent);
+      await emitToOrderRoom(this.prisma, this.io, order.id, 'order:status_changed', statusEvent);
       if (order.vendorId) {
         this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
       }
@@ -2582,7 +2583,7 @@ export class OrderService {
       });
     }
 
-    this.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', { orderId, status: 'CANCELLED' });
     // A held order was never shown to the vendor — telling them about a
     // cancellation of something they never saw would only confuse the board.
     if (order.vendorId && !heldNow) {
@@ -2667,7 +2668,7 @@ export class OrderService {
 
     log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
     const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
-    this.io.to(`order:${orderId}`).emit('order:status_changed', statusEvent);
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition
     // live without subscribing to each order individually.
     if (order.vendorId) {

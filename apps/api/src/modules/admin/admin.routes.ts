@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -2600,7 +2601,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // log + customer notification below. (Wallet credit is a Part C / fintech-phase
     // concern — see the dormant walletBalance/Transaction schema notes.)
 
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: newStatus });
 
     // [REPORT-010 F-03] Unattested MMG gets the direct-refund guidance — the
     // customer may have already paid the store's link before this cancel.
@@ -2740,7 +2741,7 @@ export async function adminRoutes(app: FastifyInstance) {
       return tx.order.findUniqueOrThrow({ where: { id } });
     });
     orderRefundCounter.labels('settled').inc();
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'REFUNDED' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'REFUNDED' });
     return { success: true, data: updated };
   });
 
@@ -5380,7 +5381,7 @@ export async function adminRoutes(app: FastifyInstance) {
       });
       markReplayAudited(request as unknown as AuditRequestLike, decisionRow?.id);
     } else {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });

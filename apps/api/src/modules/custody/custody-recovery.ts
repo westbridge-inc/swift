@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { randomInt, timingSafeEqual } from 'node:crypto';
 import type { CustodyIncidentReason, CustodyRecoveryCase, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -161,7 +162,7 @@ export async function publishCaseChange(
 ): Promise<void> {
   try {
     const event = { orderId: order.id, caseId: kase.id, state: kase.state, timestamp: new Date().toISOString() };
-    deps.io.to(`order:${order.id}`).emit(CASE_ROOM_EVENT, event);
+    await emitToOrderRoom(deps.prisma, deps.io, order.id, CASE_ROOM_EVENT, event);
     if (order.vendorId) deps.io.to(`vendor:${order.vendorId}`).emit(CASE_ROOM_EVENT, event);
   } catch (err) {
     log().warn({ err, orderId: order.id }, 'custody case socket publication failed after commit');

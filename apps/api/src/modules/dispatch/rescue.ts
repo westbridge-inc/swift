@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import type { PrismaClient, Prisma } from '@prisma/client';
 import type { Redis } from 'ioredis';
 import type { Server } from 'socket.io';
@@ -197,7 +198,7 @@ export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder
     inputs: { ageMinutes, limitMinutes, orderType: order.orderType, readyAt: order.readyAt?.toISOString() ?? null },
   });
 
-  deps.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: 'CANCELLED', timestamp: now.toISOString() });
+  await emitToOrderRoom(deps.prisma, deps.io, order.id, 'order:status_changed', { orderId: order.id, status: 'CANCELLED', timestamp: now.toISOString() });
   const money = order.paymentMethod === 'CASH'
     ? 'Nothing to pay.'
     : order.paymentMethod === 'MOBILE_MONEY'
