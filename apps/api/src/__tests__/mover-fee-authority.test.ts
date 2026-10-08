@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { activeOverdueMs, currentDunningClock, projectDunningClock } from '../modules/billing/dunning-clock';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -59,6 +60,7 @@ async function dual(tenantId = 'swift-default') {
     const driver = await app.prisma.driver.create({ data: { userId: who.userId, vehicleType: 'CAR', documentsVerified: true,
       vehicleMake: 'Test', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `FEE-${run}-${ids.length}`, driverLicenseUrl: 'storage://test/dl', vehicleInsuranceUrl: 'storage://test/insurance' } });
     await app.prisma.verificationDocument.create({ data: { userId: who.userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: 'storage://test/insurance', status: 'APPROVED', coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true, consentAt: new Date(), privacyNoticeVersion: 'v1' } });
+    await currentTaxiSplitDocuments(app.prisma, who.userId);
     return { ...who, riderId: rider.id, driverId: driver.id, tenantId };
   });
 }

@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -369,7 +370,8 @@ describe('Spec §I — acceptance conformance baseline', () => {
   // 6. Insurance-class hard-fail — REAL
   it('6. a taxi driver without HIRE-class confirmed insurance is blocked with reason "insurance"', async () => {
     const u = await makeUser(PHONES[1]!);
-    // legacyVerified bypasses the base checklist so we isolate the taxi insurance gate;
+    await currentTaxiSplitDocuments(app.prisma, u.id);
+    // Legacy base evidence remains grandfathered; the two new licences are supplied explicitly.
     // an APPROVED vehicle_insurance with no confirmed HIRE class must still hard-fail.
     await approveDoc(u.id, 'vehicle_insurance');
     const status = await verification.getLiveOperationStatus(u.id, { vehicleType: 'CAR', legacyVerified: true });

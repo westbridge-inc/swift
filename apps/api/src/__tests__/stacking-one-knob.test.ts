@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -112,6 +113,7 @@ async function makeMover(at: Point, opts: { vehicleType?: VehicleType; floatLimi
       acceptanceRate: 100,
     },
   }));
+  if (rider.vehicleType === 'CAR') await sys(() => currentTaxiSplitDocuments(app.prisma, user.id));
   return { userId: user.id, riderId: rider.id, token };
 }
 

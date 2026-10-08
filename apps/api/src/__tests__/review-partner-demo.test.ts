@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 /**
  * [REVIEW-PARTNER · lane row 53] The store-review fiction's demo RIDER and taxi
  * DRIVER: two logins an App Store / Play reviewer uses to reach the partner
@@ -720,6 +721,7 @@ describe('[REVIEW-PARTNER · DL-5 / DL-6] no money and no SMS for a review partn
       await system(() => app.prisma.reviewCredential.deleteMany({ where: { id: trapId } }));
       await app.redis.del(`stepup:fail:${prod.driverUserId}`);
     }
+    await system(() => currentTaxiSplitDocuments(app.prisma, prod.driverUserId));
     // The fee exemption is the fiction's only: a verified production taxi without a plan stays off the road.
     await system(async () => {
       await app.prisma.driver.update({ where: { id: prod.driverId }, data: { isOnline: false, locationSessionId: null } });

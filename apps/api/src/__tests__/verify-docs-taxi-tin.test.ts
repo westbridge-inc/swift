@@ -446,7 +446,9 @@ describe('[V5 · ruling 7] TIN and the VAT number', () => {
 
 describe('[V5 · registry] inactive optional documents never silence active requirements', () => {
   it('both the facade and activation rehearsal still report the blocking national ID', async () => {
-    const set = await app.prisma.requirementSet.findFirstOrThrow({ where: { countryCode: 'GY', actorRole: 'MOVER_NO_LICENCE' } });
+    const existingSet = await app.prisma.requirementSet.findFirst({ where: { countryCode: 'GY', actorRole: 'MOVER_NO_LICENCE' } });
+    const set = existingSet ?? await app.prisma.requirementSet.create({ data: { countryCode: 'GY', actorRole: 'MOVER_NO_LICENCE', tier: 'STANDARD', effectiveFrom: new Date('2026-09-01T00:00:00.000Z') } });
+    await app.prisma.requirementItem.upsert({ where: { requirementSetId_docTypeCode: { requirementSetId: set.id, docTypeCode: registryCode('GY', 'national_id') } }, create: { requirementSetId: set.id, docTypeCode: registryCode('GY', 'national_id'), isBlocking: true, minCount: 1, sortOrder: 0 }, update: { isBlocking: true } });
     const requiredCode = registryCode('GY', 'national_id');
     const optionalCode = registryCode('GY', 'police_clearance');
     const prior = await app.prisma.docType.findMany({ where: { code: { in: [requiredCode, optionalCode] } } });
@@ -463,6 +465,10 @@ describe('[V5 · registry] inactive optional documents never silence active requ
       if (priorItem) await app.prisma.requirementItem.update({ where: itemKey, data: { isBlocking: priorItem.isBlocking } });
       else await app.prisma.requirementItem.delete({ where: itemKey });
       for (const type of prior) await app.prisma.docType.update({ where: { code: type.code }, data: { isActive: type.isActive, legalFactsVerifiedAt: type.legalFactsVerifiedAt } });
+      if (!existingSet) {
+        await app.prisma.requirementItem.deleteMany({ where: { requirementSetId: set.id } });
+        await app.prisma.requirementSet.delete({ where: { id: set.id } });
+      }
     }
   });
 });

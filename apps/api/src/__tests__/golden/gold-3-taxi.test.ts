@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from '../helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -142,6 +143,7 @@ async function makeDriver(firstName: string, fix: { lat: number; lng: number }) 
       currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * DAY), nextBillingDate: new Date(Date.now() + 7 * DAY),
     },
   }));
+  await sys(() => currentTaxiSplitDocuments(app.prisma, u.userId));
   drivers.push({ driverId: driver.id, token: u.token });
   const go = await call('POST', '/api/v1/driver/go-online', u.token, { latitude: fix.lat, longitude: fix.lng });
   expect(go.statusCode, go.body).toBe(200);
