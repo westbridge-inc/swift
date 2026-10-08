@@ -4,7 +4,7 @@ import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor, type EvidenceRow } from './evidence';
@@ -62,6 +62,16 @@ const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
  */
 export function identityFaceMatchLeg(docType: string, env: Record<string, string | undefined> = process.env): boolean {
   return IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled(env);
+}
+
+/**
+ * [VERIFY-DOCS] The "Police-cleared" flag: this account holds an approved, current police
+ * clearance under THE evidence rule (document records, not images — so the flag survives the
+ * image being deleted after review, and lapses with the certificate). Optional for movers; it
+ * never decides whether anyone may work.
+ */
+export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClient, userId: string, now = new Date()): Promise<boolean> {
+  return (await approvedEvidenceFor(db, userId, [POLICE_CLEARANCE_DOC_TYPE], now)).length > 0;
 }
 
 /** The KYC engines whose identity check compares the document's face with the
@@ -487,9 +497,15 @@ export class VerificationService {
     // checklist. [STRAND-3] The old hard-coded CAR list made country-required
     // COMMERCIAL types (road_service_licence for BUS/cargo classes)
     // UNSUBMITTABLE through this API — the mover's persisted profiles decide.
-    const checklist = roleKey === 'MOVER'
-      ? await this.moverSubmittableChecklist(user.countryCode, userId)
-      : await this.checklistFor(userId, user.countryCode, roleKey);
+    // [VERIFY-DOCS] A document the role MAY add (police clearance for a mover) is submittable
+    // too; it never gates. A type no list names — required or optional — is refused below.
+    let checklist: string[];
+    if (roleKey === 'MOVER') {
+      checklist = await this.moverSubmittableChecklist(user.countryCode, userId);
+    } else {
+      const required = await this.checklistFor(userId, user.countryCode, roleKey);
+      checklist = [...required, ...await this.optionalFor(userId, user.countryCode, roleKey, required)];
+    }
     if (!checklist.includes(docType)) {
       // [DOC-1 §18.3] A document type a category gate names in this country is
       // submittable by a vendor even when no checklist lists it — a shop that wants
@@ -763,7 +779,10 @@ export class VerificationService {
     if (rider?.vehicleType) classes.add(rider.vehicleType);
     if (driver?.vehicleType) classes.add(driver.vehicleType);
     const lists = await Promise.all(
-      [...classes].map((vehicleType) => this.countryConfig.getMoverChecklist(countryCode, vehicleType)),
+      [...classes].flatMap((vehicleType) => [
+        this.countryConfig.getMoverChecklist(countryCode, vehicleType),
+        this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType),
+      ]),
     );
     return [...new Set(lists.flat())];
   }
@@ -1319,6 +1338,26 @@ export class VerificationService {
     return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId));
   }
 
+  /**
+   * [VERIFY-DOCS] The documents this person MAY add for the role — never required, never a gate:
+   * shown under the checklist and accepted for upload. Same vehicle rule as checklistFor.
+   */
+  private async optionalFor(
+    userId: string,
+    countryCode: string,
+    roleKey: ChecklistRole,
+    required: readonly string[],
+    vehicleHint?: VehicleType,
+  ): Promise<string[]> {
+    if (roleKey === 'MOVER') {
+      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
+      return this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType);
+    }
+    // A service category that is not open has no checklist at all — and nothing to add either.
+    if (roleKey === 'SERVICE_PROVIDER' && required.length === 0) return [];
+    return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
+  }
+
   /** UNREGISTERED when any store the owner holds is on that tier; otherwise undefined (standard). */
   private async vendorTierOf(userId: string): Promise<string | undefined> {
     const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { tier: 'UNREGISTERED' }, select: { id: true }, take: 1 } } });
@@ -1332,13 +1371,29 @@ export class VerificationService {
     });
     if (!user) throw new NotFoundError('User', userId);
 
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
+    // `gate`: what this role must hold to go live — roleVerified reads it alone.
+    const gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
+    // [VERIFY-DOCS] What the person MAY add. Older apps read only `checklist` and ignore this.
+    let optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
+    // [VERIFY-DOCS · ruling 6 Oct ~21:25] A service business that offers home visits is SHOWN the
+    // police clearance in its checklist — build 9 uploads only what `checklist` names — but the
+    // store's gate is unchanged: only its home-visit bookings wait for the clearance.
+    let checklist = gate;
+    let homeVisits: { offered: boolean; cleared: boolean } | undefined;
+    if (roleKey === 'SERVICE') {
+      const { homeVisitsCleared, ownerOffersHomeVisits } = await import('./home-visits');
+      homeVisits = { offered: await ownerOffersHomeVisits(this.prisma, userId), cleared: await homeVisitsCleared(this.prisma, userId) };
+      if (homeVisits.offered && !checklist.includes(POLICE_CLEARANCE_DOC_TYPE)) {
+        checklist = [...checklist, POLICE_CLEARANCE_DOC_TYPE];
+        optional = optional.filter((docType) => docType !== POLICE_CLEARANCE_DOC_TYPE);
+      }
+    }
     // A SUPERSEDED submission is no longer evidence (its record followed it): a renewal
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
     // out here, or the checklist would show an approval GO no longer counts.
     const documents = (await this.prisma.verificationDocument.findMany({
-      where: { userId, docType: { in: [...checklist, IDENTITY_DOC_TYPE] } },
+      where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
     })).filter((d) => d.state !== 'SUPERSEDED');
 
@@ -1348,6 +1403,7 @@ export class VerificationService {
         .map((d) => d.docType),
     );
     const missing = checklist.filter((docType) => !approved.has(docType));
+    const gateMissing = gate.filter((docType) => !approved.has(docType));
 
     // The mover's saved vehicle (null until they provision one) — lets the
     // onboarding screen initialise its selector and know whether to re-prompt.
@@ -1370,19 +1426,29 @@ export class VerificationService {
     // default) or the engine compares none (the on-shore manual review), so the
     // apps never claim a check that does not run. Read-only.
     const facesCompared = FACE_COMPARING_ENGINES.has(this.kyc.engine?.name ?? '');
-    const faceMatchDocTypes: string[] = facesCompared ? checklist.filter((docType) => identityFaceMatchLeg(docType)) : [];
+    const faceMatchDocTypes: string[] = facesCompared ? [...checklist, ...optional].filter((docType) => identityFaceMatchLeg(docType)) : [];
 
     return {
       roleKey,
       trustLevel: user.trustLevel,
       checklist,
+      // [VERIFY-DOCS] Documents this person MAY add (never in `missing`, never a gate).
+      optional,
       documents,
       missing,
       vehicleType,
-      roleVerified: checklist.length > 0 && missing.length === 0,
-      categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && checklist.length === 0,
+      // The gate, never the display: a home-visit owner's pending clearance never darkens the store.
+      roleVerified: gate.length > 0 && gateMissing.length === 0,
+      categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && gate.length === 0,
       trial,
       faceMatchDocTypes,
+      // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
+      // the one evidence rule, so the flag survives the image being deleted after review.
+      // Only asked where this person's lists name the document at all.
+      policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
+      // [VERIFY-DOCS] Service businesses only: whether a listing comes to the customer, and whether
+      // the owner's clearance lets those visits be booked.
+      ...(homeVisits ? { homeVisits } : {}),
     };
   }
 
@@ -1715,17 +1781,31 @@ export class VerificationService {
       }
       // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
       await this.propagateVehicleLapse(doc, 'expired');
+      // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
+      // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
+      const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
       await this.notifications.send({
         userId: doc.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Document expired',
-        body: `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+        body: optional
+          ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
+          : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expired', docId: doc.id },
       });
     }
 
     return expired;
+  }
+
+  /** [VERIFY-DOCS] A mover's document that no gate of theirs requires today (police clearance;
+   *  a licence holder's national ID). Vendor and service documents are never judged optional here. */
+  private async isOptionalMoverDocument(userId: string, role: UserRole, docType: string): Promise<boolean> {
+    if (role !== 'MOVER' && role !== 'RIDER' && role !== 'DRIVER') return false;
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    if (!user) return false;
+    return !(await this.checklistFor(userId, user.countryCode, 'MOVER')).includes(docType);
   }
 
   /** One reminder per document, 30 days before expiry. */
@@ -1740,11 +1820,15 @@ export class VerificationService {
     for (const n of due) {
       const doc = await this.prisma.verificationDocument.findUnique({ where: { id: n.documentId }, select: { docType: true, role: true } });
       if (!doc) continue;
+      // [VERIFY-DOCS] Never threaten a suspension over a document nobody requires.
+      const optional = await this.isOptionalMoverDocument(n.subjectId, doc.role, doc.docType);
       await this.notifications.send({
         userId: n.subjectId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: n.daysLeft <= 1 ? 'Document expires tomorrow' : 'Document expiring soon',
-        body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${n.expiresOn.toISOString().slice(0, 10)} — ${n.daysLeft} day${n.daysLeft === 1 ? '' : 's'} left. Renew it to avoid suspension.`,
+        body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${n.expiresOn.toISOString().slice(0, 10)} — ${n.daysLeft} day${n.daysLeft === 1 ? '' : 's'} left. ${optional
+          ? (doc.docType === POLICE_CLEARANCE_DOC_TYPE ? 'Renew it to stay recorded as police-cleared. It is optional and does not affect your work.' : 'It is optional and does not affect your work.')
+          : 'Renew it to avoid suspension.'}`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expiry_reminder', docId: n.documentId, daysLeft: n.daysLeft },
       });

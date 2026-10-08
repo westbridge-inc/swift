@@ -774,7 +774,8 @@ describe('the face-match line tells the truth', () => {
     server.statusExtra = { faceMatchDocTypes: ['owner_national_id'] };
     await ownerWaitingForApproval();
 
-    expect(card('Owner National ID').textContent).toContain(FACE_LINE);
+    // [VERIFY-DOCS · ruling 4] the label names the Digital ID card it now accepts
+    expect(card('Owner National ID or Digital ID card').textContent).toContain(FACE_LINE);
     for (const other of ['Business Registration', 'TIN Certificate', 'Storefront Photo']) {
       expect(card(other).textContent, other).not.toContain(FACE_LINE);
     }
@@ -790,5 +791,32 @@ describe('the face-match line tells the truth', () => {
     server.statusExtra = { faceMatchDocTypes: flag };
     await ownerWaitingForApproval();
     expect(text()).not.toContain(FACE_LINE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [VERIFY-DOCS · owner rulings 6 Oct 2026] Documents a mover MAY add (police clearance; a licence
+// holder's national ID) come from the server's `optional` list: shown under "Optional", never in
+// the required count, and an older server that sends no `optional` shows exactly what it always did.
+// ---------------------------------------------------------------------------
+describe('optional documents are offered, never counted as required', () => {
+  const REQUIRED = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+
+  it('lists the optional documents after the required ones, with what they are for', async () => {
+    server.statusExtra = { checklist: REQUIRED, missing: REQUIRED, optional: ['national_id', 'police_clearance'] };
+    await riderApplying();
+    expect(text()).toContain('0 of 3 approved');
+    expect(text()).toContain('Optional');
+    expect(text()).toContain('You can add these any time. You do not need them to go live.');
+    expect(card('Police Clearance Certificate').textContent).toContain('your account is recorded as police-cleared');
+    expect(card('Police Clearance Certificate').textContent).not.toMatch(/badge/i);
+    // The national ID the rider already sent shows its review state in the optional list.
+    expect(card('National ID or Digital ID card').textContent).toContain('In review');
+    expect(text().indexOf('Optional')).toBeGreaterThan(text().indexOf('Vehicle Insurance'));
+  });
+
+  it('an older server with no optional list shows no Optional section', async () => {
+    await riderApplying();
+    expect(text()).not.toContain('You can add these any time');
   });
 });

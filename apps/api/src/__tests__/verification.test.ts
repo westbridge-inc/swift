@@ -48,8 +48,11 @@ const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
 const FACE_MATCH_PHONE = `+${runBase + 9}`;
 const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
 
-// Base (incl. police clearance — required of every courier) + motor docs.
-const MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+// [VERIFY-DOCS · owner rulings 6 Oct 2026] A motorbike courier's REQUIRED documents are the motor
+// documents; the licence is their photo ID, so the national ID — and, for every mover, the police
+// clearance — are OPTIONAL: accepted for upload, never a gate.
+const MOVER_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+const MOVER_OPTIONAL_DOCS = ['national_id', 'police_clearance'];
 
 let app: FastifyInstance;
 let sweepService: VerificationService;
@@ -201,6 +204,7 @@ describe('Checklists drive from config', () => {
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
     expect(data.missing).toEqual(MOVER_DOCS);
+    expect(data.optional).toEqual(MOVER_OPTIONAL_DOCS);
     expect(data.roleVerified).toBe(false);
   });
 
@@ -233,8 +237,11 @@ describe('Checklists drive from config', () => {
       'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
     ]);
 
+    // [VERIFY-DOCS · owner ruling 6 Oct ~21:25 GYT] A service business opens on its owner's ID; a
+    // police clearance is optional for the store (home-visit bookings need it: verify-docs-home-visits).
     const service = await inject('GET', '/api/v1/verification/status?role=SERVICE', undefined, vendorToken);
-    expect(service.json().data.checklist).toEqual(['owner_national_id', 'police_clearance']);
+    expect(service.json().data.checklist).toEqual(['owner_national_id']);
+    expect(service.json().data.optional).toContain('police_clearance');
   });
 });
 
@@ -260,7 +267,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   let rejectedDocId: string;
 
   it('submitted documents land in the admin queue as PENDING', async () => {
-    for (const docType of MOVER_DOCS) {
+    // Required and optional alike: an optional document is reviewed like any other.
+    for (const docType of [...MOVER_DOCS, ...MOVER_OPTIONAL_DOCS]) {
       const res = await inject('POST', '/api/v1/verification/documents', {
         role: 'MOVER',
         docType,
@@ -277,7 +285,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     const docTypes = queue.json().data
       .filter((d: { userId: string }) => d.userId === moverUserId)
       .map((d: { docType: string }) => d.docType);
-    for (const docType of MOVER_DOCS) expect(docTypes).toContain(docType);
+    for (const docType of [...MOVER_DOCS, ...MOVER_OPTIONAL_DOCS]) expect(docTypes).toContain(docType);
   });
 
   it('rejection notifies the applicant with the reason (resubmit path)', async () => {
@@ -368,15 +376,17 @@ describe('Provider auto-decisions (swappable interface)', () => {
     expect(res.json().data.status).toBe('APPROVED');
     expect(res.json().data.kycRef).toMatch(/^sbx_/);
 
-    // ID alone is not the SERVICE bar — police clearance is still missing
-    // (service people enter customers' homes), so listing stays gated.
+    // [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT — a DELIBERATE change] The owner's ID IS
+    // the service business's bar now. A police clearance is needed only for HOME-VISIT bookings
+    // (verify-docs-home-visits.test.ts), never to list, so the listing is accepted at once.
     const early = await inject('POST', '/api/v1/vendor/items', {
       categoryId: serviceCategoryId,
       name: 'Hot Stone Massage',
       basePrice: 8000,
     }, vendorToken);
-    expect(early.statusCode).toBe(403);
-    expect(early.json().error.code).toBe('VERIFICATION_REQUIRED');
+    expect(early.statusCode).toBe(200);
+
+    // The clearance stays a document the business MAY add (and what home visits need).
 
     const clearance = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
@@ -612,9 +622,10 @@ describe('Taxi checklist merge + auto-KYC audit', () => {
 describe('Taxi movers are shown — and gated on — the taxi-extra checklist', () => {
   // The dead-end this prevents: a taxi driver was only ever shown the base
   // mover docs, uploaded them, saw "verified" — then go-online silently failed
-  // because the live gate ALSO requires hire permit / plate photo / exterior
-  // photo / fitness cert. What onboarding shows must equal what gates.
-  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'];
+  // because the live gate ALSO requires hire permit / exterior photo / fitness
+  // cert. What onboarding shows must equal what gates. [VERIFY-DOCS] The plate
+  // photo is merged into the exterior photo (it shows the plate).
+  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert'];
   let taxiToken: string;
   let bicycleToken: string;
 
@@ -640,12 +651,14 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     });
   });
 
-  it('surfaces police clearance + the taxi extras in the onboarding checklist', async () => {
+  it('surfaces the taxi extras in the onboarding checklist; police clearance is offered, not required', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, taxiToken);
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
     expect(data.checklist).toEqual(TAXI_DOCS);
-    expect(data.missing).toContain('police_clearance');
+    expect(data.missing).toEqual(TAXI_DOCS);
+    expect(data.missing).not.toContain('police_clearance');
+    expect(data.optional).toContain('police_clearance');
     expect(data.roleVerified).toBe(false);
   });
 
@@ -657,12 +670,13 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
-  it('asks a bicycle courier for identity + character only — no vehicle docs', async () => {
+  it('asks a bicycle courier for identity only — no vehicle docs; police clearance optional', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, bicycleToken);
     const data = res.json().data;
-    // Police clearance applies to EVERY courier (cash + home visits) — only
-    // the vehicle documents scale away for a bicycle (master plan §3.2).
-    expect(data.checklist).toEqual(['national_id', 'police_clearance']);
+    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required;
+    // the police clearance is optional for every mover. The vehicle documents scale away.
+    expect(data.checklist).toEqual(['national_id']);
+    expect(data.optional).toEqual(['police_clearance']);
     expect(data.checklist).not.toContain('drivers_licence');
     expect(data.checklist).not.toContain('vehicle_insurance');
     expect(data.vehicleType).toBe('BICYCLE');
@@ -937,8 +951,8 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
 describe('Taxi hire-class insurance — the manual 5-point check is enforced', () => {
   let taxiUserId: string;
   const TAXI_CHECKLIST = [
-    'national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
-    'vehicle_insurance', 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert',
+    'drivers_licence', 'vehicle_registration',
+    'vehicle_insurance', 'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert',
   ];
 
   beforeAll(async () => {
@@ -1020,14 +1034,23 @@ describe('Lapsed documents force movers offline (daily sweep)', () => {
     expect((note!.data as any)?.audience).toBe('earner');
   });
 
-  it('an online courier is pulled offline when their police clearance lapses — others untouched', async () => {
+  it('an online courier is pulled offline when a required document lapses — never for an optional one; others untouched', async () => {
     // A bystander who stays online through someone else's expiry
     const cyclist = await app.prisma.user.findUniqueOrThrow({ where: { phone: BICYCLE_MOVER_PHONE } });
     await app.prisma.rider.updateMany({ where: { userId: cyclist.id }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
 
     await app.prisma.rider.updateMany({ where: { userId: moverUserId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
+    // [VERIFY-DOCS] The police clearance is optional: its lapse leaves the courier online.
     await app.prisma.verificationDocument.updateMany({
       where: { userId: moverUserId, docType: 'police_clearance', status: 'APPROVED' },
+      data: { expiresAt: new Date(Date.now() - 60 * 1000) },
+    });
+    await sweepService.expireLapsedDocuments();
+    expect((await app.prisma.rider.findFirstOrThrow({ where: { userId: moverUserId } })).isOnline).toBe(true);
+
+    // A required one (the licence) takes the courier offline at once.
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: moverUserId, docType: 'drivers_licence', status: 'APPROVED' },
       data: { expiresAt: new Date(Date.now() - 60 * 1000) },
     });
 
