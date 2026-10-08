@@ -12,6 +12,7 @@ import { SwiftMark } from '../../components/SwiftLogo';
 import { Pictogram, Screen, T, type PictogramName } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
 import { haptic } from '../../lib/haptics';
+import { useAdsEnabled } from '../../hooks/useAdsEnabled';
 
 // FIRST OPEN [first-open spec 2.1]: one screen, the TRIO, zero carousel —
 // the same three options, pictograms and copy family as the in-app switcher
@@ -111,6 +112,7 @@ function QuietRow({
 }
 
 export function RolePickerScreen() {
+  const adsEnabled = useAdsEnabled();
   const insets = useSafeAreaInsets();
   const setIntent = useAuthStore((s) => s.setIntent);
   const setMoverPreset = useAuthStore((s) => s.setMoverPreset);
@@ -303,7 +305,7 @@ export function RolePickerScreen() {
                 setIntent('vendor');
               }}
             />
-            <QuietRow
+            {adsEnabled && <QuietRow
               icon="tv"
               label="Advertise on Swift"
               hint="Open Swift advertising"
@@ -312,7 +314,7 @@ export function RolePickerScreen() {
                 setCountry(DEFAULT_COUNTRY);
                 setIntent('advertiser');
               }}
-            />
+            />}
           </View>
         </View>
       </ScrollView>
