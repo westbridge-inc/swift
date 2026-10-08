@@ -26,6 +26,10 @@ beforeAll(async () => {
   app.decorate('io', io as never);
   app.decorate('redis', {
     lrange: async () => [],
+    eval: async (_script: string, _keys: number, key: string) => {
+      const count = Number(cache.get(key) ?? '0') + 1;
+      cache.set(key, String(count)); return count;
+    },
     get: async (key: string) => cache.get(key) ?? null,
     set: async (key: string, value: string, ...args: unknown[]) => {
       if (args.includes('NX') && cache.has(key)) return null;
@@ -209,6 +213,13 @@ describe('handover attempt budget is one locked order decision', () => {
       expect(push).toHaveBeenCalledTimes(2);
       expect(await app.prisma.notification.count({ where: { dedupeKey: row.dedupeKey } })).toBe(1);
       expect(await app.prisma.orderStatusLog.count({ where: { orderId: f.order.id, status: door === 'pickup' ? 'COMPLETED' : 'DELIVERED' } })).toBe(1);
+    });
+    it(`${door} adds a per-order request ceiling behind authorization`, async () => {
+      const f = await fixture(door);
+      for (let i = 0; i < 30; i++) expect((await f.request('246801', nanoid(16))).status).toBe(400);
+      expect(await f.request('246801', nanoid(16))).toMatchObject({ status: 429, code: 'HANDOVER_RATE_LIMITED' });
+      const other = await fixture(door);
+      expect(await other.request('135790')).toMatchObject({ status: 200 });
     });
     it(`${door} accepts a correct proof while the budget remains`, async () => {
       const f = await fixture(door);
