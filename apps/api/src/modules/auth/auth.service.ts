@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
@@ -523,6 +524,10 @@ export class AuthService {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
 
+      // This service remains authoritative if another caller is added later.
+      const authority = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenant: { select: { kind: true } } } });
+      if (authority.tenant.kind === 'REVIEW') throw new ReviewDemoCredentialRefusedError();
+
       const sessions = await tx.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
         SELECT "id", "expiresAt"
         FROM "sessions"
@@ -808,9 +813,12 @@ export class AuthService {
 
     const candidate = await this.app.prisma.user.findUnique({
       where: { phone },
-      select: { id: true },
+      select: { id: true, tenant: { select: { kind: true } } },
     });
-    if (!candidate) {
+    // [REVIEW-PARTNER] A store-review demo login is shared: its password is
+    // never reset — answered exactly as for no account (no reset code is ever
+    // texted to a demo identifier; this holds even if one were stored).
+    if (!candidate || candidate.tenant.kind === 'REVIEW') {
       // Do NOT reveal account existence on password reset — return the same
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.
