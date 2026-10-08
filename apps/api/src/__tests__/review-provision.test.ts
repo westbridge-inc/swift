@@ -9,14 +9,19 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
+import { customAlphabet } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, reviewStatus, DEFAULT_REVIEW_TTL_DAYS, ReviewProvisionRefusedError } from '../modules/review/provision';
 import { hashReviewCode } from '../modules/review/credentials';
 
-const RUN = nanoid(6).replace(/[^a-z0-9]/gi, '0').toLowerCase();
+const RUN = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 6)();
+// +592 plus this ten-digit run block and the provisioner's two-digit suffix
+// stays inside E.164's 15-digit maximum. Parallel test processes therefore
+// never share the synthetic identifier pool they exercise.
+const PHONE_RUN_BLOCK = String(Number.parseInt(RUN, 36)).padStart(10, '0');
+const PHONE_PREFIX = `+592${PHONE_RUN_BLOCK}`;
 const SLUG = `review-prov-${RUN}`;
 let app: FastifyInstance;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'review-provision-test');
@@ -54,7 +59,7 @@ describe('[STA-1] review:provision and friends', () => {
   it('refuses an EXISTING tenant of another kind, even with a review-style slug, and changes nothing: no conversion, session, login or user', async () => {
     await system(() => app.prisma.tenant.create({ data: { id: REAL, slug: REAL, name: 'A real operator', kind: 'PRODUCTION', purgeProtected: false, isActive: true } }));
     const before = await system(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: REAL } }));
-    const err = await system(() => provisionReviewTenant(app.prisma, { slug: REAL, phonePrefix: '+59200098' })).catch((e: unknown) => e);
+    const err = await system(() => provisionReviewTenant(app.prisma, { slug: REAL, phonePrefix: PHONE_PREFIX })).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ReviewProvisionRefusedError);
     expect((err as Error).message).toMatch(/PRODUCTION, not REVIEW/);
     expect(await system(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: REAL } }))).toEqual(before);
@@ -65,8 +70,8 @@ describe('[STA-1] review:provision and friends', () => {
 
   it('two provisions racing on a fresh slug settle on ONE review tenant, each with its own session and logins', async () => {
     const [a, b] = await Promise.all([
-      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: '+59200098' })),
-      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: '+59200098' })),
+      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: PHONE_PREFIX })),
+      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: PHONE_PREFIX })),
     ]);
     expect([a.tenantId, b.tenantId]).toEqual([RACE, RACE]);
     const t = await system(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: RACE } }));
@@ -80,7 +85,7 @@ describe('[STA-1] review:provision and friends', () => {
 
   it('provision: a purge-protected REVIEW tenant, one PROVISIONED session with the TTL, three synthetic logins whose codes are stored only as salted hashes', async () => {
     const now = new Date('2026-09-05T12:00:00.000Z');
-    const r = await system(() => provisionReviewTenant(app.prisma, { slug: SLUG, now, phonePrefix: `+59200098` }));
+    const r = await system(() => provisionReviewTenant(app.prisma, { slug: SLUG, now, phonePrefix: PHONE_PREFIX }));
     expect(r.tenantId).toBe(SLUG);
     expect(r.contentPack).toBe('ABSENT');
     expect(r.expiresAt.getTime() - now.getTime()).toBe(DEFAULT_REVIEW_TTL_DAYS * 86_400_000);
@@ -96,7 +101,7 @@ describe('[STA-1] review:provision and friends', () => {
     }
     const [c] = r.credentials;
     expect(c!.role).toBe('CUSTOMER');
-    expect(c!.identifier).toMatch(/^\+59200098\d{2}$/);
+    expect(c!.identifier).toMatch(new RegExp(`^\\+592${PHONE_RUN_BLOCK}\\d{2}$`));
     expect(c!.code).toMatch(/^\d{6}$/);
     const row = await system(() => app.prisma.reviewCredential.findFirstOrThrow({ where: { tenantId: SLUG, identifier: c!.identifier } }));
     expect(row.staticOtpHash).toBe(hashReviewCode(row.id, c!.code));
@@ -109,7 +114,7 @@ describe('[STA-1] review:provision and friends', () => {
     // The partners are shaped as production movers: MOVER + CUSTOMER + their role, active and remembered.
     for (const [role, roles] of [['RIDER', ['MOVER', 'CUSTOMER', 'RIDER']], ['DRIVER', ['MOVER', 'CUSTOMER', 'DRIVER']]] as const) {
       const minted = r.credentials.find((x) => x.role === role)!;
-      expect(minted.identifier).toMatch(/^\+59200098\d{2}$/);
+      expect(minted.identifier).toMatch(new RegExp(`^\\+592${PHONE_RUN_BLOCK}\\d{2}$`));
       const partner = await system(() => app.prisma.user.findUniqueOrThrow({ where: { phone: minted.identifier } }));
       expect([partner.tenantId, partner.isSynthetic, partner.activeRole, partner.lastMoverRole]).toEqual([SLUG, true, role, role]);
       expect(partner.roles).toEqual([...roles]);
@@ -151,7 +156,7 @@ describe('[STA-1] review:provision and friends', () => {
   });
 
   it('provision again: the tenant is reused (idempotent), a fresh session and credential are minted', async () => {
-    const r2 = await system(() => provisionReviewTenant(app.prisma, { slug: SLUG, phonePrefix: `+59200098` }));
+    const r2 = await system(() => provisionReviewTenant(app.prisma, { slug: SLUG, phonePrefix: PHONE_PREFIX }));
     expect(r2.tenantId).toBe(SLUG);
     expect(await system(() => app.prisma.tenant.count({ where: { id: SLUG } }))).toBe(1);
     expect(await system(() => app.prisma.reviewSession.count({ where: { tenantId: SLUG } }))).toBe(2);
