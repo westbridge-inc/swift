@@ -7,6 +7,7 @@ import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as Crypto from 'expo-crypto';
 import {
   Card,
   Chip,
@@ -253,9 +254,13 @@ function StockAdjustRow({ item }: { item: any }) {
   const [open, setOpen] = useState(false);
   const [delta, setDelta] = useState('');
   const [reason, setReason] = useState<'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN'>('RECEIVED');
+  // [MASTER-025] One key per adjustment as entered: tapping Apply again after a
+  // failure cannot move stock twice; changing the entry is a new adjustment.
+  const [commandKey, setCommandKey] = useState(() => Crypto.randomUUID());
   const adjust = useVendorMutation({
-    mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }),
+    mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }, commandKey),
     onSuccess: () => {
+      setCommandKey(Crypto.randomUUID());
       setOpen(false);
       setDelta('');
       qc.invalidateQueries({ queryKey: ['vendor', 'menu'] });
@@ -282,10 +287,10 @@ function StockAdjustRow({ item }: { item: any }) {
   }
   return (
     <View style={{ gap: space.sm }}>
-      <InlineInput value={delta} onChangeText={setDelta} placeholder="+50 received, -3 damaged" keyboardType="default" />
+      <InlineInput value={delta} onChangeText={(v) => { setDelta(v); setCommandKey(Crypto.randomUUID()); }} placeholder="+50 received, -3 damaged" keyboardType="default" />
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
         {(['RECEIVED', 'DAMAGED', 'MANUAL', 'RECONCILE', 'RETURN'] as const).map((r) => (
-          <Chip key={r} label={r.toLowerCase()} selected={reason === r} onPress={() => setReason(r)} style={{ height: 32, paddingHorizontal: space.md }} />
+          <Chip key={r} label={r.toLowerCase()} selected={reason === r} onPress={() => { setReason(r); setCommandKey(Crypto.randomUUID()); }} style={{ height: 32, paddingHorizontal: space.md }} />
         ))}
       </View>
       {adjust.isError ? (

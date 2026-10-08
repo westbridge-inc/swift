@@ -49,7 +49,17 @@ export class AdCheckoutService {
 
   /** §8.1 — reserve (if not already) + issue the invoice. Idempotent: an
    *  existing UNPAID invoice for the campaign is returned rather than forked. */
-  async checkout(campaignId: string, provider: AdPaymentProvider, reservationMinutes = 20): Promise<{ invoice: AdInvoice; reservedUntil: Date | null }> {
+  async checkout(
+    campaignId: string,
+    provider: AdPaymentProvider,
+    reservationMinutes = 20,
+    opts: {
+      /** [MASTER-064] Runs FIRST inside the checkout's transaction (the
+       *  caller's in-transaction authorization re-check): a throw rolls back
+       *  the hold and the invoice together. */
+      authorize?: (tx: Prisma.TransactionClient) => Promise<void>;
+    } = {},
+  ): Promise<{ invoice: AdInvoice; reservedUntil: Date | null }> {
     // The hosted MMG/PowerTranz checkout adapters are not implemented here yet;
     // MANUAL is the honest production invoice path. Fail before reading or
     // reserving inventory so a synthetic provider cannot mutate production.
@@ -83,6 +93,7 @@ export class AdCheckoutService {
     await this.booking.reserveAndHold(campaignId, {
       reservationMinutes,
       within: async (tx) => {
+        if (opts.authorize) await opts.authorize(tx);
         const fresh = await tx.adCampaign.findUniqueOrThrow({ where: { id: campaignId } });
         const active = await tx.adInvoice.findMany({ where: { campaignId, status: { not: 'VOID' } }, orderBy: { createdAt: 'desc' } });
         const open = active.find((i) => i.status === 'UNPAID');

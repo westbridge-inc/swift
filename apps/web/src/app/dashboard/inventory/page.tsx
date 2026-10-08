@@ -14,9 +14,12 @@ function StockAdjust({ item, onDone }: { item: CatalogItem; onDone: () => void }
   const [delta, setDelta] = useState(0);
   const [reason, setReason] = useState<AdjustReason>('RECEIVED');
   const [error, setError] = useState<string | null>(null);
+  // [MASTER-025] One key per adjustment as entered: retrying the same entry
+  // after a failure cannot move stock twice; changing it is a new adjustment.
+  const [commandKey, setCommandKey] = useState(() => crypto.randomUUID());
   const mut = useMutation({
-    mutationFn: () => adjustStock(item.id, delta, reason),
-    onSuccess: onDone,
+    mutationFn: () => adjustStock(item.id, delta, reason, undefined, commandKey),
+    onSuccess: () => { setCommandKey(crypto.randomUUID()); onDone(); },
     onError: (e) => setError((e as Error).message),
   });
   return (
@@ -25,13 +28,13 @@ function StockAdjust({ item, onDone }: { item: CatalogItem; onDone: () => void }
       <input
         type="number"
         value={delta || ''}
-        onChange={(e) => setDelta(Number(e.target.value))}
+        onChange={(e) => { setDelta(Number(e.target.value)); setCommandKey(crypto.randomUUID()); }}
         placeholder="+/- qty"
         className="w-24 rounded-lg border border-black/10 px-2 py-1.5 text-sm"
       />
       <select
         value={reason}
-        onChange={(e) => setReason(e.target.value as AdjustReason)}
+        onChange={(e) => { setReason(e.target.value as AdjustReason); setCommandKey(crypto.randomUUID()); }}
         className="rounded-lg border border-black/10 px-2 py-1.5 text-sm"
       >
         <option value="RECEIVED">Received stock</option>

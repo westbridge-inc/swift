@@ -1968,7 +1968,15 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** POST /items/:id/adjust — reasoned stock movement (received/damaged/…),
-   *  atomic and logged. The audit trail behind quantity-on-hand. */
+   *  atomic and logged. The audit trail behind quantity-on-hand.
+   *
+   *  [MASTER-025] ONE command. The canonical movement, the adjustment record
+   *  and the availability edges commit in one transaction — a failure in any
+   *  of them leaves the stock unmoved, so an error answer is the truth. With an
+   *  `Idempotency-Key` the adjustment record is the command's durable receipt
+   *  (unique per item): a retry of the same command returns the committed
+   *  movement instead of moving stock again; the same key naming a different
+   *  adjustment is refused; a new key is a new, intentional adjustment. */
   app.post<{ Params: IdParam }>('/items/:id/adjust', auth, async (request) => {
     const access = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const body = z.object({
@@ -1976,6 +1984,12 @@ export async function vendorRoutes(app: FastifyInstance) {
       reason: z.enum(['RECEIVED', 'DAMAGED', 'MANUAL', 'RECONCILE', 'RETURN']),
       note: z.string().max(300).optional(),
     }).parse(request.body);
+    const rawKey = request.headers['idempotency-key'];
+    if (rawKey !== undefined && (typeof rawKey !== 'string' || rawKey.length < 8 || rawKey.length > 128)) {
+      throw new AppError(400, 'INVALID_IDEMPOTENCY_KEY', 'The Idempotency-Key header must be 8 to 128 characters');
+    }
+    const commandKey = typeof rawKey === 'string' ? rawKey : null;
+    const note = body.note ?? null;
 
     const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds } } });
     if (!item) throw new NotFoundError('Item', request.params.id);
@@ -1983,41 +1997,65 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'UNTRACKED', 'This item does not track stock — set a quantity on it first');
     }
 
+    const answer = async (adjustment: { movementId: string | null }, replayed: boolean) => {
+      const fresh = await app.prisma.item.findUnique({ where: { id: item.id }, select: { stockQuantity: true, isAvailable: true } });
+      return { success: true, data: { adjustment, movementId: adjustment.movementId, stockQuantity: fresh?.stockQuantity, isAvailable: fresh?.isAvailable, replayed } };
+    };
+    /** The committed receipt for this command, if there is one — refused when
+     *  the key already named a different adjustment. */
+    const committedReceipt = async () => {
+      if (!commandKey) return null;
+      const receipt = await app.prisma.stockAdjustment.findUnique({ where: { itemId_commandKey: { itemId: item.id, commandKey } } });
+      if (!receipt) return null;
+      if (receipt.delta !== body.delta || receipt.reason !== body.reason || (receipt.note ?? null) !== note || receipt.createdBy !== request.user.userId) {
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'This key already named a different stock adjustment — use a new key for a new adjustment');
+      }
+      return receipt;
+    };
+
+    const prior = await committedReceipt();
+    if (prior) return answer(prior, true);
+
     // [MKT-2] Through the single writer, so the vendor's own correction lands in
     // the same ledger as the sales it is correcting. Still guarded: stock can't
     // be adjusted below zero — the writer's conditional decrement enforces it.
-    // In a TRANSACTION. applyStockMovement's own contract says it must be —
-    // it moves the counter and writes the ledger row in two statements, so
-    // outside a transaction a crash between them leaves the cache and the truth
-    // disagreeing, which is the exact failure the ledger exists to prevent.
-    await app.prisma.$transaction((tx) => applyStockMovement(tx, {
-      itemId: item.id,
-      delta: body.delta,
-      reason: body.reason,
-      actorId: request.user.userId,
-      note: body.note ?? null,
-    })).catch((err) => {
+    let adjustment;
+    try {
+      adjustment = await app.prisma.$transaction(async (tx) => {
+        const moved = await applyStockMovement(tx, {
+          itemId: item.id,
+          delta: body.delta,
+          reason: body.reason,
+          actorId: request.user.userId,
+          note,
+        });
+        // Mirror the inventory engine's edges: zero hides, restock un-hides.
+        await tx.item.updateMany({
+          where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
+          data: { isAvailable: false, autoHiddenAt: new Date() },
+        });
+        await tx.item.updateMany({
+          where: { id: item.id, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
+          data: { isAvailable: true, autoHiddenAt: null },
+        });
+        return tx.stockAdjustment.create({
+          data: { itemId: item.id, delta: body.delta, reason: body.reason, note, createdBy: request.user.userId, commandKey, movementId: moved.movementId },
+        });
+      });
+    } catch (err) {
       if (err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') {
         throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
       }
+      // A concurrent submission of the same command committed first: this one
+      // rolled back whole, and answers with that command's receipt.
+      if (commandKey && (err as { code?: unknown }).code === 'P2002') {
+        const winner = await committedReceipt();
+        if (winner) return answer(winner, true);
+      }
       throw err;
-    });
-    // Mirror the inventory engine's edges: zero hides, restock un-hides.
-    await app.prisma.item.updateMany({
-      where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
-      data: { isAvailable: false, autoHiddenAt: new Date() },
-    });
-    await app.prisma.item.updateMany({
-      where: { id: item.id, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-      data: { isAvailable: true, autoHiddenAt: null },
-    });
-
-    const adjustment = await app.prisma.stockAdjustment.create({
-      data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
-    });
-    const fresh = await app.prisma.item.findUnique({ where: { id: item.id }, select: { stockQuantity: true, isAvailable: true } });
+    }
     scheduleVendorSearchSync(app, item.vendorId);
-    return { success: true, data: { adjustment, stockQuantity: fresh?.stockQuantity, isAvailable: fresh?.isAvailable } };
+    return answer(adjustment, false);
   });
 
   /** GET /items/low-stock — everything at/under its threshold. */

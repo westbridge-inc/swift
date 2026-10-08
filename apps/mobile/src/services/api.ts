@@ -1098,8 +1098,10 @@ export const vendorApi = {
     api.post(`/vendor/orders/${orderId}/items/${lineId}/substitute`, { substituteItemId }),
   refundLine: (orderId: string, lineId: string) =>
     api.post(`/vendor/orders/${orderId}/items/${lineId}/refund-line`, {}),
-  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }) =>
-    api.post(`/vendor/items/${itemId}/adjust`, body),
+  /** [MASTER-025] `commandKey` names ONE adjustment: a retry with the same key
+   *  returns the committed movement instead of moving stock again. */
+  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }, commandKey?: string) =>
+    api.post(`/vendor/items/${itemId}/adjust`, body, commandKey ? { headers: { 'Idempotency-Key': commandKey } } : undefined),
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),

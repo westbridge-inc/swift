@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
+import { csvNumber, csvText } from '../../utils/csv-export';
 
 // Sequential receipts [san spec 20.1] — gapless per tenant per year, proven
 // under concurrency by a row lock on the counter (scenario R). Every credit
@@ -58,19 +59,22 @@ export async function cashJournalCsv(prisma: PrismaClient, from: Date, to: Date)
     select: { id: true, san: true, type: true, vendor: { select: { name: true } } },
   });
   const byId = new Map(subs.map((s) => [s.id, s]));
-  const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  // [MASTER-038] Every text cell goes through the one CSV export boundary, so
+  // a vendor name (or any other externally influenced text) that starts like a
+  // formula reaches the accountant's spreadsheet as inert text. The date and
+  // the amount are server-formatted and written as they were.
   const lines = ['date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref'];
   for (const r of receipts) {
     const s = byId.get(r.subscriptionId);
     lines.push([
       r.issuedAt.toISOString().slice(0, 10),
-      r.receiptNumber,
-      s?.san ?? '',
-      esc(s?.vendor?.name ?? r.subscriptionId),
-      s?.type ?? '',
-      r.channel ?? '',
-      Number(r.amount).toFixed(2),
-      r.mmgRef ?? '',
+      csvText(r.receiptNumber),
+      csvText(s?.san ?? ''),
+      csvText(s?.vendor?.name ?? r.subscriptionId),
+      csvText(s?.type ?? ''),
+      csvText(r.channel ?? ''),
+      csvNumber(Number(r.amount)),
+      csvText(r.mmgRef ?? ''),
     ].join(','));
   }
   return lines.join('\n');

@@ -277,8 +277,14 @@ export const updateItem = (id: string, body: Record<string, unknown>) =>
   apiFetch(`${V}/items/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 export const setItemAvailability = (id: string, isAvailable: boolean) =>
   apiFetch(`${V}/items/${id}/availability`, { method: 'PUT', body: JSON.stringify({ isAvailable }) });
-export const adjustStock = (id: string, delta: number, reason: 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN', note?: string) =>
-  apiFetch(`${V}/items/${id}/adjust`, { method: 'POST', body: JSON.stringify({ delta, reason, ...(note ? { note } : {}) }) });
+/** [MASTER-025] `commandKey` names ONE adjustment: resending it (a retry after
+ *  a lost response) returns the committed movement instead of moving stock again. */
+export const adjustStock = (id: string, delta: number, reason: 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN', note?: string, commandKey?: string) =>
+  apiFetch(`${V}/items/${id}/adjust`, {
+    method: 'POST',
+    body: JSON.stringify({ delta, reason, ...(note ? { note } : {}) }),
+    ...(commandKey ? { headers: { 'Idempotency-Key': commandKey } } : {}),
+  });
 
 // ── CSV / Excel import (the desktop star) ────────────────────────────────────
 export const templateUrl = () => `${V}/items/import/template`;

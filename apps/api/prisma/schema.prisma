@@ -2556,7 +2556,16 @@ model StockAdjustment {
   note      String?
   createdBy String?
   createdAt DateTime              @default(now())
+  /// [MASTER-025] The client's command key (Idempotency-Key) for this
+  /// adjustment. Unique per item: the row is the durable receipt, written in
+  /// the SAME transaction as the movement, so a retry of the same command finds
+  /// it instead of moving stock again.
+  commandKey String?
+  /// [MASTER-025] The canonical StockMovement this adjustment produced. Not a
+  /// relation, like StockMovement.itemId: inventory evidence never cascades.
+  movementId String?
 
+  @@unique([itemId, commandKey])
   @@index([itemId, createdAt])
   @@map("stock_adjustments")
 }
