@@ -125,6 +125,7 @@ describe('AX8: candidate consumption and receipt insertion commit together', () 
 function productionConfig(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {
     NODE_ENV: 'production', LIFECYCLE_V2: '0', JWT_SECRET: 'synthetic'.repeat(8),
+    PLACES_PROVIDER: 'osm', PHOTON_URL: 'https://places.example.invalid',
     KYC_PROVIDER: 'manual', PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1',
     MMG_DRIVER: 'live', MMG_API_URL: 'https://example.invalid/api', MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
     NOTIFICATION_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
