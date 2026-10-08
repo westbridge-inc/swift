@@ -292,9 +292,13 @@ describe('[V5 · transition] an approved permit counts as both new licences for 
     let reached = 0;
     let release!: () => void;
     const barrier = new Promise<void>((resolve) => { release = resolve; });
-    const original = app.prisma.notification.findFirst;
-    const probe = vi.spyOn(app.prisma.notification, 'findFirst').mockImplementation(async (args) => {
-      if (args?.where?.userId !== m.userId) return original.call(app.prisma.notification, args);
+    // This query is awaited directly; the concurrency seam does not use Prisma's fluent relation API.
+    const finder = app.prisma.notification as unknown as {
+      findFirst: (args?: Parameters<typeof app.prisma.notification.findFirst>[0]) => Promise<{ id: string } | null>;
+    };
+    const original = finder.findFirst.bind(finder);
+    const probe = vi.spyOn(finder, 'findFirst').mockImplementation(async (args) => {
+      if (args?.where?.userId !== m.userId) return original(args);
       reached += 1;
       if (reached === 4) release();
       await barrier;
