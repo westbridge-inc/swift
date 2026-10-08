@@ -20,6 +20,7 @@ datasource db {
 // ==========================================
 
 model User {
+  cartMergeReceipts CartMergeReceipt[]
   billingFeeNotices BillingFeeNotice[]
   id               String     @id @default(cuid())
   phone            String     @unique
@@ -288,6 +289,21 @@ model TopUpCommand {
   @@index([tenantId])
   @@index([tailDoneAt, createdAt])
   @@map("topup_commands")
+}
+
+model CartMergeReceipt {
+  id             String   @id @default(cuid())
+  tenantId       String   @default("swift-default")
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  idempotencyKey String
+  requestHash    String
+  result         Json
+  createdAt      DateTime @default(now())
+
+  @@unique([tenantId, userId, idempotencyKey])
+  @@index([tenantId])
+  @@map("cart_merge_receipts")
 }
 
 model CheckoutReceipt {

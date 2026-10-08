@@ -70,7 +70,7 @@ const TENANT_QUERY_EXTENSIONS = {
   // [TA-S1-006] A hired-professional job is one operator's incident scope.
   serviceJob: scoped,
   // [M-11] The checkout command's durable tail and result are one operator's rows.
-  orderOutbox: scoped, checkoutReceipt: scoped,
+  orderOutbox: scoped, checkoutReceipt: scoped, cartMergeReceipt: scoped,
   // [M-34] Fare zones are one operator's, in one market.
   zone: scoped,
   sosAlert: scoped, emergencyContact: scoped, tripShareToken: scoped, tripSafetySession: scoped,
