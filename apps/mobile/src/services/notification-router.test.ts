@@ -285,6 +285,8 @@ const CENSUS: Case[] = [
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
+  { k: 'ops_cash_door_short', d: { ...O, due: 3500, collected: 2800, shortfall: 700 }, to: DELIVERY('o1'), why: 'admins — [L02 row 34] a cash order was handed over for less than due; the mismatch is held for review' },
+  { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — partial cash could not be handed back and remains with the rider for operations' },
   { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
   { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },
 

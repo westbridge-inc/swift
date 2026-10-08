@@ -190,7 +190,7 @@ export async function pageOps(
   deps: CustodyDeps,
   order: Pick<CaseOrder, 'id' | 'tenantId' | 'orderNumber'>,
   kase: Pick<CustodyRecoveryCase, 'id' | 'state'>,
-  event: 'opened' | 'overdue' | 'relay_declined' | 'transfer_locked',
+  event: 'opened' | 'overdue' | 'relay_declined' | 'transfer_locked' | 'short_payment',
   body: string,
 ): Promise<void> {
   const titles = {
@@ -198,6 +198,7 @@ export async function pageOps(
     overdue: 'Custody case overdue — nobody has acted',
     relay_declined: 'Relay rider declined a custody handoff',
     transfer_locked: 'Custody handoff locked after wrong codes',
+    short_payment: 'Customer could not pay in full — order returning to the store',
   } as const;
   await notifyAdmins(deps.prisma, deps.notifications, {
     tenantId: order.tenantId ?? null,
@@ -243,6 +244,26 @@ export async function reportIncident(deps: CustodyDeps, input: ReportInput) {
     await publishCaseChange(deps, result.kase, result.order);
   }
   return result;
+}
+
+/**
+ * [L02 · row 34] After the commit of a "customer cannot pay in full" return
+ * (cash-rules.service.ts): operations is paged about the order's ONE case and
+ * the customer and the store are told what it now says. Called once per
+ * committed return, never for a replayed answer. Never throws.
+ */
+export async function announceShortPaymentReturn(deps: CustodyDeps, orderId: string): Promise<void> {
+  try {
+    const order = await readOrder(deps.prisma, orderId);
+    const kase = await latestCaseFor(deps.prisma, orderId);
+    if (!kase) return;
+    await pageOps(deps, order, kase, 'short_payment',
+      'the customer could not pay the full cash amount, so the rider did not hand the order over and is bringing it back to the store. '
+      + 'The store gives the rider back the cash they fronted when it confirms the goods are back.');
+    await publishCaseChange(deps, kase, order, { notifyVendor: true });
+  } catch (err) {
+    log().warn({ err, orderId }, 'short-payment return announcement failed after commit');
+  }
 }
 
 /** What the rider holding the order sees about its latest case (after a

@@ -64,6 +64,11 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   // handed back. Same unit as the order total the obligation is taken from.
   { model: 'Order', field: 'refundOwedAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'refundPaidAmount', unit: 'MAJOR_WHOLE' },
+  // [L02 · row 34] The cash a mover stated they took at the door, and how far
+  // short of the total a handover was made. Same unit as the order total.
+  { model: 'Order', field: 'doorCashCollectedAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'doorCashShortfallAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'doorCashReturnAmount', unit: 'MAJOR_WHOLE' },
   // [E02] The MMG refund rail: what the store attested it received (the cap),
   // what it owes back, what it says it sent, and the MMG fee Swift pays back.
   // Same unit as the order total every one of them is taken from.

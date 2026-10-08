@@ -212,13 +212,6 @@ export class AccountService {
         return { closureTicketId: ticket.id, hold: null, avatarOrphanId: null };
       }
 
-      // Profile ownership, not the active role, defines obligations. Switching
-      // to customer mode must never hide cash or live mover work.
-      const obligations = await partnerObligations(tx, userId);
-      const verdict = verdictFor(obligations);
-      if (!verdict.clear) {
-        throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers, obligations));
-      }
       // Checkout locks these same vendor rows before its live eligibility read.
       // Closing commerce under this lock prevents a new order after the census.
       await tx.$queryRaw`
@@ -237,6 +230,17 @@ export class AccountService {
           },
         }),
       ]);
+      // Read the cash census after the live-work snapshot. If goods return
+      // between these reads, their terminal status cannot hide customer cash
+      // that the rider still holds. Otherwise the earlier snapshot blocks
+      // closure while the order is still active.
+      // Profile ownership, not the active role, defines obligations. Switching
+      // to customer mode must never hide cash or live mover work.
+      const obligations = await partnerObligations(tx, userId);
+      const verdict = verdictFor(obligations);
+      if (!verdict.clear) {
+        throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers, obligations));
+      }
       if (inFlightOrders > 0) {
         throw new AppError(409, 'ACTIVE_ORDERS', 'Finish or cancel your active orders and jobs before deleting your account. For a job already collected, finish the handover or open Get help to resolve it.');
       }

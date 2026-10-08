@@ -27,7 +27,7 @@ import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { RIDER_INCIDENT_REASONS } from '../custody/custody-case';
-import { reportIncident, holderView, relayTasks, transferCustody, declineRelay, invalidTransferCodeError } from '../custody/custody-recovery';
+import { reportIncident, holderView, relayTasks, transferCustody, declineRelay, invalidTransferCodeError, announceShortPaymentReturn } from '../custody/custody-recovery';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -120,7 +120,9 @@ const offerActionSchema = z.object({
 
 /** Golden-rule handover: GPS is mandatory — a claim is impossible without it. */
 const handoverSchema = z.object({
-  outcome: z.enum(['paid', 'no_show', 'refused']),
+  /** [L02 · row 34] 'short_payment' = the customer cannot pay in full: no
+   *  handover, the order goes back to the store (owner ruling, 5 Oct 2026). */
+  outcome: z.enum(['paid', 'no_show', 'refused', 'short_payment']),
   /** [MKT-F057] The customer-held door PIN for a goods delivery (verified on
    *  the 'paid' outcome only — no_show/refused stay open without one). */
   ridePin: z.string().min(1).max(10).optional(),
@@ -129,6 +131,17 @@ const handoverSchema = z.object({
     lng: z.number().min(-180).max(180),
   }),
   photoUrl: z.string().max(2048).optional(),
+  /** [L02 · row 34] The cash actually taken (whole units). Older apps omit it
+   *  and complete as before. See cash/door-cash.ts for what it means. */
+  collectedAmount: zMoneyWhole.optional(),
+  /** Partial cash was handed back at the door. False reports cash still held
+   * by the rider for operations; neither choice executes a platform refund. */
+  cashReturned: z.boolean().optional(),
+  /** [L02 · row 34] The door authority version the screen rendered (the
+   *  `handover.version` of GET /orders/active); a stale one is refused. */
+  handoverVersion: z.string().min(1).max(64).optional(),
+  /** [L02 · row 34] The goods were already handed over for less than due. */
+  handedOverShort: z.boolean().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -314,12 +327,27 @@ export async function riderRoutes(app: FastifyInstance) {
     // original result instead of failing the (now-terminal) transition.
     const { data, replayed } = await withIdempotency(app, request, 'handover', id, async () => {
       const result = await cashRules.handover(id, request.user.userId, { ...body, sessionId: request.authSessionId ?? undefined });
+      // [L02 · row 34] A return the customer's short payment started is
+      // announced once, by the call that committed it (never by a replay).
+      if (result.returnStarted) await announceShortPaymentReturn(custodyDeps, id);
       return {
         orderId: id,
         status: result.order.status,
         claim: result.claim
           ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags }
           : null,
+        ...(result.cashReturn ? { cashReturn: result.cashReturn } : {}),
+        // [L02 · row 34] What was recorded about the cash, when the app stated it.
+        ...(result.doorCash && result.doorCash.kind !== 'UNSTATED'
+          ? {
+            cash: {
+              due: result.doorCash.due,
+              collected: result.doorCash.collected,
+              shortfall: result.doorCash.kind === 'SHORT_HANDED_OVER' ? result.doorCash.shortfall : 0,
+              heldForReview: result.doorCash.kind === 'SHORT_HANDED_OVER',
+            },
+          }
+          : {}),
       };
     });
     // [ALG-16] Once, at completion: match the trace to the road graph in the

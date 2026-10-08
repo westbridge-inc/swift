@@ -1898,6 +1898,11 @@ export class OrderService {
       where: { orderId },
       select: { itemId: true, quantity: true, subStatus: true, substituteItemId: true },
     });
+    // [L02 · row 36] The order's tenant, for the ledger row that records a
+    // line whose item the store has since deleted (see ifItemMissing below).
+    const owner = items.length > 0
+      ? await db.order.findUnique({ where: { id: orderId }, select: { tenantId: true } })
+      : null;
     for (const oi of items) {
       // [REPORT-006 F-006-05] Picking already restocked refunded/rejected
       // lines when it closed them — restocking again here doubles stock. An
@@ -1910,12 +1915,16 @@ export class OrderService {
       // [MKT-2] Through the single writer. It no-ops on an untracked item, which
       // preserves the rule this code already had: a vendor may have stopped
       // tracking since the order was placed, and null must stay null.
+      // [L02 · row 36] An item the store deleted while this order held it can
+      // take nothing back: the ledger records the skip and the cancellation
+      // completes, instead of the whole cancellation failing on ITEM_NOT_FOUND.
       const restock = await applyStockMovement(db, {
         itemId: restockItemId,
         delta: oi.quantity,
         reason: 'CANCEL_RESTOCK',
         orderId,
         note: 'Order cancelled before pickup',
+        ...(owner?.tenantId ? { ifItemMissing: { record: true as const, tenantId: owner.tenantId } } : {}),
       });
       if (restock.applied) {
         await db.item.updateMany({
