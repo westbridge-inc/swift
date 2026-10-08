@@ -6,7 +6,7 @@ import type { FareService } from './fare.service';
 import type { NotificationService } from '../notification/notification.service';
 import { createRideRequest, type RideRequestApp } from './rides.service';
 import { log } from '../../utils/logger';
-import { isRideClassServed, SERVED_RIDE_CLASSES } from '../../config/vehicle-classes';
+import { SERVED_RIDE_CLASSES } from '../../config/vehicle-classes';
 
 // ---------------------------------------------------------------------------
 // The 5.5B ride queue (rides spec): position is DERIVED (createdAt FIFO among
@@ -153,14 +153,15 @@ export async function scanRideQueue(
     });
     if (claimed.count === 0) continue;
     expired += 1;
+    const offered = SERVED_RIDE_CLASSES.some((rideClass) => rideClass === e.rideClass);
     await notifications
       .send({
         userId: e.customerId,
         type: 'ORDER_UPDATE',
-        title: isRideClassServed(e.rideClass) ? `Still need a ride to ${e.dropoffAddress}?` : 'Choose another ride class',
-        body: isRideClassServed(e.rideClass) ? 'Your place in line timed out. Tap to request again — one tap, same trip.' : 'Your queued ride class is no longer offered. Open Rides to choose an available class.',
+        title: offered ? `Still need a ride to ${e.dropoffAddress}?` : 'Choose another ride class',
+        body: offered ? 'Your place in line timed out. Tap to request again — one tap, same trip.' : 'Your queued ride class is no longer offered. Open Rides to choose an available class.',
         audience: 'customer',
-        data: !isRideClassServed(e.rideClass) ? { kind: 'ride_queue_unavailable' } : {
+        data: !offered ? { kind: 'ride_queue_unavailable' } : {
           kind: 'ride_queue_expired',
           pickup: { lat: e.pickupLat, lng: e.pickupLng, address: e.pickupAddress },
           dropoff: { lat: e.dropoffLat, lng: e.dropoffLng, address: e.dropoffAddress },
