@@ -60,7 +60,7 @@ describe('scheduled SOS watchdog recipient isolation', () => {
     const processor = state.workers.get(QUEUE_NAMES.DISPATCH);
     expect(processor).toBeDefined();
     await processor!({ name: 'promote-sos-grace', data: {} });
-    expect(query.mock.calls.some(([sql]) => (Array.isArray(sql) ? sql.join('') : (sql as { sql: string }).sql).includes('extract(epoch')))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => (Array.isArray(sql) ? sql.join('') : (sql as { sql: string }).sql).includes('extract(epoch'))).toBe(true);
     expect(send).toHaveBeenCalledTimes(pages);
     expect(audience).toHaveBeenCalledTimes(pages);
     if (pages) {

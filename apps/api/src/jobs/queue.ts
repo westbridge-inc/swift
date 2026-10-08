@@ -657,7 +657,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // could not finish. Reported, never reversed.
           const imports = await scanSettlementImports(ctx.prisma);
           if (imports.unbalanced.length + imports.rejectedButCredited.length + imports.stuck.length > 0) {
-            const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
@@ -686,7 +686,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { scanDuplicateCredits } = await import('../modules/billing/agent-cash.service');
           const duplicates = await scanDuplicateCredits(ctx.prisma);
           if (duplicates.length > 0) {
-            const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'agent-cash-duplicate-credits', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
@@ -702,7 +702,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { scanPromoFunding } = await import('../modules/promo/promo-terms');
           const promoScan = await scanPromoFunding(ctx.prisma);
           if (promoScan.invalidTerms > 0 || promoScan.discountWithoutFunder.sinceEnforced > 0 || promoScan.tipFundingGap.sinceEnforced > 0) {
-            const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'promo-funding-invariants', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
@@ -718,7 +718,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { scanInferredRefunds } = await import('../modules/order/refund-review');
           const refundReview = await scanInferredRefunds(ctx.prisma);
           if (refundReview.inferredOpen + refundReview.legacyOpen > 0) {
-            const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'refunds-awaiting-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
@@ -734,7 +734,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { scanFareZones } = await import('../modules/rides/fare-zones');
           const zoneScan = await scanFareZones(ctx.prisma);
           if (zoneScan.ambiguousPairs.length > 0) {
-            const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'fare-zone-ambiguity', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
@@ -750,7 +750,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { scanPricingConfigs } = await import('../modules/country/pricing-config');
           const pricingScan = await scanPricingConfigs(ctx.prisma);
           if (pricingScan.invalid.length > 0) {
-            const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'pricing-config-invalid', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
@@ -771,7 +771,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           await new AdsRefundService(ctx.prisma, ctx.io).drainOutbox({ limit: 50 }).catch(() => {});
           const adRefunds = await scanAdRefunds(ctx.prisma);
           if (adRefunds.failed > 0 || adRefunds.terminalWithoutIntent.length > 0) {
-            const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'ad-refund-obligations', 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
@@ -786,7 +786,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { scanAdCheckout } = await import('../modules/ads/checkout-scan');
           const adCheckout = await scanAdCheckout(ctx.prisma);
           if (adCheckout.paidWithoutInventory.length > 0 || adCheckout.duplicateActiveInvoices.length > 0) {
-            const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+            const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'ad-checkout-invariants', 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
@@ -1140,7 +1140,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const flagged = await new IncidentService(ctx.prisma, ctx.io).crossReporterScan();
         if (flagged.length > 0) {
           ctx.log.warn({ flagged }, 'cross-reporter pattern flags');
-          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'incident-pattern-scan', 20 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
               // Platform-wide ops page: an aggregate scan or infra alarm, not one
@@ -1158,7 +1158,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // §8.4 — the founder's Monday safety read.
         const { IncidentService } = await import('../modules/safety/incident.service');
         const digest = await new IncidentService(ctx.prisma, ctx.io).weeklyDigest();
-        const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+        const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
         await notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
           // Platform-wide ops page: an aggregate scan or infra alarm, not one
           // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
@@ -1484,7 +1484,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const settings = await ctx.prisma.adsSettings.findUnique({ where: { tenantId: 'swift-default' }, select: { reviewSlaHours: true } });
         const atRisk = await new CreativeService(ctx.prisma, ctx.io).reviewSlaAtRisk(settings?.reviewSlaHours ?? 24);
         if (atRisk.length > 0) {
-          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           for (const cr of atRisk) {
             await opsPageOnce(ctx, `ads-review-sla:${cr.id}`, 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
@@ -1831,7 +1831,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const sweeps = await scanSweeps(ctx.prisma).catch(() => []);
         const trouble = sweeps.filter((w) => w.stalled || w.repeatPoison.length > 0);
         if (trouble.length > 0) {
-          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           for (const w of trouble) {
             await opsPageOnce(ctx, `sweep-slo:${w.workType}`, 1800, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
@@ -1874,7 +1874,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { IncidentService } = await import('../modules/safety/incident.service');
         const breaches = await new IncidentService(ctx.prisma, ctx.io).slaWatch();
         if (breaches.length > 0) {
-          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           for (const b of breaches) {
             await opsPageOnce(ctx, `inc-sla:${b.id}:${b.kind}`, 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
@@ -1970,7 +1970,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // outcome became mandatory means a completion bypassed the terminal
         // authority — page, and keep paging while it persists.
         if (taxiUnpaidDelivered.sinceEnforced + courierUnpaidDelivered.sinceEnforced > 0) {
-          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'taxi-unpaid-earning', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
               tenantId: null,
@@ -1982,7 +1982,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         if (healed.length > 0) {
           ctx.log.error({ healed, count: healed.length, scanned }, 'Earnings reconciliation paid movers a completion had missed — investigate the completion path');
-          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'earnings-missing', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
               // Platform-wide ops page: an aggregate scan or infra alarm, not one
