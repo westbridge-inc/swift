@@ -504,16 +504,12 @@ export async function adminRoutes(app: FastifyInstance) {
       adCreative: childScope((tenantId) => ({ campaign: { tenantId } })),
       supportTicket: childScope((tenantId) => ({ user: { tenantId } })),
       item: childScope((tenantId) => ({ vendor: { tenantId } })),
-      // ContentReport keeps only a loose reporter id. Treat the reporter's
-      // tenant as the report boundary; target previews are independently
-      // scoped below so a bad cross-tenant target id cannot disclose content.
-      contentReport: childScope(async (tenantId) => {
-        const reporterIds = (await app.prisma.user.findMany({
-          where: { tenantId },
-          select: { id: true },
-        })).map((user) => user.id);
-        return { reporterId: { in: reporterIds } };
-      }),
+      // [DB-05] ContentReport carries its reporter's tenant on the row (held
+      // by a lineage trigger), so the boundary is the column itself — one
+      // bounded predicate, never a materialised list of every user id. Target
+      // previews are independently scoped below so a bad cross-tenant target
+      // id cannot disclose content.
+      contentReport: childScope((tenantId) => ({ tenantId })),
       // ChatMessage has no sender relation. Require both a local sender and a
       // local order-backed room; unattributable service chats fail closed.
       chatMessage: childScope(async (tenantId) => {
@@ -526,19 +522,11 @@ export async function adminRoutes(app: FastifyInstance) {
           chatRoom: { orderId: { in: orders.map((order) => order.id) } },
         };
       }),
-      // ReturnRequest has no relations or tenantId. Require both loose owner
-      // ids to resolve inside this tenant so a malformed cross-tenant row is
-      // hidden rather than being accepted through either side alone.
-      returnRequest: childScope(async (tenantId) => {
-        const [orders, customers] = await Promise.all([
-          app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
-          app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
-        ]);
-        return {
-          orderId: { in: orders.map((order) => order.id) },
-          customerId: { in: customers.map((customer) => customer.id) },
-        };
-      }),
+      // [DB-05] ReturnRequest carries its tenant on the row; the lineage
+      // trigger refuses a row whose order and customer disagree, and the
+      // backfill left such a legacy row NULL (quarantined, matching no tenant).
+      // One bounded predicate instead of every order and user id.
+      returnRequest: childScope((tenantId) => ({ tenantId })),
       // Rating's orderId is loose, while rater/ratee are User relations. All
       // populated ownership legs must agree with the request tenant; this also
       // prevents moderation side effects from reaching a foreign participant.

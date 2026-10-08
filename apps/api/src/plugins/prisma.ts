@@ -111,9 +111,12 @@ const TENANT_QUERY_EXTENSIONS = {
   actorRatingStat: scoped, ratingReport: scoped, itemFeedback: scoped, ratingTagDef: scoped,
   // [STORE-002] Who a person refuses contact with is theirs and their
   // operator's; it must never be readable or writable through another's
-  // session. (ContentReport beside it carries no tenantId and is therefore not
-  // here — a pre-existing shape, not a decision made by this change.)
+  // session. (ContentReport, the report beside it, is walled below since
+  // DB-05 gave it a tenantId.)
   userBlock: scoped,
+  // [DB-05 EXPAND] Formerly PENDING_EXPAND: walled on the row (tenantId nullable; NULL =
+  // quarantined, visible to no tenant).
+  returnRequest: scoped, contentReport: scoped, collectionContact: scoped,
   // Growth / QR attribution.
   slugRedirect: scoped, pendingAttribution: scoped, attributionClaim: scoped, scanDailyRollup: scoped,
   // Batching + scheduling.

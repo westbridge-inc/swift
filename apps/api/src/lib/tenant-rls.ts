@@ -139,6 +139,10 @@ export const TENANT_TABLES = [
   'user_blocks',
   'users',
   'vendor_discovery_categories', 'vendors',
+  // [DB-05 EXPAND] Formerly PENDING_EXPAND: reachable only through loose
+  // owner strings. Walled on the row, the tenant derived from the owners
+  // (quarantined, NULL, when they disagree or are gone; never defaulted).
+  'return_requests', 'content_reports', 'collection_contacts',
 ] as const;
 
 export const TENANT_POLICY_NAME = 'tenant_isolation';
@@ -232,6 +236,11 @@ export interface TenantLineageRule {
   parentTenantSql?: string;
   /** Columns whose UPDATE re-checks lineage (the fk by default). */
   watch?: readonly string[];
+  /** [DB-05] The column is NULLABLE: NULL means "unstamped" (derived from the
+   *  parent), and a backfilled row whose owners disagree or are gone stays NULL
+   *  — quarantined for adjudication, invisible to every tenant — instead of
+   *  being defaulted into the production tenant. */
+  nullable?: true;
   /** QR lineage never exempts an UPDATE whose non-null parent is missing or RLS-hidden. */
   requiredParent?: boolean;
 }
@@ -308,9 +317,36 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'card_observations', trigger: 'card_observations_tenant_matches_owner', parent: 'card_sessions', fk: 'sessionId',
     watch: ['sessionId', 'instrumentId'],
     parentTenantSql: `SELECT COALESCE((SELECT s."tenantId" FROM card_sessions s WHERE s.id = NEW."sessionId"), (SELECT i."tenantId" FROM payment_instruments i WHERE i.id = NEW."instrumentId"))` },
+  // [DB-05 EXPAND] A return belongs to its order AND to the customer who asked: both legs must
+  // name the same tenant, or the row has no owner (refused new, quarantined in the backfill).
+  { table: 'return_requests', trigger: 'return_requests_tenant_matches_order', parent: 'orders', fk: 'orderId', nullable: true,
+    watch: ['orderId', 'customerId'],
+    parentTenantSql: `SELECT o."tenantId" FROM orders o JOIN users u ON u.id = NEW."customerId" WHERE o.id = NEW."orderId" AND u."tenantId" = o."tenantId"` },
+  // [DB-05 EXPAND] A report belongs to its reporter (its target is polymorphic and is
+  // checked by its own authority resolver, never by an invented foreign key).
+  { table: 'content_reports', trigger: 'content_reports_tenant_matches_reporter', parent: 'users', fk: 'reporterId', nullable: true },
+  // [DB-05 EXPAND] A collection contact belongs to its subscription's owner (vendor, or the
+  // rider or driver person); owners in more than one tenant are no owner at all.
+  { table: 'collection_contacts', trigger: 'collection_contacts_tenant_matches_owner', parent: 'subscriptions', fk: 'subscriptionId', nullable: true,
+    parentTenantSql: `SELECT CASE WHEN count(DISTINCT owners.t) = 1 THEN min(owners.t) END FROM (SELECT v."tenantId" AS t FROM subscriptions s JOIN vendors v ON v.id = s."vendorId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN riders r ON r.id = s."riderId" JOIN users u ON u.id = r."userId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN drivers d ON d.id = s."driverId" JOIN users u ON u.id = d."userId" WHERE s.id = NEW."subscriptionId") owners` },
 ];
+
+/** The SQL that yields a lineage rule's parent tenant for the row `NEW`. */
+function parentTenantOf(rule: TenantLineageRule): string {
+  return rule.parentTenantSql ?? `SELECT "tenantId" FROM ${rule.parent} WHERE id = NEW."${rule.fk}"`;
+}
+
+/** [DB-05] The EXPAND backfill for a nullable lineage table: every unstamped
+ *  row takes the tenant its owners agree on — the SAME derivation the trigger
+ *  runs — and a row whose owners disagree or are gone stays NULL (quarantined).
+ *  Mirrored verbatim by the migration that introduced the column. */
+export function lineageBackfillSql(table: string): string {
+  const rule = TENANT_LINEAGE_TABLES.find((r) => r.table === table);
+  if (!rule?.nullable) throw new Error(`${table} is not a nullable lineage table`);
+  return `UPDATE ${table} AS lineage_row SET "tenantId" = (${parentTenantOf(rule).replace(/NEW\./g, 'lineage_row.')}) WHERE lineage_row."tenantId" IS NULL`;
+}
 export function tenantLineageDdl(): string[] {
-  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch, requiredParent }) => [
+  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch, nullable, requiredParent }) => [
     `CREATE OR REPLACE FUNCTION ${trigger}() RETURNS trigger AS $$
       DECLARE parent_tenant TEXT;
       BEGIN
@@ -323,7 +359,7 @@ export function tenantLineageDdl(): string[] {
             NEW.id, NEW."${fk}" USING ERRCODE = 'check_violation';
         END IF;
         -- The default means "unstamped": derive the truth from the parent.
-        IF NEW."tenantId" = 'swift-default' AND parent_tenant <> 'swift-default' THEN
+        IF ${nullable ? 'NEW."tenantId" IS NULL OR (' : ''}NEW."tenantId" = 'swift-default' AND parent_tenant <> 'swift-default'${nullable ? ')' : ''} THEN
           NEW."tenantId" := parent_tenant;
         ELSIF parent_tenant <> NEW."tenantId" THEN
           RAISE EXCEPTION '${table} row % names tenant % but its ${parent} row % is in tenant % [STA-1 lineage]',
