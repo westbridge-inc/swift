@@ -125,17 +125,18 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('the launch vehicle list: canters and box trucks are priced but not offered', () => {
-  it('the price list still quotes every vehicle, and marks exactly the four heavy freight classes not offered', async () => {
+describe('the launch vehicle list: canters, box trucks and (ruling 9) buses are priced but not offered', () => {
+  // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] both buses joined the hidden set.
+  it('the price list still quotes every vehicle, and marks exactly the four heavy freight classes and both buses not offered', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/auth/pricing?countryCode=GY' });
     expect(res.statusCode, res.body).toBe(200);
     const movers = res.json().data.movers as Array<{ vehicleType: string; offered: boolean }>;
     expect(movers.map((m) => m.vehicleType)).toEqual(VEHICLE_TYPES_IN_ORDER);
     expect(movers.filter((m) => !m.offered).map((m) => m.vehicleType).sort())
-      .toEqual(['BOX_TRUCK_LONG', 'BOX_TRUCK_SHORT', 'CANTER_LONG', 'CANTER_SHORT']);
+      .toEqual(['BOX_TRUCK_LONG', 'BOX_TRUCK_SHORT', 'BUS_15', 'BUS_9', 'CANTER_LONG', 'CANTER_SHORT']);
     expect(movers.filter((m) => m.offered).map((m) => m.vehicleType))
-      .toEqual(['BICYCLE', 'MOTORCYCLE', 'CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15']);
-    expect([...LAUNCH_HIDDEN_VEHICLE_TYPES].sort()).toEqual(['BOX_TRUCK_LONG', 'BOX_TRUCK_SHORT', 'CANTER_LONG', 'CANTER_SHORT']);
+      .toEqual(['BICYCLE', 'MOTORCYCLE', 'CAR', 'WAGON_CAR']);
+    expect([...LAUNCH_HIDDEN_VEHICLE_TYPES].sort()).toEqual(['BOX_TRUCK_LONG', 'BOX_TRUCK_SHORT', 'BUS_15', 'BUS_9', 'CANTER_LONG', 'CANTER_SHORT']);
   });
 
   it('"Save vehicle" refuses a canter and provisions nothing; a motorbike provisions a Rider', async () => {
@@ -331,13 +332,14 @@ describe('PUT /partner/vehicle: a driver changes car', () => {
     expect(driver).toMatchObject({ rideClass: 'COMFORT', vehicleCapacity: 5 });
     expect((await system(() => app.prisma.subjectLink.findFirstOrThrow({ where: { accountId: u.userId, subjectId: subject.id } }))).validTo).toBeNull();
 
-    // A different car: the old car's papers are retired and its assignment closes.
-    const bus = await change(u.token, { vehicleType: 'BUS_15', vehicle: { make: 'Toyota', model: 'Hiace', year: 2016, color: 'White', licensePlate: `VC${NUM}D` } });
-    expect(bus.statusCode, bus.body).toBe(200);
-    expect(bus.json().data).toMatchObject({ vehicleType: 'BUS_15', retiredDocuments: 1 });
+    // A different car: the old car's papers are retired and its assignment closes. [VERIFY-DOCS · ruling 9 — a
+    // DELIBERATE change] the different car is a car on a new plate now (it was a 15-seat bus; buses are hidden).
+    const other = await change(u.token, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Axio', year: 2016, color: 'White', licensePlate: `VC${NUM}D` } });
+    expect(other.statusCode, other.body).toBe(200);
+    expect(other.json().data).toMatchObject({ vehicleType: 'CAR', retiredDocuments: 1 });
     expect((await docState(insurance.id)).state).toBe('SUPERSEDED');
     expect((await system(() => app.prisma.subjectLink.findFirstOrThrow({ where: { accountId: u.userId, subjectId: subject.id } }))).validTo).not.toBeNull();
-    expect(await system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId: u.userId }, select: { rideClass: true, vehicleCapacity: true } }))).toEqual({ rideClass: 'GROUP', vehicleCapacity: 15 });
+    expect(await system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId: u.userId }, select: { rideClass: true, vehicleCapacity: true } }))).toEqual({ rideClass: 'ECONOMY', vehicleCapacity: 4 });
   });
 
   it('a verified driver steps up first; a driver on a ride cannot change at all', async () => {

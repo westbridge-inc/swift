@@ -149,17 +149,19 @@ describe('partner provisioning — happy paths', () => {
     expect(profile.statusCode).toBe(200);
   });
 
-  it('provisions a GROUP Driver for a bus mover — passenger runs', async () => {
+  // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] Buses are hidden at launch: a bus mover is
+  // refused before anything is provisioned (it was a GROUP Driver). Bus provisioning comes back with the buses;
+  // the refusal and the route through it are pinned in verify-docs-buses.test.ts.
+  it('refuses a bus mover at launch — no Driver is provisioned', async () => {
     const res = await post(
       '/api/v1/partner/become',
       { acceptAgreement: true, role: 'MOVER', vehicleType: 'BUS_15', vehicle: { make: 'Toyota', model: 'Coaster', year: 2019, color: 'White', licensePlate: 'BXX 5150' } },
       busToken,
     );
-    expect(res.statusCode).toBe(201);
-    expect(JSON.parse(res.body).data.kind).toBe('DRIVER');
-    const driver = await app.prisma.driver.findFirst({ where: { user: { phone: BUS_PHONE } } });
-    expect(driver?.rideClass).toBe('GROUP');
-    expect(driver?.vehicleType).toBe('BUS_15'); // drives the commercial doc checklist + hire gate
+    expect(res.statusCode).toBe(422);
+    expect(JSON.parse(res.body).error.code).toBe('VEHICLE_NOT_OFFERED');
+    expect(JSON.parse(res.body).error.message).toMatch(/buses/);
+    expect(await app.prisma.driver.count({ where: { user: { phone: BUS_PHONE } } })).toBe(0);
   });
 
   it('provisions a COMFORT Driver for a wagon mover', async () => {

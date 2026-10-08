@@ -16,6 +16,7 @@ import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-
 import { osrmOutcomeCounter } from '../plugins/observability';
 import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
 import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
+// [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
 
 // ---------------------------------------------------------------------------
 // [money] The single-leg route as it prices TODAY, pinned before a present but
@@ -63,15 +64,14 @@ async function counted(outcome: string): Promise<number> {
   return metric.values.find((v) => v.labels['op'] === 'route' && v.labels['outcome'] === outcome)?.value ?? 0;
 }
 
-const tiers = (source: string, economy: number, comfort: number, group: number) => [
+const tiers = (source: string, economy: number, comfort: number) => [
   { rideClass: 'ECONOMY', multiplier: 1, fare: economy, capacity: 4, source },
   { rideClass: 'COMFORT', multiplier: 1.35, fare: comfort, capacity: 4, source },
-  { rideClass: 'GROUP', multiplier: 2.5, fare: group, capacity: 14, source },
 ];
 
 /** The exact bytes each route answers today. */
-const TAXI_OSRM_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":11800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":27,"billableKm":10.15,"routeSource":"osrm"}}';
-const TAXI_FALLBACK_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":11800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":25,"billableKm":10.18,"routeSource":"haversine"}}';
+const TAXI_OSRM_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":27,"billableKm":10.15,"routeSource":"osrm"}}';
+const TAXI_FALLBACK_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":25,"billableKm":10.18,"routeSource":"haversine"}}';
 // 10.15 km: 800 + 1218 + 500 = 2518. The fallback's 10.18 km: 800 + 1221.6 + 500 = 2521.6 → 2522.
 const COURIER_OSRM_BODY = '{"success":true,"data":{"baseFee":800,"distanceFee":1218,"sizeSurcharge":500,"speedMultiplier":1,"totalFee":2518,"estimatedMinutes":51,"currency":"GYD","distanceKm":10.2}}';
 const COURIER_FALLBACK_BODY = '{"success":true,"data":{"baseFee":800,"distanceFee":1222,"sizeSurcharge":500,"speedMultiplier":1,"totalFee":2522,"estimatedMinutes":51,"currency":"GYD","distanceKm":10.2}}';
@@ -210,7 +210,7 @@ describe('the taxi fare service over OSRM, as today', () => {
       durationMin: 27, source: 'formula', fromZoneId: undefined, toZoneId: undefined,
     });
     expect(await svc().estimateTiers(PICKUP, DROPOFF, 'GY')).toStrictEqual({
-      tiers: tiers('formula', 4700, 6300, 11800), currencyCode: 'GYD', distanceKm: 10.2, durationMin: 27, billableKm: 10.15, routeSource: 'osrm',
+      tiers: tiers('formula', 4700, 6300), currencyCode: 'GYD', distanceKm: 10.2, durationMin: 27, billableKm: 10.15, routeSource: 'osrm',
     });
   });
 

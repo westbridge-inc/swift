@@ -20,7 +20,8 @@ import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 
 // ---------------------------------------------------------------------------
-// Ride tiers (Economy/Comfort/GROUP offered; XL hidden until a vehicle serves it) — deterministic per-tier pricing + vehicle
+// Ride tiers (Economy/Comfort offered; XL hidden until a vehicle serves it; GROUP hidden while buses are, owner
+// ruling 9 of 6 Oct 2026) — deterministic per-tier pricing + vehicle
 // matching. Re-introduced WITH a real driver-class assignment (the #112 gap was
 // that every driver was STANDARD, so tiers dispatched to nobody). Failure paths
 // first: capacity rejection and the dispatch class filter.
@@ -183,13 +184,14 @@ describe('Pure fare helpers', () => {
 });
 
 describe('FareService.estimateTiers', () => {
-  it('returns the OFFERED tiers — three today, XL hidden until a vehicle class serves it — strictly ascending, GROUP the priciest', async () => {
+  it('returns the OFFERED tiers — two today, XL and GROUP hidden while no offered vehicle serves them — strictly ascending', async () => {
     // [Ruling 2026-09-06] Nothing in the fleet maps to XL, so it is not sold (ride-tier-availability.test.ts).
+    // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] Both buses are hidden at launch, so
+    // GROUP is not sold either (verify-docs-buses.test.ts); Comfort stays the dearer tier.
     const { tiers } = await fare.estimateTiers(CENTRAL, { lat: 6.755, lng: -58.155 }, 'GY');
-    expect(tiers.map((t) => t.rideClass)).toEqual(['ECONOMY', 'COMFORT', 'GROUP']);
+    expect(tiers.map((t) => t.rideClass)).toEqual(['ECONOMY', 'COMFORT']);
     expect(tiers[0]!.fare).toBeLessThan(tiers[1]!.fare);
-    expect(tiers[1]!.fare).toBeLessThan(tiers[2]!.fare);
-    expect(tiers[2]!.fare).toBeGreaterThan(tiers[0]!.fare * 2); // GROUP ×2.5 economy
+    expect(tiers.map((t) => t.capacity)).toEqual([4, 4]);
   });
 });
 
@@ -200,7 +202,7 @@ describe('POST /rides/estimate — tiered shape', () => {
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
     expect(Array.isArray(data.tiers)).toBe(true);
-    expect(data.tiers).toHaveLength(3); // ECONOMY, COMFORT, GROUP — XL is not offered (no vehicle serves it)
+    expect(data.tiers).toHaveLength(2); // ECONOMY, COMFORT — XL and (buses hidden, ruling 9) GROUP are not offered
     expect(data.fare).toBeUndefined();
   });
 });
@@ -217,8 +219,8 @@ describe('POST /rides/request — capacity guard (failure path)', () => {
     expect(res.json().error.code).toBe('TOO_MANY_PASSENGERS');
   });
 
-  it('accepts a 10-passenger group on GROUP; an XL request is refused because the tier is not offered', async () => {
-    const { token } = await makeCustomer();
+  it('an XL or a GROUP request is refused because the tier is not offered — even with a minibus nearby', async () => {
+    const { userId, token } = await makeCustomer();
     const base = {
       pickup: CENTRAL, dropoff: { lat: 6.755, lng: -58.155 },
       pickupAddress: 'Central GT', dropoffAddress: 'South GT', passengerCount: 10,
@@ -229,9 +231,14 @@ describe('POST /rides/request — capacity guard (failure path)', () => {
     expect(onXl.statusCode).toBe(400);
     expect(onXl.json().error.code).toBe('INVALID_RIDE_CLASS');
 
-    await makeDriver('GROUP'); // a minibus to dispatch to
+    // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] Both buses are hidden at launch, so
+    // GROUP is not sold: a request for it is an unavailable tier too, even with a minibus driver registered
+    // before the ruling nearby. (Before the ruling: 201, 10 within GROUP's 14 seats.)
+    await makeDriver('GROUP');
     const onGroup = await inject('POST', '/api/v1/rides/request', { ...base, rideClass: 'GROUP' }, token);
-    expect(onGroup.statusCode).toBe(201); // 10 is within GROUP's 14 seats — ride created
+    expect(onGroup.statusCode).toBe(400);
+    expect(onGroup.json().error.code).toBe('INVALID_RIDE_CLASS');
+    expect(await app.prisma.order.count({ where: { customerId: userId } })).toBe(0);
   });
 
   it('persists the chosen tier and its fare on a valid request', async () => {

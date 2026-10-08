@@ -6,6 +6,7 @@ import { FareService, formulaFare } from '../modules/rides/fare.service';
 import { planTaxiStops, taxiMaxStops } from '../modules/rides/taxi-stops-flag';
 import { LEGACY_GY_TAXI_CARD } from './helpers/legacy-taxi-card';
 import { OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type RouteLegsEstimate, type RouteSource } from '../providers/maps/maps-provider';
+// [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] Pricing a ride with stops, service-free: the WHOLE
@@ -84,7 +85,7 @@ describe('the formula is applied once, to the whole route', () => {
   it('the plan’s worked example: 10.15 km / 27 min → 4720 → Economy 4700, Comfort 6345 → 6300', async () => {
     const { maps } = engine([{ km: 4, minutes: 10 }, { km: 6.15, minutes: 17 }], { km: 10.15, minutes: 27 });
     const est = await price([STOP_1], maps);
-    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
     expect(est).toMatchObject({ billableKm: 10.15, distanceKm: 10.2, durationMin: 27, routeSource: 'osrm', currencyCode: 'GYD' });
     expect(est.tiers.every((t) => t.source === 'formula')).toBe(true);
     // Pricing each leg as its own trip would have charged 2500 + 3300.
@@ -95,14 +96,14 @@ describe('the formula is applied once, to the whole route', () => {
     const leg = { km: 0.5, minutes: 1 };
     const { maps } = engine([leg, leg, leg, leg]);
     const est = await price([STOP_1, STOP_2, STOP_3], maps);
-    expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300, GROUP: 4300 });
+    expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300 });
     expect(est).toMatchObject({ billableKm: 2, durationMin: 4 });
   });
 
   it('the minimum once: a short trip with a stop costs the minimum, once', async () => {
     const { maps } = engine([{ km: 0.1, minutes: 0.3 }, { km: 0.1, minutes: 0.3 }]);
     const est = await price([STOP_1], maps);
-    expect(fares(est)).toEqual({ ECONOMY: 1500, COMFORT: 2000, GROUP: 3800 });
+    expect(fares(est)).toEqual({ ECONOMY: 1500, COMFORT: 2000 });
   });
 
   it('no fee per stop: the same road with more stops on it costs the same', async () => {
@@ -195,7 +196,7 @@ describe('fails closed: never a price from a guess', () => {
 
   it('one leg of 0 m is real (two points across one road snap to one node): the route is priced', async () => {
     const est = await price([STOP_1], engine([{ km: 2, minutes: 4 }, { km: 0, minutes: 0 }]).maps);
-    expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300, GROUP: 4300 }); // 1000 + 600 + 100
+    expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300 }); // 1000 + 600 + 100
     expect(est.legs[1]).toEqual({ from: 'STOP_1', to: 'DESTINATION', meters: 0, seconds: 0 });
   });
 
@@ -237,7 +238,7 @@ describe('provider → fare: a RAW OSRM body, parsed as the provider parses it (
 
   it('a valid body prices the worked example: the raw path is live (4700 / 6300)', async () => {
     const est = await osrmPrice(body('600', '1020', '1620'));
-    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
     expect(est.legs.map((l) => l.seconds)).toEqual([600, 1020]);
   });
 
@@ -257,7 +258,7 @@ describe('provider → fare: a RAW OSRM body, parsed as the provider parses it (
   it('ABSENT durations (null, or no key at all) fall back to the speed model, as today: 10.15 km → 25 min → 4670 → 4700', async () => {
     const est = await osrmPrice('{"code":"Ok","routes":[{"distance":10150,"duration":null,"legs":[{"distance":4000,"duration":null},{"distance":6150}]}]}');
     expect(est).toMatchObject({ billableKm: 10.15, durationMin: 25, routeSource: 'osrm' });
-    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
     expect(est.legs.map((l) => l.seconds)).toEqual([null, null]);
   });
 });

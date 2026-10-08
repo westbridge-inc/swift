@@ -158,9 +158,9 @@ export class PartnerService {
       return;
     }
     if (!input.vehicleType) throw new ValidationError('Vehicle type is required to move with Swift');
-    // [Launch vehicle list] Canters and box trucks are not taken on yet (config/vehicle-classes).
+    // [Launch vehicle list] Buses, canters and box trucks are not taken on yet (config/vehicle-classes).
     if (!isVehicleOffered(input.vehicleType)) {
-      throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking canters and box trucks yet. Choose another vehicle.');
+      throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Choose another vehicle.');
     }
     // Passenger-capable vehicles (car → Economy, wagon → Comfort, bus → Group)
     // provision a Driver at their tier so the vehicle earns on the higher-value
@@ -307,7 +307,7 @@ export class PartnerService {
     transitionAuthority: (tx: Tx, targetRole: UserRole) => Promise<TCleanup>,
   ): Promise<{ result: VehicleChangeResult; authorityCleanup: TCleanup | null }> {
     if (!isVehicleOffered(input.vehicleType)) {
-      throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking canters and box trucks yet. Choose another vehicle.');
+      throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Choose another vehicle.');
     }
     const target = moverRoleFor(input.vehicleType);
     if (target === 'DRIVER' && !input.vehicle) {

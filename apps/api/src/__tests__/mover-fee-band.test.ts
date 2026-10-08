@@ -437,7 +437,17 @@ describe('mover fee band — what a mover is actually charged', () => {
     // one becomes a Driver while the Rider profile keeps its cargo vehicle.
     const partners = new PartnerService(app.prisma);
     const passenger = VEHICLE_TYPES_IN_ORDER.filter((v) => isPassengerVehicle(v) && isVehicleOffered(v));
-    expect(passenger).toEqual(expect.arrayContaining(['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15']));
+    // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] both buses are hidden at launch: the
+    // offered passenger vehicles are the car and the wagon, and a bus is provisioned as nothing at all.
+    expect(passenger).toEqual(['CAR', 'WAGON_CAR']);
+    for (const bus of ['BUS_9', 'BUS_15'] as const) {
+      seq += 1;
+      const busJoiner = await makeMoverUser();
+      await expect(partners.becomePartner(busJoiner, { role: 'MOVER', vehicleType: bus, vehicle: { make: 'Toyota', model: 'Hiace', year: 2019, color: 'White', licensePlate: `PAX ${seq}` } }))
+        .rejects.toMatchObject({ code: 'VEHICLE_NOT_OFFERED' });
+      expect(await app.prisma.rider.findUnique({ where: { userId: busJoiner } }), bus).toBeNull();
+      expect(await app.prisma.driver.findUnique({ where: { userId: busJoiner } }), bus).toBeNull();
+    }
 
     for (const vehicleType of passenger) {
       seq += 1;

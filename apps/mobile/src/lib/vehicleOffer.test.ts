@@ -19,11 +19,13 @@ describe('the launch vehicle list', () => {
     expect(block, 'the server list moved or was renamed — keep the app in step with it').toBeTruthy();
     const serverHidden = [...block!.matchAll(/'([A-Z_0-9]+)'/g)].map((m) => m[1]).sort();
     expect([...LAUNCH_HIDDEN_VEHICLE_KINDS].sort()).toEqual(serverHidden);
-    expect(serverHidden).toEqual(['BOX_TRUCK_LONG', 'BOX_TRUCK_SHORT', 'CANTER_LONG', 'CANTER_SHORT']);
+    // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] both buses are hidden at launch too.
+    expect(serverHidden).toEqual(['BOX_TRUCK_LONG', 'BOX_TRUCK_SHORT', 'BUS_15', 'BUS_9', 'CANTER_LONG', 'CANTER_SHORT']);
   });
 
-  it('before the price list loads, every rider and driver vehicle is offered and the four heavy ones are not', () => {
-    for (const kind of ['BICYCLE', 'MOTORCYCLE', 'CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15'] as const) expect(vehicleOffered(kind)).toBe(true);
+  it('before the price list loads, the rider and car vehicles are offered and the buses and heavy ones are not', () => {
+    for (const kind of ['BICYCLE', 'MOTORCYCLE', 'CAR', 'WAGON_CAR'] as const) expect(vehicleOffered(kind)).toBe(true);
+    for (const kind of ['BUS_9', 'BUS_15'] as const) expect(vehicleOffered(kind)).toBe(false);
     for (const kind of LAUNCH_HIDDEN_VEHICLE_KINDS) expect(vehicleOffered(kind)).toBe(false);
   });
 

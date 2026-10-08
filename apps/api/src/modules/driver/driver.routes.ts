@@ -325,7 +325,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // [Launch vehicle list] A vehicle Swift does not take on yet cannot go online; the
     // mover changes it first (PUT /partner/vehicle).
     if (!isVehicleOffered(driver.vehicleType)) {
-      throw new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking canters and box trucks yet. Change your vehicle to go online.');
+      throw new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Change your vehicle to go online.');
     }
     if (!locationSessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');

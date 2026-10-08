@@ -6,6 +6,7 @@ import type { FareService } from './fare.service';
 import type { NotificationService } from '../notification/notification.service';
 import { createRideRequest, type RideRequestApp } from './rides.service';
 import { log } from '../../utils/logger';
+import { SERVED_RIDE_CLASSES } from '../../config/vehicle-classes';
 
 // ---------------------------------------------------------------------------
 // The 5.5B ride queue (rides spec): position is DERIVED (createdAt FIFO among
@@ -120,8 +121,26 @@ export async function scanRideQueue(
   const prisma = app.prisma;
   const now = new Date();
 
-  // ---- 1) expiry sweep ----
+  // Retired classes cannot wait for supply or be offered again by a stale-trip deep link.
   let expired = 0;
+  const unavailable = await prisma.rideQueueEntry.findMany({
+    where: { status: 'WAITING', rideClass: { notIn: [...SERVED_RIDE_CLASSES] } },
+    orderBy: { createdAt: 'asc' }, take: cap,
+  });
+  for (const entry of unavailable) {
+    const claimed = await prisma.rideQueueEntry.updateMany({
+      where: { id: entry.id, tenantId: entry.tenantId, status: 'WAITING' },
+      data: { status: 'EXPIRED', expiredNotifiedAt: now },
+    });
+    if (claimed.count !== 1) continue;
+    expired += 1;
+    await notifications.send({ userId: entry.customerId, type: 'ORDER_UPDATE', audience: 'customer',
+      title: 'Choose another ride class', body: 'Your queued ride class is no longer offered. Open Rides to choose an available class.',
+      data: { kind: 'ride_queue_unavailable' },
+    }).catch(() => {});
+  }
+
+  // ---- 1) expiry sweep ----
   const dead = await prisma.rideQueueEntry.findMany({
     where: { status: 'WAITING', expiresAt: { lte: now } },
     orderBy: { createdAt: 'asc' },
@@ -134,14 +153,15 @@ export async function scanRideQueue(
     });
     if (claimed.count === 0) continue;
     expired += 1;
+    const offered = [...SERVED_RIDE_CLASSES].some((rideClass) => rideClass === e.rideClass);
     await notifications
       .send({
         userId: e.customerId,
         type: 'ORDER_UPDATE',
-        title: `Still need a ride to ${e.dropoffAddress}?`,
-        body: 'Your place in line timed out. Tap to request again — one tap, same trip.',
+        title: offered ? `Still need a ride to ${e.dropoffAddress}?` : 'Choose another ride class',
+        body: offered ? 'Your place in line timed out. Tap to request again — one tap, same trip.' : 'Your queued ride class is no longer offered. Open Rides to choose an available class.',
         audience: 'customer',
-        data: {
+        data: !offered ? { kind: 'ride_queue_unavailable' } : {
           kind: 'ride_queue_expired',
           pickup: { lat: e.pickupLat, lng: e.pickupLng, address: e.pickupAddress },
           dropoff: { lat: e.dropoffLat, lng: e.dropoffLng, address: e.dropoffAddress },
