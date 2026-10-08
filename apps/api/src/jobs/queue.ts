@@ -1242,6 +1242,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
         if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
         else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
+        const { drainRiderCancellationNotices } = await import('../modules/order/rider-cancel-notice');
+        const cancellations = await drainRiderCancellationNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
+        if (cancellations.pending > 0) ctx.log.warn(cancellations, 'rider cancellation pushes remain pending');
+
         return;
       }
       if (job.name === 'mover-revocation-outbox') {

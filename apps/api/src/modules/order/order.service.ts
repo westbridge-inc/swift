@@ -1,3 +1,4 @@
+import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
@@ -2372,6 +2373,8 @@ export class OrderService {
             },
           });
 
+          await persistRiderCancellationNotice(tx, order);
+
           if (order.riderId) {
             await new FloatService(tx).release(tx, order.riderId, riderFloatForOrder(order));
             await this.stageRiderRelease(tx, order.riderId, orderId, false, true);
@@ -2401,6 +2404,9 @@ export class OrderService {
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
     const { order, heldNow, freeCancellation, cancellationFee, cancelledSearches } = committed;
+    await drainRiderCancellationNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId })
+      .catch((err) => log().warn({ err, orderId }, 'rider cancellation notice awaits retry'));
+
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
