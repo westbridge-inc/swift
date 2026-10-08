@@ -651,7 +651,7 @@ describe('the reads carry the stops, in order', () => {
     expect(item).toMatchObject({ stopCount: 3, stops: coarseStops, dropoffLat: Math.round(DEST.lat / 0.003) * 0.003, dropoffLng: Math.round(DEST.lng / 0.003) * 0.003, fareTotal: q.fare });
     expect(item).not.toHaveProperty('pickupAddress');
     expect(item).not.toHaveProperty('dropoffAddress');
-    expect(Object.keys((item as { customer: object }).customer)).toEqual(['displayRating']);
+    expect(Object.keys((item as { id: string; customer: object }).customer)).toEqual(['displayRating']);
     expect(Object.keys(item!)).toEqual([...BOARD_ITEM_KEYS, 'stopCount', 'stops']);
 
     // Accepted from the card.
