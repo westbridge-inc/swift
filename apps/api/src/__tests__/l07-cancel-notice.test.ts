@@ -66,6 +66,37 @@ describe('assigned riders retain a durable cancellation notice', () => {
       payload: { orderId: order.id, riderUserId: mover.id } });
     expect(await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({ status: 'CANCELLED' });
   });
+  it('captures the rider assigned when cancellation locks, not the preview recipient', async () => {
+    const first = await fixture();
+    const next = await fixture();
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = app.prisma.order.findFirst.bind(app.prisma.order);
+    vi.spyOn(app.prisma.order, 'findFirst').mockImplementationOnce((args) => (async () => {
+      const preview = await original(args); entered(); await gate; return preview;
+    })() as ReturnType<typeof original>);
+    const pending = service.cancelOrder(first.order.id, first.customer.id);
+    await waiting;
+    try { await app.prisma.order.update({ where: { id: first.order.id }, data: { riderId: next.mover.rider!.id } }); }
+    finally { release(); }
+    await pending;
+    expect((await noticeRows(first.order.id))[0]!.payload).toMatchObject({ riderUserId: next.mover.id });
+  });
+  it('a malformed retry recipient cannot publish another order notification', async () => {
+    const first = await fixture();
+    const second = await fixture();
+    await service.cancelOrder(first.order.id, first.customer.id);
+    await service.cancelOrder(second.order.id, second.customer.id);
+    const [one] = await noticeRows(first.order.id);
+    const [two] = await noticeRows(second.order.id);
+    await app.prisma.orderOutbox.update({ where: { id: one!.id }, data: { payload: { ...(two!.payload as Record<string, string>), orderId: first.order.id } } });
+    const publishPersisted = vi.fn(async () => true);
+    expect(await drainRiderCancellationNotices({ prisma: app.prisma, notifications: { publishPersisted }, now: () => new Date(Date.now() + 600_000) }, { orderId: first.order.id }))
+      .toEqual({ delivered: 0, pending: 1 });
+    expect(publishPersisted).not.toHaveBeenCalled();
+  });
   it('does not create a rider notice for an unassigned order', async () => {
     const { customer, order } = await fixture(false);
     await service.cancelOrder(order.id, customer.id);
@@ -101,6 +132,8 @@ describe('assigned riders retain a durable cancellation notice', () => {
   it('the generic queue publisher leaves this notice for its confirmed-push drainer', async () => {
     const { customer, order } = await fixture();
     await service.cancelOrder(order.id, customer.id);
+    // Make it due: the immediate failed push already installed a backoff.
+    await app.prisma.orderOutbox.updateMany({ where: { orderId: order.id }, data: { availableAt: new Date(0) } });
     const add = vi.fn(async () => ({}));
     await drainCheckoutOutbox({ prisma: app.prisma, queues: { orderQueue: { add } as never, notificationQueue: { add } as never }, log: app.log }, { orderIds: [order.id] });
     expect(add).not.toHaveBeenCalled();
