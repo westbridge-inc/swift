@@ -9,6 +9,7 @@ import {
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
@@ -359,8 +360,13 @@ export const customerApi = {
   // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
   exportAccount: (session?: AuthSessionSnapshot) =>
     api.get('/customer/account/export', capturedAuthConfig(session)),
+  requestAccountClosure: (session?: AuthSessionSnapshot) =>
+    api.post('/customer/account/closure-request', {}, capturedAuthConfig(session)),
+  // receipts=v2: this app shows every deletion receipt by its own message, so
+  // the server may answer a closure request or a pending erasure as such. An
+  // app that does not declare it is answered in the older build's words.
   deleteAccount: (session?: AuthSessionSnapshot) =>
-    api.delete('/customer/account', capturedAuthConfig(session)),
+    api.delete('/customer/account', capturedAuthConfig(session, { params: { receipts: 'v2' } })),
   switchRole: (role: string, session?: AuthSessionSnapshot) =>
     api.post('/customer/switch-role', { role }, capturedAuthConfig(session)),
   // In-app support / dispute channel.
@@ -446,6 +452,9 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
+    /** [L09 · price lock] The quote's total and line prices the customer saw. */
+    expectedTotal?: number;
+    expectedLines?: Array<{ lineId: string; unitPrice: number }>;
   }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
@@ -569,6 +578,8 @@ export const safetyApi = {
   // relative who does not have the app.
   shareTrip: (orderId: string, sendToPhone?: string) =>
     api.post(`/safety/trips/${orderId}/share`, sendToPhone ? { sendToPhone } : {}),
+  tripShares: (orderId: string) => api.get(`/safety/trips/${orderId}/shares`),
+  revokeAllTripShares: (orderId: string) => api.delete(`/safety/trips/${orderId}/shares`),
   revokeTripShare: (token: string) => api.delete(`/safety/share/${token}`),
   /** §5.1 — the "extra safety check-ins on my trips" toggle. The caller's OWN row. */
   monitoringPreference: () => api.get('/safety/monitoring-preference'),
@@ -733,6 +744,8 @@ export const placesApi = {
 type CourierSize = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type CourierSpeed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 export const courierApi = {
+  rotateTracking: (id: string) => api.post(`/courier/order/${id}/tracking`),
+  revokeTracking: (id: string) => api.delete(`/courier/order/${id}/tracking`),
   estimate: (data: { pickup: Point; dropoff: Point; packageSize: CourierSize; speed: CourierSpeed }) =>
     api.post('/courier/estimate', data),
   order: (data: {
@@ -1306,6 +1319,37 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
     },
     read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {
       const response = await api.get(`${base}/${encodeURIComponent(ref)}`, config());
+      current(); return response.data.data;
+    },
+  };
+}
+
+/** The card half of the fee page (CARD-CHECKOUT-API): the same captured principal and store as
+ *  weeklyFeeApi. The server prices a Pay now; no amount and no card detail is ever sent. */
+export function cardFeeApi(family: import('../lib/cardFee').CardFamily, session: AuthSessionSnapshot | null, storeId?: string | null) {
+  const base = `/${family}/subscription`;
+  const signedOut = async (): Promise<never> => { throw new Error('Sign in to pay.'); };
+  if (!session) return { start: signedOut, read: signedOut, remove: signedOut };
+  const current = () => {
+    const now = getAuthSessionSnapshot();
+    if (!now || now.userId !== session.userId || now.generation !== session.generation || (family === 'vendor' && useStoreSwitcher.getState().selectedStoreId !== storeId)) throw new Error('The paying account changed.');
+    return now;
+  };
+  const config = (headers?: Record<string, string>) => family === 'vendor'
+    ? capturedVendorAuthConfig(current(), storeId, { headers })
+    : capturedAuthConfig(current(), { headers });
+  return {
+    start: async (purpose: import('../lib/cardFee').CardPurpose, key: string): Promise<import('../lib/cardFee').CardSessionStart> => {
+      const body = purpose === 'ENROLL' ? { purpose, consentVersion: CARD_CONSENT_VERSION } : { purpose };
+      const response = await api.post(`${base}/card-sessions`, body, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    read: async (sessionId: string): Promise<import('../lib/cardFee').CardSessionView> => {
+      const response = await api.get(`${base}/card-sessions/${encodeURIComponent(sessionId)}`, config());
+      current(); return response.data.data;
+    },
+    remove: async (cardId: string): Promise<unknown> => {
+      const response = await api.delete(`${base}/cards/${encodeURIComponent(cardId)}`, config());
       current(); return response.data.data;
     },
   };

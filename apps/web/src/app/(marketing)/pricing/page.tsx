@@ -56,7 +56,7 @@ function itemRange(catalogue: CataloguePriceBand[], i: number): string {
 
 function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number }) {
   return (
-    <div className="rounded-2xl bg-white p-7 shadow-sm">
+    <div className="rounded-2xl bg-[var(--swift-card)] p-7 shadow-[var(--swift-elevation-card)]">
       <h3 className="font-bold">{title}</h3>
       <p className="mt-3 text-3xl font-extrabold">
         {price}
@@ -120,7 +120,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               ))}
             </div>
             {list.pricing.franchise && (
-              <div className="mt-6 rounded-2xl bg-white p-7 shadow-sm">
+              <div className="mt-6 rounded-2xl bg-[var(--swift-card)] p-7 shadow-[var(--swift-elevation-card)]">
                 <h3 className="font-bold">Franchises</h3>
                 <p className="mt-3 text-3xl font-extrabold">
                   {list.pricing.franchise.discountPct}% off
