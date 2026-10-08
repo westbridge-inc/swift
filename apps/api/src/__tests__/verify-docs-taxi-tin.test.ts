@@ -72,7 +72,7 @@ beforeAll(async () => {
   } });
   users.push(admin.id); adminId = admin.id;
   adminToken = app.jwt.sign({ userId: admin.id, role: 'ADMIN', jti: nanoid() });
-  await app.prisma.session.create({ data: { userId: admin.id, token: adminToken, refreshToken: nanoid(48), deviceId: nanoid(), deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+  await app.prisma.session.create({ data: { userId: admin.id, token: adminToken, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: nanoid(), deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
   priorSplit = (await app.prisma.platformConfig.findUnique({ where: { key: SPLIT_KEY } }))?.value ?? null;
 });
 
@@ -446,16 +446,19 @@ describe('[V5 · registry] inactive optional documents never silence active requ
     const requiredCode = registryCode('GY', 'national_id');
     const optionalCode = registryCode('GY', 'police_clearance');
     const prior = await app.prisma.docType.findMany({ where: { code: { in: [requiredCode, optionalCode] } } });
-    const optional = await app.prisma.requirementItem.create({ data: { requirementSetId: set.id, docTypeCode: optionalCode, isBlocking: false, minCount: 1, sortOrder: 99 } });
+    const itemKey = { requirementSetId_docTypeCode: { requirementSetId: set.id, docTypeCode: optionalCode } };
+    const priorItem = await app.prisma.requirementItem.findUnique({ where: itemKey });
+    await app.prisma.requirementItem.upsert({ where: itemKey, create: { requirementSetId: set.id, docTypeCode: optionalCode, isBlocking: false, minCount: 1, sortOrder: 99 }, update: { isBlocking: false } });
     try {
-      await app.prisma.docType.update({ where: { code: requiredCode }, data: { isActive: true } });
+      await app.prisma.docType.update({ where: { code: requiredCode }, data: { isActive: true, legalFactsVerifiedAt: new Date('2026-09-01T00:00:00.000Z') } });
       await app.prisma.docType.update({ where: { code: optionalCode }, data: { isActive: false } });
       expect(await registryChecklist(app.prisma, 'GY', 'MOVER_NO_LICENCE')).toEqual(['national_id']);
       const rehearsal = await rehearseActivation(app.prisma, service, { countryCode: 'GY', legacyCodes: ['national_id'] });
       expect(rehearsal.registry.setsThatSwitch.find((s) => s.actorRole === 'MOVER_NO_LICENCE')?.registryList).toEqual(['national_id']);
     } finally {
-      await app.prisma.requirementItem.delete({ where: { id: optional.id } });
-      for (const type of prior) await app.prisma.docType.update({ where: { code: type.code }, data: { isActive: type.isActive } });
+      if (priorItem) await app.prisma.requirementItem.update({ where: itemKey, data: { isBlocking: priorItem.isBlocking } });
+      else await app.prisma.requirementItem.delete({ where: itemKey });
+      for (const type of prior) await app.prisma.docType.update({ where: { code: type.code }, data: { isActive: type.isActive, legalFactsVerifiedAt: type.legalFactsVerifiedAt } });
     }
   });
 });
