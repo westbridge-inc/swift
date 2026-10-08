@@ -10,6 +10,7 @@ import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
 import { PickingService } from '../order/picking.service';
+import { lineOptionsAsMade } from '../order/substitution-view';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
@@ -602,6 +603,19 @@ const ORDER_ITEM_MONEY_FIELDS = [
 const ITEM_MONEY_FIELDS = ['basePrice'] as const;
 const OPTION_MONEY_FIELDS = ['additionalPrice'] as const;
 
+/** [L09 · M026] The store makes what the customer chose: every line carries its
+ *  snapshotted options (group, choice, price) on the board and the detail —
+ *  and none once an approved substitute replaced the line, because the swap is
+ *  charged without them (order/substitution-view.ts). */
+const VENDOR_ORDER_ITEMS = {
+  include: { selectedOptions: { select: { optionGroupName: true, optionName: true, markedUpPrice: true } } },
+} as const;
+
+function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{ optionGroupName: string; optionName: string; markedUpPrice: unknown }> }>(line: T) {
+  const { selectedOptions, ...rest } = line;
+  return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
+}
+
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
@@ -621,7 +635,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
     // Do not assert another path is safe; assert it in handover-secrets.test.ts.
     omit: HANDOVER_SECRETS_OMIT,
     include: {
-      items: true,
+      items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
       customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
@@ -1562,7 +1576,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         // HND-003: strip handover secrets from the vendor board too (see resolveOwnedOrder).
         omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
         include: {
-          items: true,
+          items: VENDOR_ORDER_ITEMS,
           customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
@@ -1589,7 +1603,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // live order keeps all of it, which is the only thing a handover needs.
     const data = orders.map((order) => redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
-      items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
+      items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
       canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
     }));
@@ -1609,7 +1623,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
     const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
-    return { success: true, data: { ...redactCustomerContact({ ...order, respondBy, canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
+    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store

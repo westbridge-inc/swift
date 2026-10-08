@@ -37,6 +37,7 @@ import { compilePublicStorefrontDisclosure } from '../verification/storefront-di
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
+import { lineOptionsAsMade, substitutionView } from '../order/substitution-view';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
@@ -2489,6 +2490,9 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/orders/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
+    // Only clients that render server decision permissions opt in. Build 9 /
+    // Android vc5 omit this capability and retain the pre-feature item shape.
+    const supportsSwapDecisions = (request.query as { swapDecisions?: unknown }).swapDecisions === 'v1';
 
     const order = await app.prisma.order.findFirst({
       where: { id, customerId: userId },
@@ -2611,6 +2615,15 @@ export async function customerRoutes(app: FastifyInstance) {
           customerPrice: Number(i.markedUpPrice),
           lineTotal: Number(i.totalCustomer),
           specialInstructions: i.specialInstructions,
+          // Additions only for a permission-aware client. The flat subStatus
+          // field activates dormant swap controls in older binaries.
+          ...(supportsSwapDecisions ? {
+            options: lineOptionsAsMade(i),
+            subStatus: i.subStatus,
+            substituteName: i.substituteName,
+            substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
+            substitution: substitutionView(i, order),
+          } : {}),
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),

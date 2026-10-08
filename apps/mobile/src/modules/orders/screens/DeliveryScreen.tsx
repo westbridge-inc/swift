@@ -30,6 +30,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { swapChangeText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
@@ -1054,15 +1055,28 @@ export function DeliveryScreen() {
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                   {o.vendor?.name ?? 'The store'} suggests {it.substituteName} ({money(Number(it.substitutePrice ?? 0))}
-                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead. Rejecting removes the item and lowers your total.
+                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead.{swapDecisionPermissions(it.substitution, o.paymentMethod).reject ? ' Rejecting removes the item and lowers your total.' : ''}
                 </T>
+                {/* [L09 · M028] What approving changes, from the server's own
+                    numbers: the total (paid options included), and the chosen
+                    options that do not come with the swap. */}
+                {swapChangeText(it.substitution, o.paymentMethod) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapChangeText(it.substitution, o.paymentMethod)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   <PillButton
                     label="Approve swap"
                     size="md"
                     style={{ flex: 1 }}
                     loading={decideSub.isPending}
-                    disabled={decideSub.isPending}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
                     onPress={() => decideSub.mutate({ lineId: it.id, approve: true })}
                   />
                   <PillButton
@@ -1070,7 +1084,7 @@ export function DeliveryScreen() {
                     variant="soft"
                     size="md"
                     style={{ flex: 1 }}
-                    disabled={decideSub.isPending}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).reject}
                     onPress={() => decideSub.mutate({ lineId: it.id, approve: false })}
                   />
                 </View>

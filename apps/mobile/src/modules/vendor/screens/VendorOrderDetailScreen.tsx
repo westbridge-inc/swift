@@ -4,6 +4,7 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
+import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
 import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
 import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
@@ -343,6 +344,12 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                     <T variant="label" weight="semibold" style={closed ? { textDecorationLine: 'line-through' } : undefined}>
                       {it.name}
                     </T>
+                    {/* [L09 · M026] What the customer chose, so the right item is made. */}
+                    {orderLineOptionsText(it.options) ? (
+                      <T variant="caption" weight="semibold" style={{ marginTop: 2 }}>
+                        {orderLineOptionsText(it.options)}
+                      </T>
+                    ) : null}
                     {it.specialInstructions ? (
                       <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
                         “{it.specialInstructions}”
