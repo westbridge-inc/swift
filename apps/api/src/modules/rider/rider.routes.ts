@@ -47,6 +47,7 @@ import { log } from '../../utils/logger';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
+import { goOnlineRefusal } from '../subscription/go-online-refusals';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
@@ -619,7 +620,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
     const verified = await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
-      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
+      throw goOnlineRefusal('DOCUMENTS', 'RIDER');
     }
 
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — a missing row is
@@ -629,9 +630,10 @@ export async function riderRoutes(app: FastifyInstance) {
     const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
-        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
+        throw goOnlineRefusal('FEE_GRACE_LAPSED', 'RIDER');
       }
-      throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your subscription is unpaid. Top up or pay to go back online.');
+      // [NO-DEAD-ENDS] Never "top up": the fee is paid under Weekly fee (go-online-refusals.ts).
+      throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
     }
 
     // Identity assurance (safety spec §7.1): when the tenant enables liveness,
@@ -661,7 +663,7 @@ export async function riderRoutes(app: FastifyInstance) {
       assertMoverRoleAuthority(authority.activeRole, 'RIDER');
       await lockMoverSources(tx, feePayer);
       if (!(await moverFeeOperability(tx, feePayer, { missingRow: 'GRANDFATHER' })).operable) {
-        throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your shared weekly fee does not currently permit going online.');
+        throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
       }
 
       // Authentication can be revoked after the Fastify pre-handler but while
