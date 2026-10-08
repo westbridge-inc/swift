@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
+import { chatContentReason } from './content-filter';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
 import {
   assertRoomAccess, chatMediaFolder, isServerIssuedMediaId, reconcileParticipants, resolveRoomAuthority, rotateLeakedRidePin,
@@ -206,12 +207,11 @@ export async function chatRoutes(app: FastifyInstance) {
       await assertUsersMayContact(app.prisma, access.tenantId, request.user.userId, other);
     }
 
-    // Off-platform contact detection (spec §2): the message still delivers —
-    // the sender gets a soft nudge and the flag feeds risk signals. Detection,
-    // never censorship.
+    // Retain the nudge/risk signal for allowed off-platform overtures. Content
+    // admission below also refuses prohibited contact details and language.
     const offPlatform = detectOffPlatformContact(message);
 
-    // [F-027-12] ...with exactly one exception. The order's pickup/ride code is
+    // [F-027-12] Redact order secrets before content admission. The pickup/ride code is
     // not content to moderate, it is the proof that the driver physically met
     // the customer. Chat puts the driver in the room and copies message text
     // verbatim into the other participants' PUSH bodies, so an unguarded room
@@ -232,6 +232,13 @@ export async function chatRoutes(app: FastifyInstance) {
     const guarded = redactOrderSecrets(message, secrets ?? {}, priorDigits);
     const body = guarded.text;
     if (guarded.redacted) chatGuardCounter.labels('send', 'redacted').inc();
+    const contentReason = chatContentReason(body);
+    if (contentReason) {
+      chatGuardCounter.labels('send', 'content_refused').inc();
+      throw new AppError(400, 'CHAT_CONTENT_NOT_ALLOWED',
+        'This message contains language or contact details that cannot be sent. Use Swift chat or the published support contact.',
+        { reason: contentReason });
+    }
 
     // [R048-004] A server-issued id cannot name the code by construction (a random name under the
     // room's folder); the check stays as the invariant it is.

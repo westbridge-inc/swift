@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { getTenantId } from '../../plugins/tenant-context';
 import { activateUserBlock, deactivateUserBlock } from './user-block.service';
+import { assertRoomAccess } from '../chat/chat-authority';
+import { NotFoundError } from '../../utils/errors';
 
 type AuthRequest = FastifyRequest & { user: { userId: string; role: string } };
 
@@ -34,6 +36,24 @@ export async function moderationRoutes(app: FastifyInstance) {
     if (body.targetType === 'USER' && body.targetId === reporterId) {
       reply.code(400);
       return { success: false, error: { code: 'CANNOT_REPORT_SELF', message: 'You cannot report your own profile.' } };
+    }
+
+    // Reporting preserves read access after a conversation closes or a user
+    // blocks contact, but cannot expose or target somebody else's transcript.
+    // Recheck before duplicate success as room participants can change.
+    if (body.targetType === 'CHAT_MESSAGE') {
+      const message = await app.prisma.chatMessage.findUnique({
+        where: { id: body.targetId }, select: { chatRoomId: true },
+      });
+      if (!message) throw new NotFoundError('Chat message');
+      try {
+        await assertRoomAccess(app.prisma, message.chatRoomId, reporterId, { write: false, tenantId: request.tenantId });
+      } catch (error) {
+        // A room outside the reporter's tenant answers exactly like a missing
+        // message: no room id, no different wording to probe existence with.
+        if (error instanceof NotFoundError) throw new NotFoundError('Chat message');
+        throw error;
+      }
     }
 
     const existing = await app.prisma.contentReport.findUnique({

@@ -1,11 +1,11 @@
 /**
  * [F-027-12 · F-028-02] The handover secret must never travel over chat.
  *
- * Chat's standing doctrine is DETECTION, NEVER CENSORSHIP (see off-platform.ts):
- * a message carrying a phone number still delivers, because hard-blocking
- * frustrates legitimate use and teaches people to obfuscate. The order's
- * pickup/ride code is the ONE deliberate exception, and it is not a
- * moderation call — it is the control itself.
+ * Chat's launch content filter (content-filter.ts) refuses phone numbers,
+ * outside links and abusive language before a message is stored; the
+ * off-platform detector (off-platform.ts) only nudges. The order's pickup/ride
+ * code is handled here instead, and it is not a moderation call — it is the
+ * control itself: the code is redacted, never delivered.
  *
  * The code exists to prove one thing: the driver physically met the customer.
  * The moment it can be typed into a room the driver is in, that proof is gone

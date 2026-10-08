@@ -12,9 +12,8 @@ import { chatRoutes } from '../modules/chat/chat.routes';
 import { detectOffPlatformContact } from '../modules/chat/off-platform';
 
 // ---------------------------------------------------------------------------
-// Off-platform contact detection (marketplace spec §2): detection, never
-// censorship — the message DELIVERS, the sender gets the nudge, the flag
-// lands for risk signals.
+// Contact detection still supplies nudges. Launch content admission refuses
+// external contact numbers before storing or delivering them.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -118,8 +117,22 @@ describe('detector truths', () => {
 });
 
 describe('send path', () => {
-  it('a flagged message still DELIVERS, carries the nudge, and lands the flag', async () => {
-    const res = await send('text me on 592-600-1000 when you reach');
+  it('an external phone is refused before persistence or notification', async () => {
+    const before = await app.prisma.chatMessage.count({ where: { chatRoomId: roomId } });
+    const notify = vi.spyOn(NotificationService.prototype, 'send').mockResolvedValue('notification');
+    try {
+      const res = await send('text me on 592-600-1000 when you reach');
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('CHAT_CONTENT_NOT_ALLOWED');
+      expect(await app.prisma.chatMessage.count({ where: { chatRoomId: roomId } })).toBe(before);
+      expect(notify).not.toHaveBeenCalled();
+    } finally {
+      notify.mockRestore();
+    }
+  });
+
+  it('an allowed overture still delivers with the nudge and risk flag', async () => {
+    const res = await send('whatsapp me instead');
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.success).toBe(true);
@@ -127,7 +140,7 @@ describe('send path', () => {
 
     const row = await app.prisma.chatMessage.findUniqueOrThrow({ where: { id: body.data.id } });
     expect(row.offPlatformFlag).toBe(true);
-    expect(row.message).toContain('592-600-1000'); // NOT censored
+    expect(row.message).toBe('whatsapp me instead');
   });
 
   it('a normal message carries no warning and no flag', async () => {
