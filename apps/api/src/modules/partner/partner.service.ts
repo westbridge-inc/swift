@@ -158,7 +158,7 @@ export class PartnerService {
       return;
     }
     if (!input.vehicleType) throw new ValidationError('Vehicle type is required to move with Swift');
-    // [Launch vehicle list] Canters and box trucks are not taken on yet (config/vehicle-classes).
+    // [Launch vehicle list] Buses, canters and box trucks are not taken on yet (config/vehicle-classes).
     if (!isVehicleOffered(input.vehicleType)) {
       throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Choose another vehicle.');
     }
