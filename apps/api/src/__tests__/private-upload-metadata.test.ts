@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -54,8 +54,8 @@ describe('private photo metadata at persistence boundaries', () => {
     app.decorate('prisma', { encryptedObject: {
       findFirst: vi.fn(async () => null),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => { records.push(data); return data; }),
-    } });
-    app.decorate('io', {});
+    } } as unknown as FastifyInstance['prisma']);
+    app.decorate('io', {} as FastifyInstance['io']);
     app.decorate('authenticate', async (request: { user: unknown }) => { request.user = { userId: 'synthetic-subject' }; });
     await app.register(multipart);
     await app.register(verificationRoutes, { prefix: '/verification' });
