@@ -609,7 +609,7 @@ export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verificatio
 export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck } | undefined, reason: string) =>
+export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
 // [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
 // reviewer's words and the server's reason code. The words also ride the

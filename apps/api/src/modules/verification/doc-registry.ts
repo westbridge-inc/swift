@@ -562,6 +562,11 @@ export async function registryChecklist(prisma: PrismaClient, countryCode: strin
 
 /** [DOC-1 Part XIX · P19] The identity types whose VALID record lets a proprietor's verified name stand in for a business name ("trading as"). Registry text (DOC-INV-2). */
 export const IDENTITY_DOC_TYPES: readonly string[] = ['owner_national_id', 'national_id', 'passport'];
+/** [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] The licence whose NUMBER a reviewer types at approval (kept only as a
+ *  blind index, for the duplicate-account check — verification/identity-signal-policy.ts). Registry text (DOC-INV-2). */
+export const LICENCE_NUMBER_DOC_TYPES: ReadonlySet<string> = new Set(['drivers_licence']);
+/** [VERIFY-DOCS · same ruling] The documents whose ISSUE date a reviewer types at approval (the yearly re-check). Registry text (DOC-INV-2). */
+export const ISSUE_DATE_DOC_TYPES: ReadonlySet<string> = new Set(['police_clearance']);
 /** [DOC-1 Part XIX · P19] Licence-class types disclosed on the storefront while VALID (number when read, else "on file"). Registry text (DOC-INV-2). */
 /** [DOC-1 §3.6 · P3-2] The registration records that promote an UNREGISTERED store, and the declaration that puts it there. */
 export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration'];

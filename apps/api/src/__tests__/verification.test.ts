@@ -21,6 +21,7 @@ import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { reviewerTyped } from './helpers/reviewer-typed';
 
 // [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
 process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
@@ -324,9 +325,11 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     for (const doc of pending) {
       // [A-19] A reviewer keys the printed expiry; a document type that carries
       // one can no longer be approved without it.
-      const body = docTypeExpires(doc.docType)
-        ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() }
-        : {};
+      const body = {
+        ...(docTypeExpires(doc.docType) ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() } : {}),
+        // [VERIFY-DOCS] …and types the ID/licence number or the clearance's issue date.
+        ...reviewerTyped(doc.docType, doc.id),
+      };
       const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/approve`, body, adminToken);
       expect(res.statusCode, doc.docType).toBe(200);
     }
@@ -437,7 +440,7 @@ describe('L2 identity — permanent customer verification', () => {
     }, customer.tokens.accessToken);
     expect(res.json().data.status).toBe('PENDING');
 
-    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, {}, adminToken);
+    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, reviewerTyped('identity_l2', res.json().data.id), adminToken);
     expect(approve.statusCode).toBe(200);
 
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_MANUAL_PHONE } });
@@ -1101,10 +1104,12 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
 
   it('the route refuses the approval, and the document stays PENDING', async () => {
     const pending = await app.prisma.verificationDocument.findFirst({
-      where: { status: 'PENDING', docType: { in: ['drivers_licence', 'vehicle_insurance', 'police_clearance'] } },
+      // [VERIFY-DOCS] A police clearance's re-check date now comes from its typed ISSUE date
+      // (reviewer-typed-fields.test.ts), so it is no longer an example of a printed expiry.
+      where: { status: 'PENDING', docType: { in: ['drivers_licence', 'vehicle_insurance'] } },
     });
     if (!pending) return; // no such candidate in this fixture run
-    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, {}, adminToken);
+    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, reviewerTyped(pending.docType, pending.id), adminToken);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('EXPIRY_REQUIRED');
     const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: pending.id } });

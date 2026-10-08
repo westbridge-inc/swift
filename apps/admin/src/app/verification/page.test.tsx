@@ -373,7 +373,13 @@ describe('[A-19] the expiring-type list cannot drift from the server', () => {
     const clientTypes = [...local[1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!).sort();
     // the server refuses these without a date; the console must ASK for exactly
     // the same set, or it blocks the wrong documents and lets others through
-    expect(clientTypes).toEqual(serverTypes);
+    // Police clearance derives its re-check from the typed issue date, not a printed expiry.
+    const issueTypes = /ISSUE_DATE_DOC_TYPES[^=]*= new Set\(\[([^\]]*)\]\)/.exec(api);
+    if (!issueTypes) throw new Error('ISSUE_DATE_DOC_TYPES not found');
+    const issued = [...issueTypes[1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    expect(clientTypes).toEqual(serverTypes.filter((type) => !issued.includes(type)));
+    expect(page).toContain("selected?.reviewerTypes?.includes('issuedOn')");
+    expect(page).toContain('Issue date printed on the document');
   });
 });
 

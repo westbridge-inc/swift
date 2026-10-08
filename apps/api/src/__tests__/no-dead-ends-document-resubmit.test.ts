@@ -16,6 +16,7 @@ import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verific
 import { injectWithApproval } from './helpers/admin-approval';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { previousDecisions } from '../modules/verification/previous-decision';
+import { reviewerTyped } from './helpers/reviewer-typed';
 
 // ---------------------------------------------------------------------------
 // [NO-DEAD-ENDS · owner, 6 Oct] "Remember the issue for them to be able to
@@ -148,7 +149,7 @@ describe('a store owner re-submits one rejected document without restarting the 
         expect(rejected.statusCode, rejected.body).toBe(200);
         expect(rejected.json().data.status).toBe('REJECTED');
       } else {
-        const approved = await admin('PUT', `/api/v1/admin/verification/${doc.id}/approve`, {});
+        const approved = await admin('PUT', `/api/v1/admin/verification/${doc.id}/approve`, reviewerTyped(docType, doc.id));
         expect(approved.statusCode, approved.body).toBe(200);
       }
     }
@@ -203,7 +204,9 @@ describe('a store owner re-submits one rejected document without restarting the 
   });
 
   it('approving it completes the checklist and the store goes live — the same store, no restart', async () => {
-    const approved = await admin('PUT', `/api/v1/admin/verification/${resubmittedDocId}/approve`, {});
+    // [VERIFY-DOCS · reviewer-typed fields — a DELIBERATE change] the reviewer types what the type needs (an
+    // owner's national ID: its number), exactly as the console's approve panel asks.
+    const approved = await admin('PUT', `/api/v1/admin/verification/${resubmittedDocId}/approve`, reviewerTyped(rejectedDocType, resubmittedDocId));
     expect(approved.statusCode, approved.body).toBe(200);
     expect((await status()).roleVerified).toBe(true);
     const profile = await get('/api/v1/vendor/profile', ownerToken);

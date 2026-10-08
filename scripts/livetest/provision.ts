@@ -114,9 +114,19 @@ export async function submitDoc(owner: Session, role: string, docType: string, l
 
 const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString();
 
+/** [VERIFY-DOCS] What a reviewer TYPES at approval (the queue's `reviewerTypes`): the number on an ID or
+ *  licence — synthetic and unique to the document, so no two journey accounts are ever joined — or a
+ *  police clearance's issue date. */
+const NUMBER_TYPED = new Set(['national_id', 'owner_national_id', 'passport', 'identity_l2', 'drivers_licence']);
+export function reviewerTypedBody(docType: string, docId: string): Record<string, string> {
+  if (NUMBER_TYPED.has(docType)) return { documentNumber: `SYN${docId.replace(/[^a-zA-Z0-9]/g, '').slice(-16)}` };
+  if (docType === 'police_clearance') return { issuedOn: new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10) };
+  return {};
+}
+
 /** Approve one pending document as the admin (with an expiry, and hire insurance for a taxi). */
 export async function approveDoc(admin: Session, docId: string, docType: string, vehicleType?: string): Promise<Res> {
-  const body: Record<string, unknown> = {};
+  const body: Record<string, unknown> = { ...reviewerTypedBody(docType, docId) };
   if (EXPIRING.has(docType)) body.expiresAt = inDays(300);
   if (docType === 'vehicle_insurance' && vehicleType && ['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15'].includes(vehicleType)) {
     body.insurance = { insurerName: 'Synthetic Assurance', policyNumber: `SYN-${docId.slice(-8)}`, coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true };
@@ -384,7 +394,7 @@ export async function provisionJourneyWorld(roster: Roster, admin: Session, log:
       const face = await upload('/verification/upload', c7.session.token, { name: 'face.png', type: 'image/png', bytes: uniquePng('C7-identity') });
       const idv = await POST('/verification/identity', { idDocumentUrl: idDoc.url, selfieUrl: face.json?.data?.url, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION }, c7.session.token);
       const docId = idv.json?.data?.id;
-      if (docId) await asAdmin(admin.token, 'approve the synthetic identity check of the taxi journey passenger', 'PUT', `/admin/verification/${docId}/approve`, {});
+      if (docId) await asAdmin(admin.token, 'approve the synthetic identity check of the taxi journey passenger', 'PUT', `/admin/verification/${docId}/approve`, reviewerTypedBody('identity_l2', docId));
       else if (idv.status !== 409) log(`  C7: identity → ${idv.status} ${codeOf(idv)} ${idv.text.slice(0, 160)}`);
     }
     const after = (await GET('/verification/status?role=MOVER', c7.session.token)).json?.data;

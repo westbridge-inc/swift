@@ -162,21 +162,24 @@ describe('test_characterization_legacy_upload_paths', () => {
   });
 
   describe('4. [A-19] the approval expiry rule', () => {
+    // [VERIFY-DOCS] The example type was the police clearance; its re-check date now comes from the
+    // ISSUE date the reviewer types (reviewer-typed-fields.test.ts), so a type with a PRINTED expiry
+    // (the food handler's permit) carries this rule's characterization instead.
     it('an expiring type refuses approval without a printed date (EXPIRY_REQUIRED)', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('food_handler_cert');
       const res = await approve(d.id, {});
       expect(res.statusCode, res.body).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('EXPIRY_REQUIRED');
       expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } })).status).toBe('PENDING');
     });
     it('a date already passed is refused (EXPIRY_IN_PAST)', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('food_handler_cert');
       const res = await approve(d.id, { expiresAt: new Date(Date.now() - 86_400_000).toISOString() });
       expect(res.statusCode, res.body).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('EXPIRY_IN_PAST');
     });
     it('a future printed date is stored with the approval', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('food_handler_cert');
       const future = new Date(Date.now() + 300 * 86_400_000);
       const res = await approve(d.id, { expiresAt: future.toISOString() });
       expect(res.statusCode, res.body).toBe(200);

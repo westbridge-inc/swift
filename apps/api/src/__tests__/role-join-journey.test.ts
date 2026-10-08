@@ -18,6 +18,7 @@ import { loginWithOtp, requestOtp } from './helpers/otp';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { injectWithApproval } from './helpers/admin-approval';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { reviewerTyped } from './helpers/reviewer-typed';
 
 // ---------------------------------------------------------------------------
 // [phone feedback P2] The owner installed the app, signed up as a customer
@@ -226,11 +227,12 @@ describe('business: a customer with no business lists one, end to end', () => {
 
   it('an admin reviews each document through the real route; the completed checklist activates the store and the dashboard loads', async () => {
     const status = await get('/api/v1/verification/status?role=SUPERMARKET', tokens['vendor']!);
-    const pending = (status.json().data.documents as Array<{ id: string; status: string }>).filter((d) => d.status === 'PENDING');
+    const pending = (status.json().data.documents as Array<{ id: string; status: string; docType: string }>).filter((d) => d.status === 'PENDING');
     expect(pending.length).toBeGreaterThan(0);
     for (const doc of pending) {
       const approved = await injectWithApproval(app, {
-        method: 'PUT', url: `/api/v1/admin/verification/${doc.id}/approve`, payload: {},
+        // [VERIFY-DOCS] the reviewer types the owner's ID number, as the console asks
+        method: 'PUT', url: `/api/v1/admin/verification/${doc.id}/approve`, payload: reviewerTyped(doc.docType, doc.id),
         headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
       });
       expect(approved.statusCode, approved.body).toBe(200);
