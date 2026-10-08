@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import Fastify from 'fastify';
-import { prismaPlugin, systemPrismaClient, setSystemPrismaClient } from '../plugins/prisma';
+import { prismaPlugin, systemPrismaClient, setSystemPrismaClient, scopedClientFor, runWithTenant } from '../plugins/prisma';
 import {
   assessTestTarget, destructiveGuardExtension, grantSuiteCapability, isDdl, isUnscopedMutation, resetSuiteCapabilitiesForTests, TEST_TARGET_DEFAULTS, TestTargetLockError,
   withSuiteCapability,
@@ -98,12 +98,18 @@ describe('the bootstrap exits before opening a socket', () => {
     }
   });
 
-  it('the locked test target passes the gate and prints a fingerprint without a credential', () => {
-    const r = spawn({ NODE_ENV: 'test', DATABASE_URL: process.env['DATABASE_URL'] ?? GOOD.DATABASE_URL, REDIS_URL: process.env['REDIS_URL'] ?? GOOD.REDIS_URL });
+  it.each(['configured', 'query', 'path-precedence'])('the locked test target prints the %s fingerprint without a credential', (style) => {
+    const redisUrl = new URL(process.env['REDIS_URL'] ?? GOOD.REDIS_URL);
+    if (style === 'query') { redisUrl.pathname = ''; redisUrl.searchParams.set('db', '9'); }
+    if (style === 'path-precedence') { redisUrl.pathname = '/9'; redisUrl.searchParams.set('db', '14'); }
+    const env = { NODE_ENV: 'test', DATABASE_URL: process.env['DATABASE_URL'] ?? GOOD.DATABASE_URL, REDIS_URL: redisUrl.toString() };
+    const r = spawn(env);
     expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
-    const database = new URL(process.env['DATABASE_URL'] ?? GOOD.DATABASE_URL);
-    const redis = new URL(process.env['REDIS_URL'] ?? GOOD.REDIS_URL);
-    const fingerprint = `locked ${database.hostname}:${database.port || '5432'}${database.pathname} redis db ${Number(redis.pathname.slice(1))} run `;
+    const assessment = assessTestTarget(env);
+    expect(assessment.ok).toBe(true);
+    if (!assessment.ok) throw new Error('Test target was unexpectedly refused');
+    const target = assessment.target;
+    const fingerprint = `locked ${target.pgHost}:${target.pgPort}/${target.database} redis db ${target.redisDb} run `;
     expect(r.stdout.startsWith(fingerprint)).toBe(true);
     expect(r.stdout.slice(fingerprint.length)).toMatch(/^[0-9a-f-]{36}\s*$/);
     expect(r.stdout).not.toContain('swift:swift');
@@ -111,6 +117,32 @@ describe('the bootstrap exits before opening a socket', () => {
 });
 
 describe('the destructive guard', () => {
+  it('refuses predicate-free tenant mutations before tenant filtering on every client shape', async () => {
+    const app = Fastify({ logger: false });
+    await app.register(prismaPlugin);
+    await app.ready();
+    const raw = new PrismaClient();
+    const prior = process.env['SYSTEM_DATABASE_URL'];
+    process.env['SYSTEM_DATABASE_URL'] = process.env['DATABASE_URL'] ?? GOOD.DATABASE_URL;
+    setSystemPrismaClient(null);
+    try {
+      const clients = [app.prisma, scopedClientFor(raw), systemPrismaClient()!];
+      for (const client of clients) {
+        // A deliberately nonexistent tenant: even a broken guard cannot mutate fixtures.
+        await expect(runWithTenant('r048-nonexistent-tenant', () => client.user.deleteMany({})))
+          .rejects.toMatchObject({ code: 'UNSCOPED_MUTATION_REFUSED' });
+        await expect(runWithTenant('r048-nonexistent-tenant', () => client.user.updateMany({ data: { firstName: 'Forbidden' } })))
+          .rejects.toMatchObject({ code: 'UNSCOPED_MUTATION_REFUSED' });
+      }
+    } finally {
+      await systemPrismaClient()?.$disconnect();
+      setSystemPrismaClient(null);
+      if (prior === undefined) delete process.env['SYSTEM_DATABASE_URL']; else process.env['SYSTEM_DATABASE_URL'] = prior;
+      await raw.$disconnect();
+      await app.close();
+    }
+  });
+
   it('is installed on BOTH process clients by the plugin itself in test mode — app.prisma and the system client refuse without a grant', async () => {
     const app = Fastify({ logger: false });
     await app.register(prismaPlugin);
