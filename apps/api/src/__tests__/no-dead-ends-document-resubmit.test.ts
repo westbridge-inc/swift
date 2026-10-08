@@ -141,7 +141,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await cleanup();
   if (reviewerUserId) {
-    await app.prisma.auditLog.deleteMany({ where: { userId: reviewerUserId } });
+    // Audit rows are append-only and intentionally survive synthetic actor cleanup.
     await app.prisma.session.deleteMany({ where: { userId: reviewerUserId } });
     await app.prisma.admin.deleteMany({ where: { userId: reviewerUserId } });
     await app.prisma.user.deleteMany({ where: { id: reviewerUserId } });
