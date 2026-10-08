@@ -30,7 +30,7 @@ def validate(model):
     if env.get('STORAGE_ALLOW_LOCAL') != '1' or env.get('STORAGE_LOCAL_BACKUP_ACK') != '1':
         return False
     root = env.get('UPLOAD_DIR', '')
-    if not isinstance(root, str) or not root.startswith('/') or root == '/' or posixpath.normpath(root) != root:
+    if not isinstance(root, str) or not root.startswith('/') or root.startswith('//') or root == '/' or posixpath.normpath(root) != root:
         return False
     mounts = []
     for service in services:

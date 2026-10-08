@@ -76,6 +76,12 @@ class UploadStorageCheck(unittest.TestCase):
                 self.check_model(config, False)
 
     def test_local_acknowledgements_are_required(self):
+        for root in ('relative/root', '/', '/srv/../uploads', '//srv/uploads'):
+            config = local_model()
+            for service in config['services'].values():
+                service['environment']['UPLOAD_DIR'] = root
+                service['volumes'][0]['target'] = root
+            self.check_model(config, False)
         for field in ('STORAGE_ALLOW_LOCAL', 'STORAGE_LOCAL_BACKUP_ACK'):
             config = local_model()
             config['services']['api']['environment'][field] = '0'
