@@ -25,6 +25,7 @@ import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefron
 import {
   addToCart,
   checkoutAttemptSignature,
+  pricesAsSeen,
   cartQuoteFingerprint,
   checkout,
   clearCart,
@@ -686,6 +687,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       const body = {
         paymentMethod: 'CASH' as const,
         tipAmount: riderTip,
+        ...pricesAsSeen(quotedCart),
         ...(quotedCart.promoCode?.code ? { promoCode: quotedCart.promoCode.code } : {}),
       };
       const signature = checkoutAttemptSignature(quotedCart, body);
