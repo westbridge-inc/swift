@@ -10,7 +10,6 @@ import { haversineDistance } from '../../utils/distance';
 import { identityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
 import { assertFailureSource, captureHandoverEvidence, handoverBinding } from './handover-evidence';
-import { handoverAttemptState } from '../handover/handover-security';
 import {
   LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, adjustReserve, assembleClaimEvidence, assertEvidenceComplete, coveredAmountFor,
   drawReserveForPayout, reserveStatement, rollingClaimTotal, type LossProtectionRules,
@@ -302,32 +301,6 @@ export class CashRulesService {
 
     const gpsNote = gpsEvidence(input.gps.lat, input.gps.lng);
     if (input.outcome === 'paid') {
-      // [MKT-F057] The door proof for a GOODS delivery: the customer holds a
-      // 6-digit PIN and the rider enters it before the money is captured. Rides
-      // and courier jobs keep their own custody ceremonies. Legacy rows without
-      // a PIN complete as they always did (presence-gated), so nothing in flight
-      // at deploy strands. no_show/refused never reach this branch.
-      if (!isRide && !isCourier) {
-        const secret = await this.prisma.order.findUnique({
-          where: { id: orderId },
-          select: { ridePin: true, ridePinAttempts: true },
-        });
-        if (secret?.ridePin) {
-          const { locked, remaining } = handoverAttemptState(secret.ridePinAttempts);
-          if (locked) throw new AppError(400, 'MAX_ATTEMPTS',
-            'Too many incorrect PIN attempts on this order. Please contact support.');
-          if (!input.ridePin) throw new AppError(400, 'MISSING_PIN',
-            "Enter the customer's 6-digit delivery PIN.");
-          if (input.ridePin !== secret.ridePin) {
-            // The attempt burns as its own committed update, BEFORE the throw —
-            // the terminal capture transaction never runs for a wrong guess.
-            await this.prisma.order.update({ where: { id: orderId },
-              data: { ridePinAttempts: { increment: 1 } } });
-            throw new AppError(400, 'INVALID_PIN',
-              `That PIN does not match. ${remaining} attempt(s) remaining.`);
-          }
-        }
-      }
       // [M-24] ONE terminal generation: the captured payment, the DELIVERED
       // transition and the earnings commit together on the canonical seam's
       // transaction. Before, CAPTURED was written first and DELIVERED and the
@@ -385,7 +358,7 @@ export class CashRulesService {
               withinTransaction,
               invalidStatus: (current) => new AppError(409, 'NOT_IN_TRANSIT', `Cannot close a courier job from status ${current}`),
             })).order
-          : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction, expectedRiderId: mover.riderId, expectedDriverId: mover.driverId });
+          : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction, allowedFrom: ['ARRIVED'], expectedRiderId: mover.riderId, expectedDriverId: mover.driverId, handover: { kind: 'cash-delivery', code: input.ridePin } });
       for (const notice of earningNotices) {
         await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type).catch(() => {});
       }

@@ -36,9 +36,8 @@ import { assertNotSafetySuspended } from '../safety/incident.service';
 import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { requireStepUp } from '../auth/step-up';
 import { normalizeRegistrationMark } from '../verification/subjects';
-import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
-import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
-import { handoverBlockCounter } from '../../plugins/observability';
+import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { handoverAuthorityFor } from '../order/handover-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
@@ -1586,83 +1585,12 @@ export async function riderRoutes(app: FastifyInstance) {
     const { data, replayed } = await withIdempotency(app, request, 'delivered', id, async () => {
       const order = await getOwnedOrder(app, id, rider.id);
 
-      // [MOB-023] The door's authority, validated at the moment of hand-over:
-      // a screen that rendered an older payment or custody state is refused
-      // (refresh), and a non-cash rail whose money has not landed — PENDING,
-      // UNKNOWN, FAILED, EXPIRED, REFUNDED — is never handed over as paid.
-      if (!handoverVersionMatches(order, handoverVersion)) {
-        handoverBlockCounter.labels('STALE_VERSION').inc();
-        throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
-      }
-      const authority = handoverAuthorityFor(order);
-      if (authority.permitted === 'BLOCKED') {
-        handoverBlockCounter.labels(authority.blockReason ?? 'BLOCKED').inc();
-        // [F-103-01 · F-106-xx] ONE mapping, so a reason the door produces is
-        // never answered as a different one. This enumerated two and let the
-        // third fall through to "Payment is captured — do not hand over",
-        // which contradicts itself and re-offers the "ask the store" advice
-        // F-106-03 removed.
-        const refusal = HANDOVER_REFUSALS[authority.blockReason ?? ''];
-        if (refusal) throw new AppError(409, refusal.code, refusal.message);
-        // PENDING keeps the fulfilment gate's one domain error (SPS-F-0016); every other un-landed state is the door's.
-        const code = order.paymentStatus === 'PENDING' ? 'MMG_PAYMENT_PENDING' : 'PAYMENT_NOT_CAPTURED';
-        throw new AppError(409, code, `Payment is ${order.paymentStatus.toLowerCase()} — do not hand over. Refresh, or ask the store to confirm the payment.`);
-      }
-
-      const validFrom = ['ARRIVED', 'EN_ROUTE_DELIVERY'];
-      if (!validFrom.includes(order.status)) {
-        throw new AppError(
-          400,
-          'INVALID_TRANSITION',
-          `Cannot mark as delivered from status ${order.status}. Rider must be ARRIVED or EN_ROUTE_DELIVERY.`,
-        );
-      }
-
-      // Golden rule: a CASH order can't be closed until the money is in hand.
-      // Cash is captured only via POST /handover {outcome:'paid'} (which then
-      // completes the delivery); /delivered is the final step for orders already
-      // paid (MMG is CAPTURED at checkout). Without this gate a rider could mark
-      // a cash order delivered without collecting — skipping the strike/guarantee
-      // flow and leaving the books saying "delivered" while nothing was paid.
-      if (order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
-        throw new AppError(
-          409,
-          'PAYMENT_NOT_CAPTURED',
-          'Collect the cash first — use “Confirm payment & hand over” to record it, which completes the delivery.',
-        );
-      }
-
-      // Verify the delivery PIN if one was set on the order.
-      // [F-0011] Read the secret ONLY here, where it is compared — the rider is
-      // its VERIFIER, so no rider-facing payload may carry it (see getOwnedOrder).
-      // [MKT-F057] The same shared lockout as the taxi PIN and the pickup code:
-      // 5 wrong tries (MAX_HANDOVER_ATTEMPTS), support-only reset. Legacy rows
-      // without a PIN complete as before (presence-gated), so nothing in flight
-      // strands.
-      const secret = await app.prisma.order.findUnique({ where: { id },
-        select: { ridePin: true, ridePinAttempts: true } });
-      if (secret?.ridePin) {
-        const { locked, remaining } = handoverAttemptState(secret.ridePinAttempts);
-        if (locked) throw new AppError(400, 'MAX_ATTEMPTS',
-          'Too many incorrect delivery-PIN attempts on this order. Please contact support.');
-        if (ridePin == null || ridePin === '') throw new AppError(400, 'MISSING_PIN',
-          "Enter the customer's 6-digit delivery PIN.");
-        if (ridePin !== secret.ridePin) {
-          // A wrong guess burns its attempt as its own committed update BEFORE
-          // the throw — the DELIVERED transition never runs for it.
-          await app.prisma.order.update({ where: { id }, data: { ridePinAttempts: { increment: 1 } } });
-          throw new AppError(400, 'INVALID_PIN',
-            `That PIN does not match. ${remaining} attempt(s) remaining.`);
-        }
-      }
-
-      // 1. Update order status — handles notifications, sockets, float release,
-      //    and freeing the rider (isAvailable/currentOrderId/totalDeliveries)
-      //    centrally, so every terminal path behaves the same.
-      await orderService.updateStatus(id, 'DELIVERED', request.user.userId, 'Delivery completed');
-
-      // 2. Create earning records (delivery fee + tip).
-      await orderService.createEarnings(id);
+      // Fresh custody, payment, code and budget are one canonical Order-lock
+      // decision. A wrong attempt commits before its route error is returned.
+      await orderService.updateStatus(id, 'DELIVERED', request.user.userId, 'Delivery completed', {
+        allowedFrom: ['ARRIVED', 'EN_ROUTE_DELIVERY'], expectedRiderId: rider.id,
+        handover: { kind: 'delivery', code: ridePin, handoverVersion },
+      });
 
       // 3. Read the freed rider back for the response payload.
       const updated = await app.prisma.rider.findUniqueOrThrow({

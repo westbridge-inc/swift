@@ -1,3 +1,5 @@
+import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
+import { authorizeHandover, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
@@ -494,6 +496,7 @@ type EarningNotice = {
 };
 
 export interface CanonicalOrderTransitionInput {
+  handover?: HandoverDecision;
   serializeIdentity?: boolean;
   orderId: string;
   target: OrderStatus;
@@ -556,6 +559,7 @@ export interface CanonicalOrderTransitionInput {
 }
 
 export interface CanonicalOrderTransitionResult {
+  replayed?: boolean;
   order: CanonicalTransitionOrder;
   sourceStatus: OrderStatus;
   cancelledSearches: number;
@@ -1894,15 +1898,16 @@ export class OrderService {
   async stageCanonicalOrderTransition(
     tx: Prisma.TransactionClient,
     input: CanonicalOrderTransitionInput,
-  ): Promise<CanonicalOrderTransitionResult> {
+  ): Promise<CanonicalOrderTransitionResult | HandoverFailure> {
     await bindTenantTransaction(tx);
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const source = await tx.order.findUnique({ where: { id: input.orderId } });
     if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
-    if (!input.allowedFrom.includes(source.status)) {
+    if (!input.handover && !input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
+
     // A BOOKING is confirmed, completed or cancelled — never prepared, marked
     // ready, handed to a rider or delivered [order-status.ts BOOKING_LAW]. The
     // kitchen routes refuse it first, but this is the locked seam every caller
@@ -1927,6 +1932,17 @@ export class OrderService {
     }
     if (input.expectedFulfillmentMode !== undefined && source.fulfillmentMode !== input.expectedFulfillmentMode) {
       throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
+    }
+    if (input.handover) {
+      await authorizeHandover(tx, source, input.handover);
+      if (source.status === input.target) {
+        const order = await tx.order.findUniqueOrThrow({ where: { id: input.orderId }, omit: HANDOVER_SECRETS_OMIT, include: CANONICAL_TRANSITION_INCLUDE });
+        return { order, sourceStatus: source.status, cancelledSearches: 0, earningNotices: [], replayed: true };
+      }
+    }
+    if (!input.allowedFrom.includes(source.status)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
     // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
@@ -1997,6 +2013,10 @@ export class OrderService {
     if (input.requireHoldExpired && source.holdExpiresAt && source.holdExpiresAt > now) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
+    }
+    if (input.handover) {
+      const failure = await verifyHandoverDecision(tx, source, input.handover);
+      if (failure) return failure;
     }
     const data: Prisma.OrderUncheckedUpdateInput = { status: input.target };
     const timestampField: Partial<Record<OrderStatus, keyof Prisma.OrderUncheckedUpdateInput>> = {
@@ -2179,6 +2199,7 @@ export class OrderService {
         );
       }
     }
+    if (input.handover) await persistHandoverNotice(tx, order);
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
 
@@ -2198,7 +2219,7 @@ export class OrderService {
   async transitionOrderAtomically(
     input: CanonicalOrderTransitionInput,
   ): Promise<CanonicalOrderTransitionResult> {
-    let committed: CanonicalOrderTransitionResult | undefined;
+    let committed: CanonicalOrderTransitionResult | HandoverFailure | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         committed = await this.prisma.$transaction(async (tx) => {
@@ -2215,6 +2236,14 @@ export class OrderService {
       }
     }
     if (!committed) throw new Error('Order transition transaction did not produce a result');
+    if ('handoverFailure' in committed) {
+      const refusal = committed.handoverFailure;
+      throw new AppError(refusal.statusCode, refusal.code, refusal.message);
+    }
+
+
+    if (input.handover) await drainHandoverNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId: input.orderId })
+      .catch((err) => log().warn({ err, orderId: input.orderId }, 'handover notice remains pending after commit'));
 
     // [DISPATCH 1/3 · B4] Every operational cancellation passes here (vendor
     // reject, courier sender cancel, admin cancel, the no-response
@@ -2467,6 +2496,7 @@ export class OrderService {
     changedBy: string,
     note?: string,
     opts?: {
+      handover?: HandoverDecision;
       serializeIdentity?: boolean;
       withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
       allowedFrom?: readonly OrderStatus[];
@@ -2484,13 +2514,14 @@ export class OrderService {
 
     // Status, timestamps, terminal mover/float release, stock, earnings, and
     // append-only evidence share one commit. Only sockets/push happen below.
-    const { order } = await this.transitionOrderAtomically({
+    const { order, replayed } = await this.transitionOrderAtomically({
       orderId,
       target,
       allowedFrom,
       changedBy,
       note,
       serializeIdentity: opts?.serializeIdentity,
+      handover: opts?.handover,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
       ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
@@ -2503,13 +2534,21 @@ export class OrderService {
       ),
     });
 
+    if (replayed) return order;
+
     log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
     const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
+    try {
     this.io.to(`order:${orderId}`).emit('order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition
     // live without subscribing to each order individually.
     if (order.vendorId) {
       this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+    }
+
+    } catch (err) {
+      if (!opts?.handover) throw err;
+      log().warn({ err, orderId }, 'handover socket publication failed after commit');
     }
 
     // Send notifications
@@ -2544,7 +2583,7 @@ export class OrderService {
         break;
       }
       case 'DELIVERED':
-        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
+        if (!opts?.handover) await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
         break;
     }
 
@@ -2554,6 +2593,10 @@ export class OrderService {
       const account = await this.prisma.user.findUnique({
         where: { id: order.customerId },
         select: { countryCode: true },
+      }).catch((err) => {
+        if (!opts?.handover) throw err;
+        log().warn({ err, orderId }, 'trust promotion deferred after handover');
+        return null;
       });
       if (account) {
         await new CashRulesService(this.prisma, this.notifications, this)
