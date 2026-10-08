@@ -80,7 +80,7 @@ function pauseTransition() {
   const waiting = new Promise<void>((resolve) => { entered = resolve; });
   const gate = new Promise<void>((resolve) => { resume = resolve; });
   const original = OrderService.prototype.updateStatus;
-  vi.spyOn(OrderService.prototype, 'updateStatus').mockImplementationOnce(async function (...args) {
+  vi.spyOn(OrderService.prototype, 'updateStatus').mockImplementationOnce(async function (this: OrderService, ...args) {
     entered(); await gate;
     return original.apply(this, args);
   });
@@ -150,4 +150,24 @@ describe('rider pickup binds the locked assignment and route state', () => {
     expect(await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({ status: 'PICKED_UP', riderId: mover.rider!.id });
     expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'PICKED_UP' } })).toBe(1);
   });
+  it('the transition helper rejects another actor even with the current generation', async () => {
+    const { order } = await fixture();
+    const outsider = await actor(true);
+    const service = new OrderService(app.prisma, { to: () => ({ emit }) } as never);
+    await expect(service.updateRiderStatus(order.id, 'PICKED_UP', outsider.id, 'Synthetic pickup', {
+      riderId: outsider.rider!.id, assignmentVersion: order.riderAssignmentVersion,
+      allowedFrom: ['RIDER_ARRIVED_PICKUP'],
+    })).rejects.toMatchObject({ code: 'ACTOR_NOT_ASSIGNED' });
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id } })).toBe(0);
+  });
+  it('the database advances on release and reassignment and refuses counter rewrites', async () => {
+    const { mover, order } = await fixture();
+    const released = await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, riderAssignmentVersion: 0 } });
+    expect(released.riderAssignmentVersion).toBe(order.riderAssignmentVersion + 1);
+    const assigned = await app.prisma.order.update({ where: { id: order.id }, data: { riderId: mover.rider!.id } });
+    expect(assigned.riderAssignmentVersion).toBe(order.riderAssignmentVersion + 2);
+    const rewritten = await app.prisma.order.update({ where: { id: order.id }, data: { riderAssignmentVersion: 0 } });
+    expect(rewritten.riderAssignmentVersion).toBe(assigned.riderAssignmentVersion);
+  });
+
 });
