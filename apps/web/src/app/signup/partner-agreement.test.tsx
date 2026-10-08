@@ -59,7 +59,8 @@ async function newAccount(user: ReturnType<typeof userEvent.setup>, tile: RegExp
 async function driverDetails() {
   const user = userEvent.setup();
   render(<SignupPage />);
-  await user.click(screen.getByRole('button', { name: /Drive & deliver/ }));
+  // [W9] The taxi driver's door (a car: vehicle details and the agreement).
+  await user.click(screen.getByRole('button', { name: /Drive a taxi with Swift/ }));
   fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001004' } });
   await user.click(screen.getByRole('button', { name: 'Send code' }));
   fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } });
