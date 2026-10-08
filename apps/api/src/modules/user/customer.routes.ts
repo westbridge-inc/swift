@@ -32,7 +32,7 @@ import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
+import { visibleVendorRelForCaller, visibleVendorForCaller, visibleVendorSqlForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
@@ -1342,11 +1342,12 @@ export async function customerRoutes(app: FastifyInstance) {
         return { success: true, ...paginatedResponse([], 0, { page, limit, skip }) };
       }
       categoryRow = { id: cat.id, kind: cat.kind };
-      const members = await app.prisma.vendorDiscoveryCategory.findMany({
-        where: { categoryId: cat.id },
-        select: { vendorId: true },
-      });
-      where['id'] = { in: members.map((m) => m.vendorId) };
+      if (sort !== 'top_rated') {
+        const members = await app.prisma.vendorDiscoveryCategory.findMany({
+          where: { categoryId: cat.id }, select: { vendorId: true },
+        });
+        where['id'] = { in: members.map((m) => m.vendorId) };
+      }
     }
     if (cuisine) where['cuisineTypes'] = { has: cuisine };
     if (open === 'true') where['isCurrentlyOpen'] = true;
@@ -1372,33 +1373,35 @@ export async function customerRoutes(app: FastifyInstance) {
     let vendors: Awaited<ReturnType<typeof app.prisma.vendor.findMany>>;
     let total: number;
     if (sort === 'top_rated') {
-      // R8: Bayesian display lives on ActorRatingStat (relation-less by
-      // design), so the global order is computed over an id projection first,
-      // then the page is fetched — unrated stores sink, ties break on the raw
-      // mean then name so the order is stable.
-      const idRows = await app.prisma.vendor.findMany({
-        where,
-        select: { id: true, isCurrentlyOpen: true, averageRating: true, name: true },
-      });
-      const surfAll = await ratingSurfaces(app.prisma, 'VENDOR', idRows.map((r) => r.id));
-      idRows.sort(
-        (a, b) =>
-          (categoryRow ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
-          (surfAll.get(b.id)!.displayRating ?? -1) - (surfAll.get(a.id)!.displayRating ?? -1) ||
-          b.averageRating - a.averageRating ||
-          a.name.localeCompare(b.name),
-      );
-      // [DL-7 · SX397 F4] THE TOTAL'S CONTRACT: it counts the ranking
-      // population as it was when the ranking was computed — the same caller
-      // predicate, read once. The page rows are re-read with every caller
-      // filter, so a store that became hidden in between is never RETURNED,
-      // though it may still be COUNTED for this one response. The total is
-      // pagination metadata, never content; it reveals nothing the caller was
-      // not eligible to rank a moment earlier (dl7-public-scope-r3).
-      total = idRows.length;
-      const pageIds = idRows.slice(skip, skip + limit).map((r) => r.id);
-      // Recheck all caller filters after ranking; visibility can change
-      // between the ID projection and this page read.
+      if (!Number.isSafeInteger(skip) || skip > 5000) throw new AppError(400, 'PAGE_TOO_DEEP', 'Choose a page within the first 5,000 results.');
+      // ActorRatingStat already materializes the canonical display score on
+      // every rating update. Page in SQL before loading detail or rating IDs.
+      const predicates = [visibleVendorSqlForCaller(), Prisma.sql`EXISTS (SELECT 1 FROM "items" i WHERE i."vendorId" = v."id" AND i."isAvailable" = true)`];
+      if (type) predicates.push(Prisma.sql`v."vendorType"::text = ${type}`);
+      if (cuisine) predicates.push(Prisma.sql`${cuisine} = ANY(v."cuisineTypes")`);
+      if (open === 'true') predicates.push(Prisma.sql`v."isCurrentlyOpen" = true`);
+      if (minRating != null) predicates.push(Prisma.sql`v."averageRating" >= ${minRating}`);
+      if (categoryRow) predicates.push(Prisma.sql`EXISTS (SELECT 1 FROM "vendor_discovery_categories" c WHERE c."vendorId" = v."id" AND c."tenantId" = v."tenantId" AND c."categoryId" = ${categoryRow.id})`);
+      if (search) {
+        const contains = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
+        predicates.push(Prisma.sql`(v."name" ILIKE ${contains} OR v."description" ILIKE ${contains} OR ${search} = ANY(v."cuisineTypes"))`);
+      }
+      const predicate = Prisma.join(predicates, ' AND ');
+      const [ids, counts] = await app.prisma.$transaction([
+        app.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+          SELECT v."id" FROM "vendors" v
+          LEFT JOIN "actor_rating_stats" r ON r."tenantId" = v."tenantId" AND r."subjectRole" = 'VENDOR' AND r."subjectId" = v."id"
+          WHERE ${predicate}
+          ORDER BY ${categoryRow ? Prisma.sql`v."isCurrentlyOpen" DESC,` : Prisma.empty}
+            COALESCE(r."displayRating", -1) DESC, v."averageRating" DESC,
+            v."name" COLLATE "C" ASC, v."id" COLLATE "C" ASC
+          LIMIT ${limit} OFFSET ${skip}
+        `),
+        app.prisma.$queryRaw<Array<{ total: bigint }>>(Prisma.sql`SELECT COUNT(*) AS total FROM "vendors" v WHERE ${predicate}`),
+      ], { isolationLevel: 'RepeatableRead' });
+      total = Number(counts[0]?.total ?? 0);
+      const pageIds = ids.map((r) => r.id);
+      // A current visibility reread fences eligibility changes after ranking.
       const rows = await app.prisma.vendor.findMany({ where: { AND: [where, { id: { in: pageIds } }] } });
       const byId = new Map(rows.map((r) => [r.id, r]));
       vendors = pageIds.map((id) => byId.get(id)).filter((v): v is NonNullable<typeof v> => v != null);
@@ -1436,22 +1439,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // the category, then live-item counts grouped by vendor.
     const itemCounts = new Map<string, number>();
     if (categoryRow && ['DISH', 'DIETARY', 'AISLE'].includes(categoryRow.kind) && vendors.length) {
-      const tagRows = await app.prisma.itemDiscoveryCategory.findMany({
-        where: { categoryId: categoryRow.id },
-        select: { itemId: true },
-      });
-      if (tagRows.length) {
-        const grouped = await app.prisma.item.groupBy({
-          by: ['vendorId'],
-          where: {
-            id: { in: tagRows.map((t) => t.itemId) },
-            vendorId: { in: vendors.map((v) => v.id) },
-            isAvailable: true,
-          },
-          _count: { _all: true },
-        });
-        for (const g of grouped) itemCounts.set(g.vendorId, g._count._all);
-      }
+      const grouped = await app.prisma.$queryRaw<Array<{ vendorId: string; count: bigint }>>(Prisma.sql`
+        SELECT i."vendorId", COUNT(DISTINCT i."id") AS count FROM "items" i
+        JOIN "vendors" v ON v."id" = i."vendorId"
+        JOIN "item_discovery_categories" c ON c."itemId" = i."id" AND c."tenantId" = v."tenantId"
+        WHERE c."categoryId" = ${categoryRow.id} AND i."isAvailable" = true
+          AND i."vendorId" IN (${Prisma.join(vendors.map((v) => v.id))})
+        GROUP BY i."vendorId"
+      `);
+      for (const g of grouped) itemCounts.set(g.vendorId, Number(g.count));
     }
 
     // [FUL-003b completion] Resolve the buyer's delivery schedule ONCE for this

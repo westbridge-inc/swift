@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { mondayOf } from './ads-weeks';
-import { signImpressionToken, userHash } from './ads-token';
+import { signImpressionToken, userHash, adIdentity, adNetwork, recordAdServe, cleanupAdAuthorities } from './ads-token';
 
 // Ad serving (ads-platform spec §11). One batched endpoint builds the home
 // screen's ad slots. The cardinal rule: ADS NEVER BREAK THE HOME SCREEN — empty
@@ -82,8 +82,11 @@ export class AdServingService {
     /** Server-authenticated principal. It is used only to derive pseudonymous
      *  values and is never returned or persisted as a raw id. */
     userId: string | null;
+    guestId?: string;
+    network?: string;
     keys: string[];
   }, now = new Date()): Promise<{ placements: Record<string, PlacementSlot>; _house: Record<string, boolean> }> {
+    await cleanupAdAuthorities(this.prisma, now, input.tenantId);
     const week = mondayOf(now, 'America/Guyana');
     const placements: Record<string, PlacementSlot> = {};
     const house: Record<string, boolean> = {};
@@ -123,7 +126,17 @@ export class AdServingService {
       items = rotateStart(items, fnv1a(`${currentUserHash ?? input.sessionId}:${hourBucket}`));
 
       const maxItems = key === 'home_ad_bar' ? placement.slotsPerWeek : 1;
-      const shaped = items.slice(0, maxItems).map((it) => this.attachToken(it, key, input.sessionId, input.userId, isHouse, now.getTime()));
+      const shaped: ServeItem[] = [];
+      const identity = adIdentity(input.userId, input.guestId);
+      for (const item of items.slice(0, maxItems)) {
+        if (isHouse) { shaped.push(item); continue; }
+        if (!identity) continue;
+        const grant = await recordAdServe(this.prisma, {
+          tenantId: input.tenantId, campaignId: item.campaignId, creativeId: item.creativeId,
+          placementKey: key, principalHash: identity, networkHash: adNetwork(input.network ?? identity), week, city: input.city,
+        }, now);
+        if (grant) shaped.push({ ...item, impressionToken: signImpressionToken({ c: item.campaignId, r: item.creativeId, p: key, s: input.sessionId, i: grant, t: input.tenantId }, input.userId, now.getTime()) });
+      }
 
       placements[key] = { rotationSeconds: placement.rotationSeconds ?? null, ttlSeconds: Math.floor(POOL_TTL_MS / 1000), items: shaped };
       if (isHouse) house[key] = true;
@@ -185,8 +198,4 @@ export class AdServingService {
     return items;
   }
 
-  private attachToken(item: ServeItem, placementKey: string, sessionId: string, userId: string | null, isHouse: boolean, now: number): ServeItem {
-    if (isHouse) return item; // house ads are not tracked (§11.1)
-    return { ...item, impressionToken: signImpressionToken({ c: item.campaignId, r: item.creativeId, p: placementKey, s: sessionId }, userId, now) };
-  }
 }

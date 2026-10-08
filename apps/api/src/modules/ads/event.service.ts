@@ -1,13 +1,11 @@
 import { Prisma, type PrismaClient, type AdEventType } from '@prisma/client';
 import { createHash } from 'node:crypto';
-import { adTokenMatchesPrincipal, userHash, verifyImpressionToken } from './ads-token';
+import { adTokenMatchesPrincipal, userHash, verifyImpressionToken, adIdentity } from './ads-token';
 
-// Ad event ingestion (ads-platform spec §12.2). The anti-fraud core: an event
-// is only counted if its impression token verifies (HMAC + expiry) — a token
-// never issued by a real serve is impossible to forge. Then dedupe (one event
-// per token per type), increment the frequency counter on viewable
-// impressions, and insert the billing-grade AdEvent. Raw user ids never enter
-// AdEvent — only the daily-rotating userHash. Postgres is the source of truth.
+// Ad event ingestion (ads-platform spec §12.2). Recorded serve grants bound
+// client reports to a serving decision, principal, lifetime and event sequence.
+// They do not prove a human view. Grant transitions, dedupe, frequency and
+// telemetry commit together. Raw user ids never enter AdEvent.
 
 const VIEWABLE = 'VIEWABLE_IMPRESSION';
 
@@ -23,6 +21,7 @@ export type EventVerdict = 'accepted' | 'duplicate' | 'invalid';
 export interface AdEventRequestPrincipal {
   userId: string | null;
   authPresented: boolean;
+  guestId?: string;
 }
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -43,7 +42,7 @@ export class AdEventService {
 
   private async ingestOne(ev: IncomingEvent, principal: AdEventRequestPrincipal, now: Date): Promise<EventVerdict> {
     const verdict = verifyImpressionToken(ev.token, now.getTime());
-    if (!verdict.ok) return 'invalid';
+    if (!verdict.ok || verdict.payload.v !== 2 || !verdict.payload.i || !verdict.payload.t) return 'invalid';
     // A token issued to user A can never acquire user B's attribution, and a
     // guest token stays guest-only. This check precedes dedupe/frequency writes
     // so a rejected replay cannot consume the legitimate event.
@@ -55,18 +54,44 @@ export class AdEventService {
     const occurredAt = this.safeDate(ev.occurredAt, now);
 
     // Campaign authority, the exact dedupe claim, frequency mutation, and the
-    // billing-grade event are one commit. FOR KEY SHARE makes a concurrently
+    // bounded client report are one commit. FOR KEY SHARE makes a concurrently
     // deleted campaign wait until this event commits; an already-missing
     // campaign is invalid and can never fall through to a default tenant.
     return this.prisma.$transaction(async (tx): Promise<EventVerdict> => {
+      await tx.$executeRaw`SELECT set_config('app.current_tenant', ${verdict.payload.t}, true)`;
       const campaigns = await tx.$queryRaw<Array<{ tenantId: string }>>(Prisma.sql`
         SELECT "tenantId"
         FROM "ad_campaigns"
-        WHERE "id" = ${campaignId}
+        WHERE "id" = ${campaignId} AND "tenantId" = ${verdict.payload.t}
         FOR KEY SHARE
       `);
       const campaign = campaigns[0];
       if (!campaign) return 'invalid';
+
+      const grants = await tx.$queryRaw<Array<{ principalHash: string; campaignId: string; creativeId: string; placementKey: string; issuedAt: Date; expiresAt: Date; eventMask: number; kind: string; durationMs: number }>>(Prisma.sql`
+        SELECT * FROM "ad_serve_grants" WHERE "id" = ${verdict.payload.i} AND "tenantId" = ${campaign.tenantId} FOR UPDATE
+      `);
+      const grant = grants[0];
+      if (!grant || grant.expiresAt <= now || grant.expiresAt.getTime() !== verdict.payload.e
+        || grant.principalHash !== adIdentity(principal.userId, principal.guestId)
+        || grant.campaignId !== campaignId || grant.creativeId !== creativeId || grant.placementKey !== placementKey) return 'invalid';
+      const bits: Record<AdEventType, number> = { IMPRESSION: 1, VIEWABLE_IMPRESSION: 2, CLICK: 4, VIDEO_START: 8, VIDEO_Q25: 16, VIDEO_Q50: 32, VIDEO_Q75: 64, VIDEO_COMPLETE: 128 };
+      const bit = bits[ev.eventType];
+      if (!bit) return 'invalid';
+      if (grant.eventMask & bit) return 'duplicate';
+      // Permit one minute of client clock skew, never backdating a grant into
+      // unrelated historical traffic. Progress uses server elapsed time.
+      if (occurredAt.getTime() < grant.issuedAt.getTime() - 60_000) return 'invalid';
+      const elapsed = now.getTime() - grant.issuedAt.getTime();
+      if (elapsed < 0 || (bit !== 1 && !(grant.eventMask & 1))) return 'invalid';
+      if (bit === 2 && elapsed < 1000) return 'invalid';
+      if (bit >= 8) {
+        if (grant.kind !== 'VIDEO' || grant.durationMs <= 0) return 'invalid';
+        const prior: Record<number, number> = { 16: 8, 32: 16, 64: 32, 128: 64 };
+        const fraction: Record<number, number> = { 16: 0.25, 32: 0.5, 64: 0.75, 128: 0.98 };
+        if (prior[bit] && !(grant.eventMask & prior[bit]!)) return 'invalid';
+        if (elapsed < grant.durationMs * (fraction[bit] ?? 0)) return 'invalid';
+      }
 
       // Only a conflict on this exact (tokenHash, eventType) claim is a
       // duplicate. A broad P2002 catch would hide unrelated data-integrity
@@ -90,12 +115,14 @@ export class AdEventService {
         });
       }
 
+      await tx.$executeRaw(Prisma.sql`UPDATE "ad_serve_grants" SET "eventMask" = "eventMask" | ${bit} WHERE "id" = ${verdict.payload.i}`);
       await tx.adEvent.create({
         data: {
           tenantId: campaign.tenantId,
           campaignId, creativeId, placementKey, eventType: ev.eventType,
           userHash: currentUserHash, sessionId, occurredAt, tokenHash: th,
-          meta: (ev.meta ?? undefined) as never,
+          authorityVersion: 2,
+          meta: { ...(ev.meta ?? {}), authorityVersion: 2 } as never,
         },
       });
       return 'accepted';

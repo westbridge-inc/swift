@@ -61,6 +61,19 @@ async function paidInvoice(advertiserId: string, campaignId: string, amount: num
 const intentsFor = (campaignId: string) => prisma.adRefundIntent.findMany({ where: { campaignId }, include: { items: true, outbox: true }, orderBy: { createdAt: 'asc' } });
 const readyNow = (campaignId: string) => prisma.adRefundOutbox.updateMany({ where: { refundIntent: { campaignId } }, data: { availableAt: new Date(0), leaseExpiresAt: null } });
 
+async function assertDue(intentId: string) {
+  const [row] = await prisma.$queryRaw<Array<{ ready: boolean; unprocessed: boolean; unleased: boolean; live: boolean; aheadMs: number }>>`
+    SELECT "availableAt" <= CURRENT_TIMESTAMP AS ready,
+      "processedAt" IS NULL AS unprocessed, "leaseExpiresAt" IS NULL AS unleased,
+      "deadLetteredAt" IS NULL AS live,
+      (extract(epoch FROM ("availableAt" - CURRENT_TIMESTAMP)) * 1000)::double precision AS "aheadMs"
+    FROM "ad_refund_outbox" WHERE "refundIntentId" = ${intentId}`;
+  expect(row, `refund fixture must be due on the database clock; aheadMs=${row?.aheadMs}`)
+    .toMatchObject({ ready: true, unprocessed: true, unleased: true, live: true });
+  expect(process.env['AD_REFUND_EXECUTION_KILL']).not.toBe('1');
+}
+
+
 describe('the register’s red test: the obligation is one generation with the terminal state', () => {
   it('cancel creates the intent, its items and its outbox row in the SAME transaction; a staging failure leaves the campaign uncancelled and nothing staged', async () => {
     const { campaign, placement, advertiser } = await scaffold({ status: 'SCHEDULED', startWeek: WK_FUTURE });
@@ -96,6 +109,7 @@ describe('the register’s red test: the obligation is one generation with the t
     const [intent] = await intentsFor(campaign.id);
     let failures = 0;
     refunds.observer = { beforeExecute: async () => { failures += 1; throw new Error('provider blip'); } };
+    await assertDue(intent!.id);
     const first = await refunds.drainOutbox({ intentIds: [intent!.id] });
     expect(first).toMatchObject({ processed: 0, failed: 1 });
     expect(failures).toBe(1);
@@ -131,6 +145,7 @@ describe('[R045-ADS-02] a CREDIT is a persisted liability applied once', () => {
     expect(intent!.items).toHaveLength(1);
     expect(intent!.items[0]).toMatchObject({ kind: 'CREDIT', bookingId: booking.id });
     expect(intent!.items[0]!.amountMinor).toBe(200000n); // 2 of 7 days of 7,000.00
+    await assertDue(intent!.id);
     await refunds.executeNow(intent!.id);
     const after = await prisma.advertiser.findUniqueOrThrow({ where: { id: advertiser.id } });
     expect(after.creditBalance.toString()).toBe('2000');
@@ -163,6 +178,7 @@ describe('[R045-ADS-03] integer minor units end to end', () => {
     expect(byBooking.get(b1.id)).toBe(51n);  // 101 at 50% → 51 (half up)
     expect(byBooking.get(b2.id)).toBe(58n);  // 115 at 50% → 57.5 → 58 — never 57 from a truncated 114
     expect(intent!.amountMinor).toBe(109n);
+    await assertDue(intent!.id);
     await refunds.executeNow(intent!.id);
     expect((await prisma.adInvoice.findUniqueOrThrow({ where: { id: invoice.id } })).refundedAmount.toString()).toBe('1.09');
     // a forced replay moves the invoice nowhere: the bookings are already REFUNDED

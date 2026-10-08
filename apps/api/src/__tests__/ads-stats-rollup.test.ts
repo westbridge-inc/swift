@@ -41,7 +41,7 @@ async function makeCampaign() {
 }
 
 async function seedEvent(campaignId: string, creativeId: string, type: string, at: Date) {
-  await prisma.adEvent.create({ data: { campaignId, creativeId, placementKey: 'home_ad_bar', eventType: type as never, sessionId: nanoid(6), occurredAt: at, tokenHash: nanoid(16), receivedAt: at } });
+  await prisma.adEvent.create({ data: { campaignId, creativeId, placementKey: 'home_ad_bar', eventType: type as never, sessionId: nanoid(6), occurredAt: at, tokenHash: nanoid(16), receivedAt: at, authorityVersion: 2 } });
 }
 
 describe('§12.3 rollup reconciliation (MERGE GATE)', () => {
@@ -86,4 +86,24 @@ describe('§12.3 rollup reconciliation (MERGE GATE)', () => {
     await stats.rollupDay(DAY);
     expect((await stats.campaignStats(campaign.id)).totals.impressions).toBe(5);
   });
+});
+
+it('MASTER-052 keeps legacy unverified claims outside new accepted rollups', async () => {
+  const { campaign, creativeId } = await makeCampaign();
+  await prisma.adEvent.create({ data: { campaignId: campaign.id, creativeId, placementKey: 'legacy', eventType: 'IMPRESSION', sessionId: 'legacy', tokenHash: nanoid(16), occurredAt: DAY } });
+  await stats.rollupDay(DAY);
+  const report = await stats.campaignStats(campaign.id);
+  expect(report.totals.impressions).toBe(0);
+  expect(report.totals.spend).toBe(1000);
+  expect(report.measurement).toMatchObject({ unverifiedEvents: 1, acceptedEvents: 0, historicalRollups: 'UNVERIFIED' });
+});
+
+it('MASTER-052 legacy client metadata cannot certify its own provenance', async () => {
+  const { campaign, creativeId } = await makeCampaign();
+  await prisma.adEvent.create({ data: { campaignId: campaign.id, creativeId, placementKey: 'legacy-marker', eventType: 'IMPRESSION', sessionId: 'legacy', tokenHash: nanoid(16), occurredAt: DAY, meta: { authorityVersion: 2 } } });
+  await stats.rollupDay(DAY);
+  const report = await stats.campaignStats(campaign.id);
+  expect(report.totals.impressions).toBe(0);
+  expect(report.totals.spend).toBe(1000);
+  expect(report.measurement).toMatchObject({ unverifiedEvents: 1, acceptedEvents: 0 });
 });

@@ -1,3 +1,5 @@
+import { isProduction } from '../../utils/runtime-mode';
+import { issueAdGuest, readAdGuest } from './ads-token';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AdvertiserService } from './advertiser.service';
@@ -226,14 +228,22 @@ export async function adsRoutes(app: FastifyInstance) {
   const optionalAuth = { preHandler: [app.authenticateOptional] };
 
   const deriveUserId = (request: { user?: { userId?: string } }): string | null => request.user?.userId ?? null;
-  const deriveEventPrincipal = (request: { user?: { userId?: string }; headers: { authorization?: unknown } }) => ({
+  const deriveEventPrincipal = (request: { user?: { userId?: string }; headers: { authorization?: unknown; cookie?: string } }) => ({
     userId: deriveUserId(request),
+    guestId: readAdGuest(request.headers.cookie),
     authPresented: typeof request.headers.authorization === 'string' && request.headers.authorization.trim().length > 0,
   });
 
   /** GET /serve — build the home-screen ad slots. Never errors the home screen;
    *  empty inventory → house ads → collapsed slot. */
-  app.get('/serve', optionalAuth, async (request) => {
+  app.get('/serve', optionalAuth, async (request, reply) => {
+    let guestId = readAdGuest(request.headers.cookie);
+    if (!deriveUserId(request) && !guestId) {
+      const cookie = issueAdGuest();
+      guestId = readAdGuest(`swift_ad_guest=${cookie}`);
+      reply.header('Set-Cookie', `swift_ad_guest=${cookie}; Path=/api/v1/ads; Max-Age=86400; HttpOnly; SameSite=Lax${isProduction() ? '; Secure' : ''}`);
+    }
+    reply.header('Cache-Control', 'private, no-store');
     const q = z.object({
       placements: z.string().min(1),
       city: z.string().trim().min(1).default('*'),
@@ -242,7 +252,7 @@ export async function adsRoutes(app: FastifyInstance) {
     const keys = q.placements.split(',').map((k) => k.trim()).filter(Boolean).slice(0, 5);
     try {
       const { getTenantId } = await import('../../plugins/tenant-context');
-      const data = await serving.serve({ tenantId: getTenantId() ?? 'swift-default', city: q.city, sessionId: q.sessionId, userId: deriveUserId(request), keys });
+      const data = await serving.serve({ tenantId: getTenantId() ?? 'swift-default', city: q.city, sessionId: q.sessionId, userId: deriveUserId(request), guestId, network: request.ip, keys });
       return { success: true, data };
     } catch {
       // Ads must NEVER break the home screen — degrade to empty on any failure.

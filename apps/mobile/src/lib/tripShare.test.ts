@@ -127,3 +127,14 @@ describe('the screen calls the real thing', () => {
     expect(shareFn).not.toMatch(/licensePlate/);
   });
 });
+
+describe('MASTER-049 exact expiry', () => {
+  it.each([59 * 60_000, 60_000, 1])('never declares a link expired with %i ms remaining', (remaining) => {
+    const share = { ...SHARE(), expiresAt: new Date(NOW.getTime() + remaining).toISOString() };
+    expect(shareStatusLine(share, NOW)).not.toMatch(/expired|no longer shows/i);
+  });
+  it('declares exact and past expiry without rounding the positive window away', () => {
+    expect(shareStatusLine(SHARE(0), NOW)).toMatch(/expired/);
+    expect(shareStatusLine(SHARE(-1), NOW)).toMatch(/expired/);
+  });
+});
