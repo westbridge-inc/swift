@@ -77,7 +77,7 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
           {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
         </button>
       </section>}
-      <CardPay family={family} storeId={storeId} card={card} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
+      <CardPay family={family} storeId={storeId} card={card} latest={sub.latestCardSession} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
     <h2 className="text-lg font-bold">Recent checkouts</h2>

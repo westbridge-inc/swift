@@ -11,7 +11,7 @@ import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
-import { liveCard } from '../../../lib/cardFee';
+import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
 export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false }: {
@@ -61,7 +61,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const blocked = mmgPending || cardPending;
   // The card choice exists only when the server says CARD is live (or a card payment of ours is in flight).
   const card = liveCard(sub?.payActions);
-  const showCard = !!card || cardPending || hasCardSession(cardContextKey(principal, generation, family, storeId));
+  const showCard = !!card || cardPending || hasCardSession(cardContextKey(principal, generation, family, storeId)) || !!adoptableCardSession(sub?.latestCardSession);
   return <Screen>
     <Header title="Weekly fee" />
     {contextError ? <Card>
@@ -85,7 +85,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>Opens MMG&apos;s page, then brings you back to Swift.</T>
           <PillButton label={`Pay ${feeMoney(action.amountGyd)} with MMG`} loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} />
         </Card> : null}
-        {showCard ? <CardPaySection family={family} card={card} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
+        {showCard ? <CardPaySection family={family} card={card} latest={sub?.latestCardSession} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>
         <View>
           <T variant="heading">Recent checkouts</T>
