@@ -51,6 +51,7 @@ import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -1355,6 +1356,8 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+    // [DELETION-INTEGRITY] A store wound down with its owner's closed account never reopens.
+    if (vendor.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
 
     // [ACTIVATION AUTHORITY / EV-ACT-11] This button is no longer a
     // checklist-free ACTIVE writer. The founder invariant is: submit owner ID
@@ -1381,8 +1384,13 @@ export async function adminRoutes(app: FastifyInstance) {
     const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
       // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
       // suspension source survives it for a later heal or payment to act on.
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
-      if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' }, OR: [{ suspensionSource: null }, { suspensionSource: { not: 'WIND_DOWN' } }] }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
+      if (won.count === 0) {
+        // The store changed after the check above: say which way.
+        const now = await tx.vendor.findUnique({ where: { id }, select: { suspensionSource: true } });
+        if (now?.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
+        throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+      }
       return tx.vendor.findUniqueOrThrow({ where: { id } });
     });
 
@@ -5906,6 +5914,51 @@ export async function adminRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     const updated = await mutationOrNotFound('SupportTicket', id, () => support.resolve(id, request.user.userId, body));
     return { success: true, data: updated };
+  });
+
+  // [DELETION-INTEGRITY] A business or advertiser asks for closure in the app
+  // and gets a ticket. This completes it, through the same erasure a person's
+  // own deletion runs: every obligation check still applies, so live work or
+  // open cash refuses with the person's own message and the request stays
+  // open. Only a request confirmed in the app qualifies, and a staff account
+  // is never closed from the support queue.
+  app.post('/support/:id/complete-account-closure', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const ticket = await tenantPrisma.supportTicket.findUnique({
+      where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
+    });
+    if (!ticket) throw new NotFoundError('SupportTicket', id);
+    // The subject alone can be typed by anyone; the confirmation record is
+    // written only by the in-app request, behind the deletion step-up.
+    const confirmedInApp = ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT
+      && await app.prisma.auditLog.findFirst({
+        where: { userId: ticket.userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
+      });
+    if (!confirmedInApp) {
+      throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request confirmed in the app can be completed here.');
+    }
+    if (ticket.status === 'RESOLVED') throw new AppError(409, 'ALREADY_RESOLVED', 'This closure request is already resolved.');
+    const [subject, staffGrant] = await Promise.all([
+      tenantPrisma.user.findUnique({ where: { id: ticket.userId }, select: { roles: true } }),
+      app.prisma.admin.findUnique({ where: { userId: ticket.userId }, select: { userId: true } }),
+    ]);
+    if (!subject) throw new NotFoundError('User', ticket.userId);
+    if (ticket.userId === request.user.userId || staffGrant
+      || subject.roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
+      throw new ForbiddenError('A staff account is not closed from the support queue.');
+    }
+    const outcome = await new AccountService(app).deleteAccount(ticket.userId);
+    const complete = 'deleted' in outcome && outcome.deleted === true;
+    await tenantPrisma.supportTicket.updateMany({
+      where: { id, status: { not: 'RESOLVED' } },
+      data: {
+        status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedById: request.user.userId, resolvedAt: new Date(),
+        adminNote: complete
+          ? 'Account closed and personal data de-identified; financial and legal records are retained.'
+          : 'Account closed; the remaining erasure is pending and retried automatically.',
+      },
+    });
+    return { success: true, data: { ticketId: id, outcome } };
   });
 
   // =========================================================================
