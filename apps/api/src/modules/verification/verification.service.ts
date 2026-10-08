@@ -354,7 +354,16 @@ export class VerificationService {
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      let finalVerdict = verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING' as const;
+      if (finalVerdict === 'APPROVED') {
+        try { await this.assertStoredVehicleApproval(tx, created); }
+        catch (error) {
+          if (!(error instanceof AppError) || !['VEHICLE_SUBJECT_REQUIRED', 'WRONG_PLATE_CLASS', 'MOVER_PROFILE_REQUIRED', 'VEHICLE_CLASS_CHANGED', 'INSURANCE_SCOPE_INSUFFICIENT'].includes(error.code)) throw error;
+          finalVerdict = 'PENDING';
+          await tx.verificationDocument.update({ where: { id: created.id }, data: { reviewedBy: null, reviewedAt: null } });
+        }
+      }
+      const doc = await walkSubmission(tx, created.id, finalVerdict, review.extraction);
       // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
       // created on another account's subject — the impostor's link never survives a rejection,
       // and a later resubmission starts a fresh pending assignment.
@@ -992,6 +1001,11 @@ export class VerificationService {
       vehicleType = vehicle.vehicleKind as VehicleType;
       plate = vehicle.registrationMark;
       taxi = isPassengerVehicle(vehicleType);
+      const authority = await captureSubmissionAuthority(tx, doc.userId);
+      if (authority.profile && normalizeRegistrationMark(authority.profile.licensePlate ?? '') === normalizeRegistrationMark(plate ?? '')
+        && authority.profile.vehicleType !== vehicleType) {
+        throw new AppError(409, 'VEHICLE_CLASS_CHANGED', 'The registered vehicle class differs from the vehicle now in use. Ask for a review before approving it.');
+      }
     } else {
       // A legacy unbound row cannot acquire today's chosen role as historical authority.
       const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });
