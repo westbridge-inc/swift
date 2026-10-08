@@ -32,10 +32,16 @@ describe('history is returned only to the current participant set', () => {
 
   it('opening a room rechecks after its initial authority read and serialization', async () => {
     const read = f.app.prisma.order.findUnique.bind(f.app.prisma.order);
-    vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce((async (args: Prisma.OrderFindUniqueArgs) => {
-      const result = await read(args); await f.revoke(); return result;
-    }) as never);
+    // The first read checks who may open the order. Reassignment must land
+    // AFTER the next read returns the authority snapshot, so only the final
+    // response check can stop that stale snapshot leaving the server.
+    const spy = vi.spyOn(f.app.prisma.order, 'findUnique')
+      .mockImplementationOnce(read as never)
+      .mockImplementationOnce((async (args: Prisma.OrderFindUniqueArgs) => {
+        const result = await read(args); await f.revoke(); return result;
+      }) as never);
     const res = await f.inject('POST', '/rooms', f.oldMover.token, { orderId: f.order.id });
+    expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(res.statusCode, res.body).toBe(403);
     expect(res.body).not.toContain('private history fixture');
   });
