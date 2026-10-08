@@ -447,6 +447,9 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
+    /** [L09 · price lock] The quote's total and line prices the customer saw. */
+    expectedTotal?: number;
+    expectedLines?: Array<{ lineId: string; unitPrice: number }>;
   }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
