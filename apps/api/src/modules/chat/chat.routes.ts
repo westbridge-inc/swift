@@ -12,6 +12,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { chatGuardCounter } from '../../plugins/observability';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
+import { withLockedChatAccess } from './chat-persistence.service';
 
 /** How far back the split-code check looks. Bounded on BOTH axes on purpose:
  *  an unbounded scan of a long conversation would put an O(history) query on
@@ -180,7 +181,7 @@ export async function chatRoutes(app: FastifyInstance) {
     const { message, messageType, mediaId, mediaUrl } = sendMessageSchema.parse(request.body);
 
     // [R048-004] Authority is the order's CURRENT people, inside the order's tenant, and the room must be open.
-    const access = await assertRoomAccess(app.prisma, roomId, request.user.userId, { write: true, tenantId: request.tenantId });
+    let access = await assertRoomAccess(app.prisma, roomId, request.user.userId, { write: true, tenantId: request.tenantId });
 
     // [R048-004] A client-supplied media URL is not stored — not scrubbed, not stored: refused.
     if (mediaUrl !== undefined) {
@@ -201,7 +202,7 @@ export async function chatRoutes(app: FastifyInstance) {
     // how a customer finds "I left it inside your gate" after they have blocked
     // the person who wrote it; deleting or hiding it would destroy the record
     // at the moment it matters most.
-    const otherUserIds = [...access.participants.keys()].filter((uid) => uid !== request.user.userId);
+    let otherUserIds = [...access.participants.keys()].filter((uid) => uid !== request.user.userId);
     for (const other of otherUserIds) {
       await assertUsersMayContact(app.prisma, access.tenantId, request.user.userId, other);
     }
@@ -229,28 +230,34 @@ export async function chatRoutes(app: FastifyInstance) {
     const priorDigits = secrets
       ? await recentSenderDigits(app, roomId, request.user.userId)
       : '';
-    const guarded = redactOrderSecrets(message, secrets ?? {}, priorDigits);
-    const body = guarded.text;
+    const persisted = await withLockedChatAccess(app.prisma, roomId, request.user.userId, request.tenantId, async (tx, current) => {
+      // The earlier contact/content checks may yield. Re-prove the CURRENT
+      // audience and scrub against its current secrets while its parent is locked.
+      const recipients = [...current.participants.keys()].filter((uid) => uid !== request.user.userId);
+      for (const other of recipients) {
+        await assertUsersMayContact(tx, current.tenantId, request.user.userId, other);
+      }
+      const guarded = redactOrderSecrets(message, current.secrets, priorDigits);
+      const mediaBlocked = mediaId !== undefined && mediaUrlCarriesSecret(mediaId, current.secrets);
+      const msg = await tx.chatMessage.create({
+        data: {
+          chatRoomId: roomId, senderId: request.user.userId,
+          message: guarded.text, messageType,
+          mediaUrl: mediaBlocked ? undefined : mediaId,
+          offPlatformFlag: offPlatform,
+        },
+      });
+      return { msg, access: current, recipients, guarded, mediaBlocked };
+    });
+    access = persisted.access;
+    otherUserIds = persisted.recipients;
+    const { msg, guarded, mediaBlocked } = persisted;
     if (guarded.redacted) chatGuardCounter.labels('send', 'redacted').inc();
 
     // [R048-004] A server-issued id cannot name the code by construction (a random name under the
     // room's folder); the check stays as the invariant it is.
-    const mediaBlocked = mediaId !== undefined && mediaUrlCarriesSecret(mediaId, secrets ?? {});
-    const safeMediaId = mediaBlocked ? undefined : mediaId;
-
-    const msg = await app.prisma.chatMessage.create({
-      data: {
-        chatRoomId: roomId,
-        senderId: request.user.userId,
-        message: body,
-        messageType,
-        mediaUrl: safeMediaId,
-        offPlatformFlag: offPlatform,
-      },
-    });
-
     // [R048-004] A live ride PIN typed into chat is in someone's hands now: re-issue it.
-    if (guarded.redacted && access.orderId) await rotateLeakedRidePin(app.prisma, access.orderId, message, secrets ?? {});
+    if (guarded.redacted && access.orderId) await rotateLeakedRidePin(app.prisma, access.orderId, message, access.secrets);
 
     // ONE serializer for every egress: the socket payload, the push body and the response are the same view.
     const view = await serializeChatMessage(msg, access, 'socket');
