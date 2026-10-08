@@ -357,6 +357,108 @@ describe('invite grants serialize with revocation', () => {
   });
 });
 
+describe('invitation authority survives delayed work and account closure', () => {
+  it('a delivery started before removal cannot create a fresh grant after removal', async () => {
+    process.env['STAFF_INVITE_ACCEPT'] = '1';
+    const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await add(known.phone, 'MANAGER');
+    const [first] = await waitForInvites(known.userId, 1);
+    let release!: () => void;
+    let paused!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { paused = resolve; });
+    const delayedPrisma = new Proxy(app.prisma, {
+      get(target, key, receiver) {
+        if (key === '$transaction') return async (...args: unknown[]) => {
+          paused(); await held;
+          return Reflect.apply(target.$transaction, target, args);
+        };
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const stale = deliverStaffInvite(delayedPrisma, new NotificationService(app.prisma, app.io), {
+      vendorId, targetUserId: known.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(),
+    });
+    await ready;
+    let result: Awaited<typeof stale>;
+    try {
+      expect((await inject('POST', `/api/v1/customer/team-invites/${first!.id}/accept`, known.token)).statusCode).toBe(200);
+      const member = await memberOf(known.userId);
+      expect(member?.role).toBe('MANAGER');
+      expect((await inject('DELETE', `/api/v1/vendor/staff/${member!.id}`, owner.token)).statusCode).toBe(200);
+      expect(await memberOf(known.userId)).toBeNull();
+    } finally { release(); result = await stale; }
+    const pending = (await invitesOf(known.userId)).filter(row => (row.data as { state: string }).state === 'PENDING');
+    if (pending[0]) await inject('POST', `/api/v1/customer/team-invites/${pending[0].id}/accept`, known.token);
+    expect(await memberOf(known.userId), 'a stale delivery cannot restore removed access').toBeNull();
+    expect(pending, 'no unfinished pre-removal request may create another invitation').toEqual([]);
+    expect(result).toBe('NOT_INVITABLE');
+    expect(await memberOf(known.userId)).toBeNull();
+    // A deliberate new owner request after removal still works.
+    expect((await add(known.phone, 'STAFF')).statusCode).toBe(200);
+    const fresh = (await waitForInvites(known.userId, 2)).find(row => (row.data as { state: string }).state === 'PENDING');
+    expect(fresh).toBeDefined();
+    expect((await inject('POST', `/api/v1/customer/team-invites/${fresh!.id}/accept`, known.token)).statusCode).toBe(200);
+    expect((await memberOf(known.userId))?.role).toBe('STAFF');
+  });
+
+  it.each(['accept', 'deliver'] as const)('%s waits for the account cutoff transaction and then refuses the grant', async action => {
+    process.env['STAFF_INVITE_ACCEPT'] = '1';
+    const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await add(known.phone, 'MANAGER');
+    const [invite] = await waitForInvites(known.userId, 1);
+    let release!: () => void;
+    let acquired!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { acquired = resolve; });
+    const cutoff = app.prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id=${owner.userId} FOR UPDATE`;
+      await tx.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } });
+      acquired(); await held;
+    }, { timeout: 10000 });
+    await ready;
+    let finished = false;
+    const grant = (action === 'accept'
+      ? inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token)
+      : deliverStaffInvite(app.prisma, new NotificationService(app.prisma, app.io), {
+        vendorId, targetUserId: known.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(),
+      })).then(result => { finished = true; return result; });
+    let whileHeld = false;
+    try { await new Promise(resolve => setTimeout(resolve, 150)); whileHeld = finished; }
+    finally { release(); await cutoff; }
+    try {
+      const result = await grant;
+      expect(whileHeld, 'grant must wait for the same account lock as deletion').toBe(false);
+      expect(typeof result === 'string' ? result : result.statusCode).toBe(action === 'accept' ? 409 : 'NOT_INVITABLE');
+      expect(await memberOf(known.userId)).toBeNull();
+    } finally { await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'ACTIVE' } }); }
+  });
+
+  it.each(['owner-deactivated', 'store-wound-down'] as const)('%s cuts off both outstanding acceptance and unfinished issuance', async cutoff => {
+    process.env['STAFF_INVITE_ACCEPT'] = '1';
+    const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const later = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await add(known.phone, 'MANAGER');
+    const [invite] = await waitForInvites(known.userId, 1);
+    try {
+      if (cutoff === 'owner-deactivated') await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'DEACTIVATED' } });
+      else await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' } });
+      const accepted = await inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token);
+      const issued = await deliverStaffInvite(app.prisma, new NotificationService(app.prisma, app.io), {
+        vendorId, targetUserId: later.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(),
+      });
+      expect(accepted.statusCode, 'retained owner identity does not retain grant authority').toBe(409);
+      expect(await memberOf(known.userId)).toBeNull();
+      expect(((await app.prisma.notification.findUniqueOrThrow({ where: { id: invite!.id } })).data as { state: string }).state).toBe('CLOSED');
+      expect(issued).toBe('NOT_INVITABLE');
+      expect(await invitesOf(later.userId)).toEqual([]);
+    } finally {
+      await app.prisma.user.update({ where: { id: owner.userId }, data: { status: 'ACTIVE' } });
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'ACTIVE', suspensionSource: null } });
+    }
+  });
+});
+
 describe('[row 55] the console shows which way the switch is set', () => {
   it('GET /admin/config reports staffInviteAccept as this API runs it', async () => {
     const boss = await makeUser(['SUPER_ADMIN', 'CUSTOMER'], 'SUPER_ADMIN', { admin: { create: { permissions: ['*'] } } });
