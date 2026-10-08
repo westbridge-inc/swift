@@ -29,6 +29,27 @@ describe('history is returned only to the current participant set', () => {
     expect(res.body).not.toContain('private history fixture');
   });
 
+  it('opening a room rechecks after its initial authority read and serialization', async () => {
+    const read = f.app.prisma.order.findUnique.bind(f.app.prisma.order);
+    vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce(async (args) => {
+      const result = await read(args); await f.revoke(); return result;
+    });
+    const res = await f.inject('POST', '/rooms', f.oldMover.token, { orderId: f.order.id });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.body).not.toContain('private history fixture');
+  });
+
+  it('a room preview is suppressed when authority changes during serialization', async () => {
+    const read = f.app.prisma.order.findUnique.bind(f.app.prisma.order);
+    vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce(async (args) => {
+      const result = await read(args); await f.revoke(); return result;
+    });
+    const res = await f.inject('GET', '/rooms', f.oldMover.token);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toEqual([]);
+    expect(res.body).not.toContain('private history fixture');
+  });
+
   it('the current mover and customer keep access; an already removed mover has none', async () => {
     await f.revoke();
     const denied = await f.inject('GET', `/rooms/${f.room.id}/messages`, f.oldMover.token);
