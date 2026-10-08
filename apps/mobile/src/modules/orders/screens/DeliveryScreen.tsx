@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
+import { RouteAttribution } from '../../../components/RouteAttribution';
 import { Image } from 'expo-image';
 import { openExternal } from '../../../lib/openExternal';
 // The emergency path for the person WAITING. The earner side got one; the
@@ -848,6 +849,7 @@ export function DeliveryScreen() {
           track. No route geometry is drawn because the API does not send one. */}
       <View style={{ height: screenHeight * (holdActive || releasePending || holdTimingUnavailable ? 0.24 : 0.4) }}>
         {initialRegion ? (
+          <>
           <MapView key={orderId} ref={mapRef} style={{ flex: 1 }} initialRegion={initialRegion}>
             {pickupPos ? (
               <Marker coordinate={pickupPos} title={o.vendor?.name ?? 'Pickup'}>
@@ -909,6 +911,8 @@ export function DeliveryScreen() {
               </Marker>
             ) : null}
           </MapView>
+          <RouteAttribution top={insets.top + 56} />
+          </>
         ) : (
           <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space['3xl'], backgroundColor: color.surface.sunken }}>
             <IconChip icon="map-pin" size={48} />
