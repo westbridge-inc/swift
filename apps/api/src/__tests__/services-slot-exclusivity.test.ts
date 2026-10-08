@@ -2,6 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -78,7 +82,16 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
     headers: {
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
     },
+  });
+}
+
+/** The app already in the stores (build 9): no contract header, old bodies. */
+function injectLegacy(url: string, payload: Record<string, unknown>, token: string) {
+  return app.inject({
+    method: 'POST', url, payload,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
   });
 }
 
@@ -110,13 +123,28 @@ async function quotedJob(
   }, customer.token);
   expect(created.statusCode).toBe(201);
   const jobId = created.json().data.id as string;
-  const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 15000 }, provider.token);
+  const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, {
+    amount: 15000,
+    expectedUpdatedAt: created.json().data.updatedAt,
+  }, provider.token);
   expect(quoted.statusCode).toBe(200);
   return jobId;
 }
 
-function schedule(jobId: string, when: Date, token: string) {
-  return inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: when.toISOString() }, token);
+async function commandState(jobId: string) {
+  const job = await jobRow(jobId);
+  return {
+    expectedUpdatedAt: job.updatedAt.toISOString(),
+    expectedScheduledFor: job.scheduledFor?.toISOString(),
+    expectedQuoteAmount: Number(job.quoteAmount),
+  };
+}
+
+async function schedule(jobId: string, when: Date, token: string) {
+  return inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+    scheduledFor: when.toISOString(),
+    ...await commandState(jobId),
+  }, token);
 }
 
 function liveJobsAt(providerId: string, when: Date) {
@@ -276,7 +304,7 @@ describe('Services — double-booking a provider is impossible at the data layer
     expect((await schedule(jobA, slot, first.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(409);
 
-    const declined = await inject('POST', `/api/v1/services/jobs/${jobA}/decline-slot`, undefined, provider.token);
+    const declined = await inject('POST', `/api/v1/services/jobs/${jobA}/decline-slot`, await commandState(jobA), provider.token);
     expect(declined.statusCode).toBe(200);
 
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(200);
@@ -294,7 +322,7 @@ describe('Services — double-booking a provider is impossible at the data layer
     expect((await schedule(jobA, slot, first.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(409);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, undefined, first.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, await commandState(jobA), first.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(200);
 
     expect(await liveJobsAt(provider.providerId, slot)).toBe(1);
@@ -313,7 +341,21 @@ describe('Services — double-booking a provider is impossible at the data layer
     const slot = nextSlot();
 
     expect((await schedule(jobA, slot, first.token)).statusCode).toBe(200);
-    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/complete`, undefined, provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/confirm`, await commandState(jobA), provider.token)).statusCode).toBe(200);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobA },
+      data: { scheduledFor: new Date(Date.now() - HOUR) },
+    }));
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/start`, await commandState(jobA), provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/complete`, await commandState(jobA), provider.token)).statusCode).toBe(200);
+    // Put the completed fixture back on the originally held hour. If terminal
+    // rows were still part of the partial unique key, the next schedule would
+    // now fail even though the completed history remains at that exact slot.
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobA },
+      data: { scheduledFor: slot },
+    }));
+    expect((await jobRow(jobA)).scheduledFor?.toISOString()).toBe(slot.toISOString());
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(200);
     expect(await liveJobsAt(provider.providerId, slot)).toBe(1);
   });
@@ -324,15 +366,23 @@ describe('Services — double-booking a provider is impossible at the data layer
     const jobId = await quotedJob(provider, customer);
     const morning = nextSlot();
     const afternoon = nextSlot();
+    const expected = await commandState(jobId);
 
     const [a, b] = await Promise.all([
-      schedule(jobId, morning, customer.token),
-      schedule(jobId, afternoon, customer.token),
+      inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: morning.toISOString(), ...expected }, customer.token),
+      inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: afternoon.toISOString(), ...expected }, customer.token),
     ]);
 
-    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 400]);
-    const loser = a.statusCode === 400 ? a : b;
-    expect(loser.json().error.code).toBe('BAD_STATE');
+    // Request arrival relative to the initial read is deliberately not
+    // scheduler-controlled: a loser that read before the winner reaches the
+    // exact-generation CAS and returns SERVICE_JOB_CHANGED; a loser that read
+    // after the winner correctly returns BAD_STATE. The service-free
+    // transition unit test separately forces updateMany.count=0 and proves the
+    // CAS path without depending on HTTP scheduling.
+    expect([a.statusCode, b.statusCode].filter((code) => code === 200)).toHaveLength(1);
+    const loser = a.statusCode === 200 ? b : a;
+    expect([400, 409]).toContain(loser.statusCode);
+    expect(loser.json().error.code).toBe(loser.statusCode === 409 ? 'SERVICE_JOB_CHANGED' : 'BAD_STATE');
 
     // Exactly one of the two times is held, and it is the winner's.
     const held = await jobRow(jobId);
@@ -350,9 +400,9 @@ describe('Services — closing a job is never silent', () => {
     const jobId = await quotedJob(provider, customer);
     const slot = nextSlot();
     expect((await schedule(jobId, slot, customer.token)).statusCode).toBe(200);
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, undefined, provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, undefined, customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), customer.token)).statusCode).toBe(200);
 
     const told = await notificationFor(provider.userId, 'booking_cancelled', jobId);
     expect(told).not.toBeNull();
@@ -372,7 +422,7 @@ describe('Services — closing a job is never silent', () => {
     const slot = nextSlot();
     expect((await schedule(jobId, slot, customer.token)).statusCode).toBe(200);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, undefined, provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
     const told = await notificationFor(customer.userId, 'booking_cancelled', jobId);
     expect(told).not.toBeNull();
@@ -385,7 +435,7 @@ describe('Services — closing a job is never silent', () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const jobId = await quotedJob(provider, customer);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, undefined, customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), customer.token)).statusCode).toBe(200);
 
     const told = await notificationFor(provider.userId, 'booking_cancelled', jobId);
     expect(told).not.toBeNull();
@@ -399,9 +449,14 @@ describe('Services — closing a job is never silent', () => {
     const jobId = await quotedJob(provider, customer);
     const slot = nextSlot();
     expect((await schedule(jobId, slot, customer.token)).statusCode).toBe(200);
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, undefined, provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, undefined, provider.token)).statusCode).toBe(200);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobId },
+      data: { scheduledFor: new Date(Date.now() - HOUR) },
+    }));
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
     const customerNudge = await notificationFor(customer.userId, 'booking_completed', jobId);
     const providerNudge = await notificationFor(provider.userId, 'booking_completed', jobId);
@@ -410,5 +465,154 @@ describe('Services — closing a job is never silent', () => {
     // Swift never holds the money: the customer pays the provider directly.
     expect(customerNudge!.body).toContain('Pay cash directly');
     expect(providerNudge!.body).toContain('Rate your customer');
+  });
+
+  it('[M063] start is refused until the provider has confirmed the slot, even once it is due', async () => {
+    const provider = await makeVerifiedProvider();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const jobId = await quotedJob(provider, customer);
+    expect((await schedule(jobId, nextSlot(), customer.token)).statusCode).toBe(200);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+    const started = await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token);
+    expect(started.statusCode).toBe(409);
+    expect(started.json().error.code).toBe('SERVICE_JOB_CHANGED');
+    expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+  });
+
+  it('[M063] start is refused before the confirmed slot is due', async () => {
+    const provider = await makeVerifiedProvider();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const jobId = await quotedJob(provider, customer);
+    expect((await schedule(jobId, nextSlot(), customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    const started = await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token);
+    expect(started.statusCode).toBe(409);
+    expect(started.json().error.code).toBe('JOB_NOT_DUE');
+    expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+  });
+
+  it('[M063] complete is refused unless the job is in progress', async () => {
+    const provider = await makeVerifiedProvider();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const jobId = await quotedJob(provider, customer);
+    expect((await schedule(jobId, nextSlot(), customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    const completed = await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, await commandState(jobId), provider.token);
+    expect(completed.statusCode).toBe(400);
+    expect(completed.json().error.code).toBe('BAD_STATE');
+    expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+  });
+
+  describe('[build 9] the installed app keeps working under the same server rules', () => {
+    async function legacyConfirmedJob() {
+      const provider = await makeVerifiedProvider();
+      const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix the gate latch and oil the hinges' }, customer.token);
+      const jobId = created.json().data.id as string;
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/quote`, { amount: 9000 }, provider.token)).statusCode).toBe(200);
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: nextSlot().toISOString() }, customer.token)).statusCode).toBe(200);
+      return { provider, customer, jobId };
+    }
+
+    it('old bodies run quote → schedule → confirm → complete once the slot is due, through IN_PROGRESS', async () => {
+      const { provider, jobId } = await legacyConfirmedJob();
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token)).statusCode).toBe(200);
+      await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+      const done = await injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+      expect(done.statusCode).toBe(200);
+      expect((await jobRow(jobId)).status).toBe('COMPLETED');
+      const actions = await runWithoutTenant(() => app.prisma.auditLog.findMany({
+        where: { entity: 'ServiceJob', entityId: jobId, action: { in: ['SERVICE_JOB_STARTED', 'SERVICE_JOB_COMPLETED'] } },
+        orderBy: { createdAt: 'asc' }, select: { action: true },
+      }));
+      expect(actions.map((a) => a.action)).toEqual(['SERVICE_JOB_STARTED', 'SERVICE_JOB_COMPLETED']);
+    });
+
+    it('an old-app complete before the agreed time is refused', async () => {
+      const { provider, jobId } = await legacyConfirmedJob();
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token)).statusCode).toBe(200);
+      const early = await injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+      expect(early.statusCode).toBe(409);
+      expect(early.json().error.code).toBe('JOB_NOT_DUE');
+      expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+    });
+
+    it('an old-app complete of a slot the provider never confirmed is refused', async () => {
+      const { provider, jobId } = await legacyConfirmedJob();
+      await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+      const refused = await injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+      expect(refused.statusCode).toBe(409);
+      expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+    });
+
+    it('old-app complete and cancel together still leave exactly one winner', async () => {
+      const { provider, customer, jobId } = await legacyConfirmedJob();
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token)).statusCode).toBe(200);
+      await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+      const [complete, cancel] = await Promise.all([
+        injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token),
+        injectLegacy(`/api/v1/services/jobs/${jobId}/cancel`, {}, customer.token),
+      ]);
+      expect([complete.statusCode, cancel.statusCode].filter((code) => code === 200)).toHaveLength(1);
+      expect(['COMPLETED', 'CANCELLED']).toContain((await jobRow(jobId)).status);
+    });
+
+    it('a request naming a different contract is told to update', async () => {
+      const { provider, jobId } = await legacyConfirmedJob();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/services/jobs/${jobId}/confirm`, payload: {},
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${provider.token}`, [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: '99' },
+      });
+      expect(res.statusCode).toBe(426);
+    });
+  });
+
+  it('simultaneous complete and cancel commands have one terminal winner and never resurrect the job', async () => {
+    const provider = await makeVerifiedProvider();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const jobId = await quotedJob(provider, customer);
+    expect((await schedule(jobId, nextSlot(), customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobId },
+      data: { scheduledFor: new Date(Date.now() - HOUR) },
+    }));
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+
+    const expected = await commandState(jobId);
+    const [complete, cancel] = await Promise.all([
+      inject('POST', `/api/v1/services/jobs/${jobId}/complete`, expected, provider.token),
+      inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, expected, customer.token),
+    ]);
+    expect([complete.statusCode, cancel.statusCode].filter((code) => code === 200)).toHaveLength(1);
+    const loser = complete.statusCode === 200 ? cancel : complete;
+    expect([400, 409]).toContain(loser.statusCode);
+    expect(['BAD_STATE', 'SERVICE_JOB_CHANGED']).toContain(loser.json().error.code);
+
+    const winnerStatus = complete.statusCode === 200 ? 'COMPLETED' : 'CANCELLED';
+    expect((await jobRow(jobId)).status).toBe(winnerStatus);
+
+    // [M036] Exactly one receipt: the winner's audit row and notices were
+    // written in its transaction; the loser's never were.
+    const terminalAudits = await runWithoutTenant(() => app.prisma.auditLog.findMany({
+      where: { entity: 'ServiceJob', entityId: jobId, action: { in: ['SERVICE_JOB_COMPLETED', 'SERVICE_JOB_CANCELLED'] } },
+      select: { action: true },
+    }));
+    expect(terminalAudits.map((a) => a.action)).toEqual([winnerStatus === 'COMPLETED' ? 'SERVICE_JOB_COMPLETED' : 'SERVICE_JOB_CANCELLED']);
+    const terminalNotices = await runWithoutTenant(() => app.prisma.notification.findMany({
+      where: { AND: [{ data: { path: ['jobId'], equals: jobId } }] },
+      select: { data: true },
+    }));
+    const kinds = terminalNotices
+      .map((n) => (n.data as Record<string, unknown> | null)?.['kind'])
+      .filter((kind) => kind === 'booking_completed' || kind === 'booking_cancelled');
+    expect(new Set(kinds)).toEqual(new Set([winnerStatus === 'COMPLETED' ? 'booking_completed' : 'booking_cancelled']));
+
+    // A delayed copy of the losing command remains stale after the winner.
+    const staleRetry = complete.statusCode === 200
+      ? await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, expected, customer.token)
+      : await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, expected, provider.token);
+    expect([400, 409]).toContain(staleRetry.statusCode);
+    expect((await jobRow(jobId)).status).toBe(winnerStatus);
   });
 });

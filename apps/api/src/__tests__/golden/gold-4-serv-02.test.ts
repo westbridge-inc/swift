@@ -321,6 +321,18 @@ describe('GOLD-4 · SERV-02 — the professional-services golden journey', () =>
     expect(customerComplete.json().error.code).toBe('PROVIDER_ONLY');
     expect((await jobRow(jobId)).status).toBe('SCHEDULED');
 
+    // Not before the agreed time: the app's one-tap completion starts the job
+    // too, so it waits for the slot and the job stays SCHEDULED.
+    const early = await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+    expect(early.statusCode).toBe(409);
+    expect(early.json().error.code).toBe('JOB_NOT_DUE');
+    expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+
+    // The agreed time arrives (the slot moves into the past, as the lifecycle
+    // suites do; the clock itself is not faked).
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - 60_000) },
+    }));
     const complete = await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
     expect(complete.statusCode).toBe(200);
     const finished = await jobRow(jobId);

@@ -12,3 +12,4 @@ export * from './cart';
 export type { ServiceBookingMode, ServiceCategoryDocument, ServiceCategory, ServiceCatalog } from './service-catalog';
 export * from './market-time';
 export * from './mmg-checkout-support';
+export * from './service-job';

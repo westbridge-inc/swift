@@ -62,8 +62,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // Rides
     'ride_queue_matched', 'ride_queue_expired', 'ride_released_no_drivers',
     // Bookings and service jobs, other than the two that ring or need action now
-    'booking_confirmed', 'booking_slot_declined', 'booking_completed', 'booking_cancelled',
-    'booking_reminder', 'booking_rescheduled',
+    'booking_quoted', 'booking_confirmed', 'booking_slot_declined', 'booking_started',
+    'booking_completed', 'booking_cancelled', 'booking_reminder', 'booking_rescheduled',
     // Safety of the person receiving it (the driver confirm is a job update)
     'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',

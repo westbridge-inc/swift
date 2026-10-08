@@ -6,6 +6,10 @@ import axios, {
 } from 'axios';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot, RotatedAuthTokens } from '../lib/authSession';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 
 const nativePlatform = vi.hoisted(() => ({ OS: 'ios' }));
 
@@ -518,6 +522,55 @@ describe('Axios auth interceptor integration', () => {
     expect(seen.every((request) => request.authorization === 'Bearer access-a-1')).toBe(true);
     expect(JSON.parse(seen[1]?.data ?? '{}')).toMatchObject({ trade: 'Mason', bio: 'Block work' });
     expect(JSON.parse(seen[2]?.data ?? '{}')).toMatchObject({ type: 'CVQ', referenceNumber: 'CVQ-1' });
+  });
+
+  it('marks every service-job lifecycle command with contract v2 and sends every authority fact explicitly', async () => {
+    const seen: Array<{ url: string; contract?: string; body: Record<string, unknown> }> = [];
+    setAdapter(async (config) => {
+      const raw = typeof config.data === 'string' ? JSON.parse(config.data) : config.data;
+      seen.push({
+        url: config.url ?? '',
+        contract: config.headers.get(SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER) as string | undefined,
+        body: (raw ?? {}) as Record<string, unknown>,
+      });
+      return response(config, 200, { data: { id: 'job-a' } });
+    });
+
+    const expectedUpdatedAt = '2026-09-20T12:00:00.000Z';
+    const expectedScheduledFor = '2026-09-21T13:00:00.000Z';
+    await servicesApi.scheduleJob('job-a', {
+      scheduledFor: expectedScheduledFor,
+      expectedUpdatedAt,
+      expectedQuoteAmount: 8_000,
+    });
+    await servicesApi.cancelJob('job-a', expectedUpdatedAt);
+    await servicesApi.quoteJob('job-a', 8_000, expectedUpdatedAt);
+    await servicesApi.confirmJob('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.declineSlot('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.startJob('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.completeJob('job-a', expectedUpdatedAt);
+
+    expect(seen.map(({ url }) => url)).toEqual([
+      '/services/jobs/job-a/schedule',
+      '/services/jobs/job-a/cancel',
+      '/services/jobs/job-a/quote',
+      '/services/jobs/job-a/confirm',
+      '/services/jobs/job-a/decline-slot',
+      '/services/jobs/job-a/start',
+      '/services/jobs/job-a/complete',
+    ]);
+    expect(seen.every(({ contract }) => contract === SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION)).toBe(true);
+    expect(seen[0]?.body).toEqual({
+      scheduledFor: expectedScheduledFor,
+      expectedUpdatedAt,
+      expectedQuoteAmount: 8_000,
+    });
+    expect(seen[1]?.body).toEqual({ expectedUpdatedAt });
+    expect(seen[2]?.body).toEqual({ amount: 8_000, expectedUpdatedAt });
+    for (const index of [3, 4, 5]) {
+      expect(seen[index]?.body).toEqual({ expectedUpdatedAt, expectedScheduledFor });
+    }
+    expect(seen[6]?.body).toEqual({ expectedUpdatedAt });
   });
 
   it('pins every protected multi-step API method to A while B is current', async () => {
