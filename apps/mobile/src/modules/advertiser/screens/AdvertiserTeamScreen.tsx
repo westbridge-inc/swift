@@ -22,7 +22,7 @@ import { useAdvertiserExitDialog } from '../AdvertiserExitDialog';
 // is the authority — a non-owner sees the list, and the add box simply isn't
 // rendered for them.
 
-export function AdvertiserTeamScreen() {
+export function AdvertiserTeamScreen({ navigation }: any = {}) {
   const insets = useSafeAreaInsets();
   const user = useAuthStore((state) => state.user);
   const me = useMyAdvertisers();
@@ -111,6 +111,7 @@ export function AdvertiserTeamScreen() {
           Swift experience
         </T>
         <Card style={{ paddingVertical: space.sm }}>
+          <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData' , { closureRequest: true })} />
           <SettingsRow
             icon="log-out"
             label="Log out and switch experience"

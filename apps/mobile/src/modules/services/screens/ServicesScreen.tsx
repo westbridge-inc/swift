@@ -5,6 +5,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
 import { Card, Chip, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, Pictogram, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill, type PictogramName } from '../../../kit';
+import { errorMessage } from '../../../lib/apiError';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
 import { enterServiceProvider } from '../serviceProviderEntry';
@@ -52,13 +53,15 @@ export function ServicesScreen({ navigation }: any) {
   const categories = catalog.data?.categories ?? [];
   const visibleCategories = customerServiceCategories(categories);
   const requestTrade = catalog.isError ? undefined : serviceRequestTrade(categories, trade);
-  const { data, isFetching, isError } = useServiceProviders<ProviderBrowse>(requestTrade);
+  const { data, isFetching, isError, refetch: refetchProviders } = useServiceProviders<ProviderBrowse>(requestTrade);
   const requestJob = useRequestJob();
 
   const providers = data?.providers ?? [];
   const selectedTrade = selectedServiceCategory(visibleCategories, trade);
   const canSend = !!requestTrade && !!selectedProviderId && description.trim().length >= 10;
-  const errMsg = (requestJob.error as any)?.response?.data?.message;
+  // [NO-DEAD-ENDS] The API's refusal lives at error.message (lib/apiError); the
+  // old path read a field the API never sends, so the line under the form was blank.
+  const errMsg = requestJob.isError ? errorMessage(requestJob.error, 'Couldn’t send your request. Try again.') : undefined;
 
   const onSend = () => {
     if (!canSend || !selectedProviderId) return;
@@ -170,7 +173,14 @@ export function ServicesScreen({ navigation }: any) {
         ) : isFetching ? (
           <LoadingBlock />
         ) : isError ? (
-          <EmptyState icon="alert-circle" title="Couldn’t load providers" body="Give it another go in a moment." />
+          // [NO-DEAD-ENDS] A failed list is not "none available": say so, and retry here.
+          <EmptyState
+            icon="alert-circle"
+            title="Couldn’t load providers"
+            body="This is not an empty list. Check your connection and try again."
+            actionLabel="Try again"
+            onAction={() => { void refetchProviders(); }}
+          />
         ) : providers.length === 0 ? (
           <EmptyState
             icon="users"

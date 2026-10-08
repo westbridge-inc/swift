@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { Prisma } from '@prisma/client';
@@ -200,6 +200,90 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
     });
   });
 
+  it('reads a promoted store tier through the same transaction as its checklist', async () => {
+    const owner = await makeUser('TierTransaction');
+    const store = await makeStore(owner.id, 'PENDING_APPROVAL', { tier: 'UNREGISTERED' });
+    for (const t of ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo']) await doc(owner.id, t, 'APPROVED');
+    expect(await svc.isRoleVerified(owner.id, 'SUPERMARKET')).toBe(true);
+    await app.prisma.$transaction(async (tx) => {
+      await tx.vendor.update({ where: { id: store.id }, data: { tier: 'REGISTERED' } });
+      expect(await svc.isRoleVerified(owner.id, 'SUPERMARKET', tx)).toBe(false);
+      expect((await svc.activationChecklist(owner.id, 'SUPERMARKET', { db: tx })).complete).toBe(false);
+    });
+  });
+
+  it('does not deadlock against a store edit inserting an owner notification', async () => {
+    const owner = await makeUser('PinLock');
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    await feeSubscription(store.id, 'ACTIVE');
+    let held!: () => void;
+    let notify!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const insert = new Promise<void>((resolve) => { notify = resolve; });
+    const editing = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${store.id} FOR UPDATE`;
+      held();
+      await insert;
+      await tx.notification.create({ data: { userId: owner.id, type: 'SYSTEM_ANNOUNCEMENT', title: 'Store pin changed', body: 'Synthetic store edit.' } });
+    }, { timeout: 15_000 });
+    await holding;
+    const reinstating = approve(store.id);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    notify();
+    await editing;
+    expect((await reinstating).statusCode).toBe(200);
+  });
+
+  it('two concurrent activation requests have one approval winner and one notification', async () => {
+    const owner = await makeUser('ConcurrentActivation');
+    const store = await makeStore(owner.id);
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    const original = VerificationService.prototype.vendorGoLive;
+    let release!: () => void;
+    const together = new Promise<void>((resolve) => { release = resolve; });
+    let reads = 0;
+    const spy = vi.spyOn(VerificationService.prototype, 'vendorGoLive').mockImplementation(async function (this: VerificationService, ...args) {
+      const result = await original.apply(this, args);
+      if (args[0] === store.id && reads < 2) {
+        reads += 1;
+        if (reads === 2) release();
+        await together;
+      }
+      return result;
+    });
+    try {
+      const responses = await Promise.all([approve(store.id), approve(store.id)]);
+      expect(responses.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+      expect(await app.prisma.notification.count({ where: { userId: owner.id, title: 'Vendor Approved!' } })).toBe(1);
+      expect(await app.prisma.subscription.count({ where: { vendorId: store.id } })).toBe(1);
+    } finally { release(); spy.mockRestore(); }
+  });
+
+  it('rolls back every activation effect if a pending store changes after its first checklist read', async () => {
+    const owner = await makeUser('ActivationRace');
+    const store = await makeStore(owner.id);
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    const original = VerificationService.prototype.vendorGoLive;
+    let changed = false;
+    const spy = vi.spyOn(VerificationService.prototype, 'vendorGoLive').mockImplementation(async function (this: VerificationService, ...args) {
+      const result = await original.apply(this, args);
+      if (args[0] === store.id && !changed) {
+        changed = true;
+        await app.prisma.vendor.update({ where: { id: store.id }, data: { status: 'SUSPENDED', suspensionSource: 'ADMIN' } });
+      }
+      return result;
+    });
+    try {
+      const res = await approve(store.id);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('ACTIVATION_HELD');
+      expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: 'SUSPENDED', isVerified: false, acceptingOrders: false, activationValidUntil: null });
+      expect(await app.prisma.subscription.count({ where: { vendorId: store.id } })).toBe(0);
+      expect(await app.prisma.notification.count({ where: { userId: owner.id } })).toBe(0);
+    } finally { spy.mockRestore(); }
+  });
+
   it('activates through the projection: the store carries the activation expiry its evidence allows', async () => {
     const owner = await makeUser('Expiry');
     const store = await makeStore(owner.id);
@@ -317,6 +401,35 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
     expect(await app.prisma.notification.count({ where: { userId: owner.id } })).toBe(0);
   });
 
+  it.each(['BANNED', 'SUSPENDED'] as const)('refuses reinstatement until the %s owner is reinstated', async (status) => {
+    const owner = await makeUser('RestrictedOwner', { status });
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
+    await feeSubscription(store.id, 'ACTIVE');
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    const checklist = await read(`/api/v1/admin/vendors/${store.id}/activation-checklist`);
+    expect(checklist.json().data.next).toBe('OWNER_ACCOUNT_RESTRICTED');
+    const res = await approve(store.id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('OWNER_ACCOUNT_RESTRICTED');
+    expect(res.json().error.message).toMatch(/owner.*account.*reinstated/i);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'ADMIN' });
+    expect(await app.prisma.notification.count({ where: { userId: owner.id } })).toBe(0);
+    await app.prisma.user.update({ where: { id: owner.id }, data: { status: 'ACTIVE' } });
+    expect((await approve(store.id)).statusCode).toBe(200);
+  });
+
+  it.each(['BANNED', 'SUSPENDED'] as const)('honours a %s owner decision committed under the account lock during reinstate', async (status) => {
+    const owner = await makeUser('RestrictedRace');
+    const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
+    await feeSubscription(store.id, 'ACTIVE');
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
+    const res = await raceAgainstAccountLock(owner.id, (tx) => tx.user.update({ where: { id: owner.id }, data: { status } }), () => approve(store.id));
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('OWNER_ACCOUNT_RESTRICTED');
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'ADMIN' });
+    expect(await app.prisma.notification.count({ where: { userId: owner.id } })).toBe(0);
+  });
+
   it('a document revoked while a reinstate is in flight wins: the store stays suspended', async () => {
     const owner = await makeUser('RaceRevoke');
     const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
@@ -332,6 +445,17 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
 });
 
 describe('[MC-PR2] GET /vendors/:id/activation-checklist — the per-document truth, in the gate’s own terms', () => {
+  it('uses approved evidence expiry while a newer renewal is pending', async () => {
+    const owner = await makeUser('RenewalExpiry');
+    const store = await makeStore(owner.id);
+    const expiry = new Date(Date.now() + 30 * DAY);
+    await doc(owner.id, 'owner_national_id', 'APPROVED', { expiresAt: expiry, createdAt: new Date(Date.now() - DAY) });
+    await doc(owner.id, 'owner_national_id', 'PENDING', { expiresAt: new Date(Date.now() + 365 * DAY) });
+    const res = await read(`/api/v1/admin/vendors/${store.id}/activation-checklist`);
+    const item = res.json().data.checklist.items.find((row: { docType: string }) => row.docType === 'owner_national_id');
+    expect(item).toMatchObject({ state: 'APPROVED', expiresAt: expiry.toISOString(), renewalPending: true });
+  });
+
   it('lists every required document with its state, the rejection note, and what to do next — and no file reference', async () => {
     const owner = await makeUser('Checklist');
     const store = await makeStore(owner.id);

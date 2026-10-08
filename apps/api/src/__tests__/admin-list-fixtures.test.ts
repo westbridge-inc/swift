@@ -232,3 +232,37 @@ describe('[MC-PR3 · security review] "TEST-" names are reserved for test accoun
     expect(() => assertNameNotReserved('Testing Shop', '+5926123456')).not.toThrow();
   });
 });
+
+
+it('equal creation times have a stable id order across every paged list', async () => {
+  const createdAt = new Date('2026-01-01T00:00:00Z');
+  await app.prisma.user.updateMany({ where: { id: { in: [real.id, fixturePhone.id, testName.id] } }, data: { createdAt } });
+  await app.prisma.vendor.updateMany({ where: { id: { in: [realStore.id, testStore.id, fixtureOwnerStore.id] } }, data: { createdAt } });
+  await app.prisma.rider.updateMany({ where: { userId: { in: [real.id, fixturePhone.id, testName.id] } }, data: { createdAt } });
+  await app.prisma.driver.updateMany({ where: { userId: { in: [real.id, fixturePhone.id, testName.id] } }, data: { createdAt } });
+  await app.prisma.order.updateMany({ where: { id: { in: orderIds } }, data: { createdAt } });
+  for (const [kind, search] of [['users', `List${RUN}`], ['vendors', RUN], ['riders', `List${RUN}`], ['drivers', `List${RUN}`], ['orders', `LIST-${RUN}`]]) {
+    const first = await get(`/api/v1/admin/${kind}?search=${search}&limit=100`);
+    expect(first.statusCode).toBe(200);
+    const all = first.json().data.map((row: { id: string }) => row.id);
+    expect(all, kind).toEqual([...all].sort().reverse());
+    const pages: string[] = [];
+    for (let page = 1; page <= all.length; page++) {
+      const response = await get(`/api/v1/admin/${kind}?search=${search}&limit=1&page=${page}`);
+      expect(response.statusCode).toBe(200);
+      pages.push(response.json().data[0].id);
+    }
+    expect(pages, kind).toEqual(all);
+  }
+});
+it('orders at a fixture-owned store are hidden even when the customer is real', async () => {
+  const vendorLeg = await order(real.id, fixtureOwnerStore.id);
+  const shown = await get(`/api/v1/admin/orders?search=${vendorLeg.id}&excludeFixtures=true`);
+  expect(shown.statusCode).toBe(200);
+  expect(ids(shown)).not.toContain(vendorLeg.id);
+  const all = await get(`/api/v1/admin/orders?search=LIST-${RUN}&excludeFixtures=false`);
+  expect(ids(all)).toContain(vendorLeg.id);
+  const filtered = await get(`/api/v1/admin/orders?search=LIST-${RUN}&excludeFixtures=true`);
+  expect(ids(filtered)).not.toContain(vendorLeg.id);
+  expect(filtered.json().meta.hiddenTestRecords).toBe(2);
+});

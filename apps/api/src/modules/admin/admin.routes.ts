@@ -1,8 +1,10 @@
+import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
+import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
@@ -49,6 +51,7 @@ import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -1101,7 +1104,7 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.user.count({ where }),
       hiddenWhere ? app.prisma.user.count({ where: hiddenWhere }) : Promise.resolve(0),
@@ -1181,7 +1184,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // [DS110 #12] Who may suspend whom is decided inside the transition, from
     // the database's view of both accounts (see mover-authority.ts).
@@ -1205,7 +1208,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/users/:id/unsuspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // Restoration obeys the same hierarchy as the act it reverses: an ordinary
     // ADMIN cannot lift a suspension a SUPER_ADMIN imposed on another ADMIN.
@@ -1230,7 +1233,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // [DS110 #12] The role hierarchy — not an ADMIN-string check — decides who
     // may ban whom, inside the transition: the seed mints the SUPER_ADMIN as
@@ -1259,7 +1262,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // nothing could reverse one. Lifting a ban is SUPER_ADMIN-only; the
     // transition enforces that whichever route asks, so an ordinary ADMIN can
     // never walk a ban back, through this route or /unsuspend.
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
       actorUserId: request.user.userId,
@@ -1310,7 +1313,7 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.vendor.count({ where }),
       hiddenWhere ? app.prisma.vendor.count({ where: hiddenWhere }) : Promise.resolve(0),
@@ -1438,6 +1441,8 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+    // [DELETION-INTEGRITY] A store wound down with its owner's closed account never reopens.
+    if (vendor.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
 
     const goLive = await verification.vendorGoLive(id);
     if (!goLive) throw new NotFoundError('Vendor', id);
@@ -1463,7 +1468,7 @@ export async function adminRoutes(app: FastifyInstance) {
         // [MC-PR2 · Opus S3-1] Decide again under the locks the competing writers take, so nothing that
         // commits after the first read can be reopened: the owner's account row (account deletion and the
         // partner wind-down take it; so do document decisions, revocations and expiry), then the store row.
-        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR UPDATE /* admin-reinstate-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-reinstate-owner-authority */`;
         await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-reinstate-store */`;
         const fresh = await tx.vendor.findUniqueOrThrow({
           where: { id },
@@ -1475,7 +1480,7 @@ export async function adminRoutes(app: FastifyInstance) {
         const refusedNow = again === 'CAN_REINSTATE' ? null
           : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
         if (refusedNow) throw refusedNow;
-        const activationValidUntil = await verification.checklistEvidenceValidUntil(goLive.ownerUserId, goLive.role, tx);
+        const activationValidUntil = await verification.checklistEvidenceValidUntil(freshGoLive.ownerUserId, freshGoLive.role, tx);
         // [Fable #1481 S4-2] A reinstatement ends whatever suspension the store was under: no stale
         // suspension source survives it for a later heal or payment to act on. The CAS names the exact
         // suspension decided above, under the lock.
@@ -1594,7 +1599,7 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.rider.count({ where }),
       hiddenWhere ? app.prisma.rider.count({ where: hiddenWhere }) : Promise.resolve(0),
@@ -1779,7 +1784,7 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.driver.count({ where }),
       hiddenWhere ? app.prisma.driver.count({ where: hiddenWhere }) : Promise.resolve(0),
@@ -1985,7 +1990,7 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.order.count({ where }),
       hiddenWhere ? app.prisma.order.count({ where: hiddenWhere }) : Promise.resolve(0),
@@ -5441,7 +5446,21 @@ export async function adminRoutes(app: FastifyInstance) {
       tenantPrisma.verificationDocument.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(documents, total, { page, limit, skip }) };
+    // [NO-DEAD-ENDS] A re-submitted document says so: the earlier verdict on
+    // the same applicant's same document, and the reviewer's reason, ride on
+    // the queue row (verification/previous-decision.ts). Only applicants on
+    // this page are read, through the same tenant-scoped client; a failed
+    // lookup degrades to null and never fails the queue.
+    const rows = await withPreviousDecisions(
+      documents,
+      (earlierWhere) => tenantPrisma.verificationDocument.findMany({
+        where: earlierWhere,
+        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+      }),
+      (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
+    );
+
+    return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });
 
   app.put('/verification/:id/approve', { preHandler: [adminGuard] }, async (request) => {
@@ -6064,6 +6083,51 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
+  // [DELETION-INTEGRITY] A business or advertiser asks for closure in the app
+  // and gets a ticket. This completes it, through the same erasure a person's
+  // own deletion runs: every obligation check still applies, so live work or
+  // open cash refuses with the person's own message and the request stays
+  // open. Only a request confirmed in the app qualifies, and a staff account
+  // is never closed from the support queue.
+  app.post('/support/:id/complete-account-closure', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const ticket = await tenantPrisma.supportTicket.findUnique({
+      where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
+    });
+    if (!ticket) throw new NotFoundError('SupportTicket', id);
+    // The subject alone can be typed by anyone; the confirmation record is
+    // written only by the in-app request, behind the deletion step-up.
+    const confirmedInApp = ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT
+      && await app.prisma.auditLog.findFirst({
+        where: { userId: ticket.userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
+      });
+    if (!confirmedInApp) {
+      throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request confirmed in the app can be completed here.');
+    }
+    if (ticket.status === 'RESOLVED') throw new AppError(409, 'ALREADY_RESOLVED', 'This closure request is already resolved.');
+    const [subject, staffGrant] = await Promise.all([
+      tenantPrisma.user.findUnique({ where: { id: ticket.userId }, select: { roles: true } }),
+      app.prisma.admin.findUnique({ where: { userId: ticket.userId }, select: { userId: true } }),
+    ]);
+    if (!subject) throw new NotFoundError('User', ticket.userId);
+    if (ticket.userId === request.user.userId || staffGrant
+      || subject.roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
+      throw new ForbiddenError('A staff account is not closed from the support queue.');
+    }
+    const outcome = await new AccountService(app).deleteAccount(ticket.userId);
+    const complete = 'deleted' in outcome && outcome.deleted === true;
+    await tenantPrisma.supportTicket.updateMany({
+      where: { id, status: { not: 'RESOLVED' } },
+      data: {
+        status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedById: request.user.userId, resolvedAt: new Date(),
+        adminNote: complete
+          ? 'Account closed and personal data de-identified; financial and legal records are retained.'
+          : 'Account closed; the remaining erasure is pending and retried automatically.',
+      },
+    });
+    return { success: true, data: { ticketId: id, outcome } };
+  });
+
   // =========================================================================
   // COMPLIANCE — the liability shield: audit runs, violations, re-reviews
   // =========================================================================
@@ -6597,4 +6661,17 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'DISCOVERY_CATEGORY_MERGE', 'DiscoveryCategory', request.params.id, { targetId, ...result.dedupes }, request);
     return { success: true, data: result };
   });
+
+  // [PT-2] Card rail v2 read views (CARD-CHECKOUT-API.md section 8): sessions,
+  // their evidence (hashes, never payloads) and a subscription's cards. No
+  // vault token, state, page address or provider reference is ever returned.
+  app.get('/billing/card-sessions', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminCardSessions(app.prisma, request.query),
+  }));
+  app.get<{ Params: { id: string } }>('/billing/card-sessions/:id', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminCardSession(app.prisma, request.params.id),
+  }));
+  app.get<{ Params: { subscriptionId: string } }>('/billing/subscriptions/:subscriptionId/cards', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminSubscriptionCards(app.prisma, request.params.subscriptionId),
+  }));
 }

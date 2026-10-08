@@ -101,8 +101,10 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
       return {
         tone: 'refused',
         title: 'This store is held by its weekly fee',
-        next: `${NOTHING_CHANGED} Its weekly fee is unpaid or its billing is stopped. It comes back by itself when the fee is paid through the MMG checkout page; the console cannot lift a fee hold.`,
+        next: `${NOTHING_CHANGED} Its weekly fee is unpaid or its billing is stopped. The fee must be paid through the MMG checkout page first. Billing suspensions lift automatically after confirmed payment; admin suspensions still need Reinstate. The console cannot lift a fee hold.`,
       };
+    case 'OWNER_ACCOUNT_RESTRICTED':
+      return { tone: 'refused', title: 'The owner’s account is banned or suspended', next: `${NOTHING_CHANGED} The owner's account must be reinstated first. Then refresh this store's checklist.` };
     case 'ACCOUNT_CLOSED':
       return { tone: 'refused', title: 'The owner closed their Swift account', next: `${NOTHING_CHANGED} A closed account's store is not reopened from the console.` };
     case 'STORE_CLOSED':

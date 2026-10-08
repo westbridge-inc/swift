@@ -1,3 +1,4 @@
+import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -23,6 +24,11 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
+import {
+  publicOperatingHours,
+  publicStorefrontCategory,
+  publicStorefrontImage,
+} from './storefront-projection';
 import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
@@ -34,12 +40,13 @@ import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCo
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
+import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
-import { AccountService } from './account.service';
+import { AccountService, closesByRequest } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
@@ -101,6 +108,16 @@ const itemSlotsQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
 });
 
+/** [M023] Cart add/update validation: the shared validator, refused as a 400 naming the reason. */
+function validatedSelection(item: Parameters<typeof validateSelectedOptions>[0], selected: unknown): OptionSelection {
+  try {
+    return validateSelectedOptions(item, selected).selection;
+  } catch (error) {
+    if (error instanceof OptionSelectionError) throw new ValidationError(error.message, { selectedOptions: [error.reason] });
+    throw error;
+  }
+}
+
 const addCartItemSchema = z.object({
   vendorId: z.string().min(1),
   itemId: z.string().min(1),
@@ -155,6 +172,17 @@ const checkoutSchema = z.object({
       }),
     )
     .max(10)
+    .optional(),
+  // [L09 · price lock] What the customer saw: the quote's total and each cart
+  // line's unit price. Optional: an older app sends neither.
+  expectedTotal: z.number().nonnegative().max(1_000_000_000).optional(),
+  // No count cap of its own: a cart has no line cap and the apps send every
+  // line, so a cap here would refuse a cart the customer can build. The
+  // request body limit bounds the list, and checkout only looks each entry up
+  // in the cart it already loaded (no query per entry).
+  expectedLines: z
+    .array(z.object({ lineId: z.string().min(1).max(64), unitPrice: z.number().nonnegative().max(1_000_000_000) }))
+    .refine((lines) => new Set(lines.map((line) => line.lineId)).size === lines.length, 'Expected-price line IDs must be unique')
     .optional(),
 });
 
@@ -329,8 +357,13 @@ async function buildCartResponse(
             select: {
               id: true, name: true, basePrice: true, imageUrl: true,
               isAvailable: true, vendorId: true, fulfillment: true,
+              // [F4] Everything the one option validator reads, so the quote
+              // marks a line whose choice sold out exactly as checkout refuses it.
               optionGroups: {
-                select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
+                select: {
+                  id: true, name: true, isRequired: true, minSelect: true, maxSelect: true,
+                  options: { select: { id: true, name: true, additionalPrice: true, isAvailable: true } },
+                },
               },
               // [E01] Each line prices against ITS OWN vendor — the tracked
               // `cart.vendor` is only the most recently added store.
@@ -438,8 +471,13 @@ async function buildCartResponse(
 
   const itemDetails = cart.items.map((ci) => {
     const line = priceCartLine(ci);
+    // [F4] A line is orderable only if its item AND its choices still are: a
+    // sold-out choice marks the line the way a sold-out item does (every app
+    // blocks the order button on it and offers Remove), with the reason.
+    const optionsIssue = ci.item.isAvailable ? lineOptionsIssue(ci.item, ci.selectedOptions) : null;
+    const lineAvailable = ci.item.isAvailable && optionsIssue === null;
 
-    if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
+    if (!lineAvailable) unavailableItemIds.push(ci.id);
 
     return {
       id: ci.id,
@@ -453,7 +491,8 @@ async function buildCartResponse(
       selectedOptionNames: line.options.map((o) => o.optionName),
       specialInstructions: ci.specialInstructions,
       lineTotal: line.lineTotal,
-      isAvailable: ci.item.isAvailable,
+      isAvailable: lineAvailable,
+      unavailableReason: optionsIssue,
       fulfillment: ci.item.fulfillment,
       // [E01] Which store's order this line joins at checkout.
       vendorId: ci.item.vendorId,
@@ -808,6 +847,9 @@ export async function customerRoutes(app: FastifyInstance) {
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
         roles: user.roles,
+        // [DELETION-INTEGRITY] What Delete starts for this person: erasure, or a
+        // closure request the support team completes (store or advertiser).
+        accountClosure: await closesByRequest(app.prisma, userId, user.roles) ? 'REQUEST' : 'DELETE',
         customer: {
           id: customer.id,
           totalOrders: customer.totalOrders,
@@ -874,8 +916,37 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
+  app.post('/account/closure-request', async (request: AuthRequest, reply) => {
+    await requireRecentOtpOrStepUp(app, request);
+    const result = await account.requestClosure(request.user.userId);
+    reply.code(202);
+    return { success: true, data: result };
+  });
+
   app.delete('/account', async (request: AuthRequest, reply) => {
-    const result = await account.deleteAccount(request.user.userId);
+    // [DELETION-INTEGRITY] Build 9 (in store review, frozen) says "Your account
+    // has been deleted." and signs out on every success except
+    // PENDING_DOCUMENT_ERASURE, where it shows this server's message. Newer
+    // builds show every receipt by its own message and say so with
+    // ?receipts=v2. Without it the answer uses build 9's words, so build 9
+    // never reports an open account, or an unfinished erasure, as deleted.
+    const modernReceipts = (request.query as Record<string, unknown> | undefined)?.['receipts'] === 'v2';
+    await requireRecentOtpOrStepUp(app, request).catch((error: unknown) => {
+      // Build 9 has no code sheet on this screen and shows the message as is:
+      // name the step it can take (a fresh code sign-in counts as step-up).
+      if (!modernReceipts && error instanceof AppError && error.code === 'STEP_UP_REQUIRED') {
+        throw new AppError(403, 'STEP_UP_REQUIRED',
+          'For your security, sign out and sign back in with a code sent to your phone, then delete your account within 10 minutes.', error.details);
+      }
+      throw error;
+    });
+    const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
+      const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
+      if (user?.phone !== `deleted:${request.user.userId}`) throw error;
+      app.log.error({ err: error, userId: request.user.userId }, 'Account erasure pending automatic retry');
+      return { deleted: false, status: 'PENDING_ACCOUNT_ERASURE' as const,
+        message: 'Your account is closed. Personal-data erasure is pending and will be retried automatically; no further sign-in is needed.' };
+    });
     if (!result.deleted) reply.code(202);
     // Leave an audit trail (the de-identified row is retained, so its id stays a
     // valid FK). Best-effort; a pending document obligation is not completion.
@@ -883,11 +954,13 @@ export async function customerRoutes(app: FastifyInstance) {
       .create({
         data: {
           userId: request.user.userId,
-          action: result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
+          action: result.status === 'CLOSURE_REQUESTED' ? 'ACCOUNT_CLOSURE_REQUESTED'
+            : result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
           entity: 'User',
           entityId: request.user.userId,
           changes: {
             reason: 'DPA right to erasure (self-serve)',
+            ...(result.status && { status: result.status }),
             ...(result.status === 'PENDING_DOCUMENT_ERASURE' && {
               status: result.status,
               pendingDocuments: result.pendingDocuments,
@@ -897,6 +970,15 @@ export async function customerRoutes(app: FastifyInstance) {
         },
       })
       .catch(() => {});
+    if (!modernReceipts && result.status === 'CLOSURE_REQUESTED') {
+      // Not a success to build 9: the account stays open and signed in, and the
+      // request (already recorded) is described in the server's own words.
+      throw new AppError(409, 'ACCOUNT_CLOSURE_REQUESTED', result.message, { status: result.status, ticketId: result.ticketId });
+    }
+    if (!modernReceipts && !result.deleted && result.status !== 'PENDING_DOCUMENT_ERASURE') {
+      // Closed, with some erasure still pending: build 9's own word for that.
+      return { success: true, data: { ...result, status: 'PENDING_DOCUMENT_ERASURE' as const, pendingReason: result.status } };
+    }
     return { success: true, data: result };
   });
 
@@ -1495,15 +1577,10 @@ export async function customerRoutes(app: FastifyInstance) {
         })) > 0
       : false;
 
-    // Zero markup — customers pay the vendor base price (revenue = subscriptions).
-    const categories = vendor.categories.map((cat) => ({
-      ...cat,
-      items: cat.items.map((item) => ({
-        ...item,
-        basePrice: Number(item.basePrice),
-        customerPrice: Number(item.basePrice),
-      })),
-    }));
+    // [Row 77] Field-by-field guest allowlist (storefront-projection.ts) —
+    // never a spread of the raw category/item rows. A category the store has
+    // switched off is not on its public page.
+    const categories = vendor.categories.filter((cat) => cat.isActive).map(publicStorefrontCategory);
 
     // Distance & ETA
     let distanceKm: number | null = null;
@@ -1539,7 +1616,7 @@ export async function customerRoutes(app: FastifyInstance) {
         cuisineTypes: vendor.cuisineTypes,
         logoUrl: vendor.logoUrl,
         coverImageUrl: vendor.coverImageUrl,
-        images: vendor.images,
+        images: vendor.images.map(publicStorefrontImage),
         addressLine1: vendor.addressLine1,
         city: vendor.city,
         latitude: vendor.latitude,
@@ -1568,7 +1645,7 @@ export async function customerRoutes(app: FastifyInstance) {
         estimatedPrepTime: vendor.estimatedPrepTime,
         minOrderAmount: Number(vendor.minOrderAmount),
         deliveryRadius: vendor.deliveryRadius,
-        operatingHours: vendor.operatingHours,
+        operatingHours: vendor.operatingHours.map(publicOperatingHours),
         categories,
         isFavorite,
         // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
@@ -1825,24 +1902,9 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'VENDOR_UNAVAILABLE', 'This vendor is not currently available');
     }
 
-    // Validate selected options against option groups
-    const selectedOptions = body.selectedOptions ?? {};
-    for (const group of item.optionGroups) {
-      const raw = (selectedOptions as Record<string, unknown>)[group.id];
-      const chosen = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
-      const validIds = new Set(group.options.map((o) => o.id));
-      for (const id of chosen) {
-        if (typeof id !== 'string' || !validIds.has(id)) {
-          throw new ValidationError(`That option isn't available for "${group.name}"`);
-        }
-      }
-      if (group.isRequired && chosen.length < Math.max(1, group.minSelect)) {
-        throw new ValidationError(`Please choose an option for "${group.name}"`);
-      }
-      if (chosen.length > group.maxSelect) {
-        throw new ValidationError(`Choose at most ${group.maxSelect} for "${group.name}"`);
-      }
-    }
+    // [M023] The one option validator (cart add, cart update and checkout).
+    const selectedOptions = validatedSelection(item, body.selectedOptions);
+    const note = normalizeItemNote(body.specialInstructions);
 
     // Get or create cart. Multi-vendor carts are allowed: checkout
     // splits per vendor; cart.vendorId just tracks the most recent vendor.
@@ -1866,10 +1928,14 @@ export async function customerRoutes(app: FastifyInstance) {
       });
     }
 
-    // Merge if same item + same options already in cart
-    const optionsKey = JSON.stringify(selectedOptions);
+    // [row 70] A line is the item, its options AND its note: the same item
+    // with a different note is its own line (a second note is never dropped);
+    // the same item, options and note merges into the existing line.
+    const optionsKey = selectionKey(selectedOptions);
     const existing = cart.items.find(
-      (ci) => ci.itemId === body.itemId && JSON.stringify(ci.selectedOptions) === optionsKey,
+      (ci) => ci.itemId === body.itemId
+        && selectionKey(ci.selectedOptions) === optionsKey
+        && normalizeItemNote(ci.specialInstructions) === note,
     );
 
     if (existing) {
@@ -1884,7 +1950,7 @@ export async function customerRoutes(app: FastifyInstance) {
           itemId: body.itemId,
           quantity,
           selectedOptions: selectedOptions as never,
-          specialInstructions: body.specialInstructions,
+          specialInstructions: note,
         },
       });
     }
@@ -1919,6 +1985,16 @@ export async function customerRoutes(app: FastifyInstance) {
     if (!cartItem || cartItem.cart.customerId !== userId) {
       throw new NotFoundError('CartItem', id);
     }
+    // [M023] An edited selection passes the same validator as an added one.
+    const editedSelection = body.selectedOptions === undefined || body.quantity <= 0
+      ? undefined
+      : validatedSelection(
+        await app.prisma.item.findUniqueOrThrow({
+          where: { id: cartItem.itemId },
+          select: { optionGroups: { include: { options: true } } },
+        }),
+        body.selectedOptions,
+      );
 
     if (body.quantity <= 0) {
       await app.prisma.cartItem.delete({ where: { id } });
@@ -1936,8 +2012,8 @@ export async function customerRoutes(app: FastifyInstance) {
         where: { id },
         data: {
           quantity,
-          ...(body.selectedOptions !== undefined && { selectedOptions: body.selectedOptions as never }),
-          ...(body.specialInstructions !== undefined && { specialInstructions: body.specialInstructions }),
+          ...(editedSelection !== undefined && { selectedOptions: editedSelection as never }),
+          ...(body.specialInstructions !== undefined && { specialInstructions: normalizeItemNote(body.specialInstructions) }),
         },
       });
     }
@@ -2183,6 +2259,9 @@ export async function customerRoutes(app: FastifyInstance) {
         fulfillmentSelections: body.fulfillmentSelections,
         express: body.express,
         appointments: body.appointments,
+        ...(body.expectedTotal != null || body.expectedLines
+          ? { expectedPrices: { total: body.expectedTotal, lines: body.expectedLines } }
+          : {}),
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
         onCommitted: (committed) => { commit = committed; },
       });
@@ -2580,7 +2659,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // response — which the app discards on navigation — so "Share
         // tracking" had nothing durable to build a link from. Customer-scoped
         // read (this route already proves ownership); null on non-courier rows.
-        courierTrackingToken: order.courierTrackingToken,
+        courierTrackingToken: null,
         deliveryAddress: order.deliveryAddress,
         deliveryLat: order.deliveryLat,
         deliveryLng: order.deliveryLng,
