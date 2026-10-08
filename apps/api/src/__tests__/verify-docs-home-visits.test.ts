@@ -12,7 +12,8 @@
  *  - Build 9 shows and uploads only `checklist`: an owner who offers home visits sees the police
  *    clearance there, so a build-9 owner can upload it — but it never gates the store.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import * as homeVisits from '../modules/verification/home-visits';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -193,6 +194,33 @@ describe('[home visits] what the owner is shown', () => {
 });
 
 describe('[home visits] booking', () => {
+  it('clearance that lapses after preflight cannot authorize a committed home visit', async () => {
+    const store = await serviceStore('MOBILE');
+    const pc = await clearOwner(store.userId, new Date(Date.now() + 200 * DAY));
+    const c = await customer();
+    const check = homeVisits.homeVisitsCleared;
+    const preflight = vi.spyOn(homeVisits, 'homeVisitsCleared').mockImplementation(async (db, ownerId, now) => {
+      const allowed = await check(db, ownerId, now);
+      if (db === app.prisma && ownerId === store.userId && allowed) {
+        await app.prisma.verificationDocument.update({ where: { id: pc }, data: { expiresAt: new Date(Date.now() - DAY) } });
+      }
+      return allowed;
+    });
+    try {
+      const res = await book(c, store, 10);
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('HOME_VISIT_UNAVAILABLE');
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+      expect(await app.prisma.booking.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally { preflight.mockRestore(); }
+  });
+
+  it('concurrent refusals give the owner one daily notice', async () => {
+    const store = await serviceStore('MOBILE');
+    const notifications = new NotificationService(app.prisma, app.io);
+    await Promise.all(Array.from({ length: 4 }, () => homeVisits.tellOwnerHomeVisitsPaused(app.prisma, notifications, store.userId, store.vendorName)));
+    expect(await homeVisitNotices(store.userId)).toBe(1);
+  });
   it('a home visit is refused at checkout while the owner holds no approved police clearance; the customer and the owner are told plainly', async () => {
     const store = await serviceStore('MOBILE');
     const c = await customer();

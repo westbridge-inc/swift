@@ -60,7 +60,7 @@ export function homeVisitRefusal(vendorName: string, inShopAvailable: boolean): 
  */
 export async function tellOwnerHomeVisitsPaused(
   db: Db,
-  notifications: { send: (input: { userId: string; type: 'SYSTEM_ANNOUNCEMENT'; title: string; body: string; audience: 'business' }) => Promise<unknown> },
+  notifications: { send: (input: { userId: string; type: 'SYSTEM_ANNOUNCEMENT'; title: string; body: string; audience: 'business'; dedupeKey?: string }) => Promise<unknown> },
   ownerUserId: string,
   vendorName: string,
   now: Date = new Date(),
@@ -76,6 +76,7 @@ export async function tellOwnerHomeVisitsPaused(
     title: HOME_VISITS_PAUSED_TITLE,
     body: `A customer tried to book a home visit from ${vendorName}. Home visits need your police clearance, approved and current. Upload it under Documents; bookings at your place are not affected.`,
     audience: 'business',
+    dedupeKey: `home-visits-paused:${guyanaDayKey(now)}`,
   });
   return true;
 }
