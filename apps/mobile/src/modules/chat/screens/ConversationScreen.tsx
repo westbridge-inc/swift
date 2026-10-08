@@ -10,6 +10,7 @@ import { chatSendRefusal } from '../sendRefusal';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBlockUser, useReportContent } from '../../../hooks/customer';
 import { ActionSheet, CircleChip, ConfirmDialog, ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
+import { errorMessage } from '../../../lib/apiError';
 
 const GUTTER = space['2xl'];
 
@@ -97,7 +98,14 @@ export function ConversationScreen() {
       ) : (!paramRoomId && room.isError) || !roomId ? (
         <ErrorState
           onRetry={() => room.refetch()}
-          message="Chat opens once a rider is on your order."
+          message={
+            // [NO-DEAD-ENDS] The room opens without a rider, so a failed open
+            // is a failure (offline, or a refusal the server names), never
+            // "wait for a rider", which had people waiting for nothing.
+            room.isError
+              ? errorMessage(room.error, 'Couldn’t open this chat. Check your connection and try again.')
+              : 'Chat opens once a rider is on your order.'
+          }
         />
       ) : (
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>

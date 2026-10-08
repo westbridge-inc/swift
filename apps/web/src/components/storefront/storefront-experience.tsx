@@ -7,7 +7,6 @@ import { useRouter } from 'next/navigation';
 import {
   Banknote,
   Clock3,
-  ImageIcon,
   MapPin,
   Minus,
   Plus,
@@ -26,6 +25,7 @@ import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefron
 import {
   addToCart,
   checkoutAttemptSignature,
+  pricesAsSeen,
   cartQuoteFingerprint,
   checkout,
   clearCart,
@@ -48,6 +48,7 @@ import {
 import type { StorefrontDetail } from '@/lib/api';
 import { storefrontVertical, storefrontVerticalVariables } from '@/lib/design-tokens';
 import styles from './storefront.module.css';
+import { Pictogram } from '@/components/glyphs';
 
 type Address = {
   id: string;
@@ -79,7 +80,9 @@ const CATALOG_REFRESH_MS = 30_000;
 // 0 still renders "GY$0". Same guarantee as `money()` on the vendor side.
 // [W-13] One parser, one em-dash. `null` now reaches here from itemPrice and
 // optionPrice — a price the server never sent, which must never render as free.
-const gyMoney = (value: unknown) => formatAmount(value, 'GY$');
+// [WEB-REDESIGN] Customer prices read like the rest of the app (and the phone
+// app): `$2,500`, in Guyana dollars as the footer states.
+const gyMoney = (value: unknown) => formatAmount(value, '$');
 
 const verticalLabel: Record<ReturnType<typeof storefrontVertical>, string> = {
   food: 'Food',
@@ -684,6 +687,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       const body = {
         paymentMethod: 'CASH' as const,
         tipAmount: riderTip,
+        ...pricesAsSeen(quotedCart),
         ...(quotedCart.promoCode?.code ? { promoCode: quotedCart.promoCode.code } : {}),
       };
       const signature = checkoutAttemptSignature(quotedCart, body);
@@ -992,7 +996,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                           </span>
                         ) : (
                           <span className={styles.itemImageFallback} aria-hidden="true">
-                            <ImageIcon size={24} />
+                            <Pictogram name={currentVertical} size={28} />
                           </span>
                         )}
                       </article>
