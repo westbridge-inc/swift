@@ -1,6 +1,7 @@
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
+import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
@@ -1093,7 +1094,7 @@ export async function riderRoutes(app: FastifyInstance) {
             addressLine1: true, city: true,
           },
         },
-        items: { select: { name: true, quantity: true } },
+        items: { select: { quantity: true } },
       },
       orderBy: { createdAt: 'asc' },
       take: 50,
@@ -1123,14 +1124,18 @@ export async function riderRoutes(app: FastifyInstance) {
         // empty, and nothing about the system says why.
         const pickupLat = order.pickupLat != null ? Number(order.pickupLat) : Number(order.vendor?.latitude ?? NaN);
         const pickupLng = order.pickupLng != null ? Number(order.pickupLng) : Number(order.vendor?.longitude ?? NaN);
-        const hasPickup = Number.isFinite(pickupLat) && Number.isFinite(pickupLng);
+        const privatePickup = order.orderType === 'COURIER' ? coarsePoint(pickupLat, pickupLng) : null;
+        const boardPickupLat = order.orderType === 'COURIER' ? privatePickup?.lat ?? NaN : pickupLat;
+        const boardPickupLng = order.orderType === 'COURIER' ? privatePickup?.lng ?? NaN : pickupLng;
+        const destination = coarsePoint(order.deliveryLat, order.deliveryLng);
+        const hasPickup = Number.isFinite(boardPickupLat) && Number.isFinite(boardPickupLng);
 
         // No usable pickup point is NOT a job 6,494 km away — it is a job whose
         // distance we do not know. Infinity keeps it off the radius-filtered
         // board without pretending we measured something.
-        const pickupDistance = hasPickup ? haversineDistance(riderLat, riderLng, pickupLat, pickupLng) : Infinity;
-        const deliveryDistance = hasPickup
-          ? haversineDistance(pickupLat, pickupLng, Number(order.deliveryLat), Number(order.deliveryLng))
+        const pickupDistance = hasPickup ? haversineDistance(riderLat, riderLng, boardPickupLat, boardPickupLng) : Infinity;
+        const deliveryDistance = hasPickup && destination
+          ? haversineDistance(boardPickupLat, boardPickupLng, destination.lat, destination.lng)
           : Infinity;
         return {
           id: order.id,
@@ -1138,10 +1143,6 @@ export async function riderRoutes(app: FastifyInstance) {
           orderType: order.orderType,
           status: order.status,
           vendor: order.vendor,
-          pickupAddress: order.pickupAddress,
-          deliveryAddress: order.deliveryAddress,
-          deliveryInstructions: order.deliveryInstructions,
-          items: order.items,
           itemCount: order.items.reduce((s, i) => s + i.quantity, 0),
           estLoad: estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0)),
           deliveryFee: Number(order.deliveryFee),

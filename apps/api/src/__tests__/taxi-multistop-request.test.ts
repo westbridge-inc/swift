@@ -66,7 +66,7 @@ const PORT_OF_SPAIN = { lat: 10.6596, lng: -61.5089, address: 'Port of Spain' };
 const PINNED_SINGLE_LEG_ANSWER = '{"success":true,"data":{"ride":{"id":"<ID>","orderNumber":"<NUMBER>","status":"PENDING","fare":1700,"rideClass":"ECONOMY","currencyCode":"GYD","fareSource":"formula","distanceKm":2,"durationMin":5,"ridePin":"<PIN>","pickupAddress":"Bartica Police Station","dropoffAddress":"Bartica Airstrip"},"message":"Looking for a driver near you…"}}';
 
 /** The keys of an open-board item and of the two offer cards today (main). */
-const BOARD_ITEM_KEYS = ['id', 'orderNumber', 'pickupAddress', 'dropoffAddress', 'pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng', 'passengerCount', 'estimatedDistance', 'estimatedDuration', 'fareTotal', 'fareSurge', 'distanceToPickup', 'etaToPickup', 'customer', 'createdAt'];
+const BOARD_ITEM_KEYS = ['id', 'orderNumber', 'pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng', 'passengerCount', 'estimatedDistance', 'estimatedDuration', 'fareTotal', 'fareSurge', 'distanceToPickup', 'etaToPickup', 'customer', 'createdAt'];
 const LIVE_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'isExpress', 'expiresInSeconds', 'etaMinutes', 'rescueIncentiveGyd', 'paymentMethod', 'customerTrust', 'itemCount', 'estLoad', 'cashMath'];
 const RECOVERED_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'vendorName', 'isExpress', 'paymentMethod', 'expiresInSeconds', 'itemCount', 'estLoad', 'customerTrust', 'deliveryFee', 'tipAmount', 'taxiFareTotal', 'pickupAddress', 'deliveryAddress', 'etaMinutes', 'rescueIncentiveGyd', 'cashMath'];
 const STOP_KEYS = ['stops', 'stopCount', 'nextStopSequence'];
@@ -647,7 +647,11 @@ describe('the reads carry the stops, in order', () => {
     // The open board.
     const board = await call(app, 'GET', '/api/v1/driver/rides/available', driver.token);
     const item = (board.json().data as { id: string }[]).find((r) => r.id === rideId);
-    expect(item).toMatchObject({ stopCount: 3, stops: preview, dropoffAddress: DROPOFF_ADDRESS, dropoffLat: DEST.lat, dropoffLng: DEST.lng, fareTotal: q.fare });
+    const coarseStops = [S1, S2, S3].map((s, i) => ({ sequence: i + 1, lat: Math.round(s.lat / 0.003) * 0.003, lng: Math.round(s.lng / 0.003) * 0.003 }));
+    expect(item).toMatchObject({ stopCount: 3, stops: coarseStops, dropoffLat: Math.round(DEST.lat / 0.003) * 0.003, dropoffLng: Math.round(DEST.lng / 0.003) * 0.003, fareTotal: q.fare });
+    expect(item).not.toHaveProperty('pickupAddress');
+    expect(item).not.toHaveProperty('dropoffAddress');
+    expect(Object.keys((item as { customer: object }).customer)).toEqual(['displayRating']);
     expect(Object.keys(item!)).toEqual([...BOARD_ITEM_KEYS, 'stopCount', 'stops']);
 
     // Accepted from the card.

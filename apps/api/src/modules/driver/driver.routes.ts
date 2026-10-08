@@ -16,6 +16,7 @@ import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
+import { coarsePoint } from '../dispatch/board-privacy';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { loadTaxiStops, offerItinerary, readRideItinerary } from '../rides/taxi-stops-read';
 import { freshRidePinReset } from '../rides/ride-pin';
@@ -725,7 +726,7 @@ export async function driverRoutes(app: FastifyInstance) {
         }],
       },
       include: {
-        customer: { select: { id: true, firstName: true, avatar: true } },
+        customer: { select: { id: true } },
       },
       orderBy: { placedAt: 'asc' },
       take: 20,
@@ -741,21 +742,22 @@ export async function driverRoutes(app: FastifyInstance) {
 
     // Enrich with distance from driver to pickup
     const enriched = orders.map((order) => {
+      const pickup = coarsePoint(order.pickupLat, order.pickupLng);
+      const dropoff = coarsePoint(order.deliveryLat, order.deliveryLng);
       const distanceToPickup =
-        driver.currentLat && driver.currentLng && order.pickupLat && order.pickupLng
-          ? haversineDistance(driver.currentLat, driver.currentLng, order.pickupLat, order.pickupLng)
+        driver.currentLat !== null && driver.currentLng !== null && pickup
+          ? haversineDistance(driver.currentLat, driver.currentLng, pickup.lat, pickup.lng)
           : null;
       const etaMinutes = distanceToPickup !== null ? estimateDeliveryMinutes(distanceToPickup) : null;
+      const itinerary = offerItinerary(order, itineraries);
 
       return {
         id: order.id,
         orderNumber: order.orderNumber,
-        pickupAddress: order.taxiPickupAddress || order.pickupAddress,
-        dropoffAddress: order.taxiDropoffAddress || order.deliveryAddress,
-        pickupLat: order.pickupLat,
-        pickupLng: order.pickupLng,
-        dropoffLat: order.deliveryLat,
-        dropoffLng: order.deliveryLng,
+        pickupLat: pickup?.lat ?? null,
+        pickupLng: pickup?.lng ?? null,
+        dropoffLat: dropoff?.lat ?? null,
+        dropoffLng: dropoff?.lng ?? null,
         passengerCount: order.taxiPassengerCount || 1,
         estimatedDistance: order.taxiDistance,
         estimatedDuration: order.taxiDuration,
@@ -767,13 +769,19 @@ export async function driverRoutes(app: FastifyInstance) {
         distanceToPickup: distanceToPickup !== null ? Math.round(distanceToPickup * 10) / 10 : null,
         etaToPickup: etaMinutes,
         customer: order.customer
-          ? { ...order.customer, displayRating: passengerSurfaces.get(order.customer.id)?.displayRating ?? null }
+          ? { displayRating: passengerSurfaces.get(order.customer.id)?.displayRating ?? null }
           : order.customer,
         createdAt: order.createdAt,
         // [TAXI multi-stop] A ride with stops: how many and where, in order. The
         // dropoff above stays the FINAL destination; distance, duration and
         // fare are the whole route's. A ride without stops gains no key.
-        ...offerItinerary(order, itineraries),
+        ...(itinerary && {
+          stopCount: itinerary.stopCount,
+          stops: itinerary.stops.map((stop) => {
+            const point = coarsePoint(stop.lat, stop.lng);
+            return { sequence: stop.sequence, lat: point?.lat ?? null, lng: point?.lng ?? null };
+          }),
+        }),
       };
     });
 
