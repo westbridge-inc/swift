@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
-import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
+import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
   addToCart,
   checkoutAttemptSignature,
@@ -49,6 +49,8 @@ import {
   validateSelectedOptions,
 } from '@/lib/menu-options';
 import { useCustomerSession } from '@/components/customer-session';
+import { addGuestLine, changeGuestQuantity, clearGuestBasket, guestCart, useGuestBasket } from '@/lib/basket';
+import { useOrderingContext } from '@/components/ordering-context';
 import { Photo } from '@/components/order-ui';
 import { Sheet } from '@/components/sheet';
 import { StoreActions } from './store-actions';
@@ -191,6 +193,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // guest to sign in, and its cart count is refreshed after every change made
   // here. Rendered on its own (tests), both are simply absent.
   const shellSession = useCustomerSession();
+  const { mode: orderingMode } = useOrderingContext();
+  const guestBasket = useGuestBasket();
   const shellQueries = useContext(QueryClientContext);
   const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
   const diningNoticeDismissed = dismissedDiningStore === store.id;
@@ -214,6 +218,12 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const [loadingCart, setLoadingCart] = useState(false);
   const [cartHydrated, setCartHydrated] = useState(false);
   const [cartLoadVersion, setCartLoadVersion] = useState(0);
+  useEffect(() => { if (!signedIn) setCart(guestCart(guestBasket)); }, [signedIn, guestBasket]);
+  useEffect(() => {
+    const changed = () => setCartLoadVersion(v => v + 1);
+    window.addEventListener('swift-guest-merged', changed);
+    return () => window.removeEventListener('swift-guest-merged', changed);
+  }, []);
   const [busyItem, setBusyItem] = useState<string | null>(null);
   const [quotingAddress, setQuotingAddress] = useState(false);
   const [placingOrder, setPlacingOrder] = useState(false);
@@ -386,7 +396,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     && discount > 0
     && cartFulfillmentModes.size === 1
     && cartFulfillmentModes.has('DELIVERY');
-  const directCheckoutBlocked = !catalogVerified || cartNeedsReview || cartHasAppointment || fulfillmentNeedsReview || cartOutOfRange || cashPromoBlocked;
+  const directCheckoutBlocked = orderingMode === 'PICKUP' || !catalogVerified || cartNeedsReview || cartHasAppointment || fulfillmentNeedsReview || cartOutOfRange || cashPromoBlocked;
   const menuFulfillmentModes = new Set(categoryItems.map((item) => item.fulfillment).filter(Boolean));
   const storePickupOnly = menuFulfillmentModes.size === 1 && menuFulfillmentModes.has('PICKUP');
   const storeAppointmentOnly = menuFulfillmentModes.size === 1 && menuFulfillmentModes.has('APPOINTMENT');
@@ -486,6 +496,23 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     setModalItem(item);
   };
 
+  const addLocal = (item: DisplayItem, quantity: number, selectedOptions: Record<string, string | string[]>) => {
+    try {
+      const unitPrice = selectionPrice(item, Object.fromEntries(Object.entries(selectedOptions).map(([k, v]) => [k, typeof v === 'string' ? [v] : v])));
+      if (unitPrice === null) throw new Error('Check the live item price before adding it.');
+      const result = addGuestLine({ vendorId: catalog.id, storeSlug: store.slug, vendorName: catalog.name, itemId: item.id,
+        name: item.name, quantity, unitPrice, selectedOptions, fulfillment: item.fulfillment, returnPath });
+      if (result === 'DIFFERENT_STORE') {
+        if (window.confirm('Your basket is from another store. Replace it with this store’s basket?')) {
+          clearGuestBasket(); addLocal(item, quantity, selectedOptions);
+        }
+        return;
+      }
+      if (result === 'QUANTITY_LIMIT') throw new Error('You can add up to 99 of one item and choice.');
+      showNotice(`${item.name} added to your order.`, true);
+    } catch (e) { setError((e as Error).message); }
+  };
+
   const addItem = (item: DisplayItem, trigger?: HTMLElement) => {
     if (!orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
     // [W6] One tap adds an item that needs no choice; an item with a required
@@ -494,10 +521,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       openOptions(item, trigger);
       return;
     }
-    if (!signedIn) {
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: {}, returnPath });
-    }
-    if (!requireCustomerSession()) return;
+    if (!signedIn) { addLocal(item, 1, {}); return; }
     const existing = cartItems.find((line) => line.itemId === item.id);
     void mutateItem(
       item.id,
@@ -546,7 +570,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
 
   const subtractItem = (item: DisplayItem) => {
-    if (!requireCustomerSession()) return;
+    if (!signedIn) {
+      const line = guestBasket.lines.filter(l => l.itemId === item.id).at(-1);
+      if (line) { try { changeGuestQuantity(line.clientLineId, line.quantity - 1); } catch (e) { setError((e as Error).message); } }
+      return;
+    }
     const matching = cartItems.filter((line) => line.itemId === item.id);
     const line = matching.at(-1);
     if (!line) return;
@@ -601,9 +629,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       return;
     }
     if (!signedIn) {
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: modalItem.id, selectedOptions, returnPath });
-      requireCustomerSession();
-      return;
+      addLocal(liveItem, itemQuantity, selected); closeOptions(); return;
     }
     const item = modalItem;
     const quantity = itemQuantity;
@@ -1016,7 +1042,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             <div className={styles.railBody}>
               {cartItems.length === 0 ? (
                 <p className={styles.emptyRail}>
-                  {signedIn ? 'Add a menu item to start your order.' : 'Sign in with your phone to order here on the web. No app install needed.'}
+                  Add a menu item to start your order. No account needed to fill your basket.
                 </p>
               ) : (
                 <>
@@ -1039,7 +1065,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                             type="button"
                             className={styles.removeLineButton}
                             disabled={busyItem !== null || quotingAddress || placingOrder}
-                            onClick={() => void mutateItem(line.itemId, () => removeCartLine(line.id), `${line.name} removed.`)}
+                            onClick={() => { if (!signedIn) { try { changeGuestQuantity(line.id, 0); } catch (e) { setError((e as Error).message); } } else void mutateItem(line.itemId, () => removeCartLine(line.id), `${line.name} removed.`); }}
                             aria-label={`Remove ${line.name}${line.selectedOptionNames?.length ? ` with ${line.selectedOptionNames.join(', ')}` : ''} from your order`}
                           >
                             <X size={16} aria-hidden="true" />
@@ -1082,7 +1108,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
               {itemCount > 0 && directCheckoutBlocked ? (
                 <div className={styles.reviewNotice} role={catalogState === 'unavailable' ? 'alert' : 'note'}>
                   <p>
-                    {!catalogVerified
+                    {orderingMode === 'PICKUP'
+                      ? 'Pickup checkout is not available yet.'
+                      : !catalogVerified
                       ? catalogState === 'loading'
                         ? 'Swift is still checking this menu’s required choices. Checkout stays locked until that server catalog is ready.'
                         : 'Swift could not verify this menu’s required choices. Checkout stays locked so no incomplete order is placed.'
@@ -1191,12 +1219,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             <div className={styles.railFooter}>
               {!signedIn ? (
                 <>
-                  <Link
-                    href={`/login?next=${encodeURIComponent(returnPath)}`}
-                    className={styles.primaryButton}
-                  >
-                    Sign in to order
-                  </Link>
+                  <button type="button" disabled={!itemCount} onClick={requireCustomerSession} className={styles.primaryButton}>Place order</button>
+                  <p className={styles.guestCopy}>Your items are an estimate. Sign in with your phone for a server quote before ordering.</p>
                   <p className={styles.guestCopy}>
                     New to Swift?{' '}
                     <Link href={`/signup?next=${encodeURIComponent(returnPath)}`}>Create your web account</Link>.

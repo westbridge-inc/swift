@@ -14,14 +14,14 @@ import OrdersPage from '@/app/(app)/orders/page';
 import CartPage from '@/app/(app)/cart/page';
 import OrderPage from '@/app/(app)/orders/[id]/page';
 
-const person = vi.hoisted(() => ({ scope: 'guest', epoch: 0 }));
+const person = vi.hoisted(() => ({ scope: 'guest', epoch: 0, status: 'guest' }));
 
 vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'v1' }), useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({ push: vi.fn() }),
 }));
 vi.mock('./customer-session', () => ({ useCustomerSession: () => ({
-  status: 'guest', ...person, nearPoint: null, setNearPoint: vi.fn(), ensureSignedIn: vi.fn(),
+  ...person, nearPoint: null, setNearPoint: vi.fn(), ensureSignedIn: vi.fn(),
 }) }));
 
 function pending<T>() {
@@ -97,7 +97,8 @@ describe('loading surfaces become content in the reserved layout', () => {
     expect(view.container.querySelector('.swift-order-row')).toBeTruthy();
   });
 
-  it('the cart retains its actual two-column CSS layout when data arrives', async () => {
+  it('the signed-in cart retains its actual two-column CSS layout when data arrives', async () => {
+    person.status = 'signed-in';
     const response = pending<api.Cart>();
     vi.spyOn(api, 'getCart').mockReturnValue(response.promise);
     vi.spyOn(api, 'getAddresses').mockResolvedValue([]);
@@ -108,6 +109,7 @@ describe('loading surfaces become content in the reserved layout', () => {
     await response.finish({ items: [{ id: 'l1', itemId: 'i1', name: 'Lunch box', quantity: 1, customerPrice: 500, isAvailable: true }], vendor: { id: 'v1', name: 'Local store' }, subtotalCustomer: 500 } as api.Cart);
     expect(await screen.findByText('Lunch box')).toBeTruthy();
     expect(view.container.firstElementChild?.className).toBe(layout);
+    person.status = 'guest';
   });
 
   it('tracking retains its page, hero and progress CSS layout when the order arrives', async () => {

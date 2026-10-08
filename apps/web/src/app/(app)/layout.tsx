@@ -15,6 +15,9 @@ import CartSkeleton from './cart/loading';
 import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
 import { OfflineNotice } from '@/components/offline-notice';
+import { GuestBasketSync } from '@/components/guest-basket';
+import { useGuestBasket } from '@/lib/basket';
+import { OrderingContextBar, OrderingContextProvider } from '@/components/ordering-context';
 import { InstallPrompt } from '@/components/install-prompt';
 
 // The customer ordering app. Opening swiftgy.com lands here, on Home.
@@ -32,7 +35,7 @@ import { InstallPrompt } from '@/components/install-prompt';
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <Providers>
-      <CustomerShell>{children}</CustomerShell>
+      <OrderingContextProvider><CustomerShell>{children}</CustomerShell></OrderingContextProvider>
     </Providers>
   );
 }
@@ -165,7 +168,8 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   const signedIn = status === 'signed-in';
   const cart = useQuery({ queryKey: customerCartKey(scope, epoch), queryFn: readShellCart, enabled: signedIn, staleTime: 30_000, retry: false });
   const me = useQuery({ queryKey: shellPersonKey(scope, epoch), queryFn: readShellPerson, enabled: signedIn, staleTime: 5 * 60_000, retry: false });
-  const cartCount = signedIn ? cartItemCount(cart.data) : 0;
+  const guestBasket = useGuestBasket();
+  const cartCount = signedIn ? cartItemCount(cart.data) : guestBasket.lines.reduce((n, l) => n + l.quantity, 0);
 
   // A private page opened with an expired access cookie: spend the refresh
   // cookie once before deciding this is a guest.
@@ -223,7 +227,9 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
           />
           <main className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
             <div className="sw-page">
+              <OrderingContextBar />
               <OfflineNotice />
+              <GuestBasketSync />
               {showBack && backClaims === 0 ? <BackRow /> : null}
               <div key={pathname} className="swift-route-in">{content}</div>
             </div>

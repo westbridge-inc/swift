@@ -68,7 +68,7 @@ const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(
 
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
-  sessionStorage.clear();
+  sessionStorage.clear(); localStorage.clear();
   window.history.replaceState({}, '', '/');
   signedIn = true;
   liveCart = cart();
@@ -112,21 +112,18 @@ async function choose(name: string) {
 }
 
 describe('[Q7b] store → cart', () => {
-  it('a guest can open the item, and is sent to sign in on the way to adding it — coming back to that same item', async () => {
+  it('a guest fills the basket, then signs in at Place order and comes back to that store', async () => {
     signedIn = false;
     at('/store/shanta-kitchen', {}, await storePage());
     await choose('Pepperpot bowl');
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $1,800' }));
-    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fshanta-kitchen'));
-    // The way back names this item and the choice made (the sign-in
-    // continuation reopens it on the store's page).
-    expect(JSON.parse(sessionStorage.getItem('swift_storefront_add')!)).toMatchObject({
-      storeSlug: 'shanta-kitchen', itemId: 'i1', selectedOptions: { g1: ['small'] }, returnPath: '/store/shanta-kitchen',
-    });
+    expect(state.push).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1')!).lines[0]).toMatchObject({ itemId: 'i1', selectedOptions: { g1: 'small' }, unitPrice: 1800 });
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
-    // It tried the refresh cookie once first — a returning customer is not
-    // sent to sign in for nothing.
+    expect(calls('POST', '/api/v1/auth/refresh')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fshanta-kitchen'));
     expect(calls('POST', '/api/v1/auth/refresh')).toHaveLength(1);
   });
 
@@ -238,11 +235,10 @@ describe('[Q7b] cart → checkout → tracking', () => {
     expect(screen.getByRole('button', { name: 'Place cash order · $2,150' })).toBeTruthy();
   });
 
-  it('sends a guest who opens the cart to sign in and back to the cart — never showing a cart', async () => {
+  it('shows a guest their browser basket without reading anyone’s server cart', async () => {
     signedIn = false;
     at('/cart', {}, <CartPage />);
-    const door = await screen.findByRole('region', { name: 'Sign in to start a cart' });
-    expect(within(door).getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe('/login?next=%2Fcart');
+    expect(await screen.findByRole('heading', { name: 'Your basket' })).toBeTruthy();
     expect(calls('GET', '/api/v1/customer/cart')).toHaveLength(0);
   });
 

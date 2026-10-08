@@ -1,6 +1,9 @@
 'use client';
 
 import CartSkeleton from './loading';
+import { useOrderingContext } from '@/components/ordering-context';
+import { GuestCart } from '@/components/guest-basket';
+import { useGuestBasket } from '@/lib/basket';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -49,6 +52,15 @@ import styles from './cart.module.css';
 const TIPS = [0, 200, 500, 1000];
 
 export default function CartPage() {
+  const { status } = useCustomerSession();
+  const basket = useGuestBasket();
+  if (status === 'checking') return <CartSkeleton />;
+  if (status !== 'signed-in' || basket.lines.length) return <GuestCart />;
+  return <SignedInCart />;
+}
+
+function SignedInCart() {
+  const { mode: orderingMode } = useOrderingContext();
   const router = useRouter();
   // [WEB-REDESIGN] Every fresh read of the cart also updates the count the
   // rail and the dock show, so the badge never disagrees with this page.
@@ -314,6 +326,7 @@ export default function CartPage() {
   }
 
   async function placeOrder() {
+    if (orderingMode === 'PICKUP') { setError('Pickup checkout is not available yet. Choose delivery to continue.'); return; }
     if (!cart?.items?.length || checkoutBusy.current || cartSafety !== 'safe' || !addrId || !meetsMinimum) return;
     checkoutBusy.current = true;
     setBusy(true); setError(null); setNoRiders(false);

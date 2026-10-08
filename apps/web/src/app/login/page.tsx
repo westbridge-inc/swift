@@ -7,6 +7,7 @@ import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
+import { guestBasketReturn } from '@/lib/basket';
 import { customerRoute } from '@/lib/customer-routes';
 import { AuthError, AuthHeading, AuthPage, CodeBoxes, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/auth-ui';
 
@@ -37,7 +38,7 @@ function LoginInner() {
   const [next, setNext] = useState('');
   const requestedNext = params.get('next');
   useEffect(() => {
-    setNext(storefrontAuthReturn(requestedNext));
+    setNext(storefrontAuthReturn(requestedNext) || (requestedNext === null ? guestBasketReturn() : ''));
     setPendingReturn(readStorefrontContinuation()?.returnPath ?? '');
   }, [requestedNext]);
   const isCustomer = isCustomerReturn(next);

@@ -76,15 +76,16 @@ describe('[Q7b] the shell stays put while pages change', () => {
     const view = render(<AppLayout><p>Home page</p></AppLayout>);
     expect(screen.getByText('Home page')).toBeTruthy();
 
-    go(view, '/cart', 'Cart page');
-    expect(screen.queryByText('Cart page')).toBeNull();
+    go(view, '/cart', 'Guest basket page');
+    expect(screen.getByText('Guest basket page')).toBeTruthy();
+    go(view, '/orders', 'Orders page');
+    expect(screen.queryByText('Orders page')).toBeNull();
     expect(screen.getByLabelText('Opening this page')).toBeTruthy();
     expect(screen.getByRole('banner')).toBeTruthy();
     expect(screen.getByRole('navigation', { name: 'Swift tabs' })).toBeTruthy();
     expect(screen.queryByText(/Loading…/)).toBeNull();
-
     await act(async () => { answer({ ok: true }); });
-    expect(screen.getByText('Cart page')).toBeTruthy();
+    expect(screen.getByText('Orders page')).toBeTruthy();
   });
 });
 

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -62,7 +62,7 @@ async function start(options: { item?: string; wrap?: (_node: ReactNode) => Reac
 }
 
 beforeEach(() => {
-  sessionStorage.clear();
+  sessionStorage.clear(); localStorage.clear();
   nav.push.mockReset();
   signedIn = true;
   vi.restoreAllMocks();
@@ -234,7 +234,7 @@ describe('[W6] the menu around the sheet', () => {
 });
 
 describe('[W6] a guest at Add', () => {
-  it('is sent to sign in only after the app tried to renew the session, with the chosen item kept for the way back', async () => {
+  it('fills the basket as a guest and only renews the session at Place order', async () => {
     signedIn = false;
     const ensureSignedIn = vi.fn(async () => false);
     await start({ wrap: (node) => <CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}</CustomerSessionProvider> });
@@ -243,24 +243,24 @@ describe('[W6] a guest at Add', () => {
     fireEvent.click(within(sheet).getByRole('radio', { name: /Large/ }));
     fireEvent.click(within(sheet).getByRole('radio', { name: /Paratha/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/login?next=%2Fstore%2Fsample-kitchen'));
-    expect(ensureSignedIn).toHaveBeenCalledOnce();
-    expect(JSON.parse(sessionStorage.getItem('swift_storefront_add')!)).toMatchObject({
-      storeSlug: 'sample-kitchen', itemId: 'curry', selectedOptions: { size: ['large'], roti: ['paratha'] },
+    expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1')!).lines[0]).toMatchObject({
+      vendorId: 'menu-store', itemId: 'curry', unitPrice: 1900, selectedOptions: { size: 'large', roti: 'paratha' },
     });
-    expect(customer.addToCart).not.toHaveBeenCalled();
+    expect(ensureSignedIn).not.toHaveBeenCalled(); expect(nav.push).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/login?next=%2Fstore%2Fsample-kitchen'));
+    expect(ensureSignedIn).toHaveBeenCalledOnce(); expect(customer.addToCart).not.toHaveBeenCalled();
   });
 
-  it('whose session the app renews stays here: the cart loads and the chosen item reopens, still not added', async () => {
+  it('tries the refresh cookie at Place order without silently placing an order', async () => {
     signedIn = false;
     const ensureSignedIn = vi.fn(async () => { signedIn = true; return true; });
     await start({ wrap: (node) => <CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}</CustomerSessionProvider> });
     fireEvent.click(screen.getByRole('button', { name: 'Add Pumpkin soup' }));
+    expect(ensureSignedIn).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
     await waitFor(() => expect(customer.getCart).toHaveBeenCalled());
-    expect(await screen.findByRole('dialog', { name: 'Pumpkin soup' })).toBeTruthy();
-    expect(nav.push).not.toHaveBeenCalled();
-    expect(customer.addToCart).not.toHaveBeenCalled();
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Add to order/ })); });
-    await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: 'menu-store', itemId: 'soup', quantity: 1, selectedOptions: {} }));
+    expect(nav.push).not.toHaveBeenCalled(); expect(customer.addToCart).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1')!).lines[0].itemId).toBe('soup');
   });
 });
