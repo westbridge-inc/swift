@@ -324,7 +324,7 @@ describe('[seal 3] role grants: refused inside every authority', () => {
   it('[row 55] a store-team invite is never sent to a demo account, and a demo account cannot accept one', async () => {
     const send = vi.fn().mockResolvedValue('never');
     const outcome = await system(() => deliverStaffInvite(app.prisma, { publishPersisted: send }, {
-      vendorId: ids.prodVendor, targetUserId: ids.rider, role: 'STAFF', inviterId: ids.prodOwner, now: new Date(),
+      vendorId: ids.prodVendor, targetUserId: ids.rider, role: 'STAFF', inviterId: ids.prodOwner, now: new Date(), revocationVersion: 0,
     }));
     expect(outcome).toBe('NOT_INVITABLE');
     expect(send).not.toHaveBeenCalled();

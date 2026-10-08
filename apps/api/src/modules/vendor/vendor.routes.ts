@@ -18,7 +18,7 @@ import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/ob
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
-import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites } from './staff-invites';
+import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -818,13 +818,17 @@ export async function vendorRoutes(app: FastifyInstance) {
     // answers about the caller alone, so it says nothing about the number.
     await refuseReviewAccountRoleGrant(app.prisma, request.user.userId);
     const reply = staffAddReply(body.role);
+    // The same read runs for every number. Capture authority before scheduling
+    // delivery, without waiting for invitation persistence or publication.
+    const revocationVersion = staffInviteAcceptEnabled()
+      ? await staffInviteRevocationVersion(app.prisma, vendorId, target?.id ?? 'unresolved-recipient') : 0;
     if (!target || target.status !== 'ACTIVE') return reply;
 
     if (staffInviteAcceptEnabled()) {
       // Off the request path: the reply never waits on whether an invite was due
       // (deliverStaffInvite also sends nothing to a demo account).
       void deliverStaffInvite(app.prisma, notifications, {
-        vendorId, targetUserId: target.id, role: body.role, inviterId: request.user.userId, now: new Date(),
+        vendorId, targetUserId: target.id, role: body.role, inviterId: request.user.userId, now: new Date(), revocationVersion,
       }).catch((err: unknown) => request.log.error({ err, vendorId }, '[row 55] staff invite not delivered'));
       return reply;
     }
@@ -881,6 +885,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       await lockStaffInviteGrant(tx, vendorId, existing.userId);
       const current = await tx.vendorStaff.findFirst({ where: { id: request.params.id, vendorId, userId: existing.userId } });
       if (!current) throw new NotFoundError('StaffMember', request.params.id);
+      await recordStaffInviteRevocation(tx, vendorId, current.userId, request.user.userId);
       await closePendingStaffInvites(tx, vendorId, current.userId, new Date());
       await tx.vendorStaff.delete({ where: { id: current.id } });
     });

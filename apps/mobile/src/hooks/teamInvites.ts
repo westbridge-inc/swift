@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { customerApi } from '../services/api';
+import { teamInviteKeys } from './teamInviteKeys';
+export { teamInviteKeys } from './teamInviteKeys';
 
 // [Row 55] A store owner's "add to team" sends an invite; the person joins
 // only by accepting it here. Nothing about them reaches the store before that.
@@ -11,8 +13,6 @@ export interface TeamInvite {
   expiresAt: string;
   createdAt: string;
 }
-
-export const teamInviteKeys = { mine: ['team-invites', 'mine'] as const };
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;

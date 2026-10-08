@@ -22,6 +22,8 @@ import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-po
 // ---------------------------------------------------------------------------
 
 export const STAFF_INVITE_KIND = 'staff_invite';
+const STAFF_INVITE_REVOKED = 'STAFF_INVITE_REVOKED';
+const grantKey = (vendorId: string, userId: string) => JSON.stringify([vendorId, userId]);
 export const STAFF_INVITE_TTL_MS = 72 * 60 * 60 * 1000;
 
 export type StaffInviteRole = 'MANAGER' | 'STAFF';
@@ -86,6 +88,29 @@ export async function lockStaffInviteGrant(tx: Prisma.TransactionClient, vendorI
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
 }
 
+/** Revocations live in the append-only audit trail. Capture this token on
+ * the request path; a delayed delivery must still match it under the lock. */
+export async function staffInviteRevocationVersion(prisma: Pick<Prisma.TransactionClient, 'auditLog'>, vendorId: string, userId: string) {
+  // Count is monotonic under the grant lock even when transaction timestamps
+  // or clocks differ. Audit rows are append-only and cannot disappear.
+  return prisma.auditLog.count({
+    where: { action: STAFF_INVITE_REVOKED, entity: 'VendorStaffGrant', entityId: grantKey(vendorId, userId) },
+  });
+}
+
+/** Caller holds the grant lock; commit this marker with membership removal. */
+export async function recordStaffInviteRevocation(tx: Prisma.TransactionClient, vendorId: string, userId: string, actorId: string) {
+  await tx.auditLog.create({ data: {
+    userId: actorId, action: STAFF_INVITE_REVOKED, entity: 'VendorStaffGrant', entityId: grantKey(vendorId, userId),
+  } });
+}
+
+/** Account deletion takes the user row exclusively before its authority
+ * cutoff. Hold shared locks in a stable order through the membership write. */
+async function lockStaffInviteAccounts(tx: Prisma.TransactionClient, inviterId: string, userId: string) {
+  await tx.$queryRaw`SELECT id FROM "users" WHERE id IN (${inviterId}, ${userId}) ORDER BY id FOR SHARE`;
+}
+
 /** Caller holds the grant lock. Close even legacy duplicates, including
  * expired rows, so no old invitation can outlive acceptance or revocation. */
 export async function closePendingStaffInvites(
@@ -111,12 +136,25 @@ export async function closePendingStaffInvites(
 export async function deliverStaffInvite(
   prisma: PrismaClient,
   sender: InviteSender,
-  input: { vendorId: string; targetUserId: string; role: StaffInviteRole; inviterId: string; now: Date },
+  input: { vendorId: string; targetUserId: string; role: StaffInviteRole; inviterId: string; now: Date; revocationVersion: number },
 ): Promise<'SENT' | 'ALREADY_MEMBER' | 'ALREADY_INVITED' | 'NOT_INVITABLE'> {
   // [REVIEW-PARTNER] A demo account never receives a store membership invite.
   if (await isReviewAccount(prisma, input.targetUserId)) return 'NOT_INVITABLE';
   const committed = await prisma.$transaction(async (tx) => {
+    await lockStaffInviteAccounts(tx, input.inviterId, input.targetUserId);
     await lockStaffInviteGrant(tx, input.vendorId, input.targetUserId);
+    if (await staffInviteRevocationVersion(tx, input.vendorId, input.targetUserId) !== input.revocationVersion) {
+      return { result: 'NOT_INVITABLE' as const };
+    }
+    const vendor = await tx.vendor.findUnique({
+      where: { id: input.vendorId },
+      select: { name: true, suspensionSource: true, owner: { select: { userId: true, user: { select: { status: true } } } } },
+    });
+    const recipient = await tx.user.findUnique({ where: { id: input.targetUserId }, select: { status: true } });
+    if (!vendor || vendor.owner.userId !== input.inviterId || vendor.owner.user.status !== 'ACTIVE'
+      || vendor.suspensionSource === 'WIND_DOWN' || recipient?.status !== 'ACTIVE') {
+      return { result: 'NOT_INVITABLE' as const };
+    }
     const member = await tx.vendorStaff.findUnique({
       where: { vendorId_userId: { vendorId: input.vendorId, userId: input.targetUserId } },
       select: { id: true },
@@ -130,10 +168,6 @@ export async function deliverStaffInvite(
       return d !== null && new Date(d.expiresAt).getTime() > input.now.getTime();
     })) return { result: 'ALREADY_INVITED' as const };
 
-    const vendor = await tx.vendor.findUnique({
-      where: { id: input.vendorId }, select: { name: true, owner: { select: { userId: true } } },
-    });
-    if (!vendor || vendor.owner.userId !== input.inviterId) return { result: 'NOT_INVITABLE' as const };
     const roleWords = input.role === 'MANAGER' ? 'a manager' : 'staff';
     // The invite must be persisted by the SAME transaction holding the grant
     // lock; sender.send would write through a separate client and fan out early.
@@ -187,13 +221,14 @@ export async function decideStaffInvite(
   const candidateInvite = candidate && readInvite(candidate.data);
   if (!candidateInvite) throw new NotFoundError('Invite', input.inviteId);
   const outcome = await prisma.$transaction(async (tx) => {
+    await lockStaffInviteAccounts(tx, candidateInvite.invitedBy, input.userId);
     await lockStaffInviteGrant(tx, candidateInvite.vendorId, input.userId);
     const locked = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM "notifications" WHERE id = ${input.inviteId} AND "userId" = ${input.userId} FOR UPDATE`;
     if (locked.length === 0) throw new NotFoundError('Invite', input.inviteId);
     const row = await tx.notification.findUniqueOrThrow({ where: { id: input.inviteId }, select: { data: true } });
     const invite = readInvite(row.data);
-    if (!invite || invite.vendorId !== candidateInvite.vendorId) throw new NotFoundError('Invite', input.inviteId);
+    if (!invite || invite.vendorId !== candidateInvite.vendorId || invite.invitedBy !== candidateInvite.invitedBy) throw new NotFoundError('Invite', input.inviteId);
     if (invite.state !== 'PENDING') {
       throw new AppError(409, 'INVITE_CLOSED', 'This invite has already been answered.');
     }
@@ -218,9 +253,12 @@ export async function decideStaffInvite(
 
     const vendor = await tx.vendor.findUnique({
       where: { id: invite.vendorId },
-      select: { id: true, name: true, owner: { select: { userId: true } } },
+      select: { id: true, name: true, suspensionSource: true, owner: { select: { userId: true, user: { select: { status: true } } } } },
     });
-    if (!vendor || vendor.owner.userId !== invite.invitedBy || vendor.owner.userId === input.userId) {
+    const recipient = await tx.user.findUnique({ where: { id: input.userId }, select: { status: true } });
+    if (!vendor || vendor.owner.userId !== invite.invitedBy || vendor.owner.userId === input.userId
+      || vendor.owner.user.status !== 'ACTIVE' || vendor.suspensionSource === 'WIND_DOWN'
+      || recipient?.status !== 'ACTIVE') {
       await close('CLOSED');
       return { error: new AppError(409, 'INVITE_CLOSED', 'This invite is no longer valid.') };
     }

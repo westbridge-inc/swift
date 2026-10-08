@@ -1,5 +1,6 @@
 /// <reference lib="dom" />
 import React, { act, useEffect } from 'react';
+// @ts-expect-error react-dom is supplied by the workspace test renderer.
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -10,6 +11,7 @@ const fx = vi.hoisted(() => ({
   client: undefined as QueryClient | undefined, navigate: undefined as undefined | ((name: string, params?: any) => boolean),
 }));
 vi.mock('react-native', () => ({
+  I18nManager: { getConstants: () => ({ isRTL: false }) },
   Platform: { OS: 'web', select: (options: any) => options.web ?? options.default }, Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove() {} }) },
   BackHandler: { addEventListener: () => ({ remove() {} }) },
 }));

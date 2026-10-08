@@ -277,7 +277,7 @@ describe('invite grants serialize with revocation', () => {
       await held;
     }, { timeout: 10000 });
     await ready;
-    const input = { vendorId, targetUserId: known.userId, role: 'MANAGER' as const, inviterId: owner.userId, now: new Date() };
+    const input = { vendorId, targetUserId: known.userId, role: 'MANAGER' as const, inviterId: owner.userId, now: new Date(), revocationVersion: 0 };
     const publisher = new NotificationService(app.prisma, app.io);
     const deliveries = Promise.all([deliverStaffInvite(app.prisma, publisher, input), deliverStaffInvite(app.prisma, publisher, input)]);
     let whileHeld: Awaited<ReturnType<typeof invitesOf>> = [];
@@ -377,7 +377,7 @@ describe('invitation authority survives delayed work and account closure', () =>
       },
     });
     const stale = deliverStaffInvite(delayedPrisma, new NotificationService(app.prisma, app.io), {
-      vendorId, targetUserId: known.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(),
+      vendorId, targetUserId: known.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(), revocationVersion: 0,
     });
     await ready;
     let result: Awaited<typeof stale>;
@@ -421,7 +421,7 @@ describe('invitation authority survives delayed work and account closure', () =>
     const grant = (action === 'accept'
       ? inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token)
       : deliverStaffInvite(app.prisma, new NotificationService(app.prisma, app.io), {
-        vendorId, targetUserId: known.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(),
+        vendorId, targetUserId: known.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(), revocationVersion: 0,
       })).then(result => { finished = true; return result; });
     let whileHeld = false;
     try { await new Promise(resolve => setTimeout(resolve, 150)); whileHeld = finished; }
@@ -445,7 +445,7 @@ describe('invitation authority survives delayed work and account closure', () =>
       else await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' } });
       const accepted = await inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token);
       const issued = await deliverStaffInvite(app.prisma, new NotificationService(app.prisma, app.io), {
-        vendorId, targetUserId: later.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(),
+        vendorId, targetUserId: later.userId, role: 'MANAGER', inviterId: owner.userId, now: new Date(), revocationVersion: 0,
       });
       expect(accepted.statusCode, 'retained owner identity does not retain grant authority').toBe(409);
       expect(await memberOf(known.userId)).toBeNull();

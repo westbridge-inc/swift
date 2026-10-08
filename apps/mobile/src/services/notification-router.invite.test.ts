@@ -10,7 +10,7 @@ const fromCore = createRequire(fromNative.resolve('@react-navigation/core'));
 const { StackRouter } = await import(fromCore.resolve('@react-navigation/routers')) as Pick<typeof import('@react-navigation/native'), 'StackRouter'>;
 const fx = vi.hoisted(() => ({
   listener: undefined as undefined | ((response: unknown) => void),
-  navigate: vi.fn(), last: vi.fn(), ready: true,
+  navigate: vi.fn(), last: vi.fn(), ready: true, refresh: vi.fn(),
 }));
 vi.mock('expo-notifications', () => ({
   addNotificationResponseReceivedListener: (listener: typeof fx.listener) => { fx.listener = listener; return { remove: vi.fn() }; },
@@ -19,6 +19,7 @@ vi.mock('expo-notifications', () => ({
 vi.mock('../navigation/navigationRef', () => ({ navigationRef: { isReady: () => fx.ready }, safeNavigate: fx.navigate }));
 vi.mock('../stores/authStore', () => ({ getAuthSessionSnapshot: () => ({ userId: 'invite-recipient', generation: 1 }) }));
 vi.mock('../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null, storeGeneration: 0 }) } }));
+vi.mock('../lib/queryClient', () => ({ queryClient: { invalidateQueries: fx.refresh } }));
 import { installNotificationTapRouter, flushPendingNavigation } from './notification-router';
 
 let uninstall: (() => void) | undefined;

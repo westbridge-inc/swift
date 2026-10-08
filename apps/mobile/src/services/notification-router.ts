@@ -1,3 +1,4 @@
+import { teamInviteKeys } from '../hooks/teamInviteKeys';
 import * as Notifications from 'expo-notifications';
 import { navigationRef, safeNavigate } from '../navigation/navigationRef';
 import { getAuthSessionSnapshot } from '../stores/authStore';
@@ -320,6 +321,15 @@ async function go(tap: Tap) {
     dest = { ...dest, params: { ...params, feeFamily: 'vendor' } };
   } else if (dest.screen === 'WeeklyFee') {
     dest = { ...dest, params: { ...dest.params, feeFamily: 'mover' } };
+  }
+  if (tap.data['kind'] === 'staff_invite') {
+    const { queryClient } = await import('../lib/queryClient');
+    const owner = getAuthSessionSnapshot();
+    if (tap.attempt !== routing || !tap.owner || owner?.userId !== tap.owner.userId
+      || owner.generation !== tap.owner.generation) return;
+    // A second tap can land on the already focused inbox. Invalidate the
+    // active query on every invitation tap instead of relying on a remount.
+    void queryClient.invalidateQueries({ queryKey: teamInviteKeys.mine });
   }
   if (tap.attempt !== routing) return;
   if (!safeNavigate(dest.screen, dest.params)) pending = { ...tap, dest };
