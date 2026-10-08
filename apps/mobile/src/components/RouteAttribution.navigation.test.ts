@@ -10,7 +10,7 @@ vi.mock('react-native', async () => {
   return { Linking: { openURL: fx.openURL }, Pressable: ({ children, onPress, style, accessibilityLabel }: any) =>
     R.createElement('button', { onClick: onPress, style, 'aria-label': accessibilityLabel }, children) };
 });
-vi.mock('@swift/ui', () => ({ color: { text: { primary: '#181818' }, surface: { base: '#FFFFFF' } }, radius: { sm: 4 }, space: { sm: 8, xs: 4 } }));
+vi.mock('@swift/ui', () => ({ color: { text: { primary: 'black' }, surface: { base: 'white' } }, radius: { sm: 4 }, space: { sm: 8, xs: 4 } }));
 vi.mock('../kit', async () => {
   const R = await import('react');
   return { T: ({ children, style }: any) => R.createElement('span', { style }, children) };
@@ -34,8 +34,8 @@ describe('routing credit stays readable and leads to its licence', () => {
     expect(credit.style.position).toBe('absolute');
     expect(credit.style.top).toBe('80px');
     expect(credit.style.minHeight).toBe('44px');
-    expect(credit.style.backgroundColor).toBe('rgb(255, 255, 255)');
-    expect(host.querySelector('span')!.style.color).toBe('rgb(24, 24, 24)');
+    expect(credit.style.backgroundColor).toBe('white');
+    expect(host.querySelector('span')!.style.color).toBe('black');
     await act(async () => credit.click());
     expect(fx.openURL).toHaveBeenCalledWith('https://www.openstreetmap.org/copyright');
   });

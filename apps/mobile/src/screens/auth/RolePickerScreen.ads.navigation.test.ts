@@ -17,7 +17,7 @@ vi.mock('react-native', async () => {
 });
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
 vi.mock('@expo/vector-icons', () => ({ Feather: () => null }));
-vi.mock('@swift/ui', () => ({ color: { brand: { 500: '#803B3B' }, border: {}, text: {}, surface: {} }, radius: {}, space: {} }));
+vi.mock('@swift/ui', () => ({ color: { brand: { 500: 'maroon' }, border: {}, text: {}, surface: {} }, radius: {}, space: {} }));
 vi.mock('../../kit', async () => {
   const R = await import('react');
   const Box = ({ children }: any) => R.createElement('div', null, children);
