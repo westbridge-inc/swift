@@ -25,6 +25,7 @@ const fx = vi.hoisted(() => ({
     emit: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn>; off: ReturnType<typeof vi.fn>;
   }>,
 }));
+vi.mock('../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react-native', async () => {
   const R = await import('react');
   const View = ({ children }: any) => R.createElement('div', null, typeof children === 'function' ? children({ pressed: false }) : children);
@@ -282,6 +283,16 @@ describe('SX383 real navigation container and vendor handoffs', () => {
     const newInput = host.querySelector<HTMLInputElement>('input[value="08:00"]')!;
     expect(newInput).not.toBe(oldInput);
     expect(newInput.value).toBe('08:00');
+  });
+
+  it('[DELETION-INTEGRITY] the Account row opens personal data and closure in the real navigator', async () => {
+    await mount(); await openAccount();
+    expect(host.querySelector('personaldatascreen')).toBeNull();
+    await act(async () => button('Personal data & account closure').click());
+    const route = navigation.getCurrentRoute()!;
+    expect(route.name).toBe('PersonalData');
+    expect(route.params).toEqual({ closureRequest: true });
+    expect(host.querySelector('personaldatascreen')).not.toBeNull();
   });
 
   it.each([
