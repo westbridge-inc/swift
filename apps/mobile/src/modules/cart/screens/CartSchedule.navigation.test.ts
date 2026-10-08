@@ -87,7 +87,7 @@ describe('launch cart scheduling', () => {
     expect(place).toBeDefined(); expect(place.disabled).toBe(false);
     await act(async () => place.click());
     expect(fx.place).toHaveBeenCalledOnce();
-    expect(fx.place.mock.calls[0]![0]).toEqual({ paymentMethod: 'CASH', tipAmount: 0 });
+    expect(fx.place.mock.calls[0]![0]).toEqual({ paymentMethod: 'CASH', tipAmount: 0, expectedTotal: 2500, expectedLines: [{ lineId: 'line', unitPrice: 2000 }] });
   });
 
   it('service appointment slots remain available and travel as appointments, independently of order scheduling', async () => {
@@ -100,7 +100,7 @@ describe('launch cart scheduling', () => {
       const book = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Book now')!;
       expect(book.disabled).toBe(false);
       await act(async () => book.click());
-      expect(fx.place.mock.calls[0]![0]).toEqual({ paymentMethod: 'CASH', appointments: [{ itemId: 'item', slotStart: '2026-12-01T16:00:00.000Z', mode: 'AT_BUSINESS' }], tipAmount: 0 });
+      expect(fx.place.mock.calls[0]![0]).toEqual({ paymentMethod: 'CASH', appointments: [{ itemId: 'item', slotStart: '2026-12-01T16:00:00.000Z', mode: 'AT_BUSINESS' }], tipAmount: 0, expectedTotal: 2500, expectedLines: [{ lineId: 'line', unitPrice: 2000 }] });
     } finally { fx.cart.items[0]!.fulfillment = original; }
   });
 });
