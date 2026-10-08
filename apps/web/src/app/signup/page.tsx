@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
+import { ChevronLeft } from 'lucide-react';
 import { sendOtp, sessionProbe } from '@/lib/auth';
 import { LEGAL_URL } from '@/lib/api';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
@@ -12,11 +12,24 @@ import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 import { launchCity } from '@/lib/web-ordering';
 import { SwiftLogo } from '@/components/swift-logo';
+import { Pictogram, type PictogramName } from '@/components/glyphs';
+import { MOVER_VEHICLES } from '@/lib/signup-roles';
 import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
 
-type Role = 'CUSTOMER' | 'VENDOR' | 'MOVER';
+/** The server's rule for a taxi's year (partner.routes vehicle schema): 1980
+ *  to next year. Checked here too, so a typo is caught before the round trip. */
+function vehicleYearAccepted(year: string): boolean {
+  const n = Number(year);
+  return Number.isInteger(n) && n >= 1980 && n <= new Date().getFullYear() + 1;
+}
+
+/** [W9] The four ways in. A delivery rider and a taxi driver are both movers
+ *  to the API; the vehicle each chooses decides which (partner.service:
+ *  a car or a bus provisions a Driver, a motorbike or bicycle a Rider). */
+type Role = 'CUSTOMER' | 'VENDOR' | 'RIDER' | 'DRIVER';
+const accountRole = (r: Role): 'CUSTOMER' | 'VENDOR' | 'MOVER' => (r === 'RIDER' || r === 'DRIVER' ? 'MOVER' : r);
 type Step = 'role' | 'phone' | 'code' | 'name' | 'business' | 'vehicle';
 
 function safeReturnPath(): string {
@@ -24,10 +37,11 @@ function safeReturnPath(): string {
   return storefrontAuthReturn(new URLSearchParams(window.location.search).get('next'));
 }
 
-const ROLES: { role: Role; title: string; desc: string; Icon: any }[] = [
-  { role: 'CUSTOMER', title: 'Order on Swift', desc: 'Food, groceries, shops & rides', Icon: ShoppingBag },
-  { role: 'VENDOR', title: 'Put my business on Swift', desc: 'Take orders, keep 100%', Icon: Store },
-  { role: 'MOVER', title: 'Drive & deliver', desc: 'Earn on your schedule', Icon: Car },
+const ROLES: { role: Role; title: string; desc: string; pictogram: PictogramName }[] = [
+  { role: 'CUSTOMER', title: 'Order on Swift', desc: 'Food, groceries, shops, parcels and rides.', pictogram: 'food' },
+  { role: 'VENDOR', title: 'Put my business on Swift', desc: 'Take orders and keep 100% of your prices. A flat weekly fee, paid through MMG checkout.', pictogram: 'shops' },
+  { role: 'RIDER', title: 'Deliver with Swift', desc: 'Motorbike or bicycle deliveries on your own schedule.', pictogram: 'send' },
+  { role: 'DRIVER', title: 'Drive a taxi with Swift', desc: 'Take ride requests with your car. Documents are checked before your first trip.', pictogram: 'taxi' },
 ];
 
 
@@ -73,6 +87,7 @@ export default function SignupPage() {
   }, [placingStore]);
   const closeStorePicker = () => { restorePinFocus.current = true; setPlacingStore(false); };
   const [veh, setVeh] = useState({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
+  const mover = role === 'RIDER' || role === 'DRIVER' ? role : null;
   // The partner agreement: an explicit, unticked clickwrap. The API records the
   // consent and refuses a partner sign-up without it (AGREEMENT_REQUIRED).
   const [agree, setAgree] = useState(false);
@@ -132,7 +147,7 @@ export default function SignupPage() {
     // Consent is explicit clickwrap: the agreement line sits directly above
     // the button that triggers this. Recorded server-side [SWIFT-AUD-D9-03].
     try {
-      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role, acceptTerms: true });
+      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role: accountRole(role), acceptTerms: true });
     } catch (cause) {
       // Registration consumes its HttpOnly continuation before account reads
       // and writes. A transport or server error is therefore ambiguous: never
@@ -167,9 +182,21 @@ export default function SignupPage() {
   };
   const doVehicle = () => wrap(async () => {
     if (!agree) throw new Error('Tick the Driver Partner Agreement to continue');
-    await becomePartner({ role: 'MOVER', acceptAgreement: true, vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } });
+    if (!mover || !MOVER_VEHICLES[mover].some((v) => v.value === veh.vehicleType)) throw new Error('Choose your vehicle');
+    // A rider's bike needs no make or plate here (the documents step asks for
+    // what the vehicle needs); a taxi's details are required by the server.
+    await becomePartner(mover === 'DRIVER'
+      ? { role: 'MOVER', acceptAgreement: true, vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } }
+      : { role: 'MOVER', acceptAgreement: true, vehicleType: veh.vehicleType });
     router.replace('/portal');
   });
+  const chooseRole = (r: Role) => {
+    if (r !== 'CUSTOMER') clearStorefrontContinuation();
+    setRole(r);
+    // Each mover starts on their own kind of vehicle.
+    if (r === 'RIDER' || r === 'DRIVER') setVeh((current) => ({ ...current, vehicleType: MOVER_VEHICLES[r][0]!.value }));
+    setStep('phone');
+  };
 
   return (
     <main className={styles.page}>
@@ -188,14 +215,15 @@ export default function SignupPage() {
 
         {step === 'role' && (
           <div className={styles.stackTight}>
-            <h1 id="signup-title" className={styles.heading}>What brings you to Swift?</h1>
-            {ROLES.map(({ role: r, title, desc, Icon }) => {
+            <h1 id="signup-title" className={styles.heading}>Who are you signing up as?</h1>
+            <p className={styles.bodyCopy}>Every sign-up starts with your phone and a 6-digit code. Partners also accept their partner agreement.</p>
+            {ROLES.map(({ role: r, title, desc, pictogram }) => {
               // [Item 7] Before launch, the public site cannot start a customer
-              // account; businesses and drivers can still sign up.
+              // account; businesses, riders and drivers can still sign up.
               const closed = r === 'CUSTOMER' && !orderingOpen;
               return (
-                <button key={r} type="button" disabled={closed} onClick={() => { if (r !== 'CUSTOMER') clearStorefrontContinuation(); setRole(r); setStep('phone'); }} className={styles.roleButton}>
-                  <span className={styles.roleIcon}><Icon size={22} aria-hidden="true" /></span>
+                <button key={r} type="button" disabled={closed} onClick={() => chooseRole(r)} className={styles.roleButton}>
+                  <span className={styles.roleIcon} data-role-tile={r === 'CUSTOMER' ? 'brand' : 'neutral'}><Pictogram name={pictogram} size={24} /></span>
                   <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{closed ? `Launching soon in ${launchCity()}` : desc}</span></span>
                 </button>
               );
@@ -279,19 +307,27 @@ export default function SignupPage() {
             <p className={styles.smallCopy}>You’ll finish verification (documents) in your dashboard before going live.</p>
           </div>
         )}
-        {step === 'vehicle' && (
+        {step === 'vehicle' && mover && (
           <div className={styles.stackTight}>
-            <h1 id="signup-title" className={styles.heading}>Your vehicle</h1>
-            <div className={styles.field}><label htmlFor="vehicle-type" className={styles.label}>Vehicle type</label><select id="vehicle-type" value={veh.vehicleType} onChange={(e) => setVeh({ ...veh, vehicleType: e.target.value })} className={styles.input}>
-              <option value="MOTORCYCLE">Motorcycle / bicycle (deliveries)</option><option value="CAR">Car (taxi & deliveries)</option>
+            <h1 id="signup-title" className={styles.heading}>{mover === 'DRIVER' ? 'Your taxi' : 'How you deliver'}</h1>
+            <div className={styles.field}><label htmlFor="vehicle-type" className={styles.label}>Vehicle</label><select id="vehicle-type" value={veh.vehicleType} onChange={(e) => setVeh({ ...veh, vehicleType: e.target.value })} className={styles.input}>
+              {MOVER_VEHICLES[mover].map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
             </select></div>
-            <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} /></div>
+            {mover === 'DRIVER' ? (
+              <>
+                <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} /></div>
+              </>
+            ) : null}
             <PartnerAgreement kind="Driver" doc="driver-agreement" agree={agree} onChange={setAgree} />
-            <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || !Number.isInteger(Number(veh.year)) || Number(veh.year) < 1900} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
+            {mover === 'DRIVER' ? (
+              <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
+            ) : (
+              <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create rider account'}</button>
+            )}
             <p className={styles.smallCopy}>You’ll upload your documents in your earner dashboard before going online.</p>
           </div>
         )}

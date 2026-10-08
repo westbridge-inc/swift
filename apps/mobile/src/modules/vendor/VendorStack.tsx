@@ -10,6 +10,7 @@ import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
 import { VendorTierScreen } from './screens/VendorTierScreen';
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -249,6 +250,10 @@ export function VendorStack() {
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO
           route to a human. Registration, not a rewrite. */}
       <Stack.Screen name="GetHelp" component={GetHelpScreen} />
+      {/* [DELETION-INTEGRITY] Personal data and account closure, reached from
+          the Account tab. Registered on THIS stack: a screen inside the Menu
+          tab's nested stack is not reachable from a sibling tab. */}
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
     </Stack.Navigator>
   );
 }
