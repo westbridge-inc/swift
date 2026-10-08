@@ -147,20 +147,11 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: OTP_HASH_SECRET or JWT_SECRET must be at least 32 characters in production — OTP records require a keyed HMAC. Refusing to start.');
   }
 
-  // Identity must never silently select the deterministic test adapter. Its
-  // marker URLs can approve a user, so a missing production variable is a
-  // security failure, not a reasonable default.
+  // Launch verification is human review only. Require an explicit production
+  // setting; neither external processors nor synthetic approvals are allowed.
   const kycProvider = env['KYC_PROVIDER'];
-  // [FD-DOC-3b (b) · 2026-09-07] `manual` = on-shore human review; it approves nothing, so it is
-  // as safe as a real provider here. `sandbox` self-approves and stays forbidden.
-  if (kycProvider !== 'didit' && kycProvider !== 'idanalyzer' && kycProvider !== 'manual') {
-    throw new Error('FATAL: KYC_PROVIDER must be didit, idanalyzer or manual in production; sandbox/unset can self-approve test identities. Refusing to start.');
-  }
-  if (kycProvider === 'didit' && !env['DIDIT_API_KEY']) {
-    throw new Error('FATAL: DIDIT_API_KEY is required when KYC_PROVIDER=didit. Refusing to start.');
-  }
-  if (kycProvider === 'idanalyzer' && !env['ID_ANALYZER_API_KEY']) {
-    throw new Error('FATAL: ID_ANALYZER_API_KEY is required when KYC_PROVIDER=idanalyzer. Refusing to start.');
+  if (kycProvider !== 'manual') {
+    throw new Error('FATAL: KYC_PROVIDER must be manual in production; launch verification requires human review. Refusing to start.');
   }
 
   // Subscription charges are real platform revenue. The sandbox succeeds for
