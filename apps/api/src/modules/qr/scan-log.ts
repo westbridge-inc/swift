@@ -4,6 +4,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import type { QrLookup, ScanVerdict } from './qr-codes';
 import { sanitizeSrc, sanitizeTemplate } from './qr-codes';
 import { qrSalt } from './qr-config';
+import { runAsSystem } from '../../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // Scan logging — the analytics spine, fire-and-forget by construction. A scan
@@ -145,7 +146,10 @@ async function flush(): Promise<void> {
   const batch = queue.splice(0, FLUSH_BATCH);
   inFlight = batch.length;
   try {
-    const retry = await writeBatch(prisma, batch);
+    // [L01 · tenant wall] A flush writes events of every tenant (each row
+    // carries its own tenantId, taken from its QR code): named system work, not
+    // an unbound write, and never stamped with whatever tenant was ambient.
+    const retry = await runAsSystem('qr:scan-log-flush', () => writeBatch(prisma, batch));
     queue.unshift(...retry);
   } finally { inFlight = 0; }
 }

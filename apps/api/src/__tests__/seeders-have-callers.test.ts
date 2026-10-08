@@ -105,11 +105,15 @@ describe('every seeder is reachable from production code', () => {
     // the same rule the Meilisearch warm-up follows.
     const server = readFileSync(join(SRC, 'server.ts'), 'utf8');
     // Scoped to the seed's OWN block. Split on the CALL (the first mention is
-    // the comment explaining it) and stop at the IIFE's close — a wider window
-    // runs into `start()`'s catch, where `process.exit(1)` is the correct
-    // behaviour for a server that could not boot at all.
+    // the comment explaining it) and stop where the statement wrapping the seed
+    // closes at its own indentation (named system work `});`, or an IIFE
+    // `})();`) — a wider window runs into `start()`'s catch, where
+    // `process.exit(1)` is the correct behaviour for a server that could not
+    // boot at all.
     const after = server.split('await seedDiscoveryTaxonomy(')[1] ?? '';
-    const block = after.split('})();')[0] ?? '';
+    const end = after.search(/\n {4}\}\)(?:\(\))?;/);
+    expect(end, 'the seed block closes before start() ends').toBeGreaterThan(0);
+    const block = after.slice(0, end);
     expect(block, 'the seed must catch its own failure').toMatch(/catch/);
     expect(block, 'a seed failure must not exit the process').not.toMatch(/process\.exit/);
   });

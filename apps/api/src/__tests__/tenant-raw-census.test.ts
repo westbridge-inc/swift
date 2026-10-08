@@ -65,8 +65,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   // isFiction (store-review demo check): reached only from authenticated requests — document
   // submission (vendor, verification routes) and an admin's approval (admin routes).
   'modules/subscription/subscription.service.ts': { sites: 1, role: 'REQUEST' },
-  // Rating-outbox comment erasure: authenticated self/admin requests and the
-  // account-erasure retry worker (runWithTenant); rawTenantBinding scopes both.
+  // Account erasure and rating-outbox comment erasure run from authenticated
+  // self/admin requests and the tenant-bound retry worker (runWithTenant);
+  // rawTenantBinding scopes both.
   'modules/user/account.service.ts': { sites: 1, role: 'SHARED' },
   'modules/user/partner-wind-down.ts': { sites: 2, role: 'SHARED' },
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },
