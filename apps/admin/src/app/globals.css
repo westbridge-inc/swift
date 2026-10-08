@@ -335,3 +335,18 @@ body {
 .admin-modal.mc-dialog button.mc-btn-primary { background: var(--mc-accent); border-color: var(--mc-accent); color: #fff; }
 .admin-modal.mc-dialog button.mc-btn-primary:hover:not(:disabled) { background: var(--mc-accent-deep); }
 @media (max-width: 480px) { .admin-modal.mc-dialog .mc-dialog-actions .mc-btn { flex: 1 1 auto; } }
+
+/* [MC-PR2] The activation checklist panel. */
+.mc-pip { width: 22px; height: 5px; border-radius: 2px; background: var(--mc-line-strong); }
+.mc-pip-good { background: var(--mc-good); }
+.mc-pip-warn { background: #D08B4C; }
+.mc-pip-bad { background: var(--mc-bad); }
+.mc-verdict { padding: .6rem .8rem; border-radius: var(--mc-radius-sm); background: var(--mc-surface); border: 1px solid var(--mc-line); font-weight: 600; }
+.mc-verdict-good { background: var(--mc-good-soft); color: var(--mc-good); border-color: transparent; }
+.mc-verdict-warn { background: var(--mc-warn-soft); color: var(--mc-warn); border-color: transparent; }
+.mc-verdict-bad { background: var(--mc-bad-soft); color: var(--mc-bad); border-color: transparent; }
+.mc-verdict-info { background: var(--mc-info-soft); color: var(--mc-info); border-color: transparent; }
+.mc-doc { display: flex; align-items: center; gap: .75rem; padding: .65rem .8rem; border-radius: var(--mc-radius-sm); border: 1px solid var(--mc-line); background: var(--mc-card); min-width: 0; }
+.mc-doc-bad { border-color: rgb(185 28 28 / 25%); }
+.mc-doc-warn { border-color: rgb(154 71 8 / 25%); }
+@media (max-width: 480px) { .mc-doc { flex-wrap: wrap; } }
