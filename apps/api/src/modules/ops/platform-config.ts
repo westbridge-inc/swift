@@ -28,6 +28,8 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  */
 
 /** Bump when any value below changes; recorded with every apply.
+ *  2026-10-07.1: Guyana's police, fire and ambulance numbers verified by
+ *  the owner on 5 October; preserve that confirmation on every seed run.
  *  2026-10-01.1 (main): the owner's Georgetown fares — Guyana's taxiRates, and
  *  the delivery columns a fresh Georgetown Central zone is created with.
  *  2026-10-01.2 (main) [ZONE-FARES]: the CJIA and Ogle airport zones with their
@@ -37,7 +39,7 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  2026-10-04.2: all of these together, as merged; no earlier version
  *  (including 2026-10-04.1, the previous merge of this lane) describes these
  *  values, so none may be reused. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-04.2';
+export const PLATFORM_CONFIG_VERSION = '2026-10-07.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -170,13 +172,12 @@ export function desiredPlatformConfig(): DesiredConfig {
     l3MinAccountAgeDays: 30,
     outlierMultiplier: 3,
   };
-  // [MOB-018] Per-market emergency numbers with a verification record. Only
-  // the number the launch market actually verified is marked verified; the
-  // rest are carried but flagged, so the SOS ceremony can say so.
+  // [MOB-018] All three Guyana numbers were verified by the owner on 5 Oct
+  // 2026. Keep the seed aligned with the emergency-policy confirmation.
   const guyanaEmergency = {
-    police: { number: '911', verified: true, verifiedAt: '2026-09-02T00:00:00.000Z', verifiedBy: 'launch-market' },
-    fire: { number: '912', verified: false },
-    ambulance: { number: '913', verified: false },
+    police: { number: '911', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+    fire: { number: '912', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+    ambulance: { number: '913', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
   };
   const guyanaRegion = {
     taxiCredentialName: 'Hire Car Licence',
