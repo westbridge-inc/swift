@@ -364,8 +364,13 @@ export const customerApi = {
   // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
   exportAccount: (session?: AuthSessionSnapshot) =>
     api.get('/customer/account/export', capturedAuthConfig(session)),
+  requestAccountClosure: (session?: AuthSessionSnapshot) =>
+    api.post('/customer/account/closure-request', {}, capturedAuthConfig(session)),
+  // receipts=v2: this app shows every deletion receipt by its own message, so
+  // the server may answer a closure request or a pending erasure as such. An
+  // app that does not declare it is answered in the older build's words.
   deleteAccount: (session?: AuthSessionSnapshot) =>
-    api.delete('/customer/account', capturedAuthConfig(session)),
+    api.delete('/customer/account', capturedAuthConfig(session, { params: { receipts: 'v2' } })),
   switchRole: (role: string, session?: AuthSessionSnapshot) =>
     api.post('/customer/switch-role', { role }, capturedAuthConfig(session)),
   // In-app support / dispute channel.
@@ -451,6 +456,9 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
+    /** [L09 · price lock] The quote's total and line prices the customer saw. */
+    expectedTotal?: number;
+    expectedLines?: Array<{ lineId: string; unitPrice: number }>;
   }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended

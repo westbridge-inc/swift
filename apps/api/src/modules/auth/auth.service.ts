@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
@@ -48,7 +49,7 @@ import {
   recordPasswordFailure,
   resetPasswordAttemptBudget,
 } from './password-attempts';
-import { stepUpKey } from './step-up';
+import { requireStepUp } from './step-up';
 
 interface DeviceInfo {
   deviceId: string;
@@ -523,6 +524,10 @@ export class AuthService {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
 
+      // This service remains authoritative if another caller is added later.
+      const authority = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenant: { select: { kind: true } } } });
+      if (authority.tenant.kind === 'REVIEW') throw new ReviewDemoCredentialRefusedError();
+
       const sessions = await tx.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
         SELECT "id", "expiresAt"
         FROM "sessions"
@@ -534,6 +539,8 @@ export class AuthService {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
       if (BLOCKED_STATUSES.has(user.status)) throw accountSuspended();
+
+      await requireStepUp(this.app, { user: { userId }, authSessionId: sessionId }, { consume: true });
 
       await tx.user.update({
         where: { id: userId },
@@ -581,7 +588,6 @@ export class AuthService {
     // never turns a completed change into an error.
     await resetPasswordAttemptBudget(this.app.redis, userId)
       .catch((error) => this.app.log.error({ err: error, userId }, 'password-set attempt budget reset failed'));
-    await this.app.redis.del(stepUpKey(sessionId)).catch(() => {});
     for (const { sessionId: revokedId, cleanup } of changed.revoked) {
       this.disconnectSessionSockets(revokedId);
       await completeMoverSessionRevocation(this.app, cleanup)
@@ -807,9 +813,12 @@ export class AuthService {
 
     const candidate = await this.app.prisma.user.findUnique({
       where: { phone },
-      select: { id: true },
+      select: { id: true, tenant: { select: { kind: true } } },
     });
-    if (!candidate) {
+    // [REVIEW-PARTNER] A store-review demo login is shared: its password is
+    // never reset — answered exactly as for no account (no reset code is ever
+    // texted to a demo identifier; this holds even if one were stored).
+    if (!candidate || candidate.tenant.kind === 'REVIEW') {
       // Do NOT reveal account existence on password reset — return the same
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.
@@ -922,6 +931,26 @@ export class AuthService {
       if (session.expiresAt < new Date()) {
         return { kind: 'invalid' as const };
       }
+      // Match the credential and retire reused rotations before any account
+      // status answer. Even a blocked account must invalidate this family.
+      const previous = session.refreshToken !== refreshToken;
+      if (previous) {
+        if (session.previousRefreshToken !== refreshToken) return { kind: 'invalid' as const };
+        const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
+        const age = session.rotatedAt ? Date.now() - session.rotatedAt.getTime() : Infinity;
+        if (!(age <= graceMs)) {
+          const cleanup = await this.revokeLockedSession(tx, session.id, session.userId);
+          return {
+            kind: 'reuse' as const,
+            userId: session.userId,
+            sessionId: session.id,
+            deviceId: session.deviceId,
+            deviceType: session.deviceType,
+            cleanup,
+          };
+        }
+      }
+
       // SEC: a suspended/banned/deactivated account cannot rotate new tokens.
       if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(user.status)) {
         throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
@@ -939,35 +968,12 @@ export class AuthService {
         };
       }
 
-      if (session.refreshToken !== refreshToken) {
-        if (session.previousRefreshToken !== refreshToken) {
-          return { kind: 'invalid' as const };
-        }
-
-        // A legitimate double-fire immediately after rotation receives the
-        // already-current pair. Outside the grace period, the same credential
-        // is theft evidence and revokes the locked session atomically.
-        const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
-        const age = session.rotatedAt ? Date.now() - session.rotatedAt.getTime() : Infinity;
-        if (age <= graceMs) {
-          return {
-            kind: 'success' as const,
-            tokens: {
-              accessToken: session.token,
-              refreshToken: session.refreshToken,
-              expiresIn: 900,
-            },
-          };
-        }
-
-        const cleanup = await this.revokeLockedSession(tx, session.id, session.userId);
+      // A legitimate double-fire receives the current pair only AFTER the
+      // same account-status and assurance checks as a current credential.
+      if (previous) {
         return {
-          kind: 'reuse' as const,
-          userId: session.userId,
-          sessionId: session.id,
-          deviceId: session.deviceId,
-          deviceType: session.deviceType,
-          cleanup,
+          kind: 'success' as const,
+          tokens: { accessToken: session.token, refreshToken: session.refreshToken, expiresIn: 900 },
         };
       }
 
