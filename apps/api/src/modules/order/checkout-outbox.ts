@@ -45,7 +45,7 @@ export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
  *  whose delivery must be CONFIRMED before the row may close (a direct-MMG
  *  claim notice stays owed until its recipients hold inbox rows) is drained in
  *  process by the same sweep instead — see `drainMmgClaimNotices`. */
-export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice'];
+export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'driver-pickup-notice'];
 
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */
