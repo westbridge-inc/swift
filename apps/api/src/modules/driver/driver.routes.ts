@@ -58,6 +58,7 @@ import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
+import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
@@ -207,6 +208,7 @@ export async function driverRoutes(app: FastifyInstance) {
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
+      if (identityChanged && me.currentRideId) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active ride before changing your vehicle.');
       const driver = await tx.driver.update({
         where: { userId: request.user.userId },
         data: {
@@ -246,13 +248,7 @@ export async function driverRoutes(app: FastifyInstance) {
         },
       });
       if (identityChanged) {
-        // A vehicle identity change never inherits another subject's approved documents: every open
-        // vehicle link closes. New vehicle submissions create a PENDING assignment
-        // that an admin must approve before its evidence propagates.
-        await tx.subjectLink.updateMany({
-          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-          data: { validTo: new Date() },
-        });
+        await requireFreshVehicleReview(tx, request.user.userId, me.licensePlate, { ...driver, kind: 'DRIVER' });
       }
 
       return driver;

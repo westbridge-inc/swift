@@ -35,6 +35,7 @@ import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { requireStepUp } from '../auth/step-up';
+import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
@@ -537,6 +538,8 @@ export async function riderRoutes(app: FastifyInstance) {
       updateData['isOnline'] = false;
       updateData['locationSessionId'] = null;
       updateData['documentsVerified'] = false;
+      updateData['documentsVerifiedAt'] = null;
+      updateData['documentsVerifiedBy'] = null;
     }
 
     if (Object.keys(updateData).length === 0) {
@@ -548,6 +551,7 @@ export async function riderRoutes(app: FastifyInstance) {
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM riders WHERE id = ${rider.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== rider.updatedAt.getTime()) throw staleMoverAuthorityError();
+      if (identityChanged && (rider.currentOrderId || (await riderLiveLegCount(tx, rider.id)) > 0)) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active delivery before changing your vehicle.');
       const updated = await tx.rider.update({
         where: { id: rider.id },
         data: updateData,
@@ -568,13 +572,7 @@ export async function riderRoutes(app: FastifyInstance) {
       });
 
       if (identityChanged) {
-        // A vehicle identity change never inherits another subject's approved documents: every open
-        // vehicle link closes. New vehicle submissions create a PENDING assignment
-        // that an admin must approve before its evidence propagates.
-        await tx.subjectLink.updateMany({
-          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-          data: { validTo: new Date() },
-        });
+        await requireFreshVehicleReview(tx, request.user.userId, rider.licensePlate, { ...updated, kind: 'RIDER' });
       }
 
       return updated;

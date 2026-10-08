@@ -4,6 +4,7 @@ import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
+import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
 import { FloatService } from '../dispatch/float.service';
@@ -483,6 +484,11 @@ export class PartnerService {
       if (withdrawn.length > 0) {
         await tx.reviewCase.updateMany({ where: { submissionId: { in: withdrawn }, closedAt: null }, data: { closedAt: now } });
       }
+
+      const nextProfile = target === 'DRIVER' ? await tx.driver.findUniqueOrThrow({ where: { id: targetId } }) : await tx.rider.findUniqueOrThrow({ where: { id: targetId } });
+      const freshReview = await requireFreshVehicleReview(tx, userId, currentProfile.licensePlate, { ...nextProfile, kind: target });
+      superseded.push(...freshReview.superseded);
+      withdrawn.push(...freshReview.withdrawn);
 
       // The change is on the record: what the mover drove before and after, and which
       // papers it retired, so a reviewer can read a vehicle's history.
