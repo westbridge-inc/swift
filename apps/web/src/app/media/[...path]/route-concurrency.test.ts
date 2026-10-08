@@ -2,14 +2,14 @@
 import sharp from 'sharp';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const native = vi.hoisted(() => ({ held: false, pending: [] as Array<(body: Buffer) => void> }));
+const native = vi.hoisted(() => ({ held: false, pending: [] as Array<(_body: Buffer) => void> }));
 vi.mock('sharp', async (importOriginal) => {
   const actual = await importOriginal<typeof import('sharp')>();
   return { default: (...args: Parameters<typeof sharp>) => {
     const pipeline = actual.default(...args);
     if (native.held) pipeline.toBuffer = vi.fn(() => new Promise<Buffer>((resolve) => {
       native.pending.push(resolve);
-    })) as typeof pipeline.toBuffer;
+    })) as unknown as typeof pipeline.toBuffer;
     return pipeline;
   } };
 });
@@ -87,7 +87,7 @@ describe('store-photo concurrency and overload recovery', () => {
 
   it.each([404, 410])('revokes a queued width on upstream %s without fetching it', async (status) => {
     vi.useFakeTimers();
-    const release: Array<(response: Response) => void> = [];
+    const release: Array<(_response: Response) => void> = [];
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { release.push(resolve); })));
     const first = get('removed', 160);
     const others = ['b', 'c', 'd'].map((store) => get(store));
@@ -114,7 +114,7 @@ describe('store-photo concurrency and overload recovery', () => {
 
   it('bounds waiting at 32 unique jobs, expires queued work without fetching, and recovers', async () => {
     vi.useFakeTimers();
-    const release: Array<(response: Response) => void> = [];
+    const release: Array<(_response: Response) => void> = [];
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { release.push(resolve); })));
     const admitted = Array.from({ length: 36 }, (_, i) => get(`overload-${i}`));
     await vi.advanceTimersByTimeAsync(0);

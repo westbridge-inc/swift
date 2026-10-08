@@ -20,7 +20,7 @@ type PhotoJob = {
   revokedStatus: number;
   controller: AbortController;
   reply: Promise<PhotoResult>;
-  respond: (result: PhotoResult) => void;
+  respond: (_result: PhotoResult) => void;
   timer: ReturnType<typeof setTimeout>;
 };
 // One job per photo/width, including timed-out work that has not settled yet.
