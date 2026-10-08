@@ -1,6 +1,18 @@
+/* [WEB-REDESIGN] The cart in the owner's design: hairline item rows with a
+   brand stepper, the delivery/tip/payment choices below them, and the order
+   summary in a sticky right column from 760 px. Token variables only. */
+
 .page {
   display: grid;
-  gap: var(--swift-space-2xl);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px 48px;
+  align-items: start;
+  padding-top: 8px;
+}
+
+@media (min-width: 72rem) {
+  .page { grid-template-columns: minmax(0, 1fr) 380px; }
+  .rail { position: sticky; top: 16px; margin-top: 60px; }
 }
 
 .itemsColumn,
@@ -8,44 +20,68 @@
 .formStack,
 .panelStack {
   display: grid;
-}
-
-.itemsColumn,
-.rail {
-  gap: var(--swift-space-lg);
   align-content: start;
 }
 
+.itemsColumn { gap: 0; }
+.rail { gap: 16px; outline: none; }
 .formStack,
-.panelStack {
-  gap: var(--swift-space-sm);
+.panelStack { gap: 8px; }
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding-bottom: 8px;
 }
 
 .title,
 .stateTitle {
   margin: 0;
-  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  color: var(--swift-ink);
 }
 
 .title {
-  font-size: var(--swift-type-title);
-  line-height: var(--swift-leading-title);
+  flex: 1;
+  font: 600 22px/28px var(--swift-face-display), system-ui, sans-serif;
 }
 
 .stateTitle {
-  font-size: var(--swift-type-heading);
-  line-height: var(--swift-leading-heading);
+  font: 600 17px/24px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.fromStore {
+  margin: 0;
+  color: var(--swift-muted);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.fromStore b { color: var(--swift-ink); font-weight: 600; }
+
+.lines {
+  margin-top: 12px;
+  border-bottom: 1px solid var(--swift-border);
 }
 
 .itemCard {
   display: flex;
-  align-items: center;
-  gap: var(--swift-space-md);
-  padding: var(--swift-space-md);
-  border: thin solid var(--swift-border);
-  border-radius: var(--swift-radius-lg);
-  background: var(--swift-card);
-  box-shadow: var(--swift-elevation-card);
+  gap: 12px;
+  padding: 16px 0;
+  border-top: 1px solid var(--swift-border);
+}
+
+.thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-red-50);
+  color: var(--swift-red-600);
 }
 
 .itemCopy {
@@ -53,376 +89,366 @@
   flex: 1;
 }
 
+.itemTop {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
 .itemName,
 .itemMeta,
 .itemPrice,
+.lineTotal,
 .panelTitle,
 .cashTitle,
 .cashCopy,
 .stateCopy,
-.errorCopy {
+.errorCopy,
+.payNote {
   margin: 0;
 }
 
-.itemName,
-.panelTitle,
-.cashTitle {
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+.itemName {
+  flex: 1;
+  font: 600 15px/22px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.lineTotal {
+  font: 600 17px/22px var(--swift-face-display), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 
 .itemMeta,
+.itemPrice,
 .cashCopy,
 .stateCopy,
 .errorCopy,
-.errorMessage {
+.errorMessage,
+.payNote {
   color: var(--swift-muted);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.errorMessage {
-  margin: 0;
-  color: var(--swift-error);
-}
+.itemPrice { margin-top: 2px; }
 
-.itemMeta {
-  margin-block-start: var(--swift-space-xs);
-}
-
-.itemPrice {
-  margin-block-start: var(--swift-space-xs);
-  color: var(--swift-red);
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+.itemActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
 }
 
 .quantity {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: var(--swift-space-xs);
-  padding-inline: var(--swift-space-xs);
-  border: thin solid var(--swift-border);
+  justify-content: space-between;
+  width: 104px;
+  height: 32px;
   border-radius: var(--swift-radius-full);
-}
-
-.quantityButton,
-.removeButton {
-  width: var(--swift-touch);
-  height: var(--swift-touch);
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: var(--swift-radius-full);
-  background: transparent;
-  cursor: pointer;
+  background: var(--swift-red);
+  color: var(--swift-white);
 }
 
 .quantityButton {
-  color: var(--swift-ink);
-  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  border: 0;
+  border-radius: var(--swift-radius-full);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.quantityButton:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.quantityCount {
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 
 .removeButton {
-  flex: 0 0 auto;
-  color: var(--swift-red);
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-right: -12px;
+  border: 0;
+  background: transparent;
+  color: var(--swift-muted-soft);
+  cursor: pointer;
 }
 
-.quantityButton:hover:not(:disabled),
-.removeButton:hover:not(:disabled) {
-  background: var(--swift-red-50);
-}
-
-.quantityButton:disabled,
-.removeButton:disabled,
-.button:disabled,
-.tipButton:disabled,
-.input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.quantityCount {
-  min-width: var(--swift-space-xl);
-  text-align: center;
-  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
-}
-
-.panel,
-.stateCard,
-.safety,
-.error {
-  padding: var(--swift-space-lg);
-  border: thin solid var(--swift-border);
-  border-radius: var(--swift-radius-lg);
-  background: var(--swift-card);
-}
+.removeButton:hover { color: var(--swift-ink); }
+.removeButton:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .panel {
-  box-shadow: var(--swift-elevation-card);
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
 }
 
 .panelHeading {
   display: flex;
   align-items: center;
-  gap: var(--swift-space-sm);
-  margin-block-end: var(--swift-space-sm);
+  gap: 6px;
+  color: var(--swift-ink);
 }
 
-.safety,
-.error {
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
-}
-
-.safety p {
-  margin: 0;
-}
-
-.safetyNotice {
-  border-color: var(--swift-info);
-  color: var(--swift-info);
-}
-
-.safetyBlocked,
-.error {
-  border-color: var(--swift-error);
-  color: var(--swift-error);
+.panelTitle {
+  color: var(--swift-ink);
+  font: 600 17px/24px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .field {
   display: grid;
-  gap: var(--swift-space-xs);
+  gap: 6px;
 }
 
 .label {
   color: var(--swift-muted);
-  font-family: var(--swift-font-body-medium), system-ui, sans-serif;
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .input {
   width: 100%;
-  min-height: var(--swift-touch);
-  padding-inline: var(--swift-space-md);
-  border: thin solid var(--swift-border-strong);
-  border-radius: var(--swift-radius-md);
+  min-height: 52px;
+  padding: 0 16px;
+  border: 1px solid var(--swift-border);
+  border-radius: var(--swift-radius-lg);
   background: var(--swift-card);
   color: var(--swift-ink);
+  font: 400 16px/22px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.button,
-.emptyLink {
-  min-height: var(--swift-touch);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding-inline: var(--swift-space-lg);
-  border-radius: var(--swift-radius-full);
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
-  text-align: center;
-  cursor: pointer;
-}
-
-.buttonPrimary,
-.emptyLink {
-  border: thin solid var(--swift-red);
-  background: var(--swift-red);
-  color: var(--swift-white);
-}
-
-.buttonPrimary:hover:not(:disabled),
-.emptyLink:hover {
-  border-color: var(--swift-red-600);
-  background: var(--swift-red-600);
-}
-
-.buttonSecondary {
-  border: thin solid var(--swift-red);
-  background: var(--swift-card);
-  color: var(--swift-red);
-}
+.input:focus { border-color: var(--swift-red); outline: none; }
 
 .tipGrid {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--swift-space-sm);
+  gap: 12px;
 }
 
 .tipButton {
-  min-height: var(--swift-touch);
-  padding-inline: var(--swift-space-md);
-  border: thin solid var(--swift-border);
+  height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--swift-border);
   border-radius: var(--swift-radius-full);
   background: var(--swift-card);
   color: var(--swift-ink);
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
   cursor: pointer;
 }
+
+.tipButton:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .tipSelected {
   border-color: var(--swift-red);
   background: var(--swift-red);
   color: var(--swift-white);
+  font-weight: 600;
 }
 
-.cashPanel {
-  padding: var(--swift-space-md);
-  border: thin solid var(--swift-red);
-  border-radius: var(--swift-radius-md);
-  background: var(--swift-red-50);
-}
-
-.cashTitle {
-  color: var(--swift-red);
-}
-
-/* [Q7b] Cash, or the business's own MMG — offered only when the server says
-   this cart can take it. The chosen way reads like the cash panel. */
 .payOptions {
   display: grid;
-  gap: var(--swift-space-sm);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.payOption {
+.payOption,
+.cashPanel {
   display: flex;
   align-items: flex-start;
-  gap: var(--swift-space-sm);
-  padding: var(--swift-space-md);
-  border: thin solid var(--swift-border);
-  border-radius: var(--swift-radius-md);
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--swift-border);
+  border-radius: var(--swift-radius-lg);
   background: var(--swift-card);
+  color: var(--swift-ink);
   cursor: pointer;
 }
 
-.payOption:has(input:checked) {
-  border-color: var(--swift-red);
-  background: var(--swift-red-50);
-}
+.cashPanel { border-color: var(--swift-red); cursor: default; }
 
-.payOption:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
+.payOption:has(input:checked) { border-color: var(--swift-red); }
 
 .payOption input {
-  margin-block-start: var(--swift-space-xs);
-  accent-color: var(--swift-red);
+  appearance: none;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  min-height: 20px;
+  margin: 0;
+  border: 2px solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-full);
+  transition: border 140ms;
+}
+
+.payOption input:checked { border: 6px solid var(--swift-red); }
+
+.radioOn {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 6px solid var(--swift-red);
+  border-radius: var(--swift-radius-full);
 }
 
 .payOptionCopy {
   display: grid;
 }
 
-.cashCopy {
-  margin-block-start: var(--swift-space-xs);
+.cashTitle {
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.summary {
+  display: grid;
+  gap: 12px;
 }
 
 .breakdown {
   display: grid;
-  gap: var(--swift-space-xs);
 }
 
 .moneyLine,
 .totalLine {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--swift-space-lg);
-}
-
-.moneyLine {
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  gap: 12px;
+  padding: 6px 0;
 }
 
 .moneyLabel {
   color: var(--swift-muted);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.moneyValue,
-.totalLine {
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+.moneyValue {
+  font: 600 17px/22px var(--swift-face-display), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .totalLine {
-  margin-block-start: var(--swift-space-xs);
-  padding-block-start: var(--swift-space-sm);
-  border-block-start: thin solid var(--swift-border);
-  font-size: var(--swift-type-heading);
-  line-height: var(--swift-leading-heading);
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--swift-border);
+  font: 600 15px/22px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.totalLine strong {
+  font: 700 24px/28px var(--swift-face-display), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 20px;
+  border: 0;
+  border-radius: var(--swift-radius-full);
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
+  text-align: center;
+  cursor: pointer;
+  transition: background 140ms;
+}
+
+.button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.buttonPrimary {
+  background: var(--swift-red);
+  color: var(--swift-white);
+}
+
+.buttonPrimary:hover:not(:disabled) { background: var(--swift-red-600); }
+
+.buttonSecondary {
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  box-shadow: inset 0 0 0 1px var(--swift-border);
+}
+
+.buttonSecondary:hover:not(:disabled) { background: var(--swift-red-50); }
+
+.checkoutButton { min-height: 64px; }
+
+.payNote { text-align: center; }
+
+.safety,
+.error,
+.noRiders {
+  padding: 16px;
+  border-radius: var(--swift-radius-md);
+  font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
+  outline: none;
+}
+
+.safety p { margin: 0; }
+
+.safetyNotice {
+  background: var(--swift-sunken);
+  color: var(--swift-ink);
+}
+
+.safetyBlocked,
+.error {
+  margin: 0;
+  background: var(--swift-soft-danger);
+  color: var(--swift-error);
 }
 
 .noRiders {
   display: grid;
-  gap: var(--swift-space-sm);
-  margin-block-start: var(--swift-space-md);
+  gap: 12px;
+  background: var(--swift-soft-warning);
 }
 
 .noRidersCopy {
   margin: 0;
-  color: var(--swift-error);
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  color: var(--swift-warning);
+  font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.checkoutButton {
-  width: 100%;
-  margin-block-start: var(--swift-space-md);
-}
-
-.stateCard,
-.emptyState {
+.emptyState,
+.stateCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 72px 0;
   text-align: center;
 }
 
-.stateCopy,
-.errorCopy {
-  margin-block-start: var(--swift-space-sm);
+.emptyLink,
+.retryButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 400px;
+  height: 56px;
+  margin-top: 16px;
+  border-radius: var(--swift-radius-full);
+  background: var(--swift-red);
+  color: var(--swift-white);
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.retryButton,
-.emptyLink {
-  margin-block-start: var(--swift-space-lg);
-}
+.emptyLink:hover,
+.retryButton:hover { background: var(--swift-red-600); }
+
+.emptyState .stateCopy,
+.stateCard .errorCopy { font-size: 15px; line-height: 22px; }
 
 .loading {
-  min-height: calc(var(--swift-space-5xl) * 4);
-  border-radius: var(--swift-radius-lg);
-  background: var(--swift-sunken);
-  animation: cartPulse 1.4s ease-in-out infinite alternate;
-}
-
-.emptyState {
-  padding-block: var(--swift-space-5xl);
-}
-
-@keyframes cartPulse {
-  from { opacity: 0.55; }
-  to { opacity: 1; }
-}
-
-@media (min-width: 56.25em) {
-  .page {
-    grid-template-columns: minmax(0, 1fr) var(--swift-rail-width);
-  }
-
-  .rail {
-    position: sticky;
-    inset-block-start: var(--swift-rail-sticky-top);
-  }
-}
-
-@media (max-width: 42em) {
-  .itemCard {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-
-  .itemCopy {
-    flex-basis: calc(100% - var(--swift-touch) - var(--swift-space-md));
-  }
-
-  .quantity {
-    order: 3;
-  }
+  color: var(--swift-muted);
 }

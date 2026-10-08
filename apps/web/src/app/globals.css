@@ -1,5 +1,38 @@
 @import 'tailwindcss';
 
+/* ── Type [WEB-REDESIGN] ─────────────────────────────────────────────────────
+   Bricolage Grotesque (titles, money) over Hanken Grotesk (everything else),
+   self-hosted: the CSP allows fonts from 'self' only. Each file is declared
+   twice — once under the family name the browser uses with font-weight, and
+   once under the React Native per-weight name that the shared tokens carry
+   (--swift-font-display = 'Bricolage', --swift-font-body-semibold =
+   'HankenSemiBold'…), so markup written against either reads the same face. */
+@font-face { font-family: 'Bricolage Grotesque'; font-weight: 600; font-style: normal; font-display: swap; src: url('/fonts/bricolage-grotesque-600.woff2') format('woff2'); }
+@font-face { font-family: 'Bricolage Grotesque'; font-weight: 700; font-style: normal; font-display: swap; src: url('/fonts/bricolage-grotesque-700.woff2') format('woff2'); }
+@font-face { font-family: 'Hanken Grotesk'; font-weight: 400; font-style: normal; font-display: swap; src: url('/fonts/hanken-grotesk-400.woff2') format('woff2'); }
+@font-face { font-family: 'Hanken Grotesk'; font-weight: 500; font-style: normal; font-display: swap; src: url('/fonts/hanken-grotesk-500.woff2') format('woff2'); }
+@font-face { font-family: 'Hanken Grotesk'; font-weight: 600; font-style: normal; font-display: swap; src: url('/fonts/hanken-grotesk-600.woff2') format('woff2'); }
+@font-face { font-family: 'Hanken Grotesk'; font-weight: 700; font-style: normal; font-display: swap; src: url('/fonts/hanken-grotesk-700.woff2') format('woff2'); }
+@font-face { font-family: 'BricolageSemiBold'; font-weight: 600; font-display: swap; src: url('/fonts/bricolage-grotesque-600.woff2') format('woff2'); }
+@font-face { font-family: 'Bricolage'; font-weight: 700; font-display: swap; src: url('/fonts/bricolage-grotesque-700.woff2') format('woff2'); }
+@font-face { font-family: 'Hanken'; font-weight: 400; font-display: swap; src: url('/fonts/hanken-grotesk-400.woff2') format('woff2'); }
+@font-face { font-family: 'HankenMedium'; font-weight: 500; font-display: swap; src: url('/fonts/hanken-grotesk-500.woff2') format('woff2'); }
+@font-face { font-family: 'HankenSemiBold'; font-weight: 600; font-display: swap; src: url('/fonts/hanken-grotesk-600.woff2') format('woff2'); }
+@font-face { font-family: 'HankenBold'; font-weight: 700; font-display: swap; src: url('/fonts/hanken-grotesk-700.woff2') format('woff2'); }
+
+/* The app's one layout switch: below 760 px the phone layout (bottom dock),
+   from 760 px the side rail. `wide:` in markup, 47.5rem here. */
+@theme {
+  --breakpoint-wide: 47.5rem;
+  /* Two-column pages (cart, tracking, send) split only from 72rem (1152 px):
+     beside the 280 px rail, 80 px of gutters, a 380 px side column and its
+     gap, that is the first width that leaves the main column real room
+     (>= 360 px). Between 760 and 1152 px they stay one column. */
+  --breakpoint-split: 72rem;
+  --font-sans: 'Hanken Grotesk', system-ui, sans-serif;
+  --font-display: 'Bricolage Grotesque', 'Hanken Grotesk', system-ui, sans-serif;
+}
+
 html {
   scroll-behavior: smooth;
   overflow-x: clip;
@@ -8,7 +41,7 @@ html {
 body {
   background: var(--swift-canvas);
   color: var(--swift-ink);
-  font-family: var(--swift-font-body), system-ui, sans-serif;
+  font-family: var(--swift-face-body), system-ui, sans-serif;
   font-size: var(--swift-type-body);
   line-height: var(--swift-leading-body);
   -webkit-font-smoothing: antialiased;
@@ -21,16 +54,34 @@ body {
   padding-right: env(safe-area-inset-right);
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
+/* [WEB-REDESIGN] In the base layer, so a class on the element (a Tailwind
+   utility or the paper kit) sets its own type and size: unlayered element
+   rules here used to beat every class, which is why a button's text-sm never
+   took. */
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 
-:focus-visible {
-  outline: medium solid var(--swift-focus);
-  outline-offset: var(--swift-space-xs);
+  :focus-visible {
+    outline: medium solid var(--swift-focus);
+    outline-offset: var(--swift-space-xs);
+  }
+
+  /* [WEB-REDESIGN] Titles speak in Bricolage on every customer-facing page
+     (the app, the company pages, legal, sharing). The partner consoles keep
+     their own type until their redesign (phase 2). */
+  :where(h1, h2) {
+    font-family: var(--swift-face-display), var(--swift-face-body), system-ui, sans-serif;
+    letter-spacing: -0.005em;
+  }
+  .swift-console :where(h1, h2) {
+    font-family: inherit;
+    letter-spacing: normal;
+  }
 }
 
 /* ── The customer app shell [Q7b] ──────────────────────────────────────────
@@ -131,26 +182,28 @@ textarea {
   color: var(--swift-red-600);
 }
 
-/* Reserve card geometry while data and images arrive. */
-.swift-menu-heading { min-height: 7.75rem; }
-.swift-menu-item { min-height: 7.5rem; }
-.swift-order-row { min-height: 6rem; gap: 1rem; }
+/* Card geometry while data and images arrive: each placeholder now shares its
+   card's own layout classes (components/customer-skeletons.tsx, order-ui.tsx),
+   so the markers .swift-menu-heading, .swift-menu-item and .swift-order-row
+   carry no size of their own [WEB-REDESIGN]. */
 .swift-bone { animation: swift-bone 1.6s ease-in-out infinite alternate; }
 @keyframes swift-bone { to { opacity: 0.5; } }
 
-.swift-app :where(a, button, input, select, textarea, label[for]) {
-  touch-action: manipulation;
-}
-.swift-app :where(a, button, select, input:not([type=radio]):not([type=checkbox])) {
-  min-height: 44px;
-  min-width: 44px;
-}
-.swift-app label:has(input) {
-  min-height: 44px;
-  touch-action: manipulation;
-}
-.swift-app :where(a, button):active {
-  filter: brightness(0.92);
+@layer base {
+  .swift-app :where(a, button, input, select, textarea, label[for]) {
+    touch-action: manipulation;
+  }
+  .swift-app :where(a, button, select, input:not([type=radio]):not([type=checkbox])) {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .swift-app :where(label:has(input)) {
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+  .swift-app :where(a, button):active {
+    filter: brightness(0.92);
+  }
 }
 .swift-console {
   -webkit-tap-highlight-color: transparent;
@@ -170,4 +223,386 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .swift-bone { animation: none; }
+}
+
+/* ── The Swift paper kit [WEB-REDESIGN] ────────────────────────────────────
+   The owner's design (Swift App, 4 Oct 2026) in one place: paper ground, ink
+   titles in Bricolage, hairline rows, pill buttons, soft cards. Every page of
+   the customer app is drawn from these, so the site cannot drift into two
+   looks. In @layer components so a Tailwind utility on the same element still
+   wins (margins, widths). Colours are token variables only. */
+@layer components {
+  .sw-eyebrow {
+    display: block;
+    font: 500 11px/14px var(--swift-face-body), system-ui, sans-serif;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--swift-muted);
+  }
+  .sw-eyebrow-soft { color: var(--swift-muted-soft); }
+  .sw-title {
+    margin: 0;
+    font: 600 22px/28px var(--swift-face-display), system-ui, sans-serif;
+    color: var(--swift-ink);
+    letter-spacing: 0;
+  }
+  .sw-heading {
+    margin: 0;
+    font: 600 17px/24px var(--swift-face-body), system-ui, sans-serif;
+    color: var(--swift-ink);
+  }
+  .sw-caption {
+    font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
+    color: var(--swift-muted);
+  }
+  .sw-label {
+    font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
+    color: var(--swift-ink);
+  }
+  .sw-money {
+    font: 600 17px/22px var(--swift-face-display), system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  .sw-money-lg {
+    font: 700 24px/28px var(--swift-face-display), system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  .sw-money-xl {
+    font: 700 34px/38px var(--swift-face-display), system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Buttons — pills. 56 tall for the one main action, 38 for row actions. */
+  .sw-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 56px;
+    padding: 0 24px;
+    border: 0;
+    border-radius: var(--swift-radius-full);
+    background: var(--swift-red);
+    color: var(--swift-white);
+    font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
+    text-align: center;
+    cursor: pointer;
+    transition: background 140ms, transform 100ms;
+  }
+  .sw-btn:hover:not(:disabled) { background: var(--swift-red-600); }
+  .sw-btn:active:not(:disabled) { transform: scale(0.98); }
+  .sw-btn:disabled, .sw-btn[aria-disabled='true'] { opacity: 0.45; cursor: not-allowed; }
+  .sw-btn-tall { height: 64px; }
+  .sw-btn-block { width: 100%; }
+  .sw-btn-ink { background: var(--swift-ink); }
+  .sw-btn-ink:hover:not(:disabled) { background: var(--swift-ink-pressed); }
+  .sw-btn-outline {
+    background: var(--swift-card);
+    color: var(--swift-ink);
+    box-shadow: inset 0 0 0 1px var(--swift-border);
+  }
+  .sw-btn-outline:hover:not(:disabled) { background: var(--swift-red-50); }
+  .sw-btn-sm {
+    height: 38px;
+    padding: 0 16px;
+    font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
+  }
+  .sw-btn-md { height: 44px; padding: 0 20px; }
+  .sw-link-btn {
+    border: 0;
+    background: none;
+    padding: 0;
+    color: var(--swift-muted);
+    font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
+    cursor: pointer;
+  }
+  .sw-link-btn:hover { color: var(--swift-ink); }
+  .sw-link { color: var(--swift-red); font-weight: 600; }
+  .sw-link:hover { color: var(--swift-red-600); }
+
+  /* Round icon buttons: back, share, search. */
+  .sw-icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    flex: none;
+    border: 1px solid var(--swift-border);
+    border-radius: var(--swift-radius-full);
+    background: var(--swift-card);
+    color: var(--swift-ink);
+    cursor: pointer;
+  }
+  .sw-icon-btn:hover { border-color: var(--swift-border-strong); }
+  .sw-icon-btn-bare { border-color: transparent; background: transparent; }
+  .sw-icon-btn-bare:hover { background: var(--swift-sunken); border-color: transparent; }
+
+  /* Chips: filters, categories, tips. Selected = brand fill. */
+  .sw-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    flex: none;
+    height: 44px;
+    padding: 0 16px;
+    border: 1px solid var(--swift-border);
+    border-radius: var(--swift-radius-full);
+    background: var(--swift-card);
+    color: var(--swift-ink);
+    font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 140ms;
+  }
+  .sw-chip:hover { border-color: var(--swift-border-strong); }
+  .sw-chip[aria-current='page'], .sw-chip[aria-pressed='true'], .sw-chip[aria-checked='true'], .sw-chip-on {
+    border-color: var(--swift-red);
+    background: var(--swift-red);
+    color: var(--swift-white);
+    font-weight: 600;
+  }
+  .sw-chip:disabled { opacity: 0.45; cursor: not-allowed; }
+  .sw-chip-row {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+  }
+
+  /* Fields */
+  .sw-field-label {
+    display: block;
+    margin-bottom: 6px;
+    font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
+    color: var(--swift-muted);
+  }
+  .sw-input {
+    width: 100%;
+    min-width: 0;
+    height: 52px;
+    padding: 0 16px;
+    border: 1px solid var(--swift-border-strong);
+    border-radius: var(--swift-radius-lg);
+    background: var(--swift-card);
+    color: var(--swift-ink);
+    font: 400 16px/22px var(--swift-face-body), system-ui, sans-serif;
+    outline: none;
+  }
+  .sw-input:focus { border-color: var(--swift-red); }
+  .sw-input::placeholder { color: var(--swift-muted-soft); }
+  textarea.sw-input { height: auto; min-height: 104px; padding: 14px 16px; resize: vertical; }
+  select.sw-input { appearance: auto; }
+
+  /* Surfaces */
+  .sw-card {
+    border-radius: var(--swift-radius-lg);
+    background: var(--swift-card);
+    box-shadow: var(--swift-elevation-card);
+  }
+  .sw-panel {
+    border: 1px solid var(--swift-border);
+    border-radius: var(--swift-radius-lg);
+    background: var(--swift-card);
+  }
+  .sw-band {
+    background: var(--swift-sunken);
+  }
+  .sw-tile {
+    display: grid;
+    place-items: center;
+    width: 56px;
+    height: 56px;
+    flex: none;
+    border-radius: var(--swift-radius-lg);
+    background: var(--swift-sunken);
+  }
+  .sw-photo {
+    position: relative;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    border-radius: var(--swift-radius-lg);
+    background: var(--swift-red-50);
+    color: var(--swift-red-600);
+  }
+
+  /* Hairline rows (account, orders, menus). */
+  .sw-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 56px;
+    padding: 8px 0;
+    border: 0;
+    border-bottom: 1px solid var(--swift-border);
+    background: none;
+    color: var(--swift-ink);
+    text-align: left;
+  }
+  a.sw-row:active, button.sw-row:active { opacity: 0.65; }
+  .sw-row-chip {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    flex: none;
+    border-radius: var(--swift-radius-md);
+    background: var(--swift-red-50);
+    color: var(--swift-red-600);
+  }
+
+  /* Counts and status. */
+  .sw-badge {
+    display: inline-grid;
+    place-items: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: var(--swift-radius-full);
+    background: var(--swift-red);
+    color: var(--swift-white);
+    font: 600 11px/14px var(--swift-face-body), system-ui, sans-serif;
+  }
+  .sw-status {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: var(--swift-radius-full);
+    font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
+    background: var(--swift-red-50);
+    color: var(--swift-red-600);
+    white-space: nowrap;
+  }
+  .sw-status-success { background: var(--swift-soft-success); color: var(--swift-success); }
+  .sw-status-neutral { background: var(--swift-border); color: var(--swift-muted); }
+  .sw-status-warning { background: var(--swift-soft-warning); color: var(--swift-warning); }
+  .sw-status-error { background: var(--swift-soft-danger); color: var(--swift-error); }
+
+  /* Notes: honest messages inside a page. */
+  .sw-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px;
+    border-radius: var(--swift-radius-md);
+    background: var(--swift-red-50);
+    color: var(--swift-red-600);
+    font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
+  }
+  .sw-note-error { background: var(--swift-soft-danger); color: var(--swift-error); }
+  .sw-note-info { background: var(--swift-sunken); color: var(--swift-ink); }
+
+  /* Empty states — a soft tile, a line, a way forward. */
+  .sw-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 72px 0;
+    text-align: center;
+  }
+  .sw-empty-tile {
+    display: grid;
+    place-items: center;
+    width: 104px;
+    height: 104px;
+    margin-bottom: 16px;
+    border-radius: 28px;
+    background: var(--swift-red-50);
+    color: var(--swift-red-600);
+  }
+
+  /* Page frame: paper, 24 px gutters on phones, 40 px from 760 px, 1200 max. */
+  .sw-page {
+    width: 100%;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 16px 24px 0;
+  }
+  .sw-page-narrow { max-width: 720px; }
+  .sw-bleed { margin-left: -24px; margin-right: -24px; padding-left: 24px; padding-right: 24px; }
+  @media (min-width: 47.5rem) {
+    .sw-page { padding: 16px 40px 0; }
+    .sw-page-narrow { max-width: 800px; }
+    .sw-bleed { margin-left: -40px; margin-right: -40px; padding-left: 40px; padding-right: 40px; }
+  }
+
+  .sw-rail-scroll {
+    display: grid;
+    grid-auto-flow: column;
+    gap: 16px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+  }
+
+  .sw-skeleton {
+    display: block;
+    border-radius: var(--swift-radius-md);
+    background: var(--swift-skeleton);
+    animation: swift-bone 1.6s ease-in-out infinite alternate;
+  }
+
+  /* Sheets: from the bottom on phones, centred from 760 px. */
+  .sw-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    background: var(--swift-scrim);
+    animation: sw-fade 220ms ease-out;
+  }
+  .sw-sheet {
+    width: 100%;
+    max-height: 92%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-radius: var(--swift-radius-sheet) var(--swift-radius-sheet) 0 0;
+    background: var(--swift-canvas);
+    box-shadow: var(--swift-elevation-floating);
+    padding-bottom: env(safe-area-inset-bottom);
+    animation: sw-rise 220ms cubic-bezier(0, 0, 0, 1);
+  }
+  @media (min-width: 47.5rem) {
+    .sw-scrim { align-items: center; }
+    .sw-sheet { width: 480px; border-radius: var(--swift-radius-xl); animation: sw-pop 220ms cubic-bezier(0, 0, 0, 1); }
+  }
+
+  .sw-toast {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--swift-dock, 0px) + 20px);
+    z-index: 70;
+    width: max-content;
+    max-width: calc(100% - 32px);
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 10px 18px 10px 14px;
+    border-radius: var(--swift-radius-lg);
+    background: var(--swift-ink);
+    color: var(--swift-white);
+    font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
+    box-shadow: var(--swift-elevation-floating);
+    animation: sw-in 220ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .sw-in { animation: sw-in 320ms cubic-bezier(0.2, 0, 0, 1); }
+}
+
+@keyframes sw-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes sw-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sw-rise { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes sw-pop { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .sw-in, .sw-scrim, .sw-sheet, .sw-toast, .sw-skeleton { animation: none; }
 }

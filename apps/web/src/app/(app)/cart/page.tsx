@@ -5,7 +5,13 @@ import CartSkeleton from './loading';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Trash2, MapPin } from 'lucide-react';
+import Image from 'next/image';
+import { MapPin, Minus, Plus, Trash2 } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { BackButton, useOwnBackButton } from '@/components/customer-shell';
+import { Pictogram } from '@/components/glyphs';
+import { useCustomerSession } from '@/components/customer-session';
+import { customerCartKey } from '@/lib/shell-data';
 import {
   addAddress,
   cartQuoteFingerprint,
@@ -44,7 +50,14 @@ const TIPS = [0, 200, 500, 1000];
 
 export default function CartPage() {
   const router = useRouter();
+  // [WEB-REDESIGN] Every fresh read of the cart also updates the count the
+  // rail and the dock show, so the badge never disagrees with this page.
+  const { scope, epoch } = useCustomerSession();
+  const queryClient = useQueryClient();
   const [cart, setCart] = useState<Cart | null>(null);
+  // The cart draws its own Back beside its title only once it has lines; in
+  // its loading, error and empty states the shell's Back row stays.
+  useOwnBackButton(Boolean(cart?.items?.length));
   const [addresses, setAddresses] = useState<any[]>([]);
   const [addrId, setAddrId] = useState<string | null>(null);
   const [addressError, setAddressError] = useState<string | null>(null);
@@ -92,6 +105,7 @@ export default function CartPage() {
     const c = cartResult.value;
     const a = addressResult.status === 'fulfilled' ? addressResult.value : [];
     setCart(c); setAddresses(a); setError(null);
+    queryClient.setQueryData(customerCartKey(scope, epoch), c);
     setAddressError(addressResult.status === 'rejected'
       ? addressResult.reason instanceof Error ? addressResult.reason.message : 'Could not load your delivery addresses.'
       : null);
@@ -339,10 +353,19 @@ export default function CartPage() {
         window.requestAnimationFrame(() => errorMessage.current?.focus());
         return;
       }
+      // [L09 · price lock] The total and line prices this page showed: the
+      // server refuses with PRICE_CHANGED (old → new) if the order would
+      // charge anything else, so a price changed since is never charged unseen.
+      const expectedLines = cart.items.flatMap((line) => {
+        const unitPrice = parseAmount(line.customerPrice);
+        return unitPrice === null ? [] : [{ lineId: line.id, unitPrice }];
+      });
       const body = {
         paymentMethod,
         tipAmount: tip,
         ...(liveCart.promoCode?.code ? { promoCode: liveCart.promoCode.code } : {}),
+        ...(total !== null ? { expectedTotal: total } : {}),
+        expectedLines,
       };
       const signature = checkoutAttemptSignature(liveCart, body);
       const storedAttempt = checkoutAttempt.current ?? readCheckoutAttempt();
@@ -438,6 +461,7 @@ export default function CartPage() {
 
   if (!cart && error) return (
     <section className={styles.stateCard} role="alert">
+      <span className="sw-empty-tile"><Pictogram name="groceries" size={40} /></span>
       <h1 className={styles.stateTitle}>Swift could not load your cart</h1>
       <p className={styles.errorCopy}>{error}</p>
       <button type="button" onClick={() => void refresh().catch((refreshError) => setError(refreshError instanceof Error ? refreshError.message : 'Could not load your cart.'))} className={`${styles.button} ${styles.buttonPrimary} ${styles.retryButton}`}>Try again</button>
@@ -446,74 +470,70 @@ export default function CartPage() {
   if (!cart) return <CartSkeleton />;
   if (!cart.items?.length) return (
     <section className={styles.emptyState}>
+      <span className="sw-empty-tile"><Pictogram name="groceries" size={40} /></span>
       <h1 className={styles.stateTitle}>Your cart is empty</h1>
-      <Link href="/" className={styles.emptyLink}>Browse Swift</Link>
+      <p className={styles.stateCopy}>Add something good — it lands here.</p>
+      <Link href="/" className={styles.emptyLink}>Find food</Link>
     </section>
   );
 
+  const unitCount = cart.items.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0);
   return (
     <div className={styles.page}>
       <section className={styles.itemsColumn} aria-labelledby="cart-title">
-        <h1 id="cart-title" className={styles.title}>Your cart</h1>
-        {cart.items.map((l) => (
-          <article key={l.id} className={styles.itemCard}>
-            <div className={styles.itemCopy}>
-              <p className={styles.itemName}>{l.name}</p>
-              {l.vendorName ? <p className={styles.itemMeta}>{l.vendorName}</p> : null}
-              {(l.selectedOptionNames?.length ?? 0) > 0 ? <p className={styles.itemMeta}>{l.selectedOptionNames?.join(' · ')}</p> : null}
-              <p className={styles.itemPrice}>{money(l.customerPrice)}</p>
-            </div>
-            <div className={styles.quantity} aria-label={`${l.name} quantity`}>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void mutateCart(() => l.quantity <= 1 ? removeCartLine(l.id) : updateCartLine(l.id, l.quantity - 1))}
-                aria-label={`Remove one ${l.name}`}
-                className={styles.quantityButton}
-              >−</button>
-              <span className={styles.quantityCount} aria-live="polite">{l.quantity}</span>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void mutateCart(() => updateCartLine(l.id, l.quantity + 1))}
-                aria-label={`Add another ${l.name}`}
-                className={styles.quantityButton}
-              >+</button>
-            </div>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void mutateCart(() => removeCartLine(l.id))}
-              aria-label={`Remove ${l.name} from cart`}
-              className={styles.removeButton}
-            ><Trash2 size={18} /></button>
-          </article>
-        ))}
-      </section>
-
-      <aside ref={checkoutRail} tabIndex={-1} className={styles.rail} aria-label="Checkout">
-        {cartSafety !== 'safe' ? (
-          <div ref={safetyNotice} tabIndex={-1} className={`${styles.safety} ${cartSafety === 'blocked' ? styles.safetyBlocked : styles.safetyNotice}`} role={cartSafety === 'blocked' ? 'alert' : 'status'}>
-            <div className={styles.panelStack}>
-              <p>{cartSafetyMessage}</p>
-              {cartSafety === 'blocked' && discount > 0 ? (
-                <button type="button" disabled={busy} onClick={() => void mutateCart(() => clearCart())} className={`${styles.button} ${styles.buttonSecondary}`}>
-                  Clear saved cart and promotion
-                </button>
-              ) : null}
-              {cartSafety === 'blocked' ? (
-                <button type="button" disabled={busy} onClick={() => void recheckCartSafety()} className={`${styles.button} ${styles.buttonSecondary}`}>
-                  Check cart again
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-        {error ? <p ref={errorMessage} tabIndex={-1} className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
+        <div className={styles.titleRow}>
+          <BackButton />
+          <h1 id="cart-title" className={styles.title}>Cart</h1>
+        </div>
+        {cart.vendor?.name ? <p className={styles.fromStore}>From <b>{cart.vendor.name}</b></p> : null}
+        <div className={styles.lines}>
+          {cart.items.map((l) => (
+            <article key={l.id} className={styles.itemCard}>
+              <span className={styles.thumb}>
+                {l.imageUrl ? <Image src={l.imageUrl} alt="" fill unoptimized sizes="64px" loading="lazy" className="object-cover" /> : <Pictogram name="food" size={26} />}
+              </span>
+              <div className={styles.itemCopy}>
+                <div className={styles.itemTop}>
+                  <p className={styles.itemName}>{l.name}</p>
+                  {/* The server's own line total, or the em-dash: never price × quantity worked out here. */}
+                  <p className={styles.lineTotal}>{money(l.lineTotal)}</p>
+                </div>
+                {(l.selectedOptionNames?.length ?? 0) > 0 ? <p className={styles.itemMeta}>{l.selectedOptionNames?.join(' · ')}</p> : null}
+                <p className={styles.itemPrice}>{money(l.customerPrice)} each</p>
+                <div className={styles.itemActions}>
+                  <div className={styles.quantity} aria-label={`${l.name} quantity`}>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void mutateCart(() => l.quantity <= 1 ? removeCartLine(l.id) : updateCartLine(l.id, l.quantity - 1))}
+                      aria-label={`Remove one ${l.name}`}
+                      className={styles.quantityButton}
+                    ><Minus size={14} aria-hidden /></button>
+                    <span className={styles.quantityCount} aria-live="polite">{l.quantity}</span>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void mutateCart(() => updateCartLine(l.id, l.quantity + 1))}
+                      aria-label={`Add another ${l.name}`}
+                      className={styles.quantityButton}
+                    ><Plus size={14} aria-hidden /></button>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void mutateCart(() => removeCartLine(l.id))}
+                    aria-label={`Remove ${l.name} from cart`}
+                    className={styles.removeButton}
+                  ><Trash2 size={18} /></button>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
 
         <section className={styles.panel} aria-labelledby="delivery-address-title">
           <div className={styles.panelHeading}>
-            <MapPin size={18} color="var(--swift-red)" aria-hidden="true" />
+            <MapPin size={16} aria-hidden="true" />
             <h2 id="delivery-address-title" className={styles.panelTitle}>Deliver to</h2>
           </div>
           {addressError ? (
@@ -601,15 +621,40 @@ export default function CartPage() {
             </div>
           ) : (
             <div className={styles.cashPanel}>
-              <p className={styles.cashTitle}>Cash at the door</p>
-              <p className={styles.cashCopy}>Pay the rider directly when this delivery arrives. Swift never holds your order money.</p>
+              <span className={styles.radioOn} aria-hidden="true" />
+              <span className={styles.payOptionCopy}>
+                <span className={styles.cashTitle}>Cash at the door</span>
+                <span className={styles.cashCopy}>Pay the rider directly when this delivery arrives. Swift never holds your order money.</span>
+              </span>
             </div>
           )}
         </section>
+      </section>
 
-        {cartSafety === 'safe' ? <section className={styles.panel} aria-label="Order total">
+      <aside ref={checkoutRail} tabIndex={-1} className={styles.rail} aria-label="Checkout">
+        {cartSafety !== 'safe' ? (
+          <div ref={safetyNotice} tabIndex={-1} className={`${styles.safety} ${cartSafety === 'blocked' ? styles.safetyBlocked : styles.safetyNotice}`} role={cartSafety === 'blocked' ? 'alert' : 'status'}>
+            <div className={styles.panelStack}>
+              <p>{cartSafetyMessage}</p>
+              {cartSafety === 'blocked' && discount > 0 ? (
+                <button type="button" disabled={busy} onClick={() => void mutateCart(() => clearCart())} className={`${styles.button} ${styles.buttonSecondary}`}>
+                  Clear saved cart and promotion
+                </button>
+              ) : null}
+              {cartSafety === 'blocked' ? (
+                <button type="button" disabled={busy} onClick={() => void recheckCartSafety()} className={`${styles.button} ${styles.buttonSecondary}`}>
+                  Check cart again
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {error ? <p ref={errorMessage} tabIndex={-1} className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
+
+        {cartSafety === 'safe' ? <section className={styles.summary} aria-label="Order total">
+          <h2 className={styles.panelTitle}>Order summary</h2>
           <div className={styles.breakdown}>
-            <div className={styles.moneyLine}><span className={styles.moneyLabel}>Items</span><strong className={styles.moneyValue}>{money(serverSubtotal)}</strong></div>
+            <div className={styles.moneyLine}><span className={styles.moneyLabel}>Items ({unitCount})</span><strong className={styles.moneyValue}>{money(serverSubtotal)}</strong></div>
             <div className={styles.moneyLine}><span className={styles.moneyLabel}>Delivery fee</span><strong className={styles.moneyValue}>{hasDestinationQuote ? money(deliveryFee) : 'Choose an address for a quote'}</strong></div>
             {discount > 0 ? <div className={styles.moneyLine}><span className={styles.moneyLabel}>Discount</span><strong className={styles.moneyValue}>−{money(discount)}</strong></div> : null}
             <div className={styles.moneyLine}><span className={styles.moneyLabel}>Rider tip</span><strong className={styles.moneyValue}>{money(tip)}</strong></div>
@@ -634,6 +679,7 @@ export default function CartPage() {
               {busy ? 'Placing…' : !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : hasDestinationQuote ? (payByMmg ? `Place order · ${money(total)} · pay by MMG` : `Place cash order · ${money(total)}`) : 'Get delivery quote'}
             </button>
           )}
+          <p className={styles.payNote}>{payByMmg ? `You’ll pay ${cart.vendor?.name ?? 'the business'} on MMG — Swift never holds your money.` : 'Pay in cash when it arrives.'}</p>
         </section> : null}
       </aside>
     </div>
