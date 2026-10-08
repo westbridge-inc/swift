@@ -10,6 +10,8 @@ import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
+import { reorderNotice } from '../../../lib/reorderNotice';
+import { toast } from '../../../kit/toast';
 // The single authority for what a status is CALLED — type-aware, so a ride is
 // never described with a store's words. This screen owns tone, never wording.
 import { orderStatusLabel, presentedVertical } from '../../../lib/orderStatus';
@@ -418,7 +420,13 @@ export function OrdersHistoryScreen() {
                   loading={reorder.isPending && reorder.variables === o.id}
                   onPress={() =>
                     reorder.mutate(o.id, {
-                      onSuccess: () => navigation.navigate('Tabs', { screen: 'Cart' }),
+                      onSuccess: (result) => {
+                        // [L09] Lines left out (sold out, or choices to make
+                        // again) are named before the cart opens.
+                        const notice = reorderNotice(result);
+                        if (notice) toast.show(notice.title, notice.description);
+                        navigation.navigate('Tabs', { screen: 'Cart' });
+                      },
                     })
                   }
                 />
