@@ -1826,6 +1826,8 @@ model Order {
   vendorId               String?
   vendor                 Vendor?                 @relation(fields: [vendorId], references: [id])
   riderId                String?
+  /// Advances whenever the assigned rider changes, including release/reassignment.
+  riderAssignmentVersion Int @default(0)
   rider                  Rider?                  @relation(fields: [riderId], references: [id])
   driverId               String?
   driver                 Driver?                 @relation(fields: [driverId], references: [id])
