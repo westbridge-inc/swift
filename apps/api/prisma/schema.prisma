@@ -4534,8 +4534,8 @@ model ChatMessage {
   messageType     String   @default("text")
   mediaUrl        String?
   isRead          Boolean  @default(false)
-  /// Off-platform contact signal (spec §2): phone number / "WhatsApp me"
-  /// detected at send. The message still delivers — this feeds risk scoring.
+  /// Off-platform contact signal (spec §2) on admitted text, used for risk scoring.
+  /// Phone numbers, outside links and abusive text are refused before storage.
   offPlatformFlag Boolean  @default(false)
   createdAt       DateTime @default(now())
 
