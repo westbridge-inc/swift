@@ -104,6 +104,12 @@
   transition: background 140ms;
 }
 
+/* [W9] The phone app's tiles: neutral with a dark icon, only Food (ordering) in Swift red. */
+.roleIcon[data-role-tile='brand'] {
+  background: var(--swift-red);
+  color: var(--swift-white);
+}
+
 .roleCopy { display: grid; gap: 2px; }
 
 .roleTitle { font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif; }
