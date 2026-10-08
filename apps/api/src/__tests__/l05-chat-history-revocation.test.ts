@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chatFixture } from './helpers/l05-chat-fixture';
 
@@ -10,9 +11,9 @@ afterAll(async () => { await f?.close(); });
 describe('history is returned only to the current participant set', () => {
   it('opening a room refuses the old mover when reassignment commits during its history read', async () => {
     const read = f.app.prisma.chatRoom.findFirst.bind(f.app.prisma.chatRoom);
-    const spy = vi.spyOn(f.app.prisma.chatRoom, 'findFirst').mockImplementationOnce(async (args) => {
+    const spy = vi.spyOn(f.app.prisma.chatRoom, 'findFirst').mockImplementationOnce((async (args?: Prisma.ChatRoomFindFirstArgs) => {
       const result = await read(args); await f.revoke(); return result;
-    });
+    }) as never);
     const res = await f.inject('POST', '/rooms', f.oldMover.token, { orderId: f.order.id });
     expect(spy).toHaveBeenCalled(); expect(res.statusCode, res.body).toBe(403);
     expect(res.body).not.toContain('private history fixture');
@@ -21,9 +22,9 @@ describe('history is returned only to the current participant set', () => {
 
   it('a history page loaded before reassignment is refused at the response boundary', async () => {
     const read = f.app.prisma.chatMessage.findMany.bind(f.app.prisma.chatMessage);
-    vi.spyOn(f.app.prisma.chatMessage, 'findMany').mockImplementationOnce(async (args) => {
+    vi.spyOn(f.app.prisma.chatMessage, 'findMany').mockImplementationOnce((async (args?: Prisma.ChatMessageFindManyArgs) => {
       const result = await read(args); await f.revoke(); return result;
-    });
+    }) as never);
     const res = await f.inject('GET', `/rooms/${f.room.id}/messages`, f.oldMover.token);
     expect(res.statusCode, res.body).toBe(403);
     expect(res.body).not.toContain('private history fixture');
@@ -31,9 +32,9 @@ describe('history is returned only to the current participant set', () => {
 
   it('opening a room rechecks after its initial authority read and serialization', async () => {
     const read = f.app.prisma.order.findUnique.bind(f.app.prisma.order);
-    vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce(async (args) => {
+    vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce((async (args: Prisma.OrderFindUniqueArgs) => {
       const result = await read(args); await f.revoke(); return result;
-    });
+    }) as never);
     const res = await f.inject('POST', '/rooms', f.oldMover.token, { orderId: f.order.id });
     expect(res.statusCode, res.body).toBe(403);
     expect(res.body).not.toContain('private history fixture');
@@ -41,9 +42,9 @@ describe('history is returned only to the current participant set', () => {
 
   it('a room preview is suppressed when authority changes during serialization', async () => {
     const read = f.app.prisma.order.findUnique.bind(f.app.prisma.order);
-    vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce(async (args) => {
+    vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce((async (args: Prisma.OrderFindUniqueArgs) => {
       const result = await read(args); await f.revoke(); return result;
-    });
+    }) as never);
     const res = await f.inject('GET', '/rooms', f.oldMover.token);
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().data).toEqual([]);
