@@ -151,17 +151,55 @@ export async function feePauseSpanOpen(db: ConfigReader, env: Record<string, str
  * reserved or settled before its reactivation is on record, and no paused
  * minute counts toward its grace.
  */
+export interface FeePausePredicate {
+  holds(subscriptionId: string): boolean;
+  /** The same held set, for a relational catalogue/gate query. */
+  excludingHeld: Prisma.SubscriptionWhereInput;
+}
+
+/** One held set for both forms of enforcement. Callers obtain it from
+ * readFeePause; the pure constructor also supports gate truth-table tests. */
+export function feePausePredicate(all: boolean, subscriptionIds: readonly string[] = []): FeePausePredicate {
+  const ids = [...new Set(subscriptionIds)];
+  const held = new Set(ids);
+  return {
+    holds: (id) => all || held.has(id),
+    excludingHeld: all ? { id: { in: [] } } : { id: { notIn: ids } },
+  };
+}
+
+type PauseReader = Pick<Tx, 'platformConfig' | 'billingDunningClock'>;
+
+/** Fresh persisted hold state; never cached across requests or transactions.
+ * A point lookup keeps billing cheap; catalogue reads load the same set in
+ * bulk. Presence of a repair record holds even if its contents are invalid. */
+export async function readFeePause(
+  db: PauseReader,
+  env: Record<string, string | undefined> = process.env,
+  subscriptionId?: string,
+): Promise<FeePausePredicate> {
+  if (await feePauseSpanOpen(db, env)) return feePausePredicate(true);
+  const repairs = subscriptionId
+    ? await db.platformConfig.findUnique({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${subscriptionId}` }, select: { value: true } })
+      ? [subscriptionId] : []
+    : (await db.platformConfig.findMany({ where: { key: { startsWith: FEE_PAUSE_REPAIR_PREFIX } }, select: { key: true } }))
+      .map((row) => row.key.slice(FEE_PAUSE_REPAIR_PREFIX.length));
+  if (subscriptionId && repairs.length > 0) return feePausePredicate(false, repairs);
+  const held = await heldClocks(db);
+  if (held.length === 0) return feePausePredicate(false, repairs);
+  const clocks = subscriptionId
+    ? [await db.billingDunningClock.findUnique({ where: { subscriptionId }, select: { id: true, subscriptionId: true } })]
+    : await db.billingDunningClock.findMany({ where: { id: { in: held } }, select: { id: true, subscriptionId: true } });
+  return feePausePredicate(false, [...repairs, ...clocks.flatMap((clock) =>
+    clock && held.includes(clock.id) ? [clock.subscriptionId] : [])]);
+}
+
 export async function feePauseHoldsBilling(
-  db: Pick<Tx, 'platformConfig' | 'billingDunningClock'>,
+  db: PauseReader,
   subscriptionId: string,
   env: Record<string, string | undefined> = process.env,
 ): Promise<boolean> {
-  if (await feePauseSpanOpen(db, env)) return true;
-  if (await db.platformConfig.findUnique({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${subscriptionId}` }, select: { value: true } })) return true;
-  const held = (await db.platformConfig.findUnique({ where: { key: MMG_PAUSE_CLOCKS_KEY }, select: { value: true } }))?.value;
-  if (!Array.isArray(held) || held.length === 0) return false;
-  const clock = await db.billingDunningClock.findUnique({ where: { subscriptionId }, select: { id: true } });
-  return !!clock && (held as unknown[]).includes(clock.id);
+  return (await readFeePause(db, env, subscriptionId)).holds(subscriptionId);
 }
 
 // Ticks serialise on this lock (taken first, before any payer or clock lock),

@@ -1,3 +1,4 @@
+import { readFeePause } from '../modules/billing/mmg-pause';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -73,8 +74,8 @@ describe('MMG negative identity with the real shared clock and payment transacti
         expect(clock.pausedAt).not.toBeNull(); expect(activeOverdueMs(clock, at(100))).toBe(47 * HOUR);
         const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
         expect(fresh.failedAttempts).toBe(2); expect(fresh.status).toBe('PAST_DUE');
-        expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
-        expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(at(100)) } })).toBe(0);
+        expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, await readFeePause(db), at(100)).operable).toBe(true);
+        expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(await readFeePause(db), at(100)) } })).toBe(0);
         expect(await db.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_FAILED' } })).toBe(0);
         expect(remote.initiate).not.toHaveBeenCalled();
       });
@@ -99,7 +100,7 @@ describe('MMG negative identity with the real shared clock and payment transacti
       expect(await db.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: payment.id } })).toMatchObject({ status: 'ACTIVE' });
       const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
       expect(fresh.failedAttempts).toBe(2); expect(fresh.status).toBe('PAST_DUE');
-      expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
+      expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, await readFeePause(db), at(100)).operable).toBe(true);
       expect(await db.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_FAILED' } })).toBe(0);
       expect(remote.initiate).not.toHaveBeenCalled();
     });

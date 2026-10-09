@@ -3633,9 +3633,10 @@ export class BillingService {
   ): Promise<FailureOutcome> {
     await requireBillingEffectsReady(tx);
     // [PROD-PATH] The one place a failure is recorded, dunned or suspended:
-    // never while no partner has a live way to pay. Every caller is already
-    // walled; this refusal rolls back whatever transaction reached it.
-    if (noLivePayPath()) throw new AppError(409, 'FEE_PAUSED', 'No way to pay the weekly fee is live: the fee is paused, never failed.');
+    // never during a fee pause or its persisted clock repair. Recheck under
+    // the transaction: terminal recovery also enters here. Refusal rolls back
+    // every failure, dunning and access write together.
+    if (await feePauseHoldsBilling(tx, sub.id)) throw new AppError(409, 'FEE_PAUSED', 'The weekly fee is paused, never failed.');
     const failedKey = `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: failedKey }, select: { id: true } });
     if (!recorded) {

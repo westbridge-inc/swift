@@ -54,6 +54,9 @@ async function fixture(status = 'ACTIVE') {
     return snapshot;
   };
   const prisma = prismaDouble(orderStore([]), {
+    // This privacy fixture has no global pause, repair rows or held clocks.
+    // Preserve the tripwire for every unmodelled database delegate.
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
     vendor: { findFirst: readVendor, findUnique: readVendor,
       update: vi.fn(async ({ data }: { data: Row }) => Object.assign(vendor, data)),
       updateMany: vi.fn(async ({ where, data }: { where: Row; data: Row }) => {
@@ -199,7 +202,7 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
   it.each(['unverified', 'fee-suspended', 'fee-paused', 'fee-grace-expired', 'fee-period-ended'])('%s withholds disclosure before extraction', async restriction => {
     const h = await fixture();
     if (restriction === 'unverified') h.vendor['isVerified'] = false;
-    else h.vendor['subscription'] = {
+    else h.vendor['subscription'] = { id: 'disclosure-sub',
       status: restriction === 'fee-suspended' ? 'SUSPENDED' : restriction === 'fee-paused' ? 'PAUSED' : restriction === 'fee-grace-expired' ? 'PAST_DUE' : 'ACTIVE',
       gracePeriodEnd: restriction === 'fee-grace-expired' ? new Date(0) : null,
       autoRenew: restriction !== 'fee-period-ended', currentPeriodEnd: new Date(0),
@@ -215,7 +218,7 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
 
   it.each(['legacy', 'paid', 'grace'])('an eligible CLOSED store retains the supplier block (%s)', async subscription => {
     const h = await fixture('CLOSED');
-    if (subscription !== 'legacy') h.vendor['subscription'] = {
+    if (subscription !== 'legacy') h.vendor['subscription'] = { id: 'disclosure-sub',
       status: subscription === 'paid' ? 'ACTIVE' : 'PAST_DUE', autoRenew: true,
       gracePeriodEnd: new Date(Date.now() + 60_000), currentPeriodEnd: new Date(Date.now() + 60_000),
       autoSuspendEnabled: true, billingConfirmationPausedAt: null, billingEnforcementDueAt: new Date(Date.now() + 60_000),

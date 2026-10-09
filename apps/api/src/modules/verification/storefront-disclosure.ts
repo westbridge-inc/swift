@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 /**
  * [DOC-1 Part XIX · DOC-INV-27 · P19] The storefront disclosure compiler.
  *
@@ -111,7 +112,7 @@ type DisclosureVendor = Prisma.VendorGetPayload<{ select: typeof DISCLOSURE_VEND
 export async function compilePublicStorefrontDisclosure(db: Db, vendorId: string, now = new Date()): Promise<DisclosureBlock | null> {
   const vendor = await db.vendor.findFirst({
     where: { id: vendorId, ...vendorTenantForCaller(), status: { in: ['ACTIVE', 'CLOSED'] },
-      isVerified: true, subscription: { isNot: inoperableSubscriptionWhere(now) },
+      isVerified: true, subscription: { isNot: inoperableSubscriptionWhere(await readFeePause(db), now) },
       owner: { user: { status: 'ACTIVE' } } },
     select: DISCLOSURE_VENDOR_SELECT,
   });

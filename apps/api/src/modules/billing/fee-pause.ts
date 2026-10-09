@@ -25,8 +25,8 @@ import { weeklyFeeCardLive } from '../../utils/card-rail';
 // iOS off unless switched on) decides which apps show the card, so switch
 // the provider on only once every partner can reach a card page.
 //
-// The rule reads only the environment, so the operate gate and its database
-// form (which cannot wait on a query) apply exactly the same answer.
+// This switch rule is one part of the persisted hold predicate in mmg-pause.
+// Billing and both operate gates also wait for clock repair after switches return.
 // ---------------------------------------------------------------------------
 
 export function noLivePayPath(env: Record<string, string | undefined> = process.env): boolean {

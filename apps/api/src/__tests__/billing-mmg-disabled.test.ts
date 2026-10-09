@@ -1,3 +1,6 @@
+import { VISIBLE_VENDOR, VISIBLE_VENDOR_SELECT, isVendorVisible } from '../modules/vendor/vendor-visibility';
+import { readFeePause, feePausePredicate } from '../modules/billing/mmg-pause';
+import { noLivePayPath } from '../modules/billing/fee-pause';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -21,7 +24,7 @@ import { subscriptionOperability, inoperableSubscriptionWhere, type OperabilityS
 /** A gate input that also carries the billing method, to prove the gate gives
  *  the same answer whatever it is (the gate itself never reads it). */
 type GateRow = OperabilitySubscription & { billingMethod: PaymentMethod };
-const gate = (row: GateRow, now: Date, env: Record<string, string>) => subscriptionOperability(row, { missingRow: 'BLOCK' }, now, env);
+const gate = (row: GateRow, now: Date, env: Record<string, string>) => subscriptionOperability(row, { missingRow: 'BLOCK' }, feePausePredicate(noLivePayPath(env)), now);
 import { FEE_PAUSE_REPAIR_PREFIX, MMG_PAUSE_CLOCKS_KEY, feePauseHoldsBilling, feePauseStatus, syncMmgPauseClock } from '../modules/billing/mmg-pause';
 import { activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS } from '../modules/billing/dunning-clock';
 import { mmgTerminalProof } from '../modules/billing/mmg-terminal-evidence';
@@ -373,6 +376,7 @@ describe('[PROD-PATH] MMG_DRIVER=disabled: the weekly fee on the MMG rail is pau
 describe('[PROD-PATH] the operate gate holds every partner inside grace while their fee is paused', () => {
   const now = new Date('2026-10-05T12:00:00.000Z');
   const lapsed: GateRow = {
+    id: 'pure-lapsed',
     status: 'PAST_DUE', gracePeriodEnd: new Date('2026-10-04T12:00:00.000Z'), billingEnforcementDueAt: new Date('2026-10-04T12:00:00.000Z'),
     billingConfirmationPausedAt: null, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date('2026-10-10T00:00:00.000Z'), billingMethod: 'MOBILE_MONEY',
   };
@@ -384,12 +388,12 @@ describe('[PROD-PATH] the operate gate holds every partner inside grace while th
   });
 
   it('MMG on: the lapse refuses as before', () => {
-    expect(subscriptionOperability(lapsed, { missingRow: 'BLOCK' }, now, ON)).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
+    expect(subscriptionOperability(lapsed, { missingRow: 'BLOCK' }, feePausePredicate(noLivePayPath(ON)), now)).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
   });
 
   it('the hold is only about grace: suspended and billing-stopped partners stay refused', () => {
-    expect(subscriptionOperability({ ...lapsed, status: 'SUSPENDED' }, { missingRow: 'BLOCK' }, now, OFF)).toMatchObject({ operable: false, why: 'STATUS' });
-    expect(subscriptionOperability({ ...lapsed, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: new Date('2026-10-01T00:00:00.000Z') }, { missingRow: 'BLOCK' }, now, OFF)).toMatchObject({ operable: false, why: 'BILLING_STOPPED' });
+    expect(subscriptionOperability({ ...lapsed, status: 'SUSPENDED' }, { missingRow: 'BLOCK' }, feePausePredicate(noLivePayPath(OFF)), now)).toMatchObject({ operable: false, why: 'STATUS' });
+    expect(subscriptionOperability({ ...lapsed, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: new Date('2026-10-01T00:00:00.000Z') }, { missingRow: 'BLOCK' }, feePausePredicate(noLivePayPath(OFF)), now)).toMatchObject({ operable: false, why: 'BILLING_STOPPED' });
   });
 
   it('the database form, run for real, matches the predicate for every billing method', async () => {
@@ -398,7 +402,7 @@ describe('[PROD-PATH] the operate gate holds every partner inside grace while th
     const mmg = await makeVendorSub(new Date(Date.now() + 2 * DAY), { status: 'PAST_DUE', extra });
     const cash = await makeVendorSub(new Date(Date.now() + 2 * DAY), { status: 'PAST_DUE', method: 'CASH', extra });
     const blocked = async (env: Record<string, string>) => (await app.prisma.subscription.findMany({
-      where: { id: { in: [mmg, cash] }, ...inoperableSubscriptionWhere(new Date(), env) }, select: { id: true },
+      where: { id: { in: [mmg, cash] }, ...inoperableSubscriptionWhere(await readFeePause(app.prisma, env), new Date()) }, select: { id: true },
     })).map((r) => r.id).sort();
     expect(await blocked(OFF)).toEqual([]);
     expect(await blocked(ON)).toEqual([mmg, cash].sort());
@@ -594,7 +598,7 @@ describe('[PROD-PATH · 6 Oct ruling] no live way to pay pauses every partner\'s
     });
     const paused = await sub(subId);
     expect(paused).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
-    expect(subscriptionOperability(paused, { missingRow: 'BLOCK' }, new Date(), OFF)).toEqual({ operable: true });
+    expect(subscriptionOperability(paused, { missingRow: 'BLOCK' }, await readFeePause(app.prisma, OFF), new Date())).toEqual({ operable: true });
     expect(await events(subId)).toBe(0);
     expect(await balanceOf(subId)).toBe(50000);
     const reactivatedAt = new Date();
@@ -682,6 +686,7 @@ describe('[PROD-PATH] the pause is decided by server facts only: nothing a partn
   it('MMG off but the card rail live: the operate gate enforces a lapsed grace for every billing method', async () => {
     const now = new Date('2026-10-05T12:00:00.000Z');
     const lapsed: GateRow = {
+    id: 'pure-lapsed',
       status: 'PAST_DUE', gracePeriodEnd: new Date('2026-10-04T12:00:00.000Z'), billingEnforcementDueAt: new Date('2026-10-04T12:00:00.000Z'),
       billingConfirmationPausedAt: null, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date('2026-10-10T00:00:00.000Z'), billingMethod: 'MOBILE_MONEY',
     };
@@ -844,6 +849,124 @@ describe('[PROD-PATH] each pause and resume is on the record, and admins see it'
       await syncMmgPauseClock(app.prisma, new Date(), ON);
       await admin.close();
     }
+  });
+});
+
+// Real persisted repair state, produced by failed pause writes on both ticks.
+// The stale projection has elapsed, but the partner still owns a minute of grace.
+async function pendingRepairFixture() {
+  await noPauseOpen();
+  const start = new Date(Date.now() - 120_000);
+  const due = new Date(start.getTime() - FULL_FEE_GRACE_MS + 60_000);
+  const id = await makeVendorSub(due, { status: 'PAST_DUE', extra: { failedAttempts: 2 } });
+  await app.prisma.$transaction((tx) => currentDunningClock(tx, id, start));
+  const fail = async (boundary: string, subscriptionId?: string) => {
+    if (boundary === 'after-read' && subscriptionId === id) throw new Error('injected: repair still pending');
+  };
+  await syncMmgPauseClock(app.prisma, start, OFF, fail);
+  const resumed = new Date(start.getTime() + 120_000);
+  await syncMmgPauseClock(app.prisma, resumed, ON, fail);
+  expect(await app.prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_pause.open' } })).toBeNull();
+  expect((await app.prisma.platformConfig.findUnique({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${id}` } }))?.value)
+    .toEqual({ since: start.toISOString() });
+  expect((await sub(id)).billingEnforcementDueAt!.getTime()).toBeLessThan(resumed.getTime());
+  expect(await feePauseHoldsBilling(app.prisma, id)).toBe(true);
+  expect(await billing.billSubscription((await subWithRelations(id)) as any)).toBe('pending');
+  return { id, due, start, resumed, fail };
+}
+
+describe('[PROD-PATH] persisted repair holds every enforcement entry point', () => {
+  it('terminal recovery cannot dun or suspend a fee held for repair, then resumes exactly once with its remaining grace', async () => {
+    const { id, due, resumed, fail } = await pendingRepairFixture();
+    const periodKey = due.toISOString().slice(0, 10);
+    await app.prisma.billingEvent.create({ data: {
+      subscriptionId: id, type: 'CHARGE_ATTEMPT', amount: 12000, currencyCode: 'GYD', idempotencyKey: `charge:${id}:${periodKey}:a2`,
+    } });
+    const payment = await app.prisma.subscriptionPayment.create({ data: {
+      subscriptionId: id, amount: 12000, status: 'FAILED', paymentMethod: 'MOBILE_MONEY',
+      externalRef: null, clientKey: `sub:${id}:${periodKey}:a2`, failureRaw: { providerEffect: 'NOT_SENT' },
+      periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
+    } });
+    const before = await sub(id);
+    const clock = await clockOf(id);
+    for (const minutes of [0, 2, 4]) {
+      const at = new Date(resumed.getTime() + minutes * 60_000);
+      await syncMmgPauseClock(app.prisma, at, ON, fail);
+      await billing.reconcileTerminalWithoutOutcome(at);
+      expect(await sub(id)).toMatchObject({ status: 'PAST_DUE', failedAttempts: 2, nextRetryAt: before.nextRetryAt });
+      expect(await events(id, 'CHARGE_FAILED')).toBe(0);
+      expect(await events(id, 'SUSPENDED')).toBe(0);
+      expect(await clockOf(id)).toEqual(clock);
+      expect(await app.prisma.vendor.findUnique({ where: { id: before.vendorId! } })).toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
+      expect(await app.prisma.subscriptionPayment.findUnique({ where: { id: payment.id } })).toMatchObject({ status: 'FAILED', failureRaw: { providerEffect: 'NOT_SENT' } });
+    }
+    const released = new Date(resumed.getTime() + 6 * 60_000);
+    await syncMmgPauseClock(app.prisma, released, ON);
+    await billing.reconcileTerminalWithoutOutcome(released);
+    await billing.reconcileTerminalWithoutOutcome(released);
+    expect(await sub(id)).toMatchObject({ status: 'PAST_DUE', failedAttempts: 3, billingEnforcementDueAt: new Date(released.getTime() + 60_000) });
+    expect(await events(id, 'CHARGE_FAILED')).toBe(1);
+    expect(await events(id, 'SUSPENDED')).toBe(0);
+  });
+
+  it('the row operate gate keeps a pending repair operable across failed ticks and preserves grace after repair', async () => {
+    const { id, resumed, fail } = await pendingRepairFixture();
+    for (const minutes of [0, 2, 4]) {
+      const at = new Date(resumed.getTime() + minutes * 60_000);
+      await syncMmgPauseClock(app.prisma, at, ON, fail);
+      expect(await subscriptionOperability(await sub(id), { missingRow: 'BLOCK' }, await readFeePause(app.prisma, ON), at)).toEqual({ operable: true });
+    }
+    const released = new Date(resumed.getTime() + 6 * 60_000);
+    await syncMmgPauseClock(app.prisma, released, ON);
+    expect(await subscriptionOperability(await sub(id), { missingRow: 'BLOCK' }, await readFeePause(app.prisma, ON), new Date(released.getTime() + 59_999))).toEqual({ operable: true });
+    expect(await subscriptionOperability(await sub(id), { missingRow: 'BLOCK' }, await readFeePause(app.prisma, ON), new Date(released.getTime() + 60_000)))
+      .toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
+  });
+
+  it.each(['open span', 'held clock', 'invalid repair record'] as const)('both gate forms use the billing hold for %s', async (kind) => {
+    await noPauseOpen();
+    const now = new Date();
+    const id = await makeVendorSub(new Date(now.getTime() - 3 * DAY), { status: 'PAST_DUE', extra: {
+      billingEnforcementDueAt: new Date(now.getTime() - DAY), gracePeriodEnd: new Date(now.getTime() - DAY),
+    } });
+    if (kind === 'open span') {
+      await app.prisma.platformConfig.create({ data: { key: 'billing.mmg_pause.open', value: { since: now.toISOString() } } });
+    } else if (kind === 'held clock') {
+      const clock = await app.prisma.$transaction((tx) => currentDunningClock(tx, id, now));
+      await app.prisma.platformConfig.create({ data: { key: MMG_PAUSE_CLOCKS_KEY, value: [clock.id] } });
+    } else {
+      await app.prisma.platformConfig.create({ data: { key: `${FEE_PAUSE_REPAIR_PREFIX}${id}`, value: { since: 'invalid' } } });
+    }
+    const row = await sub(id);
+    expect(await feePauseHoldsBilling(app.prisma, id, ON)).toBe(true);
+    expect(subscriptionOperability(row, { missingRow: 'BLOCK' }, await readFeePause(app.prisma, ON, id), now)).toEqual({ operable: true });
+    expect(await app.prisma.subscription.count({ where: { id, ...inoperableSubscriptionWhere(await readFeePause(app.prisma, ON), now) } })).toBe(0);
+  });
+
+  it('the database operate gate includes the repair-held store and excludes an unrelated lapsed store', async () => {
+    const { id, resumed, fail } = await pendingRepairFixture();
+    const other = await makeVendorSub(new Date(resumed.getTime() - 3 * DAY), { status: 'PAST_DUE', extra: {
+      billingEnforcementDueAt: new Date(resumed.getTime() - DAY), gracePeriodEnd: new Date(resumed.getTime() - DAY),
+    } });
+    const ids = [(await sub(id)).vendorId!, (await sub(other)).vendorId!];
+    const pause = await readFeePause(app.prisma, ON);
+    expect(await app.prisma.vendor.findMany({ where: { ...VISIBLE_VENDOR(pause), id: { in: ids } }, select: { id: true } }))
+      .toEqual([{ id: ids[0] }]);
+    const indexed = await app.prisma.vendor.findUniqueOrThrow({ where: { id: ids[0] }, select: VISIBLE_VENDOR_SELECT });
+    expect(isVendorVisible(indexed, pause)).toBe(true);
+    const visible = async (now: Date) => app.prisma.vendor.findMany({ where: {
+      id: { in: ids }, status: 'ACTIVE', isVerified: true,
+      subscription: { isNot: await inoperableSubscriptionWhere(await readFeePause(app.prisma, ON), now) },
+    }, select: { id: true } });
+    for (const minutes of [0, 2, 4]) {
+      const at = new Date(resumed.getTime() + minutes * 60_000);
+      await syncMmgPauseClock(app.prisma, at, ON, fail);
+      expect(await visible(at)).toEqual([{ id: ids[0] }]);
+    }
+    const released = new Date(resumed.getTime() + 6 * 60_000);
+    await syncMmgPauseClock(app.prisma, released, ON);
+    expect(await visible(new Date(released.getTime() + 59_999))).toEqual([{ id: ids[0] }]);
+    expect(await visible(new Date(released.getTime() + 60_000))).toEqual([]);
   });
 });
 

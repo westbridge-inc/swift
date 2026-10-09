@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import type { PrismaClient, QrCode } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { generateShortCode, type QrLookup } from './qr-codes';
@@ -58,7 +59,7 @@ export class QrService {
       // today, which is exactly when a polymorphic read is written without a
       // check and exactly when the second value silently breaks it.
       const vendor = await this.prisma.vendor.findFirst({
-        where: { ...VISIBLE_VENDOR, id: qr.entityId, tenantId: qr.tenantId, tenant: { isActive: true, kind: 'PRODUCTION' } },
+        where: { ...VISIBLE_VENDOR(await readFeePause(this.prisma)), id: qr.entityId, tenantId: qr.tenantId, tenant: { isActive: true, kind: 'PRODUCTION' } },
         select: { slug: true },
       });
       if (!vendor) return null;
