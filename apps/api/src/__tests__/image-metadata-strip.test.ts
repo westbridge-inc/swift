@@ -84,13 +84,17 @@ describe('ICC descriptions are metadata, while verified colour transforms surviv
     expect(sanitized.includes('synthetic-unreferenced-location')).toBe(false);
   });
 
-  it.each(['unknown rendering type', 'tag past the profile', 'duplicate tag', 'unsupported transform'])('refuses %s rather than publish an unverified profile', (kind) => {
+  it.each(['unknown rendering type', 'tag past the profile', 'duplicate tag', 'unsupported transform', 'unsupported optional transform'])('refuses %s rather than publish an unverified profile', (kind) => {
     const profile = Buffer.from(ICC_PROFILE);
     const rxyz = [...Array(profile.readUInt32BE(128)).keys()].map(n => 132 + n * 12).find(i => profile.toString('ascii', i, i + 4) === 'rXYZ')!;
     if (kind === 'unknown rendering type') profile.write('mluc', profile.readUInt32BE(rxyz + 4));
     if (kind === 'tag past the profile') profile.writeUInt32BE(profile.length, rxyz + 4);
     if (kind === 'duplicate tag') profile.write('desc', rxyz);
     if (kind === 'unsupported transform') profile.write('A2B0', rxyz);
+    if (kind === 'unsupported optional transform') {
+      const chad = [...Array(profile.readUInt32BE(128)).keys()].map(n => 132 + n * 12).find(i => profile.toString('ascii', i, i + 4) === 'chad')!;
+      profile.write('A2B0', chad);
+    }
     expect(stripImageMetadataStrict(jpegProfile(profile), 'image/jpeg')).toBeNull();
     expect(stripImageMetadata(jpegProfile(profile), 'image/jpeg')).toEqual(jpegProfile(profile));
   });
