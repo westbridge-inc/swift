@@ -1,3 +1,4 @@
+import { publicVendorReviewId } from '../modules/rating/vendor-review-visibility';
 import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ownedVerificationFixture } from './helpers/verification-object';
@@ -355,10 +356,14 @@ describe('DELETION-INTEGRITY — reviews by and about the person are kept anonym
       const after = await reviews.getVendorReviews(vendor.id, 100);
       expect(after.distribution).toEqual(before.distribution);
       expect(after.total).toBe(before.total);
-      const shown = after.reviews.find((r) => r.id === rating.id)!;
+      const shown = after.reviews.find((r) => r.id === publicVendorReviewId(rating.id))!;
       expect(shown).toMatchObject({ score: 2, comment: null, response: null });
       expect(JSON.stringify(shown)).not.toMatch(/Del\b|blue house/);
-      expect(shown.rater).toMatchObject({ firstName: 'Deleted', avatar: null });
+      expect(shown).not.toHaveProperty('rater');
+      // The published projection is anonymous; still prove the stored profile
+      // was erased, rather than losing that original deletion assertion.
+      expect(await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId } }))
+        .toMatchObject({ firstName: 'Deleted', avatar: null });
     } finally {
       await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: { in: [rating.id, about.id] } } });
       await app.prisma.rating.deleteMany({ where: { id: { in: [rating.id, about.id] } } });

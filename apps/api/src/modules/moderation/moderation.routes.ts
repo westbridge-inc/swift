@@ -1,3 +1,4 @@
+import { resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { getTenantId } from '../../plugins/tenant-context';
@@ -28,6 +29,9 @@ export async function moderationRoutes(app: FastifyInstance) {
   // a jumpy tap never creates duplicate rows or looks like an error.
   app.post('/reports', { preHandler: [app.authenticate] }, async (request: AuthRequest, reply: FastifyReply) => {
     const body = reportSchema.parse(request.body);
+    if (body.targetType === 'RATING' && body.targetId.startsWith('rv_')) {
+      body.targetId = await resolveVendorReviewId(app.prisma, body.targetId);
+    }
     const reporterId = request.user.userId;
 
     // A user can't report their own profile (the one self-target that's gameable).

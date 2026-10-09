@@ -54,6 +54,8 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/order/refund-review.ts': { sites: 1, role: 'SHARED' },
   'modules/promo/promo-terms.ts': { sites: 3, role: 'SHARED' },
   'modules/qr/qr-analytics.service.ts': { sites: 2, role: 'SHARED' },
+  // Public-ID lookup is only at authenticated report/reply doors; the feeds hash without SQL.
+  'modules/rating/vendor-review-id.service.ts': { sites: 2, role: 'REQUEST' },
   'modules/rides/queue.service.ts': { sites: 2, role: 'SHARED' },
   'modules/safety/guardian-delivery.ts': { sites: 4, role: 'JOB_PENDING' },
   'modules/safety/incident.service.ts': { sites: 2, role: 'SHARED' },

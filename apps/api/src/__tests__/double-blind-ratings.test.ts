@@ -1,3 +1,4 @@
+import { publicVendorReviewId } from '../modules/rating/vendor-review-visibility';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -152,10 +153,10 @@ describe('double-blind release', () => {
     });
 
     const before = await svc.getVendorReviews(vendor.id, 100, 0);
-    expect(before.reviews.some((r: { id: string }) => r.id === blind.id)).toBe(false);
+    expect(before.reviews.some((r: { id: string }) => r.id === publicVendorReviewId(blind.id))).toBe(false);
 
     await app.prisma.rating.update({ where: { id: blind.id }, data: { visibleAt: new Date() } });
     const after = await svc.getVendorReviews(vendor.id, 100, 0);
-    expect(after.reviews.some((r: { id: string }) => r.id === blind.id)).toBe(true);
+    expect(after.reviews.some((r: { id: string }) => r.id === publicVendorReviewId(blind.id))).toBe(true);
   });
 });
