@@ -869,3 +869,35 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 };
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
+
+
+export interface PaymentConfirmation {
+  id: string; subscriptionId: string; source: string; sourceId: string | null;
+  epoch: number; clockVersion: number; status: string; reason: string;
+  beganAt: string; reviewDueAt: string; overdue: boolean; remainingGraceMs: number; resolvable: boolean;
+  swiftReference: string | null; partner: string | null;
+  settlementPayments: { providerPaymentId: string; mmgTransactionId: string }[];
+}
+export const fetchPaymentConfirmations = (): Promise<Envelope<PaymentConfirmation[]>> => apiFetch('/api/v1/admin/billing/confirmations');
+export interface ConfirmationDecision {
+  sourceId: string; epoch: number; clockVersion: number; decision: 'UNPAID' | 'PAID';
+  providerPaymentId?: string; evidenceReference: string; reason: string;
+}
+export const requestConfirmationResolution = (id: string, body: ConfirmationDecision) =>
+  apiFetch(`/api/v1/admin/billing/confirmations/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify(body), reason: body.reason });
+
+/** Both active statuses, every page: the first fifty approvals are not exhaustive. */
+export async function fetchConfirmationApprovals(): Promise<import('./approvals').ApprovalRow[]> {
+  const rows: import('./approvals').ApprovalRow[] = [];
+  for (const status of ['PENDING', 'APPROVED']) {
+    for (let page = 1; ; page += 1) {
+      const response = await apiFetch(`/api/v1/admin/approvals?status=${status}&limit=50&page=${page}`);
+      if (response?.success !== true || !Array.isArray(response.data) || !Number.isInteger(response.pagination?.pages)) {
+        throw new Error('Could not read the complete approvals queue. Reload before requesting another decision.');
+      }
+      rows.push(...response.data);
+      if (page >= response.pagination.pages) break;
+    }
+  }
+  return rows;
+}

@@ -1,4 +1,4 @@
-import type { MmgCheckoutIntent, Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, type MmgCheckoutIntent, type PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { ACTIVE_CONFIRMATION_STATES, activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS, markSettlementApplying, resolveConfirmationInTx } from './dunning-clock';
 import type { OnAudit } from '../../lib/audit-writer';
@@ -27,10 +27,35 @@ export async function verifiedCheckoutCredit(tx: Prisma.TransactionClient, check
   return event ? { identity, creditEventId: event.id } : null;
 }
 
+const partnerSelect = {
+  vendor: { select: { name: true } },
+  rider: { select: { user: { select: { firstName: true, lastName: true } } } },
+  driver: { select: { user: { select: { firstName: true, lastName: true } } } },
+} satisfies Prisma.SubscriptionSelect;
+function partnerLabel(sub: Prisma.SubscriptionGetPayload<{ select: typeof partnerSelect }>) {
+  const user = sub.rider?.user ?? sub.driver?.user;
+  return sub.vendor?.name ?? (user ? [user.firstName, user.lastName].filter(Boolean).join(' ') : null);
+}
+
 export async function confirmationReviewQueue(db: PrismaClient, tenantId: string, now = new Date()) {
   const holds = await db.paymentConfirmationHold.findMany({ where: { tenantId, status: { in: ACTIVE_CONFIRMATION_STATES } },
-    orderBy: [{ reviewDueAt: 'asc' }, { id: 'asc' }], take: 200, include: { clock: true } });
+    orderBy: [{ reviewDueAt: 'asc' }, { id: 'asc' }], take: 200, include: { clock: true, checkout: { select: { merchantTransactionId: true } }, originalSubscription: { select: partnerSelect } } });
+  const checkoutIds = holds.flatMap((hold) => hold.checkoutId ? [hold.checkoutId] : []);
+  // Read-only choices for the existing resolver. It independently checks the ledger
+  // again when the approved action executes; a displayed record never proves credit.
+  const recorded = checkoutIds.length ? await db.$queryRaw<Array<{ checkoutId: string; providerPaymentId: string; mmgTransactionId: string }>>(Prisma.sql`
+    SELECT c.id AS "checkoutId", p.id AS "providerPaymentId", p."providerTxnId" AS "mmgTransactionId"
+    FROM mmg_checkout_intents c JOIN provider_payments p ON p."tenantId"=c."tenantId"
+      AND p."subscriptionId"=c."subscriptionId" AND p.amount=c.amount AND p."currencyCode"=c."currencyCode"
+      AND p.provider='MMG' AND p.status='CREDITED'
+      AND (c."providerPaymentId" IS NULL OR p.id=c."providerPaymentId")
+      AND EXISTS (SELECT 1 FROM unnest(c.candidates || ARRAY[c."mmgTransactionId"]) r
+        WHERE mmg_txn_canon(r)=mmg_txn_canon(p."providerTxnId"))
+    WHERE c."tenantId"=${tenantId} AND c.id IN (${Prisma.join(checkoutIds)})
+    ORDER BY c.id,p.id`) : [];
   const payments = holds.map((hold) => ({
+    swiftReference: hold.checkout?.merchantTransactionId ?? null, partner: partnerLabel(hold.originalSubscription),
+    settlementPayments: recorded.filter((record) => record.checkoutId === hold.checkoutId).map(({ providerPaymentId, mmgTransactionId }) => ({ providerPaymentId, mmgTransactionId })),
     id: hold.id, subscriptionId: hold.subscriptionId, epoch: hold.sourceEpoch, clockEpoch: hold.clock.epoch,
     clockVersion: hold.clock.version, status: hold.status, resolvable: true,
     source: hold.checkoutId ? 'MMG_CHECKOUT' : hold.cardSessionId ? 'CARD_SESSION' : 'PAYMENT',
@@ -41,7 +66,7 @@ export async function confirmationReviewQueue(db: PrismaClient, tenantId: string
   // A legacy PAUSED obligation is a review item, not a provider confirmation.
   // It cannot acquire a PAID/UNPAID override through the hold resolver.
   const clocks = await db.billingDunningClock.findMany({ where: { tenantId, subscription: { status: 'PAUSED' } },
-    orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: 200 });
+    orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: 200, include: { subscription: { select: partnerSelect } } });
   const byId = new Map(clocks.map((clock) => [clock.id, clock]));
   const audits = clocks.length ? await db.auditLog.findMany({ where: { entity: 'BillingDunningClock',
     entityId: { in: clocks.map((clock) => clock.id) }, action: 'BILLING_OBLIGATION_REVIEW_REQUIRED' },
@@ -52,7 +77,7 @@ export async function confirmationReviewQueue(db: PrismaClient, tenantId: string
     if (!clock || facts?.['tenantId'] !== tenantId || facts['clockId'] !== clock.id
       || facts['subscriptionId'] !== clock.subscriptionId || facts['epoch'] !== clock.epoch
       || facts['dueAt'] !== clock.dueAt.toISOString()) return [];
-    return [{ id: audit.id, subscriptionId: clock.subscriptionId, epoch: clock.epoch, clockEpoch: clock.epoch,
+    return [{ swiftReference: null, partner: partnerLabel(clock.subscription), settlementPayments: [], id: audit.id, subscriptionId: clock.subscriptionId, epoch: clock.epoch, clockEpoch: clock.epoch,
       clockVersion: clock.version, status: 'REVIEW_REQUIRED', resolvable: false, source: 'OBLIGATION', sourceId: clock.subscriptionId,
       reason: 'PAUSED_COVERAGE_UNPROVEN_OR_ALREADY_USED', beganAt: audit.createdAt, reviewDueAt: audit.createdAt, overdue: true,
       remainingGraceMs: Math.max(0, FULL_FEE_GRACE_MS - activeOverdueMs(clock, now)) }];
