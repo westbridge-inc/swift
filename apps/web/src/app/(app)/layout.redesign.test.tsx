@@ -136,6 +136,16 @@ describe('[WEB-REDESIGN] the cart count', () => {
     expect(calls('/api/v1/customer/cart')).toHaveLength(0);
   });
 
+  it('shows a guest the count of their browser basket, still without asking the server for a cart', async () => {
+    signedIn = false;
+    const { addGuestLine } = await import('@/lib/basket');
+    addGuestLine({ vendorId: 'v1', storeSlug: 'shanta-kitchen', vendorName: 'Shanta Kitchen', itemId: 'i1', name: 'Pepperpot bowl', quantity: 2, unitPrice: 1800, selectedOptions: {} });
+    shell('/');
+    await waitFor(() => expect(within(rail()).getByLabelText('2 in your cart').textContent).toBe('2'));
+    expect(within(dock()).getByLabelText('2 in your cart')).toBeTruthy();
+    expect(calls('/api/v1/customer/cart')).toHaveLength(0);
+  });
+
   it('shows no count — never a made-up one — when the cart cannot be read', async () => {
     cartFails = true;
     shell('/');
