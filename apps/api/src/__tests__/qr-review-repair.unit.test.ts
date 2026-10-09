@@ -133,6 +133,10 @@ function productionConfig(): Record<string, string | undefined> {
     STORAGE_SIGNING_SECRET: 'synthetic'.repeat(8), STORAGE_PROVIDER: 's3', CONSENT_IP_PEPPER: 'synthetic'.repeat(8),
     AWS_S3_BUCKET: 'synthetic-boot-bucket',
     SCAN_IP_SALT: 'synthetic-scan'.repeat(4), ATTRIB_SALT: 'synthetic-attribution'.repeat(4),
+    // Production also requires an SOS on-call list and a real email sender
+    // (boot-config): a fully configured baseline carries both.
+    OPS_ONCALL_PHONES: '+5926000001', EMAIL_PROVIDER: 'smtp', SMTP_HOST: 'smtp.example.test', SMTP_PORT: '465',
+    SMTP_USER: 'noreply@example.test', SMTP_PASS: 'synthetic-only', EMAIL_FROM: 'Swift <noreply@example.test>',
   };
   for (const key of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET']) env[key] = 'synthetic-only';
   return env;

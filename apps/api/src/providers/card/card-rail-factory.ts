@@ -8,6 +8,12 @@ import { SIMULATOR_PROVIDER, SimulatorCardRailProvider } from './simulator-provi
  *  payment_instruments / card_sessions CHECK constraints hold). */
 export const CARD_RAIL_ACCOUNT_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+/** Names accepted by this build's factory. Fee-pause liveness must never
+ * treat an arbitrary configured name as an implemented payment provider. */
+export function cardRailProviderNames(): readonly string[] {
+  return [SIMULATOR_PROVIDER];
+}
+
 /**
  * [PT-1] The card rail v2 provider for this process. Chosen EXPLICITLY by
  * CARD_RAIL_PROVIDER — there is no default — and resolved lazily: only v2 work

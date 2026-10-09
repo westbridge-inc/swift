@@ -1,4 +1,5 @@
 import type { Prisma, Subscription, SubscriptionStatus } from '@prisma/client';
+import type { FeePausePredicate } from '../billing/mmg-pause';
 
 // THE canOperate predicate (lifecycle/billing spec §14, G-BILL-03) — the ONE
 // place that answers "may this subscription state operate right now?". Before
@@ -24,11 +25,12 @@ export type SubscriptionOperability =
   | { operable: true }
   | { operable: false; why: 'MISSING' | 'STATUS' | 'GRACE_LAPSED' | 'BILLING_STOPPED'; status?: SubscriptionStatus };
 
-export type OperabilitySubscription = Pick<Subscription, 'status' | 'gracePeriodEnd' | 'autoRenew' | 'currentPeriodEnd' | 'billingConfirmationPausedAt' | 'billingEnforcementDueAt' | 'autoSuspendEnabled'>;
+export type OperabilitySubscription = Pick<Subscription, 'id' | 'status' | 'gracePeriodEnd' | 'autoRenew' | 'currentPeriodEnd' | 'billingConfirmationPausedAt' | 'billingEnforcementDueAt' | 'autoSuspendEnabled'>;
 
 export function subscriptionOperability(
   sub: OperabilitySubscription | null | undefined,
   opts: { missingRow: 'BLOCK' | 'GRANDFATHER' },
+  feePause: FeePausePredicate,
   now = new Date(),
 ): SubscriptionOperability {
   if (!sub) {
@@ -38,7 +40,11 @@ export function subscriptionOperability(
     return { operable: false, why: 'STATUS', status: sub.status };
   }
   const graceEnd = sub.billingEnforcementDueAt;
-  if (sub.status === 'PAST_DUE' && sub.autoSuspendEnabled && !sub.billingConfirmationPausedAt && graceEnd && graceEnd <= now) {
+  // [PROD-PATH] While no partner has a live way to pay (MMG off, no live card
+  // rail: billing/fee-pause.ts) nobody's grace lapses, whatever their billing
+  // method: their dunning clock is paused for the span (billing/mmg-pause.ts),
+  // including an open span or persisted repair after the switches return.
+  if (sub.status === 'PAST_DUE' && sub.autoSuspendEnabled && !sub.billingConfirmationPausedAt && graceEnd && graceEnd <= now && !feePause.holds(sub.id)) {
     return { operable: false, why: 'GRACE_LAPSED', status: sub.status };
   }
   // [E12] A partner who stopped weekly billing works exactly until the period
@@ -52,11 +58,13 @@ export function subscriptionOperability(
 
 /** DB form of the same refusal rule. A nullable relation may use `isNot` with
  * this filter to preserve the vendor gate's legacy missing-row policy. */
-export function inoperableSubscriptionWhere(now = new Date()): Prisma.SubscriptionWhereInput {
+export function inoperableSubscriptionWhere(feePause: FeePausePredicate, now = new Date()): Prisma.SubscriptionWhereInput {
   return {
     OR: [
       { status: { notIn: [...OPERABLE_STATUSES] } },
-      { status: 'PAST_DUE', autoSuspendEnabled: true, billingConfirmationPausedAt: null, billingEnforcementDueAt: { lte: now } },
+      // [PROD-PATH] The same held grace as subscriptionOperability: while no
+      // partner has a live way to pay, a lapsed grace refuses nobody.
+      { status: 'PAST_DUE', autoSuspendEnabled: true, billingConfirmationPausedAt: null, billingEnforcementDueAt: { lte: now }, ...feePause.excludingHeld },
       // [E12] Billing stopped and the paid period (or trial) over — the same
       // refusal subscriptionOperability makes, so a catalogue read never shows
       // a store the gate would refuse.

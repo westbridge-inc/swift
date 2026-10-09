@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import { applySeedPlan, buildSeedPlan, type ApplyOptions, type DesiredConfig, type SeedPlan } from './seed-plan';
+import { applySeedPlan, buildSeedPlan, type ApplyOptions, type ApplyResult, type DesiredConfig, type RequestContext, type SeedPlan } from './seed-plan';
 import { isProduction } from '../../utils/runtime-mode';
 import { DEFAULT_DELIVERY_RATES } from '../../utils/markup';
 import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
@@ -368,6 +368,15 @@ export interface SpineOptions extends ApplyOptions {
   databaseUrl?: string;
   /** Called with the plan before it is applied — the preview a ceremony shows. */
   onPlan?: (plan: SeedPlan) => void | Promise<void>;
+  /** Called with what the apply did (including a first admin the signed plan minted). */
+  onApplied?: (result: ApplyResult) => void | Promise<void>;
+}
+
+/** [PROD-PATH] What the approvers of a spine plan see beside the changes: the
+ *  FX rate this very seed uses (the one the desired data was built with) and
+ *  the first admin's phone. Printing and applying both use this, so they agree. */
+export function spineRequestContext(adminPhone?: string | null): RequestContext {
+  return { fxGydPerUsd: seedFxRate(), adminPhone: adminPhone ?? null };
 }
 
 /**
@@ -384,6 +393,7 @@ export async function seedPlatformSpine(prisma: PrismaClient, opts: SpineOptions
   const desired = desiredPlatformConfig();
   const plan = await buildSeedPlan(prisma, databaseUrl, desired);
   if (opts.onPlan) await opts.onPlan(plan);
-  await applySeedPlan(prisma, databaseUrl, desired, plan, opts);
+  const result = await applySeedPlan(prisma, databaseUrl, desired, plan, { ...opts, request: spineRequestContext(opts.request?.adminPhone) });
+  if (opts.onApplied) await opts.onApplied(result);
   return plan;
 }

@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
@@ -1130,7 +1131,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // no tenant context, which the Prisma extension defines as an UNSCOPED
           // query — so without the relational predicate a deactivated operator's
           // whole catalog kept serving here after the platform shut them off.
-          where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
+          where: { ...visibleVendorForCaller(await readFeePause(app.prisma)), items: { some: { isAvailable: true } } },
           include: {
             // imageUrl was NOT selected, so Home had nothing to draw a category
             // chip with and every chip fell back to the same stock photograph —
@@ -1156,7 +1157,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // DISH sat above the fold ([F-028-07] applies here identically: a
           // guest request is unscoped, so the relational predicate is the only
           // thing standing between a shut-off operator and the Home rail).
-          where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
+          where: { isAvailable: true, vendor: visibleVendorRelForCaller(await readFeePause(app.prisma)) },
           orderBy: { totalOrdered: 'desc' },
           take: 10,
           select: {
@@ -1351,7 +1352,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
-    const where: Record<string, unknown> = { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } };
+    const where: Record<string, unknown> = { ...visibleVendorForCaller(await readFeePause(app.prisma)), items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug

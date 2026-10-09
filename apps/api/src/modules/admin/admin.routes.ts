@@ -4793,6 +4793,15 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ingestionMode: row.value } };
   });
 
+  // [PROD-PATH] The fee pause (billing/fee-pause.ts): whether partners'
+  // weekly fees are paused because no way to pay is live, since when, whether
+  // a resume is still being recorded, and how many of this tenant's fees the
+  // pause holds. Read-only; the pause itself follows the server's switches.
+  app.get('/billing/fee-pause', { preHandler: [adminGuard] }, async () => {
+    const { feePauseStatus } = await import('../billing/mmg-pause');
+    return { success: true, data: await feePauseStatus(app.prisma, subscriptionTenantScope(requireTenantId())) };
+  });
+
   app.get('/billing/confirmations', { preHandler: [adminGuard] }, async () => {
     const { confirmationReviewQueue } = await import('../billing/confirmation-finance');
     return { success: true, data: await confirmationReviewQueue(app.prisma, requireTenantId()) };

@@ -1,3 +1,4 @@
+import { readFeePause } from '../modules/billing/mmg-pause';
 import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -417,16 +418,16 @@ describe('E12 — the stopped subscription and the billing engine', () => {
     // [DS198 D2] The paid period is over: the gate refuses work NOW, not an
     // hour later when the billing job's sweep runs.
     const before = await app.prisma.subscription.findUniqueOrThrow({ where: { id: lapsed.subId } });
-    expect(subscriptionOperability(before, { missingRow: 'BLOCK' }, now)).toEqual({ operable: false, why: 'BILLING_STOPPED', status: 'ACTIVE' });
+    expect(subscriptionOperability(before, { missingRow: 'BLOCK' }, await readFeePause(app.prisma), now)).toEqual({ operable: false, why: 'BILLING_STOPPED', status: 'ACTIVE' });
     // …while a stopped row still inside its paid period keeps working
     const notYetRow = await app.prisma.subscription.findUniqueOrThrow({ where: { id: notYet.subId } });
-    expect(subscriptionOperability(notYetRow, { missingRow: 'BLOCK' }, now)).toEqual({ operable: true });
+    expect(subscriptionOperability(notYetRow, { missingRow: 'BLOCK' }, await readFeePause(app.prisma), now)).toEqual({ operable: true });
 
     await billing.lapseStoppedSubscriptions(now);
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: lapsed.subId } });
     expect(after).toMatchObject({ status: 'PAUSED', autoRenew: false, nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null });
-    expect(subscriptionOperability(after, { missingRow: 'BLOCK' }, now)).toEqual({ operable: false, why: 'STATUS', status: 'PAUSED' });
+    expect(subscriptionOperability(after, { missingRow: 'BLOCK' }, await readFeePause(app.prisma), now)).toEqual({ operable: false, why: 'STATUS', status: 'PAUSED' });
     // one pause event per paid period, and a second sweep adds none
     await billing.lapseStoppedSubscriptions(now);
     const pauseEvents = await app.prisma.billingEvent.findMany({ where: { subscriptionId: lapsed.subId, idempotencyKey: { startsWith: 'pause:' } } });

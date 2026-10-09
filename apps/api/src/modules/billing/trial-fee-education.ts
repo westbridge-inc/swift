@@ -4,6 +4,7 @@ import type { NotificationService } from '../notification/notification.service';
 import { payInfo } from './agent-cash.service';
 import { feeCoveredLine, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
+import { feePauseHoldsBilling, feePauseSpanOpen } from './mmg-pause';
 
 // Trial first-payment funnel [san spec 21.4]: the first fee, told before the
 // first bill ever exists. Day 10 (trial end − 4d) and day 13 (− 1d): the exact
@@ -23,6 +24,10 @@ export async function sweepTrialFeeEducation(
   now = new Date(),
 ): Promise<{ day10: number; day13: number }> {
   const out = { day10: 0, day13: 0 };
+  // [PROD-PATH] No live way to pay: the fee is paused, so naming the amount
+  // and the date it is due would be untrue. Nothing is written, so a stage
+  // still goes out if a way to pay comes back inside its window.
+  if (await feePauseSpanOpen(prisma)) return out;
   const trials = await prisma.subscription.findMany({
     where: {
       status: 'TRIAL',
@@ -46,6 +51,7 @@ export async function sweepTrialFeeEducation(
     try {
       const allowed = await prisma.$transaction(async (tx) => {
         if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+        if (await feePauseHoldsBilling(tx, sub.id)) return false;
         await tx.billingEvent.create({
         data: {
           subscriptionId: sub.id,

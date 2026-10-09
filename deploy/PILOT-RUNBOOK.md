@@ -395,9 +395,10 @@ Making the owner an admin: the console admits a phone whose account holds
 ADMIN or SUPER_ADMIN. Once a SUPER_ADMIN exists (staging has one from its
 seed), the only way to promote another phone is the two-person break-glass
 ceremony in 6b, with the owner's phone as SEED_ADMIN_PHONE:
-two different people each sign their own half with SEED_SIGN_APPROVER, and the
-operator promotes with both halves in SEED_PROMOTION_APPROVALS. Nobody signs both
-halves, and no step prints the key. The promotion SETS that account's roles to
+two different people each sign the printed request with their own key
+(deploy/seed-approve.sh), and the operator promotes with both lines in
+SEED_PROMOTION_APPROVALS. Nobody signs for someone else, and no private key
+ever reaches the server. The promotion SETS that account's roles to
 SUPER_ADMIN and CUSTOMER: a phone that is also a store, rider or driver on this
 database loses those roles, so promote a phone that is not used as a partner
 here. The owner then signs in with that phone and the code texted to it.
@@ -461,7 +462,16 @@ errors. The UnsetEnvironment property mirrors swift-backup.service: the two
 `*_FILE` names deploy/.env wires for the containers would otherwise shadow the
 credential directory systemd provides, exactly the trap the backup unit hit.
 Record the actual elapsed time and inspect constraints and policies in the
-scratch database. Restore an encrypted document from the separate document
+scratch database. On a new or quiet database, add `--compare-source` (first
+argument, before the object) to judge the copy against the live database it
+came from instead of fixed minimums: in schemas public and swift_qr, every
+table's row count and content checksum, column definitions and defaults,
+row-level-security switches, policies, constraints, indexes, triggers,
+function definitions, grants and sequence positions must match exactly, and
+the script prints both summaries (the backup heartbeats in platform_config
+are left out, since backup.sh writes them after the dump). A row written to
+the live database since the dump is a mismatch, so run it right after the
+backup. Restore an encrypted document from the separate document
 bucket and verify it can be decrypted with the off-host MASTER_KEK escrow
 copy; the database dump alone cannot prove this. Keep the scratch database
 until the drill evidence is reviewed. A controlled cleanup then uses a
@@ -484,55 +494,80 @@ container.
 
 The seed prints the plan diff before applying it. On a staging target
 (development posture) it applies directly; a production target needs two
-approvals signed with SEED_PLAN_SECRET and exits 2 with the digest to sign.
-This staging runbook never supplies SEED_PLAN_SECRET for a production
-target, and no command here authorizes a production seed.
+approvals by two different people (section 6b) and exits 2 with the request
+to sign. No command here authorizes a production seed.
 
-### 6b. A second SUPER_ADMIN on staging: the two-person break-glass ceremony
+### 6b. Two-person approvals: each approver's own key
 
-Once a SUPER_ADMIN exists, promoting another is a break-glass change that
-needs TWO different people's approvals, each signed over this database's
-identity and the new admin's phone with SEED_PLAN_SECRET
-(seed-plan.ts `promoteBootstrapAdmin`). The key lives only in the encrypted
-store and reaches the one-off seed container only as a file; no step below
-prints it.
+A production spine apply, and promoting a SUPER_ADMIN once one exists (a
+break-glass change, on any target), need TWO approvals by two DIFFERENT
+people. An approval is the person's own signature: each approver has an
+Ed25519 key made on their own computer, the server holds only the public
+halves, and so the server (or anyone operating it) cannot sign for anyone. A
+name is never identity: a signature must verify under the key pinned for that
+name, and two approvals need two different pinned keys.
 
-1. Once, create the key inside the store (the value is generated on the host
-   and never shown):
+What an approver signs is what they read: the request names, in words, the
+database (its name, server and deployment), the configuration version and the
+FX rate the seed records, the first admin's phone (its last four digits; the
+request carries only the phone's hash) and every change, one line each (a
+long value is shown by its start, its length and its digest). The server
+rebuilds those words from the change it is about to make and refuses an
+approval whose words differ by a single character. Approvals expire (24 hours
+as printed, never more than 72 hours after the server ISSUED the request,
+however late it is used) and are single-use, even when the plan turns out to
+have nothing to change: each one used is recorded in the append-only
+privileged-change audit, so replaying it is refused even after the data is
+rolled back, in any encoding of the same signature (keyed on the signer and
+the request, not the pasted text). Replacing the whole database with an older
+backup would also bring back approvals consumed since; the expiry (72 hours
+from issue at most) bounds that window.
 
-       openssl rand -hex 32 | tr -d '\n' | sudo swift-secrets set SEED_PLAN_SECRET
+1. Once per approver, on their own computer (choose a passphrase):
 
-2. Each approver signs their own half — read-only; it prints one JSON line on
-   stdout, `{"approver":"…","signature":"…"}` (after one guidance line on
-   stderr), and seeds nothing:
+       ssh-keygen -t ed25519 -f ~/.ssh/swift_seed_approver -C <their-name>
+
+   They send the operator only the public line
+   (`~/.ssh/swift_seed_approver.pub`). The operator writes one line per
+   approver, `<name> ssh-ed25519 AAAA…`, into a file and pins it in the store
+   (public keys, but root-only there, so nobody can swap one):
+
+       sudo swift-secrets set SEED_APPROVER_KEYS < approver-keys.txt
+
+2. The operator runs the change without approvals. It prints the request
+   between two `-----` lines (stdout carries only the request) and exits 2
+   (spine) or 3 (promotion):
 
        cd /opt/swift
-       SEED_ADMIN_PHONE=+5920400001 SEED_SIGN_APPROVER=<their-name> ./deploy/seed-production.sh "$SHA"
+       SEED_ADMIN_PHONE=+5920400001 ./deploy/seed-production.sh "$SHA" > request.txt
 
-   Never sign both halves yourself: the control is two people, not two
-   commands. Approver names are self-declared, so no code can tell one
-   person signing under two names from two people; the names only catch a
-   slip.
+3. Each approver checks the request and signs it on their own computer. The
+   script shows the database, the configuration and FX rate, the first
+   admin's phone ending and every change, asks for `yes`, and prints one
+   line, `{"approver":"…","request":"…","signature":"…"}`. It refuses a
+   request that does not say these things in words, or that hides anything
+   (control characters, lines after its `end`):
 
-   Run steps 2 and 3 against the same deployment, with no redeploy in
-   between. Each half is bound to this database's fingerprint, which includes
-   the Postgres server's network address; a redeploy that recreates the
-   Postgres container can change it, and then both halves are refused as
-   APPROVAL_INVALID and the ceremony restarts at step 2. It fails closed,
-   never open.
+       ./deploy/seed-approve.sh <their-name> ~/.ssh/swift_seed_approver < request.txt
 
-3. The operator promotes with both lines:
+   Never sign for someone else: the control is two people with two keys.
+   Never export SEED_APPROVE_YES in a shell: it skips the typed yes and is
+   for the tests only.
+
+4. The operator re-runs with both lines, against the same deployment (the
+   request is bound to this database's fingerprint, which includes the
+   Postgres server's address; a redeploy that recreates the Postgres
+   container refuses both as APPROVAL_INVALID, and the ceremony restarts at
+   step 2. It fails closed, never open):
 
        SEED_ADMIN_PHONE=+5920400001 \
        SEED_PROMOTION_APPROVALS='[<first line>,<second line>]' \
          ./deploy/seed-production.sh "$SHA"
 
-   The promotion re-fingerprints the database and refuses an approval signed
-   for another database or phone, the same approver name twice, or a wrong
-   key. It writes
-   one PROMOTE_SUPER_ADMIN audit row naming both approvers.
+   (`SEED_PLAN_APPROVALS` for a production spine apply.) It writes one audit
+   row naming both approvers, plus one consumption row per approval.
 
-4. Pass the new admin to the journeys: `LIVETEST_ADMIN2_PHONE=+5920400001`.
+5. Pass a new staging admin to the journeys: `LIVETEST_ADMIN2_PHONE=+5920400001`.
 
 ## 7. Rollback and incident boundary
 
@@ -725,3 +760,148 @@ roles with other database/object dependencies remain NOLOGIN with this
 database's purge grants removed. Do not remove another database's role to make
 rollback pass. Reset the acknowledgement after the rehearsal. Rollback cannot
 restore rows already deleted.
+
+## 12. The production host (PILOT_ENV=production)
+
+The same scripts run the production host, a separate server. They never turn a
+staging host into production. deploy/.env on that host says
+`PILOT_ENV=production`, and pilot-up.sh then also refuses, each before
+anything changes:
+
+- any NODE_ENV but `production`;
+- a served name (API_HOST, API_ALIAS_HOST, WEB_HOST, WEB_ALIAS_HOSTS,
+  ADMIN_HOST) containing `staging`;
+- documents on the host's disk (STORAGE_PROVIDER must be s3 or r2, and
+  STORAGE_ALLOW_LOCAL must be unset) and WEB_ALLOW_SITE_TOKENS;
+- a store without AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (the backup
+  keys);
+- any setting Compose fills from `${…}` that is also set in the operator's
+  shell (Compose prefers the shell to deploy/.env, which is what every check
+  reads), and the COMPOSE_* switches. Run it from a clean shell;
+- DOCKER_HOST, DOCKER_CONTEXT or DOCKER_CONFIG in the shell (on any host), and
+  on production a Docker context other than `default`: every docker call must
+  act on this host's own daemon;
+- a test-environment name (a label that is or starts uat, test, sandbox, dev,
+  qa or demo) anywhere a staging name is refused;
+- API_PUBLIC_URL other than `https://<API_HOST>` (storage links and card
+  return pages are built from it); an APP_PUBLIC_URL that is not the public
+  website's `https://` origin (every printed QR code and trip-share link
+  names it); and a CORS_ORIGIN that is empty or has an entry that is not an
+  `https://` origin of a public name (no http, localhost, address or
+  wildcard), or is a staging or test name;
+- for the whole stack, a served name that does not already resolve to this
+  host, over IPv4 and IPv6 (`getent ahostsv4` and `getent ahostsv6` against
+  `hostname -I`; an AAAA record left on the old host sends IPv6 clients and
+  the certificate authority there): Caddy obtains the certificates, and the
+  public names stay on the old host until DNS moves.
+
+The website, when WEB_HOST is set, is built on the production channel
+(SWIFT_WEB_CHANNEL follows PILOT_ENV), so it must call `https://api.<site
+domain>`.
+
+The API refuses to boot in production unless every provider is real or
+explicitly off. Beyond the earlier guards:
+
+- **MMG.** `MMG_DRIVER=live` with every credential and the verified
+  reference round-trip, or exactly `MMG_DRIVER=disabled` with
+  `MMG_CHECKOUT_ENABLED=0`. With MMG off and no live card rail, no partner
+  has a way to pay, so EVERY partner's weekly fee is paused, whatever their
+  billing method (cash included; ruling of 6 Oct): nothing is charged (not
+  even prepaid balance), failed, dunned, suspended, nudged or churned, no
+  "due soon" reminder or trial fee notice names a fee, and nobody's grace
+  runs (each due fee's dunning clock is paused). The pause follows the
+  server's switches only (the MMG driver, and the card rail: CARD_RAIL_V2=1,
+  not killed, with a real provider accepted by this build's factory; unknown
+  provider names and the card simulator never count), never
+  anything a partner sets, so a partner can neither
+  cause it nor dodge it. When a way to pay comes back, only the current week
+  is billed: one fee covers the weeks nobody could pay and the week in
+  progress (owner ruling, 5 Oct), whatever job runs first (billing waits
+  until the resume has recorded it). Each pause and resume is in the audit
+  log (BILLING_FEE_PAUSE_STARTED/ENDED, and BILLING_FEE_PAUSED/RESUMED per
+  fee), and an admin sees the state and counts at
+  `GET /api/v1/admin/billing/fee-pause`. A fee whose dunning clock could
+  not be paused waits on its own after the resume, never anyone else's:
+  the API logs each one at every tick ("could not pause this billing
+  clock"), `awaitingRepair` counts this tenant's, and one that stays needs
+  a person. The poller leaves every MMG row
+  untouched, and any MMG call refuses with MMG_DISABLED.
+  To switch MMG on, set `MMG_DRIVER=live` and `MMG_CHECKOUT_ENABLED=1`
+  together (cash partners pay through the checkout page) and redeploy;
+  turning a real card provider on also ends the pause, so do it only when
+  partners can open the card pages (note the per-platform card switch: iOS
+  is off unless switched on).
+- **OPS_ONCALL_PHONES.** One or more E.164 numbers, comma-separated. An
+  unacknowledged SOS escalates to them by SMS.
+- **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
+  EMAIL_FROM and the SMTP_PASS secret (wired as SMTP_PASS_FILE).
+
+### Database first, before the providers and DNS
+
+    cd /opt/swift
+    ./deploy/pilot-up.sh --data-only "$APPROVED_SHA"
+
+It runs every check above except DNS, starts Postgres, Redis, search and
+routing, and applies the migrations. It never starts, stops or builds the
+API, worker, website, console or Caddy, and it refuses outright while an
+API or worker is running, or when Docker cannot say whether they are. Then
+write the identity row the seed and the
+purge tools bind to, once, as swift-deploy:
+
+    docker compose -f deploy/docker-compose.yml exec -T postgres sh -c \
+      'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' <<'SQL'
+    INSERT INTO deployment_identity (id, "deploymentId", environment, "updatedAt")
+    VALUES ('singleton', 'swift-production', 'production', now());
+    SQL
+
+Before the API ever starts, the weekly-fee confirmation cutover must report
+READY: apps/api/BILLING-CONFIRMATION-CUTOVER.md, step 3 (the versioned
+backfill) and step 4 (the check). Until then billing stays BLOCKED: no
+collection, no fee demand, no suspension. The backfill runs with tsx, which
+the runtime image does not carry; run it in the build-stage container the
+seed uses (section 6), never on a host install.
+
+Back up and rehearse the restore (sections 4 and 5, with `--compare-source`:
+in schemas public and swift_qr it compares every table's row count and
+content checksum, column definitions and defaults, RLS switches, policies,
+constraints, indexes, triggers, function definitions, grants and sequence
+positions).
+
+### The spine seed: a two-person ceremony
+
+seed-production.sh on PILOT_ENV=production needs NODE_ENV=production,
+SEED_FX_GYD_PER_USD (today's observed GYD per USD) in the environment, and a
+database whose deployment_identity says exactly production (a staging host
+seeds only a database that says exactly staging). The approvers' public keys
+must be pinned first (section 6b, step 1).
+
+1. The first run prints the plan, then the request to sign, and exits 2:
+
+       SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' ./deploy/seed-production.sh "$SHA" > request.txt
+
+2. Each approver signs it on their own computer (section 6b, step 3).
+
+3. The operator applies with both lines, with the same FX rate and phone
+   (the request names both; a different one refuses both lines). While no
+   SUPER_ADMIN exists, SEED_ADMIN_PHONE becomes the first one, in the signed
+   plan's own transaction and audited with it: on production the first
+   SUPER_ADMIN is minted only by a signed plan that names its phone, never
+   without approvals. A phone that already holds SUPER_ADMIN changes nothing.
+
+       SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' \
+       SEED_PLAN_APPROVALS='[<first line>,<second line>]' ./deploy/seed-production.sh "$SHA"
+
+4. SEED_PLAN_SECRET is no longer used (approvals are the approvers' own
+   signatures). If the production store still holds it, from 5 Oct, remove
+   it, then confirm the list no longer names it:
+
+       sudo rm /etc/credstore.encrypted/swift/SEED_PLAN_SECRET.cred
+       sudo systemctl restart swift-secrets.service
+       sudo swift-secrets list
+
+### The whole stack
+
+Once the owner's provider secrets are stored and wired (TWILIO_*,
+SMTP_PASS_FILE, OPS_ONCALL_PHONES) and DNS points at this host, run
+`./deploy/pilot-up.sh "$APPROVED_SHA"`. It ends with `PRODUCTION READY at
+exact SHA …`. Then follow section 9 for the certificate chain.

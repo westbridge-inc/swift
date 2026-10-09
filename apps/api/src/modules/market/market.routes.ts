@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
@@ -117,7 +118,7 @@ export async function marketRoutes(app: FastifyInstance) {
     const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
     const where = {
       isAvailable: true,
-      vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), vendorType: VERTICAL_VENDOR_TYPE.RETAIL },
+      vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)), vendorType: VERTICAL_VENDOR_TYPE.RETAIL },
       ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
     };
     const [items, sellers, config] = await Promise.all([
@@ -198,7 +199,7 @@ export async function marketRoutes(app: FastifyInstance) {
         // ([R048-003]: the relation filter is not reached by the scoping
         // extension, so the tenant is named here). Re-expressing it would be
         // its seventh copy, and the copies already disagree.
-        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
+        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)),
         // THE MARKET IS GOODS. Without this the feed returned every item from
         // every vendor type, so the goods tab filled with restaurant dishes —
         // Dhal Puri, Pork Chops, Margherita — and service listings. `vertical`

@@ -66,9 +66,11 @@ export const SECRET_FILE_NAMES = [
   'METRICS_TOKEN',
   'HEALTH_DETAIL_TOKEN',
   'SWIFT_BOOTSTRAP_PASSWORD',
-  // The key both halves of a two-person seed or promotion approval are signed
-  // with (seed-plan.ts). Only the one-off seed ceremony container reads it.
-  'SEED_PLAN_SECRET',
+  // [PROD-PATH] The seed ceremony approvers' pinned PUBLIC keys, one
+  // `<name> ssh-ed25519 <key>` per line (approver-signatures.ts). Not a secret,
+  // but pinned in the root-only store so nobody can swap an approver's key.
+  // Only the one-off seed ceremony container reads it.
+  'SEED_APPROVER_KEYS',
   // Keyed hashes and signatures: the salts and the ads token secret are
   // required in production and generated; the cursor and velocity secrets
   // fall back to the session secret and may be delivered separately.

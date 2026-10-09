@@ -280,11 +280,13 @@ services:
       dockerfile: apps/web/Dockerfile
       # NEXT_PUBLIC_* is inlined into the browser bundle at BUILD time, so the
       # API the site calls is fixed per image: this stack's own public API, on
-      # the staging channel (apps/web/src/lib/browser-api-origin.ts refuses any
-      # other pairing, so the build fails unless API_HOST is the staging API).
+      # this host's channel (apps/web/src/lib/browser-api-origin.ts refuses any
+      # other pairing, so the build fails unless API_HOST is that channel's
+      # API). [PROD-PATH] pilot-up.sh sets the channel from PILOT_ENV; unset
+      # it stays the staging channel, as before.
       args:
         NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}
-        SWIFT_WEB_CHANNEL: staging
+        SWIFT_WEB_CHANNEL: ${SWIFT_WEB_CHANNEL:-staging}
         # Empty keeps apps/web/src/site.config.ts refusing to build while a
         # company detail is still a {{TOKEN}}; WEB_ALLOW_SITE_TOKENS=1 in
         # deploy/.env lets the staging site build with them (PILOT-RUNBOOK.md).

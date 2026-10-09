@@ -300,6 +300,9 @@ class SeedProductionScript(unittest.TestCase):
         self.deploy = self.tmp / "deploy"
         self.deploy.mkdir()
         shutil.copy(DEPLOY / "seed-production.sh", self.deploy / "seed-production.sh")
+        # [PROD-PATH] the script reads the Compose files it runs (the shell-override guard).
+        shutil.copy(DEPLOY / "docker-compose.yml", self.deploy / "docker-compose.yml")
+        shutil.copy(DEPLOY / "docker-compose.seed.yml", self.deploy / "docker-compose.seed.yml")
         (self.deploy / ".env").write_text("PILOT_ENV=staging\n")
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
@@ -307,7 +310,7 @@ class SeedProductionScript(unittest.TestCase):
         self.log.write_text("")
         sh_shim(self.bin, "id", 'if [ "$1" = "-u" ]; then echo 1000; else exec /usr/bin/id "$@"; fi')
         sh_shim(self.bin, "git", 'echo "git $*" >> "$CALL_LOG"\ncase "$*" in *"rev-parse HEAD"*) echo "$GIT_HEAD";; esac\nexit 0')
-        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1"; exit "${POSTGRES_FAIL:-0}";; *config*) exit "${CONFIG_FAIL:-0}";; *build*) exit "${BUILD_FAIL:-0}";; *"run --rm --no-TTY seed"*) exit "${RUN_FAIL:-0}";; *) exit 0;; esac')
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1:staging"; exit "${POSTGRES_FAIL:-0}";; *config*) exit "${CONFIG_FAIL:-0}";; *build*) exit "${BUILD_FAIL:-0}";; *"run --rm --no-TTY seed"*) exit "${RUN_FAIL:-0}";; *) exit 0;; esac')
 
     def run_script(self, argv=None, **extra):
         env = os.environ.copy()
@@ -374,64 +377,48 @@ class SeedProductionScript(unittest.TestCase):
 
 
 class SeedBreakGlassCeremony(SeedProductionScript):
-    """The two-person promotion (runbook §6): SEED_SIGN_APPROVER signs one
-    approver's half and seeds nothing; SEED_PROMOTION_APPROVALS carries both
-    halves. Either needs SEED_PLAN_SECRET in the encrypted store, and the key
-    reaches the one-off container only as a FILE path — never as a value."""
+    """The two-person ceremony (runbook §6b): approvals are signatures by the
+    approvers' OWN keys; the server only pins their public keys
+    (SEED_APPROVER_KEYS), which reach the one-off container only as a FILE.
+    [PROD-PATH] There is no server-side signing mode and no shared key."""
 
     def setUp(self):
         super().setUp()
-        # The store lists names only; sudo -n runs the named tool; systemctl is logged.
         sh_shim(self.bin, "swift-secrets", 'echo "swift-secrets $*" >> "$CALL_LOG"\n[ "$1" = list ] && echo "$STORE_NAMES"\nexit 0')
         sh_shim(self.bin, "sudo", '[ "$1" = -n ] && shift\nexec "$@"')
         sh_shim(self.bin, "systemctl", 'echo "systemctl $*" >> "$CALL_LOG"\nexit 0')
-        # The container run records which ceremony variables reached it.
-        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV file=[$SEED_PLAN_SECRET_FILE] signer=[$SEED_SIGN_APPROVER] approvals=[$SEED_PROMOTION_APPROVALS]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1:staging"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV keys=[$SEED_APPROVER_KEYS_FILE] promotion=[$SEED_PROMOTION_APPROVALS] plan=[$SEED_PLAN_APPROVALS]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
 
-    def test_sign_mode_refuses_without_the_key_in_the_store(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="owner", STORE_NAMES="JWT_SECRET OTP_HASH_SECRET")
+    def test_approvals_refuse_without_the_pinned_keys_in_the_store(self):
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS="[]", STORE_NAMES="JWT_SECRET OTP_HASH_SECRET")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SEED_PLAN_SECRET", result.stderr)
+        self.assertIn("SEED_APPROVER_KEYS", result.stderr)
         self.assertNotIn("run --rm", self.log.read_text())
 
-    def test_sign_mode_refuses_a_malformed_approver_name(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="Owner Name", STORE_NAMES="SEED_PLAN_SECRET")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SEED_SIGN_APPROVER", result.stderr)
-        self.assertNotIn("run --rm", self.log.read_text())
-
-    def test_sign_mode_passes_the_key_only_as_a_file_and_materializes_the_store(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="owner", STORE_NAMES="JWT_SECRET SEED_PLAN_SECRET")
+    def test_the_promotion_carries_both_lines_and_the_keys_file(self):
+        approvals = '[{"approver":"owner","request":"cg==","signature":"ab"},{"approver":"coordinator","request":"cg==","signature":"cd"}]'
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS=approvals, STORE_NAMES="SEED_APPROVER_KEYS")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
         self.assertIn("systemctl restart swift-secrets.service", calls)
-        self.assertIn("ENV file=[/run/secrets/SEED_PLAN_SECRET] signer=[owner]", calls)
-        self.assertEqual(calls.count("run --rm --no-TTY seed"), 1)
-
-    def test_the_promotion_carries_both_halves_and_the_key_file(self):
-        approvals = '[{"approver":"owner","signature":"ab"},{"approver":"coordinator","signature":"cd"}]'
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS=approvals, STORE_NAMES="SEED_PLAN_SECRET")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        calls = self.log.read_text()
-        self.assertIn("ENV file=[/run/secrets/SEED_PLAN_SECRET] signer=[]", calls)
+        self.assertIn("ENV keys=[/run/secrets/SEED_APPROVER_KEYS]", calls)
         self.assertIn('"approver":"coordinator"', calls)
 
     def test_an_ordinary_seed_leaves_the_ceremony_off(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", STORE_NAMES="SEED_PLAN_SECRET")
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", STORE_NAMES="SEED_APPROVER_KEYS")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
-        self.assertIn("ENV file=[] signer=[] approvals=[]", calls)
+        self.assertIn("ENV keys=[] promotion=[] plan=[]", calls)
         self.assertNotIn("swift-secrets", calls)
         self.assertNotIn("systemctl", calls)
 
     def test_the_compose_override_wires_the_ceremony_with_empty_defaults(self):
         override = (DEPLOY / "docker-compose.seed.yml").read_text()
-        for line in ("SEED_PLAN_SECRET_FILE: ${SEED_PLAN_SECRET_FILE:-}",
+        for line in ("SEED_APPROVER_KEYS_FILE: ${SEED_APPROVER_KEYS_FILE:-}",
                      "SEED_PROMOTION_APPROVALS: ${SEED_PROMOTION_APPROVALS:-}",
-                     "SEED_SIGN_APPROVER: ${SEED_SIGN_APPROVER:-}"):
+                     "SEED_PLAN_APPROVALS: ${SEED_PLAN_APPROVALS:-}"):
             self.assertIn(line, override)
-        # The key is never a plain value anywhere in the ceremony's files.
-        self.assertIsNone(re.search(r"(?m)^\s*SEED_PLAN_SECRET\s*[:=]", override))
+        self.assertIsNone(re.search(r"SEED_PLAN_SECRET|SEED_SIGN_", override))
 
     def test_the_seed_runs_in_the_stacks_posture_never_an_unset_one(self):
         # The promotion calls isProduction() (seedFxRate); runtime-mode refuses
@@ -444,7 +431,7 @@ class SeedBreakGlassCeremony(SeedProductionScript):
         self.assertIn("NODE_ENV: ${NODE_ENV:?", stack)
         self.assertNotIn("${NODE_ENV:-", override)
         self.assertIn("SEED_FX_GYD_PER_USD: ${SEED_FX_GYD_PER_USD:-}", override)
-        self.assertNotIn("SEED_PLAN_SECRET=", (DEPLOY / "seed-production.sh").read_text())
+        self.assertNotIn("SEED_APPROVER_KEYS=", (DEPLOY / "seed-production.sh").read_text())
 
 
 
@@ -518,7 +505,7 @@ class Q11WebsiteCompose(unittest.TestCase):
         self.assertIn("dockerfile: apps/web/Dockerfile", web)
         self.assertIn("image: swift-web:${SWIFT_TAG:-local}", web)
         self.assertIn("NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}", web)
-        self.assertIn("SWIFT_WEB_CHANNEL: staging", web)
+        self.assertIn("SWIFT_WEB_CHANNEL: ${SWIFT_WEB_CHANNEL:-staging}", web)
         # Unfilled company details stay refused unless the operator says otherwise.
         self.assertIn("NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}", web)
 
@@ -1655,7 +1642,10 @@ class AdminConsoleDocs(unittest.TestCase):
 
     def test_the_runbook_says_how_the_owner_becomes_an_admin_without_skipping_the_two_person_rule(self):
         section = self.section()
-        for needle in ("6b", "SEED_SIGN_APPROVER", "SEED_PROMOTION_APPROVALS", "two different people"):
+        # Each approver signs the printed request with their own key on their
+        # own machine (deploy/seed-approve.sh); no private key reaches the server.
+        for needle in ("6b", "deploy/seed-approve.sh", "with their own key", "SEED_PROMOTION_APPROVALS",
+                       "two different people", "no private key"):
             self.assertIn(needle, section)
 
     def test_the_example_settings_document_both_and_leave_them_empty(self):
