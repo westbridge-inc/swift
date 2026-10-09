@@ -102,7 +102,7 @@ repeats its locked authority checks before returning the same page URL; no
 second checkout or hold is created. Clients never retain that URL.
 
 After expiry without an MMG answer, hide Pay and Back: **This checkout expired.
-We're checking this payment with MMG. Don't pay again. Support will help.**
+Your payment is being checked. Don't pay again. Support will help.**
 Refresh status remains available. Expiry is no proof of non-payment, releases
 no hold, and permits no retry payment.
 
@@ -224,7 +224,7 @@ An API older than this sends neither: show nothing in their place.
 | `CONFIRMING` | MMG sent the partner back; Swift is checking with MMG | "Confirming your payment with MMG. Don't pay again." |
 | `CONFIRMED` | MMG answered success for this checkout and its records confirm the payment (the six conditions below), and the fee is credited | "Paid: GY$X received on <date>." |
 | `NOT_PAID` | MMG answered for this checkout that it was not paid (result 1, 2 or 6; 7 when MMG declines the transaction it named), or MMG's own record for this checkout shows the payment did not complete. Never a return path or a missing record alone | "MMG didn't complete this payment. You can try again." |
-| `EXPIRED` | the checkout ran out of time, or MMG never confirmed it within a day; no failure is declared | "This checkout expired. We're checking this payment with MMG. Don't pay again. Support will help." |
+| `EXPIRED` | the checkout ran out of time, or MMG never confirmed it within a day; no failure is declared | "This checkout expired. Your payment is being checked. Don't pay again. Support will help." |
 | `HELD` | MMG's records show a payment that cannot be confirmed automatically: a condition below fails (status word, amount, currency, merchant, time, a number already credited), the server is not configured to read MMG's payment time (condition 5), MMG never answered success for it, or MMG's answers for this checkout disagree; a person reviews it, and reminders and suspension stay paused meanwhile | "We're checking this payment by hand. Don't pay again. Support will contact you." |
 
 **Automatic confirmation (owner, 1 Oct).** A payment is credited automatically only when ALL of these hold; anything else is `HELD` for a person, with no reminders and no suspension, and operators are alerted once:

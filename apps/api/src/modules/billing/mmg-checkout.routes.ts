@@ -39,7 +39,7 @@ import {
 //   POST /api/v1/{vendor|rider|driver}/subscription/mmg-checkout      start one
 //   GET  /api/v1/{vendor|rider|driver}/subscription/mmg-checkout/:ref follow it
 //   GET  /api/v1/{family}/subscription   gains payActions, latestMmgCheckout,
-//                                        recentCheckouts (feeCheckoutPayload)
+//                                        recentCheckouts, reopenableMmgCheckout (feeCheckoutPayload)
 //   POST /api/v1/billing/mmg-checkout/return   the web return page forwards
 //                                              MMG's reply here (success AND
 //                                              failure arrive on one URL)
@@ -117,7 +117,7 @@ export function mmgCheckoutRuntimeOf(app: FastifyInstance): MmgCheckoutRuntime {
 }
 
 // ---------------------------------------------------------------------------
-// The subscription payload's three new fields (section 3).
+// The subscription payload's additive checkout fields (section 3).
 // ---------------------------------------------------------------------------
 
 export interface FeeCheckoutPayload {
@@ -176,7 +176,7 @@ async function payActionsFor(
 }
 
 export interface PartnerCheckoutRoutes {
-  /** The three fields GET /subscription gains, for this family's own subscription. */
+  /** Additive checkout fields GET /subscription gains, for this family's own subscription. */
   feePayload: (sub: Subscription, headers: Record<string, unknown>, now?: Date) => Promise<FeeCheckoutPayload>;
 }
 

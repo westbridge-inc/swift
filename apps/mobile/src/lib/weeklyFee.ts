@@ -55,7 +55,7 @@ export function checkoutWords(c: CheckoutStatus, returned = false): string {
     case 'CONFIRMING': return "Confirming your payment with MMG. Don't pay again.";
     case 'CONFIRMED': return `Paid: ${feeMoney(c.amountGyd)} received${feeDate(c.confirmedAt) ? ` on ${feeDate(c.confirmedAt)}` : ''}.`;
     case 'NOT_PAID': return "MMG didn't complete this payment. You can try again.";
-    case 'EXPIRED': return "This checkout expired. We're checking this payment with MMG. Don't pay again. Support will help.";
+    case 'EXPIRED': return "This checkout expired. Your payment is being checked. Don't pay again. Support will help.";
     case 'HELD': return "We're checking this payment by hand. Don't pay again. Support will contact you.";
   }
 }

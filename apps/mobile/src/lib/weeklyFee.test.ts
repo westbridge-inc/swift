@@ -23,7 +23,7 @@ describe('weekly fee contract', () => {
   it.each([
     ['OPEN', 'Finish paying on the MMG page.'], ['CONFIRMING', "Confirming your payment with MMG. Don't pay again."],
     ['CONFIRMED', 'Paid: GY$1,200 received on 29 Sept 2026.'], ['NOT_PAID', "MMG didn't complete this payment. You can try again."],
-    ['EXPIRED', "This checkout expired. We're checking this payment with MMG. Don't pay again. Support will help."],
+    ['EXPIRED', "This checkout expired. Your payment is being checked. Don't pay again. Support will help."],
     ['HELD', "We're checking this payment by hand. Don't pay again. Support will contact you."],
   ] as const)('%s has truthful words', (state, words) => expect(checkoutWords(checkout(state))).toBe(words));
   it("references: the Swift reference always, MMG's transaction ID only on CONFIRMED, nothing invented", () => {
@@ -172,7 +172,7 @@ describe('checkout deadline before the next server refresh', () => {
   it('a stale OPEN at its deadline tells the partner it is being checked', () => {
     const c = { ...checkout('OPEN'), expiresAt: '2026-10-08T23:30:00Z' };
     vi.useFakeTimers(); vi.setSystemTime(new Date(c.expiresAt));
-    expect(checkoutWords(c, true)).toBe("This checkout expired. We're checking this payment with MMG. Don't pay again. Support will help.");
+    expect(checkoutWords(c, true)).toBe("This checkout expired. Your payment is being checked. Don't pay again. Support will help.");
   });
 });
 
