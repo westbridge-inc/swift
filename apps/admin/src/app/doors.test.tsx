@@ -152,6 +152,9 @@ describe('reviewed door recovery paths', () => {
     await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
     await user.click(within(dialog).getByRole('button', { name: 'Customer paid' }));
     await within(dialog).findByRole('alert');
+    await user.click(within(dialog).getByRole('button', { name: 'Customer paid' }));
+    await within(dialog).findByText(/Close this panel and review the refreshed payment evidence/);
+    expect(revisions).toEqual([4]);
     await user.click(within(dialog).getByRole('button', { name: 'Close' }));
     await user.click(screen.getByRole('button', { name: 'Customer paid…' }));
     dialog = screen.getByRole('dialog');

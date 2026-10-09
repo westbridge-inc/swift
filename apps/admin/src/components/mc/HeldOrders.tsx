@@ -29,7 +29,7 @@ const minutes = (m: number | null) => (m == null ? '—' : m < 60 ? `${m} min` :
 
 export function HeldOrders() {
   const qc = useQueryClient();
-  const [dispatchRetry, setDispatchRetry] = useState<HeldOrder | null>(null);
+  const [dispatchRetry, setDispatchRetry] = useState<HeldOrder[]>([]);
   const held = useQuery({ queryKey: ['orders-held'], queryFn: fetchHeldOrders, refetchInterval: 60_000 });
   const actions = useActionRunner(() => {
     void qc.invalidateQueries({ queryKey: ['orders-held'] });
@@ -57,22 +57,14 @@ export function HeldOrders() {
     },
     success: (response) => {
       if (response.data?.dispatch?.error) {
-        setDispatchRetry(o);
+        setDispatchRetry((pending) => [...pending.filter((item) => item.id !== o.id), o]);
         return { tone: 'failed', title: `Order ${o.orderNumber} is released; dispatch needs retry.`, next: 'The hold is released, but finding a rider failed. Retry dispatch below.' };
       }
       return `Order ${o.orderNumber} is released and back with dispatch.`;
     },
   });
 
-  if (held.isError) {
-    return (
-      <section aria-labelledby="held-orders" className="mb-5">
-        <h2 id="held-orders" className="mc-label">Held for review</h2>
-        <QueryFailed error={held.error} what="the held orders" onRetry={() => void held.refetch()} retrying={held.isFetching} />
-      </section>
-    );
-  }
-  if (!rows.length && !actions.result) return null;
+  if (!rows.length && !actions.result && !dispatchRetry.length && !held.isError) return null;
   return (
     <section aria-labelledby="held-orders" className="mc-card mc-door mb-5 space-y-3">
       <h2 id="held-orders" className="mc-label">Held for review · {rows.length}</h2>
@@ -81,12 +73,13 @@ export function HeldOrders() {
         is still fit, or leave it held.
       </p>
       {actions.banner}
-      {dispatchRetry && <button type="button" className="mc-btn" aria-label={`Retry dispatch for ${dispatchRetry.orderNumber}`} onClick={() => void actions.run({
-        title: `Retry dispatch for ${dispatchRetry.orderNumber}?`, confirmLabel: 'Retry dispatch', reason: false,
-        submit: () => retryOrderDispatch(dispatchRetry.id),
-        success: () => { setDispatchRetry(null); return 'Dispatch retry requested. Check the order for its current rider search.'; },
-      })}>Retry dispatch</button>}
-      {rows.length > 0 ? (
+      {held.isError && <QueryFailed error={held.error} what="the held orders" onRetry={() => void held.refetch()} retrying={held.isFetching} />}
+      {dispatchRetry.map((order) => <button key={order.id} type="button" className="mc-btn" aria-label={`Retry dispatch for ${order.orderNumber}`} onClick={() => void actions.run({
+        title: `Retry dispatch for ${order.orderNumber}?`, confirmLabel: 'Retry dispatch', reason: false,
+        submit: () => retryOrderDispatch(order.id),
+        success: () => { setDispatchRetry((pending) => pending.filter((item) => item.id !== order.id)); return 'Dispatch retry requested. Check the order for its current rider search.'; },
+      })}>Retry dispatch for {order.orderNumber}</button>)}
+      {!held.isError && rows.length > 0 ? (
         <DataTable<HeldOrder>
           label="Orders held for review"
           rows={rows}
