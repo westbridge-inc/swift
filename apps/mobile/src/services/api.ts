@@ -1303,7 +1303,7 @@ export const adsApi = {
 /** Checkout calls capture the paying principal and selected store across retries. */
 export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, session: AuthSessionSnapshot | null, storeId?: string | null) {
   const base = `/${family}/subscription/mmg-checkout`;
-  if (!session) return { start: async () => { throw new Error('Sign in to pay.'); }, read: async () => { throw new Error('Sign in to view payment.'); } };
+  if (!session) return { start: async () => { throw new Error('Sign in to pay.'); }, reopen: async () => { throw new Error('Sign in to pay.'); }, read: async () => { throw new Error('Sign in to view payment.'); } };
   const current = () => {
     const now = getAuthSessionSnapshot();
     if (!now || now.userId !== session.userId || now.generation !== session.generation || (family === 'vendor' && useStoreSwitcher.getState().selectedStoreId !== storeId)) throw new Error('The paying account changed.');
@@ -1315,6 +1315,11 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
   return {
     start: async (key: string): Promise<import('../lib/weeklyFee').CheckoutStart> => {
       const response = await api.post(base, {}, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    /** Back to MMG's page: only the named checkout's open page, never a new checkout. */
+    reopen: async (ref: string, key: string): Promise<import('../lib/weeklyFee').CheckoutStart> => {
+      const response = await api.post(`${base}/${encodeURIComponent(ref)}/reopen`, {}, config({ 'Idempotency-Key': key }));
       current(); return response.data.data;
     },
     read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {

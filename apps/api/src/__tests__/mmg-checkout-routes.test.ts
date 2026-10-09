@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { nanoid } from 'nanoid';
-import type { SubscriptionStatus, UserRole } from '@prisma/client';
+import type { Prisma, PrismaClient, SubscriptionStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -21,7 +21,8 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
-import { readDunningClock } from '../modules/billing/dunning-clock';
+import { readReopenableMmgCheckout } from '../modules/billing/mmg-checkout-reopen';
+import { readDunningClock, resolveConfirmationInTx } from '../modules/billing/dunning-clock';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import {
   MMG_CHECKOUT_NOTIFY_BODY_LIMIT,
@@ -229,6 +230,16 @@ const start = (p: Partner, extra: Record<string, string> = {}, target = app) =>
   target.inject({ method: 'POST', url: `/api/v1/${p.family}/subscription/mmg-checkout`, headers: { 'content-type': 'application/json', 'idempotency-key': key(), ...headersOf(p, extra) }, payload: {} });
 const follow = (p: Partner, ref: string, target = app) =>
   target.inject({ method: 'GET', url: `/api/v1/${p.family}/subscription/mmg-checkout/${ref}`, headers: headersOf(p) });
+/** [MMG reopen] The Back button's own request: it names the ONE checkout it may hand back. */
+const reopenTap = (p: Partner, ref: string, extra: Record<string, string> = {}, target = app) =>
+  target.inject({ method: 'POST', url: `/api/v1/${p.family}/subscription/mmg-checkout/${ref}/reopen`, headers: { 'content-type': 'application/json', 'idempotency-key': key(), ...headersOf(p, extra) }, payload: {} });
+/** [MMG reopen · F2] The reopen switch's platform-config key (written as text: a missing row is OFF). */
+const REOPEN_SWITCH = 'billing.feeCheckout.reopen.platforms';
+const reopenSwitch = async (value: unknown) => {
+  if (value === null) await app.prisma.platformConfig.deleteMany({ where: { key: REOPEN_SWITCH } });
+  else await app.prisma.platformConfig.upsert({ where: { key: REOPEN_SWITCH }, create: { key: REOPEN_SWITCH, value: value as never }, update: { value: value as never } });
+  resetFeeCheckoutSwitchCache();
+};
 const ret = (outcome: unknown, params: unknown, target = app) =>
   target.inject({ method: 'POST', url: RETURN_URL, headers: { 'content-type': 'application/json' }, payload: { outcome, params } });
 const notify = (payload: string | Record<string, unknown>, contentType = 'application/json', target = app) =>
@@ -322,7 +333,7 @@ afterAll(async () => {
     await app.prisma.mmgCheckoutObservation.deleteMany({ where: { OR: [{ intentId: { in: intents.map((i) => i.id) } }, { intentId: null, createdAt: { gte: startedAt } }] } });
     await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { endsWith: RUN } }] } });
-    await app.prisma.platformConfig.deleteMany({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } });
+    await app.prisma.platformConfig.deleteMany({ where: { key: { in: [FEE_CHECKOUT_PLATFORMS_KEY, REOPEN_SWITCH] } } });
     await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.topUpCommand.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -1119,5 +1130,266 @@ describe('the web return page contract', () => {
     // The page forwards at most 16 values of at most 4096 characters: the API's own caps.
     expect(src).toContain('value.length > 4096');
     expect(src).toContain('entries.length >= 16');
+  });
+});
+
+
+describe('[MMG reopen] the partner’s own open checkout', () => {
+  // [F2] Reopen has its own switch, OFF when missing: these cases run with it ON everywhere.
+  beforeEach(async () => { enable(true); await reopenSwitch({ ios: true, android: true, web: true }); });
+  afterEach(() => reopenSwitch(null));
+
+  it.each(['vendor', 'rider', 'driver'] as const)('%s relaunch and two devices reopen the SAME checkout with one hold', async (family) => {
+    const p = await (family === 'vendor' ? makeStore() : family === 'rider' ? makeRider() : makeDriver());
+    const first = await started(p);
+    const payload = (await subscriptionOf(p)).json().data;
+    expect(payload.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    expect(payload.reopenableMmgCheckout).toEqual({ ref: first.ref, expiresAt: first.row.expiresAt.toISOString() });
+    expect(Object.keys(payload.reopenableMmgCheckout).sort()).toEqual(['expiresAt', 'ref']);
+    const replies = await Promise.all([isolated(() => start(p)), isolated(() => start(p))]);
+    for (const reply of replies) {
+      expect(reply.statusCode, reply.body).toBe(200);
+      expect(reply.json().data).toMatchObject({ ref: first.ref, status: 'OPEN', checkoutUrl: first.checkoutUrl });
+    }
+    expect(await isolated(() => app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } }))).toBe(1);
+    expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId } }))).toBe(1);
+    expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE', checkoutId: first.ref } }))).toBe(1);
+    const other = await makeStore();
+    expect((await subscriptionOf(other)).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await follow(other, first.ref)).statusCode).toBe(404);
+  });
+
+  it.each(['CONFIRMING', 'HELD', 'EXPIRED', 'NOT_PAID', 'CONFIRMED'] as const)('never reopens %s', async (status) => {
+    const p = await makeStore(); const first = await started(p);
+    if (status === 'CONFIRMED') {
+      const txn = tx('REOPENPAID'); approved(txn, 2100);
+      expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+    } else await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('does not reopen a timed-out OPEN or an older checkout', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { expiresAt: new Date() } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { expiresAt: new Date(Date.now() + 60_000) } });
+    await app.prisma.mmgCheckoutIntent.create({ data: { ...first.row, id: nanoid(), merchantTransactionId: first.row.merchantTransactionId.slice(0, 9) + '999999999', status: 'NOT_PAID', createdAt: new Date(Date.now() + 1000) } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('requires the sole ACTIVE hold on the current clock and epoch', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const hold = await app.prisma.paymentConfirmationHold.findFirstOrThrow({ where: { checkoutId: first.ref } });
+    for (const data of [{ status: 'SETTLEMENT_APPLY_PENDING' as const }]) {
+      await app.prisma.paymentConfirmationHold.update({ where: { id: hold.id }, data });
+      expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+      await app.prisma.paymentConfirmationHold.update({ where: { id: hold.id }, data: { status: 'ACTIVE', sourceEpoch: hold.sourceEpoch } });
+    }
+    // The database refuses stale source epochs. Also fail closed on a stale or missing read.
+    for (const rows of [[{ ...hold, sourceEpoch: hold.sourceEpoch + 1 }], []]) {
+      const staleDb = { $transaction: (work: (tx: Prisma.TransactionClient) => Promise<unknown>) => app.prisma.$transaction((tx) => work(new Proxy(tx, {
+        get: (target, name) => name === 'paymentConfirmationHold' ? { findMany: async () => rows } : Reflect.get(target, name),
+      }))) } as unknown as PrismaClient;
+      expect(await readReopenableMmgCheckout(staleDb, p.subId, first.ref, new Date())).toBeNull();
+    }
+    await app.prisma.billingDunningClock.update({ where: { id: hold.clockId }, data: { authorityHoldReason: 'TEST_REVIEW' } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it.each(['PENDING', 'UNKNOWN'] as const)('a card %s blocks reopen even before its hold is discovered', async (status) => {
+    const p = await makeStore(); await started(p);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: p.subId, amount: 2100, paymentMethod: 'CARD', status, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), clientKey: `cardpay:${nanoid()}` } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    await isolated(() => readDunningClock(app.prisma, p.subId));
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('another active confirmation hold blocks reopen', async () => {
+    const p = await makeStore(); await started(p);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: p.subId, amount: 2100, paymentMethod: 'CARD', status: 'UNKNOWN', periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY) } });
+    await isolated(() => readDunningClock(app.prisma, p.subId));
+    expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE' } })).toBe(2);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('respects the global and platform kill switches', async () => {
+    const p = await makeStore(); await started(p);
+    enable(false);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    enable(true);
+    await app.prisma.platformConfig.upsert({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY }, create: { key: FEE_CHECKOUT_PLATFORMS_KEY, value: { ios: false } }, update: { value: { ios: false } } });
+    resetFeeCheckoutSwitchCache();
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await subscriptionOf(p, { 'x-client-platform': 'web' })).json().data.reopenableMmgCheckout).toBeTruthy();
+    await app.prisma.platformConfig.delete({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } }); resetFeeCheckoutSwitchCache();
+  });
+});
+
+
+describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN checkout', () => {
+  beforeEach(async () => { enable(true); await reopenSwitch({ ios: true, android: true, web: true }); });
+  afterEach(() => reopenSwitch(null));
+  const countsOf = (p: Partner) => isolated(async () => ({
+    checkouts: await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } }),
+    holds: await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId } }),
+    activeHolds: await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } }),
+    keys: await app.prisma.mmgCheckoutKey.count({ where: { intent: { subscriptionId: p.subId } } }),
+  }));
+
+  it('[F1] Back while OPEN hands back the SAME page (two devices at once): one checkout, one hold, 200 never 201', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const replies = await Promise.all([isolated(() => reopenTap(p, first.ref)), isolated(() => reopenTap(p, first.ref))]);
+    for (const reply of replies) {
+      expect(reply.statusCode, reply.body).toBe(200);
+      expect(reply.json().data).toMatchObject({ ref: first.ref, status: 'OPEN', checkoutUrl: first.checkoutUrl });
+    }
+    expect(await countsOf(p)).toEqual({ checkouts: 1, holds: 1, activeHolds: 1, keys: 3 });
+  });
+
+  it.each(['CONFIRMED', 'NOT_PAID'] as const)('[F1] a stale Back tap after MMG answered %s opens nothing: no new checkout, hold or key', async (outcome) => {
+    const p = await makeStore(); const first = await started(p);
+    // Another device (or this one before its refresh) still holds the grant it read while C1 was OPEN.
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
+    if (outcome === 'CONFIRMED') {
+      const txn = tx(`STALEBACK${seq}`); approved(txn, 2100);
+      expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+    } else {
+      expect((await ret('error', { token: officialReply(first.row, '6') })).json().data.state).toBe('NOT_PAID');
+    }
+    const before = await countsOf(p);
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: first.ref, status: outcome } });
+    expect(res.body).not.toContain('checkoutUrl');
+    expect(await countsOf(p)).toEqual(before);
+    expect(before.checkouts).toBe(1);
+  });
+
+  it('[F1] a Back tap past the deadline expires the page and opens nothing new', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: first.ref } });
+    expect(await countsOf(p)).toEqual({ checkouts: 1, holds: 1, activeHolds: 1, keys: 1 });
+    expect((await intentOf(first.ref)).status).toBe('EXPIRED');
+  });
+
+  it('[F1] Back names only its own subscription’s latest checkout: another partner’s ref is 404, an older one is refused', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const other = await makeStore();
+    const foreign = await reopenTap(other, first.ref);
+    expect(foreign.statusCode, foreign.body).toBe(404);
+    expect((await reopenTap(p, 'no-such-ref-at-all')).statusCode).toBe(404);
+    await app.prisma.mmgCheckoutIntent.create({ data: { ...first.row, id: nanoid(), merchantTransactionId: first.row.merchantTransactionId.slice(0, 9) + '888888888', status: 'NOT_PAID', createdAt: new Date(Date.now() + 1000) } });
+    const older = await reopenTap(p, first.ref);
+    expect(older.statusCode, older.body).toBe(409);
+    expect(older.json().error.code).toBe('CHECKOUT_NOT_REOPENABLE');
+    expect(await isolated(() => app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: other.subId } }))).toBe(0);
+  });
+
+  it('[F1] the service itself refuses a resolved checkout even when the grant says yes, and binds no key', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const txn = tx(`SVCPAID${seq}`); approved(txn, 2100);
+    expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+    const before = await countsOf(p);
+    const service = mmgCheckoutRuntimeOf(app).service;
+    await expect(isolated(() => service.reopenCheckout({ subscriptionId: p.subId, userId: p.userId, ref: first.ref, clientKey: key(), granted: async () => true })))
+      .rejects.toMatchObject({ code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: first.ref, status: 'CONFIRMED' } });
+    expect(await countsOf(p)).toEqual(before);
+  });
+
+  it('[F1] a checkout that leaves OPEN while Back is being answered hands out no page', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const service = mmgCheckoutRuntimeOf(app).service;
+    // MMG's reply lands between the read and the page: the checkout is CONFIRMING when the page would go out.
+    const granted = async () => { await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status: 'CONFIRMING' } }); return true; };
+    await expect(isolated(() => service.reopenCheckout({ subscriptionId: p.subId, userId: p.userId, ref: first.ref, clientKey: key(), granted })))
+      .rejects.toMatchObject({ code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: first.ref, status: 'CONFIRMING' } });
+    expect(await countsOf(p)).toMatchObject({ checkouts: 1, holds: 1 });
+  });
+
+  it('[F1] Back is refused while a card payment is pending, exactly as the grant is withheld', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: p.subId, amount: 2100, paymentMethod: 'CARD', status: 'PENDING', periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), clientKey: `cardpay:${nanoid()}` } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.body).not.toContain('checkoutUrl');
+  });
+
+  it('[F2] the reopen switch is OFF when its row is missing: no grant, and Back is refused', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await reopenSwitch(null);
+    const payload = (await subscriptionOf(p)).json().data;
+    expect(payload.latestMmgCheckout).toMatchObject({ ref: first.ref, status: 'OPEN' });
+    expect(payload.reopenableMmgCheckout).toBeNull();
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.body).not.toContain('checkoutUrl');
+    expect(await countsOf(p)).toEqual({ checkouts: 1, holds: 1, activeHolds: 1, keys: 1 });
+  });
+
+  it('[F2] the reopen switch is per platform, strict booleans only, and separate from the Pay switch', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await reopenSwitch({ web: true });
+    expect((await subscriptionOf(p, { 'x-client-platform': 'web' })).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await subscriptionOf(p, { 'x-client-platform': 'android' })).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await subscriptionOf(p, { 'x-client-platform': 'unknown-thing' })).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await reopenTap(p, first.ref)).statusCode).toBe(409);
+    expect((await reopenTap(p, first.ref, { 'x-client-platform': 'web' })).statusCode).toBe(200);
+    for (const value of [{ ios: 'true' }, { ios: 1 }, 'on', true, [true]]) {
+      await reopenSwitch(value);
+      expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout, JSON.stringify(value)).toBeNull();
+    }
+    // The Pay switch is untouched by the reopen switch: a fresh partner still sees Pay live.
+    const fresh = await makeStore();
+    expect((await subscriptionOf(fresh)).json().data.payActions[0]).toMatchObject({ id: 'MMG_CHECKOUT', state: 'live' });
+  });
+
+  it.each(['legacy push payment proven to have had no effect', 'earlier expired checkout resolved by finance'] as const)('[F3] resolved history (%s) does not deny the reopen grant', async (history) => {
+    const p = await makeStore();
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    if (history === 'legacy push payment proven to have had no effect') {
+      const legacy = await inTenant(undefined, () => app.prisma.subscriptionPayment.create({ data: {
+        subscriptionId: p.subId, amount: 2100, paymentMethod: 'MOBILE_MONEY', status: 'EXPIRED', failureCode: 'PROVIDER_NOT_FOUND',
+        periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
+      } }));
+      await isolated(() => readDunningClock(app.prisma, p.subId));
+      await isolated(() => app.prisma.$transaction((t) => resolveConfirmationInTx(t, p.subId, { paymentId: legacy.id }, 'PROVEN_NO_EFFECT', { actor: 'provider-confirmation', reference: 'PROVIDER_NOT_FOUND' })));
+    } else {
+      const earlier = await started(p);
+      await app.prisma.mmgCheckoutIntent.update({ where: { id: earlier.ref }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      // The next Pay expires the timed-out page (its pause stays: expiry is no proof) and is refused.
+      expect((await start(p)).statusCode).toBe(409);
+      expect((await intentOf(earlier.ref)).status).toBe('EXPIRED');
+      await isolated(() => app.prisma.$transaction((t) => resolveConfirmationInTx(t, p.subId, { checkoutId: earlier.ref }, 'PROVEN_UNPAID', { actor: 'fixture-finance', reference: 'fixture-bank-confirmed-unpaid' })));
+    }
+    expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } }))).toBe(0);
+    const current = await started(p);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toEqual({ ref: current.ref, expiresAt: current.row.expiresAt.toISOString() });
+    const res = await reopenTap(p, current.ref);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ ref: current.ref, status: 'OPEN', checkoutUrl: current.checkoutUrl });
+  });
+
+  it('[F4] a failing reopen read never fails the fee page: no grant, the rest of the payload intact', async () => {
+    const p = await makeStore(); const first = await started(p);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
+    const original = app.prisma.$transaction;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation(((input: unknown, options?: { isolationLevel?: string }) =>
+      options?.isolationLevel === 'RepeatableRead'
+        ? Promise.reject(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' }))
+        : (original as (i: unknown, o?: unknown) => Promise<unknown>).call(app.prisma, input, options)) as never);
+    try {
+      const res = await subscriptionOf(p);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().data).toMatchObject({ reopenableMmgCheckout: null, latestMmgCheckout: { ref: first.ref, status: 'OPEN' }, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }, expect.anything()] });
+      expect(spy.mock.calls.some(([, options]) => (options as { isolationLevel?: string } | undefined)?.isolationLevel === 'RepeatableRead')).toBe(true);
+    } finally { spy.mockRestore(); }
   });
 });

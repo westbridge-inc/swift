@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutWords, dueLine, feeDate, feeExpiry, feeMoney, FeeCheckoutSession, liveMmg, REOPEN_ALREADY_PAID, reopenableMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 
@@ -31,6 +31,7 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
   const refreshFee = useCallback(() => { void client.invalidateQueries({ queryKey }); }, [client, queryKey]);
   const session = useMemo(() => new FeeCheckoutSession({
     start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
+    reopen: (ref, key) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}/reopen`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, undefined, { storeId }).then((r) => r.data),
     open: async (url) => { window.location.assign(url); },
     refresh: () => { void client.invalidateQueries({ queryKey }); },
@@ -43,12 +44,24 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
     window.addEventListener('focus', focus);
     return () => window.removeEventListener('focus', focus);
   }, [client, queryKey, session]);
+  const reopenExpiresAt = q.data?.reopenableMmgCheckout?.expiresAt;
+  const refetch = q.refetch;
+  const [, setExpiryTick] = useState(0);
+  useEffect(() => {
+    if (!reopenExpiresAt) return;
+    const delay = Date.parse(reopenExpiresAt) - Date.now();
+    if (!(delay > 0)) return;
+    const timer = setTimeout(() => { setExpiryTick(Date.now()); void refetch(); }, Math.min(delay, 2_147_483_647));
+    return () => clearTimeout(timer);
+  }, [reopenExpiresAt, refetch]);
   if (q.isLoading) return <p>Loading your weekly fee…</p>;
   if (q.isError || !q.data) return <div role="alert"><p>Could not load your weekly fee.</p><button onClick={() => void q.refetch()}>Try again</button></div>;
   const sub = q.data;
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
-  const mmgPending = view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const reopen = reopenableMmg(sub, checkout);
+  const mmgPending = view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const canReopen = !!reopen && !view.blocked && !cardPending;
   const blocked = mmgPending || cardPending;
   // The card choice exists only when the server says CARD is live.
   const card = liveCard(sub.payActions);
@@ -65,6 +78,12 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
     </div>
     {action && !blocked && card && <h2 className="text-lg font-bold">Choose how to pay</h2>}
     <div className={`grid gap-4 ${action && !blocked && card ? 'md:grid-cols-2' : ''}`}>
+      {canReopen && reopen && <section aria-labelledby="mmg-reopen-title" className="space-y-4 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
+        <h3 id="mmg-reopen-title" className="text-lg font-bold">Back to MMG&apos;s page</h3>
+        <p className="text-sm text-[var(--swift-muted)]">{feeExpiry(reopen.expiresAt)}</p>
+        <p className="text-sm font-semibold">{REOPEN_ALREADY_PAID}</p>
+        <button disabled={view.busy} onClick={() => void session.reopen(reopen.ref)} className="inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">Back to MMG&apos;s page</button>
+      </section>}
       {action && !blocked && <section aria-labelledby="mmg-pay-title" className="flex flex-col gap-4 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
         <div className="flex items-start gap-3">
           <span aria-hidden="true" className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--swift-red-50)] text-xs font-extrabold text-[var(--swift-red-600)]">MMG</span>
