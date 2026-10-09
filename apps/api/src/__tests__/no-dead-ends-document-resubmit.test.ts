@@ -214,23 +214,31 @@ describe('a store owner re-submits one rejected document without restarting the 
 describe('previousDecisions (pure)', () => {
   const at = (iso: string) => new Date(iso);
   const queued = [
-    { id: 'new-id', userId: 'u1', docType: 'national_id', createdAt: at('2026-10-06T12:00:00Z') },
-    { id: 'first', userId: 'u2', docType: 'national_id', createdAt: at('2026-10-06T12:00:00Z') },
+    { id: 'new-id', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', createdAt: at('2026-10-06T12:00:00Z') },
+    { id: 'first', userId: 'u2', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', createdAt: at('2026-10-06T12:00:00Z') },
   ];
   it('picks the newest earlier decision of the same applicant and type, and names a rejection a re-submission', () => {
     const found = previousDecisions(queued, [
-      { id: 'old-reject', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'old', reviewedAt: at('2026-10-01T00:00:00Z'), createdAt: at('2026-10-01T00:00:00Z') },
-      { id: 'last-reject', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: at('2026-10-05T00:00:00Z'), createdAt: at('2026-10-05T00:00:00Z') },
-      { id: 'other-type', userId: 'u1', docType: 'tin_certificate', status: 'REJECTED', reviewNote: 'x', reviewedAt: null, createdAt: at('2026-10-05T06:00:00Z') },
-      { id: 'other-person', userId: 'u3', docType: 'national_id', status: 'REJECTED', reviewNote: 'y', reviewedAt: null, createdAt: at('2026-10-05T06:00:00Z') },
-      { id: 'later', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'z', reviewedAt: null, createdAt: at('2026-10-07T00:00:00Z') },
+      { id: 'old-reject', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'old', reviewedAt: at('2026-10-01T00:00:00Z'), createdAt: at('2026-10-01T00:00:00Z') },
+      { id: 'last-reject', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: at('2026-10-05T00:00:00Z'), createdAt: at('2026-10-05T00:00:00Z') },
+      { id: 'other-type', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'tin_certificate', status: 'REJECTED', reviewNote: 'x', reviewedAt: null, createdAt: at('2026-10-05T06:00:00Z') },
+      { id: 'other-person', userId: 'u3', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'y', reviewedAt: null, createdAt: at('2026-10-05T06:00:00Z') },
+      { id: 'later', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'z', reviewedAt: null, createdAt: at('2026-10-07T00:00:00Z') },
     ]);
     expect(found.get('new-id')).toMatchObject({ documentId: 'last-reject', kind: 'RESUBMITTED_AFTER_REJECTION', reviewNote: 'blurry' });
     expect(found.has('first'), 'a first upload has no previous decision').toBe(false);
   });
+  it.each([
+    { role: 'MOVER', subjectId: null },
+    { role: 'CUSTOMER', subjectId: 'another-subject' },
+  ] as const)('does not attach evidence from another role or subject: %j', (other) => {
+    const matching = { ...queued[0]!, id: 'matching', status: 'REJECTED', reviewNote: 'matching decision', reviewedAt: null, createdAt: at('2026-10-01T00:00:00Z') };
+    const wrong = { ...matching, ...other, id: 'wrong', createdAt: at('2026-10-05T00:00:00Z') };
+    expect(previousDecisions([queued[0]!], [matching, wrong]).get('new-id')?.documentId).toBe('matching');
+  });
   it('an earlier approved or expired document makes it a renewal', () => {
     const found = previousDecisions([queued[0]!], [
-      { id: 'expired', userId: 'u1', docType: 'national_id', status: 'EXPIRED', reviewNote: null, reviewedAt: null, createdAt: at('2025-10-01T00:00:00Z') },
+      { id: 'expired', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'EXPIRED', reviewNote: null, reviewedAt: null, createdAt: at('2025-10-01T00:00:00Z') },
     ]);
     expect(found.get('new-id')).toMatchObject({ kind: 'RENEWAL', status: 'EXPIRED' });
   });
@@ -239,7 +247,7 @@ describe('previousDecisions (pure)', () => {
 describe('[DS778 S4] the queue never fails because the earlier-verdict lookup failed', () => {
   it('a failing lookup degrades every row to previousDecision: null and reports the failure', async () => {
     const { withPreviousDecisions } = await import('../modules/verification/previous-decision');
-    const docs = [{ id: 'd1', userId: 'u1', docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z'), note: 'kept' }];
+    const docs = [{ id: 'd1', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z'), note: 'kept' }];
     const failures: unknown[] = [];
     const rows = await withPreviousDecisions(docs, async () => { throw new Error('connection reset'); }, (error) => failures.push(error));
     expect(rows).toEqual([{ ...docs[0], previousDecision: null }]);
@@ -247,9 +255,9 @@ describe('[DS778 S4] the queue never fails because the earlier-verdict lookup fa
   });
   it('a working lookup attaches the decision, and an empty page reads nothing', async () => {
     const { withPreviousDecisions } = await import('../modules/verification/previous-decision');
-    const docs = [{ id: 'd1', userId: 'u1', docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z') }];
+    const docs = [{ id: 'd1', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z') }];
     const rows = await withPreviousDecisions(docs, async () => [
-      { id: 'old', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: null, createdAt: new Date('2026-10-01T00:00:00Z') },
+      { id: 'old', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: null, createdAt: new Date('2026-10-01T00:00:00Z') },
     ], () => {});
     expect(rows[0]!.previousDecision).toMatchObject({ documentId: 'old', kind: 'RESUBMITTED_AFTER_REJECTION', reviewNote: 'blurry' });
     let read = false;

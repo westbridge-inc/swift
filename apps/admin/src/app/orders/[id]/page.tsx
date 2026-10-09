@@ -7,6 +7,9 @@ import { ArrowLeft, Phone } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { PaymentDispute } from '@/components/mc/PaymentDispute';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 import { askReason } from '@/lib/ask-reason';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
@@ -48,7 +51,7 @@ function Party({ label, name, phone, href }: { label: string; name?: string | nu
 export default function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const queryClient = useQueryClient();
-  const { data, isLoading, isError } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
   const cancelMutation = useMutation({
     // [ADM-006] the operator's words, not a template
     mutationFn: ({ refund, reason }: { refund: boolean; reason: string }) => cancelOrder(id, { refund }, reason),
@@ -68,6 +71,10 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     },
   });
 
+  const actions = useActionRunner(() => {
+    void queryClient.invalidateQueries({ queryKey: ['order', id] });
+    void queryClient.invalidateQueries({ queryKey: ['orders'] });
+  });
   const o: any = data?.data;
 
   if (isLoading) {
@@ -79,7 +86,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
         <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
           <ArrowLeft size={16} /> Orders
         </Link>
-        <p className="text-[var(--muted)]">Order not found.</p>
+        <QueryFailed error={error ?? new Error('The order response was empty.')} what="this order" onRetry={() => void refetch()} retrying={isFetching} />
       </div>
     );
   }
@@ -96,6 +103,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
         <ArrowLeft size={16} /> Orders
       </Link>
+
+      {actions.banner}
+      <PaymentDispute order={o} actions={actions} />
 
       {/* Header — identity + the actions an operator actually has */}
       <div className="flex flex-wrap items-center gap-3 mb-6">

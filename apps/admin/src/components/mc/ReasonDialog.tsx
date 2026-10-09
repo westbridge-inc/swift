@@ -154,6 +154,7 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
   const [values, setValues] = useState<Record<string, string>>({});
   const [shown, setShown] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
   const [refusal, setRefusal] = useState<Outcome | null>(null);
 
   const reasonCheck = asksReason ? checkReason(reasonText) : null;
@@ -164,7 +165,7 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || inFlight.current) return;
     setShown(Object.fromEntries([['reason', true], ...fields.map((f) => [f.name, true])]));
     const firstBad = fields.findIndex((_, i) => !fieldChecks[i]!.ok);
     if (firstBad >= 0) { document.getElementById(`${uid}-${fields[firstBad]!.name}`)?.focus(); return; }
@@ -174,6 +175,7 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
       values: Object.fromEntries(fields.map((f, i) => [f.name, (fieldChecks[i] as { ok: true; value: string | number }).value])),
     };
     if (!request.submit) { onSettle({ kind: 'done', answer, outcome: null }); return; }
+    inFlight.current = true;
     setBusy(true);
     setRefusal(null);
     try {
@@ -185,6 +187,7 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
       // A queued approval is the success-class answer for a money action: close.
       if (outcome.tone === 'queued') { onSettle({ kind: 'done', answer, outcome }); return; }
       setRefusal(outcome);
+      inFlight.current = false;
       setBusy(false);
     }
   };

@@ -869,3 +869,49 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 };
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
+
+// ── [MC-AD4] Paid MMG orders held for review (ready too long) ─────────────
+export interface HeldOrder {
+  id: string;
+  orderNumber: string;
+  orderType: string;
+  status: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  totalAmount: number;
+  readyAt: string | null;
+  foodAgeHeldAt: string | null;
+  placedAt: string | null;
+  heldMinutes: number | null;
+  readyMinutes: number | null;
+  vendor: { id: string; name: string } | null;
+}
+export const fetchHeldOrders = (): Promise<Envelope<HeldOrder[]>> => apiFetch('/api/v1/admin/orders/held');
+/** An unreadable acknowledgement does not establish whether an action completed. */
+const unreadableOrderAction = () => Object.assign(new Error('Swift returned an unreadable answer. Refresh the order and check whether the action went through before retrying.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+export const retryOrderDispatch = async (id: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/retry-dispatch`, { method: 'POST', body: '{}' });
+  if (response?.success !== true || !isRecord(response.data)) throw unreadableOrderAction();
+  return response;
+};
+/** C2 (operational): the only release the server offers today is "deliver anyway". */
+export const releaseHeldOrder = async (id: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/food-age-hold/release`, { method: 'POST', body: JSON.stringify({ decision: 'DELIVER_ANYWAY' }) });
+  if (response?.success !== true || response.data?.released !== true || response.data?.decision !== 'DELIVER_ANYWAY' || !isRecord(response.data?.dispatch)) throw unreadableOrderAction();
+  return response;
+};
+
+// ── [MC-AD5] An MMG payment dispute on a store order ──────────────────────
+/** C3: decided against the claim revision the operator reviewed; the reason is the decision note too. */
+export const resolvePaymentDispute = async (
+  id: string,
+  decision: { resolution: 'CUSTOMER_PAID' | 'CUSTOMER_DID_NOT_PAY'; expectedClaimRevision: number },
+  reason: string,
+) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/payment-claim/resolve`, {
+    method: 'POST', body: JSON.stringify({ ...decision, note: reason }), reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.resolution !== decision.resolution || response.data?.mismatch !== false) throw unreadableOrderAction();
+  return response;
+};

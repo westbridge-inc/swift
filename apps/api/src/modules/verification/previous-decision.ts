@@ -1,3 +1,5 @@
+import type { UserRole } from '@prisma/client';
+
 /**
  * [NO-DEAD-ENDS · owner, 6 Oct] "Resubmit the document rejected rather than
  * restart the application." The applicant already can: a rejected document
@@ -24,9 +26,9 @@ export interface PreviousDecision {
   submittedAt: Date;
 }
 
-export interface QueuedDocument { id: string; userId: string; docType: string; createdAt: Date }
-export interface EarlierDocument {
-  id: string; userId: string; docType: string; status: string;
+export interface QueuedDocument { id: string; userId: string; role: UserRole; subjectId: string | null; docType: string; createdAt: Date }
+export interface EarlierDocument extends QueuedDocument {
+  status: string;
   reviewNote: string | null; reviewedAt: Date | null; createdAt: Date;
 }
 
@@ -37,16 +39,16 @@ export const DECIDED_STATUSES = ['REJECTED', 'EXPIRED', 'APPROVED'] as const;
 export function earlierDocumentsWhere(queued: readonly QueuedDocument[]) {
   return {
     status: { in: [...DECIDED_STATUSES] },
-    OR: queued.map((doc) => ({ userId: doc.userId, docType: doc.docType, createdAt: { lt: doc.createdAt } })),
+    OR: queued.map((doc) => ({ userId: doc.userId, role: doc.role, subjectId: doc.subjectId, docType: doc.docType, createdAt: { lt: doc.createdAt } })),
   };
 }
 
-/** For each queued document, the latest earlier decision on the same applicant's same document type. */
+/** For each queued document, the latest earlier decision on the same applicant, role, subject and document type. */
 export function previousDecisions(queued: readonly QueuedDocument[], earlier: readonly EarlierDocument[]): Map<string, PreviousDecision> {
   const newestFirst = [...earlier].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   const found = new Map<string, PreviousDecision>();
   for (const doc of queued) {
-    const prior = newestFirst.find((e) => e.userId === doc.userId && e.docType === doc.docType
+    const prior = newestFirst.find((e) => e.userId === doc.userId && e.role === doc.role && e.subjectId === doc.subjectId && e.docType === doc.docType
       && e.id !== doc.id && e.createdAt.getTime() < doc.createdAt.getTime()
       && (DECIDED_STATUSES as readonly string[]).includes(e.status));
     if (!prior) continue;
