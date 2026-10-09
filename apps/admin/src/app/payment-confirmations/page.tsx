@@ -25,14 +25,15 @@ export default function PaymentConfirmationsPage() {
   const queue = useQuery({ queryKey: ['payment-confirmations'], queryFn: fetchPaymentConfirmations });
   const approvals = useQuery({ queryKey: ['confirmation-approvals'], queryFn: fetchConfirmationApprovals });
   const [selection, setSelection] = useState<{ row: PaymentConfirmation; decision: 'PAID' | 'UNPAID' } | null>(null);
+  const [reloadRequired, setReloadRequired] = useState<Record<string, boolean>>({});
   const [requestBusy, setRequestBusy] = useState(false);
   const [queued, setQueued] = useState<Record<string, string>>({});
   const rows = [...(queue.data?.data ?? [])].sort((a, b) => Number(b.overdue) - Number(a.overdue) || Date.parse(a.reviewDueAt) - Date.parse(b.reviewDueAt) || a.id.localeCompare(b.id));
   const ready = !requestBusy && !queue.isFetching && !approvals.isFetching && !queue.isError && !approvals.isError && !!approvals.data;
   const reload = async () => {
     setSelection(null);
-    const [, approvalResult] = await Promise.all([queue.refetch(), approvals.refetch()]);
-    if (!approvalResult.isError) setQueued({});
+    const [queueResult, approvalResult] = await Promise.all([queue.refetch(), approvals.refetch()]);
+    if (!queueResult.isError && !approvalResult.isError) { setQueued({}); setReloadRequired({}); }
   };
   return (
     <div className="space-y-5">
@@ -62,19 +63,20 @@ export default function PaymentConfirmationsPage() {
                 <p>{approval?.status === 'APPROVED' ? 'Approved by a second admin; waiting for the requester to apply it.' : 'Waiting for a second admin. Nothing has changed yet.'}</p>
                 <Link className="underline text-[var(--accent)]" href="/approvals">Open Approvals</Link>
               </div> : <div className="flex flex-wrap gap-2">
-                <button type="button" disabled={!ready} aria-label={`Close as NOT PAID ${reference}`} onClick={() => setSelection({ row, decision: 'UNPAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Close as NOT PAID</button>
-                <button type="button" disabled={!ready} aria-label={`Mark PAID ${reference}`} onClick={() => setSelection({ row, decision: 'PAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Mark PAID</button>
+                {reloadRequired[row.id] && <p>Reload confirmations before another request.</p>}
+                <button type="button" disabled={!ready || reloadRequired[row.id]} aria-label={`Close as NOT PAID ${reference}`} onClick={() => setSelection({ row, decision: 'UNPAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Close as NOT PAID</button>
+                <button type="button" disabled={!ready || reloadRequired[row.id]} aria-label={`Mark PAID ${reference}`} onClick={() => setSelection({ row, decision: 'PAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Mark PAID</button>
               </div>}</td>
             </tr>;
           })}</tbody>
         </table>
       </div>}
-      {selection && <ResolveForm key={`${selection.row.id}:${selection.decision}`} {...selection} onBusy={setRequestBusy} onCancel={() => setSelection(null)} onQueued={(id) => { setQueued((old) => ({ ...old, [selection.row.id]: id })); setSelection(null); }} />}
+      {selection && <ResolveForm key={`${selection.row.id}:${selection.decision}`} {...selection} onBusy={setRequestBusy} onReloadRequired={() => setReloadRequired((old) => ({ ...old, [selection.row.id]: true }))} onCancel={() => setSelection(null)} onQueued={(id) => { setQueued((old) => ({ ...old, [selection.row.id]: id })); setSelection(null); }} />}
     </div>
   );
 }
 
-function ResolveForm({ row, decision, onCancel, onQueued, onBusy }: { row: PaymentConfirmation; decision: 'PAID' | 'UNPAID'; onBusy: (_busy: boolean) => void; onCancel: () => void; onQueued: (_id: string) => void }) {
+function ResolveForm({ row, decision, onCancel, onQueued, onBusy, onReloadRequired }: { row: PaymentConfirmation; decision: 'PAID' | 'UNPAID'; onBusy: (_busy: boolean) => void; onReloadRequired: () => void; onCancel: () => void; onQueued: (_id: string) => void }) {
   const [evidence, setEvidence] = useState('');
   const [reason, setReason] = useState('');
   const [paymentId, setPaymentId] = useState('');
@@ -96,12 +98,12 @@ function ResolveForm({ row, decision, onCancel, onQueued, onBusy }: { row: Payme
     try {
       await requestConfirmationResolution(row.id, { sourceId: row.sourceId, epoch: row.epoch, clockVersion: row.clockVersion, decision,
         ...(decision === 'PAID' && mmg ? { providerPaymentId: paymentId } : {}), evidenceReference: evidence, reason: checked.reason });
-      setStale(true);
+      setStale(true); onReloadRequired();
       setError(new Error('The server did not confirm a queued approval. Reload confirmations and check Approvals before sending again.'));
     } catch (err) {
       const approvalId = errorDetails(err)?.['approvalId'];
       if (errorCode(err) === 'APPROVAL_REQUIRED' && typeof approvalId === 'string' && approvalId.length > 0) { onQueued(approvalId); return; }
-      if (errorCode(err) === 'CONFIRMATION_CHANGED' || errorCode(err) === 'APPROVAL_REQUIRED' || !errorStatus(err) || errorStatus(err)! >= 500) setStale(true);
+      if (errorCode(err) === 'CONFIRMATION_CHANGED' || errorCode(err) === 'APPROVAL_REQUIRED' || !errorStatus(err) || errorStatus(err)! >= 500) { setStale(true); onReloadRequired(); }
       setError(err);
     } finally { inFlight.current = false; setBusy(false); onBusy(false); }
   };

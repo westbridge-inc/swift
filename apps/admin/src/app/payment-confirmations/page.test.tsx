@@ -124,3 +124,29 @@ it('an uncertain acknowledgement requires checking the queue before another requ
   await user.click(within(form).getByRole('button', { name: 'Close' }));
   expect((screen.getByRole('button', { name: `Close as NOT PAID ${row.swiftReference}` }) as HTMLButtonElement).disabled).toBe(true);
 });
+
+it('the existing Approvals page displays a server self-approval refusal on the actual decision endpoint', async () => {
+  const fetch = serve((r) => {
+    expect(r.url.pathname).toBe('/api/v1/admin/approvals/approval-one/decide');
+    return { status: 403, body: { success: false, error: { code: 'FORBIDDEN', message: 'You raised this request. A money or platform action needs a second person.' } } };
+  }, [row], [{ ...pending, isOwnRequest: false }]);
+  // The server remains authoritative even if the rendered identity facts are stale.
+  const { user } = renderWithQuery(<ApprovalsPage />);
+  await user.type(await screen.findByRole('textbox'), REASON);
+  await user.click(screen.getByRole('button', { name: 'Approve' }));
+  expect(await screen.findByText(/You raised this request/)).toBeTruthy();
+  expect(requestsByMethod(fetch, 'POST')).toHaveLength(1);
+});
+
+it('the requester sees the reload message if confirmation evidence changes before the approved action is applied', async () => {
+  const fetch = mockApi((r) => {
+    if (r.method === 'GET') return { body: { success: true, data: r.url.searchParams.get('status') === 'APPROVED' ? [{ ...pending, status: 'APPROVED' }] : [] } };
+    expect(r.url.pathname).toBe('/api/v1/admin/approvals/approval-one/apply');
+    return { status: 409, body: { success: false, error: { code: 'CONFLICT', message: 'Reload the payment confirmation before resolving it.' } } };
+  });
+  const { user } = renderWithQuery(<ApprovalsPage />);
+  await user.click(screen.getByRole('button', { name: 'Approved' }));
+  await user.click(await screen.findByRole('button', { name: 'Execute the approved action' }));
+  expect(await screen.findByText(/Reload the payment confirmation before resolving it/)).toBeTruthy();
+  expect(requestsByMethod(fetch, 'POST')).toHaveLength(1);
+});
