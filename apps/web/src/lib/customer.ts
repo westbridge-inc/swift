@@ -133,6 +133,8 @@ export interface Cart {
   };
   meetsMinimum?: boolean;
   minimumOrderAmount?: number;
+  /** [E01] One row per future order: each store's fulfilment, fee and total, as checkout writes it. */
+  vendors?: Array<{ vendorId: string; name: string; fulfillment: string; subtotal?: number; deliveryFee: number; totalAmount?: number; meetsMinimum?: boolean }>;
   paymentCapabilities?: {
     /** Changes when the vendor set or the validated MMG destination changes. */
     scope?: string;
@@ -243,9 +245,33 @@ export async function getMarketCategories(): Promise<MarketCategory[]> {
 }
 
 // ── Cart ──────────────────────────────────────────────────────────────────
-export async function getCart(options?: { redirectOnExpired?: boolean }): Promise<Cart> {
-  const data = (await apiFetch('/api/v1/customer/cart', undefined, options)).data as Cart | null;
+/** [E01] The checkout choices a quote is priced for — the same meaning as the
+ *  checkout body's fields of these names (GET /cart takes them as a query). */
+export type CartQuoteChoices = { fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>; tipAmount?: number };
+
+export async function getCart(options?: { redirectOnExpired?: boolean; choices?: CartQuoteChoices }): Promise<Cart> {
+  const query = new URLSearchParams();
+  if (options?.choices?.fulfillmentSelections) query.set('fulfillmentSelections', JSON.stringify(options.choices.fulfillmentSelections));
+  if (options?.choices?.tipAmount !== undefined) query.set('tipAmount', String(options.choices.tipAmount));
+  const qs = query.toString();
+  const data = (await apiFetch(`/api/v1/customer/cart${qs ? `?${qs}` : ''}`, undefined, options?.redirectOnExpired === undefined ? undefined : { redirectOnExpired: options.redirectOnExpired })).data as Cart | null;
   return data ?? { items: [] };
+}
+
+/** [W5] The stores a cart's quote prices, from its own lines (sorted, so an
+ *  unchanged cart gives an unchanged selection). */
+export function quoteStoreIds(items: Cart['items'] | null | undefined): string[] {
+  return [...new Set((items ?? []).map((line) => line.vendorId).filter((id): id is string => typeof id === 'string' && id.length > 0))].sort();
+}
+
+/**
+ * [W5] Pickup, priced the way the phone app prices it (cartQuote.ts
+ * cartPricingChoices; pickup.test.tsx holds the two equal): the one pickup
+ * choice applies to EVERY store in the basket, and with no rider there is no
+ * rider tip. The same object prices the quote and goes in the order.
+ */
+export function pickupChoices(storeIds: readonly string[]): Required<CartQuoteChoices> {
+  return { fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP' as const])), tipAmount: 0 };
 }
 export async function addToCart(body: { vendorId: string; itemId: string; quantity: number; selectedOptions?: Record<string, string | string[]> }) {
   return (await apiFetch('/api/v1/customer/cart/items', { method: 'POST', body: JSON.stringify(body) })).data;
