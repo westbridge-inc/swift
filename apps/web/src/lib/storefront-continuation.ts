@@ -67,7 +67,8 @@ export function readStorefrontContinuation(): StorefrontContinuation | null {
     }
     return {
       storeSlug: value.storeSlug, itemId: value.itemId, returnPath: value.returnPath,
-      selectedOptions: value.selectedOptions, quantity: value.quantity ?? 1,
+      selectedOptions: value.selectedOptions,
+      ...(value.quantity !== undefined ? { quantity: value.quantity } : {}),
     };
   } catch { clearStorefrontContinuation(); return null; }
 }
@@ -82,7 +83,8 @@ export function queueStorefrontContinuation(intent: StorefrontContinuation): voi
     sessionStorage.setItem(INTENT_EPOCH_KEY, epoch);
     sessionStorage.setItem(KEY, JSON.stringify({
       storeSlug: intent.storeSlug, itemId: intent.itemId,
-      selectedOptions: intent.selectedOptions, returnPath: intent.returnPath, quantity: intent.quantity ?? 1,
+      selectedOptions: intent.selectedOptions, returnPath: intent.returnPath,
+      ...(intent.quantity !== undefined ? { quantity: intent.quantity } : {}),
     }));
   } catch { clearStorefrontContinuation(); /* Browsing still works without storage. */ }
 }
