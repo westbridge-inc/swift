@@ -7,6 +7,7 @@ import { StorefrontExperience } from './storefront-experience';
 import * as auth from '@/lib/auth';
 import * as customer from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
+import { swiftDesignVariables } from '@/lib/design-tokens';
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
@@ -38,6 +39,28 @@ const reportIntersection = (isIntersecting: boolean) => act(() => {
   if (!intersect) throw new Error('Checkout observer was not installed');
   intersect([{ target: panel(), isIntersecting }]);
 });
+// A busy main thread can queue several crossings of the panel edge; the browser then delivers
+// them oldest first in ONE callback.
+const reportCrossings = (...crossings: boolean[]) => act(() => {
+  if (!intersect) throw new Error('Checkout observer was not installed');
+  intersect(crossings.map(isIntersecting => ({ target: panel(), isIntersecting })));
+});
+// Every `@media <query> { … }` block of a stylesheet, brace-matched.
+const mediaBlocks = (css: string, query: string) => {
+  const blocks: string[] = [];
+  for (let at = css.indexOf(`@media ${query} {`); at >= 0; at = css.indexOf(`@media ${query} {`, at + 1)) {
+    const open = css.indexOf('{', at);
+    let depth = 0;
+    let end = open;
+    for (; end < css.length; end += 1) {
+      if (css[end] === '{') depth += 1;
+      if (css[end] === '}' && --depth === 0) break;
+    }
+    blocks.push(css.slice(open + 1, end));
+  }
+  return blocks;
+};
+const tokenPx = (name: `--${string}`) => Number.parseFloat(String(swiftDesignVariables[name]));
 
 beforeEach(() => {
   intersect = undefined;
@@ -91,7 +114,9 @@ describe('storefront mobile checkout access', () => {
     for (const link of [dock()!, basket, basket]) {
       link.focus();
       fireEvent.click(link);
-      expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: reducedMotion ? 'instant' : 'smooth', block: 'start' });
+      // Reduced motion asks for 'auto': the page's own reduced-motion rule makes it a jump, and every
+      // engine accepts 'auto' (an engine that rejects 'instant' would throw before the focus moves).
+      expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
       expect(scrollIntoView.mock.contexts.at(-1)).toBe(panel());
       expect(document.activeElement).toBe(heading);
       expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
@@ -149,6 +174,57 @@ describe('storefront mobile checkout access', () => {
     expect(css).toMatch(/padding-block-end: calc\(var\(--swift-order-dock-height\).*env\(safe-area-inset-bottom, 0\)\)/);
     expect(css).toMatch(/\.rail\s*\{[^}]*scroll-margin-block-start:/);
     expect(css).toMatch(/\.railTitle:focus\s*\{[^}]*outline:/);
+  });
+
+  it('follows the latest crossing when one observer callback reports several, so the dock never sits over a visible panel', async () => {
+    await renderCart();
+    // Panel scrolled away and back before the callback ran: it is on screen now.
+    reportCrossings(false, true);
+    expect(dock()).toBeNull();
+    expect(within(panel()).getByRole('button', { name: 'Place cash order' })).toBeTruthy();
+    // Scrolled in and out again: it is off screen now, so the dock returns.
+    reportCrossings(true, false);
+    expect(dock()).not.toBeNull();
+    reportCrossings(false, true, false, true);
+    expect(dock()).toBeNull();
+  });
+
+  it('still scrolls and focuses the order heading under reduced motion where the browser rejects the instant scroll value', async () => {
+    vi.mocked(window.matchMedia).mockReturnValue({ matches: true } as MediaQueryList);
+    // An engine without the 'instant' value throws a TypeError for it, as WebIDL requires.
+    scrollIntoView.mockImplementationOnce((options?: ScrollIntoViewOptions) => {
+      if (options?.behavior === 'instant') throw new TypeError("'instant' is not a valid ScrollBehavior value");
+    });
+    await renderCart();
+    const heading = within(panel()).getByRole('heading', { level: 2 });
+    fireEvent.click(screen.getByRole('link', { name: /Your order, 1 items/ }));
+    // The tap must never "do nothing": focus lands on the order heading.
+    expect(document.activeElement).toBe(heading);
+    expect(scrollIntoView).toHaveBeenCalledOnce();
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'auto', block: 'start' });
+    expect(scrollIntoView.mock.contexts.at(-1)).toBe(panel());
+  });
+
+  it('lands the order panel below the phone header and the stuck category bar', () => {
+    const css = readFileSync(`${process.cwd()}/src/components/storefront/storefront.module.css`, 'utf8');
+    const phone = mediaBlocks(css, '(max-width: 56.25em)').join('\n');
+    const phoneRail = phone.match(/(?:^|\n)\s*\.rail\s*\{([^}]*)\}/)?.[1] ?? '';
+    // Same offset the menu sections use on a phone.
+    expect(phoneRail).toMatch(/scroll-margin-block-start:\s*var\(--swift-section-scroll\);/);
+    expect(css).toMatch(/\.section\s*\{[^}]*scroll-margin-block-start:\s*var\(--swift-section-scroll\);/);
+    // The header bar (touch + lg) and the category bar stuck under it (touch link + sm above and below).
+    const stuckChrome = tokenPx('--swift-touch') + tokenPx('--swift-space-lg') + tokenPx('--swift-touch') + 2 * tokenPx('--swift-space-sm');
+    expect(tokenPx('--swift-section-scroll')).toBeGreaterThan(stuckChrome);
+  });
+
+  it('announces the focused heading as the order panel to screen readers, with the visible title unchanged', async () => {
+    await renderCart();
+    fireEvent.click(screen.getByRole('link', { name: /Your order, 1 items/ }));
+    const heading = within(panel()).getByRole('heading', { level: 2, name: 'Your order, Test Kitchen' });
+    expect(document.activeElement).toBe(heading);
+    const prefix = heading.querySelector('.sr-only');
+    expect(prefix?.textContent).toBe('Your order, ');
+    expect(heading.textContent?.slice(prefix?.textContent?.length ?? 0)).toBe('Test Kitchen');
   });
 });
 

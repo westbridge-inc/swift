@@ -1040,6 +1040,8 @@
 
   .rail {
     position: static;
+    /* Clear the header and the category bar stuck under it, as menu sections do. */
+    scroll-margin-block-start: var(--swift-section-scroll);
   }
 
   .storeCard {

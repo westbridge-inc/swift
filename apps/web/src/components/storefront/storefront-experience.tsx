@@ -239,8 +239,10 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
 
   useEffect(() => {
     if (!orderPanel.current || typeof IntersectionObserver === 'undefined') return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry) setCheckoutVisible(entry.isIntersecting);
+    // One callback can carry several crossings, oldest first; only the newest says where the panel is now.
+    const observer = new IntersectionObserver((entries) => {
+      const latest = entries[entries.length - 1];
+      if (latest) setCheckoutVisible(latest.isIntersecting);
     }, { threshold: 0 });
     observer.observe(orderPanel.current);
     return () => observer.disconnect();
@@ -249,7 +251,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
   const showOrder = (event: React.MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     orderPanel.current?.scrollIntoView({
-      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+      // 'auto' follows the page's reduced-motion scroll rule and, unlike 'instant', no engine rejects it.
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
       block: 'start',
     });
     railHeading.current?.focus({ preventScroll: true });
@@ -1055,7 +1058,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
               <p className={styles.railEyebrow}>
                 Your order{selectedAddress ? ` · delivery to ${selectedAddress.label}` : ''}
               </p>
-              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
+              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}><span className="sr-only">Your order, </span>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
             </div>
 
             <div className={styles.railBody}>
