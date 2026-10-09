@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkoutReferences, checkoutWords, dueLine, FeeCheckoutSession, reopenableMmg, liveMmg, pollDelay, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
+import { checkoutReferences, checkoutWords, dueLine, FeeCheckoutSession, feeExpiry, reopenableMmg, liveMmg, pollDelay, REOPEN_ALREADY_PAID, REOPEN_REFUSED, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
 const checkout = (status: CheckoutStatus['status']): CheckoutStatus => ({ ref: 'reference-1', status, amountGyd: 1200, currencyCode: 'GYD', createdAt: '2026-09-29T12:00:00Z', expiresAt: status === 'OPEN' ? '2099-09-29T13:00:00Z' : '2026-09-29T13:00:00Z', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:02:00Z' : null, subscriptionStatus: 'ACTIVE' });
 function setup() {
   const views: CheckoutView[] = [];
-  const transport = { start: vi.fn(async (_key: string): Promise<CheckoutStart> => ({ ref: 'reference-1', status: 'OPEN' as const, checkoutUrl: 'https://checkout.test/private', amountGyd: 1200, currencyCode: 'GYD' as const, expiresAt: '2026-09-29T13:00:00Z' })), read: vi.fn(async () => checkout('OPEN')), open: vi.fn(async (_url: string): Promise<unknown> => ({ type: 'success', url: 'swift://pay/mmg/return?status=CONFIRMED' })), refresh: vi.fn() };
+  const transport = { start: vi.fn(async (_key: string): Promise<CheckoutStart> => ({ ref: 'reference-1', status: 'OPEN' as const, checkoutUrl: 'https://checkout.test/private', amountGyd: 1200, currencyCode: 'GYD' as const, expiresAt: '2026-09-29T13:00:00Z' })), read: vi.fn(async () => checkout('OPEN')), reopen: vi.fn(async (ref: string, _key: string): Promise<CheckoutStart> => ({ ref, status: 'OPEN' as const, checkoutUrl: 'https://checkout.test/private', amountGyd: 1200, currencyCode: 'GYD' as const, expiresAt: '2099-09-29T13:00:00Z' })), open: vi.fn(async (_url: string): Promise<unknown> => ({ type: 'success', url: 'swift://pay/mmg/return?status=CONFIRMED' })), refresh: vi.fn() };
   let keys = 0;
   const session = new FeeCheckoutSession(transport, () => `tap-key-${++keys}`, (v) => views.push(v), (e) => e as { status?: number; code?: string; details?: { ref?: string } });
   return { session, transport, views };
@@ -23,7 +23,7 @@ describe('weekly fee contract', () => {
   it.each([
     ['OPEN', 'Finish paying on the MMG page.'], ['CONFIRMING', "Confirming your payment with MMG. Don't pay again."],
     ['CONFIRMED', 'Paid: GY$1,200 received on 29 Sept 2026.'], ['NOT_PAID', "MMG didn't complete this payment. You can try again."],
-    ['EXPIRED', "This checkout expired. Your payment is being checked. Don't pay again. Support will help."],
+    ['EXPIRED', "This checkout expired. Don't pay again. Swift support will check this payment."],
     ['HELD', "We're checking this payment by hand. Don't pay again. Support will contact you."],
   ] as const)('%s has truthful words', (state, words) => expect(checkoutWords(checkout(state))).toBe(words));
   it("references: the Swift reference always, MMG's transaction ID only on CONFIRMED, nothing invented", () => {
@@ -172,7 +172,7 @@ describe('checkout deadline before the next server refresh', () => {
   it('a stale OPEN at its deadline tells the partner it is being checked', () => {
     const c = { ...checkout('OPEN'), expiresAt: '2026-10-08T23:30:00Z' };
     vi.useFakeTimers(); vi.setSystemTime(new Date(c.expiresAt));
-    expect(checkoutWords(c, true)).toBe("This checkout expired. Your payment is being checked. Don't pay again. Support will help.");
+    expect(checkoutWords(c, true)).toBe("This checkout expired. Don't pay again. Swift support will check this payment.");
   });
 });
 
@@ -186,5 +186,81 @@ describe('reopen authority changes before POST', () => {
     expect(transport.start).toHaveBeenCalledOnce(); expect(transport.open).not.toHaveBeenCalled();
     expect(transport.read).toHaveBeenCalledWith('reference-1');
     expect(views.at(-1)?.blocked).toBe(true); session.dispose();
+  });
+  it('[F5] PAYMENT_CONFIRMING has neutral words (it also means billing is preparing or under review); CHECKOUT_CONFIRMING names the payment', async () => {
+    const { session, transport, views } = setup();
+    transport.start.mockRejectedValue({ status: 409, code: 'PAYMENT_CONFIRMING' });
+    await session.pay();
+    expect(views.at(-1)?.error).toBe("Paying is paused while Swift checks this fee. If you already paid, don't pay again.");
+    expect(views.at(-1)?.blocked).toBe(true); session.dispose();
+    const second = setup();
+    second.transport.start.mockRejectedValue({ status: 409, code: 'CHECKOUT_CONFIRMING' });
+    await second.session.pay();
+    expect(second.views.at(-1)?.error).toBe("We're confirming your last payment, don't pay again."); second.session.dispose();
+  });
+});
+
+
+describe('[review F1/F2/F5] Back reopens only the checkout it names', () => {
+  it('asks for the named ref with a fresh key per tap, never the start route, and opens only that ref’s OPEN page', async () => {
+    vi.useFakeTimers(); const { session, transport, views } = setup();
+    await session.reopen('reference-1'); await session.reopen('reference-1');
+    expect(transport.start).not.toHaveBeenCalled();
+    expect(transport.reopen.mock.calls).toEqual([['reference-1', 'tap-key-1'], ['reference-1', 'tap-key-2']]);
+    expect(transport.open.mock.calls).toEqual([['https://checkout.test/private'], ['https://checkout.test/private']]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.read).toHaveBeenCalledWith('reference-1');
+    expect(JSON.stringify(views)).not.toContain('https://checkout.test/private'); session.dispose();
+  });
+  it.each([
+    ['another checkout', { ref: 'someone-else', status: 'OPEN', checkoutUrl: 'https://checkout.test/other' }],
+    ['the same ref without a page', { ref: 'reference-1', status: 'OPEN', checkoutUrl: null }],
+    ['the same ref no longer OPEN', { ref: 'reference-1', status: 'CONFIRMED', checkoutUrl: 'https://checkout.test/private' }],
+  ] as const)('refuses an answer naming %s: opens nothing, refreshes, follows only its own ref', async (_name, answer) => {
+    vi.useFakeTimers(); const { session, transport, views } = setup();
+    transport.reopen.mockResolvedValue({ ...answer, amountGyd: 1200, currencyCode: 'GYD', expiresAt: '2099-09-29T13:00:00Z' } as CheckoutStart);
+    await session.reopen('reference-1'); await vi.advanceTimersByTimeAsync(0);
+    expect(transport.open).not.toHaveBeenCalled();
+    expect(transport.refresh).toHaveBeenCalledOnce();
+    expect(transport.read).not.toHaveBeenCalledWith('someone-else');
+    expect(views.at(-1)?.error).toBe(REOPEN_REFUSED);
+    // The refreshed subscription shows the asked checkout's own status, never the other one.
+    session.reconcile({ ...checkout('OPEN'), ref: 'someone-else' }, [checkout('CONFIRMED')]);
+    expect(views.at(-1)?.checkout).toMatchObject({ ref: 'reference-1', status: 'CONFIRMED' });
+    expect(views.at(-1)?.error).toBe(REOPEN_REFUSED); session.dispose();
+  });
+  it.each([
+    { status: 409, code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: 'reference-1' } },
+    { status: 409, code: 'PAYMENT_CONFIRMING', details: { ref: 'reference-1' } },
+    { status: 404, code: 'NOT_FOUND' },
+  ])('a refused Back ($code) opens nothing, refreshes and shows the checkout’s own status', async (failure) => {
+    vi.useFakeTimers(); const { session, transport, views } = setup();
+    transport.reopen.mockRejectedValue(failure);
+    await session.reopen('reference-1'); await vi.advanceTimersByTimeAsync(0);
+    expect(transport.open).not.toHaveBeenCalled(); expect(transport.start).not.toHaveBeenCalled();
+    expect(transport.refresh).toHaveBeenCalledOnce();
+    expect(views.at(-1)?.error).toBe(REOPEN_REFUSED);
+    session.reconcile(checkout('CONFIRMED'));
+    expect(views.at(-1)?.checkout?.status).toBe('CONFIRMED'); expect(views.at(-1)?.error).toBe(REOPEN_REFUSED); session.dispose();
+  });
+  it.each([{}, { status: 503 }, { status: 429 }])('an uncertain Back failure %j opens nothing and asks to try again', async (failure) => {
+    const { session, transport, views } = setup();
+    transport.reopen.mockRejectedValue(failure);
+    await session.reopen('reference-1');
+    expect(transport.open).not.toHaveBeenCalled(); expect(transport.start).not.toHaveBeenCalled();
+    expect(views.at(-1)?.error).toBe('Try again in a minute.'); expect(views.at(-1)?.busy).toBe(false); session.dispose();
+  });
+  it('a double tap or a blocked view sends nothing', async () => {
+    const { session, transport } = setup();
+    transport.reopen.mockImplementation(() => new Promise(() => {}));
+    void session.reopen('reference-1'); void session.reopen('reference-1');
+    expect(transport.reopen).toHaveBeenCalledOnce(); session.dispose();
+    const blocked = setup(); blocked.session.reconcile(checkout('HELD'));
+    await blocked.session.reopen('reference-1');
+    expect(blocked.transport.reopen).not.toHaveBeenCalled(); blocked.session.dispose();
+  });
+  it('[F5] the deadline is Swift’s own time limit, in Guyana time; [F2] the Back card warns before a second payment', () => {
+    expect(feeExpiry('2026-10-08T23:30:00Z')).toBe('Swift keeps this checkout open until 19:30 (Guyana time).');
+    expect(REOPEN_ALREADY_PAID).toBe("Already paid on MMG's page? Don't pay again — we'll confirm it with MMG.");
   });
 });

@@ -10,7 +10,7 @@ import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '.
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutWords, dueLine, feeDate, feeExpiry, feeMoney, FeeCheckoutSession, liveMmg, reopenableMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutWords, dueLine, feeDate, feeExpiry, feeMoney, FeeCheckoutSession, liveMmg, REOPEN_ALREADY_PAID, reopenableMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 import { liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
@@ -93,8 +93,9 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
         {action && !blocked && card ? <T variant="heading" accessibilityRole="header">Choose how to pay</T> : null}
         {canReopen && reopen ? <Card>
           <T variant="heading">Back to MMG&apos;s page</T>
-          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{feeExpiry(reopen.expiresAt)} (Guyana time)</T>
-          <PillButton label="Back to MMG's page" loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} />
+          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{feeExpiry(reopen.expiresAt)}</T>
+          <T variant="body" style={{ marginTop: space.md }}>{REOPEN_ALREADY_PAID}</T>
+          <PillButton label="Back to MMG's page" loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.reopen(reopen.ref); }} />
         </Card> : null}
         {action && !blocked ? <Card>
           <T variant="heading">Pay with MMG</T>

@@ -1,4 +1,4 @@
-// MMG-CHECKOUT-API ca425ee7, plus the receipt references of section 5. Kept identical across the two independently built apps.
+// MMG-CHECKOUT-API ca425ee7, plus the receipt references of section 5 and the reopen route of section 3. Kept identical across the two independently built apps.
 export type FeeFamily = 'vendor' | 'rider' | 'driver';
 export type CheckoutState = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
 export type PayAction = { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' } | { id: 'MMG_CHECKOUT' | 'CARD'; state: 'off' };
@@ -33,9 +33,14 @@ export function reopenableMmg(sub?: FeeSubscription | null, current?: CheckoutSt
     || !(Date.parse(grant.expiresAt) > now) || !(Date.parse(latest.expiresAt) > now)) return undefined;
   return grant;
 }
+/** Swift's own time limit for the checkout (not the lifetime of MMG's page, which MMG has not documented). */
 export function feeExpiry(value: string): string {
-  return `expires at ${new Date(value).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Guyana' })}`;
+  return `Swift keeps this checkout open until ${new Date(value).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Guyana' })} (Guyana time).`;
 }
+/** Shown on the Back card: a reopened page must never invite a second payment. */
+export const REOPEN_ALREADY_PAID = "Already paid on MMG's page? Don't pay again — we'll confirm it with MMG.";
+/** A Back tap the server refused, or answered with anything but that checkout's open page. */
+export const REOPEN_REFUSED = "We couldn't reopen that MMG page. Its latest status is shown here.";
 export function dueLine(sub: FeeSubscription): string {
   const raw = sub.amountDueGyd;
   const due = raw != null && raw !== '' ? Number(raw) : NaN;
@@ -55,7 +60,7 @@ export function checkoutWords(c: CheckoutStatus, returned = false): string {
     case 'CONFIRMING': return "Confirming your payment with MMG. Don't pay again.";
     case 'CONFIRMED': return `Paid: ${feeMoney(c.amountGyd)} received${feeDate(c.confirmedAt) ? ` on ${feeDate(c.confirmedAt)}` : ''}.`;
     case 'NOT_PAID': return "MMG didn't complete this payment. You can try again.";
-    case 'EXPIRED': return "This checkout expired. Your payment is being checked. Don't pay again. Support will help.";
+    case 'EXPIRED': return "This checkout expired. Don't pay again. Swift support will check this payment.";
     case 'HELD': return "We're checking this payment by hand. Don't pay again. Support will contact you.";
   }
 }
@@ -75,6 +80,8 @@ export function pollDelay(elapsed: number, state?: CheckoutState): number | null
 export interface FeeFailure { status?: number; code?: string; details?: { ref?: string } }
 export interface FeeTransport {
   start(_key: string): Promise<CheckoutStart>;
+  /** Back to MMG's page: the server may only hand back THIS checkout's open page. */
+  reopen(_ref: string, _key: string): Promise<CheckoutStart>;
   read(_ref: string): Promise<CheckoutStatus>;
   open(_url: string): Promise<unknown>;
   refresh(): void;
@@ -122,7 +129,8 @@ export class FeeCheckoutSession {
       const f = this.failure(e);
       if (f.status && f.status < 500 && f.status !== 429) this.retryKey = undefined;
       if (f.code === 'CHECKOUT_CONFIRMING' || f.code === 'PAYMENT_CONFIRMING') {
-        this.emit({ blocked: true, error: "We're confirming your last payment, don't pay again." });
+        // PAYMENT_CONFIRMING also means billing is being prepared or reviewed: neutral words.
+        this.emit({ blocked: true, error: f.code === 'CHECKOUT_CONFIRMING' ? "We're confirming your last payment, don't pay again." : "Paying is paused while Swift checks this fee. If you already paid, don't pay again." });
         if (f.details?.ref) this.follow(f.details.ref, true);
       } else if (f.status === 403 || f.code === 'PAY_ACTION_OFF') {
         this.emit({ blocked: true }); this.transport.refresh();
@@ -130,6 +138,32 @@ export class FeeCheckoutSession {
         this.emit({ error: f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.' });
         if (f.code === 'SUBSCRIPTION_NOT_FOUND') this.transport.refresh();
       }
+    } finally { this.emit({ busy: false }); }
+  }
+  /** Back to MMG's page for `ref` only. Never the start route: a stale tap can
+   *  never start a new payment. A page is opened only when the answer names the
+   *  same ref, OPEN, with a page; anything else opens nothing and refreshes. */
+  async reopen(ref: string) {
+    if (!this.active || this.view.busy || this.view.blocked) return;
+    this.generation++; clearTimeout(this.timer);
+    this.followingRef = ref;
+    this.emit({ busy: true, error: '', returned: false });
+    try {
+      const started = await this.transport.reopen(ref, this.key());
+      if (!this.active) return;
+      if (started.ref === ref && started.status === 'OPEN' && started.checkoutUrl !== null) {
+        try { await this.transport.open(started.checkoutUrl); } catch { /* Poll even when the browser cannot finish. */ }
+        if (this.active) { this.emit({ returned: true }); this.follow(ref, true); }
+        return;
+      }
+      // Another checkout, no page, or no longer OPEN: nothing is opened. The
+      // refreshed subscription shows this checkout's own status (reconcile).
+      this.emit({ error: REOPEN_REFUSED }); this.transport.refresh();
+    } catch (e) {
+      if (!this.active) return;
+      const f = this.failure(e);
+      const uncertain = f.status === undefined || f.status === 429 || f.status >= 500;
+      this.emit({ error: uncertain ? 'Try again in a minute.' : REOPEN_REFUSED }); this.transport.refresh();
     } finally { this.emit({ busy: false }); }
   }
   follow(ref: string, returned = false) {

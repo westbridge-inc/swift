@@ -16,7 +16,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { BillingService } from './billing.service';
 import { MmgCheckoutService, type CheckoutStatus, type CheckoutView, type ReturnState } from './mmg-checkout.service';
-import { clientPlatform, feePayActions, mmgCheckoutLive, type ClientPlatform, type PayAction } from './fee-pay-actions';
+import { clientPlatform, feePayActions, mmgCheckoutLive, mmgReopenSwitchedOn, type ClientPlatform, type PayAction } from './fee-pay-actions';
 import { readReopenableMmgCheckout, type ReopenableMmgCheckout } from './mmg-checkout-reopen';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
 import { readFeePaymentDecision } from './fee-payment-authority';
@@ -37,6 +37,8 @@ import {
 // sections 2-6, the contract the phone and web fee pages already call.
 //
 //   POST /api/v1/{vendor|rider|driver}/subscription/mmg-checkout      start one
+//   POST /api/v1/{vendor|rider|driver}/subscription/mmg-checkout/:ref/reopen
+//                                        Back to MMG's page: that ref only
 //   GET  /api/v1/{vendor|rider|driver}/subscription/mmg-checkout/:ref follow it
 //   GET  /api/v1/{family}/subscription   gains payActions, latestMmgCheckout,
 //                                        recentCheckouts, reopenableMmgCheckout (feeCheckoutPayload)
@@ -194,6 +196,18 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
   let runtime: MmgCheckoutRuntime | null = null;
   const rt = () => (runtime ??= mmgCheckoutRuntimeOf(app));
 
+  /** [MMG reopen] THE grant for one ref, read-only: the reopen switch and the
+   *  Pay rule for this platform (configured, payable), a production payer, and
+   *  readReopenableMmgCheckout. The payload shows it; the reopen POST asks it
+   *  again for the ref it names before any page goes out. */
+  const reopenGrant = async (sub: Subscription, platform: ClientPlatform, ref: string, now: Date): Promise<ReopenableMmgCheckout | null> => {
+    if (!(await mmgReopenSwitchedOn(app.prisma, platform))) return null;
+    if (!(await mmgCheckoutLive(app.prisma, sub, platform, rt().checkout))) return null;
+    if (!(await payerIsProduction(app.prisma, sub.id))) return null;
+    const grant = await readReopenableMmgCheckout(app.prisma, sub.id, ref, now);
+    return grant?.ref === ref ? grant : null;
+  };
+
   const feePayload = async (sub: Subscription, headers: Record<string, unknown>, now: Date = new Date()): Promise<FeeCheckoutPayload> => {
     if (!mmgCheckoutEnabled()) return { payActions: OFF_ACTIONS, latestMmgCheckout: null, recentCheckouts: [], reopenableMmgCheckout: null };
     const [payActions, rows] = await Promise.all([
@@ -202,10 +216,19 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
     ]);
     const recentCheckouts = rows.map((row) => checkoutView(row, sub.status));
     const latestMmgCheckout = recentCheckouts.find((c) => Date.parse(c.createdAt) >= now.getTime() - LATEST_WINDOW_MS) ?? null;
-    const reopenableMmgCheckout = latestMmgCheckout?.status === 'OPEN'
-      && await mmgCheckoutLive(app.prisma, sub, clientPlatform(headers), rt().checkout)
-      && await payerIsProduction(app.prisma, sub.id)
-      ? await readReopenableMmgCheckout(app.prisma, sub.id, latestMmgCheckout.ref, now) : null;
+    let reopenableMmgCheckout: ReopenableMmgCheckout | null = null;
+    if (latestMmgCheckout?.status === 'OPEN') {
+      try {
+        reopenableMmgCheckout = await reopenGrant(sub, clientPlatform(headers), latestMmgCheckout.ref, now);
+      } catch (err) {
+        // [review F4] A failed read offers no reopen; the fee page itself still loads.
+        const code = (err as { code?: unknown } | null)?.code;
+        log().error(
+          { subscriptionId: sub.id, errorName: err instanceof Error ? err.name : typeof err, errorCode: typeof code === 'string' ? code : null },
+          '[MMG checkout] the reopen grant could not be read; no reopen is offered',
+        );
+      }
+    }
     return { payActions, latestMmgCheckout, recentCheckouts, reopenableMmgCheckout };
   };
 
@@ -226,6 +249,32 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
       clientKey: request.headers['idempotency-key'],
     });
     return reply.status(created ? 201 : 200).send({ success: true, data: checkout });
+  });
+
+  /** [MMG reopen · review F1] POST …/subscription/mmg-checkout/:ref/reopen —
+   *  "Back to MMG's page" for the ONE checkout it names. It can only hand back
+   *  that checkout's page, while the reopen grant still holds: it never reaches
+   *  the start route's create branch. Anything else is 409 CHECKOUT_NOT_REOPENABLE. */
+  app.post<{ Params: { ref: string } }>('/subscription/mmg-checkout/:ref/reopen', { preHandler: [app.authenticate], config: { rateLimit: { ...MMG_CHECKOUT_START_RATE, ...rateLimited } } }, async (request, reply) => {
+    const sub = await options.subscriptionFor(request);
+    if (!sub) throw new AppError(404, 'SUBSCRIPTION_NOT_FOUND', 'There is no subscription to pay.');
+    if (!mmgCheckoutEnabled()) throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
+    if (!(await payerIsProduction(app.prisma, sub.id))) {
+      throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
+    }
+    const ref = request.params.ref;
+    if (!REF_SHAPE.test(ref)) throw new AppError(404, 'CHECKOUT_NOT_FOUND', 'There is no such checkout.');
+    const now = new Date();
+    const platform = clientPlatform(request.headers);
+    const checkout = await rt().service.reopenCheckout({
+      subscriptionId: sub.id,
+      userId: request.user.userId,
+      ref,
+      clientKey: request.headers['idempotency-key'],
+      granted: async () => (await reopenGrant(sub, platform, ref, now)) !== null,
+      now,
+    });
+    return reply.status(200).send({ success: true, data: checkout });
   });
 
   /** GET …/subscription/mmg-checkout/:ref — one answer, 404, for an unknown ref and for another partner's. */

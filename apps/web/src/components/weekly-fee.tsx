@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutWords, dueLine, feeDate, feeExpiry, feeMoney, FeeCheckoutSession, liveMmg, reopenableMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutWords, dueLine, feeDate, feeExpiry, feeMoney, FeeCheckoutSession, liveMmg, REOPEN_ALREADY_PAID, reopenableMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 
@@ -31,6 +31,7 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
   const refreshFee = useCallback(() => { void client.invalidateQueries({ queryKey }); }, [client, queryKey]);
   const session = useMemo(() => new FeeCheckoutSession({
     start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
+    reopen: (ref, key) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}/reopen`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, undefined, { storeId }).then((r) => r.data),
     open: async (url) => { window.location.assign(url); },
     refresh: () => { void client.invalidateQueries({ queryKey }); },
@@ -79,8 +80,9 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
     <div className={`grid gap-4 ${action && !blocked && card ? 'md:grid-cols-2' : ''}`}>
       {canReopen && reopen && <section aria-labelledby="mmg-reopen-title" className="space-y-4 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
         <h3 id="mmg-reopen-title" className="text-lg font-bold">Back to MMG&apos;s page</h3>
-        <p className="text-sm text-[var(--swift-muted)]">{feeExpiry(reopen.expiresAt)} (Guyana time)</p>
-        <button disabled={view.busy} onClick={() => void session.pay()} className="inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">Back to MMG&apos;s page</button>
+        <p className="text-sm text-[var(--swift-muted)]">{feeExpiry(reopen.expiresAt)}</p>
+        <p className="text-sm font-semibold">{REOPEN_ALREADY_PAID}</p>
+        <button disabled={view.busy} onClick={() => void session.reopen(reopen.ref)} className="inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">Back to MMG&apos;s page</button>
       </section>}
       {action && !blocked && <section aria-labelledby="mmg-pay-title" className="flex flex-col gap-4 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
         <div className="flex items-start gap-3">
