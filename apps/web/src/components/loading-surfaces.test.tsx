@@ -20,7 +20,7 @@ vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'v1' }), useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({ push: vi.fn() }),
 }));
-vi.mock('./customer-session', () => ({ useCustomerSession: () => ({
+vi.mock('./customer-session', () => ({ useOptionalCustomerSession: () => null, useCustomerSession: () => ({
   status: 'guest', ...person, nearPoint: null, setNearPoint: vi.fn(), ensureSignedIn: vi.fn(),
 }) }));
 

@@ -1,5 +1,4 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { StorefrontExperience } from './storefront-experience';
@@ -104,16 +103,19 @@ describe('reviewer regression proofs', () => {
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
     await waitFor(() => expect(customer.getCart).toHaveBeenCalled());
     await waitFor(() => expect(sessionStorage.getItem('swift_storefront_add')).toBeNull());
-    expect(within(screen.getByRole('dialog')).getByLabelText('Quantity 2')).toBeTruthy();
+    expect(within(screen.getByRole('dialog')).queryByLabelText('Quantity 2')).not.toBeNull();
   });
   it('a deep-linked item remains open when Add is attempted before cart hydration completes', async () => {
-    let resolveCart!: (c: customer.Cart) => void;
+    let resolveCart!: (_cart: customer.Cart) => void;
     vi.mocked(customer.getCart).mockImplementation(() => new Promise(resolve => { resolveCart = resolve; }));
     render(<StorefrontExperience store={store()} returnPath="/store/sample-kitchen" initialItemId="soup" />);
     const sheet = await screen.findByRole('dialog', { name: 'Pumpkin soup' });
     await waitFor(() => expect(customer.getCart).toHaveBeenCalled());
-    fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
+    const add = within(sheet).getByRole('button', { name: /^Add to order/ }) as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    fireEvent.click(add);
     expect(screen.queryByRole('dialog', { name: 'Pumpkin soup' })).not.toBeNull();
     await act(async () => resolveCart(emptyCart));
+    await waitFor(() => expect(add.disabled).toBe(false));
   });
 });

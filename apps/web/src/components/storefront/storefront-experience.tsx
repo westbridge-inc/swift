@@ -191,6 +191,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // guest to sign in, and its cart count is refreshed after every change made
   // here. Rendered on its own (tests), both are simply absent.
   const shellSession = useOptionalCustomerSession();
+  const shellStatus = shellSession?.status;
   const shellQueries = useContext(QueryClientContext);
   const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
   const diningNoticeDismissed = dismissedDiningStore === store.id;
@@ -230,6 +231,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const addressBusy = useRef(false);
   const placingOrderNow = useRef(false);
   const restoringSession = useRef(false);
+  const renewedSession = useRef(false);
   const checkoutKey = useRef<CheckoutAttempt | null>(null);
   const modalReturnFocus = useRef<HTMLElement | null>(null);
   const clearConfirmButton = useRef<HTMLButtonElement | null>(null);
@@ -286,12 +288,23 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     void refreshCatalog();
     const catalogTimer = window.setInterval(() => void refreshCatalog(), CATALOG_REFRESH_MS);
 
+    return () => {
+      alive = false;
+      window.clearInterval(catalogTimer);
+    };
+  }, [store.id, store.slug]);
+
+  useEffect(() => {
+    let alive = true;
+
     // [W-01] Signed-in is the server's answer about an HttpOnly cookie, not a
     // token this script can read. Start signed-OUT, ask, and hydrate the cart
     // only once the server has attested — so a signed-out visitor never fires
     // the two authenticated loads, exactly as the token check used to prevent.
     setSignedIn(false);
-    void (shellSession ? Promise.resolve({ ok: shellSession.status === 'signed-in' }) : sessionProbe()).then((session) => {
+    const renewed = renewedSession.current;
+    renewedSession.current = false;
+    void (shellStatus !== undefined ? Promise.resolve({ ok: renewed || shellStatus === 'signed-in' }) : sessionProbe()).then((session) => {
       if (!alive || !session.ok) return;
       setSignedIn(true);
       setLoadingCart(true);
@@ -333,9 +346,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
 
     return () => {
       alive = false;
-      window.clearInterval(catalogTimer);
     };
-  }, [cartLoadVersion, store.id, store.slug]);
+  }, [cartLoadVersion, store.id, store.slug, shellStatus, shellSession?.scope, shellSession?.epoch]);
 
   const storeAcceptsOrders = catalog.isCurrentlyOpen && catalog.acceptingOrders;
   const catalogVerified = catalogState === 'ready';
@@ -448,7 +460,10 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     const toSignIn = () => router.push(`/login?next=${encodeURIComponent(returnPath)}`);
     void (shellSession?.ensureSignedIn() ?? Promise.resolve(false)).then((restored) => {
       restoringSession.current = false;
-      if (restored) setCartLoadVersion((version) => version + 1);
+      if (restored) {
+        renewedSession.current = true;
+        setCartLoadVersion((version) => version + 1);
+      }
       else toSignIn();
     }, () => {
       restoringSession.current = false;
