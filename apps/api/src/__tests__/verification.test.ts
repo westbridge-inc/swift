@@ -137,7 +137,7 @@ beforeAll(async () => {
       roles: ['ADMIN'],
       activeRole: 'ADMIN',
       isPhoneVerified: true, selfieCapturedAt: new Date(),
-      admin: { create: { permissions: ['*'] } },
+      admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
     },
   });
   adminToken = app.jwt.sign({ userId: adminUser.id, role: 'ADMIN', jti: `s4-${Date.now()}` });

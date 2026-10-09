@@ -30,6 +30,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
@@ -690,9 +691,16 @@ export async function adminRoutes(app: FastifyInstance) {
     const userId: string | undefined = request.user?.userId;
     if (!role || !userId) return; // adminGuard already refused; nothing to decide
     const grant = await app.prisma.admin.findUnique({ where: { userId }, select: { permissions: true } });
+    // [VERIFY-DOCS V3] Kept for this request's response: the legacy document
+    // pointers are withheld unless this same live read holds the grant.
+    request.adminPermissions = grant?.permissions ?? null;
     const decision = decideCapability({ role, permissions: grant?.permissions ?? null }, request.method, routeUrl);
     adminCapabilityCounter.labels(decision.allowed ? 'granted' : decision.reason, decision.cls ?? 'none').inc();
     if (decision.allowed) return;
+    // [VERIFY-DOCS V3] The document reviewer grant is refused in EVERY mode:
+    // shadow mode exists to watch capability decisions before enforcing them,
+    // never to open a person's identity documents to an operator without it.
+    if (decision.reason === 'missing-explicit-grant') throw documentReviewerRequired();
     if (capabilityMode() === 'shadow') {
       adminCapabilityCounter.labels('shadow_denied', decision.cls ?? 'none').inc();
       app.log.warn({ userId, routeUrl, method: request.method, capability: decision.capability, reason: decision.reason },
@@ -707,6 +715,20 @@ export async function adminRoutes(app: FastifyInstance) {
         ? 'This admin action is not classified and cannot be performed'
         : `This admin action requires the ${decision.capability} capability`,
     );
+  });
+
+  // [VERIFY-DOCS V3] THE LEGACY DOCUMENT POINTERS LEAVE ONLY WITH THE GRANT.
+  //
+  // Rider and Driver rows still carry the client-written document fields of
+  // the pre-registry upload path (nationalIdUrl, driverLicenseUrl, ...). A
+  // dozen admin responses include a mover row — the rider and driver detail
+  // and lists, orders, custody cases — so any operator could read where a
+  // person's ID was stored. They are removed from EVERY admin response, at any
+  // depth, unless the caller's live grant (read by the capability hook above)
+  // holds the document reviewer permission. Default: withheld.
+  app.addHook('preSerialization', async (request: any, _reply: any, payload: unknown) => {
+    if (holdsDocumentReviewerGrant(request.adminPermissions)) return payload;
+    return withoutLegacyDocumentPointers(payload);
   });
 
   // [ADM-006] A CONSEQUENTIAL ACTION STATES WHY, before it happens.
@@ -5516,13 +5538,82 @@ export async function adminRoutes(app: FastifyInstance) {
     const ttlSeconds = 300;
 
     await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
-    const minted = mintRenderPath(id, ttlSeconds);
+    // [VERIFY-DOCS V3] The link is minted FOR this reviewer: the render route
+    // re-checks their grant on every load.
+    const minted = mintRenderPath(id, request.user.userId, ttlSeconds);
     await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
     // [DS110-15] A path RELATIVE to the API origin, on purpose. The console
     // resolves it against its configured API origin and loads it through its
     // own same-origin proxy; an origin built here from the Host header would
     // be client-supplied input, and the console discards it anyway.
     return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
+  });
+
+  // ─── [VERIFY-DOCS V3] Staff: the document reviewer grant ─────────────────
+  //
+  // A SUPER_ADMIN grants and revokes it — to themselves too (owner ruling,
+  // 6 Oct 2026: "a super-admin may grant it to themselves with a recorded
+  // reason") — with a reason (C3), and the record keeps the Admin row before
+  // and after (ADM-004, inline) plus a named row saying who, whom and why.
+  // The target must be an ACTIVE admin of the caller's own tenant.
+  const staffName = (u: { firstName: string | null; lastName: string | null }) =>
+    [u.firstName, u.lastName].filter((part) => part && part.trim()).join(' ') || 'Unnamed admin';
+
+  app.get('/staff/document-reviewers', { preHandler: [founderGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const staff = await app.prisma.user.findMany({
+      where: { tenantId, roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] } },
+      select: { id: true, firstName: true, lastName: true, activeRole: true, roles: true, status: true, admin: { select: { permissions: true } } },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+    });
+    return {
+      success: true,
+      data: staff.map((u) => ({
+        userId: u.id,
+        name: staffName(u),
+        role: u.roles.includes('SUPER_ADMIN') ? 'SUPER_ADMIN' : 'ADMIN',
+        active: u.status === 'ACTIVE',
+        documentReviewer: holdsDocumentReviewerGrant(u.admin?.permissions),
+        you: u.id === request.user.userId,
+      })),
+    };
+  });
+
+  app.put('/staff/:userId/document-reviewer', { preHandler: [founderGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { userId } = request.params as { userId: string };
+    const body = z.object({ grant: z.boolean() }).passthrough().parse(request.body ?? {});
+    const target = await app.prisma.user.findFirst({
+      where: { id: userId, tenantId },
+      select: { id: true, roles: true, status: true },
+    });
+    // Another tenant's admin is indistinguishable from an unknown id.
+    if (!target) throw new NotFoundError('Admin', userId);
+    if (!target.roles.some((r) => r === 'ADMIN' || r === 'SUPER_ADMIN') || target.status !== 'ACTIVE') {
+      throw new AppError(409, 'NOT_ACTIVE_STAFF', 'Only an active admin of this team can hold the document-reviewer permission.');
+    }
+    const reason = reasonOf(request.body, request.headers as never);
+    const self = target.id === request.user.userId;
+    const result = await app.prisma.$transaction(async (tx) => {
+      const change = await setDocumentReviewerGrant(tx, target.id, body.grant);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        extra: { documentReviewer: change.documentReviewer, grantChanged: change.changed, self },
+      });
+      if (change.changed) {
+        await tx.auditLog.create({ data: {
+          userId: request.user.userId,
+          action: body.grant ? 'DOCUMENT_REVIEWER_GRANTED' : 'DOCUMENT_REVIEWER_REVOKED',
+          entity: 'Admin',
+          entityId: target.id,
+          changes: { targetUserId: target.id, self, reason },
+          ipAddress: request.ip,
+          userAgent: request.headers['user-agent'] ?? null,
+        } });
+      }
+      return change;
+    });
+    return { success: true, data: result };
   });
 
   // ─── Retail returns ──────────────────────────────────────────

@@ -52,10 +52,15 @@ import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 const VENDOR_PHONE = '+59200199101';
 const RIDER_PHONE = '+59200199102';
 const DRIVER_PHONE = '+59200199103';
-const PHONES = [VENDOR_PHONE, RIDER_PHONE, DRIVER_PHONE];
+// [VERIFY-DOCS V3] Approving a document needs the explicit document reviewer
+// grant, which the seeded admin's `*` never confers; this journey's document
+// reviewer holds it.
+const REVIEWER_PHONE = '+59200199104';
+const PHONES = [VENDOR_PHONE, RIDER_PHONE, DRIVER_PHONE, REVIEWER_PHONE];
 
 let app: FastifyInstance;
 let adminToken = '';
+let reviewerToken = '';
 const tokens: Record<string, string> = {};
 const userIds: Record<string, string> = {};
 
@@ -157,6 +162,15 @@ beforeAll(async () => {
   }
   const admin = await loginWithOtp(app, '+5926001000');
   adminToken = admin.json().data.tokens.accessToken;
+  const reviewer = await app.prisma.user.create({ data: {
+    phone: REVIEWER_PHONE, firstName: 'Rae', lastName: 'Reviewer', roles: ['ADMIN'], activeRole: 'ADMIN', status: 'ACTIVE',
+    isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } },
+  } });
+  reviewerToken = app.jwt.sign({ userId: reviewer.id, role: 'ADMIN', jti: `rjj-${Date.now()}` });
+  await app.prisma.session.create({ data: {
+    userId: reviewer.id, token: reviewerToken, refreshToken: `rjj-refresh-${Date.now()}-${reviewer.id}`, authMethod: 'OTP',
+    deviceId: 'role-join-journey-reviewer', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000),
+  } });
 });
 
 afterAll(async () => {
@@ -231,7 +245,7 @@ describe('business: a customer with no business lists one, end to end', () => {
     for (const doc of pending) {
       const approved = await injectWithApproval(app, {
         method: 'PUT', url: `/api/v1/admin/verification/${doc.id}/approve`, payload: {},
-        headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+        headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${reviewerToken}`, 'content-type': 'application/json' },
       });
       expect(approved.statusCode, approved.body).toBe(200);
       expect(approved.json().data.status).toBe('APPROVED');

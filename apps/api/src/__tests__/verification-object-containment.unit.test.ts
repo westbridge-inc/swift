@@ -96,9 +96,12 @@ function harness() {
   }]));
   const documents: Array<{ id: string; userId: string; fileUrl: string } & Record<string, any>> = [];
   const orphans = new Map<string, any>();
+  // [VERIFY-DOCS V3] The admin who mints a view link; the render route re-reads
+  // their document reviewer grant on every load (same tenant as subject A).
+  const reviewer = { id: 'reviewer', tenantId: 'tenant-a', status: 'ACTIVE', activeRole: 'ADMIN', admin: { permissions: ['documents.review'] } };
   const db: any = {
     user: {
-      findUnique: vi.fn(async ({ where }: any) => people.get(where.id)),
+      findUnique: vi.fn(async ({ where }: any) => (where.id === reviewer.id ? reviewer : people.get(where.id))),
       findUniqueOrThrow: vi.fn(async ({ where }: any) => {
         const person = people.get(where.id); if (!person) throw new Error('not found'); return { ...person };
       }),
@@ -285,7 +288,7 @@ describe('verification object containment at real service boundaries', () => {
   it.each(['mint', 'render'])('poisoned document cannot reach admin %s dereference', async (operation) => {
     const h = harness(); const doc = h.poison();
     const routes = await handlers(h, operation === 'mint' ? adminRoutes : verificationRoutes);
-    const path = mintRenderPath(doc.id).path;
+    const path = mintRenderPath(doc.id, 'reviewer').path;
     const query = Object.fromEntries(new URL(path, 'http://localhost').searchParams);
     const invoke = operation === 'mint'
       ? routes.get('get /verification/:id/document-url')!({ params: { id: doc.id }, user: { userId: 'reviewer' } })
@@ -374,7 +377,7 @@ describe('verification object containment at real service boundaries', () => {
     if (fault === 'missing-storage') storage.getObject.mockRejectedValue({ code: 'ENOENT' });
     if (fault === 'storage-error') storage.getObject.mockRejectedValue(new Error('private storage error'));
     const routes = await handlers(h, verificationRoutes);
-    const query = Object.fromEntries(new URL(mintRenderPath(doc.id).path, 'http://localhost').searchParams);
+    const query = Object.fromEntries(new URL(mintRenderPath(doc.id, 'reviewer').path, 'http://localhost').searchParams);
     const reply = { send: vi.fn() };
     await expect(routes.get('get /render/:docId')!({ params: { docId: doc.id }, query }, reply)).rejects.toMatchObject({ ...unavailable, message: 'This verification file is unavailable. Upload it again.' });
     expect(reply.send).not.toHaveBeenCalled();

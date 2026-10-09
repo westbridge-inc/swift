@@ -131,7 +131,16 @@ describe('[DOC-1 P8-4] the review console roles, as capability presets the serve
   it('DOC_REVIEWER reads the queue with the person on it, renders (past the guard), claims and decides — but may neither place nor list a hold', async () => {
     const doc = await pendingDoc();
     const kase = await system(() => app.prisma.reviewCase.create({ data: { submissionId: doc.id, slaDueAt: new Date(Date.now() + DAY) } }));
-    const reviewer = await admin(DOC_REVIEWER_CAPABILITIES);
+    // [VERIFY-DOCS V3] The preset ALONE no longer opens or decides a document:
+    // that takes the explicit document reviewer grant, which no preset, prefix
+    // or `*` confers. Granted beside the preset, the reviewer's work is as before.
+    const presetOnly = await admin(DOC_REVIEWER_CAPABILITIES);
+    const refusedOpen = await call(presetOnly.token, 'GET', `/verification/${doc.id}/document-url`);
+    expect(refusedOpen.statusCode).toBe(403);
+    expect(refusedOpen.json().error.code).toBe('DOCUMENT_REVIEWER_REQUIRED');
+    expect((await call(presetOnly.token, 'PUT', `/verification/${doc.id}/approve`, {})).statusCode).toBe(403);
+    expect((await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } }))).status).toBe('PENDING');
+    const reviewer = await admin([...DOC_REVIEWER_CAPABILITIES, 'documents.review']);
     const queue = await call(reviewer.token, 'GET', '/verification/queue?status=PENDING');
     expect(queue.statusCode).toBe(200);
     expect(queue.body).toContain(`Zelda${RUN}`);
