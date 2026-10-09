@@ -59,6 +59,9 @@ const RULES: RouteRule[] = [
     match: exact('/cart'), public: true, tab: 'cart', parent: HOME_PATH,
     door: { title: 'Sign in to start a cart', body: 'Your basket lives on your account, so it follows you between devices.' },
   },
+  // [W4] The one checkout. A guest may open it: they see their browser basket
+  // and sign in at Place order.
+  { match: exact('/checkout'), public: true, tab: 'cart', parent: HOME_PATH },
   {
     match: exact('/account'), public: false, tab: 'profile', parent: null,
     door: { title: 'You’re browsing as a guest', body: 'Sign in to see your orders and your delivery addresses.' },

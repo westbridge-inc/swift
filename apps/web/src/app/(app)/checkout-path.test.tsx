@@ -115,7 +115,7 @@ async function choose(name: string) {
 }
 
 describe('[Q7b] store → cart', () => {
-  it('a guest fills the basket, then signs in at Place order and comes back to that store', async () => {
+  it('a guest fills the basket, then signs in at Place order and lands on the one checkout', async () => {
     signedIn = false;
     at('/store/shanta-kitchen', {}, await storePage());
     await choose('Pepperpot bowl');
@@ -130,7 +130,7 @@ describe('[Q7b] store → cart', () => {
     const placeOrder = screen.getByRole('button', { name: 'Place order' });
     await waitFor(() => expect((placeOrder as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(placeOrder);
-    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fshanta-kitchen'));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fcheckout'));
     expect(calls('POST', '/api/v1/auth/refresh')).toHaveLength(1);
   });
 
@@ -144,8 +144,8 @@ describe('[Q7b] store → cart', () => {
     await screen.findByText('Pepperpot bowl added to your order.');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
-    // The order is on this page: its panel, reached from the floating button.
-    expect(screen.getByRole('link', { name: /View your order/ }).getAttribute('href')).toBe('#checkout');
+    // [W4] The order is placed on the one checkout page, one tap from the floating button.
+    expect(screen.getByRole('link', { name: /^Checkout · 1 item/ }).getAttribute('href')).toBe('/checkout');
   });
 });
 
