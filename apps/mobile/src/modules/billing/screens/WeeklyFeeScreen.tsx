@@ -10,7 +10,7 @@ import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '.
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutWords, dueLine, feeDate, feeExpiry, feeMoney, FeeCheckoutSession, liveMmg, reopenableMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 import { liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
@@ -57,8 +57,18 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const pull = usePullToRefresh(async () => { await refreshRef.current(); if (!contextPending) session.focus(undefined, checkoutRef); });
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
-  const mmgPending = contextPending || view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const reopen = reopenableMmg(sub, checkout);
+  const mmgPending = contextPending || view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const canReopen = !!reopen && !contextPending && !view.blocked && !cardPending;
   const blocked = mmgPending || cardPending;
+  const [, setExpiryTick] = useState(0);
+  useEffect(() => {
+    if (!sub?.reopenableMmgCheckout) return;
+    const delay = Date.parse(sub.reopenableMmgCheckout.expiresAt) - Date.now();
+    if (!(delay > 0)) return;
+    const timer = setTimeout(() => { setExpiryTick(Date.now()); void refreshRef.current(); }, Math.min(delay, 2_147_483_647));
+    return () => clearTimeout(timer);
+  }, [sub?.reopenableMmgCheckout?.expiresAt]);
   // The card choice exists only when the server says CARD is live (or a card payment of ours is in flight).
   const card = liveCard(sub?.payActions);
   const showCard = !!card || cardPending || hasCardSession(cardContextKey(principal, generation, family, storeId));
@@ -80,6 +90,11 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
           <PillButton label="Refresh status" variant="soft" style={{ marginTop: space.lg }} onPress={() => { void refresh(); if (!contextPending) session.focus(undefined, checkoutRef); }} />
         </Card>
         {action && !blocked && card ? <T variant="heading" accessibilityRole="header">Choose how to pay</T> : null}
+        {canReopen && reopen ? <Card>
+          <T variant="heading">Back to MMG&apos;s page</T>
+          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{feeExpiry(reopen.expiresAt)} (Guyana time)</T>
+          <PillButton label="Back to MMG's page" loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} />
+        </Card> : null}
         {action && !blocked ? <Card>
           <T variant="heading">Pay with MMG</T>
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>Opens MMG&apos;s page, then brings you back to Swift.</T>

@@ -13,6 +13,7 @@ export interface CheckoutStatus {
 export interface FeeSubscription {
   id?: string; status: string; amountDueGyd?: number | string; nextBillingDate?: string | null;
   currentPeriodEnd?: string | null; gracePeriodEnd?: string | null;
+  reopenableMmgCheckout?: { ref: string; expiresAt: string } | null;
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
 }
 export interface CheckoutStart { ref: string; status: CheckoutState; checkoutUrl: string | null; amountGyd: number; currencyCode: 'GYD'; expiresAt: string }
@@ -22,6 +23,18 @@ export function feeDate(value?: string | null): string {
 }
 export function liveMmg(sub?: FeeSubscription | null) {
   return sub?.payActions?.find((a): a is Extract<PayAction, { state: 'live' }> => a.id === 'MMG_CHECKOUT' && a.state === 'live');
+}
+/** Only the server grants reopen; OPEN by itself never grants another Pay. */
+export function reopenableMmg(sub?: FeeSubscription | null, current?: CheckoutStatus | null, now = Date.now()) {
+  const grant = sub?.reopenableMmgCheckout;
+  const latest = sub?.latestMmgCheckout;
+  const shown = current ?? latest;
+  if (!grant || latest?.ref !== grant.ref || latest.status !== 'OPEN' || shown?.ref !== grant.ref || shown.status !== 'OPEN'
+    || !(Date.parse(grant.expiresAt) > now) || !(Date.parse(latest.expiresAt) > now)) return undefined;
+  return grant;
+}
+export function feeExpiry(value: string): string {
+  return `expires at ${new Date(value).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Guyana' })}`;
 }
 export function dueLine(sub: FeeSubscription): string {
   const raw = sub.amountDueGyd;
@@ -36,12 +49,13 @@ export function subscriptionWords(status: string): string {
   return ({ TRIAL: 'Free trial', ACTIVE: 'Active', PAST_DUE: 'Weekly fee overdue', SUSPENDED: 'Account suspended', CHURNED: 'Account inactive', PAUSED: 'Weekly billing paused', CANCELLED: 'Subscription closed' } as Record<string, string>)[status] ?? 'Status unavailable';
 }
 export function checkoutWords(c: CheckoutStatus, returned = false): string {
+  if (c.status === 'OPEN' && Date.parse(c.expiresAt) <= Date.now()) return checkoutWords({ ...c, status: 'EXPIRED' }, returned);
   switch (c.status) {
     case 'OPEN': return returned ? 'Waiting for MMG…' : 'Finish paying on the MMG page.';
     case 'CONFIRMING': return "Confirming your payment with MMG. Don't pay again.";
     case 'CONFIRMED': return `Paid: ${feeMoney(c.amountGyd)} received${feeDate(c.confirmedAt) ? ` on ${feeDate(c.confirmedAt)}` : ''}.`;
     case 'NOT_PAID': return "MMG didn't complete this payment. You can try again.";
-    case 'EXPIRED': return 'This checkout expired. If you paid, it will be credited once MMG confirms it.';
+    case 'EXPIRED': return "This checkout expired. We're checking this payment with MMG. Don't pay again. Support will help.";
     case 'HELD': return "We're checking this payment by hand. Don't pay again. Support will contact you.";
   }
 }
@@ -86,6 +100,7 @@ export class FeeCheckoutSession {
   dispose() { this.active = false; this.generation++; clearTimeout(this.timer); }
   async pay() {
     if (!this.active || this.view.busy || this.view.blocked) return;
+    this.generation++; clearTimeout(this.timer);
     this.emit({ busy: true, error: '', checkout: null, returned: false });
     this.retryKey ??= this.key();
     try {
@@ -99,14 +114,14 @@ export class FeeCheckoutSession {
       if (started.status === 'OPEN' && started.checkoutUrl !== null) {
         try { await this.transport.open(started.checkoutUrl); } catch { /* Poll even when the browser cannot finish. */ }
       } else {
-        this.emit({ blocked: started.status === 'CONFIRMING' || started.status === 'HELD' });
+        this.emit({ blocked: started.status === 'CONFIRMING' || started.status === 'HELD' || started.status === 'EXPIRED' });
       }
       if (this.active) { this.emit({ returned: true }); this.follow(started.ref, true); }
     } catch (e) {
       if (!this.active) return;
       const f = this.failure(e);
       if (f.status && f.status < 500 && f.status !== 429) this.retryKey = undefined;
-      if (f.code === 'CHECKOUT_CONFIRMING') {
+      if (f.code === 'CHECKOUT_CONFIRMING' || f.code === 'PAYMENT_CONFIRMING') {
         this.emit({ blocked: true, error: "We're confirming your last payment, don't pay again." });
         if (f.details?.ref) this.follow(f.details.ref, true);
       } else if (f.status === 403 || f.code === 'PAY_ACTION_OFF') {
@@ -130,7 +145,7 @@ export class FeeCheckoutSession {
         const c = await this.transport.read(ref);
         if (!this.active || generation !== this.generation) return;
         status = c.status;
-        this.emit({ checkout: c, returned, error: '', blocked: status === 'CONFIRMING' || status === 'HELD' });
+        this.emit({ checkout: c, returned, error: '', blocked: status === 'CONFIRMING' || status === 'HELD' || status === 'EXPIRED' });
         if (pollDelay(0, status) === null) this.transport.refresh();
       } catch { if (this.active && generation === this.generation) this.emit({ error: 'Could not check your payment. Refresh to try again.' }); }
       if (!this.active || generation !== this.generation) return;
@@ -144,7 +159,7 @@ export class FeeCheckoutSession {
     latest = this.followingRef ? [latest, ...recent].find((c) => c?.ref === this.followingRef) : latest;
     if (!latest) return;
     if (pollDelay(0, latest.status) === null) { this.generation++; clearTimeout(this.timer); }
-    this.emit({ checkout: latest, blocked: latest.status === 'CONFIRMING' || latest.status === 'HELD' });
+    this.emit({ checkout: latest, blocked: latest.status === 'CONFIRMING' || latest.status === 'HELD' || latest.status === 'EXPIRED' });
   }
   focus(latest?: CheckoutStatus | null, ref?: string) {
     const target = ref ?? latest?.ref ?? this.followingRef;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkoutReferences, checkoutWords, dueLine, FeeCheckoutSession, liveMmg, pollDelay, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
-const checkout = (status: CheckoutStatus['status']): CheckoutStatus => ({ ref: 'reference-1', status, amountGyd: 1200, currencyCode: 'GYD', createdAt: '2026-09-29T12:00:00Z', expiresAt: '2026-09-29T13:00:00Z', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:02:00Z' : null, subscriptionStatus: 'ACTIVE' });
+import { checkoutReferences, checkoutWords, dueLine, FeeCheckoutSession, reopenableMmg, liveMmg, pollDelay, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weeklyFee';
+const checkout = (status: CheckoutStatus['status']): CheckoutStatus => ({ ref: 'reference-1', status, amountGyd: 1200, currencyCode: 'GYD', createdAt: '2026-09-29T12:00:00Z', expiresAt: status === 'OPEN' ? '2099-09-29T13:00:00Z' : '2026-09-29T13:00:00Z', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:02:00Z' : null, subscriptionStatus: 'ACTIVE' });
 function setup() {
   const views: CheckoutView[] = [];
   const transport = { start: vi.fn(async (_key: string): Promise<CheckoutStart> => ({ ref: 'reference-1', status: 'OPEN' as const, checkoutUrl: 'https://checkout.test/private', amountGyd: 1200, currencyCode: 'GYD' as const, expiresAt: '2026-09-29T13:00:00Z' })), read: vi.fn(async () => checkout('OPEN')), open: vi.fn(async (_url: string): Promise<unknown> => ({ type: 'success', url: 'swift://pay/mmg/return?status=CONFIRMED' })), refresh: vi.fn() };
@@ -23,7 +23,7 @@ describe('weekly fee contract', () => {
   it.each([
     ['OPEN', 'Finish paying on the MMG page.'], ['CONFIRMING', "Confirming your payment with MMG. Don't pay again."],
     ['CONFIRMED', 'Paid: GY$1,200 received on 29 Sept 2026.'], ['NOT_PAID', "MMG didn't complete this payment. You can try again."],
-    ['EXPIRED', 'This checkout expired. If you paid, it will be credited once MMG confirms it.'],
+    ['EXPIRED', "This checkout expired. We're checking this payment with MMG. Don't pay again. Support will help."],
     ['HELD', "We're checking this payment by hand. Don't pay again. Support will contact you."],
   ] as const)('%s has truthful words', (state, words) => expect(checkoutWords(checkout(state))).toBe(words));
   it("references: the Swift reference always, MMG's transaction ID only on CONFIRMED, nothing invented", () => {
@@ -143,4 +143,48 @@ describe('weekly fee contract', () => {
     expect(checkoutWords(views.at(-1)!.checkout!)).toContain('Paid:'); session.dispose();
   });
 
+});
+
+
+describe('server reopen grant', () => {
+  it('requires the same OPEN latest ref and an unexpired deadline', () => {
+    const now = Date.parse('2026-10-08T23:00:00Z');
+    const c = { ...checkout('OPEN'), expiresAt: '2026-10-08T23:30:00Z' };
+    const grant = { ref: c.ref, expiresAt: c.expiresAt };
+    const sub = { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: grant };
+    expect(reopenableMmg(sub, c, now)).toEqual(grant);
+    expect(reopenableMmg({ ...sub, reopenableMmgCheckout: null }, c, now)).toBeUndefined();
+    expect(reopenableMmg(sub, { ...c, status: 'CONFIRMING' }, now)).toBeUndefined();
+    expect(reopenableMmg({ ...sub, latestMmgCheckout: { ...c, ref: 'another-ref' } }, c, now)).toBeUndefined();
+    expect(reopenableMmg(sub, c, Date.parse(c.expiresAt))).toBeUndefined();
+  });
+  it('expiry blocks another session Pay until fresh server state proves resolution', async () => {
+    vi.useFakeTimers(); const { session, transport } = setup();
+    session.reconcile(checkout('EXPIRED')); await session.pay();
+    expect(transport.start).not.toHaveBeenCalled();
+    session.reconcile(checkout('NOT_PAID')); await session.pay();
+    expect(transport.start).toHaveBeenCalledOnce(); session.dispose();
+  });
+});
+
+
+describe('checkout deadline before the next server refresh', () => {
+  it('a stale OPEN at its deadline tells the partner it is being checked', () => {
+    const c = { ...checkout('OPEN'), expiresAt: '2026-10-08T23:30:00Z' };
+    vi.useFakeTimers(); vi.setSystemTime(new Date(c.expiresAt));
+    expect(checkoutWords(c, true)).toBe("This checkout expired. We're checking this payment with MMG. Don't pay again. Support will help.");
+  });
+});
+
+
+describe('reopen authority changes before POST', () => {
+  it('PAYMENT_CONFIRMING follows the reference and blocks another tap', async () => {
+    vi.useFakeTimers(); const { session, transport, views } = setup();
+    transport.start.mockRejectedValue({ status: 409, code: 'PAYMENT_CONFIRMING', details: { ref: 'reference-1' } });
+    transport.read.mockResolvedValue(checkout('HELD'));
+    await session.pay(); await vi.advanceTimersByTimeAsync(0); await session.pay();
+    expect(transport.start).toHaveBeenCalledOnce(); expect(transport.open).not.toHaveBeenCalled();
+    expect(transport.read).toHaveBeenCalledWith('reference-1');
+    expect(views.at(-1)?.blocked).toBe(true); session.dispose();
+  });
 });

@@ -5,7 +5,7 @@ import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { nanoid } from 'nanoid';
-import type { SubscriptionStatus, UserRole } from '@prisma/client';
+import type { Prisma, PrismaClient, SubscriptionStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -21,6 +21,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
+import { readReopenableMmgCheckout } from '../modules/billing/mmg-checkout-reopen';
 import { readDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import {
@@ -1119,5 +1120,97 @@ describe('the web return page contract', () => {
     // The page forwards at most 16 values of at most 4096 characters: the API's own caps.
     expect(src).toContain('value.length > 4096');
     expect(src).toContain('entries.length >= 16');
+  });
+});
+
+
+describe('[MMG reopen] the partner’s own open checkout', () => {
+  beforeEach(() => enable(true));
+
+  it.each(['vendor', 'rider', 'driver'] as const)('%s relaunch and two devices reopen the SAME checkout with one hold', async (family) => {
+    const p = await (family === 'vendor' ? makeStore() : family === 'rider' ? makeRider() : makeDriver());
+    const first = await started(p);
+    const payload = (await subscriptionOf(p)).json().data;
+    expect(payload.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    expect(payload.reopenableMmgCheckout).toEqual({ ref: first.ref, expiresAt: first.row.expiresAt.toISOString() });
+    expect(Object.keys(payload.reopenableMmgCheckout).sort()).toEqual(['expiresAt', 'ref']);
+    const replies = await Promise.all([isolated(() => start(p)), isolated(() => start(p))]);
+    for (const reply of replies) {
+      expect(reply.statusCode, reply.body).toBe(200);
+      expect(reply.json().data).toMatchObject({ ref: first.ref, status: 'OPEN', checkoutUrl: first.checkoutUrl });
+    }
+    expect(await isolated(() => app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } }))).toBe(1);
+    expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId } }))).toBe(1);
+    expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE', checkoutId: first.ref } }))).toBe(1);
+    const other = await makeStore();
+    expect((await subscriptionOf(other)).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await follow(other, first.ref)).statusCode).toBe(404);
+  });
+
+  it.each(['CONFIRMING', 'HELD', 'EXPIRED', 'NOT_PAID', 'CONFIRMED'] as const)('never reopens %s', async (status) => {
+    const p = await makeStore(); const first = await started(p);
+    if (status === 'CONFIRMED') {
+      const txn = tx('REOPENPAID'); approved(txn, 2100);
+      expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+    } else await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('does not reopen a timed-out OPEN or an older checkout', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { expiresAt: new Date() } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { expiresAt: new Date(Date.now() + 60_000) } });
+    await app.prisma.mmgCheckoutIntent.create({ data: { ...first.row, id: nanoid(), merchantTransactionId: first.row.merchantTransactionId.slice(0, 9) + '999999999', status: 'NOT_PAID', createdAt: new Date(Date.now() + 1000) } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('requires the sole ACTIVE hold on the current clock and epoch', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const hold = await app.prisma.paymentConfirmationHold.findFirstOrThrow({ where: { checkoutId: first.ref } });
+    for (const data of [{ status: 'SETTLEMENT_APPLY_PENDING' as const }]) {
+      await app.prisma.paymentConfirmationHold.update({ where: { id: hold.id }, data });
+      expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+      await app.prisma.paymentConfirmationHold.update({ where: { id: hold.id }, data: { status: 'ACTIVE', sourceEpoch: hold.sourceEpoch } });
+    }
+    // The database refuses stale source epochs. Also fail closed on a stale or missing read.
+    for (const rows of [[{ ...hold, sourceEpoch: hold.sourceEpoch + 1 }], []]) {
+      const staleDb = { $transaction: (work: (tx: Prisma.TransactionClient) => Promise<unknown>) => app.prisma.$transaction((tx) => work(new Proxy(tx, {
+        get: (target, name) => name === 'paymentConfirmationHold' ? { findMany: async () => rows } : Reflect.get(target, name),
+      }))) } as unknown as PrismaClient;
+      expect(await readReopenableMmgCheckout(staleDb, p.subId, first.ref, new Date())).toBeNull();
+    }
+    await app.prisma.billingDunningClock.update({ where: { id: hold.clockId }, data: { authorityHoldReason: 'TEST_REVIEW' } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it.each(['PENDING', 'UNKNOWN'] as const)('a card %s blocks reopen even before its hold is discovered', async (status) => {
+    const p = await makeStore(); await started(p);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: p.subId, amount: 2100, paymentMethod: 'CARD', status, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), clientKey: `cardpay:${nanoid()}` } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    await isolated(() => readDunningClock(app.prisma, p.subId));
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('another active confirmation hold blocks reopen', async () => {
+    const p = await makeStore(); await started(p);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: p.subId, amount: 2100, paymentMethod: 'CARD', status: 'UNKNOWN', periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY) } });
+    await isolated(() => readDunningClock(app.prisma, p.subId));
+    expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE' } })).toBe(2);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('respects the global and platform kill switches', async () => {
+    const p = await makeStore(); await started(p);
+    enable(false);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    enable(true);
+    await app.prisma.platformConfig.upsert({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY }, create: { key: FEE_CHECKOUT_PLATFORMS_KEY, value: { ios: false } }, update: { value: { ios: false } } });
+    resetFeeCheckoutSwitchCache();
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await subscriptionOf(p, { 'x-client-platform': 'web' })).json().data.reopenableMmgCheckout).toBeTruthy();
+    await app.prisma.platformConfig.delete({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } }); resetFeeCheckoutSwitchCache();
   });
 });

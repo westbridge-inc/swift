@@ -7,7 +7,7 @@ import type { CheckoutStatus, FeeSubscription } from '../../../lib/weeklyFee';
 const host = vi.hoisted(() => ({
   index: 0, slots: [] as Array<{ value?: unknown; deps?: unknown[]; cleanup?: () => void }>,
   effects: [] as Array<() => void>,
-  read: vi.fn(), active: undefined as undefined | ((_state: string) => void),
+  start: vi.fn(), open: vi.fn(), keys: 0, read: vi.fn(), active: undefined as undefined | ((_state: string) => void),
   pending: false, recovery: null as null | { retry: () => void; cancel: () => void },
 }));
 vi.mock('react', async (original) => {
@@ -27,11 +27,11 @@ vi.mock('react', async (original) => {
 });
 vi.mock('react-native', () => ({ ScrollView: 'ScrollView', View: 'View', RefreshControl: 'RefreshControl', AppState: { addEventListener: (_event: string, fn: typeof host.active) => { host.active = fn; return { remove: () => { host.active = undefined; } }; } } }));
 vi.mock('@react-navigation/native', () => ({ useFocusEffect: () => {} }));
-vi.mock('expo-web-browser', () => ({ openAuthSessionAsync: vi.fn() }));
-vi.mock('expo-crypto', () => ({ randomUUID: () => 'tap-key-one' }));
+vi.mock('expo-web-browser', () => ({ openAuthSessionAsync: host.open }));
+vi.mock('expo-crypto', () => ({ randomUUID: () => `tap-key-${++host.keys}` }));
 vi.mock('@swift/ui', () => ({ space: {} }));
 vi.mock('../../../kit', () => Object.fromEntries(['Card', 'ErrorState', 'Header', 'LoadingBlock', 'PillButton', 'Screen', 'T'].map((name) => [name, name])));
-vi.mock('../../../services/api', () => ({ weeklyFeeApi: () => ({ start: vi.fn(), read: host.read }) }));
+vi.mock('../../../services/api', () => ({ weeklyFeeApi: () => ({ start: host.start, read: host.read }) }));
 vi.mock('../../../stores/authStore', () => ({ getAuthSessionSnapshot: () => null, useAuthStore: (pick: (_s: unknown) => unknown) => pick({ user: { id: 'test-partner' } }) }));
 vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: (pick: (_s: unknown) => unknown) => pick({ selectedStoreId: 'store-B', feeContextPending: host.pending, feeContextError: host.recovery }) }));
 import { WeeklyFeeScreen } from './WeeklyFeeScreen';
@@ -94,4 +94,50 @@ describe('phone checkout lifecycle', () => {
     expect(host.recovery.cancel).toHaveBeenCalledOnce();
   });
 
+});
+
+
+describe('relaunch with the server’s own reopen signal', () => {
+  const open = () => ({ ...checkout('OPEN'), expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() });
+  const buttons = (node: unknown): Array<{ label?: string; onPress?: () => void }> => {
+    if (Array.isArray(node)) return node.flatMap(buttons);
+    if (!node || typeof node !== 'object' || !('props' in node)) return [];
+    const props = (node as ReactElement<{ label?: string; onPress?: () => void; children?: unknown }>).props;
+    return [props, ...buttons(props.children)];
+  };
+  it('a killed app relaunch shows Back, its Guyana deadline, and each tap asks for the same page with a new key', async () => {
+    vi.setSystemTime(new Date('2026-10-08T23:00:00Z'));
+    const c = open();
+    const sub = { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt: c.expiresAt }, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' as const }] };
+    host.keys = 0; host.read.mockResolvedValue(c);
+    host.start.mockReset().mockResolvedValue({ ...c, checkoutUrl: 'https://checkout.test/same-page' }); host.open.mockReset().mockResolvedValue({ type: 'cancel' });
+    render(sub); await vi.advanceTimersByTimeAsync(0);
+    expect(render(sub)).toContain("Back to MMG's page"); expect(render(sub)).toContain('expires at 19:30');
+    for (let i = 0; i < 2; i++) {
+      host.index = 0; const tree = WeeklyFeeScreen({ family: 'vendor', sub, refresh });
+      buttons(tree).find((p) => p.label === "Back to MMG's page")!.onPress!();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(host.start.mock.calls.map(([key]) => key)).toEqual(['tap-key-1', 'tap-key-2']);
+    expect(host.open.mock.calls.map(([url]) => url)).toEqual(['https://checkout.test/same-page', 'https://checkout.test/same-page']);
+    const expired = { ...sub, latestMmgCheckout: { ...c, status: 'EXPIRED' as const }, reopenableMmgCheckout: null };
+    render(expired); expect(render(expired)).toContain('Support will help');
+    expect(render(expired)).not.toMatch(/Back to MMG|Pay GY|Retry/);
+  });
+  it('the deadline itself removes Back and shows support copy even if the server read remains OPEN', async () => {
+    vi.setSystemTime(new Date('2026-10-08T23:00:00Z'));
+    const c = open(); const sub = { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt: c.expiresAt } };
+    host.read.mockResolvedValue(c); render(sub); await vi.advanceTimersByTimeAsync(0);
+    expect(render(sub)).toContain("Back to MMG's page");
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(render(sub)).not.toContain("Back to MMG's page");
+    expect(render(sub)).toContain('Support will help');
+    expect(refresh).toHaveBeenCalled();
+  });
+  it('OPEN alone never grants reopen and an unresolved store hides the affordance', () => {
+    const c = open(); const sub = { status: 'ACTIVE', latestMmgCheckout: c };
+    expect(render(sub)).not.toContain("Back to MMG's page");
+    host.pending = true;
+    expect(render({ ...sub, reopenableMmgCheckout: { ref: c.ref, expiresAt: c.expiresAt } })).not.toContain("Back to MMG's page");
+  });
 });

@@ -16,7 +16,8 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { BillingService } from './billing.service';
 import { MmgCheckoutService, type CheckoutStatus, type CheckoutView, type ReturnState } from './mmg-checkout.service';
-import { clientPlatform, feePayActions, type ClientPlatform, type PayAction } from './fee-pay-actions';
+import { clientPlatform, feePayActions, mmgCheckoutLive, type ClientPlatform, type PayAction } from './fee-pay-actions';
+import { readReopenableMmgCheckout, type ReopenableMmgCheckout } from './mmg-checkout-reopen';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
 import { readFeePaymentDecision } from './fee-payment-authority';
 import { subscriptionPayer } from '../subscription/mover-fee-authority';
@@ -123,6 +124,7 @@ export interface FeeCheckoutPayload {
   payActions: PayAction[];
   latestMmgCheckout: CheckoutView | null;
   recentCheckouts: CheckoutView[];
+  reopenableMmgCheckout: ReopenableMmgCheckout | null;
 }
 
 function checkoutView(row: MmgCheckoutIntent, subscriptionStatus: SubscriptionStatus): CheckoutView {
@@ -193,14 +195,18 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
   const rt = () => (runtime ??= mmgCheckoutRuntimeOf(app));
 
   const feePayload = async (sub: Subscription, headers: Record<string, unknown>, now: Date = new Date()): Promise<FeeCheckoutPayload> => {
-    if (!mmgCheckoutEnabled()) return { payActions: OFF_ACTIONS, latestMmgCheckout: null, recentCheckouts: [] };
+    if (!mmgCheckoutEnabled()) return { payActions: OFF_ACTIONS, latestMmgCheckout: null, recentCheckouts: [], reopenableMmgCheckout: null };
     const [payActions, rows] = await Promise.all([
       payActionsFor(app.prisma, sub, clientPlatform(headers), rt().checkout),
-      app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: sub.id }, orderBy: { createdAt: 'desc' }, take: RECENT_CHECKOUTS }),
+      app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: sub.id }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: RECENT_CHECKOUTS }),
     ]);
     const recentCheckouts = rows.map((row) => checkoutView(row, sub.status));
     const latestMmgCheckout = recentCheckouts.find((c) => Date.parse(c.createdAt) >= now.getTime() - LATEST_WINDOW_MS) ?? null;
-    return { payActions, latestMmgCheckout, recentCheckouts };
+    const reopenableMmgCheckout = latestMmgCheckout?.status === 'OPEN'
+      && await mmgCheckoutLive(app.prisma, sub, clientPlatform(headers), rt().checkout)
+      && await payerIsProduction(app.prisma, sub.id)
+      ? await readReopenableMmgCheckout(app.prisma, sub.id, latestMmgCheckout.ref, now) : null;
+    return { payActions, latestMmgCheckout, recentCheckouts, reopenableMmgCheckout };
   };
 
   /** POST …/subscription/mmg-checkout — the server prices it; the body is ignored. */
