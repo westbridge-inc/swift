@@ -19,6 +19,7 @@ import { Modal } from '@/components/modal';
 import { signInPath } from '@/lib/customer-routes';
 import { cartItemCount, customerCartKey, readShellCart } from '@/lib/shell-data';
 import { parseAmount } from '@/lib/money';
+import { photo } from '@/lib/media';
 import { fromPage, vendorDetailKey } from '@/lib/browse-keys';
 import { useStoreSeed } from '@/components/browse-seed';
 
@@ -312,7 +313,7 @@ export default function VendorPage() {
                     <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <span className="text-[17px] font-semibold leading-6">{it.name}</span>
                       {it.description ? <span className="line-clamp-2 text-[13px] leading-[18px] text-[var(--swift-muted)]">{it.description}</span> : null}
-                      {it.imageUrl ? <span className="relative mt-2 block h-16 w-16 overflow-hidden rounded-xl"><Image src={it.imageUrl} alt="" fill unoptimized sizes="64px" loading="lazy" className="object-cover" /></span> : null}
+                      {photo(it.imageUrl) ? <span className="relative mt-2 block h-16 w-16 overflow-hidden rounded-xl"><Image {...photo(it.imageUrl)!} alt="" fill sizes="64px" loading="lazy" className="object-cover" /></span> : null}
                     </span>
                     <span className="flex flex-col items-end justify-between gap-2">
                       <span className="sw-money text-[var(--swift-red)]">{money(it.customerPrice ?? it.basePrice)}</span>

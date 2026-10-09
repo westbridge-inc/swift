@@ -6,6 +6,7 @@ import { ChevronRight, Star } from 'lucide-react';
 import { Bone, LoadingRegion } from './customer-skeletons';
 import { Pictogram, verticalPictogram } from './glyphs';
 import { money, type Vendor } from '@/lib/customer';
+import { photo } from '@/lib/media';
 
 /**
  * [WEB-REDESIGN] The store and item cards of the owner's design. Each card and
@@ -37,10 +38,13 @@ export function Photo({
 }: {
   src?: string | null; alt?: string; vendorType?: string | null; name?: string; sizes: string; priority?: boolean; iconSize?: number; className?: string; dim?: boolean;
 }) {
+  // [W2b] The store's photo at its full address; the web server resizes it
+  // for the screen when it is one of the API's public photos (lib/media.ts).
+  const media = photo(src);
   return (
     <span className={`sw-photo ${className}`} style={dim ? { opacity: 0.45 } : undefined}>
-      {src ? (
-        <Image src={src} alt={alt} fill unoptimized sizes={sizes} {...(priority ? { priority: true } : { loading: 'lazy' as const })} className="object-cover" />
+      {media ? (
+        <Image {...media} alt={alt} fill sizes={sizes} {...(priority ? { priority: true } : { loading: 'lazy' as const })} className="object-cover" />
       ) : (
         <span className="flex flex-col items-center justify-center gap-2 p-3 text-center">
           <Pictogram name={verticalPictogram(vendorType)} size={iconSize} />
