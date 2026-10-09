@@ -61,14 +61,15 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const mmgPending = contextPending || view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
   const canReopen = !!reopen && !contextPending && !view.blocked && !cardPending;
   const blocked = mmgPending || cardPending;
+  const reopenExpiresAt = sub?.reopenableMmgCheckout?.expiresAt;
   const [, setExpiryTick] = useState(0);
   useEffect(() => {
-    if (!sub?.reopenableMmgCheckout) return;
-    const delay = Date.parse(sub.reopenableMmgCheckout.expiresAt) - Date.now();
+    if (!reopenExpiresAt) return;
+    const delay = Date.parse(reopenExpiresAt) - Date.now();
     if (!(delay > 0)) return;
     const timer = setTimeout(() => { setExpiryTick(Date.now()); void refreshRef.current(); }, Math.min(delay, 2_147_483_647));
     return () => clearTimeout(timer);
-  }, [sub?.reopenableMmgCheckout?.expiresAt]);
+  }, [reopenExpiresAt]);
   // The card choice exists only when the server says CARD is live (or a card payment of ours is in flight).
   const card = liveCard(sub?.payActions);
   const showCard = !!card || cardPending || hasCardSession(cardContextKey(principal, generation, family, storeId));

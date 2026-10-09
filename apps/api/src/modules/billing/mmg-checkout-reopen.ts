@@ -35,9 +35,10 @@ export async function readReopenableMmgCheckout(
       tx.subscriptionPayment.count({ where: { subscriptionId: { in: sourceIds }, paymentMethod: 'CARD', status: { in: ['PENDING', 'UNKNOWN'] } } }),
     ]);
     const own = holds[0];
+    const source = unresolved.sources[0]?.source;
     if (holds.length !== 1 || !own || own.status !== 'ACTIVE' || own.checkoutId !== latest.id
       || own.subscriptionId !== subscriptionId || own.clockId !== clock.id || own.sourceEpoch !== clock.epoch
-      || pendingCards || unresolved.sources.length !== 1 || unresolved.sources[0]?.source.checkoutId !== latest.id) return null;
+      || pendingCards || unresolved.sources.length !== 1 || !source || !('checkoutId' in source) || source.checkoutId !== latest.id) return null;
     return { ref: latest.id, expiresAt: latest.expiresAt.toISOString() };
   }, { isolationLevel: 'RepeatableRead' });
 }

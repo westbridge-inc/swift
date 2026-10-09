@@ -43,14 +43,16 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
     window.addEventListener('focus', focus);
     return () => window.removeEventListener('focus', focus);
   }, [client, queryKey, session]);
+  const reopenExpiresAt = q.data?.reopenableMmgCheckout?.expiresAt;
+  const refetch = q.refetch;
   const [, setExpiryTick] = useState(0);
   useEffect(() => {
-    if (!q.data?.reopenableMmgCheckout) return;
-    const delay = Date.parse(q.data.reopenableMmgCheckout.expiresAt) - Date.now();
+    if (!reopenExpiresAt) return;
+    const delay = Date.parse(reopenExpiresAt) - Date.now();
     if (!(delay > 0)) return;
-    const timer = setTimeout(() => { setExpiryTick(Date.now()); void q.refetch(); }, Math.min(delay, 2_147_483_647));
+    const timer = setTimeout(() => { setExpiryTick(Date.now()); void refetch(); }, Math.min(delay, 2_147_483_647));
     return () => clearTimeout(timer);
-  }, [q.data?.reopenableMmgCheckout?.expiresAt, q.refetch]);
+  }, [reopenExpiresAt, refetch]);
   if (q.isLoading) return <p>Loading your weekly fee…</p>;
   if (q.isError || !q.data) return <div role="alert"><p>Could not load your weekly fee.</p><button onClick={() => void q.refetch()}>Try again</button></div>;
   const sub = q.data;

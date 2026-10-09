@@ -108,7 +108,7 @@ describe('relaunch with the server’s own reopen signal', () => {
   it('a killed app relaunch shows Back, its Guyana deadline, and each tap asks for the same page with a new key', async () => {
     vi.setSystemTime(new Date('2026-10-08T23:00:00Z'));
     const c = open();
-    const sub = { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt: c.expiresAt }, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' as const }] };
+    const sub = { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt: c.expiresAt }, payActions: [{ id: 'MMG_CHECKOUT' as const, state: 'off' as const }] };
     host.keys = 0; host.read.mockResolvedValue(c);
     host.start.mockReset().mockResolvedValue({ ...c, checkoutUrl: 'https://checkout.test/same-page' }); host.open.mockReset().mockResolvedValue({ type: 'cancel' });
     render(sub); await vi.advanceTimersByTimeAsync(0);
