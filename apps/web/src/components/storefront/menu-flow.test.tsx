@@ -105,6 +105,27 @@ describe('[W6] one tap or Choose', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Pumpkin soup' }));
     expect(screen.getByRole('dialog', { name: 'Pumpkin soup' })).toBeTruthy();
   });
+
+  it('opens the choices, already set to the store’s own pick, when an optional choice comes pre-selected — never adds it silently or drops it', async () => {
+    // A store pick the phone app pre-selects: one tap must not leave it out of
+    // the kitchen ticket, nor charge for it unseen. The sheet shows it chosen.
+    const BREAD: customer.OptionGroup = { id: 'bread', name: 'Bread', isRequired: false, minSelect: 0, maxSelect: 1,
+      options: [option('none', 'No bread', '0'), option('garlic', 'Garlic bread', '250', { isDefault: true })] };
+    const stew = { ...soup, id: 'stew', name: 'Bean stew', optionGroups: [BREAD] };
+    live([soup, curry, stew]);
+    await start();
+    const card = screen.getByRole('heading', { name: 'Bean stew' }).closest('article')!;
+    expect(within(card).queryByRole('button', { name: 'Add Bean stew' })).toBeNull();
+    fireEvent.click(within(card).getByRole('button', { name: 'Choose options for Bean stew' }));
+    const sheet = await screen.findByRole('dialog', { name: 'Bean stew' });
+    expect(customer.addToCart).not.toHaveBeenCalled();
+    expect((within(sheet).getByRole('checkbox', { name: /Garlic bread/ }) as HTMLInputElement).checked).toBe(true);
+    expect(within(sheet).getByRole('button', { name: /^Add to order/ }).textContent).toContain('$1,050');
+    fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
+    await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({
+      vendorId: 'menu-store', itemId: 'stew', quantity: 1, selectedOptions: { bread: 'garlic' },
+    }));
+  });
 });
 
 describe('[W6] the item sheet', () => {
@@ -170,6 +191,18 @@ describe('[W6] the item sheet', () => {
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
     expect((await within(sheet).findByRole('alert')).textContent).toBe('“Roti” is sold out right now.');
     expect(customer.addToCart).not.toHaveBeenCalled();
+  });
+
+  it('does not open a linked item (?item=) while the store is closed or has paused orders', async () => {
+    for (const state of [{ isCurrentlyOpen: false }, { acceptingOrders: false }]) {
+      const s = { ...store(), ...state } as StorefrontDetail;
+      vi.spyOn(customer, 'getPublicStorefront').mockResolvedValue(s);
+      vi.spyOn(customer, 'getPublicVendor').mockResolvedValue({ ...s, description: undefined } as unknown as customer.VendorDetail);
+      const view = render(<StorefrontExperience store={s} returnPath="/store/sample-kitchen" initialItemId="curry" />);
+      await waitFor(() => expect(screen.getByText(/Live menu checked at/)).toBeTruthy());
+      expect(screen.queryByRole('dialog')).toBeNull();
+      view.unmount();
+    }
   });
 
   it('opens the item a link names (?item=) once the live menu is verified, and adds nothing', async () => {
