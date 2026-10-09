@@ -3,7 +3,8 @@
 import { SwiftLogo } from '@/components/swift-logo';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createSequence, freshness, mapEmbedUrl, mapLinkUrl, validPoint } from '@/lib/live-tracking';
+import { coarsen, createSequence, freshness, mapLinkUrl, validPoint } from '@/lib/live-tracking';
+import { TileMap } from '@/components/tile-map';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // The polling client for the §6 public trip page. Renders exactly what the
@@ -180,25 +181,11 @@ export function TripShareClient({ token, imageOrigin = API_URL }: { token: strin
 
             {showMap && point ? (
               <div className="mt-3 overflow-hidden sw-card">
-                {/* [W-47] Coarsened to about 110 m and sent with no referer. The exact
-                    position of a person in a moving car, and the token identifying who
-                    was watching, used to reach a third party on every map load. */}
-                <iframe
-                  title="Trip location, approximate"
-                  className="h-64 w-full border-0"
-                  loading="lazy"
-                  referrerPolicy="no-referrer"
-                  src={mapEmbedUrl(point)}
-                />
-                <a
-                  className="block px-4 py-3 text-sm font-semibold text-[var(--swift-red)]"
-                  href={mapLinkUrl(point)}
-                  target="_blank"
-                  rel="noreferrer"
-                  referrerPolicy="no-referrer"
-                >
-                  Open approximate map ↗
-                </a>
+                {/* [W-47 · W7] Coarsened to about 110 m, drawn from map tiles that name
+                    only a ~1 km square and carry the site's origin, never this link's
+                    token. The old embedded map was a frame, which the site's security
+                    policy blocks, so it never drew. */}
+                <TileMap point={coarsen(point)} label="Trip location, approximate" linkHref={mapLinkUrl(point)} linkLabel="Open approximate map ↗" />
               </div>
             ) : view.ended ? (
               <div className="mt-3 sw-card p-4 text-sm text-[var(--swift-muted)]">
@@ -210,11 +197,11 @@ export function TripShareClient({ token, imageOrigin = API_URL }: { token: strin
               </div>
             )}
 
-            <div className="mt-3 rounded-2xl border border-[#EAE2E1] bg-[var(--swift-card)] p-4 text-sm shadow-[var(--swift-elevation-card)]">
-              <p className="font-semibold text-[#DC2626]">Emergency?</p>
+            <div className="mt-3 rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-4 text-sm shadow-[var(--swift-elevation-card)]">
+              <p className="font-semibold text-[var(--swift-error)]">Emergency?</p>
               <p className="mt-1 text-[var(--swift-muted)]">{view.emergencyNote}</p>
               {view.emergencyDial ? (
-                <a href={`tel:${view.emergencyDial}`} className="mt-2 inline-block rounded-full bg-[#DC2626] px-4 py-2 text-sm font-semibold text-[var(--swift-white)]">
+                <a href={`tel:${view.emergencyDial}`} className="mt-2 inline-block rounded-full bg-[var(--swift-error)] px-4 py-2 text-sm font-semibold text-[var(--swift-white)]">
                   Call {view.emergencyDial}
                 </a>
               ) : null}
