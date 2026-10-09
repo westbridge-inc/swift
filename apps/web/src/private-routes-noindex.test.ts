@@ -54,6 +54,7 @@ const PRIVATE_PAGES = [
   '(app)/account/profile/page.tsx',
   '(app)/account/safety/page.tsx',
   '(app)/cart/page.tsx', // guest basket is public to browse but stays out of search
+  '(app)/checkout/page.tsx', // [W4] the one checkout: a guest's basket is shown, still out of search
   '(app)/courier/page.tsx',
   '(app)/order/location/page.tsx',
   '(app)/orders/page.tsx',
@@ -276,7 +277,7 @@ describe('[DS288] every route has a reviewed search classification', () => {
   it('agrees with the customer shell about which routes require sign-in', () => {
     for (const [pages, isPublic] of [[PUBLIC_PAGES, true], [PRIVATE_PAGES, false]] as const) {
       for (const page of pages.filter((file) => file.startsWith('(app)/'))) {
-        expect(customerRoute(urlOf(page)).public, page).toBe(isPublic || page === '(app)/cart/page.tsx');
+        expect(customerRoute(urlOf(page)).public, page).toBe(isPublic || page === '(app)/cart/page.tsx' || page === '(app)/checkout/page.tsx');
       }
     }
   });

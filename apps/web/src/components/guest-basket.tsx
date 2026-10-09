@@ -77,7 +77,8 @@ export function GuestCart() {
       </li>)}</ul>
       <p className="my-4">Items estimate: {money(subtotal)}. Delivery and the final total are quoted by the server after sign-in.</p>
       <button className="sw-btn-primary" onClick={() => void ensureSignedIn().then(async ok => {
-        if (!ok) { router.push('/login?next=%2Fcart'); return; }
+        // Back to this same page (the cart or the checkout) after the code.
+        if (!ok) { router.push(`/login?next=${encodeURIComponent(window.location.pathname === '/checkout' ? '/checkout' : '/cart')}`); return; }
         try { const result = await uploadGuestBasket(getSessionPrincipal() ?? scope); if (result && !result.applied) { setError('Your basket changed. Check the items and retry the upload.'); return; }
           await queries.invalidateQueries({ queryKey: ['customer', 'cart'] }); router.refresh();
         } catch (e) { setError((e as Error).message); }

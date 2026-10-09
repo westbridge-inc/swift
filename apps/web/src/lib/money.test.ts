@@ -132,7 +132,8 @@ describe('[W-13] the surfaces that spent money use it', () => {
   });
 
   it('the cart computes its total from parsed parts and locks checkout when it cannot', () => {
-    const cart = source('src/app/(app)/cart/page.tsx');
+    // [W4] The one checkout (the cart and /checkout both render it).
+    const cart = source('src/components/checkout/checkout.tsx');
     // the old shape: raw arithmetic across wire values
     expect(cart).not.toMatch(/serverSubtotal \+ deliveryFee - discount \+ tip/);
     expect(cart).toMatch(/sumAmounts\(/);
