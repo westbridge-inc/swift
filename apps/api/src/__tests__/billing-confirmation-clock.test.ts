@@ -59,6 +59,7 @@ afterAll(async () => {
   await db.billingDunningClock.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
   await db.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
   await db.cardSession.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
+  await db.providerPayment.deleteMany({ where: { subscriptionId: { in: subscriptions } } });
   await db.subscription.deleteMany({ where: { id: { in: subscriptions } } });
   await db.vendor.deleteMany({ where: { id: { in: vendors } } });
   await db.vendorOwner.deleteMany({ where: { userId: { in: users } } });
@@ -334,5 +335,29 @@ describe('finance proof and source ownership', () => {
     expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).billingEnforcementDueAt).toEqual(at(101));
     expect((await resolveFinanceConfirmation(db, { ...input, decision: 'UNPAID' }, audit, at(110))).changed).toBe(false);
     expect(audit).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('confirmation queue console context', () => {
+  it('returns the Swift reference, partner and only matching credited MMG records', async () => {
+    const { sub, user } = await fixture(); await run(sub.id, 0);
+    const checkout = await heldCheckout(sub.id, user.id, 47);
+    const key = `queue-${randomUUID()}`;
+    await db.mmgCheckoutIntent.update({ where: { id: checkout.id }, data: { candidates: [key, `${key}-open`, `${key}-wrong-amount`, `${key}-wrong-currency`, `${key}-other-tenant`] } });
+    const matching = await db.providerPayment.create({ data: { provider: 'MMG', providerTxnId: key, subscriptionId: sub.id, amount: checkout.amount, currencyCode: 'GYD', status: 'CREDITED' } });
+    await db.providerPayment.createMany({ data: [
+      { provider: 'MMG', providerTxnId: `${key}-open`, subscriptionId: sub.id, amount: checkout.amount, currencyCode: 'GYD', status: 'OPEN' },
+      { provider: 'MMG', providerTxnId: `${key}-wrong-amount`, subscriptionId: sub.id, amount: 1, currencyCode: 'GYD', status: 'CREDITED' },
+      { provider: 'MMG', providerTxnId: `${key}-wrong-currency`, subscriptionId: sub.id, amount: checkout.amount, currencyCode: 'USD', status: 'CREDITED' },
+      { provider: 'MMG', providerTxnId: `${key}-other-tenant`, tenantId: 'synthetic-foreign', subscriptionId: sub.id, amount: checkout.amount, currencyCode: 'GYD', status: 'CREDITED' },
+    ] });
+    const row = (await confirmationReviewQueue(db, 'swift-default', at(100))).find((r) => r.sourceId === checkout.id);
+    expect(row).toMatchObject({ swiftReference: checkout.merchantTransactionId, partner: 'Confirmation clock fixture',
+      settlementPayments: [{ providerPaymentId: matching.id, mmgTransactionId: key }] });
+    expect((await confirmationReviewQueue(db, 'synthetic-foreign', at(100))).some((r) => r.sourceId === checkout.id)).toBe(false);
+    // Displaying a recorded payment never relaxes the resolver's independent ledger proof.
+    await expect(resolveFinanceConfirmation(db, { id: row!.id, tenantId: 'swift-default', actorId: user.id, sourceId: checkout.id,
+      epoch: row!.epoch, clockVersion: row!.clockVersion, decision: 'PAID', providerPaymentId: matching.id, evidenceReference: 'synthetic-proof' }, vi.fn(), at(100))).rejects.toThrow('settlement workflow');
   });
 });

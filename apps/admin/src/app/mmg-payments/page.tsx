@@ -85,6 +85,10 @@ export default function MmgPaymentsPage() {
   const [status, setStatus] = useState<MmgCheckoutSupportStatus | ''>('');
   const [applied, setApplied] = useState<Applied>({ q: '', status: '', run: 0 });
   const [openId, setOpenId] = useState<string | null>(null);
+  useEffect(() => {
+    const checkout = new URLSearchParams(window.location.search).get('checkout');
+    if (checkout && /^[A-Za-z0-9_-]{1,64}$/.test(checkout)) setOpenId(checkout);
+  }, []);
 
   const list = useInfiniteQuery({
     queryKey: ['mmg-checkouts', applied.q, applied.status, applied.run],

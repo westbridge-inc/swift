@@ -203,3 +203,17 @@ describe('MMG payments: one payment, its timeline and what it paid', () => {
     expect(screen.queryByRole('region', { name: 'Payment detail' })).toBeNull();
   });
 });
+
+
+it('a confirmation queue link opens the exact checkout timeline even outside the listed page', async () => {
+  window.history.replaceState(null, '', '/mmg-payments?checkout=checkout-deep-link');
+  try {
+    const fetch = mockApi((request) => {
+      if (request.url.pathname.endsWith('/checkout-deep-link')) return { body: { success: false, error: { message: 'Synthetic detail reached', code: 'NOT_FOUND' } }, status: 404 };
+      return { body: { success: true, data: [], nextCursor: null } };
+    });
+    renderWithQuery(<MmgPaymentsPage />);
+    expect(await screen.findByText(/Synthetic detail reached/)).toBeTruthy();
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/mmg-checkouts/checkout-deep-link'))).toBe(true);
+  } finally { window.history.replaceState(null, '', '/'); }
+});
