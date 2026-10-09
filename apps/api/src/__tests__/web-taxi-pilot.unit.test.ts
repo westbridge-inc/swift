@@ -5,7 +5,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 
 const fakes = vi.hoisted(() => ({
-  session: vi.fn(), createRide: vi.fn(), gates: vi.fn(), queueCreate: vi.fn(), queueUpdate: vi.fn(),
+  session: vi.fn(), user: vi.fn(), createRide: vi.fn(), gates: vi.fn(), queueCreate: vi.fn(), queueUpdate: vi.fn(),
 }));
 vi.mock('../plugins/prisma', () => ({ enterTenant: vi.fn(), getTenantId: () => 'tenant-test' }));
 vi.mock('../modules/auth/auth.service', () => ({ AuthService: class {} }));
@@ -35,10 +35,13 @@ beforeEach(async () => {
   vi.stubEnv('CORS_ORIGIN', 'https://swift.example');
   resetBrowserOriginsForTests();
   vi.clearAllMocks();
+  // A session row names its account; the account (walled per tenant) is its own read.
   fakes.session.mockResolvedValue({
-    id: 'session-test', expiresAt: new Date(Date.now() + 60_000), authMethod: 'OTP',
-    user: { id: 'customer-test', tenantId: 'tenant-test', tenant: { kind: 'STANDARD' },
-      status: 'ACTIVE', roles: ['CUSTOMER'], activeRole: 'CUSTOMER' },
+    id: 'session-test', userId: 'customer-test', expiresAt: new Date(Date.now() + 60_000), authMethod: 'OTP',
+  });
+  fakes.user.mockResolvedValue({
+    id: 'customer-test', tenantId: 'tenant-test', tenant: { kind: 'STANDARD' },
+    status: 'ACTIVE', roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
   });
   fakes.createRide.mockResolvedValue({
     order: { id: 'ride-test', orderNumber: 'TEST', status: 'REQUESTED' },
@@ -50,6 +53,7 @@ beforeEach(async () => {
   app = Fastify();
   app.decorate('prisma', {
     session: { findUnique: fakes.session },
+    user: { findUnique: fakes.user },
     rideQueueEntry: { updateMany: fakes.queueUpdate, create: fakes.queueCreate },
     supplyWatch: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
     order: { findFirst: vi.fn().mockResolvedValue(null) },

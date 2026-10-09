@@ -1,6 +1,6 @@
 /**
- * [REVIEW-PARTNER · REPORT-072 OTA-016] RECORDED, NOT FIXED: the review tenant
- * under production's strict tenant posture.
+ * [REVIEW-PARTNER · REPORT-072 OTA-016] The review tenant under production's
+ * strict tenant posture — FIXED by the pre-auth identity capability (L04 R1).
  *
  * The dependency chain, measured here:
  *  1. A REVIEW tenant is a second active tenant. On a NODE_ENV=production host
@@ -8,9 +8,9 @@
  *     (rls-attestation assertTenantWall, called by review:provision and boot):
  *     the app on a NOBYPASSRLS login, TENANT_RLS_BIND=1, TENANT_UNSCOPED_ACCESS=deny,
  *     and audited system work on its own bypass-member login.
- *  2. Under that posture nobody — the review partners included — can sign in
- *     or use a session, because authentication reads the tenant-owned User row
- *     BEFORE any tenant is bound:
+ *  2. Under that posture nobody — the review partners included — could sign
+ *     in or use a session, because authentication read the tenant-owned User
+ *     row BEFORE any tenant was bound:
  *       - verify-otp (auth.service verifyOtp) looks the account up by phone in
  *         request mode with no tenant → TENANT_CONTEXT_REQUIRED (500);
  *       - every authenticated request (plugins/auth.ts authenticate) reads
@@ -20,12 +20,11 @@
  * Staging runs NODE_ENV=loadtest, where the wall check is a no-op, so the demo
  * partners work there (review-partner-demo.test.ts proves the whole flow under
  * the default posture). This suite boots the app's OWN client as the walled
- * login — the exact topology the contract names — and pins both failures
- * through the real routes. The fix (a narrow pre-auth identity authority that
- * resolves the credential to {userId, tenantId} and binds before reading User,
- * across OTP, password, refresh, cookie and socket auth) is NOT small and is
- * reported as the next item. When it lands, these assertions go red by
- * design: flip them to the success shape.
+ * login — the exact topology the contract names — and proves, through the
+ * real routes, that both now succeed: every pre-auth read resolves the
+ * credential to {id, tenantId} through ONE named system capability and binds
+ * that tenant before reading anything else (modules/auth/preauth-identity.ts;
+ * every surface is covered in preauth-identity-posture.test.ts).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
@@ -128,7 +127,7 @@ afterAll(async () => {
   await owner.$disconnect();
 });
 
-describe('[OTA-016 · RECORDED] the review tenant under the production CONTRACT posture', () => {
+describe('[OTA-016] the review tenant under the production CONTRACT posture', () => {
   it('the dependency: on a production host a second active tenant (the review fiction) refuses to run unless the wall binds — and the contract is exactly bind + deny', async () => {
     const facts = await readRlsFacts(owner); // the suite's privileged login: the wall does not bind it
     expect(() => assertTenantWall(attestationOf(facts), 2, { NODE_ENV: 'production' })).toThrow(/2 active tenants/);
@@ -138,27 +137,29 @@ describe('[OTA-016 · RECORDED] the review tenant under the production CONTRACT 
     expect([appFacts.isSuperuser, appFacts.hasBypassRls, appFacts.isBypassRoleMember]).toEqual([false, false, false]);
   });
 
-  it('send-otp still answers (the credential lookup is audited system work on the system login) — but verify-otp fails at the account lookup: TENANT_CONTEXT_REQUIRED, nobody signs in', async () => {
+  it('send-otp answers (the credential lookup is audited system work on the system login) and verify-otp signs the review account in: one session', async () => {
     await app.redis.del(`otp_rate:${PHONE}`, `review_otp:${PHONE}`, `review_otp_fail:${PHONE}`);
     const sent = await app.inject({ method: 'POST', url: '/api/v1/auth/send-otp', payload: { phone: PHONE } });
     expect(sent.statusCode, sent.body).toBe(200);
     const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: PHONE, code: CODE } });
-    // RECORDED FAILURE (OTA-016): auth.service verifyOtp → prisma.user.findUnique({ where: { phone } })
-    // runs in request mode before any tenant is bound, and `deny` refuses it.
-    expect(verified.statusCode, verified.body).toBe(500);
-    expect(verified.json().error.code).toBe('TENANT_CONTEXT_REQUIRED');
-    expect(await owner.session.count({ where: { userId } })).toBe(0);
+    // Was OTA-016's first failure (TENANT_CONTEXT_REQUIRED): the account lookup now goes through the
+    // pre-auth identity capability, and the sign-in runs bound to the review tenant.
+    expect(verified.statusCode, verified.body).toBe(200);
+    expect(verified.json().data.user.id).toBe(userId);
+    expect(verified.json().data.user.tenant.kind).toBe('REVIEW');
+    expect(await owner.session.count({ where: { userId } })).toBe(1);
   });
 
-  it('a session that already exists is refused at the auth decorator: Session → User is read on the walled login before the tenant is entered → 503 AUTH_UNAVAILABLE', async () => {
+  it('a session that already exists is accepted at the auth decorator: the account is read bound to its own tenant', async () => {
     const token = app.jwt.sign({ userId, role: 'RIDER', jti: nanoid(8) });
     await owner.session.create({ data: {
       userId, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `strict-${RUN}`, deviceType: 'test', expiresAt: new Date(Date.now() + 3_600_000),
     } });
     const me = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { authorization: `Bearer ${token}` } });
-    // RECORDED FAILURE (OTA-016): plugins/auth.ts authenticate → session.findUnique({ select: { user } })
-    // — the users table is FORCEd row-level security and no tenant is set yet, so the user is invisible.
-    expect(me.statusCode, me.body).toBe(503);
-    expect(me.json().error.code).toBe('AUTH_UNAVAILABLE');
+    // Was OTA-016's second failure (503 AUTH_UNAVAILABLE): the session's account and tenant come from the
+    // pre-auth identity capability, and the account is then read bound to that tenant.
+    expect(me.statusCode, me.body).toBe(200);
+    expect(me.json().data.user.id).toBe(userId);
+    expect(me.json().data.user.tenant.kind).toBe('REVIEW');
   });
 });
