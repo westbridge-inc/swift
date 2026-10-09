@@ -2,14 +2,19 @@
 
 import Link from 'next/link';
 import { useRef, useState, type FormEvent } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorCode, errorDetails, errorStatus, fetchConfirmationApprovals, fetchPaymentConfirmations, requestConfirmationResolution, type PaymentConfirmation } from '@/lib/api';
 import type { ApprovalRow } from '@/lib/approvals';
 import { checkReason } from '@/lib/reason-rules';
+import { useConfirmationRequestLocks, type ConfirmationRequestLocks } from '@/lib/confirmation-request-locks';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { MutationError } from '@/components/MutationError';
 
 const ACTION = '/billing/confirmations/:id/resolve';
+const QUEUE_KEY = ['payment-confirmations'] as const;
+const APPROVALS_KEY = ['confirmation-approvals'] as const;
+// Both reads decide whether a decision may be requested, so neither is ever served from the console's 30 s cache.
+const FRESH = { staleTime: 0, refetchOnMount: 'always' } as const;
 const SOURCE: Record<string, string> = { MMG_CHECKOUT: 'MMG checkout', CARD_SESSION: 'Card session', PAYMENT: 'Payment', OBLIGATION: 'Legacy obligation' };
 const when = (date: string) => new Date(date).toLocaleString('en-GB', { timeZone: 'America/Guyana' });
 const grace = (ms: number) => { const minutes = Math.max(0, Math.floor(ms / 60_000)); return `${Math.floor(minutes / 60)} h ${minutes % 60} min`; };
@@ -22,25 +27,26 @@ function activeApproval(row: PaymentConfirmation, approvals: ApprovalRow[]) {
 }
 
 export default function PaymentConfirmationsPage() {
-  const queue = useQuery({ queryKey: ['payment-confirmations'], queryFn: fetchPaymentConfirmations });
-  const approvals = useQuery({ queryKey: ['confirmation-approvals'], queryFn: fetchConfirmationApprovals });
+  const queue = useQuery({ queryKey: QUEUE_KEY, queryFn: fetchPaymentConfirmations, ...FRESH });
+  const approvals = useQuery({ queryKey: APPROVALS_KEY, queryFn: fetchConfirmationApprovals, ...FRESH });
+  const { store: locks, locks: lockByRow } = useConfirmationRequestLocks();
   const [selection, setSelection] = useState<{ row: PaymentConfirmation; decision: 'PAID' | 'UNPAID' } | null>(null);
-  const [reloadRequired, setReloadRequired] = useState<Record<string, boolean>>({});
-  const [requestBusy, setRequestBusy] = useState(false);
   const [queued, setQueued] = useState<Record<string, string>>({});
+  const sending = Object.values(lockByRow).some((lock) => lock.state === 'sending');
   const rows = [...(queue.data?.data ?? [])].sort((a, b) => Number(b.overdue) - Number(a.overdue) || Date.parse(a.reviewDueAt) - Date.parse(b.reviewDueAt) || a.id.localeCompare(b.id));
-  const ready = !requestBusy && !queue.isFetching && !approvals.isFetching && !queue.isError && !approvals.isError && !!approvals.data;
+  const ready = !sending && !queue.isFetching && !approvals.isFetching && !queue.isError && !approvals.isError && !!approvals.data;
   const reload = async () => {
     setSelection(null);
+    const mark = locks.mark();
     const [queueResult, approvalResult] = await Promise.all([queue.refetch(), approvals.refetch()]);
-    if (!queueResult.isError && !approvalResult.isError) { setQueued({}); setReloadRequired({}); }
+    if (!queueResult.isError && !approvalResult.isError) { setQueued({}); locks.reloaded(mark); }
   };
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h1 className="text-2xl font-bold">Payment confirmations</h1>
           <p className="text-sm text-[var(--muted)] mt-1">Weekly-fee payments waiting for review. The billing clock is paused; the remaining grace is preserved.</p></div>
-        <button type="button" className="px-4 py-2 border border-[var(--border)] rounded-lg text-sm" onClick={() => void reload()} disabled={requestBusy || queue.isFetching || approvals.isFetching}>Reload confirmations</button>
+        <button type="button" className="px-4 py-2 border border-[var(--border)] rounded-lg text-sm" onClick={() => void reload()} disabled={sending || queue.isFetching || approvals.isFetching}>Reload confirmations</button>
       </div>
       <p className="text-sm text-[var(--muted)]">Every resolution needs a second admin. Review the payment evidence, request a decision, then use Approvals to complete it after another admin agrees.</p>
       {queue.isPending && <p role="status">Loading payment confirmations…</p>}
@@ -54,6 +60,9 @@ export default function PaymentConfirmationsPage() {
             const approval = activeApproval(row, approvals.data ?? []);
             const waiting = queued[row.id] || approval;
             const reference = row.swiftReference ?? row.sourceId ?? row.id;
+            const lock = lockByRow[row.id];
+            // MMG already reports a credited transaction for this checkout: closing it as NOT PAID would be wrong.
+            const credited = (row.settlementPayments ?? []).length > 0;
             return <tr key={row.id}>
               <td className="p-4"><p className="font-medium">{SOURCE[row.source] ?? row.source}</p><p className="font-mono break-all">{reference}</p><p className="text-[var(--muted)]">{row.partner ?? 'Partner unavailable'}</p>
                 {row.source === 'MMG_CHECKOUT' && row.sourceId && <Link className="underline text-[var(--accent)]" href={`/mmg-payments?checkout=${encodeURIComponent(row.sourceId)}`}>MMG timeline</Link>}</td>
@@ -63,20 +72,23 @@ export default function PaymentConfirmationsPage() {
                 <p>{approval?.status === 'APPROVED' ? 'Approved by a second admin; waiting for the requester to apply it.' : 'Waiting for a second admin. Nothing has changed yet.'}</p>
                 <Link className="underline text-[var(--accent)]" href="/approvals">Open Approvals</Link>
               </div> : <div className="flex flex-wrap gap-2">
-                {reloadRequired[row.id] && <p>Reload confirmations before another request.</p>}
-                <button type="button" disabled={!ready || reloadRequired[row.id]} aria-label={`Close as NOT PAID ${reference}`} onClick={() => setSelection({ row, decision: 'UNPAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Close as NOT PAID</button>
-                <button type="button" disabled={!ready || reloadRequired[row.id]} aria-label={`Mark PAID ${reference}`} onClick={() => setSelection({ row, decision: 'PAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Mark PAID</button>
+                {lock?.state === 'sending' && <p>A request for this payment is still being sent. Wait for the answer.</p>}
+                {lock?.state === 'reload' && <p>Reload confirmations before another request.</p>}
+                {credited && <p id={`credited-${row.id}`}>MMG shows a credited payment for this checkout — reconcile it as PAID instead.</p>}
+                <button type="button" disabled={!ready || !!lock || credited} aria-describedby={credited ? `credited-${row.id}` : undefined} aria-label={`Close as NOT PAID ${reference}`} onClick={() => setSelection({ row, decision: 'UNPAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Close as NOT PAID</button>
+                <button type="button" disabled={!ready || !!lock} aria-label={`Mark PAID ${reference}`} onClick={() => setSelection({ row, decision: 'PAID' })} className="px-3 py-2 border border-[var(--border)] rounded-lg disabled:opacity-40">Mark PAID</button>
               </div>}</td>
             </tr>;
           })}</tbody>
         </table>
       </div>}
-      {selection && <ResolveForm key={`${selection.row.id}:${selection.decision}`} {...selection} onBusy={setRequestBusy} onReloadRequired={() => setReloadRequired((old) => ({ ...old, [selection.row.id]: true }))} onCancel={() => setSelection(null)} onQueued={(id) => { setQueued((old) => ({ ...old, [selection.row.id]: id })); setSelection(null); }} />}
+      {selection && <ResolveForm key={`${selection.row.id}:${selection.decision}`} {...selection} locks={locks} onCancel={() => setSelection(null)} onQueued={(id) => { setQueued((old) => ({ ...old, [selection.row.id]: id })); setSelection(null); }} />}
     </div>
   );
 }
 
-function ResolveForm({ row, decision, onCancel, onQueued, onBusy, onReloadRequired }: { row: PaymentConfirmation; decision: 'PAID' | 'UNPAID'; onBusy: (_busy: boolean) => void; onReloadRequired: () => void; onCancel: () => void; onQueued: (_id: string) => void }) {
+function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: PaymentConfirmation; decision: 'PAID' | 'UNPAID'; locks: ConfirmationRequestLocks; onCancel: () => void; onQueued: (_id: string) => void }) {
+  const queryClient = useQueryClient();
   const [evidence, setEvidence] = useState('');
   const [reason, setReason] = useState('');
   const [paymentId, setPaymentId] = useState('');
@@ -94,18 +106,31 @@ function ResolveForm({ row, decision, onCancel, onQueued, onBusy, onReloadRequir
     if (!checked.ok) { setProblem(checked.message); return; }
     if (decision === 'PAID' && mmg && !row.settlementPayments?.some((p) => p.providerPaymentId === paymentId)) { setProblem('Select a recorded MMG transaction. If none is available, complete the existing settlement workflow first.'); return; }
     if (!row.sourceId) return;
-    inFlight.current = true; setBusy(true); onBusy(true); setProblem(null); setError(null);
+    inFlight.current = true; setBusy(true); setProblem(null); setError(null);
+    // Held outside this page: leaving it while the request is unanswered must not unlock the row.
+    locks.sending(row.id);
+    let answer: 'queued' | 'refused' | 'uncertain' = 'uncertain';
     try {
       await requestConfirmationResolution(row.id, { sourceId: row.sourceId, epoch: row.epoch, clockVersion: row.clockVersion, decision,
         ...(decision === 'PAID' && mmg ? { providerPaymentId: paymentId } : {}), evidenceReference: evidence, reason: checked.reason });
-      setStale(true); onReloadRequired();
+      setStale(true);
       setError(new Error('The server did not confirm a queued approval. Reload confirmations and check Approvals before sending again.'));
     } catch (err) {
       const approvalId = errorDetails(err)?.['approvalId'];
-      if (errorCode(err) === 'APPROVAL_REQUIRED' && typeof approvalId === 'string' && approvalId.length > 0) { onQueued(approvalId); return; }
-      if (errorCode(err) === 'CONFIRMATION_CHANGED' || errorCode(err) === 'APPROVAL_REQUIRED' || !errorStatus(err) || errorStatus(err)! >= 500) { setStale(true); onReloadRequired(); }
+      if (errorCode(err) === 'APPROVAL_REQUIRED' && typeof approvalId === 'string' && approvalId.length > 0) { answer = 'queued'; onQueued(approvalId); return; }
+      // The approval gate answers every request it accepts with 202 before the resolver runs, so a 4xx here is a refusal
+      // from an earlier gate (session, permission, reason) and nothing was queued. No answer, a 5xx or a 202 without an
+      // approval id may have queued one.
+      if (errorCode(err) === 'APPROVAL_REQUIRED' || !errorStatus(err) || errorStatus(err)! >= 500) setStale(true);
+      else answer = 'refused';
       setError(err);
-    } finally { inFlight.current = false; setBusy(false); onBusy(false); }
+    } finally {
+      // Both lists are read again after every answer, and those reads start before the row unlocks.
+      void queryClient.invalidateQueries({ queryKey: QUEUE_KEY });
+      void queryClient.invalidateQueries({ queryKey: APPROVALS_KEY });
+      if (answer === 'uncertain') locks.reloadRequired(row.id); else locks.release(row.id);
+      inFlight.current = false; setBusy(false);
+    }
   };
   const inputClass = 'w-full mt-1 p-2 rounded-lg border border-[var(--border)] bg-[var(--bg)]';
   return <form aria-label="Resolve payment confirmation" onSubmit={submit} noValidate className="rounded-xl border border-[var(--border)] bg-[var(--panel)] p-5 space-y-4">
