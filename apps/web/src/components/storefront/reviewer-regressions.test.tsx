@@ -9,6 +9,9 @@ import * as auth from '@/lib/auth';
 import type { StorefrontDetail } from '@/lib/api';
 import { GuestCart } from '@/components/guest-basket';
 import { readGuestBasket } from '@/lib/basket';
+// The item sheet's code is split from the page; load it up front so a busy
+// test run waits on the sheet's behaviour, not on fetching its code.
+import './item-options-panel';
 
 // ---------------------------------------------------------------------------
 // [W6] The one store page's menu: one tap for an item that needs no choice,

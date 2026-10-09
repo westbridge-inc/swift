@@ -16,7 +16,7 @@ import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
 import { OfflineNotice } from '@/components/offline-notice';
 import { useGuestBasket } from '@/lib/basket-state';
-import { OrderingContextProvider } from '@/components/ordering-context';
+import { OrderingContextProvider, showsOrderingContext } from '@/components/ordering-context';
 import { InstallPrompt } from '@/components/install-prompt';
 
 // Upload code is needed only after sign-in with a browser basket.
@@ -230,7 +230,7 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
           />
           <main className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
             <div className="sw-page">
-              <Suspense fallback={<p role="status">Delivery to · ASAP</p>}><OrderingContextBar /></Suspense>
+              {showsOrderingContext(pathname) ? <Suspense fallback={<div aria-hidden="true" className="py-3"><div className="min-h-11" /></div>}><OrderingContextBar /></Suspense> : null}
               <OfflineNotice />
               {status === 'signed-in' && guestBasket.lines.length > 0 ? <Suspense fallback={null}><GuestBasketSync /></Suspense> : null}
               {showBack && backClaims === 0 ? <BackRow /> : null}

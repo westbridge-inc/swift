@@ -117,11 +117,23 @@ describe('guest basket upload', () => {
   });
   it('asks about a saved cart from a different store without changing it', async () => {
     const c = await customer();
-    await app.prisma.cart.create({ data: { customerId: c.id, vendorId: vendors[1]! } });
+    // A saved cart with a line from the other store: a real choice to make.
+    const otherCategory = await app.prisma.category.create({ data: { vendorId: vendors[1]!, name: 'Other menu' } });
+    const otherItem = await app.prisma.item.create({ data: { vendorId: vendors[1]!, categoryId: otherCategory.id, name: 'Other soup', basePrice: 500, isAvailable: true } });
+    await app.prisma.cart.create({ data: { customerId: c.id, vendorId: vendors[1]!, items: { create: [{ itemId: otherItem.id, quantity: 1, selectedOptions: {} }] } } });
     const r = await merge(c.token, [line()]);
     expect(r.json().data).toMatchObject({ applied: false, verdicts: [{ status: 'DIFFERENT_STORE' }] });
     expect((await app.prisma.cart.findUnique({ where: { customerId: c.id } }))?.vendorId).toBe(vendors[1]);
-    expect(await quantity(c.id)).toBe(0);
+    expect(await quantity(c.id)).toBe(1);
+  });
+  it('treats an empty saved cart from another store as no cart: the basket is added and the cart follows this store', async () => {
+    const c = await customer();
+    await app.prisma.cart.create({ data: { customerId: c.id, vendorId: vendors[1]! } });
+    const r = await merge(c.token, [line()]);
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().data).toMatchObject({ applied: true, verdicts: [{ status: 'ADDED' }] });
+    expect((await app.prisma.cart.findUnique({ where: { customerId: c.id } }))?.vendorId).toBe(vendorId);
+    expect(await quantity(c.id)).toBe(2);
   });
   it('rejects duplicate line identifiers and non-integer or excessive quantities', async () => {
     const c = await customer();

@@ -7,6 +7,9 @@ import { CustomerSessionProvider, type CustomerSession } from '@/components/cust
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 import type { StorefrontDetail } from '@/lib/api';
+// The item sheet's code is split from the page; load it up front so a busy
+// test run waits on the sheet's behaviour, not on fetching its code.
+import './item-options-panel';
 
 // ---------------------------------------------------------------------------
 // [W6] The one store page's menu: one tap for an item that needs no choice,
@@ -102,7 +105,10 @@ describe('[W6] one tap or Choose', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add Pumpkin soup' }));
     await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: 'menu-store', itemId: 'soup', quantity: 1 }));
     expect(screen.queryByRole('dialog')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Choose options for Pumpkin soup' }));
+    // Choices open once the Add has finished (the page is busy until then).
+    const customise = screen.getByRole('button', { name: 'Choose options for Pumpkin soup' });
+    await waitFor(() => expect((customise as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(customise);
     expect(await screen.findByRole('dialog', { name: 'Pumpkin soup' })).toBeTruthy();
   });
 

@@ -55,7 +55,10 @@ export async function mergeGuestCart(prisma: PrismaClient, userId: string, key: 
     await tx.$queryRaw`SELECT o.id FROM options o JOIN option_groups g ON g.id = o."optionGroupId" JOIN items i ON i.id = g."itemId" WHERE i.id IN (${Prisma.join(itemIds)}) AND i."tenantId" = ${tenantId} ORDER BY o.id FOR UPDATE OF o`;
     const items = await tx.item.findMany({ where: { id: { in: itemIds }, vendor: vendorTenantForCaller() }, include: { optionGroups: { include: { options: true } }, vendor: { select: { id: true, status: true } } } });
     const existing = saved ? await tx.cartItem.findMany({ where: { cartId: saved.id }, include: { item: { select: { vendorId: true } } } }) : [];
-    const differentStore = Boolean(saved && (saved.vendorId !== vendorIds[0] || existing.some(l => l.item.vendorId !== vendorIds[0])));
+    // Only saved LINES from another store are a conflict. An empty saved cart
+    // (its lines removed or gone) is no cart: the basket lands and the cart
+    // follows this store, as a first add would.
+    const differentStore = existing.some(l => l.item.vendorId !== vendorIds[0]);
     const prepared = input.lines.map(line => {
       const verdict: MergeVerdict = { clientLineId: line.clientLineId, status: 'READY' };
       const item = items.find(i => i.id === line.itemId && i.vendorId === line.vendorId);
@@ -84,7 +87,9 @@ export async function mergeGuestCart(prisma: PrismaClient, userId: string, key: 
     }
     const applied = prepared.every(p => p.verdict.status === 'READY');
     if (applied) {
-      const cart = saved ?? await tx.cart.create({ data: { customerId: userId, vendorId: vendorIds[0]! } });
+      const cart = saved
+        ? (saved.vendorId === vendorIds[0] ? saved : await tx.cart.update({ where: { id: saved.id }, data: { vendorId: vendorIds[0]! } }))
+        : await tx.cart.create({ data: { customerId: userId, vendorId: vendorIds[0]! } });
       for (const part of prepared) {
         const matches = await tx.cartItem.findMany({ where: { cartId: cart.id, itemId: part.line.itemId } });
         const same = matches.find(l => selectionKey(l.selectedOptions) === selectionKey(part.selection) && normalizeItemNote(l.specialInstructions) === null);

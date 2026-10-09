@@ -6,6 +6,9 @@ import { StorefrontPage } from '@/components/storefront/storefront-page';
 import { storefrontFixture } from '@/test/storefront-fixture';
 import CartPage from './cart/page';
 import OrderDetailPage from './orders/[id]/page';
+// The item sheet's code is split from the page; load it up front so a busy
+// test run waits on the sheet's behaviour, not on fetching its code.
+import '@/components/storefront/item-options-panel';
 
 const state = vi.hoisted(() => ({ pathname: '/', params: {} as Record<string, string>, push: vi.fn(), back: vi.fn(), replace: vi.fn() }));
 vi.mock('next/navigation', () => ({
