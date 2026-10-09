@@ -38,6 +38,7 @@ import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegra
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
 import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
+import { registerPublicStorePhotos } from './utils/public-store-photos';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
 import { publicRoutes } from './modules/public/public.routes';
@@ -61,7 +62,9 @@ const SERVER_BOOTED_AT = Date.now();
 // Public upload trees (items/, avatars/) are served via registerPublicUploads.
 // KYC / verification documents live under other /uploads folders and stay
 // private — they are only ever reachable through short-lived signed URLs.
-const UPLOAD_BASE = process.env['UPLOAD_DIR'] ?? path.join(process.cwd(), 'uploads');
+// Read when the app is built, like the storage provider the upload routes
+// write through, so the two can never point at different directories.
+const uploadBase = () => process.env['UPLOAD_DIR'] ?? path.join(process.cwd(), 'uploads');
 
 
 /**
@@ -292,7 +295,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   // Public upload trees only (items/, avatars/). Path-traversal-guarded;
   // KYC docs in other /uploads folders are never exposed here.
-  registerPublicUploads(app, UPLOAD_BASE);
+  registerPublicUploads(app, uploadBase());
+  // [PUBLIC-PHOTOS] Stores' photos saved as object-storage keys
+  // ("items/<store>/<file>") at the address every client builds from them.
+  // Only the stores' photo folder, only photos a store still uses.
+  registerPublicStorePhotos(app);
 
   // API routes
   await app.register(authRoutes, { prefix: '/api/v1/auth' });
