@@ -116,13 +116,17 @@ describe('[Q7b] store → cart', () => {
     signedIn = false;
     at('/store/shanta-kitchen', {}, await storePage());
     await choose('Pepperpot bowl');
-    const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
+    // The item sheet's code loads on first open, so the sheet arrives a moment later.
+    const sheet = await screen.findByRole('dialog', { name: 'Pepperpot bowl' });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $1,800' }));
     expect(state.push).not.toHaveBeenCalled();
-    expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1')!).lines[0]).toMatchObject({ itemId: 'i1', selectedOptions: { g1: 'small' }, unitPrice: 1800 });
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1') ?? '{"lines":[]}').lines[0]).toMatchObject({ itemId: 'i1', selectedOptions: { g1: 'small' }, unitPrice: 1800 }));
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
     expect(calls('POST', '/api/v1/auth/refresh')).toHaveLength(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
+    // The browser basket is read back asynchronously; Place order opens once it has a line.
+    const placeOrder = screen.getByRole('button', { name: 'Place order' });
+    await waitFor(() => expect((placeOrder as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(placeOrder);
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fshanta-kitchen'));
     expect(calls('POST', '/api/v1/auth/refresh')).toHaveLength(1);
   });

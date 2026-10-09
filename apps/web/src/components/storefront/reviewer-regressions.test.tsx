@@ -102,9 +102,9 @@ describe('reviewer regression proofs', () => {
     const merge = vi.spyOn(auth, 'apiFetch').mockImplementation(async () => ({ success: true, data: {
       applied: true, verdicts: readGuestBasket().lines.map(line => ({ clientLineId: line.clientLineId, status: 'ADDED' })),
     } }));
-    await start({ wrap: node => <QueryClientProvider client={new QueryClient()}><CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}<GuestCart /></CustomerSessionProvider></QueryClientProvider> });
+    await start({ wrap: node => <QueryClientProvider client={new QueryClient()}><CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}<div data-testid="guest-cart"><GuestCart /></div></CustomerSessionProvider></QueryClientProvider> });
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
-    const sheet = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /Large/ }));
     fireEvent.click(within(sheet).getByRole('radio', { name: /Paratha/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: 'Increase quantity' }));
@@ -113,7 +113,7 @@ describe('reviewer regression proofs', () => {
     await waitFor(() => expect(readGuestBasket().lines[0]?.quantity).toBe(2));
     expect(ensureSignedIn).not.toHaveBeenCalled();
     expect(merge).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
+    fireEvent.click(within(screen.getByTestId('guest-cart')).getByRole('button', { name: 'Place order' }));
     await waitFor(() => expect(merge).toHaveBeenCalledTimes(1));
     expect(ensureSignedIn).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(merge.mock.calls[0]?.[1]?.body)).lines[0]).toMatchObject({ quantity: 2, expectedUnitPrice: 1900, selectedOptions: { size: 'large', roti: 'paratha' } });

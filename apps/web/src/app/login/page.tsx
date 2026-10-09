@@ -7,7 +7,6 @@ import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
-import { guestBasketReturn } from '@/lib/basket';
 import { customerRoute } from '@/lib/customer-routes';
 import { AuthError, AuthHeading, AuthPage, CodeBoxes, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/auth-ui';
 
@@ -36,10 +35,23 @@ function LoginInner() {
   // open redirect to a phishing site.
   const [pendingReturn, setPendingReturn] = useState('');
   const [next, setNext] = useState('');
+  const [returnReady, setReturnReady] = useState(false);
   const requestedNext = params.get('next');
   useEffect(() => {
-    setNext(storefrontAuthReturn(requestedNext) || (requestedNext === null ? guestBasketReturn() : ''));
+    let alive = true;
+    const direct = storefrontAuthReturn(requestedNext);
+    setReturnReady(false);
+    setNext(direct);
     setPendingReturn(readStorefrontContinuation()?.returnPath ?? '');
+    if (direct || requestedNext !== null) setReturnReady(true);
+    else void import('@/lib/basket').then(module => {
+      if (!alive) return;
+      setNext(module.guestBasketReturn());
+      setReturnReady(true);
+    }, () => {
+      if (alive) setError('Your browser basket could not load. Reopen the store and try signing in again.');
+    });
+    return () => { alive = false; };
   }, [requestedNext]);
   const isCustomer = isCustomerReturn(next);
 
@@ -53,7 +65,7 @@ function LoginInner() {
   const busyNow = useRef(false);
 
   async function handleSend() {
-    if (busyNow.current) return;
+    if (busyNow.current || !returnReady) return;
     busyNow.current = true;
     setError(null); setBusy(true);
     try { await sendOtp(fullPhone(phone)); setStep('code'); }
@@ -62,7 +74,7 @@ function LoginInner() {
   }
 
   async function handleVerify() {
-    if (busyNow.current) return;
+    if (busyNow.current || !returnReady) return;
     busyNow.current = true;
     setError(null); setBusy(true);
     try {
@@ -88,7 +100,7 @@ function LoginInner() {
               {isCustomer ? 'We’ll text a 6-digit code to confirm it’s you.' : 'Sign in with the phone number on your Swift account. We’ll text you a 6-digit code.'}
             </AuthHeading>
             <PhoneField id="login-phone" value={phone} onChange={setPhone} onEnter={() => void handleSend()} autoFocus />
-            <button type="button" onClick={() => void handleSend()} disabled={busy || !phoneReady(phone)} className="sw-btn sw-btn-block">
+            <button type="button" onClick={() => void handleSend()} disabled={busy || !returnReady || !phoneReady(phone)} className="sw-btn sw-btn-block">
               {busy ? 'Sending…' : 'Continue'}
             </button>
           </>
@@ -101,7 +113,7 @@ function LoginInner() {
               </button>
             </AuthHeading>
             <CodeBoxes id="login-code" value={code} onChange={setCode} onEnter={() => void handleVerify()} />
-            <button type="button" onClick={() => void handleVerify()} disabled={busy || code.trim().length < 6} className="sw-btn sw-btn-block">
+            <button type="button" onClick={() => void handleVerify()} disabled={busy || !returnReady || code.trim().length < 6} className="sw-btn sw-btn-block">
               {busy ? 'Signing in…' : 'Verify'}
             </button>
           </>

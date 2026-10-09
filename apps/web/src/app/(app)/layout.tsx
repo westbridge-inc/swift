@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { getSessionPrincipal, restoreSession, sessionProbe, subscribeSession } from '@/lib/auth';
@@ -15,10 +15,13 @@ import CartSkeleton from './cart/loading';
 import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
 import { OfflineNotice } from '@/components/offline-notice';
-import { GuestBasketSync } from '@/components/guest-basket';
-import { useGuestBasket } from '@/lib/basket';
-import { OrderingContextBar, OrderingContextProvider } from '@/components/ordering-context';
+import { useGuestBasket } from '@/lib/basket-state';
+import { OrderingContextProvider } from '@/components/ordering-context';
 import { InstallPrompt } from '@/components/install-prompt';
+
+// Upload code is needed only after sign-in with a browser basket.
+const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
+const GuestBasketSync = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestBasketSync })));
 
 // The customer ordering app. Opening swiftgy.com lands here, on Home.
 //
@@ -227,9 +230,9 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
           />
           <main className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
             <div className="sw-page">
-              <OrderingContextBar />
+              <Suspense fallback={<p role="status">Delivery to · ASAP</p>}><OrderingContextBar /></Suspense>
               <OfflineNotice />
-              <GuestBasketSync />
+              {status === 'signed-in' && guestBasket.lines.length > 0 ? <Suspense fallback={null}><GuestBasketSync /></Suspense> : null}
               {showBack && backClaims === 0 ? <BackRow /> : null}
               <div key={pathname} className="swift-route-in">{content}</div>
             </div>

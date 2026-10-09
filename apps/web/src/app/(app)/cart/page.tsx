@@ -2,10 +2,9 @@
 
 import CartSkeleton from './loading';
 import { useOrderingContext } from '@/components/ordering-context';
-import { GuestCart } from '@/components/guest-basket';
-import { useGuestBasket } from '@/lib/basket';
+import { useGuestBasket } from '@/lib/basket-state';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -50,12 +49,13 @@ import {
 import styles from './cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
+const GuestCart = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestCart })));
 
 export default function CartPage() {
   const { status } = useCustomerSession();
   const basket = useGuestBasket();
-  if (status === 'checking') return <CartSkeleton />;
-  if (status !== 'signed-in' || basket.lines.length) return <GuestCart />;
+  if (status === 'checking' || !basket.loaded) return <CartSkeleton />;
+  if (status !== 'signed-in' || basket.lines.length) return <Suspense fallback={<CartSkeleton />}><GuestCart /></Suspense>;
   return <SignedInCart />;
 }
 

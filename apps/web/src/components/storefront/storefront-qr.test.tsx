@@ -181,7 +181,8 @@ describe('the actual /store/[slug] QR arrival', () => {
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(add);
     expect(nav.push).not.toHaveBeenCalled(); expect(customer.addToCart).not.toHaveBeenCalled();
-    expect(readGuestBasket().lines[0]).toMatchObject({ itemId: 'roti', quantity: 1, unitPrice: 800 });
+    await waitFor(() => expect(readGuestBasket().lines[0]).toMatchObject({ itemId: 'roti', quantity: 1, unitPrice: 800 }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
     await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fgarden-kitchen%3Fsrc%3Dqr%26c%3DBCDFGHJKMN'));
   });
@@ -218,11 +219,12 @@ describe('QR-01-W: guest basket → sign-in → one bulk upload', () => {
     const first = render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(add);
+    await waitFor(() => expect(readGuestBasket().lines).toHaveLength(1));
     expect(nav.push).not.toHaveBeenCalled(); const line = readGuestBasket().lines[0]!;
-    if (startingState === 'Place order') { fireEvent.click(screen.getByRole('button', { name: 'Place order' })); await waitFor(() => expect(nav.push).toHaveBeenCalledOnce()); }
+    if (startingState === 'Place order') { await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(screen.getByRole('button', { name: 'Place order' })); await waitFor(() => expect(nav.push).toHaveBeenCalledOnce()); }
     first.unmount(); nav.query = startingState === 'Place order' ? String(nav.push.mock.calls[0]?.[0]).split('?')[1]! : '';
     const login = render(<LoginPage />);
-    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001001' } }); fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001001' } }); await waitFor(() => expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } }); fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
     await waitFor(() => expect(nav.replace).toHaveBeenCalledWith('/store/garden-kitchen?src=qr&c=BCDFGHJKMN')); login.unmount();
     expect(readGuestBasket().lines).toHaveLength(1);
