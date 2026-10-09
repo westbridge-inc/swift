@@ -11,15 +11,20 @@ export function QrState({
   children,
   storeSlug,
   retryAction,
+  embedded = false,
 }: {
   eyebrow: string;
   title: string;
   children: React.ReactNode;
   storeSlug?: string;
   retryAction?: () => void;
+  /** [W6] Drawn inside the customer app's frame (a store page's error or
+   *  not-found state), which already holds the page's one <main>. */
+  embedded?: boolean;
 }) {
+  const Frame = embedded ? 'div' : 'main';
   return (
-    <main className={styles.page}>
+    <Frame className={embedded ? styles.embedded : styles.page}>
       <section className={styles.card}>
         <SwiftLogo />
         <span className={styles.icon} aria-hidden="true"><QrCode size={28} /></span>
@@ -38,6 +43,6 @@ export function QrState({
           <Link href="/stores" className={storeSlug || retryAction ? styles.secondary : styles.primary}>Browse stores on Swift</Link>
         </div>
       </section>
-    </main>
+    </Frame>
   );
 }

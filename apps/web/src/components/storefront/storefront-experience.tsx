@@ -1,25 +1,17 @@
 'use client';
 
-import Image from 'next/image';
 import { formatAmount, parseAmount } from '@/lib/money';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { QueryClientContext } from '@tanstack/react-query';
 import {
   Banknote,
   Clock3,
-  MapPin,
   Minus,
   Plus,
-  ShoppingBag,
-  ShoppingBasket,
-  Star,
-  Store,
-  UtensilsCrossed,
-  Wrench,
   X,
-  type LucideIcon,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
@@ -46,9 +38,21 @@ import {
   type VendorDetail,
 } from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
-import { storefrontVertical, storefrontVerticalVariables } from '@/lib/design-tokens';
+import { storefrontVerticalVariables } from '@/lib/design-tokens';
+import {
+  OptionSelectionError,
+  basePrice,
+  fromPrice,
+  opensChoices,
+  requiredCount,
+  selectionPrice,
+  validateSelectedOptions,
+} from '@/lib/menu-options';
+import { useOptionalCustomerSession } from '@/components/customer-session';
+import { Photo } from '@/components/order-ui';
+import { Sheet } from '@/components/sheet';
+import { StoreActions } from './store-actions';
 import styles from './storefront.module.css';
-import { Pictogram } from '@/components/glyphs';
 
 type Address = {
   id: string;
@@ -83,20 +87,6 @@ const CATALOG_REFRESH_MS = 30_000;
 // [WEB-REDESIGN] Customer prices read like the rest of the app (and the phone
 // app): `$2,500`, in Guyana dollars as the footer states.
 const gyMoney = (value: unknown) => formatAmount(value, '$');
-
-const verticalLabel: Record<ReturnType<typeof storefrontVertical>, string> = {
-  food: 'Food',
-  groceries: 'Groceries',
-  shops: 'Shops',
-  services: 'Services',
-};
-
-const verticalIcon: Record<ReturnType<typeof storefrontVertical>, LucideIcon> = {
-  food: UtensilsCrossed,
-  groceries: ShoppingBasket,
-  shops: Store,
-  services: Wrench,
-};
 
 function publicCatalog(store: StorefrontDetail): DisplayVendor {
   return {
@@ -134,32 +124,18 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
 // [W-13] A price the server did not send used to become ZERO here, so a broken
 // item rendered as free and could still be added to a cart and ordered. An
 // unparseable price is now null: the item shows an em-dash and cannot be added.
-function itemPrice(item: DisplayItem): number | null {
-  return parseAmount(item.customerPrice ?? item.basePrice);
-}
-
-function optionPrice(item: DisplayItem, selected: Record<string, string[]>): number | null {
-  const base = itemPrice(item);
-  if (base === null) return null;
-  let total = base;
-  for (const group of item.optionGroups ?? []) {
-    for (const optionId of selected[group.id] ?? []) {
-      const option = group.options.find((candidate) => candidate.id === optionId);
-      // an option whose surcharge is unreadable poisons the line the same way
-      const extra = option ? parseAmount(option.additionalPrice ?? 0) : 0;
-      if (extra === null) return null;
-      total += extra;
-    }
-  }
-  return total;
-}
+// [W6] Every figure on this page comes from lib/menu-options, which prices a
+// selection with the API's own resolver and judges it with the API's own
+// validator (the same one cart add, cart update and checkout run).
+const itemPrice = (item: DisplayItem): number | null => basePrice(item);
+const optionPrice = (item: DisplayItem, selected: Record<string, string[]>): number | null => selectionPrice(item, selected);
 
 function selectedDefaults(groups: OptionGroup[]): Record<string, string[]> {
   return Object.fromEntries(
     groups.map((group) => [
       group.id,
       group.options
-        .filter((option) => option.isAvailable && option.isDefault)
+        .filter((option) => option.isAvailable !== false && option.isDefault)
         .slice(0, group.maxSelect)
         .map((option) => option.id),
     ]),
@@ -171,11 +147,52 @@ function optionGuidance(group: OptionGroup): string {
   if (group.maxSelect <= 1) return minimum > 0 ? 'Choose 1' : 'Optional';
   if (minimum === group.maxSelect) return `Choose ${group.maxSelect}`;
   if (minimum > 0) return `Choose ${minimum}–${group.maxSelect}`;
-  return `Choose up to ${group.maxSelect}`;
+  return `Optional · up to ${group.maxSelect}`;
 }
 
-export function StorefrontExperience({ store, returnPath, fromQr = false }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean }) {
+/** What the person is told when the validator refuses their choices. */
+function choiceProblem(item: DisplayItem, error: unknown): { message: string; groupId: string | null } {
+  if (!(error instanceof OptionSelectionError)) return { message: 'These choices have changed. Close this panel and check the menu again.', groupId: null };
+  const group = (item.optionGroups ?? []).find((candidate) => candidate.name === error.groupName) ?? null;
+  if (error.reason === 'OPTION_REQUIRED' && group) {
+    if (!group.options.some((option) => option.isAvailable !== false)) return { message: `“${group.name}” is sold out right now.`, groupId: group.id };
+    const needed = Math.max(requiredCount(group), group.minSelect, 1);
+    return { message: `Choose ${needed === 1 ? 'an option' : `${needed} options`} for ${group.name}.`, groupId: group.id };
+  }
+  if (error.reason === 'OPTION_UNAVAILABLE' || error.reason === 'OPTION_LIMIT') return { message: `${error.message}.`, groupId: group?.id ?? null };
+  return { message: 'These choices have changed. Close this panel and check the menu again.', groupId: group?.id ?? null };
+}
+
+/** The menu section the person is reading: the last whose heading has passed the chips. */
+function useActiveSection(ids: string[]): [string | null, (_id: string) => void] {
+  const [active, setActive] = useState<string | null>(ids[0] ?? null);
+  const key = ids.join('|');
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return;
+    const visible = new Map<string, boolean>();
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) visible.set(entry.target.id.replace(/^section-/, ''), entry.isIntersecting);
+      const first = key.split('|').find((id) => visible.get(id));
+      if (first) setActive(first);
+    }, { rootMargin: '-120px 0px -55% 0px' });
+    for (const id of key.split('|')) {
+      const node = document.getElementById(`section-${id}`);
+      if (node) observer.observe(node);
+    }
+    return () => observer.disconnect();
+  }, [key]);
+  return [active, setActive];
+}
+
+export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string }) {
   const router = useRouter();
+  // [W6] The store page lives inside the customer app's frame (rail, dock,
+  // session). Its session can renew an expired access cookie before sending a
+  // guest to sign in, and its cart count is refreshed after every change made
+  // here. Rendered on its own (tests), both are simply absent.
+  const shellSession = useOptionalCustomerSession();
+  const shellStatus = shellSession?.status;
+  const shellQueries = useContext(QueryClientContext);
   const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
   const diningNoticeDismissed = dismissedDiningStore === store.id;
   const diningNoticeStorageKey = `swift:dining-notice:${store.id}`;
@@ -203,17 +220,19 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
   const [placingOrder, setPlacingOrder] = useState(false);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ message: string; added: boolean } | null>(null);
   const [floatingError, setFloatingError] = useState<string | null>(null);
   const [modalItem, setModalItem] = useState<DisplayItem | null>(null);
+  const [itemQuantity, setItemQuantity] = useState(1);
+  const deepLinkOpened = useRef(false);
   const [modalError, setModalError] = useState<string | null>(null);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const mutationBusy = useRef(false);
   const addressBusy = useRef(false);
   const placingOrderNow = useRef(false);
+  const restoringSession = useRef(false);
+  const renewedSession = useRef(false);
   const checkoutKey = useRef<CheckoutAttempt | null>(null);
-  const modal = useRef<HTMLElement | null>(null);
-  const modalCloseButton = useRef<HTMLButtonElement | null>(null);
   const modalReturnFocus = useRef<HTMLElement | null>(null);
   const clearConfirmButton = useRef<HTMLButtonElement | null>(null);
   const clearReturnFocus = useRef<HTMLButtonElement | null>(null);
@@ -225,6 +244,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     setModalError(null);
     window.requestAnimationFrame(() => modalReturnFocus.current?.focus());
   }, []);
+
+  /** The rail's and the dock's cart count are the shell's read of the same server cart. */
+  const refreshShellCart = useCallback(() => {
+    void shellQueries?.invalidateQueries({ queryKey: ['customer', 'cart'] });
+  }, [shellQueries]);
 
   const refreshCart = useCallback(async () => {
     const next = await getCart();
@@ -264,12 +288,23 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     void refreshCatalog();
     const catalogTimer = window.setInterval(() => void refreshCatalog(), CATALOG_REFRESH_MS);
 
+    return () => {
+      alive = false;
+      window.clearInterval(catalogTimer);
+    };
+  }, [store.id, store.slug]);
+
+  useEffect(() => {
+    let alive = true;
+
     // [W-01] Signed-in is the server's answer about an HttpOnly cookie, not a
     // token this script can read. Start signed-OUT, ask, and hydrate the cart
     // only once the server has attested — so a signed-out visitor never fires
     // the two authenticated loads, exactly as the token check used to prevent.
     setSignedIn(false);
-    void sessionProbe().then((session) => {
+    const renewed = renewedSession.current;
+    renewedSession.current = false;
+    void (shellStatus !== undefined ? Promise.resolve({ ok: renewed || shellStatus === 'signed-in' }) : sessionProbe()).then((session) => {
       if (!alive || !session.ok) return;
       setSignedIn(true);
       setLoadingCart(true);
@@ -311,44 +346,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
 
     return () => {
       alive = false;
-      window.clearInterval(catalogTimer);
     };
-  }, [cartLoadVersion, store.id, store.slug]);
-
-  useEffect(() => {
-    if (!modalItem) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    window.requestAnimationFrame(() => modalCloseButton.current?.focus());
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeOptions();
-        return;
-      }
-      if (event.key !== 'Tab' || !modal.current) return;
-      const focusable = Array.from(
-        modal.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [href], select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'),
-      );
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (!first || !last) return;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [closeOptions, modalItem]);
+  }, [cartLoadVersion, store.id, store.slug, shellStatus, shellSession?.scope, shellSession?.epoch]);
 
   const storeAcceptsOrders = catalog.isCurrentlyOpen && catalog.acceptingOrders;
   const catalogVerified = catalogState === 'ready';
@@ -369,8 +368,6 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
   const minimumShortfall = Math.max(0, Number(cart?.minimumOrderAmount ?? 0) - subtotal);
   const selectedAddress = addresses.find((address) => address.id === addressId);
   const storeLabel = [catalog.addressLine1, catalog.city].filter(Boolean).join(', ');
-  const currentVertical = storefrontVertical(catalog.vendorType);
-  const VerticalIcon = verticalIcon[currentVertical];
   const categoryItems = catalog.categories.flatMap((category) => category.items as DisplayItem[]);
   const itemsById = new Map(categoryItems.map((item) => [item.id, item]));
   const catalogItemIds = new Set(categoryItems.map((item) => item.id));
@@ -414,12 +411,14 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     || !needsDeliveryAddress
     || Boolean(addressId && cart?.deliveryAddress?.id === addressId);
   const orderAmountLabel = hasDestinationQuote ? gyMoney(total) : 'Quote needed';
+  const sections = catalog.categories.filter((category) => category.items.length > 0);
+  const [activeSection, setActiveSection] = useActiveSection(sections.map((category) => category.id));
 
   const quantities = new Map<string, number>();
   for (const line of cartItems) quantities.set(line.itemId, (quantities.get(line.itemId) ?? 0) + line.quantity);
 
-  const showNotice = (message: string) => {
-    setNotice(message);
+  const showNotice = (message: string, added = false) => {
+    setNotice({ message, added });
     window.setTimeout(() => setNotice(null), 2600);
   };
 
@@ -448,13 +447,32 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     window.requestAnimationFrame(() => clearReturnFocus.current?.focus());
   };
 
+  /**
+   * [Q7b] A guest browses freely and signs in to order. Inside the app, an
+   * expired access cookie is renewed first (once per page load), so a
+   * returning customer is never sent to sign in for nothing; the cart then
+   * loads and the item they chose reopens from the sign-in continuation.
+   */
   const requireCustomerSession = () => {
     if (signedIn) return true;
-    router.push(`/login?next=${encodeURIComponent(returnPath)}`);
+    if (restoringSession.current) return false;
+    restoringSession.current = true;
+    const toSignIn = () => router.push(`/login?next=${encodeURIComponent(returnPath)}`);
+    void (shellSession?.ensureSignedIn() ?? Promise.resolve(false)).then((restored) => {
+      restoringSession.current = false;
+      if (restored) {
+        renewedSession.current = true;
+        setCartLoadVersion((version) => version + 1);
+      }
+      else toSignIn();
+    }, () => {
+      restoringSession.current = false;
+      toSignIn();
+    });
     return false;
   };
 
-  const mutateItem = async (itemId: string, work: () => Promise<unknown>, message?: string) => {
+  const mutateItem = async (itemId: string, work: () => Promise<unknown>, message?: string, added = false) => {
     if (mutationBusy.current || placingOrderNow.current || cartHydrationPending || cartMutationLockedByCheckout()) return;
     mutationBusy.current = true;
     resetCheckoutAttempt();
@@ -463,7 +481,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     try {
       await work();
       await refreshCart();
-      if (message) showNotice(message);
+      refreshShellCart();
+      if (message) showNotice(message, added);
     } catch (mutationError) {
       const message = mutationError instanceof Error ? mutationError.message : 'Could not update your order.';
       setError(message);
@@ -474,29 +493,50 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     }
   };
 
+  const openOptions = (item: DisplayItem, trigger?: HTMLElement) => {
+    modalReturnFocus.current = trigger ?? null;
+    setSelectedOptions(selectedDefaults(item.optionGroups ?? []));
+    setItemQuantity(1);
+    setModalError(null);
+    setModalItem(item);
+  };
+
   const addItem = (item: DisplayItem, trigger?: HTMLElement) => {
-    if (!signedIn) {
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: selectedDefaults(item.optionGroups ?? []), returnPath });
-    }
-    if (!requireCustomerSession() || !orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
-    const groups = item.optionGroups ?? [];
-    if (groups.length > 0) {
-      modalReturnFocus.current = trigger ?? null;
-      setModalItem(item);
-      setModalError(null);
-      setSelectedOptions(selectedDefaults(groups));
+    if (!orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
+    // [W6] One tap adds an item that needs no choice; an item with a required
+    // choice, or one the store pre-selects, opens its options instead.
+    if (opensChoices(item)) {
+      openOptions(item, trigger);
       return;
     }
-    const existing = cartItems.find((line) => line.itemId === item.id);
+    if (!signedIn) {
+      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: {}, returnPath });
+    }
+    if (!requireCustomerSession()) return;
+    // The server matches the complete selection and note identity. A base
+    // Add must never increment another configuration of the same item.
     void mutateItem(
       item.id,
-      () =>
-        existing
-          ? updateCartLine(existing.id, existing.quantity + 1)
-          : addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1 }),
+      () => addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1 }),
       `${item.name} added to your order.`,
+      true,
     );
   };
+
+  // [W6] `?item=` (Home's popular rail, the Market, a shared link) opens that
+  // item's sheet once the live menu is verified — it never adds anything.
+  useEffect(() => {
+    if (!initialItemId || deepLinkOpened.current || catalogState !== 'ready') return;
+    deepLinkOpened.current = true;
+    const item = catalog.categories.flatMap(category => category.items).find(item => item.id === initialItemId);
+    // A closed or paused store opens nothing: its Add could only refuse.
+    if (item?.isAvailable && item.fulfillment === 'DELIVERY' && catalog.isCurrentlyOpen && catalog.acceptingOrders) {
+      setSelectedOptions(selectedDefaults(item.optionGroups ?? []));
+      setItemQuantity(1);
+      setModalError(null);
+      setModalItem(item);
+    }
+  }, [initialItemId, catalogState, catalog]);
 
   useEffect(() => {
     if (!signedIn || !cartHydrated || catalogState !== 'ready') return;
@@ -514,6 +554,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       (intent.selectedOptions[group.id] ?? []).filter(id => group.options.some(option => option.id === id && option.isAvailable)).slice(0, group.maxSelect),
     ]));
     setSelectedOptions(choices);
+    setItemQuantity(intent.quantity ?? 1);
     setModalError(null);
     setModalItem(item);
   }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
@@ -550,41 +591,43 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
 
   const confirmOptions = () => {
     if (!modalItem) return;
-    if (!signedIn) {
-      queueStorefrontContinuation({ storeSlug: store.slug, itemId: modalItem.id, selectedOptions, returnPath });
-      requireCustomerSession();
-      return;
-    }
+    if (cartHydrationPending) { setModalError('Your cart is still loading. Keep this item open and try again.'); return; }
     const liveItem = categoryItems.find((item) => item.id === modalItem.id);
     if (!orderable || !liveItem?.isAvailable || liveItem.fulfillment !== 'DELIVERY' || optionPrice(liveItem, selectedOptions) === null) {
       setModalError('This item is no longer verified as orderable on the live menu. Close this panel and check the menu again.');
       return;
     }
-    for (const [groupId, ids] of Object.entries(selectedOptions)) {
-      const group = liveItem.optionGroups?.find(group => group.id === groupId);
-      if (ids.length && (!group || ids.length > group.maxSelect || ids.some(id => !group.options.some(option => option.id === id && option.isAvailable)))) {
-        setModalError('These choices have changed. Close this panel and check the menu again.');
-        return;
+    // [W6] Required choices block the Add: the API's own validator (the one
+    // cart add, cart update and checkout run) must accept the selection first.
+    let selected: Record<string, string | string[]>;
+    try {
+      const validated = validateSelectedOptions(liveItem, selectedOptions).selection;
+      // The shape the apps send: one id for a pick-one group, a list otherwise.
+      selected = Object.fromEntries(Object.entries(validated).map(([groupId, ids]) => {
+        const single = (liveItem.optionGroups?.find(group => group.id === groupId)?.maxSelect ?? 1) <= 1;
+        return [groupId, single && Array.isArray(ids) ? ids[0]! : ids];
+      }));
+    } catch (choiceError) {
+      const problem = choiceProblem(liveItem, choiceError);
+      setModalError(problem.message);
+      if (problem.groupId) {
+        window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>(`[data-option-group="${problem.groupId}"] input:not(:disabled)`)?.focus());
       }
+      return;
     }
-    for (const group of liveItem.optionGroups ?? []) {
-      const minimum = group.isRequired ? Math.max(1, group.minSelect) : group.minSelect;
-      if ((selectedOptions[group.id] ?? []).length < minimum) {
-        setModalError(`Choose ${minimum === 1 ? 'an option' : `${minimum} options`} for ${group.name}.`);
-        return;
-      }
-    }
-    const selected: Record<string, string | string[]> = {};
-    for (const group of modalItem.optionGroups ?? []) {
-      const values = selectedOptions[group.id] ?? [];
-      if (values.length > 0) selected[group.id] = group.maxSelect <= 1 ? values[0]! : values;
+    if (!signedIn) {
+      queueStorefrontContinuation({ storeSlug: store.slug, itemId: modalItem.id, selectedOptions, quantity: itemQuantity, returnPath });
+      requireCustomerSession();
+      return;
     }
     const item = modalItem;
+    const quantity = itemQuantity;
     closeOptions();
     void mutateItem(
       item.id,
-      () => addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1, selectedOptions: selected }),
+      () => addToCart({ vendorId: catalog.id, itemId: item.id, quantity, selectedOptions: selected }),
       `${item.name} added to your order.`,
+      true,
     );
   };
 
@@ -617,6 +660,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     try {
       await clearCart();
       await refreshCart();
+      refreshShellCart();
       setConfirmingClear(false);
       showNotice('Saved cart cleared. Start a fresh order from this store.');
       window.requestAnimationFrame(() => railHeading.current?.focus());
@@ -711,6 +755,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       persistCheckoutAttempt(checkoutKey.current);
       const result = await checkout(body, idempotencyKey);
       resetCheckoutAttempt();
+      refreshShellCart();
       const orderId = result.order?.id ?? result.orders?.[0]?.id;
       router.push(orderId ? `/orders/${orderId}` : '/orders');
     } catch (checkoutError) {
@@ -743,101 +788,45 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     }
   };
 
+  const minutes = catalog.etaMin ? `About ${catalog.etaMin} min` : `${catalog.estimatedPrepTime} min prep`;
+  const rating = catalog.displayRating !== null ? `${catalog.displayRating.toFixed(1)} ${catalog.ratingBucket}`.trim() : 'No ratings yet';
+  const storeMeta = [catalog.cuisineTypes?.[0], storeLabel, rating].filter(Boolean).join(' · ');
+  const modalUnitPrice = modalItem ? optionPrice(modalItem, selectedOptions) : null;
+
   return (
-    <main className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
-      <header className={styles.topbar}>
-        <div className={styles.topbarInner}>
-          <div className={styles.brandGroup}>
-            <div className={styles.storeBrand}>
-              <a href="#store-name" className={styles.brandHome}>{catalog.name}</a>
-              <Link href="/" className={styles.poweredBy}>powered by Swift</Link>
+    <div className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
+      <div className={styles.content}>
+        <section className={styles.storeHead} aria-labelledby="store-name">
+          {!fromQr ? (
+            <Photo
+              src={catalog.coverImageUrl}
+              alt={`${catalog.name} storefront`}
+              vendorType={catalog.vendorType}
+              sizes="(min-width: 760px) 900px, 100vw"
+              priority
+              iconSize={44}
+              className={styles.cover}
+            />
+          ) : null}
+          <div className={styles.titleRow}>
+            <div className={styles.titleCopy}>
+              <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
+              {storeMeta ? <p className={styles.storeMeta}>{storeMeta}</p> : null}
             </div>
-            {!fromQr ? <span className={styles.verticalChip}>
-              <VerticalIcon size={18} aria-hidden="true" />
-              <span>{verticalLabel[currentVertical]}</span>
-            </span> : null}
-          </div>
-          <nav className={styles.topActions} aria-label="Order navigation">
-            <Link href={signedIn ? '/orders' : `/login?next=${encodeURIComponent('/orders')}`} className={styles.topLink}>
-              Orders
-            </Link>
-            <a
-              href="#checkout"
-              className={styles.cartLink}
-              aria-label={itemCount > 0 && directCheckoutBlocked ? `Your order, ${itemCount} items, review required` : `Your order, ${itemCount} items, ${orderAmountLabel}`}
-            >
-              <ShoppingBag size={18} aria-hidden="true" />
-              {cartHydrationPending ? 'Loading order…' : itemCount > 0 && directCheckoutBlocked ? `${itemCount} · Review` : `${itemCount} · ${orderAmountLabel}`}
-            </a>
-          </nav>
-        </div>
-      </header>
-
-      {!fromQr && catalog.coverImageUrl ? (
-        <div className={styles.hero}>
-          <Image
-            src={catalog.coverImageUrl}
-            alt={`${catalog.name} storefront`}
-            fill
-            priority
-            unoptimized
-            className={styles.heroImage}
-          />
-        </div>
-      ) : null}
-
-      <div className={`${styles.content} ${!fromQr && catalog.coverImageUrl ? styles.withHero : ''}`}>
-        <section className={styles.storeCard} aria-labelledby="store-name">
-          {catalog.logoUrl ? (
-            <span className={styles.logo}>
-              <Image src={catalog.logoUrl} alt="" fill unoptimized className={styles.logoImage} />
-            </span>
-          ) : (
-            <span className={styles.logoFallback} aria-hidden="true">
-              {catalog.name.slice(0, 1).toUpperCase()}
-            </span>
-          )}
-          <div>
-            <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
-            <p className={styles.eyebrow}>
-              {[catalog.addressLine1, catalog.cuisineTypes?.[0] ?? catalog.vendorType].filter(Boolean).join(' · ')}
-            </p>
-            <div className={styles.meta}>
-              {/* [M-D6] displayRating is null below the rating-display floor,
-                  which is a different thing from having no ratings — but both
-                  mean "we will not put a number on this yet", and the honest
-                  copy already here says exactly that. */}
-              {catalog.displayRating !== null ? (
-                <span className={styles.metaItem}>
-                  <Star size={16} className={styles.star} fill="currentColor" aria-hidden="true" />
-                  {catalog.displayRating.toFixed(1)} {catalog.ratingBucket}
-                </span>
-              ) : (
-                <span>No ratings yet</span>
-              )}
-              <span className={styles.metaItem}>
-                <Clock3 size={16} aria-hidden="true" />
-                {catalog.etaMin ? `About ${catalog.etaMin} min` : `${catalog.estimatedPrepTime} min prep`}
-              </span>
-              {storeLabel ? (
-                <span className={styles.metaItem}>
-                  <MapPin size={16} aria-hidden="true" />
-                  {storeLabel}
-                </span>
-              ) : null}
-              {Number(catalog.minOrderAmount ?? 0) > 0 ? (
-                <span>Minimum {gyMoney(Number(catalog.minOrderAmount))}</span>
-              ) : null}
-            </div>
-          </div>
-          <div className={styles.statusRow} aria-label="Store status">
-            <span className={`${styles.status} ${catalog.isCurrentlyOpen ? styles.statusOpen : styles.statusClosed}`}>
-              {catalog.isCurrentlyOpen ? 'Open' : 'Closed'}
-            </span>
-            {!catalog.acceptingOrders ? (
-              <span className={`${styles.status} ${styles.statusPaused}`}>Orders paused</span>
+            {shellQueries ? (
+              <StoreActions vendorId={catalog.id} slug={catalog.slug} name={catalog.name} onMessage={(message) => showNotice(message)} />
             ) : null}
           </div>
+          <ul className={styles.facts} aria-label="Store status">
+            <li className={`${styles.fact} ${catalog.isCurrentlyOpen ? styles.factOpen : styles.factClosed}`}>
+              {catalog.isCurrentlyOpen ? 'Open' : 'Closed'}
+            </li>
+            {!catalog.acceptingOrders ? <li className={`${styles.fact} ${styles.factPaused}`}>Orders paused</li> : null}
+            <li className={styles.fact}><Clock3 size={14} aria-hidden="true" />{minutes}</li>
+            {Number(catalog.minOrderAmount ?? 0) > 0 ? (
+              <li className={styles.fact}>Minimum {gyMoney(Number(catalog.minOrderAmount))}</li>
+            ) : null}
+          </ul>
         </section>
 
         {fromQr ? (
@@ -881,10 +870,16 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
           </p>
         ) : null}
 
-        {catalog.categories.length > 0 ? (
+        {sections.length > 0 ? (
           <nav className={styles.categoryNav} aria-label="Menu sections">
-            {catalog.categories.map((category) => (
-              <a key={category.id} href={`#section-${category.id}`} className={styles.categoryLink}>
+            {sections.map((category) => (
+              <a
+                key={category.id}
+                href={`#section-${category.id}`}
+                className={styles.categoryLink}
+                aria-current={activeSection === category.id ? 'true' : undefined}
+                onClick={() => setActiveSection(category.id)}
+              >
                 {category.name}
               </a>
             ))}
@@ -898,7 +893,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                 This store has no orderable menu items right now. Check again later.
               </p>
             ) : null}
-            {catalog.categories.map((category) => (
+            {sections.map((category) => (
               <section key={category.id} id={`section-${category.id}`} className={styles.section}>
                 <h2 className={styles.sectionTitle}>{category.name}</h2>
                 <div className={styles.rows}>
@@ -909,16 +904,21 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                     // to become GY$0 and stay addable, so a broken row shipped as free.
                     const priced = itemPrice(item) !== null;
                     const available = item.isAvailable && orderable && item.fulfillment === 'DELIVERY' && priced;
+                    const choices = opensChoices(item);
+                    const optional = !choices && (item.optionGroups?.length ?? 0) > 0;
                     return (
                       <article
                         key={item.id}
                         className={`${styles.menuRow} ${!item.isAvailable ? styles.menuRowUnavailable : ''}`}
                       >
+                        {quantity > 0 ? (
+                          <span className={styles.qtyBadge}>
+                            <span aria-hidden="true">{quantity}</span>
+                            <span className="sr-only">{quantity} in your order</span>
+                          </span>
+                        ) : null}
                         <div className={styles.itemCopy}>
-                          <div className={styles.priceRow}>
-                            <h3 className={styles.itemName}>{item.name}</h3>
-                            <span className={styles.itemPrice}>{gyMoney(itemPrice(item))}</span>
-                          </div>
+                          <h3 className={styles.itemName}>{item.name}</h3>
                           {item.description ? <p className={styles.itemDescription}>{item.description}</p> : null}
                           <div className={styles.itemMeta}>
                             {item.isPopular ? <span className={styles.popular}>Popular</span> : null}
@@ -927,78 +927,91 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                             {item.isAvailable && !priced ? (
                               <span className={styles.soldOut}>Price unavailable</span>
                             ) : null}
+                            {optional && available ? (
+                              <button
+                                type="button"
+                                className={styles.textButton}
+                                onClick={(event) => openOptions(item, event.currentTarget)}
+                                disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder}
+                                aria-label={`Choose options for ${item.name}`}
+                              >
+                                Customise
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className={styles.itemFoot}>
+                            <span className={styles.itemPrice}>
+                              {choices ? <span className={styles.fromLabel}>From</span> : null}
+                              <span>{gyMoney(choices ? fromPrice(item) : itemPrice(item))}</span>
+                            </span>
+                            {!fulfillmentVerified ? (
+                              <span className={styles.unavailableAction}>Ordering unavailable</span>
+                            ) : item.fulfillment === 'PICKUP' ? (
+                              <span className={styles.unavailableAction}>Pickup checkout unavailable</span>
+                            ) : item.fulfillment === 'APPOINTMENT' ? (
+                              <span className={styles.unavailableAction}>Appointment checkout unavailable</span>
+                            ) : choices ? (
+                              <button
+                                type="button"
+                                className={styles.chooseButton}
+                                onClick={(event) => addItem(item, event.currentTarget)}
+                                disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
+                                aria-label={quantity > 0 ? `Customize another ${item.name}; ${quantity} currently in your order` : `Choose options for ${item.name}`}
+                              >
+                                Choose
+                              </button>
+                            ) : quantity > 0 ? (
+                              <div className={styles.quantity} aria-label={`${item.name} quantity`}>
+                                <button
+                                  type="button"
+                                  className={styles.quantityButton}
+                                  onClick={() => subtractItem(item)}
+                                  disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder}
+                                  aria-label={`Remove one ${item.name}`}
+                                >
+                                  <Minus size={18} aria-hidden="true" />
+                                </button>
+                                <span className={styles.quantityCount} aria-live="polite">{quantity}</span>
+                                <button
+                                  type="button"
+                                  className={styles.quantityButton}
+                                  onClick={(event) => addItem(item, event.currentTarget)}
+                                  disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
+                                  aria-label={`Add another ${item.name}`}
+                                >
+                                  <Plus size={18} aria-hidden="true" />
+                                </button>
+                              </div>
+                            ) : item.isAvailable ? (
+                              <button
+                                type="button"
+                                className={styles.addButton}
+                                onClick={(event) => addItem(item, event.currentTarget)}
+                                disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
+                                aria-label={!fulfillmentVerified
+                                  ? `${item.name} unavailable because fulfilment could not be verified`
+                                  : storeAcceptsOrders && !catalogVerified
+                                  ? `${item.name} unavailable until menu choices are verified`
+                                  : orderable
+                                    ? `Add ${item.name}`
+                                    : !catalog.isCurrentlyOpen
+                                      ? `${item.name} unavailable while the store is closed`
+                                      : `${item.name} unavailable while the store has paused orders`}
+                              >
+                                Add
+                              </button>
+                            ) : null}
                           </div>
                         </div>
-
-                        {!fulfillmentVerified ? (
-                          <span className={styles.unavailableAction}>Ordering unavailable</span>
-                        ) : item.fulfillment === 'PICKUP' ? (
-                          <span className={styles.unavailableAction}>Pickup checkout unavailable</span>
-                        ) : item.fulfillment === 'APPOINTMENT' ? (
-                          <span className={styles.unavailableAction}>Appointment checkout unavailable</span>
-                        ) : (item.optionGroups?.length ?? 0) > 0 ? (
-                          <button
-                            type="button"
-                            className={styles.bookButton}
-                            onClick={(event) => addItem(item, event.currentTarget)}
-                            disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
-                            aria-label={quantity > 0 ? `Customize another ${item.name}; ${quantity} currently in your order` : `Choose options for ${item.name}`}
-                          >
-                            {quantity > 0 ? `${quantity} · Add another` : 'Choose'}
-                          </button>
-                        ) : quantity > 0 ? (
-                          <div className={styles.quantity} aria-label={`${item.name} quantity`}>
-                            <button
-                              type="button"
-                              className={styles.quantityButton}
-                              onClick={() => subtractItem(item)}
-                              disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder}
-                              aria-label={`Remove one ${item.name}`}
-                            >
-                              <Minus size={18} aria-hidden="true" />
-                            </button>
-                            <span className={styles.quantityCount} aria-live="polite">{quantity}</span>
-                            <button
-                              type="button"
-                              className={styles.quantityButton}
-                              onClick={(event) => addItem(item, event.currentTarget)}
-                              disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
-                              aria-label={`Add another ${item.name}`}
-                            >
-                              <Plus size={18} aria-hidden="true" />
-                            </button>
-                          </div>
-                        ) : item.isAvailable ? (
-                          <button
-                            type="button"
-                            className={styles.addButton}
-                            onClick={(event) => addItem(item, event.currentTarget)}
-                            disabled={cartHydrationPending || busyItem !== null || quotingAddress || placingOrder || !available}
-                            aria-label={!fulfillmentVerified
-                              ? `${item.name} unavailable because fulfilment could not be verified`
-                              : storeAcceptsOrders && !catalogVerified
-                              ? `${item.name} unavailable until menu choices are verified`
-                              : orderable
-                                ? `Add ${item.name}`
-                                : !catalog.isCurrentlyOpen
-                                  ? `${item.name} unavailable while the store is closed`
-                                  : `${item.name} unavailable while the store has paused orders`}
-                          >
-                            <Plus size={20} aria-hidden="true" />
-                          </button>
-                        ) : (
-                          <span className={styles.soldOut}>Sold out</span>
-                        )}
-
-                        {item.imageUrl ? (
-                          <span className={styles.itemImage}>
-                            <Image src={item.imageUrl} alt={item.name} fill unoptimized className={styles.itemImageAsset} />
-                          </span>
-                        ) : (
-                          <span className={styles.itemImageFallback} aria-hidden="true">
-                            <Pictogram name={currentVertical} size={28} />
-                          </span>
-                        )}
+                        <Photo
+                          src={item.imageUrl}
+                          alt={item.name}
+                          vendorType={catalog.vendorType}
+                          sizes="96px"
+                          iconSize={26}
+                          className={styles.itemImage}
+                          dim={!item.isAvailable}
+                        />
                       </article>
                     );
                   })}
@@ -1232,7 +1245,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
         </div>
       </div>
 
-      {itemCount > 0 ? (
+      {itemCount > 0 && !modalItem ? (
         <a href="#checkout" className={styles.mobileDock}>
           <span>View your order · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
           <span className={styles.mobileTotal}>{directCheckoutBlocked ? 'Review' : orderAmountLabel}</span>
@@ -1240,51 +1253,40 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       ) : null}
 
       {modalItem ? (
-        <div
-          className={styles.scrim}
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.currentTarget === event.target) closeOptions();
-          }}
-        >
-          <section
-            ref={modal}
-            className={styles.modal}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="menu-options-title"
-            aria-describedby={modalError ? 'menu-options-error' : undefined}
-          >
-            <div className={styles.modalHeader}>
-              <div>
-                <h2 id="menu-options-title" className={styles.modalTitle}>{modalItem.name}</h2>
-                {modalItem.description ? <p className={styles.modalDescription}>{modalItem.description}</p> : null}
-              </div>
-              <button ref={modalCloseButton} type="button" className={styles.closeButton} onClick={closeOptions} aria-label="Close item options">
-                <X size={20} aria-hidden="true" />
-              </button>
+        <Sheet labelledBy="menu-options-title" onClose={closeOptions} className={styles.sheet}>
+          <div className={styles.sheetHeader}>
+            <Photo src={modalItem.imageUrl} alt="" vendorType={catalog.vendorType} sizes="72px" iconSize={26} className={styles.sheetPhoto} />
+            <div className={styles.sheetHeading}>
+              <h2 id="menu-options-title" className={styles.modalTitle}>{modalItem.name}</h2>
+              {modalItem.description ? <p className={styles.modalDescription}>{modalItem.description}</p> : null}
             </div>
+            <button data-modal-initial-focus type="button" className={styles.closeButton} onClick={closeOptions} aria-label="Close item options">
+              <X size={20} aria-hidden="true" />
+            </button>
+          </div>
 
-            {modalError ? <p id="menu-options-error" className={styles.modalAlert} role="alert">{modalError}</p> : null}
-
-            <div className={styles.options}>
-              {(modalItem.optionGroups ?? []).map((group) => {
-                const selectedCount = (selectedOptions[group.id] ?? []).length;
-                const multiLimitReached = group.maxSelect > 1 && selectedCount >= group.maxSelect;
-                return (
-                  <fieldset key={group.id} className={styles.optionGroup}>
+          <div className={styles.options}>
+            {(modalItem.optionGroups ?? []).map((group) => {
+              const selectedCount = (selectedOptions[group.id] ?? []).length;
+              const multiLimitReached = group.maxSelect > 1 && selectedCount >= group.maxSelect;
+              const onSale = group.options.filter((option) => option.isAvailable !== false);
+              return (
+                <div key={group.id} className={styles.optionBlock}>
+                  <fieldset className={styles.optionGroup} data-option-group={group.id}>
                     <legend className={styles.optionHeading}>
                       <span className={styles.optionTitle}>{group.name}</span>
                       <span className={styles.optionMeta}>
-                        {group.isRequired ? <span className={styles.required}>Required</span> : null}
-                        <span className={styles.optionGuidance}>{optionGuidance(group)}</span>
+                        {group.isRequired ? <span className={styles.required}>Required</span> : <span className={styles.optionGuidance}>{optionGuidance(group)}</span>}
                       </span>
                     </legend>
-                    {group.options.filter((option) => option.isAvailable).map((option) => {
+                    {group.isRequired && group.maxSelect > 1 ? <p className={styles.optionGuidance}>{optionGuidance(group)}</p> : null}
+                    {onSale.length === 0 ? <p className={styles.optionGuidance}>Every choice here is sold out right now.</p> : null}
+                    {onSale.map((option) => {
                       const checked = (selectedOptions[group.id] ?? []).includes(option.id);
                       const single = group.maxSelect <= 1;
                       const clearableSingle = single && !group.isRequired && group.minSelect === 0;
                       const blockedByLimit = multiLimitReached && !checked;
+                      const extra = parseAmount(option.additionalPrice);
                       return (
                         <label key={option.id} className={`${styles.optionLabel} ${blockedByLimit ? styles.optionLabelDisabled : ''}`}>
                           <span className={styles.optionChoice}>
@@ -1297,29 +1299,49 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                             />
                             {option.name}
                           </span>
-                          {Number(option.additionalPrice) > 0 ? (
-                            <span className={styles.optionPrice}>+{gyMoney(Number(option.additionalPrice))}</span>
+                          {extra === null ? (
+                            <span className={styles.optionPrice}>Price unavailable</span>
+                          ) : extra > 0 ? (
+                            <span className={styles.optionPrice}>+{gyMoney(extra)}</span>
                           ) : null}
                         </label>
                       );
                     })}
                   </fieldset>
-                );
-              })}
-            </div>
+                </div>
+              );
+            })}
+          </div>
 
-            <div className={styles.modalFooter}>
-              <span className={styles.modalPrice}>{gyMoney(optionPrice(modalItem, selectedOptions))}</span>
-              <button type="button" className={styles.primaryButton} disabled={busyItem !== null} onClick={confirmOptions}>
-                Add to order
+          <div className={styles.sheetFooter}>
+            {modalError ? <p id="menu-options-error" className={styles.modalAlert} role="alert">{modalError}</p> : null}
+            <div className={styles.sheetFooterRow}>
+              <div className={styles.quantity} role="group" aria-label="Quantity">
+                <button type="button" className={styles.quantityButton} aria-label="Decrease quantity" disabled={itemQuantity <= 1 || busyItem !== null} onClick={() => setItemQuantity((count) => Math.max(1, count - 1))}><Minus size={18} aria-hidden="true" /></button>
+                <span className={styles.quantityCount} role="status" aria-label={`Quantity ${itemQuantity}`}>{itemQuantity}</span>
+                <button type="button" className={styles.quantityButton} aria-label="Increase quantity" disabled={itemQuantity >= 99 || busyItem !== null} onClick={() => setItemQuantity((count) => Math.min(99, count + 1))}><Plus size={18} aria-hidden="true" /></button>
+              </div>
+              <button
+                type="button"
+                className={`${styles.primaryButton} ${styles.sheetAdd}`}
+                disabled={cartHydrationPending || busyItem !== null || modalUnitPrice === null}
+                aria-describedby={modalError ? 'menu-options-error' : undefined}
+                onClick={confirmOptions}
+              >
+                Add to order · {gyMoney(modalUnitPrice === null ? null : modalUnitPrice * itemQuantity)}
               </button>
             </div>
-          </section>
-        </div>
+          </div>
+        </Sheet>
       ) : null}
 
-      {notice ? <p className={styles.notice} role="status">{notice}</p> : null}
+      {notice ? (
+        <div className={styles.notice} role="status">
+          <span>{notice.message}</span>
+          {notice.added ? <a href="#checkout" className={styles.noticeLink}>View order</a> : null}
+        </div>
+      ) : null}
       {floatingError ? <p className={styles.errorNotice} role="alert">{floatingError}</p> : null}
-    </main>
+    </div>
   );
 }

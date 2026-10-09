@@ -24,7 +24,6 @@ const PUBLIC_PAGES = [
   '(app)/order/page.tsx', // legacy Home redirect
   '(app)/order/browse/page.tsx',
   '(app)/order/search/page.tsx',
-  '(app)/order/vendor/[id]/page.tsx',
   '(app)/taxi/page.tsx', // public app handoff, no web booking
   '(marketing)/about/page.tsx',
   '(marketing)/account/delete/page.tsx', // public deletion instructions
@@ -44,7 +43,7 @@ const PUBLIC_PAGES = [
   'legal/refunds/page.tsx', // [Q36] the card bank's refund and cancellation policy
   'legal/terms/page.tsx',
   'signup/page.tsx', // public business acquisition door [AX295 F1]
-  'store/[slug]/page.tsx',
+  '(app)/store/[slug]/page.tsx', // [W6] a store's one page, inside the customer app's frame
 ];
 
 const PRIVATE_PAGES = [
@@ -91,6 +90,7 @@ const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[...path]/route.ts'];
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
 // must be reviewed here too; they cannot silently evade the census.
 const PUBLIC_RESOURCES = [
+  '(app)/order/vendor/[id]/route.ts', // [W6] the old store address: a 301 to /store/<slug>, or a noindex 404
   'manifest.ts',
   'opengraph-image.tsx',
   'robots.ts',
@@ -179,7 +179,7 @@ async function effectiveRobots(page: string): Promise<Metadata['robots']> {
     const routeModule = await load(file);
     // New dynamic metadata needs explicit fixtures, rather than guessing what
     // it will emit. This also catches re-exports and child overrides.
-    if (routeModule.generateMetadata) expect(file).toBe('store/[slug]/page.tsx');
+    if (routeModule.generateMetadata) expect(file).toBe('(app)/store/[slug]/page.tsx');
     const metadata = routeModule.generateMetadata
       ? await routeModule.generateMetadata({ params: Promise.resolve({ slug: 'census-store' }) })
       : routeModule.metadata;
@@ -270,7 +270,7 @@ describe('[DS288] every route has a reviewed search classification', () => {
 
   it('checks the storefront missing-data metadata branch without network access', async () => {
     vi.mocked(fetchStorefront).mockResolvedValueOnce(null);
-    expectRobots(await effectiveRobots('store/[slug]/page.tsx'), true, 'missing storefront metadata');
+    expectRobots(await effectiveRobots('(app)/store/[slug]/page.tsx'), true, 'missing storefront metadata');
   });
 
   it('agrees with the customer shell about which routes require sign-in', () => {

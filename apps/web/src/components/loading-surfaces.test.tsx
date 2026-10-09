@@ -3,9 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import * as api from '@/lib/customer';
+import * as auth from '@/lib/auth';
 import { CustomerHome } from './customer-home';
 import SearchPage from '@/app/(app)/order/search/page';
-import MenuPage from '@/app/(app)/order/vendor/[id]/page';
+import { StoreSkeleton } from './storefront/store-skeleton';
+import { StorefrontExperience } from './storefront/storefront-experience';
+import storeStyles from './storefront/storefront.module.css';
 import { MarketScreen as MarketPage } from '@/app/(app)/market/market-screen';
 import OrdersPage from '@/app/(app)/orders/page';
 import CartPage from '@/app/(app)/cart/page';
@@ -17,7 +20,7 @@ vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'v1' }), useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({ push: vi.fn() }),
 }));
-vi.mock('./customer-session', () => ({ useCustomerSession: () => ({
+vi.mock('./customer-session', () => ({ useOptionalCustomerSession: () => null, useCustomerSession: () => ({
   status: 'guest', ...person, nearPoint: null, setNearPoint: vi.fn(), ensureSignedIn: vi.fn(),
 }) }));
 
@@ -46,20 +49,25 @@ describe('loading surfaces become content in the reserved layout', () => {
     expect(screen.queryByLabelText('Loading home feed')).toBeNull();
   });
 
-  it('the store keeps its cover, heading and menu row sizing as the menu arrives', async () => {
-    const response = pending<api.VendorDetail>();
-    vi.spyOn(api, 'getVendor').mockReturnValue(response.promise);
-    const view = mount(<MenuPage />);
+  it('the store keeps its cover, heading, chips and menu card sizing as the page arrives', () => {
+    // [W6] The store's placeholder is drawn with the page's own classes, so
+    // the store lands in the space its placeholder held.
+    const shape = [storeStyles.cover, storeStyles.titleRow, storeStyles.facts, storeStyles.categoryNav, storeStyles.layout, storeStyles.rows, storeStyles.menuRow, storeStyles.itemCopy, storeStyles.itemFoot, storeStyles.itemImage];
+    const loading = mount(<StoreSkeleton />);
     const region = screen.getByLabelText('Loading this store');
-    // [WEB-REDESIGN] The design's photo band: 300 px on phones, 340 from 760 px.
-    expect(region.querySelector('[class*="h-[300px]"]')?.className).toContain('wide:h-[340px]');
-    expect(region.querySelector('.swift-menu-heading')).toBeTruthy();
-    expect(region.querySelector('.swift-menu-item')).toBeTruthy();
-    await response.finish(vendor);
-    expect(await screen.findByRole('button', { name: /Lunch box/ })).toBeTruthy();
-    expect(view.container.querySelector('[class*="h-[300px]"]')?.className).toContain('wide:h-[340px]');
-    expect(view.container.querySelector('.swift-menu-heading')).toBeTruthy();
-    expect(view.container.querySelector('.swift-menu-item')).toBeTruthy();
+    for (const part of shape) expect(region.querySelector(`.${part}`), part).toBeTruthy();
+    loading.unmount();
+    const store = { ...vendor, slug: 'local-store', vendorType: 'RESTAURANT', logoUrl: null, coverImageUrl: null, city: 'Georgetown', region: 'Demerara',
+      cuisineTypes: [], tags: [], ratingBucket: 'NEW', ratingCount: 0, topRated: false, acceptingOrders: true, minOrderAmount: 0, isFeatured: false,
+      addressLine1: 'Market Road', operatingHours: [], description: null,
+      categories: [{ id: 'c1', name: 'Lunch', items: [{ id: 'i1', name: 'Lunch box', description: null, basePrice: 500, imageUrl: null, unit: null, isPopular: false, fulfillment: 'DELIVERY' }] }],
+    } as unknown as Parameters<typeof StorefrontExperience>[0]['store'];
+    vi.spyOn(api, 'getPublicStorefront').mockReturnValue(new Promise(() => undefined));
+    vi.spyOn(api, 'getPublicVendor').mockReturnValue(new Promise(() => undefined));
+    vi.spyOn(auth, 'sessionProbe').mockResolvedValue({ ok: false });
+    const page = mount(<StorefrontExperience store={store} returnPath="/store/local-store" />);
+    expect(screen.getByRole('heading', { name: 'Lunch box' })).toBeTruthy();
+    for (const part of shape) expect(page.container.querySelector(`.${part}`), part).toBeTruthy();
   });
 
   it('Market reserves its title, category strip and item image heights', async () => {

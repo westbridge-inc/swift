@@ -6,7 +6,7 @@ const customerErrorCodes = new Set([
   'ACCOUNT_INACTIVE', 'MAX_ADDRESSES', 'NOT_YOUR_ORDER',
 ]);
 
-export interface Favourite { id: string; name: string }
+export interface Favourite { id: string; name: string; slug?: string }
 export interface Profile { id: string; firstName: string; lastName: string; email: string | null; phone: string }
 export interface Address {
   id: string; label: string; addressLine1: string; addressLine2?: string; city: string; region?: string;

@@ -120,7 +120,8 @@ describe('[W-13] the surfaces that spent money use it', () => {
   const source = (path: string) => readFileSync(join(process.cwd(), path), 'utf8');
 
   it('the storefront refuses to price, and refuses to sell, an item whose price it cannot read', () => {
-    const storefront = source('src/components/storefront/storefront-experience.tsx');
+    // [W6] The store page reads an item's price through lib/menu-options.
+    const storefront = source('src/components/storefront/storefront-experience.tsx') + source('src/lib/menu-options.ts');
     // the old shape: a missing price coerced to zero
     expect(storefront).not.toMatch(/Number\(item\.customerPrice \?\? item\.basePrice \?\? 0\)/);
     expect(storefront).toMatch(/parseAmount\(item\.customerPrice \?\? item\.basePrice\)/);
