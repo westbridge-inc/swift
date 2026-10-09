@@ -136,7 +136,7 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
     <aside ref={card} aria-label="Install Swift" className="fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(1rem_+_var(--swift-dock,env(safe-area-inset-bottom)))]">
       <div className="mx-auto max-w-md sw-card p-3 shadow-[var(--swift-elevation-floating)]">
         <div className="flex items-center gap-3">
-          <Image src="/icons/icon-192.png" alt="" width={44} height={44} unoptimized className="h-11 w-11 shrink-0 rounded-xl" />
+          <Image src="/icons/icon-192.png" alt="" width={44} height={44} className="h-11 w-11 shrink-0 rounded-xl" />
           <div className="min-w-0 flex-1">
             <p className="text-sm font-bold">Install Swift</p>
             <p className="text-xs text-[var(--swift-muted)]">Open Swift from your home screen.</p>
