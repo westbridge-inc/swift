@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { StorefrontExperience } from './storefront-experience';
@@ -6,6 +7,11 @@ import { CustomerSessionProvider, type CustomerSession } from '@/components/cust
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 import type { StorefrontDetail } from '@/lib/api';
+import { GuestCart } from '@/components/guest-basket';
+import { readGuestBasket } from '@/lib/basket';
+// The item sheet's code is split from the page; load it up front so a busy
+// test run waits on the sheet's behaviour, not on fetching its code.
+import './item-options-panel';
 
 // ---------------------------------------------------------------------------
 // [W6] The one store page's menu: one tap for an item that needs no choice,
@@ -15,7 +21,7 @@ import type { StorefrontDetail } from '@/lib/api';
 // Synthetic store and items only.
 // ---------------------------------------------------------------------------
 
-const nav = vi.hoisted(() => ({ push: vi.fn() }));
+const nav = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => nav }));
 
 const option = (id: string, name: string, additionalPrice: string, extra: Partial<customer.OptionGroup['options'][number]> = {}) =>
@@ -62,7 +68,9 @@ async function start(options: { item?: string; wrap?: (_node: ReactNode) => Reac
 
 beforeEach(() => {
   sessionStorage.clear();
+  localStorage.clear();
   nav.push.mockReset();
+  nav.refresh.mockReset();
   signedIn = true;
   vi.restoreAllMocks();
   vi.spyOn(auth, 'sessionProbe').mockImplementation(async () => ({ ok: signedIn }) as Awaited<ReturnType<typeof auth.sessionProbe>>);
@@ -90,20 +98,30 @@ describe('reviewer regression proofs', () => {
     await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: 'menu-store', itemId: 'soup', quantity: 1 }));
     expect(customer.updateCartLine).not.toHaveBeenCalled();
   });
-  it('keeps quantity 2 after a guest session is renewed', async () => {
+  it('keeps quantity 2 when a guest signs in at Place order', async () => {
     signedIn = false;
-    const ensureSignedIn = vi.fn(async () => { signedIn = true; return true; });
-    await start({ wrap: node => <CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}</CustomerSessionProvider> });
+    const principal = vi.spyOn(auth, 'getSessionPrincipal').mockReturnValue(null);
+    const ensureSignedIn = vi.fn(async () => { signedIn = true; principal.mockReturnValue('fixture-customer'); return true; });
+    const merge = vi.spyOn(auth, 'apiFetch').mockImplementation(async () => ({ success: true, data: {
+      applied: true, verdicts: readGuestBasket().lines.map(line => ({ clientLineId: line.clientLineId, status: 'ADDED' })),
+    } }));
+    await start({ wrap: node => <QueryClientProvider client={new QueryClient()}><CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}<div data-testid="guest-cart"><GuestCart /></div></CustomerSessionProvider></QueryClientProvider> });
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
-    const sheet = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /Large/ }));
     fireEvent.click(within(sheet).getByRole('radio', { name: /Paratha/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: 'Increase quantity' }));
     expect(within(sheet).getByLabelText('Quantity 2')).toBeTruthy();
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
-    await waitFor(() => expect(customer.getCart).toHaveBeenCalled());
-    await waitFor(() => expect(sessionStorage.getItem('swift_storefront_add')).toBeNull());
-    expect(within(screen.getByRole('dialog')).queryByLabelText('Quantity 2')).not.toBeNull();
+    await waitFor(() => expect(readGuestBasket().lines[0]?.quantity).toBe(2));
+    expect(ensureSignedIn).not.toHaveBeenCalled();
+    expect(merge).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByTestId('guest-cart')).getByRole('button', { name: 'Place order' }));
+    await waitFor(() => expect(merge).toHaveBeenCalledTimes(1));
+    expect(ensureSignedIn).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(merge.mock.calls[0]?.[1]?.body)).lines[0]).toMatchObject({ quantity: 2, expectedUnitPrice: 1900, selectedOptions: { size: 'large', roti: 'paratha' } });
+    await waitFor(() => expect(readGuestBasket().lines).toHaveLength(0));
+    await waitFor(() => expect(nav.refresh).toHaveBeenCalledTimes(1));
   });
   it('a deep-linked item remains open when Add is attempted before cart hydration completes', async () => {
     let resolveCart!: (_cart: customer.Cart) => void;

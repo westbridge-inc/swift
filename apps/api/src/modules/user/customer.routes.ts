@@ -1,3 +1,4 @@
+import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
@@ -1862,6 +1863,15 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const cart = await buildCartResponse(app, request.user.userId, lat, lng, { express, fulfillmentSelections, tipAmount });
     return { success: true, data: cart };
+  });
+
+  app.post('/cart/merge', async (request: AuthRequest) => {
+    const body = cartMergeSchema.parse(request.body);
+    const key = request.headers['idempotency-key'];
+    if (typeof key !== 'string') throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'A basket upload needs an Idempotency-Key.');
+    const result = await mergeGuestCart(app.prisma, request.user.userId, key, body);
+    await app.redis.del(`cart:${request.user.userId}`).catch(() => {});
+    return { success: true, data: { ...result, cart: await buildCartResponse(app, request.user.userId) } };
   });
 
   app.post('/cart/items', async (request: AuthRequest, reply: FastifyReply) => {

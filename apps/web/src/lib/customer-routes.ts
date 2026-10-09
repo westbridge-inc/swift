@@ -56,7 +56,7 @@ const RULES: RouteRule[] = [
   { match: exact('/taxi'), public: true, tab: 'home', parent: HOME_PATH },
   { match: exact('/market'), public: true, tab: 'market', parent: null },
   {
-    match: exact('/cart'), public: false, tab: 'cart', parent: HOME_PATH,
+    match: exact('/cart'), public: true, tab: 'cart', parent: HOME_PATH,
     door: { title: 'Sign in to start a cart', body: 'Your basket lives on your account, so it follows you between devices.' },
   },
   {

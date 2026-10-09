@@ -5,10 +5,17 @@ import styles from './storefront.module.css';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import StorePage from '@/app/(app)/store/[slug]/page';
 import LoginPage from '@/app/login/page';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { CustomerSessionProvider } from '@/components/customer-session';
+import { GuestBasketSync } from '@/components/guest-basket';
+import { readGuestBasket } from '@/lib/basket';
 import type { StorefrontDetail } from '@/lib/api';
 import * as api from '@/lib/api';
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
+// The item sheet's code is split from the page; load it up front so a busy
+// test run waits on the sheet's behaviour, not on fetching its code.
+import './item-options-panel';
 
 const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), query: '' }));
 vi.mock('next/navigation', () => ({ useRouter: () => nav, useSearchParams: () => new URLSearchParams(nav.query), notFound: () => { throw new Error('not found'); } }));
@@ -38,7 +45,7 @@ beforeAll(() => {
 afterAll(() => stylesheet.remove());
 
 beforeEach(() => {
-  sessionStorage.clear();
+  sessionStorage.clear(); localStorage.clear();
   nav.push.mockReset();
   nav.replace.mockReset();
   nav.query = '';
@@ -172,13 +179,15 @@ describe('the actual /store/[slug] QR arrival', () => {
     expect(screen.getByRole('region', { name: 'Menu' })).toBe(document.activeElement);
   });
 
-  it('lets a guest start an order and returns sign-in to the same scanned store', async () => {
-    render(await page({ src: 'qr', c: 'BCDFGHJKMN', t: 'card' }));
+  it('keeps QR items in a guest basket and signs in only at Place order', async () => {
+    render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
-    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(add);
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`/login?next=${encodeURIComponent('/store/garden-kitchen?src=qr&c=BCDFGHJKMN&t=card')}`));
-    expect(customer.addToCart).not.toHaveBeenCalled();
+    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(add);
+    expect(nav.push).not.toHaveBeenCalled(); expect(customer.addToCart).not.toHaveBeenCalled();
+    await waitFor(() => expect(readGuestBasket().lines[0]).toMatchObject({ itemId: 'roti', quantity: 1, unitPrice: 800 }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fgarden-kitchen%3Fsrc%3Dqr%26c%3DBCDFGHJKMN'));
   });
 
   it('places an order from the scanned menu after sign-in, without the banner blocking checkout', async () => {
@@ -208,37 +217,27 @@ describe('the actual /store/[slug] QR arrival', () => {
 });
 
 
-describe('QR-01-W: real guest Add → sign-in → same item continuation', () => {
-  it.each(['Add prompt', 'direct sign-in'])('resumes once from %s without another menu Add tap', async startingState => {
+describe('QR-01-W: guest basket → sign-in → one bulk upload', () => {
+  it.each(['Place order', 'direct sign-in'])('preserves the QR basket through %s and uploads once without placing an order', async startingState => {
     const first = render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
-    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(add);
-    await waitFor(() => expect(nav.push).toHaveBeenCalledOnce());
-    const loginUrl = String(nav.push.mock.calls[0]?.[0]);
-    first.unmount();
-    nav.query = startingState === 'Add prompt' ? loginUrl.split('?')[1]! : '';
+    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(add);
+    await waitFor(() => expect(readGuestBasket().lines).toHaveLength(1));
+    expect(nav.push).not.toHaveBeenCalled(); const line = readGuestBasket().lines[0]!;
+    if (startingState === 'Place order') { await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(screen.getByRole('button', { name: 'Place order' })); await waitFor(() => expect(nav.push).toHaveBeenCalledOnce()); }
+    first.unmount(); nav.query = startingState === 'Place order' ? String(nav.push.mock.calls[0]?.[0]).split('?')[1]! : '';
     const login = render(<LoginPage />);
-    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001001' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
-    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith('/store/garden-kitchen?src=qr&c=BCDFGHJKMN'));
-    login.unmount();
-    vi.mocked(auth.sessionProbe).mockResolvedValue({ ok: true });
-    vi.mocked(customer.getCart).mockResolvedValue({ items: [] });
-    vi.spyOn(customer, 'getAddresses').mockResolvedValue([]);
-    vi.mocked(customer.addToCart).mockResolvedValue({ items: [] });
-    const resumed = render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
-    expect(await screen.findByRole('dialog', { name: 'Pumpkin roti' })).toBeTruthy();
-    expect(customer.addToCart).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: /^Add to order/ }));
-    await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: store.id, itemId: 'roti', quantity: 1, selectedOptions: {} }));
-    resumed.unmount();
-    render(await page({ src: 'qr' }));
-    await waitFor(() => expect(customer.getCart).toHaveBeenCalledTimes(3));
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(customer.addToCart).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001001' } }); await waitFor(() => expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } }); fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith('/store/garden-kitchen?src=qr&c=BCDFGHJKMN')); login.unmount();
+    expect(readGuestBasket().lines).toHaveLength(1);
+    const upload = vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: { applied: true, verdicts: [{ clientLineId: line.clientLineId, status: 'ADDED' }], cart: { items: [] } } } as never);
+    const order = vi.spyOn(customer, 'checkout');
+    render(<QueryClientProvider client={new QueryClient()}><CustomerSessionProvider value={{ status: 'signed-in', scope: 'customer', epoch: 0, ensureSignedIn: async () => true, nearPoint: null, setNearPoint: () => undefined }}><GuestBasketSync /></CustomerSessionProvider></QueryClientProvider>);
+    await waitFor(() => expect(readGuestBasket().lines).toEqual([])); expect(upload).toHaveBeenCalledTimes(1);
+    expect(upload.mock.calls[0]?.[0]).toBe('/api/v1/customer/cart/merge');
+    expect(JSON.parse(String(upload.mock.calls[0]?.[1]?.body)).lines[0]).toMatchObject({ itemId: 'roti', quantity: 1, expectedUnitPrice: 800 });
+    expect(customer.addToCart).not.toHaveBeenCalled(); expect(order).not.toHaveBeenCalled();
   });
 });
 

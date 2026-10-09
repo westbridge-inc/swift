@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { getSessionPrincipal, restoreSession, sessionProbe, subscribeSession } from '@/lib/auth';
@@ -15,7 +15,13 @@ import CartSkeleton from './cart/loading';
 import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
 import { OfflineNotice } from '@/components/offline-notice';
+import { useGuestBasket } from '@/lib/basket-state';
+import { OrderingContextProvider, showsOrderingContext } from '@/components/ordering-context';
 import { InstallPrompt } from '@/components/install-prompt';
+
+// Upload code is needed only after sign-in with a browser basket.
+const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
+const GuestBasketSync = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestBasketSync })));
 
 // The customer ordering app. Opening swiftgy.com lands here, on Home.
 //
@@ -32,7 +38,7 @@ import { InstallPrompt } from '@/components/install-prompt';
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <Providers>
-      <CustomerShell>{children}</CustomerShell>
+      <OrderingContextProvider><CustomerShell>{children}</CustomerShell></OrderingContextProvider>
     </Providers>
   );
 }
@@ -165,7 +171,8 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   const signedIn = status === 'signed-in';
   const cart = useQuery({ queryKey: customerCartKey(scope, epoch), queryFn: readShellCart, enabled: signedIn, staleTime: 30_000, retry: false });
   const me = useQuery({ queryKey: shellPersonKey(scope, epoch), queryFn: readShellPerson, enabled: signedIn, staleTime: 5 * 60_000, retry: false });
-  const cartCount = signedIn ? cartItemCount(cart.data) : 0;
+  const guestBasket = useGuestBasket();
+  const cartCount = signedIn ? cartItemCount(cart.data) : guestBasket.lines.reduce((n, l) => n + l.quantity, 0);
 
   // A private page opened with an expired access cookie: spend the refresh
   // cookie once before deciding this is a guest.
@@ -223,7 +230,9 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
           />
           <main className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
             <div className="sw-page">
+              {showsOrderingContext(pathname) ? <Suspense fallback={<div aria-hidden="true" className="py-3"><div className="min-h-11" /></div>}><OrderingContextBar /></Suspense> : null}
               <OfflineNotice />
+              {status === 'signed-in' && guestBasket.lines.length > 0 ? <Suspense fallback={null}><GuestBasketSync /></Suspense> : null}
               {showBack && backClaims === 0 ? <BackRow /> : null}
               <div key={pathname} className="swift-route-in">{content}</div>
             </div>

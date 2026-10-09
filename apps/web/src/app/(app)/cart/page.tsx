@@ -1,8 +1,10 @@
 'use client';
 
 import CartSkeleton from './loading';
+import { useOrderingContext } from '@/components/ordering-context';
+import { useGuestBasket } from '@/lib/basket-state';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -47,8 +49,18 @@ import {
 import styles from './cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
+const GuestCart = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestCart })));
 
 export default function CartPage() {
+  const { status } = useCustomerSession();
+  const basket = useGuestBasket();
+  if (status === 'checking' || !basket.loaded) return <CartSkeleton />;
+  if (status !== 'signed-in' || basket.lines.length) return <Suspense fallback={<CartSkeleton />}><GuestCart /></Suspense>;
+  return <SignedInCart />;
+}
+
+function SignedInCart() {
+  const { mode: orderingMode } = useOrderingContext();
   const router = useRouter();
   // [WEB-REDESIGN] Every fresh read of the cart also updates the count the
   // rail and the dock show, so the badge never disagrees with this page.
@@ -314,6 +326,7 @@ export default function CartPage() {
   }
 
   async function placeOrder() {
+    if (orderingMode === 'PICKUP') { setError('Pickup checkout is not available yet. Choose delivery to continue.'); return; }
     if (!cart?.items?.length || checkoutBusy.current || cartSafety !== 'safe' || !addrId || !meetsMinimum) return;
     checkoutBusy.current = true;
     setBusy(true); setError(null); setNoRiders(false);
