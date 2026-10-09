@@ -120,6 +120,13 @@ body {
 .rc-chip-pending { background: #d08b4c1a; color: #e8b88b; border-color: #d08b4c66; }
 .rc-chip-approved { background: #4caf941a; color: #8cd8bf; border-color: #4caf9466; }
 .rc-chip-rejected, .rc-chip-expired { background: #e5484d1a; color: #ffb4b8; border-color: #e5484d66; }
+/* [MC-AD1] re-submission marker: the queue row chip and the earlier-decision note in the review */
+.rc-chip-resubmitted { background: #d08b4c1a; color: #e8b88b; border-color: #d08b4c66; margin-top: .25rem; white-space: normal; overflow-wrap: anywhere; }
+.rc-chip-renewal { background: #5b8def1a; color: #a9c4f5; border-color: #5b8def66; margin-top: .25rem; white-space: normal; overflow-wrap: anywhere; }
+/* [MC-AD3/4/5] A Mission Control door placed on a page not yet in the new design keeps its own ink (a light card
+   on a dark legacy page would otherwise inherit light text). */
+.mc-door { color: var(--mc-ink); font-family: var(--mc-font-body); font-size: .875rem; line-height: 1.5; }
+.rc-previous { display: grid; gap: .25rem; margin: .5rem 0 .75rem; padding: .6rem .75rem; border: 1px solid #d08b4c66; border-radius: .6rem; background: #d08b4c12; font-size: .85rem; overflow-wrap: anywhere; }
 .rc-review-body { min-width: 0; }
 .rc-document-heading { display: flex; gap: 1rem; align-items: center; margin-bottom: .75rem; }
 .rc-document-heading h3 { font-size: 1rem; font-weight: 600; }

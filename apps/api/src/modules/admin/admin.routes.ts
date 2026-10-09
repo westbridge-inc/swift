@@ -5300,7 +5300,7 @@ export async function adminRoutes(app: FastifyInstance) {
       documents,
       (earlierWhere) => tenantPrisma.verificationDocument.findMany({
         where: earlierWhere,
-        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+        select: { id: true, userId: true, role: true, subjectId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
       }),
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );

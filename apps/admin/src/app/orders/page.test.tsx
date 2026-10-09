@@ -34,6 +34,9 @@ function ordersHandler(
   orders = [otherOrder, targetOrder],
 ) {
   return (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/orders/held') {
+      return { body: { success: true, data: [] } };
+    }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/orders') {
       return { body: { success: true, data: orders } };
     }

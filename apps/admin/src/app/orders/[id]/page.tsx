@@ -7,6 +7,8 @@ import { ArrowLeft, Phone } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
+import { PaymentDispute } from '@/components/mc/PaymentDispute';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 import { askReason } from '@/lib/ask-reason';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
@@ -68,6 +70,10 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     },
   });
 
+  const actions = useActionRunner(() => {
+    void queryClient.invalidateQueries({ queryKey: ['order', id] });
+    void queryClient.invalidateQueries({ queryKey: ['orders'] });
+  });
   const o: any = data?.data;
 
   if (isLoading) {
@@ -96,6 +102,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
         <ArrowLeft size={16} /> Orders
       </Link>
+
+      {actions.banner}
+      <PaymentDispute order={o} actions={actions} />
 
       {/* Header — identity + the actions an operator actually has */}
       <div className="flex flex-wrap items-center gap-3 mb-6">

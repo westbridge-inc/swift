@@ -1,0 +1,42 @@
+import { beforeAll, afterAll, it, expect } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { prismaPlugin } from '../plugins/prisma';
+import { redisPlugin } from '../plugins/redis';
+import { authPlugin } from '../plugins/auth';
+import { socketPlugin } from '../plugins/socket';
+import { registerErrorHandler } from '../middleware/error-handler';
+import { adminRoutes } from '../modules/admin/admin.routes';
+import { authRoutes } from '../modules/auth/auth.routes';
+import { loginWithOtp } from './helpers/otp';
+let app: FastifyInstance;
+let token: string;
+const users: string[] = [];
+beforeAll(async () => {
+  app = Fastify({ logger: false });
+  registerErrorHandler(app);
+  await app.register(prismaPlugin);
+  await app.register(redisPlugin);
+  await app.register(authPlugin);
+  await app.register(socketPlugin);
+  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await app.register(adminRoutes, { prefix: '/api/v1/admin' });
+  await app.ready();
+  token = (await loginWithOtp(app, '+5926001000')).json().data.tokens.accessToken;
+});
+afterAll(async () => {
+  await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: users } } });
+  await app.close();
+});
+it('the real queue carries the earlier matching decision, never another lane or applicant', async () => {
+  const user = await app.prisma.user.create({ data: { phone: `+5920${String(Date.now()).slice(-6)}`, firstName: 'Synthetic', lastName: 'Applicant', roles: ['CUSTOMER'], activeRole: 'CUSTOMER' } });
+  users.push(user.id);
+  const old = await app.prisma.verificationDocument.create({ data: { userId: user.id, role: 'CUSTOMER', docType: 'national_id', status: 'REJECTED', fileUrl: 'test/previous', reviewNote: 'The image was unreadable.', createdAt: new Date(Date.now() - 20_000), reviewedAt: new Date(Date.now() - 19_000) } });
+  await app.prisma.verificationDocument.create({ data: { userId: user.id, role: 'MOVER', docType: 'national_id', status: 'REJECTED', fileUrl: 'test/other-lane', reviewNote: 'Different lane.', createdAt: new Date(Date.now() - 10_000) } });
+  const current = await app.prisma.verificationDocument.create({ data: { userId: user.id, role: 'CUSTOMER', docType: 'national_id', status: 'PENDING', fileUrl: 'test/current' } });
+  const res = await app.inject({ method: 'GET', url: '/api/v1/admin/verification/queue?status=PENDING&role=customer&limit=100', headers: { authorization: `Bearer ${token}` } });
+  expect(res.statusCode).toBe(200);
+  const row = res.json().data.find((doc: { id: string }) => doc.id === current.id);
+  expect(row.previousDecision).toMatchObject({ documentId: old.id, kind: 'RESUBMITTED_AFTER_REJECTION', status: 'REJECTED', reviewNote: 'The image was unreadable.' });
+  expect(row.previousDecision).not.toHaveProperty('fileUrl');
+});
