@@ -43,7 +43,7 @@ import {
   OptionSelectionError,
   basePrice,
   fromPrice,
-  needsChoices,
+  opensChoices,
   requiredCount,
   selectionPrice,
   validateSelectedOptions,
@@ -524,8 +524,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const addItem = (item: DisplayItem, trigger?: HTMLElement) => {
     if (!orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
     // [W6] One tap adds an item that needs no choice; an item with a required
-    // choice opens its options instead.
-    if (needsChoices(item)) {
+    // choice, or one the store pre-selects, opens its options instead.
+    if (opensChoices(item)) {
       openOptions(item, trigger);
       return;
     }
@@ -546,7 +546,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     if (!initialItemId || deepLinkOpened.current || catalogState !== 'ready') return;
     deepLinkOpened.current = true;
     const item = catalog.categories.flatMap(category => category.items).find(item => item.id === initialItemId);
-    if (item?.isAvailable && item.fulfillment === 'DELIVERY') {
+    // A closed or paused store opens nothing: its Add could only refuse.
+    if (item?.isAvailable && item.fulfillment === 'DELIVERY' && catalog.isCurrentlyOpen && catalog.acceptingOrders) {
       setSelectedOptions(selectedDefaults(item.optionGroups ?? []));
       setItemQuantity(1);
       setModalError(null);
@@ -922,7 +923,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                     // to become GY$0 and stay addable, so a broken row shipped as free.
                     const priced = itemPrice(item) !== null;
                     const available = item.isAvailable && orderable && item.fulfillment === 'DELIVERY' && priced;
-                    const choices = needsChoices(item);
+                    const choices = opensChoices(item);
                     const optional = !choices && (item.optionGroups?.length ?? 0) > 0;
                     return (
                       <article

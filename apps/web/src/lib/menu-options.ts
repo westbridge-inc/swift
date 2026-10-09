@@ -37,6 +37,16 @@ export function needsChoices(item: PricedItem): boolean {
 }
 
 /**
+ * The item's Add opens its choices first: a choice is required, or the store
+ * pre-selects one (the phone app pre-selects the same picks). One tap must
+ * neither drop a store's pick from the order nor add it, and its price, unseen.
+ */
+export function opensChoices(item: PricedItem): boolean {
+  return needsChoices(item)
+    || (item.optionGroups ?? []).some((group) => group.options.some((option) => option.isDefault === true && option.isAvailable !== false));
+}
+
+/**
  * The lowest price the item can be ordered at: its price plus the cheapest
  * choices each required group needs, counting only choices on sale. This is
  * the "From" figure on the menu. Null when any figure in it cannot be read.
