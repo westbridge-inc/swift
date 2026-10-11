@@ -1026,7 +1026,9 @@ describe('free cancellation when the mover search found nobody', () => {
       return { order, rider };
     };
     const empty = await taxi('EXHAUSTED');
-    await expectFree(empty.order.id, empty.rider);
+    const done = await expectFree(empty.order.id, empty.rider);
+    // A ride is a ride in the customer's words, not an "order".
+    expect(done.message).toBe('Ride cancelled — no mover was found, so there is no fee.');
     const searching = await taxi('SEARCHING');
     await expectCharged(searching.order.id, searching.rider);
   });
