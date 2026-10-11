@@ -193,7 +193,8 @@ export class DiscoveryService {
    */
   async pendingSuggestionsForVendor(vendorId: string, limit = 200) {
     const items = await this.prisma.item.findMany({
-      where: { vendorId },
+      // [Item 62] A deleted (archived) listing has nothing left to tag.
+      where: { vendorId, archivedAt: null },
       select: { id: true, name: true, imageUrl: true },
     });
     if (items.length === 0) return [];

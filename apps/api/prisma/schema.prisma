@@ -1628,6 +1628,10 @@ model Category {
   imageUrl    String?
   sortOrder   Int      @default(0)
   isActive    Boolean  @default(true)
+  /// [Item 62 · owner 11 Oct] When the store deleted this category. Like a
+  /// deleted listing it is archived, not removed: its listings are archived
+  /// with it and stay attached to the orders and bookings that hold them.
+  archivedAt  DateTime?
   items       Item[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

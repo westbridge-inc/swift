@@ -650,6 +650,12 @@ export async function vendorRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const analytics = new VendorAnalyticsService(app.prisma);
   const menu = new VendorMenuService(app.prisma);
+  /** [Item 62] A listing archived between an editor's read and its guarded
+   *  write is gone: 404, never a 500 (Prisma's P2025 "record not found"). */
+  const goneIfArchived = (id: string) => (err: unknown): never => {
+    if (typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2025') throw new NotFoundError('Item', id);
+    throw err;
+  };
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
   const custodyDeps = { prisma: app.prisma, io: app.io, notifications };
@@ -1008,8 +1014,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: {
         operatingHours: { orderBy: { dayOfWeek: 'asc' } },
         subscription: true,
-        categories: { orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: { where: { archivedAt: null } } } } } },
-        _count: { select: { orders: true, items: true } },
+        categories: { where: { archivedAt: null }, orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: { where: { archivedAt: null } } } } } },
+        _count: { select: { orders: true, items: { where: { archivedAt: null } } } },
       },
     });
     // Legacy rows predate the MMG destination validator. Never reflect an
@@ -2029,6 +2035,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       WHERE "vendorId" = ANY(${access.vendorIds})
         AND "stockQuantity" IS NOT NULL AND "lowStockThreshold" IS NOT NULL
         AND "stockQuantity" <= "lowStockThreshold"
+        AND "archivedAt" IS NULL
       ORDER BY "stockQuantity" ASC
       LIMIT 200
     `;
@@ -2430,12 +2437,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: category };
   });
 
-  /** DELETE /categories/:id — Delete a category (and its items) */
+  /** DELETE /categories/:id — Delete a category: [owner 11 Oct] it and its
+   *  listings are ARCHIVED (see VendorMenuService.deleteCategory). */
   app.delete<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { itemsRemoved, removedItemIds } = await menu.deleteCategory(vendorId, request.params.id);
 
-    // hard delete: no sweep could find these rows later [SWIFT-UG-SRCH-01]
+    // Evict the archived listings' search docs now [SWIFT-UG-SRCH-01].
     const search = new SearchService(app.prisma);
     for (const itemId of removedItemIds) search.removeItemDoc(itemId).catch(() => {});
     scheduleVendorSearchSync(app, vendorId);
@@ -2501,7 +2509,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     // Verify category belongs to this vendor
     const category = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
-    if (!category || category.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
+    if (!category || category.vendorId !== vendorId || category.archivedAt) throw new NotFoundError('Category', body.categoryId);
 
     // Auto-assign sortOrder
     let sortOrder = body.sortOrder;
@@ -2818,7 +2826,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     // Categories resolve by name (case-insensitive), created on demand
-    const categories = await app.prisma.category.findMany({ where: { vendorId } });
+    // [owner 11 Oct] An archived category never takes new rows: a row naming
+    // it files into a new live category of the same name.
+    const categories = await app.prisma.category.findMany({ where: { vendorId, archivedAt: null } });
     const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
 
     let imported = 0;
@@ -2898,7 +2908,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.id, archivedAt: null },
       data: { imageUrl: url },
       select: { id: true, name: true, imageUrl: true },
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     scheduleVendorSearchSync(app, vendorId);
 
@@ -2916,7 +2926,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // If moving to a different category, verify ownership
     if (body.categoryId && body.categoryId !== existing.categoryId) {
       const cat = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
-      if (!cat || cat.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
+      if (!cat || cat.vendorId !== vendorId || cat.archivedAt) throw new NotFoundError('Category', body.categoryId);
     }
 
     // Inventory: restocking above zero undoes an AUTO-hide (the engine hid it
@@ -2962,7 +2972,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         category: { select: { id: true, name: true } },
         optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' } } }, orderBy: { sortOrder: 'asc' } },
       },
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     // [MKT-2] THE STOCK COUNT, through the single writer.
     //
@@ -3048,7 +3058,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.id, archivedAt: null },
       data: { isAvailable: newAvailability },
       select: { id: true, name: true, isAvailable: true },
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     scheduleVendorSearchSync(app, vendorId);
 

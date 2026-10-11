@@ -204,6 +204,7 @@ export async function publicRoutes(app: FastifyInstance) {
           select: { dayOfWeek: true, openTime: true, closeTime: true, isClosed: true },
         },
         categories: {
+          where: { archivedAt: null },
           orderBy: { sortOrder: 'asc' },
           select: {
             id: true,
