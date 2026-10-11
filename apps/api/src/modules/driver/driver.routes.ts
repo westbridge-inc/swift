@@ -1,3 +1,4 @@
+import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -1081,20 +1082,6 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
     }
 
-    // Compare-and-set: exactly one transition wins, so a double-tap / retry
-    // can't double-fire notifications or clobber a concurrent transition.
-    const claimed = await app.prisma.order.updateMany({
-      where: { id, status: 'DRIVER_ASSIGNED' },
-      data: { status: 'DRIVER_EN_ROUTE' },
-    });
-    if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
-    // Named in the trail, like every vendor- and dispatch-driven transition
-    // already is. This row was 8/8 null on the database.
-    await app.prisma.orderStatusLog.create({
-      data: { orderId: id, status: 'DRIVER_EN_ROUTE', changedBy: request.user.userId, note: 'Driver started the run to the passenger' },
-    });
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
-
     // Compute ETA to pickup
     let etaMinutes: number | null = null;
     if (driver.currentLat && driver.currentLng && order.pickupLat && order.pickupLng) {
@@ -1102,21 +1089,16 @@ export async function driverRoutes(app: FastifyInstance) {
       etaMinutes = estimateDeliveryMinutes(dist);
     }
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
-      orderId: id,
-      status: 'DRIVER_EN_ROUTE',
-      eta: etaMinutes,
+    const updatedOrder = await advanceDriverPickup(app.prisma, {
+      orderId: id, driverId: driver.id, assignmentVersion: order.driverAssignmentVersion,
+      changedBy: request.user.userId, from: 'DRIVER_ASSIGNED', target: 'DRIVER_EN_ROUTE',
+      note: 'Driver started the run to the passenger', etaMinutes,
     });
-
-    await notifications.send({
-      userId: order.customerId,
-      type: 'ORDER_UPDATE',
-      title: 'Driver En Route',
-      body: etaMinutes
-        ? `Your driver is on the way. Arriving in ~${etaMinutes} minutes.`
-        : 'Your driver is on the way to pick you up.',
-      data: taxiNotificationData(id, { status: 'DRIVER_EN_ROUTE', ...(etaMinutes !== null ? { eta: etaMinutes } : {}) }),
-    });
+    try {
+      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DRIVER_EN_ROUTE', eta: etaMinutes });
+    } catch (error) { request.log.warn({ err: error, orderId: id }, 'pickup socket publication failed after commit'); }
+    await drainDriverPickupNotices({ prisma: app.prisma, notifications }, { orderId: id })
+      .catch((error) => request.log.warn({ err: error, orderId: id }, 'pickup notice remains pending after commit'));
 
     return { success: true, data: updatedOrder };
   });
@@ -1168,29 +1150,16 @@ export async function driverRoutes(app: FastifyInstance) {
       });
     }
 
-    const claimed = await app.prisma.order.updateMany({
-      where: { id, status: 'DRIVER_EN_ROUTE' },
-      data: { status: 'DRIVER_ARRIVED', driverArrivedAt: arrivedAt },
+    const updatedOrder = await advanceDriverPickup(app.prisma, {
+      orderId: id, driverId: driver.id, assignmentVersion: order.driverAssignmentVersion,
+      changedBy: request.user.userId, from: 'DRIVER_EN_ROUTE', target: 'DRIVER_ARRIVED',
+      note: gate.note, arrivedAt,
     });
-    if (claimed.count === 0) throw new AppError(409, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
-
-    await app.prisma.orderStatusLog.create({
-      data: { orderId: id, status: 'DRIVER_ARRIVED', changedBy: request.user.userId, note: gate.note },
-    });
-    const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
-
-    app.io.to(`order:${id}`).emit('order:status_changed', {
-      orderId: id,
-      status: 'DRIVER_ARRIVED',
-    });
-
-    await notifications.send({
-      userId: order.customerId,
-      type: 'ORDER_UPDATE',
-      title: 'Driver Arrived',
-      body: `Your driver has arrived. Please share your ride PIN to begin the trip.`,
-      data: taxiNotificationData(id, { status: 'DRIVER_ARRIVED' }),
-    });
+    try {
+      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DRIVER_ARRIVED' });
+    } catch (error) { request.log.warn({ err: error, orderId: id }, 'pickup socket publication failed after commit'); }
+    await drainDriverPickupNotices({ prisma: app.prisma, notifications }, { orderId: id })
+      .catch((error) => request.log.warn({ err: error, orderId: id }, 'pickup notice remains pending after commit'));
 
     return { success: true, data: updatedOrder };
   });
