@@ -200,6 +200,34 @@ describe('[W2] a store, a category and the Market arrive with their content in t
     expect(carriesAPerson(reads[0]!.init)).toBe(false);
   });
 
+  it('the old store address says a store is not listed only when the API itself answers 404', async () => {
+    const response = await legacyStore(new Request('https://web.test/order/vendor/gone'), { params: Promise.resolve({ id: 'gone' }) });
+    expect(calls('/api/v1/customer/vendors/gone')).toHaveLength(1);
+    expect(response.status).toBe(404);
+    expect(await response.text()).toContain('may no longer be listed');
+  });
+
+  it.each<[string, () => ApiReply]>([
+    ['an outage', () => ({ status: 503, body: { success: false, error: { message: 'Swift is busy' } } })],
+    ['a server error', () => ({ status: 500, body: { success: false } })],
+    ['no answer at all', () => { throw new TypeError('fetch failed'); }],
+    ['an answer it cannot read', () => ({ body: { success: true, data: { id: 'someone-else' } } })],
+  ])('the old store address never calls %s "no longer listed": 503, not cached, with a way to try again', async (_case, reply) => {
+    const listed = api;
+    api = (request) => (request.url.pathname === '/api/v1/customer/vendors/v1' ? reply() : listed(request));
+    const response = await legacyStore(new Request('https://web.test/order/vendor/v1?item=m1'), { params: Promise.resolve({ id: 'v1' }) });
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Location')).toBeNull();
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const html = await response.text();
+    expect(html).toContain('Swift could not check this store right now');
+    expect(html).toContain('Try again');
+    expect(html).toContain('noindex');
+    expect(html).not.toContain('no longer be listed');
+    // Nothing from the visitor's address is written back into the page.
+    expect(html).not.toContain('item=');
+  });
+
   it('a made-up store id is never read on the server', async () => {
     const response = await legacyStore(new Request('https://web.test/order/vendor/x'), { params: Promise.resolve({ id: '../../admin' }) });
     expect(response.status).toBe(404);

@@ -102,7 +102,10 @@ describe('[W6] one tap or Choose', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add Pumpkin soup' }));
     await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: 'menu-store', itemId: 'soup', quantity: 1 }));
     expect(screen.queryByRole('dialog')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Choose options for Pumpkin soup' }));
+    // Choices open once the Add has settled (the row's buttons wait for it).
+    const customise = screen.getByRole('button', { name: 'Choose options for Pumpkin soup' }) as HTMLButtonElement;
+    await waitFor(() => expect(customise.disabled).toBe(false));
+    fireEvent.click(customise);
     expect(screen.getByRole('dialog', { name: 'Pumpkin soup' })).toBeTruthy();
   });
 
@@ -191,6 +194,15 @@ describe('[W6] the item sheet', () => {
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
     expect((await within(sheet).findByRole('alert')).textContent).toBe('“Roti” is sold out right now.');
     expect(customer.addToCart).not.toHaveBeenCalled();
+  });
+
+  it('a row whose required choice is sold out says Sold out, never a From price nobody can order at', async () => {
+    live([soup, { ...curry, optionGroups: [SIZE, { ...ROTI, options: ROTI.options.map((choice) => ({ ...choice, isAvailable: false })) }] }]);
+    await start();
+    const card = screen.getByRole('button', { name: 'Choose options for Curry & roti' }).closest('article')!;
+    expect(within(card).getByText('Sold out')).toBeTruthy();
+    expect(card.textContent).not.toContain('From');
+    expect(card.textContent).not.toContain('$1,200');
   });
 
   it('does not open a linked item (?item=) while the store is closed or has paused orders', async () => {

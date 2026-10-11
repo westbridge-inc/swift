@@ -23,7 +23,13 @@ beforeEach(() => {
 it('renews before sending a known customer to login after Home to store navigation with expired access', async () => {
   let accessAlive = true;
   let refreshes = 0;
-  mockApi(({ url }) => {
+  let adds = 0;
+  mockApi(({ url, method }) => {
+    if (url.pathname === '/api/v1/customer/cart/items' && method === 'POST') {
+      if (!accessAlive) return { status: 401, body: { success: false } };
+      adds += 1;
+      return ok({ items: [{ id: 'soup-line', itemId: 'soup', name: 'Fixture soup', quantity: 1, customerPrice: 800, isAvailable: true, fulfillment: 'DELIVERY' }] });
+    }
     if (url.pathname === '/api/v1/auth/me') return accessAlive ? ok({ user: { id: 'fixture-person' } }) : { status: 401, body: { success: false } };
     if (url.pathname === '/api/v1/auth/refresh') { refreshes += 1; accessAlive = true; return ok({}); }
     if (url.pathname === '/api/v1/market/depth') return ok({ visible: false, items: 0, vendors: 0 });
@@ -45,6 +51,9 @@ it('renews before sending a known customer to login after Home to store navigati
   const add = await screen.findByRole('button', { name: 'Add Fixture soup' });
   await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(add);
-  await waitFor(() => expect(refreshes > 0 || nav.push.mock.calls.length > 0).toBe(true));
+  // Judge only once the Add itself has completed: a sign-in redirect that
+  // came after an await would otherwise land after the assertion ran.
+  await screen.findByText('Fixture soup added to your order.');
+  expect(adds).toBe(1);
   expect({ refreshes, navigations: nav.push.mock.calls }).toEqual({ refreshes: 1, navigations: [] });
 });
