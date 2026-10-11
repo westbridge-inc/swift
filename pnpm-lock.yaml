@@ -559,6 +559,9 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.2.4(react@19.2.4)
+      sharp:
+        specifier: ^0.35.5
+        version: 0.35.5(@types/node@22.19.15)
     devDependencies:
       '@tailwindcss/postcss':
         specifier: ^4.0.0

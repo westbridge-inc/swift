@@ -46,6 +46,7 @@ import {
   type VendorDetail,
 } from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
+import { photo } from '@/lib/media';
 import { storefrontVertical, storefrontVerticalVariables } from '@/lib/design-tokens';
 import styles from './storefront.module.css';
 import { Pictogram } from '@/components/glyphs';
@@ -178,7 +179,7 @@ function ItemPhoto({ item, vertical }: { item: DisplayItem; vertical: ReturnType
   const [failed, setFailed] = useState(false);
   return item.imageUrl && !failed ? (
     <span className={styles.itemImage}>
-      <Image src={item.imageUrl} alt={item.name} fill unoptimized className={styles.itemImageAsset} onError={() => setFailed(true)} />
+      <Image {...photo(item.imageUrl)!} alt={item.name} fill sizes="96px" className={styles.itemImageAsset} onError={() => setFailed(true)} />
     </span>
   ) : (
     <span className={styles.itemImageFallback} aria-hidden="true">
@@ -830,11 +831,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       {!fromQr && catalog.coverImageUrl ? (
         <div className={styles.hero}>
           <Image
-            src={catalog.coverImageUrl}
+            {...photo(catalog.coverImageUrl)!}
             alt={`${catalog.name} storefront`}
             fill
             priority
-            unoptimized
+            sizes="(min-width: 760px) 1200px, 100vw"
             className={styles.heroImage}
           />
         </div>
@@ -844,7 +845,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
         <section className={styles.storeCard} aria-labelledby="store-name">
           {catalog.logoUrl ? (
             <span className={styles.logo}>
-              <Image src={catalog.logoUrl} alt="" fill unoptimized className={styles.logoImage} />
+              <Image {...photo(catalog.logoUrl)!} alt="" fill sizes="64px" className={styles.logoImage} />
             </span>
           ) : (
             <span className={styles.logoFallback} aria-hidden="true">

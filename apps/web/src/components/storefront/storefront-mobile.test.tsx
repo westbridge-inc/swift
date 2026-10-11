@@ -252,7 +252,8 @@ describe('storefront item photo fallback', () => {
       ...category, items: category.items.map(item => item.id === 'roti' ? { ...item, imageUrl: '/replacement.jpg' } : item),
     })) });
     await act(async () => { (interval.mock.calls.find(([, delay]) => delay === 30_000)![0] as () => void)(); });
+    // [W2b, #1523] A bare path is drawn from the API's origin, as the phone app does.
     expect((screen.getByRole('img', { name: 'Pumpkin roti' }) as HTMLImageElement).src)
-      .toBe(new URL('/replacement.jpg', window.location.href).href);
+      .toBe('http://vendor-api.test/replacement.jpg');
   });
 });
