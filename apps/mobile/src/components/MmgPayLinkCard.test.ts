@@ -63,3 +63,15 @@ describe('both screens wire the same seam', () => {
     expect(api).toContain("api.delete('/driver/profile/mmg-pay-url/pending')");
   });
 });
+
+describe('who pays a taxi driver (owner, 11 Oct)', () => {
+  it('the driver card names passengers, never riders', () => {
+    // Only a taxi driver sees this card (MoverAccountScreen renders it under
+    // isDriver). A driver's customers are passengers; in Swift "riders" are
+    // delivery partners, so "Riders can pay you" told a driver the wrong thing.
+    expect(mover).toMatch(/\{isDriver \? \(\s*<MmgPayLinkCard\s+who="rides"/);
+    expect(card).toContain("const payer = who === 'store' ? 'Customers' : 'Passengers';");
+    expect(card).toContain("const payerLower = who === 'store' ? 'customers' : 'passengers';");
+    expect(card).not.toMatch(/'Riders'|'riders'/);
+  });
+});
