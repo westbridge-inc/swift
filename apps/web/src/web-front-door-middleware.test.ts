@@ -11,9 +11,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // The public site (swiftgy.com and www) must not take orders before launch,
 // while staging.swiftgy.com — answered by the SAME web container once
 // swiftgy.com points at that stack — keeps the full marketplace for testing.
-// So there is ONE switch, baked per deployment at build time
-// (NEXT_PUBLIC_WEB_ORDERING), and it governs the public hosts only. Unset, the
-// public site is closed: the safe default.
+// So there is ONE switch, and it governs the public hosts only. Unset, the
+// public site is closed: the safe default. [S1 · owner ruling 6 Oct] It is read
+// by the web SERVER while it runs (SWIFT_WEB_ORDERING), not baked into a build,
+// so flipping it — open, or back to closed — needs no rebuild.
 //
 // This file runs in Node, not the browser double: a browser-style Request
 // drops the Host header (a forbidden header name), and the middleware decides
@@ -29,18 +30,15 @@ async function load<T>(relativePath: string): Promise<T> {
   return (await import(/* @vite-ignore */ path)) as T;
 }
 
-/** A fresh module graph built the way a deployment builds it: with the switch baked in. */
-async function configWith(webOrdering: string) {
-  vi.resetModules();
-  vi.stubEnv('NEXT_PUBLIC_WEB_ORDERING', webOrdering);
-  return import('@/site.config');
-}
-
+/** A web server running with the switch set to `webOrdering` (its own environment, read per request). */
 async function deployedWith(webOrdering: string) {
-  const config = await configWith(webOrdering);
+  vi.resetModules();
+  vi.stubEnv('SWIFT_WEB_ORDERING', webOrdering);
+  const switchModule = await load<{ webOrderingState: () => string }>('lib/launch-switch.ts');
+  const ordering = await load<{ webOrderingOpen: (_host: string | null | undefined, _state: string) => boolean }>('lib/web-ordering.ts');
   return {
-    config,
-    ordering: await load<{ webOrderingOpen: (_host: string | null | undefined, _state?: string) => boolean }>('lib/web-ordering.ts'),
+    state: switchModule.webOrderingState,
+    ordering: { webOrderingOpen: (host: string | null | undefined) => ordering.webOrderingOpen(host, switchModule.webOrderingState()) },
     middleware: await load<{ middleware: (_r: NextRequest) => NextResponse; config: { matcher: string[] } }>('middleware.ts'),
   };
 }
@@ -68,15 +66,58 @@ function requestAt(host: string, path: string) {
   return new NextRequest(`https://${host.replace(/\.$/, '')}${path}`, { headers: { host } });
 }
 
-describe('[Item 7] one switch, set per deployment, failing closed', () => {
-  it.each(['', 'soon', 'waitlist', 'LIVE', 'true', '1'])('NEXT_PUBLIC_WEB_ORDERING=%j keeps the public site closed', async (value) => {
-    const config = await configWith(value);
-    expect(config.launch.webOrdering).toBe('soon');
+describe('[Item 7 · S1] one switch, read by the server while it runs, failing closed', () => {
+  it.each(['', 'soon', 'waitlist', 'LIVE', 'true', '1'])('SWIFT_WEB_ORDERING=%j keeps the public site closed', async (value) => {
+    const { state } = await deployedWith(value);
+    expect(state()).toBe('soon');
   });
 
-  it('NEXT_PUBLIC_WEB_ORDERING=live opens it', async () => {
-    const config = await configWith('live');
-    expect(config.launch.webOrdering).toBe('live');
+  it('SWIFT_WEB_ORDERING=live opens it', async () => {
+    const { state } = await deployedWith('live');
+    expect(state()).toBe('live');
+  });
+
+  it('flips without a rebuild: the same running middleware follows the setting, open and back to closed', async () => {
+    const { middleware } = await deployedWith('');
+    const cart = () => getRewrittenUrl(middleware.middleware(requestAt('swiftgy.com', '/cart')));
+    expect(new URL(cart()!).pathname).toBe('/launching-soon');
+    vi.stubEnv('SWIFT_WEB_ORDERING', 'live');
+    expect(cart()).toBeNull();
+    vi.stubEnv('SWIFT_WEB_ORDERING', '');
+    expect(new URL(cart()!).pathname).toBe('/launching-soon');
+  });
+
+  // The retired build-time name, spelled out of parts: it is no longer an
+  // allowlisted public variable (security/public-env-allowlist.txt), and the
+  // public-env gate reads tests too. It appears here only to prove it is dead.
+  const RETIRED = ['NEXT', 'PUBLIC', 'WEB', 'ORDERING'].join('_');
+
+  it('the old build-time setting opens nothing any more, and no source reads it', async () => {
+    vi.stubEnv(RETIRED, 'live');
+    const { middleware } = await deployedWith('');
+    expect(new URL(getRewrittenUrl(middleware.middleware(requestAt('swiftgy.com', '/cart')))!).pathname).toBe('/launching-soon');
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) walk(path);
+        else if (/\.(ts|tsx)$/.test(name) && !/\.test\.(ts|tsx)$/.test(name) && readFileSync(path, 'utf8').includes(RETIRED)) offenders.push(path);
+      }
+    };
+    walk(SRC);
+    expect(offenders).toEqual([]);
+  });
+
+  it('the browser asks the server, which answers from its own setting and never lets the answer be cached', async () => {
+    await deployedWith('');
+    const { GET } = await load<{ GET: () => Response }>('app/api/launch-state/route.ts');
+    let response = GET();
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({ webOrdering: 'soon' });
+    vi.stubEnv('SWIFT_WEB_ORDERING', 'live');
+    response = GET();
+    expect(await response.json()).toEqual({ webOrdering: 'live' });
   });
 
   it('governs the public hosts only: staging, previews and local runs keep the full marketplace', async () => {
