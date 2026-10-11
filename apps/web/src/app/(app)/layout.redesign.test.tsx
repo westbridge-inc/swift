@@ -4,7 +4,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiReply, type ApiRequest } from '@/test/test-utils';
 import AppLayout from './layout';
-import VendorPage from './order/vendor/[id]/page';
+import { StorefrontPage } from '@/components/storefront/storefront-page';
+import { storefrontFixture } from '@/test/storefront-fixture';
 
 const state = vi.hoisted(() => ({ pathname: '/', params: {} as Record<string, string>, push: vi.fn(), back: vi.fn(), replace: vi.fn() }));
 vi.mock('next/navigation', () => ({
@@ -61,7 +62,13 @@ beforeEach(async () => {
     if (url.pathname === '/api/v1/customer/cart' && method === 'GET') {
       return cartFails ? { status: 500, body: { success: false } } : ok({ items: cartLines, subtotalCustomer: 2600 });
     }
+    if (url.pathname === '/api/v1/public/storefronts/shanta-kitchen') return ok(storefrontFixture(STORE));
+    if (url.pathname === '/api/v1/customer/addresses') return ok([]);
     if (url.pathname === '/api/v1/customer/vendors/v1') return ok(STORE);
+    if (url.pathname === '/api/v1/customer/cart/items/l1' && method === 'PUT') {
+      cartLines = cartLines.map((line) => (line.id === 'l1' ? { ...line, quantity: line.quantity + 1 } : line));
+      return ok({});
+    }
     if (url.pathname === '/api/v1/customer/cart/items' && method === 'POST') {
       cartLines = [...cartLines, { id: 'l3', itemId: 'i1', name: 'Pepperpot bowl', quantity: 1, customerPrice: 1800 }];
       return { status: 201, body: { success: true, data: {} } };
@@ -146,12 +153,12 @@ describe('[WEB-REDESIGN] the cart count', () => {
   });
 
   it('moves when something is added at a store', async () => {
-    state.params = { id: 'v1' };
-    shell('/order/vendor/v1', <VendorPage />);
+    // [W6] The store's one page; an item with no choice to make is one tap.
+    shell('/store/shanta-kitchen', await StorefrontPage({ params: Promise.resolve({ slug: 'shanta-kitchen' }), searchParams: Promise.resolve({}) }));
     await waitFor(() => expect(within(rail()).getByLabelText('3 in your cart')).toBeTruthy());
-    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
-    const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
+    const add = await screen.findByRole('button', { name: 'Add another Pepperpot bowl' });
+    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(add);
     await waitFor(() => expect(within(rail()).getByLabelText('4 in your cart').textContent).toBe('4'));
     expect(within(dock()).getByLabelText('4 in your cart')).toBeTruthy();
   });

@@ -36,17 +36,24 @@ export interface CustomerSession {
   setNearPoint: (_point: NearPoint | null) => void;
 }
 
-const CustomerSessionContext = createContext<CustomerSession>({
+const defaultSession: CustomerSession = {
   status: 'checking',
   scope: 'guest',
   epoch: 0,
   ensureSignedIn: async () => false,
   nearPoint: null,
   setNearPoint: () => undefined,
-});
+};
+
+const CustomerSessionContext = createContext<CustomerSession | null>(null);
 
 export const CustomerSessionProvider = CustomerSessionContext.Provider;
 
 export function useCustomerSession(): CustomerSession {
+  return useContext(CustomerSessionContext) ?? defaultSession;
+}
+
+/** A shared customer shell owns session probing when it is present. */
+export function useOptionalCustomerSession(): CustomerSession | null {
   return useContext(CustomerSessionContext);
 }
