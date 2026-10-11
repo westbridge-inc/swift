@@ -92,6 +92,8 @@ export default function DeliveryPage() {
           A failed delivery counts against your account (a strike) only when the evidence supports it, such as the
           rider&apos;s location at your address; never on the rider&apos;s word alone.
         </li>
+        {/* Strike line reworded 11 Oct 2026 for the owner's customer-ID ruling of 8 Oct (ID on file;
+            a restricted account's ID waits for a person). DRAFT wording, not yet owner-approved. */}
         <li>
           Strikes count for 90 days. After repeated failed deliveries you must add your ID — and a person on our team
           checks it — before ordering again; after more, ordering is switched off until you contact support.

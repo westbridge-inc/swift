@@ -94,6 +94,13 @@ describe('the Privacy Policy DRAFT and Terms say what the code does', () => {
     expect(CHILD_SAFETY).not.toMatch(/government-ID verification/);
   });
 
+  it('nothing in the policy says a customer\'s ID or photo is face-matched (review S2): face-matching is a Partner check', () => {
+    expect(PRIVACY).toMatch(/For Partners, to confirm a document and selfie match/);
+    expect(PRIVACY).not.toMatch(/(?<!For Partners, )To confirm a document and selfie match/);
+    expect(PRIVACY).toMatch(/face-matching checks on the verification documents and selfies that Partners submit \(a customer's ID is never face-matched\)/);
+    expect(PRIVACY).not.toMatch(/face-matching checks on the verification document and selfie you submit/);
+  });
+
   it('the public delivery policy says a restricted account adds its ID and a person checks it', () => {
     const delivery = readFileSync(join(__dirname, '../../../web/src/app/legal/delivery/page.tsx'), 'utf8');
     expect(delivery).not.toMatch(/verify your identity/);
