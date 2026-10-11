@@ -151,7 +151,7 @@ describe('vehicle edit evidence lifecycle', () => {
   const result = await system(() => evaluateMoverDocuments(app.prisma, mover.userId, { kind: kind === 'driver' ? 'DRIVER' : 'RIDER', vehicleType: 'CAR', legacyVerified: false }));
   expect(result.allowed).toBe(false);
   const fileKey = await system(() => ownedVerificationFixture(app.prisma, mover.userId));
-  const uploaded = await system(() => verification().submitDocument(mover.userId, 'MOVER', 'vehicle_registration', fileKey));
+  const uploaded = await system(() => verification().submitDocument(mover.userId, 'MOVER', 'vehicle_registration', fileKey, 'test-v1'));
   expect(uploaded).toMatchObject({ status: 'PENDING', state: 'REVIEW_QUEUED' });
   expect(await app.prisma.reviewCase.count({ where: { submissionId: uploaded.id, closedAt: null } })).toBe(1);
   const reviewer = await system(() => app.prisma.user.create({ data: { phone: `+${phoneBase + users.length}`, firstName: 'Synthetic', lastName: 'Reviewer', roles: ['ADMIN'], activeRole: 'ADMIN', admin: { create: { permissions: ['*'] } } } }));
@@ -178,7 +178,10 @@ describe('vehicle edit evidence lifecycle', () => {
  });
  it.each(['driver','rider'] as const)('%s refuses an identity edit while working', async kind => {
   const mover = await fixture(kind);
-  await system(() => kind === 'driver' ? app.prisma.driver.update({ where: { userId: mover.userId }, data: { currentRideId: 'synthetic-active-ride' } }) : app.prisma.rider.update({ where: { userId: mover.userId }, data: { currentOrderId: 'synthetic-active-order' } }));
+  await system(async () => {
+    if (kind === 'driver') await app.prisma.driver.update({ where: { userId: mover.userId }, data: { currentRideId: 'synthetic-active-ride' } });
+    else await app.prisma.rider.update({ where: { userId: mover.userId }, data: { currentOrderId: 'synthetic-active-order' } });
+  });
   await grantStepUp(app, mover.token);
   const result = await save(kind, mover.token, { vehicleColor: 'Blue' });
   expect(result.statusCode).toBe(409); expect(result.json().error.code).toBe('ACTIVE_WORK');
