@@ -138,6 +138,9 @@ describe('record-only closure of store-claimed MMG orders', () => {
     const notices = await sys(() => app.prisma.notification.findMany({ where: { userId: { in: [customerId, ownerId] }, data: { path: ['orderId'], equals: before.id } } }));
     expect(notices).toHaveLength(2);
     expect(new Set(notices.map((n) => n.userId))).toEqual(new Set([customerId, ownerId]));
+    // The store is told exactly how much it owes back; the customer how much is coming.
+    expect(notices.find((n) => n.userId === ownerId)!.body).toContain('GY$1,300');
+    expect(notices.find((n) => n.userId === customerId)!.body).toContain('GY$1,300');
     for (const notice of notices) {
       expect(notice.body).toMatch(/store.*refund/i);
       expect(notice.body).toMatch(/Swift.*(never|does not).*money/i);
@@ -224,5 +227,32 @@ describe('record-only closure of store-claimed MMG orders', () => {
     expect((await view(cash.id)).canCloseStoreRefund).toBe(false);
     await close(eligible.id, 'ADMIN', 3, await approve(eligible.id));
     expect((await view(eligible.id)).canCloseStoreRefund).toBe(false);
+  });
+
+  it('a booking is closed in provider words, not store words', async () => {
+    const o = await order({ fulfillment: 'APPOINTMENT' } as never);
+    const res = await close(o.id, 'ADMIN', 3, await approve(o.id));
+    expect(res.statusCode, res.body).toBe(200);
+    const notices = await sys(() => app.prisma.notification.findMany({ where: { userId: { in: [customerId, ownerId] }, data: { path: ['orderId'], equals: o.id } } }));
+    expect(notices).toHaveLength(2);
+    for (const n of notices) {
+      expect(n.body).toMatch(/provider/i);
+      expect(n.body).not.toMatch(/\bstore\b/i);
+    }
+  });
+
+  it('refuses a claim with no attested amount: there is nothing to record', async () => {
+    const o = await order({ mmgAttestedAmount: null } as never);
+    const res = await close(o.id, 'ADMIN', 3, await approve(o.id));
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('MMG_PAYMENT_NOT_ATTESTED');
+    expect((await read(o.id)).status).toBe('ACCEPTED');
+  });
+
+  it('a cash order is refused in words that say why', async () => {
+    const o = await order({ paymentMethod: 'CASH', paymentStatus: 'PENDING' });
+    const res = await close(o.id, 'ADMIN', 3, await approve(o.id));
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.message).toMatch(/cash/i);
   });
 });
