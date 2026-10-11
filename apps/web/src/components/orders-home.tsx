@@ -402,7 +402,7 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
 }
 
 /** "Deliver my own orders" — the store-wide self-delivery setting (owners and managers). */
-export function SelfDeliveryCard({ store, readFailed = false }: { store: HubStore; readFailed?: boolean }) {
+export function SelfDeliveryCard({ store, readFailed = false, onRetryRead = () => {} }: { store: HubStore; readFailed?: boolean; onRetryRead?: () => void }) {
   const storeId = useStoreId();
   const client = useQueryClient();
   const selfDelivery = !!store.selfDeliveryEnabled;
@@ -425,6 +425,7 @@ export function SelfDeliveryCard({ store, readFailed = false }: { store: HubStor
         <Switch on={selfDelivery} />
       </button>
       {mut.isError && <p className="mt-2 text-[13px] text-[var(--swift-error)]">Couldn’t update — try again.</p>}
+      {readFailed && <ReadFailed onRetry={onRetryRead} />}
     </section>
   );
 }

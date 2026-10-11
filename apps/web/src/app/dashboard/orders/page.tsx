@@ -10,7 +10,7 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
 import { useStoreRole } from '@/lib/store-role';
-import { mmgPayBlockedReason } from '@/lib/mmg-pay-words';
+import { mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../../../mobile/src/modules/vendor/order-dispute';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
@@ -297,7 +297,12 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const s = (o.status || '').toUpperCase();
   // A disputed MMG order is paused: only Reject stays, as on the card and in the app (order-dispute.ts).
   const paused = mmgDisputePaused(o);
-  const actions = paused ? actionsFor(o).filter((a) => a.kind === 'reject') : actionsFor(o);
+  // Payment-first, the same rule as the card (lib/mmg-pay-words): an MMG order
+  // is accepted only once its money has moved (CAPTURED or CLAIMED). Until then
+  // the window offers the store's confirmation, or says why it cannot.
+  const mmgUnpaid = o.paymentMethod === 'MOBILE_MONEY' && !mmgMoneyMoved(o.paymentStatus);
+  const actions = (paused ? actionsFor(o).filter((a) => a.kind === 'reject') : actionsFor(o))
+    .filter((a) => !(a.kind === 'accept' && mmgUnpaid));
   const pickable = ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   // [W-25] The old predicate was "not captured and not cancelled", so a
@@ -369,6 +374,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
           <span>{money(o.totalAmount)}</span>
         </div>
       </div>
+      {isMmg && mmgMoneyMoved(o.paymentStatus) && <p className="mt-2 text-sm font-semibold text-[var(--swift-success)]">{mmgMovedLabel(o.paymentStatus)}</p>}
 
       {o.deliveryInstructions && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">Note: {o.deliveryInstructions}</p>}
       {riderAssigned && <p className="mt-3 text-sm text-[var(--swift-muted)]">Rider: <b className="text-[var(--swift-ink)]">{riderName || 'Swift rider'}</b> {o.rider?.user?.phone}</p>}
@@ -665,7 +671,7 @@ export default function OrdersPage() {
     {manager ? <ManageGrid store={store.data} owner={role === 'OWNER'} onOrderHistory={() => setBucket('done')} /> : <StaffAvailability />}
     {store.data && <div className="grid gap-4 wide:grid-cols-2">
       <StoreStatusCard store={store.data} manager={manager} readFailed={store.isError} onRetryRead={() => void store.refetch()} />
-      {manager && storeLive && <SelfDeliveryCard store={store.data} readFailed={store.isError} />}
+      {manager && storeLive && <SelfDeliveryCard store={store.data} readFailed={store.isError} onRetryRead={() => void store.refetch()} />}
     </div>}
     <p className="text-center text-[13px] text-[var(--swift-muted)]">You keep 100% of every order — Swift takes no commission.</p>
     {selected && <div ref={dialog} className="sw-scrim items-start overflow-y-auto p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] wide:items-center" role="dialog" aria-modal="true" aria-label="Order details" onKeyDown={e => { if (e.key === 'Escape') setSelected(null); else trapTab(e); }}>

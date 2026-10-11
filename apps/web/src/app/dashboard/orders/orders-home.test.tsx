@@ -426,10 +426,56 @@ describe('the store state stays current', () => {
     const control = await screen.findByRole('switch', { name: 'Store open to customers' });
     await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
     await view.user.click(control);
-    expect(await screen.findByText(/Couldn.t check your store.s current state/)).toBeTruthy();
+    expect(await within(screen.getByRole('region', { name: 'Store status' })).findByText(/Couldn.t check your store.s current state/)).toBeTruthy();
     expect((screen.getByRole('switch', { name: 'Store open to customers' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Pause new orders' }) as HTMLButtonElement).disabled).toBe(true);
     expect(writes.length).toBe(1);
+  });
+});
+
+// DS914 on #1615: the order window follows the same payment rule as the card —
+// an unpaid MMG order shows the confirmation step and no Accept; Accept only
+// once the money has moved (CAPTURED or CLAIMED); a failed payment says why.
+describe('the order window\'s payment rule matches the card', () => {
+  async function windowFor(paymentStatus: string) {
+    hubApi({ orders: [wireVendorOrder({ id: 'o-mmg', orderNumber: 'SW-7601', status: 'PENDING', paymentMethod: 'MOBILE_MONEY', paymentStatus, canConfirmPayment: true })] });
+    const view = renderWithQuery(<OrdersPage />);
+    const later = await screen.findByText(/View later/).catch(() => null);
+    if (later) await view.user.click(later);
+    const card = await screen.findByRole('article', { name: 'Order SW-7601' });
+    await view.user.click(within(card).getByText('#SW-7601'));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    await within(dialog).findByText('Total (MMG)');
+    return dialog;
+  }
+  it('PENDING: the confirmation step, no Accept', async () => {
+    const d = await windowFor('PENDING');
+    expect(within(d).getByLabelText('MMG transaction reference')).toBeTruthy();
+    expect(within(d).queryByRole('button', { name: 'Accept' })).toBeNull();
+    expect(within(d).getByRole('button', { name: 'Reject' })).toBeTruthy();
+  });
+  it('CLAIMED: Accept, and the store\'s report said as such', async () => {
+    const d = await windowFor('CLAIMED');
+    expect(within(d).getByRole('button', { name: 'Accept' })).toBeTruthy();
+    expect(within(d).getByText('MMG payment reported received by your store')).toBeTruthy();
+    expect(within(d).queryByLabelText('MMG transaction reference')).toBeNull();
+  });
+  it('FAILED: the reason, no Accept', async () => {
+    const d = await windowFor('FAILED');
+    expect(within(d).getByText(/MMG reports this payment as failed/)).toBeTruthy();
+    expect(within(d).queryByRole('button', { name: 'Accept' })).toBeNull();
+  });
+});
+
+describe('every locked store control says why', () => {
+  it('the "Who delivers" card explains a failed re-read too', async () => {
+    hubApi({ selfDelivery: false, failProfileRefetch: true });
+    const view = renderWithQuery(<OrdersPage />);
+    const control = await screen.findByRole('switch', { name: 'Deliver my own orders' });
+    await view.user.click(control);
+    const card = await screen.findByRole('region', { name: 'Who delivers' });
+    expect(await within(card).findByText(/Couldn.t check your store.s current state/)).toBeTruthy();
+    expect((within(card).getByRole('switch', { name: 'Deliver my own orders' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
