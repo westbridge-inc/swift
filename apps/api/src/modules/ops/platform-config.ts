@@ -41,10 +41,13 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  police clearance optional, national ID optional with a driver's licence,
  *  no separate taxi plate photo — and the data-protection note corrected
  *  (the Act is not yet in force).
+ *  2026-10-07.1 [VERIFY-DOCS · ruling of 6 Oct ~21:25]: a service business opens on
+ *  its owner's ID; police clearance is a document it may add, and it is what
+ *  home-visit bookings need. Marketplace tradespeople keep it required.
  *  2026-10-07.2 [VERIFY-DOCS · rulings 7 and 8]: the taxi's seven documents (the
  *  person's Hire Car Driver's Licence and the car's yearly hire licence replace
- *  the single hire-car permit) and no TIN certificate on any store list.
- *  (2026-10-07.1 is the services home-visit change; the two never share a value.) */
+ *  the single hire-car permit) and no TIN certificate on any store list — on top
+ *  of 2026-10-07.1 (both changes together; the two never share a value). */
 export const PLATFORM_CONFIG_VERSION = '2026-10-07.2';
 
 /**
@@ -146,7 +149,12 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
     SUPERMARKET_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
     STORE_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
-    SERVICE: ['owner_national_id', 'police_clearance'],
+    // Service businesses (owner ruling, 6 Oct 2026 ~21:25 GYT): the store opens on the owner's ID;
+    // a police clearance is OPTIONAL for the store, and a HOME-VISIT booking needs the owner's
+    // approved, current one (modules/verification/home-visits) — in-shop bookings never do.
+    // Marketplace tradespeople keep it REQUIRED: their jobs are home visits.
+    SERVICE: ['owner_national_id'],
+    SERVICE_OPTIONAL: ['police_clearance'],
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
