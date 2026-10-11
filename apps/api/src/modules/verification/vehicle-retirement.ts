@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import { BUCKET_OF } from './doc-registry';
+import { BUCKET_OF, VEHICLE_REGISTRATION_DOC_TYPE } from './doc-registry';
 import { hopDocState } from './doc-state';
 import { normalizeRegistrationMark, resolveSubject, rootSubjectId } from './subjects';
 import type { VehicleSubmissionProfile } from './submission-authority';
@@ -38,7 +38,7 @@ export async function requireFreshVehicleReview(tx: Prisma.TransactionClient, us
   }
   if (superseded.length) await tx.renewalSchedule.updateMany({ where: { documentId: { in: superseded }, suspendedAt: null }, data: { suspendedAt: now } });
   if (withdrawn.length) await tx.reviewCase.updateMany({ where: { submissionId: { in: withdrawn }, closedAt: null }, data: { closedAt: now } });
-  const subject = await resolveSubject(tx, { userId, ...user, docType: 'vehicle_registration', vehicleProfile: next });
+  const subject = await resolveSubject(tx, { userId, ...user, docType: VEHICLE_REGISTRATION_DOC_TYPE, vehicleProfile: next });
   if (subject) await tx.subjectLink.updateMany({ where: { id: subject.linkId }, data: { approvedAt: null } });
   return { superseded, withdrawn };
 }

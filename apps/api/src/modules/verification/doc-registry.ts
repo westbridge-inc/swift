@@ -568,5 +568,7 @@ export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
 /** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
 export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
+/** [L06 · #1551] The vehicle's registration — the document a vehicle subject is resolved from. Registry text (DOC-INV-2). */
+export const VEHICLE_REGISTRATION_DOC_TYPE = 'vehicle_registration';
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];
