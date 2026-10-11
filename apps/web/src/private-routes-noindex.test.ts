@@ -48,6 +48,12 @@ const PUBLIC_PAGES = [
 ];
 
 const PRIVATE_PAGES = [
+  'dashboard/notifications/page.tsx',
+  'portal/notifications/page.tsx',
+  'advertiser/page.tsx',
+  'advertiser/account/page.tsx',
+  'advertiser/notifications/page.tsx',
+  'advertiser/campaigns/[advertiserId]/[campaignId]/page.tsx',
   '(app)/account/page.tsx',
   '(app)/account/addresses/page.tsx',
   '(app)/account/favourites/page.tsx',

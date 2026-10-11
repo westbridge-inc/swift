@@ -6,7 +6,7 @@ import { NAV as portalNav } from '@/app/portal/portal-shell';
 describe('console navigation', () => {
   it('keeps Today first and places Weekly fee between Bulk import and Settings', () => {
     expect(dashboardNav.map(({ label }) => label)).toEqual([
-      'Today', 'Orders', 'Inventory', 'Bulk import', 'Weekly fee', 'Settings',
+      'Today', 'Orders', 'Menu', 'Bulk import', 'Weekly fee', 'Settings',
     ]);
   });
 
