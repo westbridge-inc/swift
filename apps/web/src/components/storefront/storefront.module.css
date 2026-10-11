@@ -1,4 +1,5 @@
 .page {
+  --swift-order-dock-height: calc(var(--swift-touch) + var(--swift-space-md));
   min-height: 100vh;
   background: var(--swift-canvas);
   color: var(--swift-ink);
@@ -588,6 +589,7 @@
 }
 
 .rail {
+  scroll-margin-block-start: var(--swift-rail-sticky-top);
   position: sticky;
   inset-block-start: var(--swift-rail-sticky-top);
   border: thin solid var(--swift-border);
@@ -613,6 +615,11 @@
   font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
   font-size: var(--swift-type-title);
   line-height: var(--swift-leading-title);
+}
+
+.railTitle:focus {
+  outline: medium solid var(--swift-focus);
+  outline-offset: var(--swift-space-xs);
 }
 
 .railBody {
@@ -1033,6 +1040,8 @@
 
   .rail {
     position: static;
+    /* Clear the header and the category bar stuck under it, as menu sections do. */
+    scroll-margin-block-start: var(--swift-section-scroll);
   }
 
   .storeCard {
@@ -1063,7 +1072,7 @@
   }
 
   .content {
-    padding-block-end: calc(var(--swift-space-5xl) + var(--swift-space-5xl) + var(--swift-space-lg) + env(safe-area-inset-bottom, 0));
+    padding-block-end: calc(var(--swift-order-dock-height) + var(--swift-space-lg) + var(--swift-space-lg) + env(safe-area-inset-bottom, 0));
   }
 }
 

@@ -137,7 +137,9 @@ describe('[Q11] the staging website build', () => {
   it('Vercel and CI (no channel, no image switch) get exactly the config they had', async () => {
     const config = await productionConfig(PUBLIC_SITE);
     expect(Object.keys(config).sort()).toEqual(
-      ['env', 'headers', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
+      // `images` is the photo optimiser every build carries (W2b, owner ruling h4); the
+      // image-build-only keys (output, typescript, eslint) must still be absent.
+      ['env', 'headers', 'images', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
     );
     expect(config.env).toEqual({ NEXT_PUBLIC_API_URL: RELEASE_BROWSER_API_ORIGIN });
     expect(headerOf(await siteWideHeaders(config), 'Content-Security-Policy')).toBe(
