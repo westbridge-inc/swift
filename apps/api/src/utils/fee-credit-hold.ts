@@ -1,3 +1,5 @@
+import { isProduction } from './runtime-mode';
+
 // ---------------------------------------------------------------------------
 // [OWNER 8 Oct 22:20 + 8 Oct 23:58 (4)] Weekly fees are paid ONLY through the
 // MMG checkout page (card later). Production holds every way of crediting a
@@ -13,8 +15,9 @@
 
 export function manualFeeCreditHeld(env: Record<string, string | undefined> = process.env): boolean {
   const value = env['BILLING_TOPUP_HOLD'];
-  if (value === undefined || value === '') return env['NODE_ENV'] === 'production';
-  return value !== '0';
+  if (value !== undefined && value !== '') return value !== '0';
+  // Unset: held in production. A posture the parser refuses is held too.
+  try { return isProduction(env); } catch { return true; }
 }
 
 /** The words an operator sees when the hold refuses a credit by hand. */
