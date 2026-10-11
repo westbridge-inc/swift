@@ -11,12 +11,14 @@ import Link from 'next/link';
 import { ApiRequestError, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
+import { catalogueName, type CatalogueName } from '@/lib/catalogue-name';
 
-// The items tab carries the app's name, "Products", for every store (owner ruling, 11 Oct).
-export const NAV = [
+/** The business console's places. The items tab is named like the app, by the
+ *  store's type: Menu, Inventory, Products or Services (lib/catalogue-name). */
+export const dashboardNav = (catalogue: CatalogueName) => [
   { href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true, dock: false },
   { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
-  { href: '/dashboard/inventory', label: 'Products', icon: Boxes, exact: true },
+  { href: '/dashboard/inventory', label: catalogue, icon: Boxes, exact: true },
   { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false, dock: false },
   { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
   { href: '/dashboard/settings', label: 'Settings', icon: Settings, exact: false },
@@ -131,8 +133,11 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
     else if (list.length === 1) onSwitch(list[0]!.id);
   }, [storeId, list, stores.data?.selectedId, onSwitch]);
 
+  const selected = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
+  const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType)), [selected?.vendorType]);
+
   return (
-    <ConsoleShell person={person} home="/dashboard" title="Business" navigation={NAV}
+    <ConsoleShell person={person} home="/dashboard" title="Business" navigation={navigation}
       switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet} />}
       signOutBody="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
       contentKey={storeId ?? 'no-store'}>

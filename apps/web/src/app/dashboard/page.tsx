@@ -6,6 +6,7 @@ import { AlertTriangle, Star } from 'lucide-react';
 import { getLowStock, getOverview, money, toggleOpen, toggleOrders } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
+import { useCatalogueName } from '@/lib/catalogue-name';
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -41,6 +42,7 @@ export default function TodayPage() {
   const storeId = useStoreId();
   const overview = useQuery({ queryKey: storeKey(storeId, 'overview'), queryFn: getOverview, refetchInterval: 30_000 });
   const lowStock = useQuery({ queryKey: storeKey(storeId, 'low-stock'), queryFn: getLowStock, refetchInterval: 60_000 });
+  const catalogue = useCatalogueName();
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'overview') });
   const openMut = useMutation({ mutationFn: toggleOpen, onSettled: invalidate });
@@ -116,7 +118,7 @@ export default function TodayPage() {
             ))}
           </div>
           <Link href="/dashboard/inventory" className="mt-3 inline-block text-sm font-semibold text-amber-800 underline">
-            Restock in Products →
+            Restock in {catalogue} →
           </Link>
         </div>
       )}

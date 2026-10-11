@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import InventoryPage from './page';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
@@ -8,6 +8,7 @@ describe('inventory count and phone column order', () => {
     mockApi(({ url }) => {
       if (url.pathname === '/api/v1/vendor/items') return { body: { data: [{ id: 'item-1', name: 'Rice', basePrice: '1200.00', stockQuantity: 7, sku: 'RICE-1', isAvailable: true }] } };
       if (url.pathname === '/api/v1/vendor/categories') return { body: { data: [] } };
+      if (url.pathname === '/api/v1/vendor/stores') return { body: { data: { stores: [], selectedId: null, myRole: 'OWNER' } } };
       throw new Error(`Unexpected request: ${url}`);
     });
     renderWithQuery(<InventoryPage />);
@@ -41,25 +42,24 @@ describe('inventory count and phone column order', () => {
     expect(within(screen.getByRole('article', { name: 'Sugar' })).queryByText('Low stock')).toBeNull();
   });
 
-  // Owner ruling (11 Oct): the app's words. The page reads "Your menu" with the
-  // app's live and sold-out counts, whatever kind of store it is.
-  it('is headed "Your menu" with how many items are live and sold out', async () => {
-    const paths: string[] = [];
-    mockApi(({ url }) => {
-      paths.push(url.pathname);
+  // Owner ruling (11 Oct): named exactly like the app — the title is the store
+  // type's name (Menu / Inventory / Products / Services), then the app's
+  // "Your menu" line with how many items are live and sold out.
+  it.each([['RESTAURANT', 'Menu'], ['SUPERMARKET', 'Inventory'], ['STORE', 'Products'], ['SERVICE', 'Services']])('a %s store sees the page titled %s', async (vendorType, name) => {
+    const fetchMock = mockApi(({ url }) => {
       if (url.pathname === '/api/v1/vendor/items') return { body: { data: [
         { id: 'item-1', name: 'Rice', basePrice: '1200.00', stockQuantity: 7, isAvailable: true },
         { id: 'item-2', name: 'Flour', basePrice: '900.00', stockQuantity: 0, isAvailable: false },
         { id: 'item-3', name: 'Sugar', basePrice: '700.00', stockQuantity: null, isAvailable: true },
       ] } };
       if (url.pathname === '/api/v1/vendor/categories') return { body: { data: [] } };
+      if (url.pathname === '/api/v1/vendor/stores') return { body: { data: { stores: [{ id: 'store-1', name: 'Sample store', vendorType, isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true }], selectedId: 'store-1', myRole: 'OWNER' } } };
       throw new Error(`Unexpected request: ${url}`);
     });
     renderWithQuery(<InventoryPage />);
-    expect((await screen.findByRole('heading', { level: 1 })).textContent).toBe('Your menu');
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/v1/vendor/stores'))).toBe(true));
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(name));
+    expect(screen.getByText('Your menu')).toBeTruthy();
     expect(await screen.findByText('2 active · 1 sold out')).toBeTruthy();
-    expect(screen.queryByRole('heading', { level: 1, name: /Menu$|Inventory/ })).toBeNull();
-    // The words never depend on the store's type, so no store lookup is made.
-    expect(paths).not.toContain('/api/v1/vendor/stores');
   });
 });

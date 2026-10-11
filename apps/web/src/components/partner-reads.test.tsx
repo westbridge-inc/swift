@@ -54,13 +54,14 @@ describe('partner read views and controls', () => {
     // Nothing can be created while advertising is off, so no pointer to do so.
     expect(screen.queryByText(/Create and manage campaigns/)).toBeNull();
   });
-  it('the low-stock link on Today says "Restock in Products"', async () => {
+  it.each([['RESTAURANT', 'Restock in Menu →'], ['SUPERMARKET', 'Restock in Inventory →'], ['STORE', 'Restock in Products →'], ['SERVICE', 'Restock in Services →']])('the low-stock link on Today names a %s store catalogue like the app: %s', async (vendorType, words) => {
     mockApi(({ url }) => {
+      if (url.pathname.endsWith('/vendor/stores')) return { body: { success: true, data: { stores: [{ id: 'store-1', name: 'Test shop', vendorType, isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true }], selectedId: 'store-1', myRole: 'OWNER' } } };
       if (url.pathname.endsWith('/items/low-stock')) return { body: { success: true, data: [{ id: 'rice', name: 'Rice', basePrice: '2500', isAvailable: true, stockQuantity: 1, lowStockThreshold: 5 }] } };
       return { body: { success: true, data: { vendor: { isCurrentlyOpen: true, acceptingOrders: true, averageRating: 5, totalRatings: 1 }, today: { orders: 0, revenue: 0 }, week: { orders: 0, revenue: 0 }, month: { orders: 0, revenue: 0 } } } };
     });
     renderWithQuery(<TodayPage />);
-    const link = await screen.findByRole('link', { name: 'Restock in Products →' });
+    const link = await screen.findByRole('link', { name: words });
     expect(link.getAttribute('href')).toBe('/dashboard/inventory');
   });
   it('reads notification pages without following untrusted payload links', async () => {

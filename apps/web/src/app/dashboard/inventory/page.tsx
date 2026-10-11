@@ -9,6 +9,7 @@ import { Pictogram } from '@/components/glyphs';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
+import { useCatalogueName } from '@/lib/catalogue-name';
 
 type AdjustReason = 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN';
 
@@ -97,6 +98,7 @@ export default function InventoryPage() {
   const [lowOnly, setLowOnly] = useState(false);
   const [adjusting, setAdjusting] = useState<string | null>(null);
   const [editingPrice, setEditingPrice] = useState<string | null>(null);
+  const catalogue = useCatalogueName();
 
   const items = useQuery({ queryKey: storeKey(storeId, 'items', 'all'), queryFn: () => getItems() });
   const categories = useQuery({ queryKey: storeKey(storeId, 'categories'), queryFn: getCategories });
@@ -123,9 +125,9 @@ export default function InventoryPage() {
       <MutationNotice errors={[availMut.error]} />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          {/* The app's words (VendorMenuScreen): "Your menu", then live and sold-out counts. */}
-          <h1 className="sw-title">Your menu</h1>
-          {items.data && <p className="sw-caption mt-1">{activeCount} active · {soldOutCount} sold out</p>}
+          {/* As in the app (VendorMenuScreen): the store type's name, then "Your menu" with live and sold-out counts. */}
+          <h1 className="sw-title">{catalogue}</h1>
+          <p className="sw-caption mt-1"><span className="font-semibold uppercase tracking-wide">Your menu</span>{items.data && <> · <span>{activeCount} active · {soldOutCount} sold out</span></>}</p>
         </div>
         <Link
           href="/dashboard/inventory/import"
