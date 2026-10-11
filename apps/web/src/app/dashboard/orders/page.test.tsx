@@ -130,6 +130,25 @@ describe('vendor order board — money is never invented', () => {
     expect(row.textContent ?? '').not.toMatch(/NaN/);
   });
 
+  it('keeps a long status on one line in the order window; the title side gives way instead', async () => {
+    // At 390 px "READY FOR PICKUP" wrapped onto three lines and became a round blob.
+    mockApi(boardHandler([wireVendorOrder({ status: 'READY_FOR_PICKUP' })], wireVendorOrderDetail({ status: 'READY_FOR_PICKUP' })));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    // The board card's chip stays on one line too.
+    expect(within(row).getByText('READY FOR PICKUP').className.split(' ')).toEqual(expect.arrayContaining(['whitespace-nowrap']));
+    await user.click(row);
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    const chip = await within(dialog).findByText('READY FOR PICKUP');
+    expect(chip.className.split(' ')).toEqual(expect.arrayContaining(['whitespace-nowrap']));
+    // The chip and the close button never shrink; the order number and customer line do.
+    const actions = chip.parentElement!;
+    expect(actions.className.split(' ')).toEqual(expect.arrayContaining(['shrink-0']));
+    const title = actions.previousElementSibling as HTMLElement;
+    expect(title.textContent).toContain('#SW-1001');
+    expect(title.className.split(' ')).toEqual(expect.arrayContaining(['min-w-0', 'flex-1']));
+  });
+
   it('never leaks the pickup code, and still tells the store a code is collected', async () => {
     const pickupBoard = wireVendorOrder({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });
     const pickupDetail = wireVendorOrderDetail({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });

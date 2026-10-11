@@ -35,7 +35,7 @@ function statusChip(s: string) {
   const dead = s === 'CANCELLED';
   return (
     <span
-      className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+      className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold ${
         done ? 'bg-green-100 text-green-700' : dead ? 'bg-black/5 text-[var(--swift-muted)]' : 'bg-[var(--swift-red)]/10 text-[var(--swift-red)]'
       }`}
     >
@@ -340,14 +340,14 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   return (
     <div className="sw-card p-6">
       <div className="flex items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0 flex-1">
           <p className="sw-heading">#{o.orderNumber}</p>
           <p className="mt-0.5 text-sm text-[var(--swift-muted)]">
             {customer} · {timeAgo(o.placedAt)} · {o.fulfillment ?? o.orderType}
           </p>
           {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {statusChip(s)}
           {closeButton}
         </div>

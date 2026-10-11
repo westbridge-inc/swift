@@ -116,7 +116,7 @@ export default function TodayPage() {
             ))}
           </div>
           <Link href="/dashboard/inventory" className="mt-3 inline-block text-sm font-semibold text-amber-800 underline">
-            Restock in Menu →
+            Restock in Products →
           </Link>
         </div>
       )}

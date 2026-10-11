@@ -107,6 +107,9 @@ export default function InventoryPage() {
     onSettled: refresh,
   });
 
+  const soldOutCount = (items.data ?? []).filter((i) => i.isAvailable === false).length;
+  const activeCount = Math.max(0, (items.data ?? []).length - soldOutCount);
+
   const list = useMemo(() => {
     let rows = items.data ?? [];
     if (search) rows = rows.filter((i) => i.name.toLowerCase().includes(search.toLowerCase()) || (i.sku ?? '').toLowerCase().includes(search.toLowerCase()));
@@ -119,7 +122,11 @@ export default function InventoryPage() {
     <div className="space-y-5">
       <MutationNotice errors={[availMut.error]} />
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="sw-title">Menu</h1>
+        <div>
+          {/* The app's words (VendorMenuScreen): "Your menu", then live and sold-out counts. */}
+          <h1 className="sw-title">Your menu</h1>
+          {items.data && <p className="sw-caption mt-1">{activeCount} active · {soldOutCount} sold out</p>}
+        </div>
         <Link
           href="/dashboard/inventory/import"
           className="flex items-center gap-2 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--swift-red-600)]"

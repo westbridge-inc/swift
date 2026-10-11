@@ -6,8 +6,13 @@ import { NAV as portalNav } from '@/app/portal/portal-shell';
 describe('console navigation', () => {
   it('keeps Today first and places Weekly fee between Bulk import and Settings', () => {
     expect(dashboardNav.map(({ label }) => label)).toEqual([
-      'Today', 'Orders', 'Menu', 'Bulk import', 'Weekly fee', 'Settings',
+      'Today', 'Orders', 'Products', 'Bulk import', 'Weekly fee', 'Settings',
     ]);
+  });
+
+  // Owner ruling (11 Oct): the app's words — the items tab is "Products" for every store.
+  it('shows Products in the phone dock beside Orders, Weekly fee and Settings', () => {
+    expect(dashboardNav.filter((item) => item.dock !== false).map(({ label }) => label)).toEqual(['Orders', 'Products', 'Weekly fee', 'Settings']);
   });
 
   it('places Weekly fee after the portal work items and before Account', () => {

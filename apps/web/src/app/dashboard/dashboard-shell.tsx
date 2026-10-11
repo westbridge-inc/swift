@@ -12,10 +12,11 @@ import { ApiRequestError, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
 
+// The items tab carries the app's name, "Products", for every store (owner ruling, 11 Oct).
 export const NAV = [
   { href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true, dock: false },
   { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
-  { href: '/dashboard/inventory', label: 'Menu', icon: Boxes, exact: true },
+  { href: '/dashboard/inventory', label: 'Products', icon: Boxes, exact: true },
   { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false, dock: false },
   { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
   { href: '/dashboard/settings', label: 'Settings', icon: Settings, exact: false },

@@ -5,6 +5,7 @@ import { AdvertiserCampaigns, CampaignRead } from './advertiser-campaigns';
 import { Notifications } from './notifications';
 import { BusinessStatus } from './business-status';
 import InventoryPage from '@/app/dashboard/inventory/page';
+import TodayPage from '@/app/dashboard/page';
 
 const campaign = { id: 'c1', name: 'Lunch special', status: 'DRAFT', statusReason: null, placement: { name: 'Home card', key: 'HOME', tier: 'STANDARD', mediaKind: 'IMAGE' }, cities: ['Georgetown'], startWeek: '2026-10-05', endWeek: '2026-10-12', totalAmount: 2500, currency: 'GYD', invoices: [{ id: 'invoice1', number: 'ADS-1', status: 'PAID', amount: 2500 }], creatives: [], bookings: [] };
 describe('partner read views and controls', () => {
@@ -52,6 +53,15 @@ describe('partner read views and controls', () => {
     expect(screen.queryByText('Your business can advertise here')).toBeNull();
     // Nothing can be created while advertising is off, so no pointer to do so.
     expect(screen.queryByText(/Create and manage campaigns/)).toBeNull();
+  });
+  it('the low-stock link on Today says "Restock in Products"', async () => {
+    mockApi(({ url }) => {
+      if (url.pathname.endsWith('/items/low-stock')) return { body: { success: true, data: [{ id: 'rice', name: 'Rice', basePrice: '2500', isAvailable: true, stockQuantity: 1, lowStockThreshold: 5 }] } };
+      return { body: { success: true, data: { vendor: { isCurrentlyOpen: true, acceptingOrders: true, averageRating: 5, totalRatings: 1 }, today: { orders: 0, revenue: 0 }, week: { orders: 0, revenue: 0 }, month: { orders: 0, revenue: 0 } } } };
+    });
+    renderWithQuery(<TodayPage />);
+    const link = await screen.findByRole('link', { name: 'Restock in Products →' });
+    expect(link.getAttribute('href')).toBe('/dashboard/inventory');
   });
   it('reads notification pages without following untrusted payload links', async () => {
     const pages: string[] = [];
