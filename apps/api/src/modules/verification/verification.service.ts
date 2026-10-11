@@ -1001,11 +1001,14 @@ export class VerificationService {
       vehicleType = vehicle.vehicleKind as VehicleType;
       plate = vehicle.registrationMark;
       taxi = isPassengerVehicle(vehicleType);
+      // [L06 · #1553 review] A mover who changed to a passenger vehicle but kept the plate reuses the
+      // subject recorded under the old class (a motorbike's private plate, say). The vehicle IN USE on
+      // that plate counts too, so the H rule and the hire insurance still apply to it. Never a refusal
+      // by class alone: a car corrected to a wagon car on the same H plate stays approvable.
       const authority = await captureSubmissionAuthority(tx, doc.userId);
-      if (authority.profile && normalizeRegistrationMark(authority.profile.licensePlate ?? '') === normalizeRegistrationMark(plate ?? '')
-        && authority.profile.vehicleType !== vehicleType) {
-        throw new AppError(409, 'VEHICLE_CLASS_CHANGED', 'The registered vehicle class differs from the vehicle now in use. Ask for a review before approving it.');
-      }
+      const inUse = authority.profile && normalizeRegistrationMark(authority.profile.licensePlate ?? '') === normalizeRegistrationMark(plate ?? '')
+        && authority.profile.vehicleType in VEHICLE_CLASSES ? authority.profile.vehicleType as VehicleType : null;
+      if (!taxi && inUse && isPassengerVehicle(inUse)) { vehicleType = inUse; taxi = true; }
     } else {
       // A legacy unbound row cannot acquire today's chosen role as historical authority.
       const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });

@@ -110,32 +110,54 @@ describe('taxi approval uses the stored registration subject', () => {
 });
 
 describe('every taxi approval path checks stored vehicle authority', () => {
- it('a motorbike-to-car change with the same private plate cannot approve the old motorbike subject', async () => {
-  const doc = await pending('PAB444444', 'PAB444444');
-  await system(async () => {
-   await app.prisma.driver.delete({ where: { userId: doc.userId } });
-   await app.prisma.rider.create({ data: { userId: doc.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', licensePlate: 'PAB444444' } });
-   await app.prisma.user.update({ where: { id: doc.userId }, data: { lastMoverRole: 'RIDER' } });
-   await app.prisma.vehicleProfile.update({ where: { subjectId: doc.subjectId! }, data: { vehicleKind: 'MOTORCYCLE' } });
-   await new PartnerService(app.prisma).changeVehicleWithAuthority(doc.userId, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PAB444444' } }, async tx => { await tx.user.update({ where: { id: doc.userId }, data: { activeRole: 'DRIVER', lastMoverRole: 'DRIVER', roles: ['MOVER','RIDER','DRIVER'] } }); return null; });
+  it('a motorbike-to-car change with the same private plate cannot approve the old motorbike subject', async () => {
+    const doc = await pending('PAB444444', 'PAB444444');
+    await system(async () => {
+      await app.prisma.driver.delete({ where: { userId: doc.userId } });
+      await app.prisma.rider.create({ data: { userId: doc.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', licensePlate: 'PAB444444' } });
+      await app.prisma.user.update({ where: { id: doc.userId }, data: { lastMoverRole: 'RIDER' } });
+      await app.prisma.vehicleProfile.update({ where: { subjectId: doc.subjectId! }, data: { vehicleKind: 'MOTORCYCLE' } });
+      await new PartnerService(app.prisma).changeVehicleWithAuthority(doc.userId, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PAB444444' } }, async (tx) => {
+        await tx.user.update({ where: { id: doc.userId }, data: { activeRole: 'DRIVER', lastMoverRole: 'DRIVER', roles: ['MOVER', 'RIDER', 'DRIVER'] } });
+        return null;
+      });
+    });
+    // The car now in use on that plate is a taxi: its private plate is refused for the reason that matters.
+    await refused(doc.id, 'WRONG_PLATE_CLASS');
+    // A fresh submission is taken (no dead end), but automatic processing never approves it.
+    const fileKey = await system(() => ownedVerificationFixture(app.prisma, doc.userId, 'auto-approve'));
+    const again = await system(() => service.submitDocument(doc.userId, 'MOVER', 'vehicle_registration', fileKey, 'test-v1', 'DRIVER'));
+    expect(again.status).toBe('PENDING');
+    await refused(again.id, 'WRONG_PLATE_CLASS');
   });
-  await refused(doc.id, 'VEHICLE_CLASS_CHANGED');
-  const fileKey = await system(() => ownedVerificationFixture(app.prisma, doc.userId));
-  await expect(system(() => service.submitDocument(doc.userId, 'MOVER', 'vehicle_registration', fileKey, undefined, 'DRIVER'))).rejects.toMatchObject({ code: 'VEHICLE_CLASS_CHANGED' });
- });
- it.each(['PAB555555',''])('automatic processing never approves taxi registration with stored mark %j', async plate => {
-  const applicant = await system(() => user());
-  await system(() => app.prisma.driver.create({ data: { userId: applicant.id, vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2018, vehicleColor: 'Silver', licensePlate: plate, driverLicenseUrl: '/uploads/synthetic-licence', vehicleInsuranceUrl: '/uploads/synthetic-insurance' } }));
-  const fileKey = await system(() => ownedVerificationFixture(app.prisma, applicant.id, 'auto-approve'));
-  const doc = await system(() => service.submitDocument(applicant.id, 'MOVER', 'vehicle_registration', fileKey));
-  expect(doc.status).toBe('PENDING'); expect(doc.state).toBe('REVIEW_QUEUED');
- });
- it('bound delivery motorbike evidence keeps the non-taxi exemption', async () => {
-  const doc = await pending('PAB666666', 'PAB666666', true);
-  await system(async () => {
-   await app.prisma.rider.update({ where: { userId: doc.userId }, data: { vehicleType: 'MOTORCYCLE' } });
-   await app.prisma.vehicleProfile.update({ where: { subjectId: doc.subjectId! }, data: { vehicleKind: 'MOTORCYCLE' } });
+  it('a car corrected to a wagon car on the same H plate can still submit and be approved', async () => {
+    const plate = `HC${nanoid(6).replace(/[^a-z0-9]/gi, '0').toUpperCase()}`;
+    const doc = await pending(plate, plate);
+    await system(() => new PartnerService(app.prisma).changeVehicleWithAuthority(doc.userId, { vehicleType: 'WAGON_CAR', vehicle: { make: 'Toyota', model: 'Fielder', year: 2018, color: 'Silver', licensePlate: plate } }, async () => null));
+    const fileKey = await system(() => ownedVerificationFixture(app.prisma, doc.userId));
+    const again = await system(() => service.submitDocument(doc.userId, 'MOVER', 'vehicle_registration', fileKey, 'test-v1'));
+    expect(again.subjectId).toBe(doc.subjectId);
+    if (again.status === 'PENDING') {
+      // (The printed date a reviewer keys; the class question is what this case is about.)
+      expect(await system(() => service.approveDocument(again.id, reviewerId, new Date(Date.now() + 300 * 86_400_000)))).toMatchObject({ status: 'APPROVED', state: 'COMMITTED' });
+    } else {
+      expect(again.status).toBe('APPROVED');
+    }
   });
-  expect(await system(() => service.approveDocument(doc.id, reviewerId))).toMatchObject({ status: 'APPROVED' });
- });
+  it.each(['PAB555555', ''])('automatic processing never approves taxi registration with stored mark %j', async (plate) => {
+    const applicant = await system(() => user());
+    await system(() => app.prisma.driver.create({ data: { userId: applicant.id, vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2018, vehicleColor: 'Silver', licensePlate: plate, driverLicenseUrl: '/uploads/synthetic-licence', vehicleInsuranceUrl: '/uploads/synthetic-insurance' } }));
+    const fileKey = await system(() => ownedVerificationFixture(app.prisma, applicant.id, 'auto-approve'));
+    const doc = await system(() => service.submitDocument(applicant.id, 'MOVER', 'vehicle_registration', fileKey, 'test-v1'));
+    expect(doc.status).toBe('PENDING');
+    expect(doc.state).toBe('REVIEW_QUEUED');
+  });
+  it('bound delivery motorbike evidence keeps the non-taxi exemption', async () => {
+    const doc = await pending('PAB666666', 'PAB666666', true);
+    await system(async () => {
+      await app.prisma.rider.update({ where: { userId: doc.userId }, data: { vehicleType: 'MOTORCYCLE' } });
+      await app.prisma.vehicleProfile.update({ where: { subjectId: doc.subjectId! }, data: { vehicleKind: 'MOTORCYCLE' } });
+    });
+    expect(await system(() => service.approveDocument(doc.id, reviewerId))).toMatchObject({ status: 'APPROVED' });
+  });
 });

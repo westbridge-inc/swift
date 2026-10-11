@@ -15,7 +15,6 @@
  */
 import type { DocSubjectKind, Prisma, PrismaClient, SubjectRelation } from '@prisma/client';
 import { BUCKET_OF, registryCode } from './doc-registry';
-import { AppError } from '../../utils/errors';
 import type { VehicleSubmissionProfile } from './submission-authority';
 
 type Db = Prisma.TransactionClient | PrismaClient;
@@ -130,10 +129,9 @@ export async function resolveSubject(
   const registrationMark = normalizeRegistrationMark(rawMark);
   const existing = await db.vehicleProfile.findUnique({
     where: { registrationMark_countryCode: { registrationMark, countryCode: input.countryCode } },
-    select: { subjectId: true, vehicleKind: true, subject: { select: { createdById: true } } },
+    select: { subjectId: true, subject: { select: { createdById: true } } },
   });
   if (existing) {
-    if (existing.vehicleKind !== profile.vehicleType) throw new AppError(409, 'VEHICLE_CLASS_CHANGED', 'The saved registration has a different vehicle class. Ask for a review before submitting it.');
     const subjectId = await rootSubjectId(db, existing.subjectId);
     // Submission and live-operation decisions serialize on this exact vehicle.
     // The submission caller holds its own User first; never lock other users.
