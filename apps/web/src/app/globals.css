@@ -184,8 +184,8 @@ body {
 
 /* Card geometry while data and images arrive: each placeholder now shares its
    card's own layout classes (components/customer-skeletons.tsx, order-ui.tsx),
-   so the markers .swift-menu-heading, .swift-menu-item and .swift-order-row
-   carry no size of their own [WEB-REDESIGN]. */
+   so the marker .swift-order-row carries no size of its own [WEB-REDESIGN].
+   The store page's placeholder is drawn with the page's own classes [W6]. */
 .swift-bone { animation: swift-bone 1.6s ease-in-out infinite alternate; }
 @keyframes swift-bone { to { opacity: 0.5; } }
 
