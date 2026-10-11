@@ -123,6 +123,12 @@ export interface AdminRouteAuthority {
   readonly cls: AdminActionClass;
   readonly capability: string;
   readonly entity?: AdminRouteEntity;
+  /**
+   * [VERIFY-DOCS V3] An EXPLICIT-ONLY grant this route demands in addition to
+   * its capability (see EXPLICIT_ONLY_CAPABILITIES). Both must hold; shadow
+   * mode relaxes the capability, never this.
+   */
+  readonly requires?: string;
 }
 
 /** `"<METHOD> <route template>"`, exactly as Fastify reports `routeOptions.url`. */
@@ -130,6 +136,30 @@ export type AdminRouteKey = string;
 
 const c = (cls: AdminActionClass, capability: string, entity?: AdminRouteEntity): AdminRouteAuthority =>
   (entity ? { cls, capability, entity } : { cls, capability });
+
+/**
+ * [VERIFY-DOCS V3] THE DOCUMENT REVIEWER GRANT.
+ *
+ * Owner rulings, 6 Oct 2026: only a verification reviewer may open documents;
+ * opening, approving and rejecting all need an explicit "document reviewer"
+ * grant, never implied by `*` or a role default; today's roles stay as they
+ * are (no REVIEWER role at launch). So the grant is one permission entry on
+ * the admin account, held only by naming it exactly. Every admin row the code
+ * has ever created says `['*']`, which is precisely why `*` cannot be allowed
+ * to mean it: the day this ships, nobody opens a document until a SUPER_ADMIN
+ * grants it, with a reason, on the record.
+ */
+export const DOCUMENT_REVIEWER_CAPABILITY = 'documents.review';
+
+/** Capabilities that `*`, a prefix wildcard and a role default never confer. */
+export const EXPLICIT_ONLY_CAPABILITIES: readonly string[] = [DOCUMENT_REVIEWER_CAPABILITY];
+
+export function isExplicitOnly(capability: string): boolean {
+  return EXPLICIT_ONLY_CAPABILITIES.includes(capability);
+}
+
+/** A route that opens or decides a document: its capability AND the reviewer grant. */
+const reviewed = (authority: AdminRouteAuthority): AdminRouteAuthority => ({ ...authority, requires: DOCUMENT_REVIEWER_CAPABILITY });
 
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
@@ -183,6 +213,8 @@ const E = {
   supportTicket: { model: 'supportTicket', fields: ['status', 'resolution', 'resolvedAt', 'resolvedById'], tenantVia: ['user'] },
   // [AF-MOB-006] A custody recovery case: who owns it, where it stands, who holds the goods.
   custodyCase: { model: 'custodyRecoveryCase', fields: ['state', 'ownerUserId', 'holderRiderId', 'relayRiderId', 'resolvedAt', 'escalationCount'] },
+  // [VERIFY-DOCS V3] An admin's grant. Admin has no tenant column: walled through its user.
+  adminGrant: { model: 'admin', routeParam: 'userId', uniqueField: 'userId', fields: ['permissions'], tenantVia: ['user'] },
 } as const satisfies Record<string, AdminRouteEntity>;
 
 /**
@@ -399,10 +431,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /verification/queue': c('C0', 'verification.read'),
   // [DOC-1 §8.4 · P8-4] SUPPORT sees status counts, never a document, a name or a phone (DOC-INV-19).
   'GET /verification/queue/counts': c('C0', 'verification.counts'),
-  'PUT /verification/:id/approve': c('C3', 'verification.decide', E.verification),
-  'PUT /verification/:id/reject': c('C3', 'verification.decide', E.verification),
-  'PUT /verification/:id/revoke': c('C3', 'verification.decide', E.verification),
-  'GET /verification/:id/document-url': c('C1', 'verification.document.read'),
+  // [VERIFY-DOCS V3] The four document doors also demand the explicit reviewer grant.
+  'PUT /verification/:id/approve': reviewed(c('C3', 'verification.decide', E.verification)),
+  'PUT /verification/:id/reject': reviewed(c('C3', 'verification.decide', E.verification)),
+  'PUT /verification/:id/revoke': reviewed(c('C3', 'verification.decide', E.verification)),
+  'GET /verification/:id/document-url': reviewed(c('C1', 'verification.document.read')),
   // [DOC-1 §20.2 · P20-2] the custody narrative is metadata about a document, never its content — still a logged read
   'GET /verification/:id/custody': c('C1', 'verification.custody.read'),
   // [DOC-1 §9.4 · P9-4] Legal holds on a person's documents: placing or releasing
@@ -440,6 +473,14 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // passes through its own C4/C5 gate again. C2 — no new reason, no new
   // approval — so "apply" can never need a second approval of its own.
   'POST /approvals/:id/apply': c('C2', 'approvals.apply', E.approval),
+
+  // ── Staff ───────────────────────────────────────────────────────────────
+  // [VERIFY-DOCS V3] Granting or revoking the document reviewer grant decides
+  // whether a person may see other people's identity documents: C3, a reason
+  // is owed, and the Admin row's permissions are recorded before and after.
+  // SUPER_ADMIN only (founderGuard on the route). The list names staff only.
+  'GET /staff/document-reviewers': c('C1', 'staff.read'),
+  'PUT /staff/:userId/document-reviewer': c('C3', 'staff.reviewer.grant', E.adminGrant),
 
   // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),
@@ -520,8 +561,10 @@ export const REVIEW_CONSOLE_PRESETS: Readonly<Record<'DOC_REVIEWER' | 'DOC_SENIO
   SUPPORT: SUPPORT_OPERATOR_CAPABILITIES,
 };
 
-/** Does a held pattern cover a needed capability? `*`, `finance.*`, or exact. */
+/** Does a held pattern cover a needed capability? `*`, `finance.*`, or exact.
+ *  [VERIFY-DOCS V3] An explicit-only capability is covered by its exact name alone. */
 export function capabilityMatches(held: string, needed: string): boolean {
+  if (isExplicitOnly(needed)) return held === needed;
   if (held === '*') return true;
   if (held === needed) return true;
   if (held.endsWith('.*')) return needed.startsWith(held.slice(0, -1));
@@ -532,11 +575,17 @@ export function holdsCapability(held: readonly string[], needed: string): boolea
   return held.some((pattern) => capabilityMatches(pattern, needed));
 }
 
-/** What this actor may do: their explicit grant, else their role's container. */
+/** What this actor may do: their explicit grant, else their role's container.
+ *
+ *  [VERIFY-DOCS V3] An explicit-only entry never NARROWS an actor: it is not an
+ *  "ordinary" grant, so a list holding only explicit-only entries still falls
+ *  back to the role's container, with those entries kept beside it. Granting
+ *  the document reviewer permission to an admin on the role default must not
+ *  silently take everything else away. */
 export function capabilitiesOf(actor: { role?: string | null; permissions?: readonly string[] | null }): readonly string[] {
   const granted = actor.permissions?.filter((p) => typeof p === 'string' && p.length > 0) ?? [];
-  if (granted.length > 0) return granted;
-  return ROLE_DEFAULT_CAPABILITIES[actor.role ?? ''] ?? [];
+  if (granted.some((p) => !isExplicitOnly(p))) return granted;
+  return [...(ROLE_DEFAULT_CAPABILITIES[actor.role ?? ''] ?? []), ...granted];
 }
 
 /**
@@ -566,7 +615,9 @@ export interface CapabilityDecision {
   readonly allowed: boolean;
   readonly capability: string | null;
   readonly cls: AdminActionClass | null;
-  readonly reason: 'granted' | 'missing-capability' | 'unregistered-route';
+  /** `missing-explicit-grant`: the route's `requires` grant is absent. Shadow
+   *  mode never relaxes it (VERIFY-DOCS V3). */
+  readonly reason: 'granted' | 'missing-capability' | 'missing-explicit-grant' | 'unregistered-route';
 }
 
 /** The whole engine, as one pure function. */
@@ -578,6 +629,12 @@ export function decideCapability(
   const authority = authorityFor(method, routeUrl);
   if (!authority) return { allowed: false, capability: null, cls: null, reason: 'unregistered-route' };
   const held = capabilitiesOf(actor);
+  // [VERIFY-DOCS V3] The explicit grant is decided first: it is the refusal
+  // that holds in every mode, so it must never be masked by a capability miss
+  // that shadow mode would let through.
+  if (authority.requires && !holdsCapability(held, authority.requires)) {
+    return { allowed: false, capability: authority.requires, cls: authority.cls, reason: 'missing-explicit-grant' };
+  }
   const allowed = holdsCapability(held, authority.capability);
   return {
     allowed,
