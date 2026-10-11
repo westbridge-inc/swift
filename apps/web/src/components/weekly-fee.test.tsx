@@ -8,21 +8,24 @@ describe('rendered weekly fee', () => {
   it('opens new and handed-back OPEN checkouts in the same tab with a fresh key per tap', async () => {
     const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
     const keys: string[] = [];
+    const posts: string[] = [];
     mockApi(({ method, url, init }) => {
       if (method === 'POST') {
-        keys.push(new Headers(init?.headers).get('Idempotency-Key')!);
+        keys.push(new Headers(init?.headers).get('Idempotency-Key')!); posts.push(url.pathname);
         return { status: keys.length === 1 ? 201 : 200, body: { success: true, data: { ref: 'open-ref', status: 'OPEN', checkoutUrl: 'https://checkout.test/opaque', amountGyd: 1200, currencyCode: 'GYD' } } };
       }
       if (url.pathname.endsWith('/open-ref')) return { body: { success: true, data: { ref: 'open-ref', status: 'OPEN', amountGyd: 1200, subscriptionStatus: 'ACTIVE' } } };
-      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] } } };
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }], latestMmgCheckout: keys.length ? { ref: 'open-ref', status: 'OPEN', expiresAt: '2099-01-01T12:00:00Z' } : null, reopenableMmgCheckout: keys.length ? { ref: 'open-ref', expiresAt: '2099-01-01T12:00:00Z' } : null } } };
     });
     const view = renderWithQuery(<WeeklyFee family="vendor" />);
     await view.user.click(await screen.findByRole('button', { name: 'Pay GY$1,200 with MMG' }));
     await screen.findByText('Waiting for MMG…');
-    await view.user.click(await screen.findByRole('button', { name: 'Pay GY$1,200 with MMG' }));
+    await act(async () => { await view.queryClient.invalidateQueries({ queryKey: ['weekly-fee'] }); });
+    await view.user.click(await screen.findByRole('button', { name: "Back to MMG's page" }));
     await waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
     expect(assign).toHaveBeenCalledWith('https://checkout.test/opaque');
     expect(keys).toHaveLength(2); expect(keys[0]).not.toBe(keys[1]);
+    expect(posts).toEqual(['/api/v1/vendor/subscription/mmg-checkout', '/api/v1/vendor/subscription/mmg-checkout/open-ref/reopen']);
     expect(document.body.textContent).not.toContain('Paid:'); view.unmount();
   });
   it.each(['live', 'off', 'absent'])('MMG %s controls the actual button; deprecated fields cannot render', async (state) => {
@@ -149,4 +152,63 @@ describe('rendered weekly fee', () => {
     expect(calls).toHaveBeenCalledTimes(2); // one read + refresh; no retry
   });
 
+});
+
+
+describe('own checkout reopen affordance', () => {
+  it('reload with MMG off shows Back and Guyana deadline; same page and fresh keys on two taps', async () => {
+    const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
+    const expiresAt = '2099-10-08T23:30:00Z';
+    const c = { ref: 'own-open', status: 'OPEN', expiresAt, amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' };
+    const keys: string[] = [];
+    const posts: string[] = [];
+    mockApi(({ method, url, init }) => {
+      if (method === 'POST') { keys.push(new Headers(init?.headers).get('Idempotency-Key')!); posts.push(url.pathname); return { status: 200, body: { success: true, data: { ...c, checkoutUrl: 'https://checkout.test/same-page' } } }; }
+      return { body: { success: true, data: url.pathname.endsWith('/own-open') ? c : { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt } } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    const back = await screen.findByRole('button', { name: "Back to MMG's page" });
+    expect(document.body.textContent).toContain('Swift keeps this checkout open until 19:30 (Guyana time).');
+    expect(document.body.textContent).toContain("Already paid on MMG's page? Don't pay again — we'll confirm it with MMG.");
+    expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull();
+    await view.user.click(back); await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+    await view.user.click(await screen.findByRole('button', { name: "Back to MMG's page" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
+    expect(keys).toHaveLength(2); expect(keys[0]).not.toBe(keys[1]);
+    expect(posts).toEqual(['/api/v1/vendor/subscription/mmg-checkout/own-open/reopen', '/api/v1/vendor/subscription/mmg-checkout/own-open/reopen']);
+    expect(assign).toHaveBeenCalledWith('https://checkout.test/same-page'); view.unmount();
+  });
+  it.each(['OPEN', 'EXPIRED', 'CONFIRMING', 'HELD'])('%s without a reopen grant has no Pay or Back, even with a stale live action', async (status) => {
+    const c = { ref: 'blocked-ref', status, expiresAt: '2099-01-01T12:00:00Z', amountGyd: 1200, subscriptionStatus: 'ACTIVE' };
+    mockApi(({ url }) => ({ body: { success: true, data: url.pathname.endsWith('/blocked-ref') ? c : { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: null, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] } } }));
+    const view = renderWithQuery(<WeeklyFee family="rider" />); await screen.findByRole('status');
+    expect(screen.queryByRole('button', { name: /Pay GY|Back to MMG|Retry/ })).toBeNull();
+    if (status === 'EXPIRED') expect(document.body.textContent).toContain('Swift support will check this payment.'); view.unmount();
+  });
+});
+
+
+describe('[review F1] a stale Back tap on the web', () => {
+  it.each([
+    ['the server refuses it (paid on another device)', { status: 409, body: { success: false, error: { code: 'CHECKOUT_NOT_REOPENABLE', message: 'no', details: { ref: 'own-open', status: 'CONFIRMED' } } } }],
+    ['the server answers with another checkout', { status: 200, body: { success: true, data: { ref: 'other-ref', status: 'OPEN', checkoutUrl: 'https://checkout.test/other-page', amountGyd: 1200, currencyCode: 'GYD' } } }],
+  ] as const)('opens no MMG page when %s, and refreshes the fee', async (_case, answer) => {
+    const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
+    const c = { ref: 'own-open', status: 'OPEN', expiresAt: '2099-10-08T23:30:00Z', amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' };
+    let feeReads = 0; const reads: string[] = [];
+    mockApi(({ method, url }) => {
+      if (method === 'POST') return answer;
+      if (url.pathname.includes('/mmg-checkout/')) { reads.push(url.pathname); return { body: { success: true, data: c } }; }
+      feeReads += 1;
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt: c.expiresAt } } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    const back = await screen.findByRole('button', { name: "Back to MMG's page" });
+    const before = feeReads;
+    await view.user.click(back);
+    await waitFor(() => expect(feeReads).toBeGreaterThan(before));
+    await screen.findByText("We couldn't reopen that MMG page. Its latest status is shown here.");
+    expect(assign).not.toHaveBeenCalled();
+    expect(reads.every((path) => path.endsWith('/own-open'))).toBe(true); view.unmount();
+  });
 });

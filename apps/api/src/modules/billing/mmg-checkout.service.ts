@@ -594,6 +594,55 @@ export class MmgCheckoutService {
     throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
   }
 
+  /**
+   * [MMG reopen · review F1] "Back to MMG's page": hand back the page of ONE
+   * named checkout, and only while it is this subscription's latest checkout,
+   * still OPEN and before Swift's deadline, and `granted()` (the read-only
+   * reopen rule, switches included) still allows it. Never prices, creates or
+   * reserves anything, so a stale tap can never start a second payment: every
+   * other case is 409 CHECKOUT_NOT_REOPENABLE naming the checkout's status, with
+   * no page. A checkout past its deadline is expired first, exactly as a new tap
+   * would. The key is bound to this checkout only (a record that its page went
+   * out again); the locked authority in `started` is repeated before the page.
+   */
+  async reopenCheckout(input: {
+    subscriptionId: string; userId: string; ref: string; clientKey: unknown; granted: () => Promise<boolean>; now?: Date;
+  }): Promise<StartedCheckout> {
+    const clientKey = typeof input.clientKey === 'string' && CLIENT_KEY.test(input.clientKey) ? input.clientKey : null;
+    if (!clientKey) {
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Reopening a checkout needs an Idempotency-Key header of 8-128 letters, digits, - or _.');
+    }
+    const now = input.now ?? new Date();
+    const refused = (status: string) => new AppError(409, 'CHECKOUT_NOT_REOPENABLE', 'That MMG page cannot be reopened. Refresh to see its status, and do not pay again until it is final.', { ref: input.ref, status });
+    let intent = await this.prisma.mmgCheckoutIntent.findFirst({ where: { id: input.ref, subscriptionId: input.subscriptionId } });
+    if (!intent) throw new AppError(404, 'CHECKOUT_NOT_FOUND', 'There is no such checkout.');
+    if (intent.status === 'OPEN' && intent.expiresAt <= now) {
+      await this.expireUnanswered(intent.id, now);
+      intent = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
+    }
+    if (intent.status !== 'OPEN' || intent.expiresAt <= now) throw refused(intent.status);
+    const latest = await this.prisma.mmgCheckoutIntent.findFirst({
+      where: { subscriptionId: input.subscriptionId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true },
+    });
+    if (latest?.id !== intent.id || !(await input.granted())) throw refused(intent.status);
+    try {
+      // [DS633] Filed under the checkout's own tenant, named.
+      await this.prisma.mmgCheckoutKey.create({ data: { tenantId: intent.tenantId, createdByUserId: input.userId, clientKey, intentId: intent.id } });
+    } catch (err) {
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+      // A retried tap keeps its key; a key bound to any other checkout is never answered with this page.
+      const bound = await this.prisma.mmgCheckoutKey.findUnique({
+        where: { createdByUserId_clientKey: { createdByUserId: input.userId, clientKey } }, select: { intentId: true },
+      });
+      if (bound?.intentId !== intent.id) {
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'That Idempotency-Key was used for a different checkout. A new tap needs a new key.');
+      }
+    }
+    const checkout = await this.started(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), input.userId);
+    if (checkout.ref !== intent.id || checkout.status !== 'OPEN' || checkout.checkoutUrl === null) throw refused(checkout.status);
+    return checkout;
+  }
+
   /** One checkout of this subscription, or 404 (the same answer for someone else's). */
   async getCheckout(input: { ref: string; subscriptionId: string }): Promise<CheckoutView> {
     const intent = await this.prisma.mmgCheckoutIntent.findFirst({ where: { id: input.ref, subscriptionId: input.subscriptionId } });

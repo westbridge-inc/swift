@@ -46,10 +46,23 @@ export async function readFeePaymentDecision(db: PrismaClient, subscriptionId: s
         || clock.tenantId !== authority.mover.tenantId || clock.authorityRevision !== authority.mover.revision))) return blocked('BILLING_REVIEW_REQUIRED');
     if (clock.pausedAt || await tx.paymentConfirmationHold.count({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } } })) return blocked('PAYMENT_CONFIRMING');
     const { sources } = await confirmationSources(tx, authority.mover?.sourceSubscriptionIds ?? [subscriptionId]);
-    for (const source of sources) {
-      const hold = await tx.paymentConfirmationHold.findFirst({ where: source.source });
-      if (!hold || hold.clockId !== clock.id || ACTIVE_CONFIRMATION_STATES.includes(hold.status)) return blocked('PAYMENT_CONFIRMING');
-    }
+    if ((await unresolvedConfirmationSources(tx, sources, clock.id, 1)).length) return blocked('PAYMENT_CONFIRMING');
     return allow;
   });
+}
+
+/** THE per-source filter over the confirmation census (`confirmationSources`
+ * lists resolved history too): a source is still unresolved on this clock
+ * unless its hold is on this clock AND no longer active. No hold, another
+ * clock's hold or an active hold all count. Read-only; `limit` stops early. */
+export async function unresolvedConfirmationSources<T extends { source: ConfirmationSource }>(
+  tx: Prisma.TransactionClient, sources: readonly T[], clockId: string, limit = Infinity,
+): Promise<T[]> {
+  const unresolved: T[] = [];
+  for (const source of sources) {
+    if (unresolved.length >= limit) break;
+    const hold = await tx.paymentConfirmationHold.findFirst({ where: source.source });
+    if (!hold || hold.clockId !== clockId || ACTIVE_CONFIRMATION_STATES.includes(hold.status)) unresolved.push(source);
+  }
+  return unresolved;
 }
