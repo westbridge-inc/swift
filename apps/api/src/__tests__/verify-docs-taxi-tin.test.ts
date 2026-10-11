@@ -37,7 +37,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
 import { moverRequiredFrom } from '../modules/country/country-config.service';
-import { AUTO_APPROVE_EXPIRY_DAYS, ALWAYS_REVIEW_LEGACY_CODES, BUCKET_OF, FIELD_CATALOGUE, VALIDATOR_CATALOGUE, registryChecklist, registryCode } from '../modules/verification/doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, ALWAYS_REVIEW_LEGACY_CODES, BUCKET_OF, FIELD_CATALOGUE, REGISTRY_EFFECTIVE_FROM, REGISTRY_TIER, VALIDATOR_CATALOGUE, registryChecklist, registryCode, seedDocRegistry } from '../modules/verification/doc-registry';
 import { VALIDATOR_IMPLEMENTATIONS } from '../modules/verification/validators';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
@@ -446,8 +446,12 @@ describe('[V5 · ruling 7] TIN and the VAT number', () => {
 
 describe('[V5 · registry] inactive optional documents never silence active requirements', () => {
   it('both the facade and activation rehearsal still report the blocking national ID', async () => {
-    const existingSet = await app.prisma.requirementSet.findFirst({ where: { countryCode: 'GY', actorRole: 'MOVER_NO_LICENCE' } });
-    const set = existingSet ?? await app.prisma.requirementSet.create({ data: { countryCode: 'GY', actorRole: 'MOVER_NO_LICENCE', tier: 'STANDARD', effectiveFrom: new Date('2026-09-01T00:00:00.000Z') } });
+    // Fixture: the registry's document types must exist before an item can name them. Seeding here keeps
+    // this case independent of which suite ran first (in CI an unseeded database failed the item's foreign key,
+    // and the set created below then outlived the case and blanked MOVER_NO_LICENCE for the next suite).
+    await system(() => seedDocRegistry(app.prisma));
+    const existingSet = await app.prisma.requirementSet.findFirst({ where: { countryCode: 'GY', actorRole: 'MOVER_NO_LICENCE', tier: REGISTRY_TIER, effectiveFrom: REGISTRY_EFFECTIVE_FROM } });
+    const set = existingSet ?? await app.prisma.requirementSet.create({ data: { countryCode: 'GY', actorRole: 'MOVER_NO_LICENCE', tier: REGISTRY_TIER, effectiveFrom: REGISTRY_EFFECTIVE_FROM } });
     await app.prisma.requirementItem.upsert({ where: { requirementSetId_docTypeCode: { requirementSetId: set.id, docTypeCode: registryCode('GY', 'national_id') } }, create: { requirementSetId: set.id, docTypeCode: registryCode('GY', 'national_id'), isBlocking: true, minCount: 1, sortOrder: 0 }, update: { isBlocking: true } });
     const requiredCode = registryCode('GY', 'national_id');
     const optionalCode = registryCode('GY', 'police_clearance');
