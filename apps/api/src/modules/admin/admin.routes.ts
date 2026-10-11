@@ -39,6 +39,7 @@ import {
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
+import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -2204,7 +2205,10 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true, ridePinAttempts: true },
     });
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}) } };
+    // [MMGCLOSE] Whether "Close — refund handled by the store" applies: the
+    // same rule the locked write re-checks (additive field).
+    const canCloseStoreRefund = mmgStoreCloseRefusal(order) === null;
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund } };
   });
 
   /**
@@ -2640,6 +2644,52 @@ export async function adminRoutes(app: FastifyInstance) {
         refundOwed: refund ? String(order.totalAmount) : null,
       },
     };
+  });
+
+  /**
+   * [MMGCLOSE · owner 8 Oct] POST /orders/:id/close-store-refund — close a
+   * store-claimed MMG order that cannot be fulfilled as "refund handled by the
+   * store". RECORD ONLY: the order becomes CANCELLED with the refund rail's
+   * CANCELLATION obligation (OWED — the store owes the customer, from its own
+   * MMG); Swift moves, credits and charges nothing. C4: a stated reason and a
+   * second admin (the approval gate above), bound to the order and to the claim
+   * revision the admin reviewed, which the locked write checks again.
+   */
+  app.post('/orders/:id/close-store-refund', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      expectedClaimRevision: z.number().int().min(0),
+      reason: z.string().optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const { order } = await closeMmgOrderAsStoreRefund(orderService, {
+      orderId: id,
+      adminUserId: request.user.userId,
+      expectedClaimRevision: body.expectedClaimRevision,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+
+    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED' });
+    if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED' });
+    // Told after the commit, each on its own key (a retry of the notice cannot
+    // double it). Neither is told the refund happened — only who makes it.
+    const words = mmgStoreCloseNotices(order.orderNumber);
+    const ownerUserId = order.vendorId
+      ? (await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { owner: { select: { userId: true } } } }))?.owner.userId
+      : undefined;
+    await notifications.send({
+      userId: order.customerId, type: 'ORDER_UPDATE', title: words.customer.title, body: words.customer.body,
+      audience: 'customer', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:customer:${id}`,
+    });
+    if (ownerUserId) {
+      await notifications.send({
+        userId: ownerUserId, type: 'ORDER_UPDATE', title: words.store.title, body: words.store.body,
+        audience: 'business', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:vendor:${id}`,
+      });
+    }
+    return { success: true, data: { orderId: id, status: 'CANCELLED', disposition: MMG_STORE_CLOSE_DISPOSITION } };
   });
 
   /**
