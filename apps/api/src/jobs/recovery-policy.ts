@@ -27,6 +27,11 @@
 // "The comment says idempotent" is NOT evidence — that is the claim being
 // checked, not a proof of it.
 //
+// [Item 63] The same register now governs BullMQ's OWN replays: only a
+// SAFE_REPLAY class is retried automatically after an error or a stalled run
+// (jobs/queue.ts `inJobContext`); every other class fails once and waits on
+// the dead-letter list for a person.
+//
 // Which classes are certified today is asserted live by
 // `job-recovery-census.test.ts` (it counts the SAFE_REPLAY policies and keeps
 // the certified set under half the registry) — this file states no fixed
@@ -63,8 +68,8 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'ads-weekly-report': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'agent-cash-sla': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'algo-decision-retention': { policy: 'SAFE_REPLAY', why: 'Purges decision-log rows past their retention. A second run finds nothing left to purge.' },
-  'auto-cancel': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'auto-complete': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'auto-cancel': { policy: 'SAFE_REPLAY', why: 'Every effect sits behind one database compare-and-set: the canonical locked transition moves the order PENDING (hold expired) to CANCELLED with its restock, search closure and status log in one commit, and the socket emits and the customer/store notices run only after that commit. A replay finds the order no longer PENDING (AUTO_CANCEL_NOT_ELIGIBLE) and returns before any notice or stock movement.' },
+  'auto-complete': { policy: 'SAFE_REPLAY', why: 'One database compare-and-set: the canonical locked transition moves the order DELIVERED to COMPLETED with its status log in one commit, and nothing but a log line follows it. A replay finds the order no longer DELIVERED (AUTO_COMPLETE_NOT_ELIGIBLE) and returns false.' },
   'reaper-lag': { policy: 'SAFE_REPLAY', why: 'Reads the reaper heartbeat, sets a gauge and pages through opsPageOnce, which dedupes. It writes no business rows.' },
   'audit-chain-verify': { policy: 'SAFE_REPLAY', why: 'Walks the audit chain and recomputes every link; writes only a gauge and, on a break, an admin notification. A second run repeats the same verdict.' },
   'audit-chain-anchor': { policy: 'SAFE_REPLAY', why: 'Appends one anchor row with the current head and tells the admins. A replay appends a second anchor of the same head — harmless, and the table is append-only by design.' },
