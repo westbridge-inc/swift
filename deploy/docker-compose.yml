@@ -254,6 +254,12 @@ services:
       ADMIN_HOST: ${ADMIN_HOST:-}
       ADMIN_BASIC_AUTH_USER: ${ADMIN_BASIC_AUTH_HASH:+admin}
       ADMIN_BASIC_AUTH_HASH: ${ADMIN_BASIC_AUTH_HASH:-}
+      # [WEB-GATE] The optional password in front of the website's own name
+      # (WEB_HOST only; the public names stay open), the same way: a bcrypt
+      # hash, its user DERIVED from the same setting, `tester` exactly when
+      # the hash is set. The website itself never sees either.
+      WEB_BASIC_AUTH_USER: ${WEB_BASIC_AUTH_HASH:+tester}
+      WEB_BASIC_AUTH_HASH: ${WEB_BASIC_AUTH_HASH:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - swift-caddy-data:/data

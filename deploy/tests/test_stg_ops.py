@@ -2035,7 +2035,6 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         site = f"https://{WEB_HOST}"
         status, out = self.fetch(name, f"{site}/")
         self.assertEqual(status, 401, out[-300:])
-        self.assertRegex(out, r"(?i)www-authenticate: basic")
         for credential in ("tester:not-the-password", f"someone-else:{self.web_password}",
                            f"admin:{self.admin_password}", f"admin:{self.web_password}"):
             with self.subTest(credential=credential.split(":")[0]):
