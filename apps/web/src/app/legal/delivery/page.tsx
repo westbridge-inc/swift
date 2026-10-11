@@ -18,7 +18,7 @@ import { site, launch } from '@/site.config';
  * countries Swift serves is data, not code). Approved by the owner, 1 Oct 2026.
  */
 
-const UPDATED = '1 October 2026';
+const UPDATED = '11 October 2026';
 
 export const metadata = policyMetadata(
   'Delivery policy',
@@ -93,8 +93,8 @@ export default function DeliveryPage() {
           rider&apos;s location at your address; never on the rider&apos;s word alone.
         </li>
         <li>
-          Strikes count for 90 days. After repeated failed deliveries you must verify your identity before ordering
-          again; after more, ordering is switched off until you contact support.
+          Strikes count for 90 days. After repeated failed deliveries you must add your ID — and a person on our team
+          checks it — before ordering again; after more, ordering is switched off until you contact support.
         </li>
       </ul>
 

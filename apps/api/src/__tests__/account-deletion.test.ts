@@ -139,6 +139,20 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(purged?.purgedAt).not.toBeNull();
   });
 
+  // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a customer's ID is kept while the account is open and
+  // deleted when it closes.
+  it("a customer's ID (identity_l2) is crypto-shredded and purged at account closure", async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const fileKey = await ownedVerificationFixture(app.prisma, u.userId);
+    const doc = await app.prisma.verificationDocument.create({ data: { userId: u.userId, role: 'CUSTOMER', docType: 'identity_l2', fileUrl: fileKey } });
+    const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+    expect(res.statusCode).toBe(200);
+    expect((await app.prisma.encryptedObject.findUnique({ where: { fileKey } }))?.shreddedAt).not.toBeNull();
+    const purged = await app.prisma.verificationDocument.findUnique({ where: { id: doc.id } });
+    expect(purged?.purgedAt).not.toBeNull();
+    expect(purged?.fileUrl).toBe('');
+  });
+
   it('[NR-3 gap 6] ephemeral high-risk rows go with the account', async () => {
     const u = await makeUser(['CUSTOMER']);
     const vendor = await app.prisma.vendor.findFirst({ select: { id: true } });
