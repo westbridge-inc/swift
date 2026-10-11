@@ -198,6 +198,26 @@ describe('storefront mobile checkout access', () => {
     expect(css).toMatch(/\.railTitle:focus\s*\{[^}]*outline:/);
   });
 
+  it('measures the dock again when it comes back after an item’s sheet closes', async () => {
+    let height = 64;
+    vi.stubGlobal('ResizeObserver', class {
+      observe = vi.fn();
+      disconnect = vi.fn();
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ height }) as DOMRect);
+    // [W6] A link that names an item opens its sheet; the dock waits while it is open.
+    const view = render(<StorefrontExperience store={store} returnPath="/store/test-kitchen" initialItemId="soup" />);
+    const sheet = await screen.findByRole('dialog', { name: 'Soup' });
+    const orderPanel = document.getElementById('checkout')!;
+    await waitFor(() => expect(orderPanel.textContent).toContain('1× Pumpkin roti'));
+    act(() => intersect!([{ target: orderPanel, isIntersecting: false }]));
+    expect(dock()).toBeNull();
+    height = 80;
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Close item options' }));
+    await waitFor(() => expect(dock()).not.toBeNull());
+    expect((view.container.firstElementChild as HTMLElement).style.getPropertyValue('--swift-order-dock-height')).toBe('80px');
+  });
+
   it('follows the latest crossing when one observer callback reports several, so the dock never sits over a visible panel', async () => {
     await renderCart();
     // Panel scrolled away and back before the callback ran: it is on screen now.

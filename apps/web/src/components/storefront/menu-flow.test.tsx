@@ -1,8 +1,8 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { StorefrontExperience } from './storefront-experience';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { StorefrontExperience, loadItemSheet } from './storefront-experience';
 import { CustomerSessionProvider, type CustomerSession } from '@/components/customer-session';
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
@@ -60,6 +60,11 @@ async function start(options: { item?: string; wrap?: (_node: ReactNode) => Reac
   render(<>{options.wrap ? options.wrap(page) : page}</>);
   await waitFor(() => expect((screen.getByRole('button', { name: signedIn ? 'Add Pumpkin soup' : 'Add Pumpkin soup' }) as HTMLButtonElement).disabled).toBe(false));
 }
+
+// [W6] As in a browser shortly after the store page is up: the item sheet's
+// code has arrived, so a tap opens the sheet at once (item-sheet-loading.test.tsx
+// covers a tap that comes before it).
+beforeAll(() => loadItemSheet());
 
 beforeEach(() => {
   sessionStorage.clear();

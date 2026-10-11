@@ -1,6 +1,6 @@
 'use client';
 
-import { formatAmount, parseAmount } from '@/lib/money';
+import { formatAmount } from '@/lib/money';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { QueryClientContext } from '@tanstack/react-query';
@@ -11,7 +11,7 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
@@ -38,7 +38,6 @@ import {
   type VendorDetail,
 } from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
-import { storefrontVerticalVariables } from '@/lib/design-tokens';
 import {
   OptionSelectionError,
   basePrice,
@@ -52,7 +51,6 @@ import {
 } from '@/lib/menu-options';
 import { useOptionalCustomerSession } from '@/components/customer-session';
 import { Photo } from '@/components/order-ui';
-import { Sheet } from '@/components/sheet';
 import { StoreActions } from './store-actions';
 import styles from './storefront.module.css';
 
@@ -79,6 +77,26 @@ type DisplayVendor = VendorDetail & {
 };
 
 const CATALOG_REFRESH_MS = 30_000;
+
+/**
+ * [W6] An item's sheet (choices, quantity, Add) is only needed after a tap or
+ * a link that names an item, so its code is not in the store page's first
+ * load. In the browser it is fetched as soon as this page's own code has run
+ * (after the first-load JavaScript, never before it) and kept here, so a tap
+ * opens the sheet at once. A sheet asked for before its code has arrived
+ * opens as soon as it does; nothing stands in for it meanwhile.
+ */
+let itemSheetModule: typeof import('./item-sheet') | null = null;
+let itemSheetLoading: Promise<typeof import('./item-sheet')> | null = null;
+/** Fetches the item sheet's code once (and again after a failed fetch). */
+export function loadItemSheet(): Promise<typeof import('./item-sheet')> {
+  itemSheetLoading ??= import('./item-sheet').then(
+    (module) => (itemSheetModule = module),
+    (error: unknown) => { itemSheetLoading = null; throw error; },
+  );
+  return itemSheetLoading;
+}
+if (typeof window !== 'undefined') void loadItemSheet().catch(() => undefined);
 
 // `value || 0` used to turn NaN (a missing/unparsable server figure) into
 // "GY$0" — an INVENTED zero, indistinguishable from a real one and the worst
@@ -144,14 +162,6 @@ function selectedDefaults(groups: OptionGroup[]): Record<string, string[]> {
   );
 }
 
-function optionGuidance(group: OptionGroup): string {
-  const minimum = group.isRequired ? Math.max(1, group.minSelect) : group.minSelect;
-  if (group.maxSelect <= 1) return minimum > 0 ? 'Choose 1' : 'Optional';
-  if (minimum === group.maxSelect) return `Choose ${group.maxSelect}`;
-  if (minimum > 0) return `Choose ${minimum}–${group.maxSelect}`;
-  return `Optional · up to ${group.maxSelect}`;
-}
-
 /** What the person is told when the validator refuses their choices. */
 function choiceProblem(item: DisplayItem, error: unknown): { message: string; groupId: string | null } {
   if (!(error instanceof OptionSelectionError)) return { message: 'These choices have changed. Close this panel and check the menu again.', groupId: null };
@@ -207,7 +217,12 @@ function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string
   );
 }
 
-export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string }) {
+/**
+ * `verticalStyle` is the store's vertical tint, worked out on the server
+ * (storefront-page.tsx) so the design-token tables stay out of the page's
+ * first-load JavaScript.
+ */
+export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties }) {
   const router = useRouter();
   // [W6] The store page lives inside the customer app's frame (rail, dock,
   // session). Its session can renew an expired access cookie before sending a
@@ -249,6 +264,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const [itemQuantity, setItemQuantity] = useState(1);
   const deepLinkOpened = useRef(false);
   const [modalError, setModalError] = useState<string | null>(null);
+  const [, setItemSheetLoaded] = useState(() => itemSheetModule !== null);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const mutationBusy = useRef(false);
   const addressBusy = useRef(false);
@@ -633,6 +649,23 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     setModalItem(item);
   }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
 
+  // [W6] A sheet asked for before its code has arrived opens when it does. If
+  // the code cannot be fetched, the customer is told instead of a tap doing
+  // nothing (and the next tap fetches it again).
+  useEffect(() => {
+    if (!modalItem || itemSheetModule) return;
+    let alive = true;
+    loadItemSheet().then(() => { if (alive) setItemSheetLoaded(true); }, () => {
+      if (!alive) return;
+      const message = 'Swift could not open this item. Check your connection and try again.';
+      setModalItem(null);
+      setError(message);
+      setFloatingError(message);
+      window.setTimeout(() => setFloatingError(null), 4200);
+    });
+    return () => { alive = false; };
+  }, [modalItem]);
+
   const subtractItem = (item: DisplayItem) => {
     if (!requireCustomerSession()) return;
     const line = stepperLine(item.id);
@@ -867,7 +900,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const modalUnitPrice = modalItem ? optionPrice(modalItem, selectedOptions) : null;
 
   return (
-    <div ref={page} className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
+    <div ref={page} className={styles.page} style={verticalStyle}>
       <div className={styles.content}>
         <section className={styles.storeHead} aria-labelledby="store-name">
           {!fromQr ? (
@@ -1320,87 +1353,21 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
         </a>
       ) : null}
 
-      {modalItem ? (
-        <Sheet labelledBy="menu-options-title" onClose={closeOptions} className={styles.sheet}>
-          <div className={styles.sheetHeader}>
-            <Photo src={modalItem.imageUrl} alt="" vendorType={catalog.vendorType} sizes="72px" iconSize={26} className={styles.sheetPhoto} />
-            <div className={styles.sheetHeading}>
-              <h2 id="menu-options-title" className={styles.modalTitle}>{modalItem.name}</h2>
-              {modalItem.description ? <p className={styles.modalDescription}>{modalItem.description}</p> : null}
-            </div>
-            <button data-modal-initial-focus type="button" className={styles.closeButton} onClick={closeOptions} aria-label="Close item options">
-              <X size={20} aria-hidden="true" />
-            </button>
-          </div>
-
-          <div className={styles.options}>
-            {(modalItem.optionGroups ?? []).map((group) => {
-              const selectedCount = (selectedOptions[group.id] ?? []).length;
-              const multiLimitReached = group.maxSelect > 1 && selectedCount >= group.maxSelect;
-              const onSale = group.options.filter((option) => option.isAvailable !== false);
-              return (
-                <div key={group.id} className={styles.optionBlock}>
-                  <fieldset className={styles.optionGroup} data-option-group={group.id}>
-                    <legend className={styles.optionHeading}>
-                      <span className={styles.optionTitle}>{group.name}</span>
-                      <span className={styles.optionMeta}>
-                        {group.isRequired ? <span className={styles.required}>Required</span> : <span className={styles.optionGuidance}>{optionGuidance(group)}</span>}
-                      </span>
-                    </legend>
-                    {group.isRequired && group.maxSelect > 1 ? <p className={styles.optionGuidance}>{optionGuidance(group)}</p> : null}
-                    {onSale.length === 0 ? <p className={styles.optionGuidance}>Every choice here is sold out right now.</p> : null}
-                    {onSale.map((option) => {
-                      const checked = (selectedOptions[group.id] ?? []).includes(option.id);
-                      const single = group.maxSelect <= 1;
-                      const clearableSingle = single && !group.isRequired && group.minSelect === 0;
-                      const blockedByLimit = multiLimitReached && !checked;
-                      const extra = parseAmount(option.additionalPrice);
-                      return (
-                        <label key={option.id} className={`${styles.optionLabel} ${blockedByLimit ? styles.optionLabelDisabled : ''}`}>
-                          <span className={styles.optionChoice}>
-                            <input
-                              type={single && !clearableSingle ? 'radio' : 'checkbox'}
-                              name={group.id}
-                              checked={checked}
-                              disabled={blockedByLimit}
-                              onChange={() => chooseOption(group, option.id)}
-                            />
-                            {option.name}
-                          </span>
-                          {extra === null ? (
-                            <span className={styles.optionPrice}>Price unavailable</span>
-                          ) : extra > 0 ? (
-                            <span className={styles.optionPrice}>+{gyMoney(extra)}</span>
-                          ) : null}
-                        </label>
-                      );
-                    })}
-                  </fieldset>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className={styles.sheetFooter}>
-            {modalError ? <p id="menu-options-error" className={styles.modalAlert} role="alert">{modalError}</p> : null}
-            <div className={styles.sheetFooterRow}>
-              <div className={styles.quantity} role="group" aria-label="Quantity">
-                <button type="button" className={styles.quantityButton} aria-label="Decrease quantity" disabled={itemQuantity <= 1 || busyItem !== null} onClick={() => setItemQuantity((count) => Math.max(1, count - 1))}><Minus size={18} aria-hidden="true" /></button>
-                <span className={styles.quantityCount} role="status" aria-label={`Quantity ${itemQuantity}`}>{itemQuantity}</span>
-                <button type="button" className={styles.quantityButton} aria-label="Increase quantity" disabled={itemQuantity >= 99 || busyItem !== null} onClick={() => setItemQuantity((count) => Math.min(99, count + 1))}><Plus size={18} aria-hidden="true" /></button>
-              </div>
-              <button
-                type="button"
-                className={`${styles.primaryButton} ${styles.sheetAdd}`}
-                disabled={cartHydrationPending || busyItem !== null || modalUnitPrice === null}
-                aria-describedby={modalError ? 'menu-options-error' : undefined}
-                onClick={confirmOptions}
-              >
-                Add to order · {gyMoney(modalUnitPrice === null ? null : modalUnitPrice * itemQuantity)}
-              </button>
-            </div>
-          </div>
-        </Sheet>
+      {modalItem && itemSheetModule ? (
+        <itemSheetModule.ItemSheet
+          item={modalItem}
+          vendorType={catalog.vendorType}
+          selectedOptions={selectedOptions}
+          onChoose={chooseOption}
+          quantity={itemQuantity}
+          onQuantity={setItemQuantity}
+          error={modalError}
+          busy={busyItem !== null}
+          cartLoading={cartHydrationPending}
+          unitPrice={modalUnitPrice}
+          onConfirm={confirmOptions}
+          onClose={closeOptions}
+        />
       ) : null}
 
       {notice ? (

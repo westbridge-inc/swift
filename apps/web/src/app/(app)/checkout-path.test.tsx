@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, stubIntersectionObserver, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
 import { StorefrontPage } from '@/components/storefront/storefront-page';
+import { loadItemSheet } from '@/components/storefront/storefront-experience';
 import { storefrontFixture } from '@/test/storefront-fixture';
 import CartPage from './cart/page';
 import OrderDetailPage from './orders/[id]/page';
@@ -65,6 +66,11 @@ let fetchMock: ReturnType<typeof mockApi>;
 const ok = (data: unknown) => ({ body: { success: true, data } });
 const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(([url, init]) =>
   new URL(String(url)).pathname === pathname && (init?.method ?? 'GET').toUpperCase() === method);
+
+// [W6] As in a browser shortly after the store page is up: the item sheet's
+// code has arrived, so a tap opens the sheet at once (item-sheet-loading.test.tsx
+// covers a tap that comes before it).
+beforeAll(() => loadItemSheet());
 
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
