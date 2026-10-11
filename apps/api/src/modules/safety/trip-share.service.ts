@@ -236,7 +236,7 @@ export class TripShareService {
       },
     });
     if (!row || !row.tokenDigest || !digestMatches(token, row.tokenDigest)) { await this.recordMiss(caller); return null; }
-    if (row.revokedAt || now > row.expiresAt) return null;
+    if (row.revokedAt || now >= row.expiresAt) return null;
     if (!(await this.viewAllowed(row.id, caller))) { tripShareCounter.labels('rate_limited').inc(); return null; }
     tripShareCounter.labels('viewed').inc();
 

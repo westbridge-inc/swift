@@ -121,6 +121,7 @@ export const PLATFORM_WIDE: Record<string, string> = {
   AuditLog: 'the admin audit trail — actor-scoped, not operator-scoped (ADM-002 rows name their entity)',
   AdEventDedupe: 'dedupe keys',
   AdFreqCounter: 'frequency counters',
+  AdServeBudget: 'platform-wide pseudonymous issuance windows shared across operators, containing only domain-separated account/network hashes, counts and expiry; no tenant content or bearer',
   AdStatsDaily: 'daily ad stats keyed by placement',
   IdentityCluster: 'trial-abuse identity graph — the one sanctioned cross-tenant system (like IdentityKey)',
   FaceTemplate: 'face-match templates — identity system',
@@ -213,4 +214,3 @@ describe('[STA-1 §4] tenant lineage — every model without tenantId is account
     for (const r of [PLATFORM_WIDE, PENDING_EXPAND, GRANDCHILD_OF]) for (const v of Object.values(r)) expect(v.length).toBeGreaterThan(3);
   });
 });
-

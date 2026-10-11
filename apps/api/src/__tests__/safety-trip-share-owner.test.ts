@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
 import { nanoid } from 'nanoid';
-import { TripShareService } from '../modules/safety/trip-share.service';
+import { TripShareService, tripShareDigest } from '../modules/safety/trip-share.service';
 import type { NotificationChannels } from '../../src/providers/notifications/channels';
 
 // Trip Share (safety spec §6). The laws under test: the token is unguessable
@@ -111,4 +111,14 @@ afterAll(async () => {
     await expect(svc.revokeAll(stranger.id, order.id)).rejects.toMatchObject({ statusCode: 404 });
     expect(await svc.publicView(link.token)).not.toBeNull();
   });
+});
+
+it('MASTER-049 public expiry agrees with the exact timestamp boundary', async () => {
+  const { customer, order } = await mkTrip();
+  const link = await svc.mint(customer.id, order.id);
+  const at = new Date();
+  await prisma.tripShareToken.update({ where: { tokenDigest: tripShareDigest(link.token) }, data: { expiresAt: at } });
+  expect(await svc.publicView(link.token, new Date(at.getTime() - 1))).not.toBeNull();
+  expect(await svc.publicView(link.token, at)).toBeNull();
+  expect(await svc.publicView(link.token, new Date(at.getTime() + 1))).toBeNull();
 });

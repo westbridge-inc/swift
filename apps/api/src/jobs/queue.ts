@@ -1501,6 +1501,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'ads-release-expired') {
+        const { cleanupAdAuthorities } = await import('../modules/ads/ads-token');
+        await cleanupAdAuthorities(ctx.prisma);
         // Ads reservation expiry [ads-platform spec §7.3]: expired RESERVED
         // holds go RELEASED and give the inventory back. CAS + guarded
         // decrement = idempotent and overlap-safe.

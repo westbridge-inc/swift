@@ -1,4 +1,4 @@
-import type { Prisma, SubscriptionStatus } from '@prisma/client';
+import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { inoperableSubscriptionWhere, subscriptionOperability } from '../subscription/operate-gate';
 import { getTenantId } from '../../plugins/tenant-context';
 import { PRODUCTION_TENANT } from '../../lib/production-only';
@@ -137,6 +137,35 @@ export const VISIBLE_VENDOR_SELECT = {
 export function visibleVendorInTenant(tenantId: string) {
   if (!tenantId) throw new Error('[R048-003] visibleVendorInTenant needs a tenant');
   return { ...VISIBLE_VENDOR_REL, tenantId } as const;
+}
+
+/** SQL companion for bounded browse. Derive subscription refusals from the
+ * canonical ORM predicate; an unsupported rule fails closed instead of drifting. */
+export function visibleVendorSqlForCaller(now = new Date()): Prisma.Sql {
+  const clauses = inoperableSubscriptionWhere(now).OR;
+  if (!Array.isArray(clauses)) throw new Error('Unsupported subscription visibility rule');
+  const refusals = clauses.map((clause) => {
+    if (typeof clause.status === 'object' && clause.status && Array.isArray(clause.status.notIn)) {
+      return Prisma.sql`s."status"::text NOT IN (${Prisma.join(clause.status.notIn)})`;
+    }
+    if (typeof clause.status === 'string' && typeof clause.gracePeriodEnd === 'object' && clause.gracePeriodEnd && 'lt' in clause.gracePeriodEnd && clause.gracePeriodEnd.lt instanceof Date) {
+      return Prisma.sql`(s."status"::text = ${clause.status} AND s."gracePeriodEnd" < ${clause.gracePeriodEnd.lt})`;
+    }
+    if (typeof clause.autoRenew === 'boolean' && typeof clause.currentPeriodEnd === 'object' && clause.currentPeriodEnd && 'lte' in clause.currentPeriodEnd && clause.currentPeriodEnd.lte instanceof Date) {
+      return Prisma.sql`(s."autoRenew" = ${clause.autoRenew} AND s."currentPeriodEnd" <= ${clause.currentPeriodEnd.lte})`;
+    }
+    throw new Error('Unsupported subscription visibility rule');
+  });
+  const tenantId = getTenantId();
+  return Prisma.sql`
+    v."status"::text = ${VISIBLE_VENDOR.status}
+    AND v."isVerified" = ${VISIBLE_VENDOR.isVerified}
+    AND EXISTS (SELECT 1 FROM "tenants" t WHERE t."id" = v."tenantId"
+      AND t."isActive" = ${VISIBLE_VENDOR.tenant.isActive}
+      AND ${tenantId ? Prisma.sql`v."tenantId" = ${tenantId}` : Prisma.sql`t."kind"::text = 'PRODUCTION'`})
+    AND NOT EXISTS (SELECT 1 FROM "subscriptions" s WHERE s."vendorId" = v."id"
+      AND (${Prisma.join(refusals, ' OR ')}))
+  `;
 }
 
 /** [DL-7 · SX397 F3] The visibility predicate for an actual catalogue read.

@@ -1680,7 +1680,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               because they answer the same worry. */}
           {activeShare || ownedShares.data?.length ? (
             <View style={{ marginTop: space.md, gap: space.sm }}>
-              {activeShare ? <T variant="caption" tone="muted">{shareStatusLine(activeShare)}</T> : null}
+              {activeShare ? <T variant="caption" tone="muted">{shareStatusLine(activeShare, new Date(nowTs))}</T> : null}
               {ownedShares.data?.length ? (
                 <T variant="caption" tone="muted">
                   {ownedShares.data.length === 1 ? '1 live link for this ride.' : `${ownedShares.data.length} live links for this ride.`}

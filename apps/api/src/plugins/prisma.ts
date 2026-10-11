@@ -104,7 +104,7 @@ const TENANT_QUERY_EXTENSIONS = {
   // of every provider answer all belong to the payer's operator.
   paymentInstrument: scoped, cardSession: scoped, cardObservation: scoped,
   // Ads platform.
-  advertiser: scoped, adPlacement: scoped, adCampaign: scoped, adInvoice: scoped,
+  advertiser: scoped, adPlacement: scoped, adServeGrant: scoped, adCampaign: scoped, adInvoice: scoped,
   adRefundIntent: scoped, adRefundItem: scoped, adRefundOutbox: scoped,
   adEvent: scoped, houseAd: scoped, adsSettings: scoped, adsAuditLog: scoped,
   // Ratings.

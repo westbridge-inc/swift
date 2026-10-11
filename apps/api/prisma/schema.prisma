@@ -5878,6 +5878,7 @@ model AdCampaign {
   bookings         AdBooking[]
   invoices         AdInvoice[]
   refundIntents    AdRefundIntent[]
+  serveGrants      AdServeGrant[]
 
   @@unique([id, tenantId], map: "ad_campaigns_id_tenantId_key")
   @@index([tenantId, status])
@@ -5908,6 +5909,9 @@ model AdCreative {
   createdAt        DateTime          @default(now())
   campaign         AdCampaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
+  serveGrants      AdServeGrant[]
+
+  @@unique([id, campaignId])
   @@index([status])
   @@map("ad_creatives")
 }
@@ -6064,8 +6068,11 @@ model AdEvent {
   receivedAt   DateTime    @default(now())
   tokenHash    String
   meta         Json?
+  /// Server-owned provenance; every pre-cutover event defaults to unverified.
+  authorityVersion Int     @default(0)
 
   @@index([campaignId, occurredAt])
+  @@index([campaignId, authorityVersion])
   @@index([occurredAt])
   @@map("ad_events")
 }
@@ -7850,4 +7857,34 @@ model IdentityReviewCase {
   @@unique([clusterId, snapshotDigest], map: "identity_review_cases_clusterId_snapshotDigest_idx")
   @@index([tenantId, status])
   @@map("identity_review_cases")
+}
+
+/// Bounded, expiring measurement authority. No bearer or raw account/IP.
+model AdServeGrant {
+  id            String   @id
+  tenantId      String
+  campaignId    String
+  creativeId    String
+  placementKey  String
+  principalHash String
+  issuedAt      DateTime
+  expiresAt     DateTime
+  eventMask     Int      @default(0)
+  kind          String
+  durationMs    Int      @default(0)
+  campaign      AdCampaign @relation(fields: [campaignId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  creative      AdCreative @relation(fields: [creativeId, campaignId], references: [id, campaignId], onDelete: Cascade)
+
+  @@index([expiresAt, id])
+  @@map("ad_serve_grants")
+}
+
+/// Platform-wide pseudonymous issuance windows, shared across operators.
+model AdServeBudget {
+  key       String   @id
+  count     Int
+  expiresAt DateTime
+
+  @@index([expiresAt, key])
+  @@map("ad_serve_budgets")
 }
