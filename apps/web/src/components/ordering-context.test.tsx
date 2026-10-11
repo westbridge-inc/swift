@@ -1,13 +1,13 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { OrderingContextProvider, showsOrderingContext } from './ordering-context';
+import { showsOrderingContext } from './ordering-context';
 import { OrderingContextBar } from './ordering-context-bar';
 
 beforeEach(() => { sessionStorage.clear(); localStorage.clear(); });
 
 describe('the order context bar', () => {
   it('says delivery or pickup and ASAP, offers no scheduled-order picker and no field that changes nothing', async () => {
-    render(<OrderingContextProvider><OrderingContextBar /></OrderingContextProvider>);
+    render(<OrderingContextBar />);
     const trigger = screen.getByRole('button', { name: /Change delivery or pickup/ });
     expect(trigger.textContent).toContain('Delivery'); expect(trigger.textContent).toContain('address at checkout'); expect(trigger.textContent).toContain('ASAP');
     fireEvent.click(trigger); const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
@@ -20,11 +20,11 @@ describe('the order context bar', () => {
   });
 
   it('keeps the choice for the tab, so a reload of the page keeps pickup', async () => {
-    const first = render(<OrderingContextProvider><OrderingContextBar /></OrderingContextProvider>);
+    const first = render(<OrderingContextBar />);
     fireEvent.click(screen.getByRole('button', { name: /Change delivery or pickup/ }));
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('radio', { name: /^Pickup/ }));
     first.unmount();
-    render(<OrderingContextProvider><OrderingContextBar /></OrderingContextProvider>);
+    render(<OrderingContextBar />);
     expect((await screen.findByRole('button', { name: /^Pickup from the store/ })).textContent).toContain('Pickup');
   });
 

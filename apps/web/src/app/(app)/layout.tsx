@@ -16,7 +16,7 @@ import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
 import { OfflineNotice } from '@/components/offline-notice';
 import { useGuestBasket } from '@/lib/basket-state';
-import { OrderingContextProvider, showsOrderingContext } from '@/components/ordering-context';
+import { showsOrderingContext } from '@/lib/ordering-paths';
 import { InstallPrompt } from '@/components/install-prompt';
 
 // Upload code is needed only after sign-in with a browser basket.
@@ -38,7 +38,7 @@ const GuestBasketSync = lazy(() => import('@/components/guest-basket').then(modu
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <Providers>
-      <OrderingContextProvider><CustomerShell>{children}</CustomerShell></OrderingContextProvider>
+      <CustomerShell>{children}</CustomerShell>
     </Providers>
   );
 }
