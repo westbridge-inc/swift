@@ -27,6 +27,7 @@ import {
 import { CountryConfigService } from '../modules/country/country-config.service';
 import { guyanaWallClockParts } from '../utils/guyana-day';
 import { EXTRA_DOC_TYPES, BUCKET_OF, DECLARATION_DOC_TYPE, REGISTRATION_DOC_TYPES } from '../modules/verification/doc-registry';
+import { GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS, waitClearOfGuyanaMidnight } from './helpers/guyana-day-clock';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -37,6 +38,10 @@ const users: string[] = [];
 const extraVendorIds: string[] = [];
 let mkUser: (n: number, roles: string[], active: string, extra?: Record<string, unknown>) => Promise<{ id: string }>;
 const orderIds: string[] = [];
+
+// Today's orders are seeded "a minute ago" and counted for the Guyana day:
+// never run across Guyana midnight (helpers/guyana-day-clock).
+beforeAll(waitClearOfGuyanaMidnight, GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS);
 
 beforeAll(async () => {
   vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64'));

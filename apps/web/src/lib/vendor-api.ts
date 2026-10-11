@@ -115,6 +115,9 @@ export interface VendorOrder {
   vendor?: { id?: string; name?: string; vendorType?: string; selfDeliveryEnabled?: boolean } | null;
   /** Detail route only (`GET /orders/:id`). */
   statusHistory?: Array<{ status: string; createdAt: string; note?: string | null }>;
+  /** Row 52: true when the caller's role at THIS order's store (owner or
+   *  manager) may confirm an MMG payment. Both routes send it. */
+  canConfirmPayment?: boolean;
 
   // ── Never sent — kept as tombstones so the lie cannot come back ──────────
   /** PHANTOM. There is no `total` column; the order total is `totalAmount`. */

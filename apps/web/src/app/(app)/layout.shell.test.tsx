@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AppLayout from './layout';
+import { CustomerHome } from '@/components/customer-home';
 
 const state = vi.hoisted(() => ({
   pathname: '/',
@@ -93,9 +94,9 @@ describe('[Q7b] the phone app’s tabs', () => {
     render(<AppLayout><p>Cart page</p></AppLayout>);
     await screen.findByText('Cart page');
     const dock = screen.getByRole('navigation', { name: 'Swift tabs' });
-    // Visible below md, fixed to the bottom; gone from md up, where the top
-    // bar carries the same places.
-    expect(dock.className).toContain('md:hidden');
+    // Visible below 760 px, fixed to the bottom; gone from 760 px up
+    // (`wide:`), where the side rail carries the same places.
+    expect(dock.className).toContain('wide:hidden');
     expect(dock.className).toContain('fixed');
     expect(dock.className).toContain('bottom-0');
     const links = within(dock).getAllByRole('link');
@@ -124,7 +125,7 @@ describe('[Q7b] the phone app’s tabs', () => {
 });
 
 describe('[Q7b] the marketing site is one tap away', () => {
-  it('links Sell on Swift, Drive with Swift and About from the slim top bar', async () => {
+  it('links Sell on Swift, Drive with Swift and About from the side rail', async () => {
     render(<AppLayout><p>Home page</p></AppLayout>);
     await screen.findByText('Home page');
     const strip = screen.getByRole('navigation', { name: 'Swift for business' });
@@ -135,10 +136,12 @@ describe('[Q7b] the marketing site is one tap away', () => {
     ]);
   });
 
-  it('opens the same pages from the phone menu, with sign-in for a guest', async () => {
+  it('opens the same pages from the phone menu on Home, with sign-in for a guest', async () => {
     state.principal = null;
     state.sessionProbe.mockResolvedValue({ ok: false });
-    render(<AppLayout><p>Home page</p></AppLayout>);
+    // [WEB-REDESIGN] The phone menu sits in Home's own header row (the design
+    // has no top bar on phones), beside the address chip.
+    render(<AppLayout><CustomerHome market="Georgetown, Guyana" /></AppLayout>);
     await waitFor(() => expect(state.sessionProbe).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole('button', { name: 'More from Swift' }));
     const menu = screen.getByRole('dialog', { name: 'More from Swift' });

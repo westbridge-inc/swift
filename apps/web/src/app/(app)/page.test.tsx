@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
-import HomePage from './page';
+import { HomeScreen as HomePage } from './home-screen';
 
 const state = vi.hoisted(() => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn(), coords: vi.fn() }));
 vi.mock('next/navigation', () => ({ usePathname: () => '/', useRouter: () => ({ push: state.push, back: state.back, replace: state.replace }) }));
@@ -72,7 +72,8 @@ function renderHome() {
 describe('[Q7b] / is the ordering home', () => {
   it('opens on ordering, not on the marketing page', async () => {
     renderHome();
-    expect(screen.getByRole('heading', { level: 1, name: 'Order food, groceries and more' })).toBeTruthy();
+    // [WEB-REDESIGN] The design greets by the time of day (and by name once signed in).
+    expect(screen.getByRole('heading', { level: 1, name: /^Good (morning|afternoon|evening)/ })).toBeTruthy();
     expect(screen.queryByText(/Everything your day needs/)).toBeNull();
     expect(screen.queryByText(/Six things, one app/)).toBeNull();
     // The services, every one a real page; taxi says where rides are booked.
@@ -80,7 +81,7 @@ describe('[Q7b] / is the ordering home', () => {
     expect(within(services).getByRole('link', { name: /^Food/ }).getAttribute('href')).toBe('/order/browse?type=RESTAURANT');
     expect(within(services).getByRole('link', { name: /^Groceries/ }).getAttribute('href')).toBe('/order/browse?type=SUPERMARKET');
     expect(within(services).getByRole('link', { name: /^Taxi/ }).textContent).toMatch(/Swift mobile app/);
-    expect(screen.getByRole('link', { name: /Search stores, dishes and groceries/ }).getAttribute('href')).toBe('/order/search');
+    expect(screen.getByRole('link', { name: /Restaurants, groceries, shops/ }).getAttribute('href')).toBe('/order/search');
   });
 
   it('shows what is popular and the stores open now, from the same feed the phone app reads', async () => {
@@ -89,7 +90,8 @@ describe('[Q7b] / is the ordering home', () => {
     const bowl = within(popular).getByRole('link', { name: /Pepperpot bowl/ });
     // An item opens at its own store, on that item.
     expect(bowl.getAttribute('href')).toBe('/order/vendor/v1?item=i1');
-    expect(bowl.textContent).toMatch(/GY\$1,800/);
+    expect(bowl.textContent).toMatch(/\$1,800/);
+    expect(bowl.textContent).not.toMatch(/GY\$/);
     const open = screen.getByRole('region', { name: 'Open now' });
     expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/order/vendor/v1');
     expect(within(screen.getByRole('region', { name: 'Closed now' })).getByText('Late Night Roti')).toBeTruthy();
@@ -105,7 +107,7 @@ describe('[Q7b] / is the ordering home', () => {
     await screen.findByRole('region', { name: 'Open now' });
     expect(screen.queryByRole('region', { name: /Sign in/ })).toBeNull();
     fireEvent.click(await screen.findByRole('button', { name: 'Show stores near me' }));
-    const near = await screen.findByRole('region', { name: 'Stores near you' });
+    const near = await screen.findByRole('region', { name: 'Nearby' });
     // Nearby first, then the rest, each store once.
     expect(within(near).getAllByRole('link').map((link) => link.textContent)).toEqual([
       expect.stringContaining('Pepperpot Corner'),
@@ -130,9 +132,9 @@ describe('[Q7b] / is the ordering home', () => {
       return base(request);
     })(api);
     renderHome();
-    const deliverTo = await screen.findByRole('link', { name: /Deliver to Home · 12 Main St/ });
+    const deliverTo = await screen.findByRole('link', { name: /12 Main St/ });
     expect(deliverTo.getAttribute('href')).toBe('/order/location');
-    expect((await screen.findByRole('link', { name: /Your live order · SW-1001/ })).getAttribute('href')).toBe('/orders/o1');
+    expect((await screen.findByRole('link', { name: /Track your live order SW-1001/ })).getAttribute('href')).toBe('/orders/o1');
     await waitFor(() => {
       const last = homeRequests().at(-1)!;
       expect([last.searchParams.get('lat'), last.searchParams.get('lng')]).toEqual(['6.81', '-58.16']);
@@ -155,17 +157,17 @@ describe('[Q7b] / is the ordering home', () => {
       return base(request);
     })(api);
     renderHome();
-    await screen.findByRole('link', { name: /Your live order · SW-1001/ });
+    await screen.findByRole('link', { name: /Track your live order SW-1001/ });
     await waitFor(() => expect(homeRequests().some((url) => url.searchParams.get('lat') === '6.81')).toBe(true));
-    await screen.findByRole('link', { name: /Deliver to Home/ });
+    await screen.findByRole('link', { name: /12 Main St/ });
 
     session = false;
     const auth = await import('@/lib/auth');
     act(() => { auth.clearSession(); });
     // At once — not after the guest's answer arrives.
-    expect(screen.queryByRole('link', { name: /Your live order/ })).toBeNull();
+    expect(screen.queryByRole('link', { name: /Track your live order/ })).toBeNull();
     expect(screen.queryByText('Shanta Kitchen')).toBeNull();
-    expect(screen.getByLabelText('Loading stores')).toBeTruthy();
+    expect(screen.getByLabelText('Loading home feed')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Show stores near me' })).toBeTruthy();
   });
 

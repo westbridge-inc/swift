@@ -13,7 +13,7 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, motion, radius, space } from '@swift/ui';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue, useRideCapabilities } from '../../../hooks';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
 import { addStop, canAddStop, maxStopsFrom, moveStop, removeStop, replaceStop, rideStops, sameWireStops, stopRefusalCopy, wireStops } from '../../../lib/taxiItinerary';
@@ -1406,6 +1406,13 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   // the old text carried now lives on that page, where it can be taken back.
   // The link outlives this render, so the sharer can be shown what they gave
   // away — and can take it back — rather than the app forgetting immediately.
+  const shareOwner = useAuthStore((st) => st.user?.id);
+  const sharesKey = ['trip-shares', shareOwner, ride.id];
+  const ownedShares = useQuery({
+    queryKey: sharesKey,
+    queryFn: async () => (await safetyApi.tripShares(ride.id)).data.data as Array<{ id: string; expiresAt: string }>,
+    refetchInterval: 30_000,
+  });
   const [activeShare, setActiveShare] = useState<MintedShare | null>(null);
   const [shareError, setShareError] = useState<string | null>(null);
   const shareMutation = useMutation({
@@ -1425,9 +1432,9 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   });
 
   const revokeMutation = useMutation({
-    mutationFn: (token: string) => safetyApi.revokeTripShare(token),
-    onSuccess: () => { setActiveShare(null); setShareError(null); },
-    onError: () => setShareError('We could not stop the link. Try again — it expires on its own either way.'),
+    mutationFn: () => safetyApi.revokeAllTripShares(ride.id),
+    onSuccess: () => { setActiveShare(null); setShareError(null); void queryClient.invalidateQueries({ queryKey: sharesKey }); },
+    onError: () => setShareError('We could not stop sharing. Try again.'),
   });
 
   const shareTrip = () => {
@@ -1435,6 +1442,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
     shareMutation.mutate(undefined, {
       onSuccess: (minted) => {
         setActiveShare(minted);
+        void queryClient.invalidateQueries({ queryKey: sharesKey });
         Share.share({ message: shareMessage(minted, myFirstName) }).catch(() => {});
       },
     });
@@ -1670,14 +1678,20 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               A live location link with no stated end is one a person forgets
               they created — so the window and the stop control sit together,
               because they answer the same worry. */}
-          {activeShare ? (
+          {activeShare || ownedShares.data?.length ? (
             <View style={{ marginTop: space.md, gap: space.sm }}>
-              <T variant="caption" tone="muted">{shareStatusLine(activeShare)}</T>
+              {activeShare ? <T variant="caption" tone="muted">{shareStatusLine(activeShare)}</T> : null}
+              {ownedShares.data?.length ? (
+                <T variant="caption" tone="muted">
+                  {ownedShares.data.length === 1 ? '1 live link for this ride.' : `${ownedShares.data.length} live links for this ride.`}
+                </T>
+              ) : null}
               <PillButton
-                label="Stop sharing"
+                label="Stop all sharing"
                 variant="outline"
                 loading={revokeMutation.isPending}
-                onPress={() => revokeMutation.mutate(activeShare.token)}
+                disabled={shareMutation.isPending}
+                onPress={() => revokeMutation.mutate()}
               />
             </View>
           ) : null}

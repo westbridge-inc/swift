@@ -7,7 +7,9 @@ import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
-import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
+import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
+import { consentSurfaceOf } from '../legal/consent-surface';
+import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -158,6 +160,8 @@ export async function authRoutes(app: FastifyInstance) {
     const result = await authService.register({
       ...body,
       registrationProof,
+      // [F-021-21] The Terms and Privacy consent is recorded on the surface it was given on.
+      surface: consentSurfaceOf(request),
       deviceId: (request.headers['x-device-id'] as string) || null,
       ipAddress: request.ip || null,
     });
@@ -374,17 +378,39 @@ export async function authRoutes(app: FastifyInstance) {
         userAgent: request.headers['user-agent'] || '',
       },
     );
+    reply.header('Cache-Control', 'no-store, max-age=0');
+    // [L04 · MASTER-041] A browser receives its session exactly as SMS-code
+    // sign-in gives it: HttpOnly cookies and no credential in the body.
+    if (browserClientOf(request)) {
+      clearSignupContinuationCookie(reply);
+      setSessionCookies(reply, result.tokens);
+      return reply.send({ success: true, data: withoutTokens(result) });
+    }
     return reply.send({ success: true, data: result });
   });
 
   app.post('/password/set', { preHandler: [app.authenticate] }, async (request, reply) => {
+    // [REVIEW-PARTNER] A store-review demo login is shared: its password is never set or changed.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoCredentialRefusedError();
+    // [L04 · MASTER-003] A password is a permanent second way in. A session
+    // alone (stolen, or left signed in) must not be able to add or change one:
+    // the same fresh step-up a money surface needs — a code verified on THIS
+    // session within its window — gates it. 403 STEP_UP_REQUIRED tells the
+    // client how to earn it. This is the repo's one step-up, not a second.
+    await requireStepUp(app, request);
     const body = setPasswordSchema.parse(request.body);
     const sessionId = request.authSessionId;
     if (!sessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
-    await authService.setPassword(request.user.userId, sessionId, body.password);
-    return reply.send({ success: true });
+    const tokens = await authService.setPassword(request.user.userId, sessionId, body.password);
+    reply.header('Cache-Control', 'no-store, max-age=0');
+    // The old credentials of this session no longer work; hand over the new pair.
+    if (browserClientOf(request)) {
+      setSessionCookies(reply, tokens);
+      return reply.send({ success: true, data: { session: 'cookie' } });
+    }
+    return reply.send({ success: true, data: { tokens } });
   });
 
   // Reset request = the normal OTP send, for the reset purpose only: this code

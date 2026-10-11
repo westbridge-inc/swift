@@ -95,7 +95,8 @@ describe('[C10] the scenario page is four buttons and nothing to type into', () 
 describe('[C1] no card data anywhere on the provider', () => {
   it('no method takes, returns or names a card number, security code or PIN, and there is no tokenize method', () => {
     const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(apiSim)).filter((m) => m !== 'constructor');
-    expect(methods.sort()).toEqual(['answerCharge', 'chargeInstrument', 'choose', 'confirm', 'createSession', 'hostedUrlFor', 'parseReturn', 'refund', 'retrieve']);
+    // [PT-2] pageFor: what the test page shows (purpose, the server's price) — no card data.
+    expect(methods.sort()).toEqual(['answerCharge', 'chargeInstrument', 'choose', 'confirm', 'createSession', 'hostedUrlFor', 'pageFor', 'parseReturn', 'refund', 'retrieve']);
     expect(methods.filter((m) => /tokeni[sz]e|pan$|cvv|cvc|cardnumber|pin$/i.test(m))).toEqual([]);
   });
 });

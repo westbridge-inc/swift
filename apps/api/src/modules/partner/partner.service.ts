@@ -8,7 +8,7 @@ import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
-import { publishLegalDocumentOnce, recordConsent } from '../legal/consent.service';
+import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
 import { assertStorePinInMarket } from '../vendor/store-pin';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
@@ -108,7 +108,7 @@ export class PartnerService {
     userId: string,
     input: BecomePartnerInput,
     transitionAuthority: (tx: Tx, targetRole: UserRole) => Promise<TCleanup>,
-    consent?: { accepted: boolean; ip?: string | null },
+    consent?: { accepted: boolean; ip?: string | null; surface: ConsentSurface },
   ): Promise<{ result: PartnerProvisionResult; authorityCleanup: TCleanup }> {
     this.validateInput(input);
     // [DCR-1] Publish (hash-anchor) the role agreement BEFORE the transaction,
@@ -139,7 +139,7 @@ export class PartnerService {
           documentType: agreement.documentType,
           version: LEGAL_VERSION,
           action: 'granted',
-          surface: 'mobile',
+          surface: consent.surface,
           ip: consent.ip ?? null,
           evidence: { control: 'agreement_checkbox', path: 'partner/become', kind: result.kind },
         });

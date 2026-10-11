@@ -856,24 +856,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         ctx.log.info({ headSeq: anchor ? String(anchor.headSeq) : null }, 'audit chain anchored');
       }
       if (job.name === 'backup-freshness') {
-        const { checkBackupFreshness } = await import('../modules/ops/backup-freshness');
-        const result = await checkBackupFreshness(ctx.prisma);
-        if (result.stale) {
-          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
-          await opsPageOnce(ctx, 'backup-freshness', 20 * 3600, () =>
-            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
-              // Platform-wide infrastructure alarm, not one tenant's event.
-              tenantId: null,
-              title: 'Backups are not safe',
-              body: result.reason,
-              data: {
-                kind: 'ops_backup_stale',
-                ageHours: result.ageHours,
-                offsite: result.offsite,
-              },
-            }),
-          );
-        }
+        // [75] A platform page: durable OpsAlert, SUPER_ADMINs in-app + push,
+        // on-call phones texted, escalated until acknowledged.
+        const { pageBackupFreshness } = await import('../modules/ops/backup-freshness');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { result } = await pageBackupFreshness({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
         ctx.log.info({ ...result }, 'backup freshness checked');
         return;
       }
@@ -929,6 +916,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
+        const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
+        await retryAccountErasures(ctx);
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
@@ -1444,8 +1433,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { getChannels } = await import('../providers/notifications/channels');
           const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
           await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
-          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[] }));
-          for (const id of esc.escalated) {
+          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
+          // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
+          for (const id of esc.platformPage) {
             await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
               pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
             ).catch(() => {});
@@ -1460,6 +1450,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { NotificationService: ShareNS } = await import('../modules/notification/notification.service');
           const rot = await rotateLegacyTripShareTokens(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch(() => null);
           if (rot && rot.rotated > 0) ctx.log.warn(rot, '[S-16] legacy plaintext trip-share tokens rotated');
+          // [L10 §2] A guardian who is a Swift user hears, in-app, how the monitoring they were given ended.
+          const { notifyTripShareGuardians } = await import('../modules/safety/trip-share.service');
+          await notifyTripShareGuardians(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch((err) => ctx.log.error({ err }, '[L10 §2] guardian outcome sweep failed'));
         }
         // [S-02] The retrigger log: import any legacy JSON history as rows,
         // then report lost sequences and oversized hot rows.

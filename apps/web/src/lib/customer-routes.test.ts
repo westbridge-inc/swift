@@ -46,6 +46,15 @@ describe('[Q7b] the customer route map', () => {
     for (const root of ['/', '/market', '/account']) expect(customerRoute(root).parent, root).toBeNull();
   });
 
+  it('[WEB-REDESIGN] keeps Account’s own pages under Profile, private, going back to Account', () => {
+    for (const path of ['/account/addresses', '/account/profile', '/account/favourites', '/account/help', '/account/safety']) {
+      const route = customerRoute(path);
+      expect(route.tab, path).toBe('profile');
+      expect(route.parent, path).toBe('/account');
+      expect(route.public, path).toBe(false);
+    }
+  });
+
   it('tells a guest what a private page is for', () => {
     expect(customerRoute('/cart').door.title).toBe('Sign in to start a cart');
     expect(customerRoute('/account').door.title).toBe('You’re browsing as a guest');

@@ -6,7 +6,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LayoutDashboard, ClipboardList, Boxes, FileUp, Receipt, Settings, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleShell } from '@/components/console-shell';
-import { sessionProbe, setSelectedStore } from '@/lib/auth';
+import Link from 'next/link';
+import { ApiRequestError, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
 
@@ -88,7 +89,15 @@ function StoreShell({ children }: { children: React.ReactNode }) {
   // (and remount its subtree) the moment it changes, which a localStorage read
   // alone would never trigger.
   const storeId = useStoreId();
-  const stores = useQuery({ queryKey: ['stores'], queryFn: getStores });
+  const stores = useQuery({
+    queryKey: ['stores'],
+    queryFn: getStores,
+    // "No store yet" (404) is an answer, not a hiccup: never retried.
+    retry: (failures, error) => !(error instanceof ApiRequestError && error.status === 404) && failures < 1,
+  });
+  // A business account whose store was never created: the server answers 404.
+  // That is a step still to do, not a failure.
+  const noStoreYet = stores.error instanceof ApiRequestError && stores.error.status === 404;
   const list: Store[] = useMemo(() => stores.data?.stores ?? [], [stores.data?.stores]);
 
   const onSwitch = useCallback(
@@ -122,10 +131,18 @@ function StoreShell({ children }: { children: React.ReactNode }) {
 
   return (
     <ConsoleShell home="/dashboard" title="Business" navigation={NAV}
-      switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError} />}
+      switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet} />}
       signOutBody="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
       contentKey={storeId ?? 'no-store'}>
-      {storeId ? children : (
+      {noStoreYet ? (
+        <div className="rounded-2xl border border-black/5 bg-white p-6">
+          <p className="text-sm font-semibold">Your business isn&apos;t set up yet.</p>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">Add your store&apos;s details and location to start taking orders.</p>
+          <Link href="/signup?resume=business" className="mt-4 inline-block rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white">
+            Finish setting up your business
+          </Link>
+        </div>
+      ) : storeId ? children : (
         <p className="rounded-2xl border border-black/5 bg-white p-6 text-sm font-semibold text-[var(--swift-muted)]">
           Choose a store to continue.
         </p>

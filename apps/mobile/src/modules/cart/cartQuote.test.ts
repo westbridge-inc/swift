@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  cartPricingChoices, cartStaleCheckoutCode, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
+  cartLineMeta, cartPricingChoices, cartStaleCheckoutCode, pricesAsSeen, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
   pickupRetryChoices, pickupStoreNames, pricedTip, quoteStoreIds, quotedRiderTip, shortStores, type CartQuote,
 } from './cartQuote';
 import { checkoutTipAmount } from './checkout-tip';
@@ -196,4 +196,56 @@ describe('[E07] a checkout refusal because the cart went stale is read as such',
   it('a refusal with no response keeps the one generic fallback — never invented availability copy', () => {
     expect(checkoutErrorMessage(null)).toBe('Could not place the order. Try again.');
   });
+
+  it('[F4] a line whose choices need updating is a stale-cart refusal too: the cart re-reads and the line marks itself', () => {
+    expect(cartStaleCheckoutCode(refused('CART_OPTIONS_CHANGED'))).toBe('CART_OPTIONS_CHANGED');
+    expect(checkoutErrorMessage(refused('CART_OPTIONS_CHANGED', 'Choose your options for Roti again — remove it from your cart and add it from the menu.')))
+      .toBe('Choose your options for Roti again — remove it from your cart and add it from the menu.');
+    expect(checkoutErrorMessage(refused('CART_OPTIONS_CHANGED'))).toBe('The choices for one of your items need updating — remove it and add it again.');
+  });
+});
+
+describe('[row 70] a cart line shows its choices and its note', () => {
+  it('two lines of one item differ by their note, so the note shows', () => {
+    expect(cartLineMeta({ selectedOptionNames: ['Large', 'Cheese'], specialInstructions: ' No onions ' }, null)).toBe('Large, Cheese · Note: No onions');
+    expect(cartLineMeta({ selectedOptionNames: ['Large'], specialInstructions: 'Extra sauce' }, 'GY$1,300 each')).toBe('Large · Note: Extra sauce · GY$1,300 each');
+  });
+
+  it('no note, no options: only what there is', () => {
+    expect(cartLineMeta({ selectedOptionNames: [], specialInstructions: '  ' }, null)).toBe('');
+    expect(cartLineMeta({}, 'GY$500 each')).toBe('GY$500 each');
+  });
+});
+
+describe('[L09 · price lock] Place order carries the prices the customer saw', () => {
+  it('the quote\'s total and each line\'s unit price, as numbers', () => {
+    expect(pricesAsSeen({ totalAmount: '2150.00', items: [{ id: 'l1', customerPrice: 1800 }, { id: 'l2', customerPrice: '350' }] }))
+      .toEqual({ expectedTotal: 2150, expectedLines: [{ lineId: 'l1', unitPrice: 1800 }, { lineId: 'l2', unitPrice: 350 }] });
+  });
+
+  it('no total it can stand behind, nothing sent (the server then compares nothing)', () => {
+    expect(pricesAsSeen(null)).toEqual({});
+    expect(pricesAsSeen({ totalAmount: null, items: [{ id: 'l1', customerPrice: 1800 }] })).toEqual({});
+    expect(pricesAsSeen({ totalAmount: 'abc', items: [] })).toEqual({});
+  });
+
+  it('a line with no readable price is left out rather than sent as 0', () => {
+    expect(pricesAsSeen({ totalAmount: 500, items: [{ id: 'l1', customerPrice: null }, { id: 'l2', customerPrice: 500 }] }))
+      .toEqual({ expectedTotal: 500, expectedLines: [{ lineId: 'l2', unitPrice: 500 }] });
+  });
+
+  it('a refusal because a price changed re-reads the cart and shows the server\'s old → new message', () => {
+    const refused = { response: { data: { error: { code: 'PRICE_CHANGED', message: 'Prices changed since you last looked: Roti GYD 800 → GYD 900. Review your cart and place the order again.' } } } };
+    expect(cartStaleCheckoutCode(refused)).toBe('PRICE_CHANGED');
+    expect(checkoutErrorMessage(refused)).toBe('Prices changed since you last looked: Roti GYD 800 → GYD 900. Review your cart and place the order again.');
+  });
+});
+
+it('[L09 · price lock] CART_CHANGED refuses a stale snapshot and re-quotes the cart', () => {
+  const error = { response: { data: { error: { code: 'CART_CHANGED', message: 'Review your cart and place the order again.' } } } };
+  expect(cartStaleCheckoutCode(error)).toBe('CART_CHANGED');
+  expect(checkoutErrorMessage(error)).toBe('Review your cart and place the order again.');
+  // Without a server message it says what happened, not a stock message.
+  expect(checkoutErrorMessage({ response: { data: { error: { code: 'CART_CHANGED' } } } }))
+    .toBe('Your cart just changed — review it and place the order again.');
 });

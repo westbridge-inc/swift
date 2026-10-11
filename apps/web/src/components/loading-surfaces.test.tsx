@@ -6,7 +6,7 @@ import * as api from '@/lib/customer';
 import { CustomerHome } from './customer-home';
 import SearchPage from '@/app/(app)/order/search/page';
 import MenuPage from '@/app/(app)/order/vendor/[id]/page';
-import MarketPage from '@/app/(app)/market/page';
+import { MarketScreen as MarketPage } from '@/app/(app)/market/market-screen';
 import OrdersPage from '@/app/(app)/orders/page';
 import CartPage from '@/app/(app)/cart/page';
 import OrderPage from '@/app/(app)/orders/[id]/page';
@@ -34,7 +34,8 @@ const vendor = { id: 'v1', name: 'Local store', isCurrentlyOpen: true, displayRa
 describe('loading surfaces become content in the reserved layout', () => {
   it('Home reserves both horizontal rails and a grid of store cards', async () => {
     const response = pending<api.HomeFeed>();
-    vi.spyOn(api, 'getHome').mockReturnValue(response.promise);
+    // [W2] A guest's Home is the public feed, read with no session.
+    vi.spyOn(api, 'getPublicHome').mockReturnValue(response.promise);
     const view = mount(<CustomerHome market="Georgetown" />);
     const region = screen.getByLabelText('Loading home feed');
     expect(region.querySelectorAll('ul')).toHaveLength(2);
@@ -50,12 +51,13 @@ describe('loading surfaces become content in the reserved layout', () => {
     vi.spyOn(api, 'getVendor').mockReturnValue(response.promise);
     const view = mount(<MenuPage />);
     const region = screen.getByLabelText('Loading this store');
-    expect(region.querySelector('.h-44')?.className).toContain('md:h-56');
+    // [WEB-REDESIGN] The design's photo band: 300 px on phones, 340 from 760 px.
+    expect(region.querySelector('[class*="h-[300px]"]')?.className).toContain('wide:h-[340px]');
     expect(region.querySelector('.swift-menu-heading')).toBeTruthy();
     expect(region.querySelector('.swift-menu-item')).toBeTruthy();
     await response.finish(vendor);
     expect(await screen.findByRole('button', { name: /Lunch box/ })).toBeTruthy();
-    expect(view.container.querySelector('.h-44')?.className).toContain('md:h-56');
+    expect(view.container.querySelector('[class*="h-[300px]"]')?.className).toContain('wide:h-[340px]');
     expect(view.container.querySelector('.swift-menu-heading')).toBeTruthy();
     expect(view.container.querySelector('.swift-menu-item')).toBeTruthy();
   });
@@ -67,12 +69,13 @@ describe('loading surfaces become content in the reserved layout', () => {
     vi.spyOn(api, 'getMarketItems').mockReturnValue(response.promise);
     const view = mount(<MarketPage />);
     const region = screen.getByLabelText('Loading market items');
-    expect(region.querySelector('.h-36')).toBeTruthy();
+    // [WEB-REDESIGN] Square item photos, as in the design.
+    expect(region.querySelector('.aspect-square')).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Market' })).toBeTruthy();
     await response.finish({ items: [{ id: 'i1', name: 'Hammer', basePrice: 500, vendorId: 'v1', vendorName: 'Local store', imageUrl: null, isNew: false, categoryName: 'Tools' }], nextCursor: null });
     expect(await screen.findByRole('link', { name: /Hammer/ })).toBeTruthy();
-    expect(view.container.querySelector('.h-36')).toBeTruthy();
-    expect(screen.getByRole('navigation', { name: 'Market categories' }).className).toContain('h-12');
+    expect(view.container.querySelector('.aspect-square')).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Market categories' }).className).toContain('h-[60px]');
   });
 
   it('orders use the same row size before and after the list arrives', async () => {
@@ -81,7 +84,8 @@ describe('loading surfaces become content in the reserved layout', () => {
     const view = mount(<OrdersPage />);
     expect(screen.getByLabelText('Loading your orders').querySelector('.swift-order-row')).toBeTruthy();
     await response.finish([{ id: 'o1', vendorName: 'Local store', status: 'PENDING', totalAmount: 500 }]);
-    expect(await screen.findByRole('link', { name: /Local store/ })).toBeTruthy();
+    // The row (its name first); the in-progress band's Track link names it too.
+    expect(await screen.findByRole('link', { name: /^Local store/ })).toBeTruthy();
     expect(view.container.querySelector('.swift-order-row')).toBeTruthy();
   });
 

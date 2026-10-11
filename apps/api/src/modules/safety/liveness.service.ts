@@ -1,3 +1,4 @@
+import { taxiNotificationData } from '../rides/taxi-notification';
 import type { PrismaClient, LivenessOutcome, LivenessPurpose } from '@prisma/client';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import type { Server } from 'socket.io';
@@ -464,7 +465,7 @@ export class LivenessService {
       type: 'ORDER_UPDATE',
       title: 'Finding you another driver',
       body: 'Do not enter the vehicle. We are matching you with the nearest available driver now.',
-      data: { orderId: releasedOrder.id, status: 'PENDING' },
+      data: taxiNotificationData(releasedOrder.id, { status: 'PENDING' }),
     }).catch((err) => log().error({ err, orderId: releasedOrder.id }, 'not-my-driver: passenger notification failed — redispatch is durable regardless'));
     // The inline fast path publishes the SAME job the outbox drainer would
     // (deterministic jobId); on success the command is marked done so the

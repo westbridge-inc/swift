@@ -101,14 +101,16 @@ describe('[W-13] formatting never invents a figure', () => {
     expect(money(undefined)).toBe(MONEY_UNKNOWN);
     expect(money(null)).toBe(MONEY_UNKNOWN);
     expect(money(NaN)).toBe(MONEY_UNKNOWN);
-    expect(money(0)).toBe('GY$0'); // free is still free
-    expect(money('4000.00')).toBe('GY$4,000');
+    // [WEB-REDESIGN] Customer prices read like the phone app's: `$4,000`.
+    expect(money(0)).toBe('$0'); // free is still free
+    expect(money('4000.00')).toBe('$4,000');
   });
 
-  it('the vendor and customer formatters share the GY$ presentation', () => {
+  it('the vendor and customer formatters read the same figure (GY$ for partners, $ for customers, as in the phone app)', () => {
     expect(vendorMoney(undefined)).toBe(MONEY_UNKNOWN);
     expect(vendorMoney('4500.00')).toBe('GY$4,500');
-    expect(vendorMoney('4500.00')).toBe(money('4500.00'));
+    expect(money('4500.00')).toBe('$4,500');
+    expect(vendorMoney('4500.00').replace('GY$', '')).toBe(money('4500.00').replace('$', ''));
     expect(toAmount('4500.00')).toBe(4500);
     expect(toAmount('')).toBeNull();
   });
@@ -145,7 +147,7 @@ describe('[W-13] the surfaces that spent money use it', () => {
     const vendor = source('src/lib/vendor-api.ts');
     const customer = source('src/lib/customer.ts');
     expect(vendor).toMatch(/return parseAmount\(value\);/);
-    expect(customer).toMatch(/formatMoney\(n\)/);
+    expect(customer).toMatch(/formatAmount\(n, '\$'\)/);
     // the permissive one is gone — checked on CODE, not on the comment that
     // quotes it (a census that matches its own documentation proves nothing)
     const code = customer.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');

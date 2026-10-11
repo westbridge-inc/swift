@@ -52,6 +52,7 @@ let seq = 0;
  *  captures twice. */
 class FakeCardRail implements CardRailProvider {
   readonly simulator = false;
+  readonly savesCards = true;
   mode: 'ok' | 'decline' | 'requires_action' | 'capture-then-timeout' | 'misprice' = 'ok';
   readonly charges: Array<{ vaultToken: string; binding: CardRailBinding; idempotencyKey: string; amountMinor: number; currencyCode: string }> = [];
   readonly retrieves: string[] = [];

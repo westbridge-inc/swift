@@ -1,9 +1,9 @@
 import type { PrismaClient, SosEscalationChannel } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, isReviewTenantId } from '../notification/notification.service';
 import { openOpsAlert } from './ops-alert';
-import { warRoomsFor } from './war-room';
+import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { isOwnNumber } from './emergency-contact.service';
 import { log } from '../../utils/logger';
 import { sosEscalationCounter, sosEscalationGauge } from '../../plugins/observability';
@@ -121,7 +121,9 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
     }
     case 'WAR_ROOM': {
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
-      const rooms = warRoomsFor(alert.tenantId);
+      // [GUARDRAILS §3] the store-review fiction's SOS stays in its own tenant's room: no platform operator sees a demo emergency
+      const fiction = alert.tenantId ? await isReviewTenantId(prisma, alert.tenantId) : false;
+      const rooms = warRoomsFor(alert.tenantId).filter((room) => !(fiction && room === OPS_WAR_ROOM));
       // [PRIV2-S2] The war room is the one live surface that may carry the
       // words the person typed: only ADMIN / SUPER_ADMIN sockets join these
       // rooms (war-room.ts), in-process, no relay, no lock screen. The other

@@ -31,7 +31,7 @@ export default function HowItWorksPage() {
         <h2 className="text-2xl font-bold">Ordering</h2>
         <ol className="mt-6 grid gap-6 md:grid-cols-2">
           {CUSTOMER_STEPS.map(([title, body], i) => (
-            <li key={title} className="rounded-2xl bg-white p-6 shadow-sm">
+            <li key={title} className="rounded-2xl bg-[var(--swift-card)] p-6 shadow-[var(--swift-elevation-card)]">
               <span className="text-sm font-bold text-[var(--swift-red)]">Step {i + 1}</span>
               <h3 className="mt-1 text-lg font-bold">{title}</h3>
               <p className="mt-2 text-[var(--swift-muted)]">{body}</p>
@@ -43,7 +43,7 @@ export default function HowItWorksPage() {
         <h2 className="text-2xl font-bold">Rides</h2>
         <ol className="mt-6 grid gap-6 md:grid-cols-2">
           {RIDE_STEPS.map(([title, body], i) => (
-            <li key={title} className="rounded-2xl border border-black/5 p-6">
+            <li key={title} className="rounded-2xl border border-[var(--swift-border)] p-6">
               <span className="text-sm font-bold text-[var(--swift-red)]">Step {i + 1}</span>
               <h3 className="mt-1 text-lg font-bold">{title}</h3>
               <p className="mt-2 text-[var(--swift-muted)]">{body}</p>

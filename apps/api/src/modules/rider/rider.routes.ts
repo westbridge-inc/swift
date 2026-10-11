@@ -1,7 +1,7 @@
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -47,6 +47,7 @@ import { log } from '../../utils/logger';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
+import { goOnlineRefusal } from '../subscription/go-online-refusals';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
@@ -69,6 +70,7 @@ import {
   RIDER_IN_CUSTODY_STATUSES,
   RIDER_PICKUP_FROM,
 } from '../order/order-status';
+import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -618,7 +620,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
     const verified = await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
-      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
+      throw goOnlineRefusal('DOCUMENTS', 'RIDER');
     }
 
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — a missing row is
@@ -628,9 +630,10 @@ export async function riderRoutes(app: FastifyInstance) {
     const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
-        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
+        throw goOnlineRefusal('FEE_GRACE_LAPSED', 'RIDER');
       }
-      throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your subscription is unpaid. Top up or pay to go back online.');
+      // [NO-DEAD-ENDS] Never "top up": the fee is paid under Weekly fee (go-online-refusals.ts).
+      throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
     }
 
     // Identity assurance (safety spec §7.1): when the tenant enables liveness,
@@ -660,7 +663,7 @@ export async function riderRoutes(app: FastifyInstance) {
       assertMoverRoleAuthority(authority.activeRole, 'RIDER');
       await lockMoverSources(tx, feePayer);
       if (!(await moverFeeOperability(tx, feePayer, { missingRow: 'GRANDFATHER' })).operable) {
-        throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your shared weekly fee does not currently permit going online.');
+        throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
       }
 
       // Authentication can be revoked after the Fastify pre-handler but while
@@ -2233,13 +2236,16 @@ export async function riderRoutes(app: FastifyInstance) {
   // follows a checkout for their own weekly fee: the payer's ONE canonical
   // subscription [#1393 mover fee authority], the same one GET /subscription
   // shows, which may sit on the mover's driver profile.
-  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
-    subscriptionFor: async (request) => {
-      const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
-      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
-      return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
-    },
-  });
+  const feeSubscriptionFor = async (request: FastifyRequest) => {
+    const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+    return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+  };
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, { subscriptionFor: feeSubscriptionFor });
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the rider
+  // lists, removes, adds and pays by card for the same subscription. Card rail
+  // v2 stays behind CARD_RAIL_V2 (default off).
+  const cardRail = registerPartnerCardRoutes(app, { subscriptionFor: feeSubscriptionFor });
 
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const found = await app.prisma.rider.findUnique({
@@ -2280,7 +2286,7 @@ export async function riderRoutes(app: FastifyInstance) {
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-        ...(await mmgCheckout.feePayload(sub, request.headers, now)),
+        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)
