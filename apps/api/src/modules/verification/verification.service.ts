@@ -4,7 +4,7 @@ import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor, recordEvidenceFor, hirePermitGraceUntil, type EvidenceRow } from './evidence';
@@ -487,6 +487,11 @@ export class VerificationService {
     // the same set auth.ts cuts off, nothing more.
     if (['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(user.status)) {
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
+    }
+    // [VERIFY-DOCS · owner ruling 5] Never a medical document, whatever a stored list names: refused
+    // before anything is recorded or sent anywhere.
+    if (isNeverAcceptedDocType(docType)) {
+      throw new AppError(400, 'DOC_TYPE_NOT_ACCEPTED', 'Swift does not accept medical documents. Remove it and upload the document your checklist asks for.');
     }
     const authority = roleKey === 'MOVER' && BUCKET_OF[docType] === 'VEHICLE'
       ? await captureSubmissionAuthority(this.prisma, userId, authenticatedRole) : undefined;
@@ -1303,10 +1308,19 @@ export class VerificationService {
    * gate apply a stricter MOTORCYCLE default for the null case.
    */
   private async getMoverVehicleType(userId: string): Promise<VehicleType | null> {
-    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } });
-    if (driver) return driver.vehicleType;
-    const rider = await this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } });
-    return rider?.vehicleType ?? null;
+    const [user, rider, driver] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
+      this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    ]);
+    if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
+    if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
+    if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+      if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
+      if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
+    }
+    // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+    return rider?.vehicleType ?? driver?.vehicleType ?? null;
   }
 
   /**
@@ -1802,11 +1816,20 @@ export class VerificationService {
     if (role !== 'MOVER' && role !== 'RIDER' && role !== 'DRIVER') return false;
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
+    // [VERIFY-DOCS · ruling 8] The retired permit is optional only once BOTH replacement licences are on record.
     if (docType === HIRE_PERMIT_DOC_TYPE) {
       const replacement = await recordEvidenceFor(this.prisma, userId, HIRE_SPLIT_DOC_TYPES, new Date());
       return HIRE_SPLIT_DOC_TYPES.every((type) => replacement.some((row) => row.docType === type && row.subjectId !== null));
     }
-    return !(await this.checklistFor(userId, user.countryCode, 'MOVER')).includes(docType);
+    const [rider, driver] = await Promise.all([
+      this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    ]);
+    const vehicles = [rider?.vehicleType, driver?.vehicleType].filter((type): type is VehicleType => !!type);
+    if (vehicles.length === 0) return false;
+    // Expiry can stop either retained profile, even while the other surface is active.
+    const required = await Promise.all(vehicles.map((type) => this.countryConfig.getMoverChecklist(user.countryCode, type)));
+    return required.every((list) => !list.includes(docType));
   }
 
   /** One reminder per document, 30 days before expiry. */
