@@ -469,7 +469,11 @@ def caddy_render(text: str, env: dict) -> str:
 
 
 def top_level_blocks(rendered: str):
-    """[addresses, body lines] for every top-level block of a rendered Caddyfile."""
+    """[addresses, body lines] for every top-level SITE block of a rendered
+    Caddyfile. The file opens with Caddy's global options block (the log filter
+    that keeps credentials out of proxy-failure logs, #1435); having no address,
+    it is no site and is left out. Only the FIRST block may be address-less:
+    any later one is a site that lost its address, and is returned as such."""
     blocks, depth = [], 0
     for raw in rendered.splitlines():
         line = raw.split("#", 1)[0].strip()
@@ -484,6 +488,10 @@ def top_level_blocks(rendered: str):
         depth += line.count("{") - line.count("}")
         if depth > 0:
             blocks[-1][1].append(line)
+    if blocks and not blocks[0][0]:
+        global_options = blocks.pop(0)[1]
+        if not global_options or global_options[0] != "log {":
+            raise AssertionError(f"the global options block holds more than the log filter: {global_options!r}")
     return blocks
 
 
@@ -622,6 +630,14 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
     def test_the_website_keeps_its_own_security_headers(self):
         # next.config.ts sets them; the proxy neither duplicates nor overrides any.
         self.assertNotRegex(self.TEXT, r"(?m)^\s*header\b")
+
+
+def with_global_options(text: str, options: str) -> str:
+    """The Caddyfile with test-only global options added to its own global
+    options block, which must open the file (Caddy refuses a second one)."""
+    if not text.startswith("{\n"):
+        raise AssertionError("the Caddyfile must open with its global options block")
+    return "{\n" + options + text[len("{\n"):]
 
 
 def caddy_image_present() -> bool:
@@ -1226,10 +1242,12 @@ class AdminConsoleCaddyfile(unittest.TestCase):
 class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     """The real Caddyfile through the stack's pinned Caddy (no network, no pull)."""
 
-    # Live runs only: a test-only global block swaps ACME for Caddy's own local
+    # Live runs only: test-only global options swap ACME for Caddy's own local
     # CA (nothing leaves the container), and a stand-in on :3000 answers for
-    # the console and echoes any Authorization header that reaches it.
-    LIVE_PREFIX = "{\n    local_certs\n    skip_install_trust\n    admin off\n}\n"
+    # the console and echoes any Authorization header that reaches it. Caddy
+    # takes ONE global options block, first in the file, and the file opens
+    # with its own (the log filter), so the options join that block.
+    LIVE_OPTIONS = "    local_certs\n    skip_install_trust\n    admin off\n"
     STAND_IN = '\nhttp://:3000 {\n    respond "authorization=[{http.request.header.Authorization}]" 200\n}\n'
 
     @classmethod
@@ -1298,7 +1316,8 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     def serve(self, env) -> str:
         tmp = Path(tempfile.mkdtemp(prefix="swift-admin-caddy-test-"))
         self.addCleanup(shutil.rmtree, tmp, True)
-        (tmp / "Caddyfile").write_text(self.LIVE_PREFIX + (DEPLOY / "Caddyfile").read_text() + self.STAND_IN)
+        (tmp / "Caddyfile").write_text(with_global_options((DEPLOY / "Caddyfile").read_text(), self.LIVE_OPTIONS)
+                                       + self.STAND_IN)
         name = f"swift-admin-caddy-test-{secrets.token_hex(4)}"
         args = ["docker", "run", "-d", "--name", name, "--network", "none"]
         for host in (API_HOST, ADMIN_HOST, "admin"):
