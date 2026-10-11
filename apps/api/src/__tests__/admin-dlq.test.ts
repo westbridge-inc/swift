@@ -365,6 +365,28 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
     expect(retried!.attemptsMade).toBe(1);
   });
 
+  it('[Item 63 · review] a dead vendor-alert escalation can be replayed by ops once they reconcile it — and the replay runs once', async () => {
+    const job = await failedJob(`escalate-${nanoid(6)}`, 'vendor-alert-escalate');
+    const blind = await app.inject({
+      method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue`,
+      headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {},
+    });
+    expect(blind.statusCode, blind.body).toBe(409);
+    expect(blind.json().error.details.policy).toBe('RECONCILE_FIRST');
+    expect(await job.getState()).toBe('failed');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/admin/dlq/order/${job.id}/requeue?acknowledgedReconciled=true`,
+      headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {},
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await job.getState()).toBe('waiting');
+    // Both counters start again for an uncertified class: a worker dying in
+    // the middle of THIS run is a prior start the automatic-replay guard
+    // refuses, so the operator's one replay can never become two.
+    const retried = await testQueue.getJob(job.id!);
+    expect({ started: retried!.attemptsStarted, made: retried!.attemptsMade }).toEqual({ started: 0, made: 0 });
+  });
+
   it('every listed dead job carries its own policy — one blanket promise no longer stands for 53', async () => {
     const job = await failedJob(`listed-${nanoid(6)}`, 'process-billing');
     const res = await app.inject({ method: 'GET', url: '/api/v1/admin/dlq', headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON } });

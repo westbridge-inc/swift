@@ -75,8 +75,8 @@ describe('[Item 63] automatic retries require certified replay safety', () => {
     expect(r.state).toBe('failed');
   });
 
-  it('a stalled uncertified job is refused before its handler runs again, and stays dead for a person', async () => {
-    const r = await run('process-billing', 1);
+  it.each(['process-billing', 'vendor-alert-escalate'])('a stalled uncertified job (%s) is refused before its handler runs again, and stays dead for a person', async (name) => {
+    const r = await run(name, 1);
     expect(r.error?.message).toContain('Automatic replay is not certified for this job class');
     expect(r.effects).toHaveLength(0);
     expect(r.attemptsMade).toBe(1);
@@ -88,6 +88,39 @@ describe('[Item 63] automatic retries require certified replay safety', () => {
     expect(r.error?.message).toContain('synthetic failure after effect');
     expect(r.effects).toHaveLength(3);
     expect(r.attemptsMade).toBe(3);
+  });
+
+  it('a failure keeps its own code and cause for the logs and error reports', async () => {
+    const redis = new Redis(process.env['REDIS_URL']!);
+    const connection = bullConnectionOpts(redis);
+    const queueName = `retry-policy-cause-${randomUUID()}`;
+    const queue = new Queue(queueName, { connection });
+    const original = Object.assign(new Error('store said no'), { code: 'STORE_REFUSED' });
+    let seen: unknown;
+    const worker = new Worker(queueName, inJobContext(queueName, async () => { throw original; }), { connection, autorun: false });
+    worker.on('failed', (_job, err) => { seen = err; });
+    try {
+      const events = new QueueEvents(queueName, { connection });
+      await events.waitUntilReady();
+      const job = await queue.add('process-billing', {}, { attempts: 3 });
+      const finished = job.waitUntilFinished(events, 15_000).catch(() => undefined);
+      void worker.run();
+      await finished;
+      await events.close();
+      expect(seen).toMatchObject({ message: 'store said no', code: 'STORE_REFUSED', cause: original });
+    } finally {
+      await worker.close();
+      await queue.obliterate({ force: true });
+      await queue.close();
+      redis.disconnect();
+    }
+  });
+
+  it('every class the workers dispatch has a recovery answer, including the ones guarded by !==', () => {
+    for (const name of ['vendor-alert-escalate', 'process-settlements', 'sync-vendor']) {
+      expect(Object.keys(JOB_RECOVERY), name).toContain(name);
+    }
+    expect(JOB_RECOVERY['vendor-alert-escalate' as keyof typeof JOB_RECOVERY]?.policy).toBe('RECONCILE_FIRST');
   });
 
   it('the one-shot order jobs with no backstop sweep stay retryable — each was certified by reading its handler', () => {
