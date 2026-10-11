@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as server from '../../../api/src/modules/order/options';
-import { fromPrice, needsChoices, selectionComplete, selectionPrice, validateSelectedOptions, OptionSelectionError } from './menu-options';
+import { fromPrice, needsChoices, requiredChoiceSoldOut, selectionComplete, selectionPrice, validateSelectedOptions, OptionSelectionError } from './menu-options';
 
 // [W6] The website judges and prices an item's choices with the API's own
 // module — the same functions, not a copy — so the store page can never accept
@@ -57,6 +57,20 @@ describe('[W6] "From" and the sheet’s price', () => {
     expect(fromPrice({ basePrice: Number.NaN })).toBeNull();
     expect(fromPrice({ basePrice: 800, optionGroups: [group('size', true, 1, 1, [['l', 'abc']])] })).toBeNull();
     expect(selectionPrice({ basePrice: 800, optionGroups: [group('size', true, 1, 1, [['l', 'abc']])] }, { size: ['l'] })).toBeNull();
+  });
+
+  it('an item a required choice is sold out for has no From price: nobody can order it at any price right now', () => {
+    // Every size sold out.
+    expect(fromPrice({ basePrice: 800, optionGroups: [group('size', true, 1, 1, [['s', '0', false], ['l', '400', false]])] })).toBeNull();
+    // Two sides needed, one left on sale.
+    expect(fromPrice({ basePrice: 800, optionGroups: [group('sides', true, 2, 3, [['a', '100'], ['b', '100', false]])] })).toBeNull();
+    expect(requiredChoiceSoldOut({ basePrice: 800, optionGroups: [group('size', true, 1, 1, [['s', '0', false]])] })).toBe(true);
+    // A sold-out OPTIONAL group never blocks the item.
+    const optional = { basePrice: 800, optionGroups: [group('extras', false, 0, 2, [['x', '50', false]])] };
+    expect(fromPrice(optional)).toBe(800);
+    expect(requiredChoiceSoldOut(optional)).toBe(false);
+    // Exactly enough on sale still has a From price.
+    expect(fromPrice({ basePrice: 800, optionGroups: [group('sides', true, 2, 3, [['a', '100'], ['b', '150'], ['c', '50', false]])] })).toBe(1050);
   });
 
   it('the sheet’s price is the item plus each chosen choice of the item’s own groups', () => {

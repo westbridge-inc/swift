@@ -12,7 +12,7 @@
  * added and again at checkout.
  */
 import { parseAmount } from './money';
-import { resolveSelectedOptions, validateSelectedOptions } from '../../../api/src/modules/order/options';
+import { normalizeItemNote, resolveSelectedOptions, validateSelectedOptions } from '../../../api/src/modules/order/options';
 
 export { OptionSelectionError, resolveSelectedOptions, validateSelectedOptions } from '../../../api/src/modules/order/options';
 export type { OptionSelection, OptionSelectionReason, ValidatableGroup } from '../../../api/src/modules/order/options';
@@ -47,13 +47,23 @@ export function opensChoices(item: PricedItem): boolean {
 }
 
 /**
+ * A required group has fewer choices on sale than it needs, so the item
+ * cannot be ordered with any selection right now (the sheet says which).
+ */
+export function requiredChoiceSoldOut(item: PricedItem): boolean {
+  return (item.optionGroups ?? []).some((group) =>
+    group.options.filter((option) => option.isAvailable !== false).length < requiredCount(group));
+}
+
+/**
  * The lowest price the item can be ordered at: its price plus the cheapest
  * choices each required group needs, counting only choices on sale. This is
- * the "From" figure on the menu. Null when any figure in it cannot be read.
+ * the "From" figure on the menu. Null when any figure in it cannot be read,
+ * and when a required choice is sold out: no price can be ordered at then.
  */
 export function fromPrice(item: PricedItem): number | null {
   const base = basePrice(item);
-  if (base === null) return null;
+  if (base === null || requiredChoiceSoldOut(item)) return null;
   let total = base;
   for (const group of item.optionGroups ?? []) {
     const needed = requiredCount(group);
@@ -69,6 +79,19 @@ export function fromPrice(item: PricedItem): number | null {
     for (const delta of deltas.slice(0, needed)) total += delta;
   }
   return total;
+}
+
+/**
+ * A cart line in the item's plain configuration: no choice and no note —
+ * exactly what one tap adds (the server keys a line by item, choices and the
+ * note it normalises with `normalizeItemNote`).
+ */
+export function isPlainLine(line: { selectedOptions?: unknown; selectedOptionNames?: readonly string[] | null; specialInstructions?: string | null }): boolean {
+  const selection = line.selectedOptions;
+  const chosen = selection && typeof selection === 'object' && !Array.isArray(selection)
+    ? Object.values(selection as Record<string, unknown>).some((value) => (Array.isArray(value) ? value.length > 0 : Boolean(value)))
+    : false;
+  return !chosen && (line.selectedOptionNames?.length ?? 0) === 0 && normalizeItemNote(line.specialInstructions) === null;
 }
 
 /**

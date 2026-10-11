@@ -35,6 +35,10 @@ export function changeGuestQuantity(id: string, quantity: number) {
   save(basket);
 }
 export function clearGuestBasket() { const basket = readGuestBasket(); editable(basket); save(empty()); }
+/** Throw the browser copy away, even mid-upload. Safe: the server's upload
+ *  receipt is the record, and an upload that committed is already in that
+ *  account's saved cart, so nothing can be added twice. */
+export function discardGuestBasket() { save(empty()); }
 export function prepareGuestMerge(scope: string) {
   const basket = readGuestBasket();
   if (basket.pending) {

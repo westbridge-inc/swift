@@ -41,6 +41,17 @@ describe('the old store address', () => {
     expect(await response.text()).toContain('noindex');
   });
 
+  it('answers 503, never "not found", when the store could not be checked', async () => {
+    vi.mocked(vendorSeed).mockRejectedValue(new Error('The Swift API could not be read.'));
+    const response = await open('v1', '?item=roti');
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Location')).toBeNull();
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const html = await response.text();
+    expect(html).toContain('Swift could not check this store right now');
+    expect(html).not.toContain('no longer be listed');
+  });
+
   it('does not invent an address for a store the server sent without a name', async () => {
     vi.mocked(vendorSeed).mockResolvedValue({ data: { id: 'v1', slug: '' } as never, at: 0 });
     const response = await open('v1');

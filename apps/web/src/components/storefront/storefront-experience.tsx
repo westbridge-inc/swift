@@ -32,7 +32,9 @@ import {
   OptionSelectionError,
   basePrice,
   fromPrice,
+  isPlainLine,
   opensChoices,
+  requiredChoiceSoldOut,
   requiredCount,
   selectionPrice,
   validateSelectedOptions,
@@ -332,6 +334,16 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
 
   const quantities = new Map<string, number>();
   for (const line of cartItems) quantities.set(line.itemId, (quantities.get(line.itemId) ?? 0) + line.quantity);
+  /**
+   * [W6] The line the row's "−" takes one from: the item's plain line (no
+   * choice, no note), which is exactly what "+" adds, and only while it is
+   * the item's ONLY configuration in the order. Otherwise null: the row shows
+   * no "−", and the order panel's × removes a chosen line by name.
+   */
+  const stepperLine = (itemId: string) => {
+    const lines = cartItems.filter((line) => line.itemId === itemId);
+    return lines.length > 0 && lines.every(isPlainLine) ? lines.at(-1)! : null;
+  };
 
   const showNotice = (message: string, added = false) => {
     setNotice({ message, added });
@@ -475,14 +487,14 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
 
   const subtractItem = async (item: DisplayItem) => {
+    // [W6] The row's "−" takes one from the item's plain line only (what "+"
+    // adds) — in a guest's browser basket exactly as in a saved cart.
+    const line = stepperLine(item.id);
+    if (!line) return;
     if (!signedIn) {
-      const line = guestBasket.lines.filter(l => l.itemId === item.id).at(-1);
-      if (line) { try { const { changeGuestQuantity } = await import('@/lib/basket'); changeGuestQuantity(line.clientLineId, line.quantity - 1); } catch (e) { setError((e as Error).message); } }
+      try { const { changeGuestQuantity } = await import('@/lib/basket'); changeGuestQuantity(line.id, line.quantity - 1); } catch (e) { setError((e as Error).message); }
       return;
     }
-    const matching = cartItems.filter((line) => line.itemId === item.id);
-    const line = matching.at(-1);
-    if (!line) return;
     void mutateItem(
       item.id,
       () => (line.quantity <= 1 ? removeCartLine(line.id) : updateCartLine(line.id, line.quantity - 1)),
@@ -666,6 +678,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                     const available = item.isAvailable && orderable && item.fulfillment === 'DELIVERY' && priced;
                     const choices = opensChoices(item);
                     const optional = !choices && (item.optionGroups?.length ?? 0) > 0;
+                    const from = choices ? fromPrice(item) : null;
+                    const choiceSoldOut = choices && item.isAvailable && requiredChoiceSoldOut(item);
+                    const stepper = quantity > 0 && stepperLine(item.id) !== null;
                     return (
                       <article
                         key={item.id}
@@ -683,7 +698,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                           <div className={styles.itemMeta}>
                             {item.isPopular ? <span className={styles.popular}>Popular</span> : null}
                             {item.unit ? <span className={styles.unit}>per {item.unit}</span> : null}
-                            {!item.isAvailable ? <span className={styles.soldOut}>Sold out</span> : null}
+                            {!item.isAvailable || choiceSoldOut ? <span className={styles.soldOut}>Sold out</span> : null}
                             {item.isAvailable && !priced ? (
                               <span className={styles.soldOut}>Price unavailable</span>
                             ) : null}
@@ -701,8 +716,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                           </div>
                           <div className={styles.itemFoot}>
                             <span className={styles.itemPrice}>
-                              {choices ? <span className={styles.fromLabel}>From</span> : null}
-                              <span>{gyMoney(choices ? fromPrice(item) : itemPrice(item))}</span>
+                              {choices && from !== null ? <span className={styles.fromLabel}>From</span> : null}
+                              <span>{gyMoney(choices ? from : itemPrice(item))}</span>
                             </span>
                             {!fulfillmentVerified ? (
                               <span className={styles.unavailableAction}>Ordering unavailable</span>
@@ -720,7 +735,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                               >
                                 Choose
                               </button>
-                            ) : quantity > 0 ? (
+                            ) : stepper ? (
                               <div className={styles.quantity} aria-label={`${item.name} quantity`}>
                                 <button
                                   type="button"
@@ -753,7 +768,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                                   : storeAcceptsOrders && !catalogVerified
                                   ? `${item.name} unavailable until menu choices are verified`
                                   : orderable
-                                    ? `Add ${item.name}`
+                                    ? quantity > 0 ? `Add another ${item.name}` : `Add ${item.name}`
                                     : !catalog.isCurrentlyOpen
                                       ? `${item.name} unavailable while the store is closed`
                                       : `${item.name} unavailable while the store has paused orders`}

@@ -11,11 +11,18 @@ import { canonicalStorePath } from '@/components/storefront/store-path';
  *
  * The store is read as a GUEST (lib/browse-server.ts: no cookie, no person),
  * only for an id that can be a store id. A store the server does not show is
- * "not found" here, never a made-up address.
+ * "not found" here, never a made-up address. A store Swift could not CHECK
+ * (no answer, a timeout, a server error) is not called "not found": the
+ * visitor is told to try again, and nothing is cached.
  */
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }): Promise<Response> {
   const { id } = await params;
-  const seed = await vendorSeed(id);
+  let seed: Awaited<ReturnType<typeof vendorSeed>>;
+  try {
+    seed = await vendorSeed(id);
+  } catch {
+    return new Response(UNAVAILABLE, { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '30' } });
+  }
   const slug = seed?.data.slug;
   if (typeof slug !== 'string' || slug.length === 0) {
     return new Response(NOT_FOUND, { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
@@ -33,6 +40,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     headers: { Location: canonicalStorePath(slug, query), 'Cache-Control': 'public, max-age=3600' },
   });
 }
+
+// The retry link is the address the visitor asked for (an empty href), so
+// nothing from that address is ever written into the page.
+const UNAVAILABLE = '<!doctype html><html lang="en-GY"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Store unavailable — Swift</title></head>'
+  + '<body><main><h1>Swift could not check this store right now</h1><p>Please try again in a moment. Nothing has been ordered or charged.</p><p><a href="">Try again</a> · <a href="/">Browse stores on Swift</a></p></main></body></html>';
 
 const NOT_FOUND = '<!doctype html><html lang="en-GY"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Store not found — Swift</title></head>'
   + '<body><main><h1>This store page is not available</h1><p>The link may be old, or this store may no longer be listed on Swift. Nothing has been ordered or charged.</p><p><a href="/">Browse stores on Swift</a></p></main></body></html>';
