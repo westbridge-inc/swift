@@ -12,6 +12,15 @@ export function mmgMoneyMoved(paymentStatus: string | null | undefined): boolean
   return (MMG_MONEY_MOVED as readonly string[]).includes(String(paymentStatus ?? ''));
 }
 
+/**
+ * THE rule for every place the web can accept an order (the board card, the
+ * new-order popup, the order window): payment-first — an MMG order is held
+ * back until its money has moved; the server refuses it otherwise.
+ */
+export function acceptHeldForPayment(order: { paymentMethod?: string | null; paymentStatus?: string | null }): boolean {
+  return order.paymentMethod === 'MOBILE_MONEY' && !mmgMoneyMoved(order.paymentStatus);
+}
+
 /** What a moved payment is called. A store's own report is never "confirmed":
  *  only the provider confirms (the receipt says "reported received by the
  *  store — not confirmed by the provider"). */

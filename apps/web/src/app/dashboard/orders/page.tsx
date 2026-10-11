@@ -10,7 +10,7 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
 import { useStoreRole } from '@/lib/store-role';
-import { mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
+import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../../../mobile/src/modules/vendor/order-dispute';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
@@ -300,9 +300,8 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // Payment-first, the same rule as the card (lib/mmg-pay-words): an MMG order
   // is accepted only once its money has moved (CAPTURED or CLAIMED). Until then
   // the window offers the store's confirmation, or says why it cannot.
-  const mmgUnpaid = o.paymentMethod === 'MOBILE_MONEY' && !mmgMoneyMoved(o.paymentStatus);
   const actions = (paused ? actionsFor(o).filter((a) => a.kind === 'reject') : actionsFor(o))
-    .filter((a) => !(a.kind === 'accept' && mmgUnpaid));
+    .filter((a) => !(a.kind === 'accept' && acceptHeldForPayment(o)));
   const pickable = ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   // [W-25] The old predicate was "not captured and not cancelled", so a
@@ -636,7 +635,7 @@ export default function OrdersPage() {
   const storeLive = store.data?.status == null || store.data.status === 'ACTIVE';
   const lastOrderAt = all.map((o) => o.placedAt).filter(Boolean).sort().at(-1);
   return <div className="space-y-6">
-    <NewOrderTakeover orders={all} />
+    <NewOrderTakeover orders={all} onOpenOrder={setSelected} />
     <StoreHeader store={store.data} action={<button onClick={() => orders.refetch()} className="sw-btn sw-btn-md sw-btn-outline"><RefreshCw size={16} className={orders.isFetching ? 'animate-spin' : ''} aria-hidden />Refresh</button>} />
     {manager ? <RevenuePulse newOrders={newOrders} /> : <LoadedBoard loading={orders.isLoading} unavailable={orders.isError && !orders.data} total={activeCount} newCount={newOrders.length} progressCount={activeCount - newOrders.length} />}
     <div>

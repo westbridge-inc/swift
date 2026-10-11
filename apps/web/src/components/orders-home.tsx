@@ -24,7 +24,7 @@ import {
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
-import { mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
+import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../mobile/src/modules/vendor/order-dispute';
 
@@ -467,7 +467,7 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
   const canConfirm = attestable && order.canConfirmPayment === true;
   const blockedReason = isMmg && !moneyMoved && !attestable && !terminal ? mmgPayBlockedReason(order.paymentStatus) : null;
   const paused = mmgDisputePaused(order);
-  const actions = orderActions(order).filter((a) => !(a.action === 'accept' && isMmg && !moneyMoved));
+  const actions = orderActions(order).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
   if (actions.length === 0 && !isMmg && !paused) return null;
   const busy = act.isPending || reject.isPending;
   return (

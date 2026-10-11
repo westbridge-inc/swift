@@ -479,3 +479,49 @@ describe('every locked store control says why', () => {
   });
 });
 
+// DS916 on #1615: one payment rule for EVERY place the web can accept an order.
+// An unpaid MMG order is offered the store's confirmation, never an Accept the
+// server refuses (409) — on the card, in the new-order popup, and in the order window.
+describe('no Accept entry point offers an unpaid MMG order', () => {
+  it('card, popup and window all hold Accept back and offer the confirmation', async () => {
+    hubApi({ orders: [wireVendorOrder({ id: 'o-unpaid', orderNumber: 'SW-7701', status: 'PENDING', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', canConfirmPayment: true })] });
+    const view = renderWithQuery(<OrdersPage />);
+    // 1. The new-order popup.
+    const later = await screen.findByText(/View later/);
+    const popup = later.closest('div.fixed') as HTMLElement;
+    expect(within(popup).queryByRole('button', { name: 'Accept' })).toBeNull();
+    expect(within(popup).getByText('Awaiting MMG payment')).toBeTruthy();
+    // Its confirmation opens the order window (and the popup steps aside).
+    await view.user.click(within(popup).getByRole('button', { name: 'Confirm MMG payment' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(screen.queryByText(/View later/)).toBeNull();
+    // 2. The order window.
+    await within(dialog).findByText('Total (MMG)');
+    expect(within(dialog).queryByRole('button', { name: 'Accept' })).toBeNull();
+    expect(within(dialog).getByLabelText('MMG transaction reference')).toBeTruthy();
+    // 3. The card.
+    const card = screen.getByRole('article', { name: 'Order SW-7701' });
+    expect(within(card).queryByRole('button', { name: 'Accept' })).toBeNull();
+    expect(within(card).getByRole('button', { name: 'Confirm MMG payment' })).toBeTruthy();
+    expect(writes.filter((w) => w.path.endsWith('/accept'))).toEqual([]);
+  });
+
+  it('the popup tells staff who can confirm, and says why for a failed payment', async () => {
+    hubApi({ orders: [
+      wireVendorOrder({ id: 'o-staff', orderNumber: 'SW-7702', status: 'PENDING', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', canConfirmPayment: false }),
+    ] });
+    renderWithQuery(<OrdersPage />);
+    const popup = (await screen.findByText(/View later/)).closest('div.fixed') as HTMLElement;
+    expect(within(popup).getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
+    expect(within(popup).queryByRole('button', { name: /Accept|Confirm MMG payment/ })).toBeNull();
+  });
+
+  it('a failed payment in the popup gives its reason and no Accept', async () => {
+    hubApi({ orders: [wireVendorOrder({ id: 'o-failed', orderNumber: 'SW-7703', status: 'PENDING', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'FAILED', canConfirmPayment: true })] });
+    renderWithQuery(<OrdersPage />);
+    const popup = (await screen.findByText(/View later/)).closest('div.fixed') as HTMLElement;
+    expect(within(popup).getByText(/MMG reports this payment as failed/)).toBeTruthy();
+    expect(within(popup).queryByRole('button', { name: 'Accept' })).toBeNull();
+  });
+});
+
