@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import type { UserEvent } from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import OrdersPage from './page';
@@ -155,7 +155,7 @@ describe('vendor order board — money is never invented', () => {
     mockApi(boardHandler([pickupBoard], pickupDetail));
     const { user } = renderWithQuery(<OrdersPage />);
 
-    await screen.findByRole('region', { name: 'Ready orders' });
+    await screen.findByRole('region', { name: 'Ready / handoff orders' });
     await user.click(await rowFor('SW-1001'));
 
     // HND-003: the hint is driven by `fulfillment`, a field the API DOES send.
@@ -204,7 +204,7 @@ describe('delivery owner controls', () => {
     });
     const fetchMock = mockApi(deliveryOwnerHandler(detail));
     const { user } = renderWithQuery(<OrdersPage />);
-    await screen.findByRole('region', { name: detail.status === 'PENDING' ? 'New orders' : 'Ready orders' });
+    await screen.findByRole('region', { name: detail.status === 'PENDING' ? 'New orders' : 'Ready / handoff orders' });
     await user.click(await rowFor('SW-1001'));
     await screen.findByRole('region', { name: 'Delivery owner' });
     return { user, fetchMock };
@@ -278,7 +278,7 @@ describe('delivery owner controls', () => {
     const detail = wireVendorOrderDetail({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });
     mockApi(deliveryOwnerHandler(detail));
     const { user } = renderWithQuery(<OrdersPage />);
-    await screen.findByRole('region', { name: 'Ready orders' });
+    await screen.findByRole('region', { name: 'Ready / handoff orders' });
     await user.click(await rowFor('SW-1001'));
     expect(screen.queryByRole('region', { name: 'Delivery owner' })).toBeNull();
     expect(screen.getByText(/Customer collects with a pickup code/)).toBeTruthy();
@@ -533,5 +533,96 @@ describe('order detail stays dismissible while its request settles', () => {
     await user.click(screen.getByRole('button', { name: 'Retry order detail' }));
     await screen.findByText('Total (Cash)');
     expect(attempts).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Independent review of #1601 (11 Oct), S2-1: React Query keeps the last good
+// data when a refresh fails but flags the error, and the board polls every 10 s.
+// One failed poll used to take every card off the screen until the next good
+// one. Main kept the known orders visible under the "Couldn't load" banner;
+// the kitchen still needs its ticket rail during a mobile-data blip.
+// ---------------------------------------------------------------------------
+describe('a failed refresh does not empty the board', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it('keeps the loaded orders on the board, under the error, after one failed poll', async () => {
+    let fail = false;
+    const order = wireVendorOrder({ status: 'PREPARING' });
+    mockApi((request) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders') {
+        return fail ? { status: 503, body: { success: false, error: { message: 'Service unavailable' } } } : { body: { success: true, data: [order], meta: { total: 1 } } };
+      }
+      return { status: 404, body: { success: false } };
+    });
+    const { queryClient } = renderWithQuery(<OrdersPage />);
+    await rowFor('SW-1001');
+    fail = true;
+    await act(async () => { await queryClient.refetchQueries({ predicate: (q) => JSON.stringify(q.queryKey).includes('"orders"') }); });
+    expect(await screen.findByText(/Couldn.t load your orders/)).toBeTruthy();
+    // The card is still there, and still in its lane.
+    expect(within(screen.getByRole('region', { name: 'Preparing orders' })).getByText('#SW-1001')).toBeTruthy();
+    // An outage is never drawn as an empty lane.
+    expect(screen.queryByText('Nothing here right now')).toBeNull();
+  });
+});
+
+// Review S3-1: the order window is a modal dialog, so Tab stays inside it, and
+// closing it returns focus to the order's card even after the order moved lanes.
+describe('the order window keeps focus inside, and returns it to the card', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it('cycles Tab and Shift+Tab inside the dialog', async () => {
+    mockApi(boardHandler([wireVendorOrder({ status: 'PREPARING' })], wireVendorOrderDetail({ status: 'PREPARING' })));
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    await within(dialog).findByRole('button', { name: 'Mark ready' });
+    const close = within(dialog).getByRole('button', { name: 'Close order detail' });
+    await waitFor(() => expect(document.activeElement).toBe(close));
+    await user.tab({ shift: true });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(close);
+    const last = document.activeElement;
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it('returns focus to the order\'s card after an action moved it to another lane', async () => {
+    let status = 'PREPARING';
+    mockApi((request) => {
+      const { method, url } = request;
+      if (method === 'GET' && url.pathname === '/api/v1/vendor/orders') return { body: { success: true, data: [wireVendorOrder({ status })], meta: { total: 1 } } };
+      if (method === 'GET' && url.pathname.startsWith('/api/v1/vendor/orders/')) return { body: { success: true, data: wireVendorOrderDetail({ status }) } };
+      if (method === 'PUT' && url.pathname.endsWith('/ready')) { status = 'READY_FOR_PICKUP'; return { body: { success: true } }; }
+      if (method === 'GET' && url.pathname === '/api/v1/vendor/items') return { body: { success: true, data: [] } };
+      return { status: 404, body: { success: false } };
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    await user.click(await within(dialog).findByRole('button', { name: 'Mark ready' }));
+    const ready = await screen.findByRole('region', { name: 'Ready / handoff orders' });
+    await waitFor(() => expect(within(ready).getAllByText('#SW-1001').length).toBe(1));
+    await user.click(within(dialog).getByRole('button', { name: 'Close order detail' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Order details' })).toBeNull());
+    const card = within(ready).getByText('#SW-1001').closest('button');
+    expect(document.activeElement).toBe(card);
+  });
+});
+
+// Review S3-5: the third lane also holds orders a rider has claimed that may
+// still be cooking, so it carries main's truthful name, not a bare "Ready".
+describe('the third lane says what it holds', () => {
+  beforeEach(() => { stubAudioContext(); });
+  it('is called "Ready / handoff" and holds rider-claimed orders', async () => {
+    mockApi(boardHandler([wireVendorOrder({ status: 'RIDER_ASSIGNED' })], wireVendorOrderDetail({ status: 'RIDER_ASSIGNED' })));
+    renderWithQuery(<OrdersPage />);
+    const lane = await screen.findByRole('region', { name: 'Ready / handoff orders' });
+    expect(within(lane).getByRole('heading', { name: 'Ready / handoff' })).toBeTruthy();
+    expect(await within(lane).findByText('#SW-1001')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Ready' })).toBeNull();
   });
 });

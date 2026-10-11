@@ -73,7 +73,7 @@ describe('partner redesign', () => {
     await screen.findByText('#P2-0');
     const later = screen.queryByText(/View later/);
     if (later) await view.user.click(later);
-    for (const [label, number] of [['New', '0'], ['Preparing', '1'], ['Ready', '2']]) {
+    for (const [label, number] of [['New', '0'], ['Preparing', '1'], ['Ready / handoff', '2']]) {
       expect(within(screen.getByRole('region', { name: `${label} orders` })).getByText(`#P2-${number}`)).toBeTruthy();
     }
     expect(screen.getByRole('button', { name: /Needs attention/ })).toBeTruthy();

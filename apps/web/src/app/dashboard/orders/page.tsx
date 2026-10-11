@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
@@ -10,6 +10,7 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { BusinessStatus } from '@/components/business-status';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { focusableIn } from '@/components/modal';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
@@ -264,8 +265,16 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // `preparingAt` / `readyAt` / `paymentStatus` are declared on VendorOrder now
   // (the detail route returns the whole Order row) — no local re-declaration.
   const o = order.data;
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const loaded = Boolean(o);
+  // The loading view and the loaded view are different trees, so the close
+  // button focused on open is replaced when the order arrives. Keep focus in
+  // the window instead of letting it fall to the page behind.
+  useEffect(() => {
+    if (!document.activeElement || document.activeElement === document.body) closeRef.current?.focus();
+  }, [loaded]);
   const closeButton = (
-    <button onClick={onClose} aria-label="Close order detail" className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-xl text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">✕</button>
+    <button ref={closeRef} onClick={onClose} aria-label="Close order detail" className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-xl text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">✕</button>
   );
   if (!o) return (
     <div className="sw-card p-6 text-sm text-[var(--swift-muted)]">
@@ -543,6 +552,7 @@ export default function OrdersPage() {
   const storeId = useStoreId();
   const [bucket, setBucket] = useState<BucketKey>('new');
   const [selected, setSelected] = useState<string | null>(null);
+  const dialog = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!selected) return;
     const previousFocus = document.activeElement as HTMLElement | null;
@@ -554,9 +564,24 @@ export default function OrdersPage() {
     return () => {
       document.body.style.overflow = previous;
       document.removeEventListener('keydown', onKeyDown);
-      previousFocus?.focus();
+      // An action may have moved the order to another lane, which remounts its
+      // card: go back to the order's card as it is now, not a detached node.
+      const card = document.querySelector<HTMLElement>(`[data-order-id="${CSS.escape(selected)}"]`);
+      (card ?? (previousFocus?.isConnected ? previousFocus : null))?.focus();
     };
   }, [selected]);
+  // The order window is a modal dialog: Tab and Shift+Tab stay inside it. A
+  // local cycle, not the shared Modal — that one makes the rest of the page
+  // inert, which would freeze the new-order takeover above it.
+  const trapTab = (event: React.KeyboardEvent) => {
+    if (event.key !== 'Tab' || !dialog.current) return;
+    const inside = focusableIn(dialog.current);
+    if (!inside.length) return;
+    const first = inside[0]!;
+    const last = inside[inside.length - 1]!;
+    if (event.shiftKey && (document.activeElement === first || !dialog.current.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || !dialog.current.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+  };
 
   // One poll feeds every lane — the queue is the live surface, keep it fresh.
   const orders = useQuery({
@@ -575,10 +600,12 @@ export default function OrdersPage() {
   const board = [
     { key: 'new' as const, label: 'New', hint: 'Waiting for a decision' },
     { key: 'kitchen' as const, label: 'Preparing', hint: 'In progress' },
-    { key: 'handoff' as const, label: 'Ready', hint: 'Pickup and handoff' },
+    // This lane also holds orders a rider has claimed that may still be cooking,
+    // so it keeps main's truthful name (independent review of #1601, S3-5).
+    { key: 'handoff' as const, label: 'Ready / handoff', hint: 'Ready, or a rider is on the way' },
   ];
   const other = BUCKETS.filter(b => !board.some(c => c.key === b.key));
-  const row = (o: VendorOrder) => <button key={o.id} onClick={() => setSelected(o.id)} className="sw-order-card w-full text-left">
+  const row = (o: VendorOrder) => <button key={o.id} data-order-id={o.id} onClick={() => setSelected(o.id)} className="sw-order-card w-full text-left">
     <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase())}</div>
     <p className="sw-caption mt-1">{timeAgo(o.placedAt)}</p>
     <div className="my-3 space-y-1">{o.items.slice(0, 3).map(item => <p key={item.id} className="sw-label">{item.quantity}× {item.name}</p>)}{o.items.length > 3 && <p className="sw-caption">+{o.items.length - 3} more</p>}</div>
@@ -594,11 +621,14 @@ export default function OrdersPage() {
     {orders.isLoading && <div role="status" className="sw-empty"><span className="sw-skeleton h-24 w-full" />Loading your orders…</div>}
     {orders.isError && <DataUnavailable what="your orders" error={orders.error} onRetry={() => void orders.refetch()} />}
     {!orders.isError && !orders.isLoading && shown.missing > 0 && <p role="status" className="sw-note">Showing {shown.shown} of {shown.total} orders — {shown.missing} not shown on this page.</p>}
-    {!orders.isError && !orders.isLoading && <>
+    {/* The board stays up whenever orders were loaded: a failed refresh keeps
+        the known orders on screen under the banner above (review S2-1). Only
+        the calm "nothing here" texts need the last read to have succeeded. */}
+    {orders.data && <>
       <div className="sw-order-board">{board.map(c => <section key={c.key} aria-label={`${c.label} orders`} className="min-w-0 space-y-3">
         <div className="flex items-baseline gap-2"><h2 className="sw-heading">{c.label}</h2><span className="sw-caption">{byBucket.get(c.key)?.length ?? 0}</span></div><p className="sw-caption">{c.hint}</p>
         {(byBucket.get(c.key) ?? []).map(row)}
-        {!byBucket.get(c.key)?.length && <p className="sw-board-empty">Nothing here right now</p>}
+        {!orders.isError && !byBucket.get(c.key)?.length && <p className="sw-board-empty">Nothing here right now</p>}
       </section>)}</div>
       <section aria-label="Other orders" className="space-y-4 border-t border-[var(--swift-border)] pt-6">
         <div className="flex flex-wrap gap-2">{other.map(b => {
@@ -606,10 +636,10 @@ export default function OrdersPage() {
           if ((b.key === 'attention' || b.key === 'unknown') && !count) return null;
           return <button key={b.key} onClick={() => setBucket(b.key)} aria-pressed={bucket === b.key} className={`sw-btn sw-btn-md ${bucket === b.key ? '' : 'sw-btn-outline'}`}>{b.label}{count > 0 ? ` · ${count}` : ''}</button>;
         })}</div>
-        {other.some(b => b.key === bucket) && <div className="grid gap-4 wide:grid-cols-2">{(byBucket.get(bucket) ?? []).map(row)}{!byBucket.get(bucket)?.length && <p className="sw-board-empty">Nothing in “{BUCKETS.find(b => b.key === bucket)?.label}”.</p>}</div>}
+        {other.some(b => b.key === bucket) && <div className="grid gap-4 wide:grid-cols-2">{(byBucket.get(bucket) ?? []).map(row)}{!orders.isError && !byBucket.get(bucket)?.length && <p className="sw-board-empty">Nothing in “{BUCKETS.find(b => b.key === bucket)?.label}”.</p>}</div>}
       </section>
     </>}
-    {selected && <div className="sw-scrim items-start overflow-y-auto p-4 wide:items-center" role="dialog" aria-modal="true" aria-label="Order details" onKeyDown={e => { if (e.key === 'Escape') setSelected(null); }}>
+    {selected && <div ref={dialog} className="sw-scrim items-start overflow-y-auto p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] wide:items-center" role="dialog" aria-modal="true" aria-label="Order details" onKeyDown={e => { if (e.key === 'Escape') setSelected(null); else trapTab(e); }}>
       <div className="relative max-h-[90dvh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-[var(--swift-canvas)]"><OrderDetail id={selected} onClose={() => setSelected(null)} /></div>
     </div>}
   </div>;

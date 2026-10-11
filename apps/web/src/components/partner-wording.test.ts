@@ -13,7 +13,12 @@ const FILES = ['components/console-shell.tsx', 'components/business-status.tsx',
   // The weekly-fee page every partner pays through, and its MMG words. (lib/card-fee.ts is
   // byte-identical to the phone copy by census and still says "added to your balance" for a
   // banked card payment: it has to be renamed in both apps together, so it is not scanned here.)
-  'components/weekly-fee.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts'];
+  'components/weekly-fee.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts',
+  // Everything else a console draws: the new-order takeover, the Switch app
+  // sheet, the error and notice blocks, and the API helpers whose messages
+  // reach the screen.
+  'components/NewOrderTakeover.tsx', 'components/customer-shell.tsx', 'components/data-unavailable.tsx', 'components/mutation-notice.tsx',
+  'lib/vendor-api.ts', 'lib/mover-api.ts', 'lib/partner-api.ts', 'lib/catalogue-name.ts'];
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -23,7 +28,10 @@ function sources(dir: string): string[] {
   });
 }
 
-const withoutComments = (code: string) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+// Drop block comments and whole-line `//` comments only. A trailing `// …`
+// after code is kept on purpose: a stray word there is a false alarm, never a
+// missed screen string (the old pattern also cut real text after any `//`).
+const withoutComments = (code: string) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
 describe('partner consoles never use stored-money words', () => {
   const files = [...ROOTS.flatMap((root) => sources(join(SRC, root))), ...FILES.map((file) => join(SRC, file))];
