@@ -8,8 +8,10 @@ import {
 } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/api';
+import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 
-const pretty = (docType: string) => docType.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+// [Owner ruling 11 Oct 2026] plain names and, on a taxi checklist, what each document is.
+const pretty = documentLabel;
 
 function statusTone(s: string, expiresAt: string | null) {
   const expiringSoon = expiresAt && new Date(expiresAt).getTime() - Date.now() < 30 * 24 * 3600 * 1000;
@@ -67,6 +69,10 @@ export default function DocumentsPage() {
         </p>
       </div>
 
+      {d && isTaxiChecklist(d.checklist ?? []) && (
+        <p className="rounded-2xl bg-[var(--swift-subtle)] p-4 text-sm">{TAXI_TWO_LICENCES}</p>
+      )}
+
       {d && (
         <div className={`flex items-center gap-3 rounded-2xl p-4 ${d.roleVerified ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
           {d.roleVerified ? <ShieldCheck className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
@@ -112,6 +118,9 @@ export default function DocumentsPage() {
                   {doc ? 'Upload renewal' : 'Upload'}
                 </button>
               </div>
+              {taxiDocumentHint(docType, d?.checklist ?? []) && (
+                <p className="mt-1 text-xs text-[var(--swift-muted)]">{taxiDocumentHint(docType, d?.checklist ?? [])}</p>
+              )}
               {doc?.reviewNote && doc.status === 'REJECTED' && (
                 <p className="mt-2 text-sm text-[var(--swift-red)]">Reviewer: {doc.reviewNote}</p>
               )}

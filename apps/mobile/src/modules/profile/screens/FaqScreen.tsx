@@ -4,6 +4,7 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { Card, Header, Screen, T } from '../../../kit';
+import { TAXI_DOCUMENTS_FAQ } from '../../../components/onboarding/taxiDocumentCopy';
 
 // Kit FAQ (54): accordion rows. Static product truths — no invented data.
 const FAQS: { q: string; a: string }[] = [
@@ -35,6 +36,8 @@ const FAQS: { q: string; a: string }[] = [
     q: 'How do refunds work with cash?',
     a: 'If something goes wrong, report it from the order. Claims are reviewed with GPS and photo evidence and settled under Swift’s guarantee policy.',
   },
+  // [Owner ruling 11 Oct 2026] the two licences, said plainly
+  TAXI_DOCUMENTS_FAQ,
 ];
 
 export function FaqScreen() {

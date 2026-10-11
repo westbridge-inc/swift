@@ -44,6 +44,19 @@ const LABELS: Record<string, string> = {
   V_MRZ_CHECKSUM: 'Machine-readable information check', V_VEHICLE_COLOUR: 'Vehicle colour check',
 };
 export const docLabel = (type: string) => LABELS[type] ?? 'Document';
+/**
+ * [Owner rulings 11 Oct 2026 — HIRE LICENCE and H-PLATE] What the reviewer checks on a taxi's papers,
+ * in plain words beside the document. The ordinary licence is NOT judged for an "H" or hire class any
+ * more: the right to drive a hire car is the separate Hire Car Driver's Licence (its own document).
+ * Supersedes the 8 Oct "licence must include the hire-car class" wording.
+ */
+const REVIEWER_HINTS: Record<string, string> = {
+  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
+  hire_car_driver_licence: "Hire Car Driver's Licence (GRA, its own document): same name as the driver's licence, and a current date (usually 3 years).",
+  hire_car_vehicle_licence: "The car's yearly hire licence: the plate matches the registration, and the date is current.",
+  vehicle_registration: 'For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234) and match the plate the driver gave.',
+};
+export const reviewerHint = (type: string): string | undefined => REVIEWER_HINTS[type];
 export const roleLabel = (role: string) => LABELS[role] ?? 'Applicant';
 export const vehicleLabel = (type: string) => LABELS[type] ?? 'Vehicle';
 const OUTCOMES: Record<string, string> = { APPROVED: 'Approved', REJECTED: 'Rejected', PENDING: 'Awaiting review', EXPIRED: 'Expired', APPROVE: 'Approved', REJECT: 'Rejected', REQUEST_INFO: 'More information requested', ESCALATE: 'Sent for another review', SECOND_REVIEW: 'Awaiting a second reviewer', ACTIVE: 'Active', REVOKED: 'Revoked' };
