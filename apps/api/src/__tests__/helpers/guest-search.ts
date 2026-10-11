@@ -43,6 +43,7 @@ export function matches(row: Row, where: Row = {}): boolean {
     if ('gte' in value) return actual != null && actual >= value.gte;
     if ('some' in value) return actual.some((r: Row) => matches(r, value.some));
     if ('in' in value) return value.in.includes(actual);
+    if ('startsWith' in value) return typeof actual === 'string' && actual.startsWith(value.startsWith);
     if ('contains' in value) return typeof actual === 'string' && actual.toLowerCase().includes(value.contains.toLowerCase());
     if ('hasSome' in value) return actual.some((s: string) => value.hasSome.includes(s));
     if ('has' in value) return actual.includes(value.has);
@@ -104,7 +105,10 @@ export async function guestSearchApp(max = 200) {
     });
     return { findMany, findUnique: vi.fn(async (args: Row) => (await findMany(args))[0] ?? null), count: vi.fn(async (args: Row) => (await findMany(args)).length) };
   }
+  const pauseRecords: Row[] = [];
+  const pauseClocks: Row[] = [];
   const db = {
+    platformConfig: delegate(pauseRecords), billingDunningClock: delegate(pauseClocks),
     tenant: delegate(tenants), vendor: delegate(vendors), item: delegate(items),
     actorRatingStat: { findMany: vi.fn(async () => []) },
     session: { findUnique: vi.fn(async ({ where }: Row) => sessions.get(where.token) ?? null) },
@@ -130,5 +134,5 @@ export async function guestSearchApp(max = 200) {
     } });
     return value;
   }
-  return { app, db, tenants, vendors, items, categories, tags, token, sessions };
+  return { pauseRecords, pauseClocks, app, db, tenants, vendors, items, categories, tags, token, sessions };
 }

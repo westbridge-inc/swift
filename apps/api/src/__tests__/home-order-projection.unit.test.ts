@@ -91,6 +91,12 @@ async function harness(vendors = [vendor(1), vendor(2)]) {
       note('country', args, args.where.id); return { countryCode: 'GY' };
     }) },
     countryConfig: { findUnique: vi.fn(async (args: unknown) => { note('pricing', args); return null; }) },
+    // The catalogue reads the persisted fee-pause state (billing/mmg-pause.ts
+    // readFeePause): no open pause, no repair records, no held clocks.
+    platformConfig: {
+      findUnique: vi.fn(async (args: unknown) => { note('feePause', args); return null; }),
+      findMany: vi.fn(async (args: unknown) => { note('feePause', args); return []; }),
+    },
     order: {
       findFirst: vi.fn(async (args: Prisma.OrderFindFirstArgs) => {
         note('active', args, args.where?.customerId as string); started.active.resolve();

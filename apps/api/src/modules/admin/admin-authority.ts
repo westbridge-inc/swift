@@ -348,6 +348,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/agent-payments': c('C0', 'billing.read'),
   'GET /billing/agent-payments/unmatched': c('C0', 'billing.read'),
   'GET /billing/agent-cash-config': c('C0', 'billing.read'),
+  'GET /billing/fee-pause': c('C0', 'billing.read'),
   'GET /billing/confirmations': c('C0', 'billing.read'),
   // [MMG support lookup] A partner's payment, found by any of its ids or the partner's phone: identity, so C1.
   'GET /billing/mmg-checkouts': c('C1', 'billing.mmg.read'),

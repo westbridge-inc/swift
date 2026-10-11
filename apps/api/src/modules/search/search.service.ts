@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { MeiliSearch } from 'meilisearch';
 import type { PrismaClient } from '@prisma/client';
 import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL, VISIBLE_VENDOR_SELECT, isVendorVisible } from '../vendor/vendor-visibility';
@@ -119,7 +120,7 @@ export class SearchService {
       // tenant.isActive, a shut-off operator's whole catalogue stayed
       // searchable until someone happened to re-sync after also suspending
       // the store itself.
-      where: VISIBLE_VENDOR,
+      where: VISIBLE_VENDOR(await readFeePause(this.prisma)),
       include: { categories: true },
     });
 
@@ -171,7 +172,7 @@ export class SearchService {
       // [B2] The vendor gate moves INTO the query and carries the full
       // predicate — the old post-fetch `status === 'ACTIVE'` filter let an
       // unverified or dead-tenant operator's dishes into the index.
-      where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL },
+      where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL(await readFeePause(this.prisma)) },
       include: {
         vendor: { select: { name: true, status: true, tenantId: true } },
         category: { select: { name: true } },
@@ -312,7 +313,7 @@ export class SearchService {
       return;
     }
 
-    if (isVendorVisible(vendor)) {
+    if (isVendorVisible(vendor, await readFeePause(this.prisma))) {
       const discovery = await this.vendorCategorySlugs([vendor.id]);
       const surface = (await ratingSurfaces(this.prisma, 'VENDOR', [vendor.id])).get(vendor.id);
       await this.client.index(VENDOR_INDEX).addDocuments([{
@@ -369,7 +370,8 @@ export class SearchService {
       },
     });
 
-    const searchable = (i: (typeof items)[number]) => i.isAvailable && isVendorVisible(i.vendor);
+    const feePause = await readFeePause(this.prisma);
+    const searchable = (i: (typeof items)[number]) => i.isAvailable && isVendorVisible(i.vendor, feePause);
     const live = items.filter(searchable);
     const gone = items.filter((i) => !searchable(i));
 

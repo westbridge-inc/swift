@@ -1,3 +1,4 @@
+import { feePausePredicate, FEE_PAUSE_REPAIR_PREFIX } from '../modules/billing/mmg-pause';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { guestSearchApp, engine, matches } from './helpers/guest-search';
 import { resetBrowserOriginsForTests } from '../modules/auth/browser-session';
@@ -93,7 +94,7 @@ it.each(['/search?q=Pepper', '/search/suggestions?q=Pepper'])('closed vendors an
 
 const now = Date.now();
 // Every row renews and is inside its paid period unless it says otherwise.
-const renewing = { billingConfirmationPausedAt: null, billingEnforcementDueAt: null, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date(now + 7 * 86_400_000) } as const;
+const renewing = { id: 'visibility-sub', billingConfirmationPausedAt: null, billingEnforcementDueAt: null, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date(now + 7 * 86_400_000), billingMethod: 'CASH' as const } as const;
 // [#1393] The grace deadline is the shared clock's projection (billingEnforcementDueAt);
 // gracePeriodEnd carries the same instant for display.
 const graceDeadline = (at: number) => ({ gracePeriodEnd: new Date(at), billingEnforcementDueAt: new Date(at) });
@@ -108,15 +109,15 @@ const subscriptionCases = [
   ['lapsed while a payment is confirming', { status: 'PAST_DUE', ...renewing, ...graceDeadline(now - 86_400_000), billingConfirmationPausedAt: new Date(now - 3_600_000) }, true],
   // [E12] Billing stopped: the store works to the end of the week it paid for,
   // then the gate refuses it — the catalogue must agree at the same instant.
-  ['billing stopped, paid week running', { status: 'ACTIVE', gracePeriodEnd: null, billingConfirmationPausedAt: null, billingEnforcementDueAt: null, autoSuspendEnabled: true, autoRenew: false, currentPeriodEnd: new Date(now + 86_400_000) }, true],
-  ['billing stopped, paid week over', { status: 'ACTIVE', gracePeriodEnd: null, billingConfirmationPausedAt: null, billingEnforcementDueAt: null, autoSuspendEnabled: true, autoRenew: false, currentPeriodEnd: new Date(now - 60_000) }, false],
+  ['billing stopped, paid week running', { id: 'visibility-stopped', status: 'ACTIVE', gracePeriodEnd: null, billingConfirmationPausedAt: null, billingEnforcementDueAt: null, autoSuspendEnabled: true, autoRenew: false, currentPeriodEnd: new Date(now + 86_400_000), billingMethod: 'CASH' as const }, true],
+  ['billing stopped, paid week over', { id: 'visibility-stopped', status: 'ACTIVE', gracePeriodEnd: null, billingConfirmationPausedAt: null, billingEnforcementDueAt: null, autoSuspendEnabled: true, autoRenew: false, currentPeriodEnd: new Date(now - 60_000), billingMethod: 'CASH' as const }, false],
   ...(['PAUSED', 'SUSPENDED', 'CANCELLED', 'CHURNED'] as const).map((status) => [status, { status, gracePeriodEnd: null, ...renewing }, false] as const),
 ] as const;
 
 it.each(subscriptionCases)('shared visibility preserves the operate-gate outcome for %s', (_name, subscription, visible) => {
   const vendor = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, subscription };
-  expect(matches(vendor, VISIBLE_VENDOR_REL)).toBe(visible);
-  expect(isVendorVisible(vendor)).toBe(visible);
+  expect(matches(vendor, VISIBLE_VENDOR_REL(feePausePredicate(false)))).toBe(visible);
+  expect(isVendorVisible(vendor, feePausePredicate(false))).toBe(visible);
 });
 
 it.each(subscriptionCases)('Market and authenticated DB search obey shared subscription visibility: %s', async (_name, subscription, visible) => {
@@ -199,13 +200,13 @@ it('honors cuisine in the guest DB vendor search', async () => {
 
 it('evaluates grace expiry at read time, including the exact deadline', () => {
   const deadline = new Date('2026-09-23T12:00:00Z');
-  const vendor = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, subscription: { status: 'PAST_DUE' as const, gracePeriodEnd: deadline, billingConfirmationPausedAt: null, billingEnforcementDueAt: deadline, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date(deadline.getTime() + 7 * 86_400_000) } };
+  const vendor = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, subscription: { id: 'visibility-deadline', status: 'PAST_DUE' as const, gracePeriodEnd: deadline, billingConfirmationPausedAt: null, billingEnforcementDueAt: deadline, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date(deadline.getTime() + 7 * 86_400_000), billingMethod: 'CASH' as const } };
   vi.useFakeTimers();
   try {
     for (const [offset, visible] of [[-1, true], [0, false], [1, false]] as const) {
       vi.setSystemTime(deadline.getTime() + offset);
-      expect(matches(vendor, VISIBLE_VENDOR_REL)).toBe(visible);
-      expect(isVendorVisible(vendor)).toBe(visible);
+      expect(matches(vendor, VISIBLE_VENDOR_REL(feePausePredicate(false)))).toBe(visible);
+      expect(isVendorVisible(vendor, feePausePredicate(false))).toBe(visible);
     }
   } finally { vi.useRealTimers(); }
 });
@@ -216,5 +217,28 @@ it('keeps nearby radius filtering inside the bounded candidate page', async () =
     vendors[0]!['latitude'] = 7.8;
     const res = await app.inject('/api/v1/search/nearby?lat=6.8&lng=-58.15&radius=1&limit=50');
     expect(res.statusCode).toBe(200); expect(res.json().data).toEqual([]);
+  } finally { await app.close(); }
+});
+
+// The actual HTTP catalogue doors must carry the persisted repair set into
+// their shared relational predicate; a pure helper test cannot prove that.
+it.each([false, true])('catalogue routes keep a repair-held store visible (search engine ready=%s)', async (ready) => {
+  engine.ready = ready;
+  const { app, vendors, pauseRecords, token } = await guestSearchApp();
+  const headers = ready ? { authorization: `Bearer ${token('public')}` } : {};
+  try {
+    const target = vendors.find((v) => v['id'] === 'public')!;
+    target['subscription'] = { status: 'PAST_DUE', ...renewing,
+      ...graceDeadline(Date.now() - 60_000), id: 'held-catalogue-sub' };
+    pauseRecords.push({ key: `${FEE_PAUSE_REPAIR_PREFIX}held-catalogue-sub`, value: { since: new Date(Date.now() - 120_000).toISOString() } });
+    engine.vendors.mockResolvedValueOnce({ hits: [{ entityId: 'public', name: 'Indexed store', vendorType: 'RESTAURANT' }], estimatedTotalHits: 1, processingTimeMs: 1 });
+    const held = await app.inject({ url: '/api/v1/search?q=Pepper', headers });
+    expect(held.statusCode).toBe(200);
+    expect(held.json().data.vendors.some((v: { id: string }) => v.id === 'public')).toBe(true);
+    pauseRecords.splice(0);
+    engine.vendors.mockResolvedValueOnce({ hits: [{ entityId: 'public', name: 'Indexed store', vendorType: 'RESTAURANT' }], estimatedTotalHits: 1, processingTimeMs: 1 });
+    const released = await app.inject({ url: '/api/v1/search?q=Pepper', headers });
+    expect(released.statusCode).toBe(200);
+    expect(released.json().data.vendors.some((v: { id: string }) => v.id === 'public')).toBe(false);
   } finally { await app.close(); }
 });

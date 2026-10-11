@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -730,7 +731,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // way, so every order step keeps one shape between its order read and its
     // write; the golden race suites hold the route at this read.)
     if (work === 'IN_FLIGHT') return;
-    const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
+    const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' }, await readFeePause(app.prisma, process.env, sub?.id));
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
         throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to keep working orders.');
@@ -1447,7 +1448,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       }
       // Subscription re-evaluated under the same lock (grace lapse included).
       const sub = await tx.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
-      const toggleOperability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
+      const toggleOperability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' }, await readFeePause(tx, process.env, sub?.id));
       if (!toggleOperability.operable) {
         if (toggleOperability.why === 'GRACE_LAPSED') {
           throw new AppError(403, 'SUBSCRIPTION_PAST_DUE',

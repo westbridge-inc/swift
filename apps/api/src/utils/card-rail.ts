@@ -1,3 +1,5 @@
+import { cardRailProviderNames } from '../providers/card/card-rail-factory';
+
 /** Explicit provider disablement and the operational kill switch both stop new
  * card instructions. A live provider may still reconcile while killed. */
 export function cardRailKilled(env: Record<string, string | undefined> = process.env): boolean {
@@ -10,6 +12,19 @@ export function cardRailKilled(env: Record<string, string | undefined> = process
  * all: it builds no v2 provider and sweeps no session [AX297 F5]. */
 export function cardRailV2Enabled(env: Record<string, string | undefined> = process.env): boolean {
   return env['CARD_RAIL_V2'] === '1';
+}
+
+/** [PROD-PATH] A partner can pay the weekly fee by card on this server: card
+ * rail v2 (hosted Pay now and enrolment, the only card paths a partner can
+ * open) is on, neither the kill switch nor a disabled provider stops it, and
+ * a REAL provider is configured. The simulator never counts: it serves only
+ * the test subscriptions it lists and moves no money, so it is no way for a
+ * real partner to pay (card-pay-action.ts cardSessionsAllowed). Server
+ * switches only: nothing about a partner (their card on file, their billing
+ * method, their app) enters it. */
+export function weeklyFeeCardLive(env: Record<string, string | undefined> = process.env): boolean {
+  const provider = env['CARD_RAIL_PROVIDER'] ?? '';
+  return cardRailV2Enabled(env) && !cardRailKilled(env) && provider !== 'simulator' && cardRailProviderNames().includes(provider);
 }
 
 /** [PT-1 · AX297 F5] With CARD_RAIL_V2 off, drain what v2 left in flight:

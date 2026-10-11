@@ -13,7 +13,9 @@ import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
-import { getMmgProvider } from '../../providers/mmg/mmg-provider';
+import { getMmgProvider, mmgDisabled } from '../../providers/mmg/mmg-provider';
+import { noLivePayPath } from './fee-pause';
+import { consumeMmgReactivation, feePauseHoldsBilling, feePauseSpanOpen, mmgReactivationPeriodEnd } from './mmg-pause';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { restoreBillingAccess } from './billing-access';
@@ -92,7 +94,6 @@ type InstrumentLookup =
   | { status: 'not_found' }
   | { status: 'unknown'; reason: string }
   | { status: 'held' };
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 /** Local request review threshold. It cannot expire an authorized provider
  * instruction: only a confirmed terminal provider outcome can do that. */
 const MMG_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
@@ -524,6 +525,16 @@ export class BillingService {
     sub = candidate;
     // An unresolved positive observation may concern this or an older attempt.
     // A new retry key, rail choice or wallet top-up is not manual disposition.
+    // [PROD-PATH] No live way to pay (MMG off, no live card rail: fee-pause.ts):
+    // EVERY subscription's fee is PAUSED before anything is written — no
+    // attempt, no prepaid spend, no failure, no grace enforcement
+    // (finishExhaustedGrace below), and the duplicate-attempt recovery (which
+    // can apply a recorded failure) is never reached. Its dunning clock is
+    // paused for the span (mmg-pause.ts). Once a way to pay is back, billing
+    // still waits until the resume has recorded that subscription's
+    // reactivation, so its next fee covers only the week in progress, whatever
+    // job runs first.
+    if (await feePauseHoldsBilling(this.prisma, sub.id)) return 'pending';
     if (await this.subscriptionHasConfirmationHold(this.prisma, sub.id, undefined, now)) return 'pending';
     const exhausted = await this.finishExhaustedGrace(sub, now);
     if (exhausted) return exhausted;
@@ -907,6 +918,9 @@ export class BillingService {
    * Returns null in that case.
    */
   private async reserveMmgIntent(sub: SubWithRelations, amount: number, reference: string, now = new Date()): Promise<{ id: string } | null> {
+    // [PROD-PATH] The period the fee buys is fixed on the intent (a payment's
+    // period is immutable once a confirmation is attached).
+    const { periodEnd: intentPeriodEnd } = await mmgReactivationPeriodEnd(this.prisma, sub.id, sub.nextBillingDate, now);
     try {
       return await this.prisma.subscriptionPayment.create({
         data: {
@@ -918,7 +932,7 @@ export class BillingService {
           failureRaw: { providerEffect: 'NOT_SENT', providerRail: sub.billingMethod },
           expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
           periodStart: sub.nextBillingDate,
-          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+          periodEnd: intentPeriodEnd,
         },
         select: { id: true },
       });
@@ -1234,7 +1248,7 @@ export class BillingService {
             instrumentId,
             expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
             periodStart: sub.nextBillingDate,
-            periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+            periodEnd: (await mmgReactivationPeriodEnd(tx, sub.id, sub.nextBillingDate, now)).periodEnd,
             ...(maySend
               ? { status: 'UNKNOWN' as const, failureRaw: { providerEffect: 'AUTHORIZED', providerRail: 'CARD', authorizedAt: now.toISOString() } }
               : {
@@ -1710,6 +1724,10 @@ export class BillingService {
     now: Date,
   ): Promise<ChargeAttemptResult> {
     if (await this.subscriptionHasConfirmationHold(this.prisma, sub.id, undefined, now)) return { ok: false, deferred: true };
+    // [PROD-PATH] No live way to pay: the fee is paused before the prepaid
+    // spend and before the no-rail fall-through (which would record a
+    // failure). billSubscription stops earlier; this is its second wall.
+    if (noLivePayPath()) return { ok: false, deferred: true };
     // Prepaid balance is money Swift already holds — spend it before pinging any
     // external rail. This is also what makes an admin top-up reinstate a CARD/MMG
     // sub: the recorded cash settles the fee instead of firing a fresh (and
@@ -1802,6 +1820,18 @@ export class BillingService {
         return { ok: false, unknown: true, clientKey: key, intentId, ...(result.reason ? { failureRaw: result.reason } : {}) };
       }
       return { ok: false, reason: result.reason ?? 'Charge declined', failureCode: mapCardFailure(result.reason), intentId, ...(result.reason ? { failureRaw: result.reason } : {}) };
+    }
+
+    // [PROD-PATH] MMG switched off while another way to pay (a card) is live:
+    // nobody's fee is paused, and the partner's billing method is their own
+    // choice, so choosing MMG must not dodge the fee. Nothing is sent to MMG:
+    // this week has no automatic rail, exactly like a cash subscription, and
+    // fails, so the partner is told to pay another way. A request already in
+    // flight for the week never fails under it: the dunning clock holds it as
+    // a payment being confirmed (dunning-clock.ts), and this method's first
+    // line defers on that hold.
+    if (sub.billingMethod === 'MOBILE_MONEY' && mmgDisabled()) {
+      return { ok: false, reason: 'MMG payments are switched off right now' };
     }
 
     if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn) {
@@ -2063,7 +2093,16 @@ export class BillingService {
     if (!this.successfulChargeAuthorityAllowsAdvance(authority, sub)) return 'skipped';
     const current = { ...sub, status: authority.status } as SubWithRelations;
     const periodStart = sub.nextBillingDate;
-    const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
+    // [PROD-PATH] Owner ruling: the first fee after a way to pay comes back
+    // covers the weeks nobody could pay and the week in progress — only that
+    // week is billed. A settled intent keeps the period fixed when it was
+    // reserved; the reactivation record is consumed only by a period that
+    // reaches past it (consumeMmgReactivation).
+    const coverage = await mmgReactivationPeriodEnd(tx, sub.id, periodStart, now);
+    const settledRow = settlePaymentId
+      ? await tx.subscriptionPayment.findUnique({ where: { id: settlePaymentId }, select: { periodStart: true, periodEnd: true } })
+      : null;
+    const periodEnd = settledRow && settledRow.periodStart.getTime() === periodStart.getTime() ? settledRow.periodEnd : coverage.periodEnd;
 
     // THE PREPAID SPEND — first, and inside this transaction, so the money and
     // the week it buys share one fate [PAY-1 M0 S0]. Still the atomic
@@ -2136,6 +2175,7 @@ export class BillingService {
     // The obligation advances on the success record just booked, in the
     // currency this settlement was pinned to (never relabelled).
     await advanceDunningObligation(tx, sub.id, periodEnd, now, sub.currencyCode);
+    await consumeMmgReactivation(tx, sub.id, periodEnd);
 
     if (amount > 0) {
       const rail = paymentRef === 'prepaid' ? 'prepaid' : sub.billingMethod === 'CARD' ? 'CARD' : 'EXTERNAL';
@@ -3054,6 +3094,13 @@ export class BillingService {
       .slice(0, 200);
     const out = { settled: 0, banked: 0, adopted: 0, failed: 0, stillPending: 0 };
     if (pending.length === 0) return out;
+    // [PROD-PATH] MMG fully off: no row is stamped, looked up, expired or
+    // dunned. Only MMG's own answer may resolve a request it once accepted
+    // [LAW M-5], so every row waits, untouched, until MMG is switched on.
+    if (mmgDisabled()) {
+      out.stillPending = pending.length;
+      return out;
+    }
 
     const mmg = getMmgProvider();
     for (const payment of pending) {
@@ -3385,6 +3432,10 @@ export class BillingService {
    * the live states is not re-dunned.
    */
   async reconcileTerminalWithoutOutcome(now = new Date(), windowDays = 30): Promise<{ scanned: number; repaired: number; stillOpen: number; oldestMinutes: number | null }> {
+    // [PROD-PATH] MMG switched off: a terminal MMG payment's outcome is a
+    // dunning step (CHARGE_FAILED, PAST_DUE, SUSPENDED). The pause holds it
+    // until MMG is on again, when this pass applies it as before.
+    if (mmgDisabled()) return { scanned: 0, repaired: 0, stillOpen: 0, oldestMinutes: null };
     const since = new Date(now.getTime() - windowDays * 86_400_000);
     // Exclude every recognized outcome BEFORE the cap. Filtering ordinary
     // CHARGE_FAILED/success rows in the loop let the same 500 oldest handled
@@ -3553,6 +3604,8 @@ export class BillingService {
    * snapshot), so a repeat with the same snapshot lands the same row.
    */
   private async finishExhaustedGrace(sub: SubWithRelations, now: Date): Promise<'pending' | 'suspended' | null> {
+    // [PROD-PATH] Nothing suspends anyone while no partner can pay.
+    if (noLivePayPath()) return 'pending';
     const result = await this.prisma.$transaction(async (tx) => {
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
       const clock = await currentDunningClock(tx, sub.id, now);
@@ -3579,6 +3632,11 @@ export class BillingService {
     periodKey: string,
   ): Promise<FailureOutcome> {
     await requireBillingEffectsReady(tx);
+    // [PROD-PATH] The one place a failure is recorded, dunned or suspended:
+    // never during a fee pause or its persisted clock repair. Recheck under
+    // the transaction: terminal recovery also enters here. Refusal rolls back
+    // every failure, dunning and access write together.
+    if (await feePauseHoldsBilling(tx, sub.id)) throw new AppError(409, 'FEE_PAUSED', 'The weekly fee is paused, never failed.');
     const failedKey = `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: failedKey }, select: { id: true } });
     if (!recorded) {
@@ -3967,6 +4025,10 @@ export class BillingService {
             },
           });
           if (!sub || sub.status !== 'SUSPENDED' || await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return null;
+          // [PROD-PATH] No live way to pay: nobody is nudged to pay or
+          // churned for not paying; their dunning clock is paused for the
+          // span (mmg-pause.ts).
+          if (await feePauseHoldsBilling(tx, sub.id)) return null;
           const suspendedSince = sub.suspendedAt ?? sub.updatedAt;
           const clock = await currentDunningClock(tx, sub.id, now);
           const elapsed = activeOverdueMs(clock, now);
@@ -4422,6 +4484,10 @@ export class BillingService {
 
   /** One reminder per subscription per period, 24h before the due date. */
   async sendUpcomingReminders(now = new Date()): Promise<number> {
+    // [PROD-PATH] No live way to pay: the fee is paused, so "due soon" would
+    // name a fee nobody can pay. Nothing is written, so the reminder still
+    // goes out if a way to pay comes back before the due date.
+    if (await feePauseSpanOpen(this.prisma)) return 0;
     const dayAhead = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const upcoming = await this.prisma.subscription.findMany({
       where: { status: 'ACTIVE', autoRenew: true, nextBillingDate: { gt: now, lte: dayAhead } },
@@ -4453,6 +4519,7 @@ export class BillingService {
       try {
         const allowed = await this.prisma.$transaction(async (tx) => {
           if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+          if (await feePauseHoldsBilling(tx, sub.id)) return false;
           await tx.billingEvent.create({
           data: {
             subscriptionId: sub.id,
