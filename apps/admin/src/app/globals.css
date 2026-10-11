@@ -335,3 +335,32 @@ body {
 .admin-modal.mc-dialog button.mc-btn-primary { background: var(--mc-accent); border-color: var(--mc-accent); color: #fff; }
 .admin-modal.mc-dialog button.mc-btn-primary:hover:not(:disabled) { background: var(--mc-accent-deep); }
 @media (max-width: 480px) { .admin-modal.mc-dialog .mc-dialog-actions .mc-btn { flex: 1 1 auto; } }
+
+/* [MC-PR2] The activation checklist panel. */
+.mc-pip { width: 22px; height: 5px; border-radius: 2px; background: var(--mc-line-strong); }
+.mc-pip-good { background: var(--mc-good); }
+.mc-pip-warn { background: #D08B4C; }
+.mc-pip-bad { background: var(--mc-bad); }
+.mc-verdict { padding: .6rem .8rem; border-radius: var(--mc-radius-sm); background: var(--mc-surface); border: 1px solid var(--mc-line); font-weight: 600; }
+.mc-verdict-good { background: var(--mc-good-soft); color: var(--mc-good); border-color: transparent; }
+.mc-verdict-warn { background: var(--mc-warn-soft); color: var(--mc-warn); border-color: transparent; }
+.mc-verdict-bad { background: var(--mc-bad-soft); color: var(--mc-bad); border-color: transparent; }
+.mc-verdict-info { background: var(--mc-info-soft); color: var(--mc-info); border-color: transparent; }
+.mc-doc { display: flex; align-items: center; gap: .75rem; padding: .65rem .8rem; border-radius: var(--mc-radius-sm); border: 1px solid var(--mc-line); background: var(--mc-card); min-width: 0; }
+.mc-doc-bad { border-color: rgb(185 28 28 / 25%); }
+.mc-doc-warn { border-color: rgb(154 71 8 / 25%); }
+@media (max-width: 480px) { .mc-doc { flex-wrap: wrap; } }
+
+/* [MC-PR3] List toolbars and pagers. */
+.mc-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .6rem; margin-bottom: .9rem; }
+.mc-toolbar-search { display: flex; align-items: center; gap: .5rem; flex: 1 1 16rem; min-width: 0; min-height: 44px; padding: 0 .7rem; border: 1px solid var(--mc-line-strong); border-radius: var(--mc-radius-sm); background: var(--mc-card); color: var(--mc-muted); }
+.mc-toolbar-search input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--mc-ink); font: inherit; min-height: 40px; outline: none; }
+.mc-toolbar-search:focus-within { border-color: var(--mc-accent); box-shadow: 0 0 0 2px var(--mc-accent-soft); }
+.mc-toolbar-filter { display: grid; gap: .2rem; flex: 0 1 12rem; min-width: 9rem; }
+.mc-toolbar-filter select { min-height: 44px; padding: 0 .6rem; border: 1px solid var(--mc-line-strong); border-radius: var(--mc-radius-sm); background: var(--mc-card); color: var(--mc-ink); font: inherit; }
+.mc-toolbar-check { display: inline-flex; align-items: center; gap: .45rem; min-height: 44px; color: var(--mc-muted-strong); font-weight: 600; }
+.mc-toolbar-check input { width: 18px; height: 18px; accent-color: var(--mc-accent); }
+.mc-pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem; margin-top: .75rem; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.mc-select { min-height: 40px; max-width: 100%; padding: 0 .5rem; border: 1px solid var(--mc-line-strong); border-radius: var(--mc-radius-sm); background: var(--mc-card); color: var(--mc-ink); font: inherit; }
+.mc-link-button { border: 0; background: none; padding: 0; color: var(--mc-accent); font: inherit; font-weight: 650; text-decoration: underline; cursor: pointer; min-height: 0; }
