@@ -355,7 +355,19 @@ export class VerificationService {
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' && pendingVehicleReview ? 'PENDING' : verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      // [L06] An automatic approval stands only when nothing a reviewer would be asked holds it:
+      // a vehicle link still awaiting fresh review (#1551) or a stored-vehicle refusal (#1553)
+      // sends the submission to a person instead.
+      let finalVerdict = verdict === 'APPROVED' && pendingVehicleReview ? 'PENDING' as const : verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING' as const;
+      if (finalVerdict === 'APPROVED') {
+        try { await this.assertStoredVehicleApproval(tx, created); }
+        catch (error) {
+          if (!(error instanceof AppError) || !['VEHICLE_SUBJECT_REQUIRED', 'WRONG_PLATE_CLASS', 'MOVER_PROFILE_REQUIRED', 'VEHICLE_CLASS_CHANGED', 'INSURANCE_SCOPE_INSUFFICIENT'].includes(error.code)) throw error;
+          finalVerdict = 'PENDING';
+          await tx.verificationDocument.update({ where: { id: created.id }, data: { reviewedBy: null, reviewedAt: null } });
+        }
+      }
+      const doc = await walkSubmission(tx, created.id, finalVerdict, review.extraction);
       // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
       // created on another account's subject — the impostor's link never survives a rejection,
       // and a later resubmission starts a fresh pending assignment.
@@ -994,18 +1006,31 @@ export class VerificationService {
       vehicleType = vehicle.vehicleKind as VehicleType;
       plate = vehicle.registrationMark;
       taxi = isPassengerVehicle(vehicleType);
+      // [L06 · #1553 review] A mover who changed to a passenger vehicle but kept the plate reuses the
+      // subject recorded under the old class (a motorbike's private plate, say). The vehicle IN USE on
+      // that plate counts too, so the H rule and the hire insurance still apply to it. Never a refusal
+      // by class alone: a car corrected to a wagon car on the same H plate stays approvable.
+      const authority = await captureSubmissionAuthority(tx, doc.userId);
+      const inUse = authority.profile && normalizeRegistrationMark(authority.profile.licensePlate ?? '') === normalizeRegistrationMark(plate ?? '')
+        && authority.profile.vehicleType in VEHICLE_CLASSES ? authority.profile.vehicleType as VehicleType : null;
+      if (!taxi && inUse && isPassengerVehicle(inUse)) { vehicleType = inUse; taxi = true; }
     } else {
       // A legacy unbound row cannot acquire today's chosen role as historical authority.
       const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });
       const driver = await tx.driver.findUnique({ where: { userId: doc.userId } });
       if (rider && driver) throw moverProfileRequired();
-      const profile = driver ?? rider;
-      vehicleType = profile?.vehicleType ?? null;
-      plate = profile?.licensePlate ?? null;
-      taxi = driver !== null;
+      if (driver) {
+        throw new AppError(400, 'VEHICLE_SUBJECT_REQUIRED',
+          'This taxi document has no registered vehicle. Ask the applicant to submit it again so its H-series registration can be reviewed.');
+      }
+      // Non-taxi legacy delivery evidence keeps its exemption. A profile plate
+      // never supplies registration authority for a taxi approval.
+      vehicleType = rider?.vehicleType ?? null;
+      plate = null;
+      taxi = false;
     }
-    if (taxi && plate && plateClassOf(plate) !== 'H') {
-      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi must carry an H registration mark. Reject the document as WRONG_PLATE_CLASS.');
+    if (taxi && plateClassOf(plate ?? '') !== 'H') {
+      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi needs an H-series registration mark on its registered vehicle. A missing or different plate cannot be approved.');
     }
     if (doc.docType === 'vehicle_insurance' && vehicleType && isPassengerVehicle(vehicleType)
       && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {

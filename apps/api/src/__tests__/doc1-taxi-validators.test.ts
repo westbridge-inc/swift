@@ -28,7 +28,8 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VALIDATOR_IMPLEMENTATIONS, NO_CONTEXT, resolvesImpl, type ValidatorContext } from '../modules/verification/validators';
-import { VALIDATOR_CATALOGUE, FIELD_CATALOGUE, seedDocRegistry, registryCode, registryCompletenessGaps } from '../modules/verification/doc-registry';
+import { BUCKET_OF, VALIDATOR_CATALOGUE, FIELD_CATALOGUE, seedDocRegistry, registryCode, registryCompletenessGaps } from '../modules/verification/doc-registry';
+import { resolveSubject } from '../modules/verification/subjects';
 import { ACTOR_FACING_CATEGORY, REJECTION_REASON_CODES, RETIRED_REJECTION_REASON_CODES } from '../modules/verification/verification.service';
 import { planExtraction, autoApproveEligible, type RoutingType } from '../modules/verification/extraction-ledger';
 import { custodyNarrative } from '../modules/verification/custody';
@@ -57,7 +58,18 @@ async function mover(n: number, kind: 'taxi' | 'delivery', plate: string, vehicl
   else await system(() => app.prisma.rider.create({ data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'CAR', licensePlate: plate } }));
   return u.id;
 }
-const pending = (userId: string, docType = 'vehicle_registration') => system(() => app.prisma.verificationDocument.create({ data: { userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING' } }));
+const pending = (userId: string, docType = 'vehicle_registration') => system(async () => {
+  // Mirror real intake: taxi vehicle evidence names its registration subject
+  // before review. Delivery keeps the legacy exemption tested below.
+  const driver = BUCKET_OF[docType] === 'VEHICLE' ? await app.prisma.driver.findUnique({ where: { userId } }) : null;
+  const subject = driver ? await resolveSubject(app.prisma, {
+    userId, countryCode: 'GY', tenantId: 'swift-default', docType, vehicleProfile: { ...driver, kind: 'DRIVER' },
+  }) : null;
+  return app.prisma.verificationDocument.create({ data: {
+    userId, subjectId: subject?.subjectId ?? null, role: 'MOVER', docType,
+    fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING',
+  } });
+});
 const admin = (method: 'PUT', url: string, payload: Record<string, unknown>) => adminApp.inject({
   method, url: `/api/v1/admin${url}`, payload, headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
 });
