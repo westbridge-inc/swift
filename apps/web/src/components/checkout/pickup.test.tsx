@@ -6,8 +6,7 @@ import CheckoutPage from '@/app/(app)/checkout/page';
 import { StorefrontPage } from '@/components/storefront/storefront-page';
 import { storefrontFixture } from '@/test/storefront-fixture';
 import { getCartQuote, pickupChoices } from '@/lib/cart-quote';
-// The item sheet's code is split from the page; load it up front.
-import '@/components/storefront/item-options-panel';
+import { loadItemSheet } from '@/components/storefront/storefront-experience';
 
 // ---------------------------------------------------------------------------
 // [W5] Delivery or Pickup, chosen by the customer on the one checkout (and in
@@ -62,6 +61,9 @@ const ok = (data: unknown) => ({ body: { success: true, data } });
 const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(([url, init]) =>
   new URL(String(url)).pathname === pathname && (init?.method ?? 'GET').toUpperCase() === method);
 const cartReads = () => calls('GET', '/api/v1/customer/cart').map(([url]) => new URL(String(url)).searchParams);
+
+// As in a browser shortly after the store page is up: the item sheet's code has arrived.
+beforeAll(() => loadItemSheet());
 
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
