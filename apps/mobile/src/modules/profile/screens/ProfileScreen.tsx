@@ -15,6 +15,7 @@ import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { MonitoringControl } from '../../safety/MonitoringControl';
 import { BrandSwitch } from '../../../kit/controls';
 import { retryRead } from '../../../lib/appQueryPolicy';
 
@@ -378,6 +379,10 @@ export function ProfileScreen() {
           </RowGroup>
 
           {/* PRIVACY — reference and legal, so the whole section reads plain. */}
+          {/* [73] SAFETY — the monitoring opt-in the server has always honoured, now reachable. */}
+          <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>SAFETY</T>
+          <MonitoringControl />
+
           <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>PRIVACY</T>
           <RowGroup>
             <MarketingConsentRow />

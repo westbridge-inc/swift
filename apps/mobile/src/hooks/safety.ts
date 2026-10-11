@@ -1,3 +1,4 @@
+import { requireAuthSessionForPrincipal, useAuthStore } from '../stores/authStore';
 import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
@@ -14,7 +15,15 @@ import { createSosKeyStore } from '../lib/sosKey';
  * invoked it. Taxi had its own `/rides/:id/sos`, so taxi had a button and
  * everyone else had nothing.
  */
+function useSosPrincipal() {
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
+  return { userId: user?.id ?? '', generation: sessionGeneration };
+}
+
 export function useJobSos() {
+  const owner = useSosPrincipal();
+  const qc = useQueryClient();
   // A ref, not state: a re-render must never hand the same emergency a new
   // identity, which is exactly what a fresh store would do.
   const keys = useRef(createSosKeyStore()).current;
@@ -33,10 +42,11 @@ export function useJobSos() {
         lng: coords?.lng,
         accuracyM: coords?.accuracyM,
         clientIdempotencyKey: keys.keyFor(jobId),
-      });
+      }, requireAuthSessionForPrincipal(owner));
+      requireAuthSessionForPrincipal(owner);
       return res.data?.data as SosRaised;
     },
-    onSuccess: () => track('job_sos', {}),
+    onSuccess: () => { track('job_sos', {}); void qc.invalidateQueries({ queryKey: ['safety'] }); },
   });
 }
 
@@ -48,6 +58,8 @@ export function useJobSos() {
  * and its provider, and repeats collapse per job like they do per order.
  */
 export function useServiceJobSos() {
+  const owner = useSosPrincipal();
+  const qc = useQueryClient();
   const keys = useRef(createSosKeyStore()).current;
 
   return useMutation({
@@ -64,10 +76,11 @@ export function useServiceJobSos() {
         lng: coords?.lng,
         accuracyM: coords?.accuracyM,
         clientIdempotencyKey: keys.keyFor(serviceJobId),
-      });
+      }, requireAuthSessionForPrincipal(owner));
+      requireAuthSessionForPrincipal(owner);
       return res.data?.data as SosRaised;
     },
-    onSuccess: () => track('service_job_sos', {}),
+    onSuccess: () => { track('service_job_sos', {}); void qc.invalidateQueries({ queryKey: ['safety'] }); },
   });
 }
 
@@ -83,9 +96,11 @@ export interface SosRaised {
  *  without waiting for the promotion worker. The client half of the confirm
  *  endpoint that shipped with zero callers. */
 export function useConfirmSos() {
+  const owner = useSosPrincipal();
   return useMutation({
     mutationFn: async (id: string) => {
-      const res = await safetyApi.confirmSos(id);
+      const res = await safetyApi.confirmSos(id, requireAuthSessionForPrincipal(owner));
+      requireAuthSessionForPrincipal(owner);
       return res.data?.data as { id: string; status: string };
     },
     meta: { silent: true },
@@ -94,9 +109,11 @@ export function useConfirmSos() {
 
 /** Cancel during the server grace window; a 409 means the window closed. */
 export function useCancelSos() {
+  const owner = useSosPrincipal();
   return useMutation({
     mutationFn: async (id: string) => {
-      const res = await safetyApi.cancelSos(id);
+      const res = await safetyApi.cancelSos(id, requireAuthSessionForPrincipal(owner));
+      requireAuthSessionForPrincipal(owner);
       return res.data?.data as { id: string; status: string };
     },
     meta: { silent: true },

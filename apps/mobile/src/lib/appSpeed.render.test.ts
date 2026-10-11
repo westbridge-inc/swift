@@ -109,6 +109,7 @@ describe('actual tab render contracts', () => {
       '../../../hooks/customer': { useProfile: () => ({ data: hasData ? { firstName: 'Fixture', lastName: 'Account' } : undefined, isLoading: false, isError, error: status ? { response: { status } } : new Error('Network Error'), refetch: () => { retries++; } }), useMyRating: () => ({}), useLiveOrders: () => ({}) },
       '../../../stores/authStore': { useAuthStore: () => ({ isAuthenticated: authenticated, user: { id: 'fixture' } }) },
       '../../../lib/appQueryPolicy': { retryRead },
+      '../../safety/MonitoringControl': { MonitoringControl: 'MonitoringControl' },
       '../../../kit': kit, '../../../kit/controls': { BrandSwitch: 'BrandSwitch' },
       'react-native-reanimated': { default: { View: 'AnimatedView' }, __esModule: true, FadeInDown: fluent, ReduceMotion: { System: 'system' } },
       '../../../components/RoleSwitcherSheet': { RoleSwitcherSheet: 'RoleSwitcherSheet' },
