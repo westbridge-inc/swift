@@ -7,9 +7,14 @@ vi.mock('../modules/notification/notification.service', async (importOriginal) =
   const mod = await importOriginal<typeof import('../modules/notification/notification.service')>();
   return { ...mod, notifyAdmins: vi.fn(mod.notifyAdmins) };
 });
+// The generic publisher is spied the same way so one case can make the first
+// drain of the checkout-outbox sweep fail on infrastructure.
+vi.mock('../modules/order/checkout-outbox', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../modules/order/checkout-outbox')>();
+  return { ...mod, drainCheckoutOutbox: vi.fn(mod.drainCheckoutOutbox) };
+});
 import { nanoid } from 'nanoid';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
+import { QueueEvents } from 'bullmq';
 import type { PrismaClient, OrderType } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -22,6 +27,7 @@ import { settleTooOldOrder, sweepFoodAge, SWEEP_PAGE, FOOD_TOO_OLD_REASON } from
 import * as checkoutOutbox from '../modules/order/checkout-outbox';
 import { drainCheckoutOutbox } from '../modules/order/checkout-outbox';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
+import { bullConnectionOpts, createQueues, createWorkers } from '../jobs/queue';
 
 // ---------------------------------------------------------------------------
 // [RESCUE S1 · AUD-CX04-001 / AUD-CX05-001] The food-age cutoff's record and
@@ -130,6 +136,27 @@ function refusing(point: string) {
     },
   }) as unknown as PrismaClient;
   return { client, fired: () => fired };
+}
+
+/** Run ONE job through the production dispatch worker (the consumer of the
+ *  checkout-outbox sweep), with real BullMQ and Redis: the job's outcome. */
+async function runDispatchJob(name: string): Promise<'completed' | Error> {
+  const queues = createQueues(app.redis);
+  const workers = await createWorkers({ prisma: app.prisma, redis: app.redis, io: app.io, log: app.log }, queues);
+  const events = new QueueEvents(queues.dispatchQueue.name, { connection: bullConnectionOpts(app.redis) });
+  let loop: Promise<void> | undefined;
+  try {
+    await workers.waitUntilReady();
+    await events.waitUntilReady();
+    loop = workers.dispatchWorker.run();
+    const job = await queues.dispatchQueue.add(name, {}, { jobId: `rescue-durability-${nanoid(10)}`, attempts: 1, removeOnComplete: true, removeOnFail: true });
+    return await job.waitUntilFinished(events, 30_000).then(() => 'completed' as const, (err: unknown) => err as Error);
+  } finally {
+    await workers.cleanup();
+    await loop?.catch(() => undefined);
+    await events.close();
+    for (const q of Object.values(queues)) await q.close();
+  }
 }
 
 /** Start both passes from the top, wherever this DB's cursors were left. */
@@ -323,12 +350,39 @@ describe('[CX04] the cancellation and its record are one transaction', () => {
     expect(checkoutOutbox.IN_PROCESS_OUTBOX_KINDS).toContain(RESCUE_KIND);
     expect((rescue as Record<string, unknown>)['RESCUE_NOTICE_KIND'], 'one name on both sides').toBe(RESCUE_KIND);
 
-    const queue = readFileSync(path.join(__dirname, '..', 'jobs', 'queue.ts'), 'utf8');
-    const sweep = queue.slice(queue.indexOf("if (job.name === 'checkout-outbox')"), queue.indexOf("if (job.name === 'mover-revocation-outbox')"));
-    expect(sweep).toMatch(/drainRescueNotices\(/);
-    expect(sweep.indexOf('drainRescueNotices(')).toBeGreaterThan(sweep.indexOf('drainCheckoutOutbox('));
-    if (drainRescueNotices) await drainRescueNotices(deps());
-    expect(await owed(order.id)).toBe(0);
+    // The production worker's checkout-outbox job drains it.
+    expect(await runDispatchJob('checkout-outbox')).toBe('completed');
+    expect(await owed(order.id), 'the sweep the worker runs every 10 s closes the obligation').toBe(0);
+    expect(await customerNotices(order.id)).toBe(1);
+  });
+
+  it('one drain failing on infrastructure does not skip the rescue drain; the job still reports the failure', async () => {
+    const order = await makeOrder();
+    const dying = new NotificationService(app.prisma, app.io);
+    vi.spyOn(dying, 'send').mockRejectedValue(new Error('worker process died'));
+    await settleTooOldOrder(deps(app.prisma, dying), await full(order.id), 120, 45);
+    expect(await owed(order.id)).toBe(1);
+    vi.mocked(drainCheckoutOutbox).mockRejectedValueOnce(new Error('order queue unreachable'));
+    const outcome = await runDispatchJob('checkout-outbox');
+    expect(outcome, 'the dead-letter alarm still sees the failing drain').toBeInstanceOf(Error);
+    expect((outcome as Error).message).toContain('order queue unreachable');
+    expect(await owed(order.id), 'the rescue drain ran anyway').toBe(0);
+    expect(await customerNotices(order.id)).toBe(1);
+  });
+
+  it('a cutoff cancellation moved on to REFUNDED before its notices were drained still gets them', async () => {
+    const order = await makeOrder();
+    const dying = new NotificationService(app.prisma, app.io);
+    vi.spyOn(dying, 'send').mockRejectedValue(new Error('worker process died'));
+    await settleTooOldOrder(deps(app.prisma, dying), await full(order.id), 120, 45);
+    expect(await owed(order.id)).toBe(1);
+    // CANCELLED → REFUNDED is a declared edge (an operator's refund record).
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'REFUNDED' } });
+    expect(drainRescueNotices, 'the rescue obligations have their own drain').toBeTypeOf('function');
+    expect(await drainRescueNotices!(deps())).toMatchObject({ delivered: 1 });
+    expect(await customerNotices(order.id)).toBe(1);
+    expect(await vendorNotices(order.id)).toBe(1);
+    expect(await opsInbox(order.id)).toBe(1);
   });
 });
 
