@@ -34,6 +34,7 @@ import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
+import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -842,6 +843,10 @@ export async function customerRoutes(app: FastifyInstance) {
         // time — a private object's key is unrenderable by any client.
         avatar: await resolveAvatarUrl(user.avatar),
         selfieCapturedAt: user.selfieCapturedAt,
+        // [Owner ruling 8 Oct 2026 — CUSTOMER ID] What the app may say about the customer's ID,
+        // truthfully (additive): NONE · ON_FILE (unlocked, no person reviewed it) · CHECKED (a person
+        // approved it) · WAITING (held for a person) · NOT_ACCEPTED.
+        idCheck: await customerIdCheck(app.prisma, userId, user.trustLevel),
         role: user.activeRole,
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
