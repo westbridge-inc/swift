@@ -48,6 +48,12 @@ const PUBLIC_PAGES = [
 ];
 
 const PRIVATE_PAGES = [
+  'dashboard/notifications/page.tsx',
+  'portal/notifications/page.tsx',
+  'advertiser/page.tsx',
+  'advertiser/account/page.tsx',
+  'advertiser/notifications/page.tsx',
+  'advertiser/campaigns/[advertiserId]/[campaignId]/page.tsx',
   '(app)/account/page.tsx',
   '(app)/account/addresses/page.tsx',
   '(app)/account/favourites/page.tsx',
@@ -91,6 +97,7 @@ const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[...path]/route.ts'];
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
 // must be reviewed here too; they cannot silently evade the census.
 const PUBLIC_RESOURCES = [
+  'api/launch-state/route.ts', // [S1] the public site's switch, as the server holds it (no personal data)
   'manifest.ts',
   'media/[...path]/route.ts', // stores' public photos only; no identity or private upload paths
   'opengraph-image.tsx',
