@@ -1242,6 +1242,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
         if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
         else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
+        // [RESCUE S1 · CX04] The food-age cutoff commits its notices as an
+        // obligation with the cancellation; whatever its own fast path could
+        // not finish (a crash, an outage, a page nobody took) is delivered
+        // here on the same terms: in process, deduplicated, owed until held.
+        const { drainRescueNotices } = await import('../modules/dispatch/rescue');
+        const rescueNotices = await drainRescueNotices({ prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
+        if (rescueNotices.owed + rescueNotices.failed > 0) ctx.log.warn(rescueNotices, '[RESCUE S1] food-age cutoff notices still owed — retrying with backoff');
+        else if (rescueNotices.delivered > 0) ctx.log.info(rescueNotices, '[RESCUE S1] food-age cutoff notices delivered');
         return;
       }
       if (job.name === 'mover-revocation-outbox') {
