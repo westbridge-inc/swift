@@ -15,6 +15,7 @@ import { readOfferItinerary, type TaxiStopPreview } from '../rides/taxi-stops-re
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
 import { algoConfig } from '../algo/algo-config';
+import { journalAuthorityWhere, poolForOrder, type DispatchPool } from './dispatch-generation-keys';
 import { foodAgeLimitMinutes, foodAge, retireTooOldOrder, rescueIncentiveGyd, grantRescueIncentive, incentiveKey, isCapturedMmg } from './rescue';
 import { recordDecision } from '../algo/decisions';
 import { TERMINAL_ORDER_STATUSES, DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
@@ -145,13 +146,9 @@ export function nearestCandidateCap(): number {
   return Number.isInteger(n) && n > 0 ? n : 50;
 }
 
-/** Taxi rides draw from the driver pool; everything else from riders.
- *  Same scoring, same cascade, same atomic claim — shared code, not a copy. */
-export type DispatchPool = 'RIDER' | 'DRIVER';
-
-function poolForOrder(order: { orderType: string }): DispatchPool {
-  return order.orderType === 'TAXI' ? 'DRIVER' : 'RIDER';
-}
+// The pool and the journal's generation rule live in dispatch-generation-keys.ts,
+// shared with the cancel policy's "no mover found" read.
+export type { DispatchPool } from './dispatch-generation-keys';
 
 /** Journal vertical (availability spec §3): TAXI | COURIER | DELIVERY. */
 function verticalForOrder(order: { orderType: string }): string {
@@ -295,26 +292,6 @@ const exhaustKey = dispatchExhaustKey;
 const reconciledKey = (orderId: string) => `dispatch:reconciled:${orderId}`;
 /** [F-014-06] Short single-flight lock around exhaust() side effects. */
 const exhaustLockKey = dispatchExhaustLockKey;
-
-/** Generation zero is also the rollout compatibility generation: searches
- * created before the migration carry NULL, while existing Order rows are
- * backfilled/defaulted to version 0. Both identities describe the same
- * pre-switch custody. Later generations are exact and never match NULL. */
-function journalAuthorityWhere(
-  pool: DispatchPool,
-  deliveryAuthorityVersion: number,
-): Prisma.DispatchSearchWhereInput {
-  if (pool !== 'RIDER') return { deliveryAuthorityVersion: null };
-  if (deliveryAuthorityVersion === 0) {
-    return {
-      OR: [
-        { deliveryAuthorityVersion: 0 },
-        { deliveryAuthorityVersion: null },
-      ],
-    };
-  }
-  return { deliveryAuthorityVersion };
-}
 
 /** A committed claim must never be surfaced as failed, even if the logger's
  * destination is itself unhealthy while reporting a best-effort side effect. */

@@ -2619,7 +2619,8 @@ export class OrderService {
     // booking and its money is with the PROVIDER — the noun and the party
     // follow the committed row's fulfillment; the fee and the MMG uncertainty
     // above are the server's and are unchanged. Food keeps its exact words.
-    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : 'Order';
+    // A ride is a "Ride" in the customer's words [Item 64 · review S4].
+    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
     const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
     // [Item 64] The plain reason, when the platform found nobody to do the job.
     const cancelled = noMoverFree ? `${noun} cancelled — no mover was found, so there is no fee.` : null;

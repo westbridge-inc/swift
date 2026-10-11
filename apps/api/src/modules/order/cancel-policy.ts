@@ -12,6 +12,8 @@
 // Founder decision 2026-07-20: record it as a marker, keep displaying it.
 // ---------------------------------------------------------------------------
 
+import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-generation-keys';
+
 /** Minutes after placing during which a PENDING order cancels free. Under
  *  LIFECYCLE_V2 the hold window itself is always free regardless. */
 export const FREE_CANCEL_WINDOW_MIN = 5;
@@ -88,17 +90,12 @@ export interface DispatchJournalReader {
  */
 export async function readNoMoverFound(db: DispatchJournalReader, order: NoMoverSubject): Promise<boolean> {
   if (order.riderId != null || order.driverId != null) return false;
-  let generation: Record<string, unknown>;
-  if (order.orderType === 'TAXI') {
-    generation = { deliveryAuthorityVersion: null };
-  } else {
-    if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY') return false;
-    generation = order.fulfillmentModeVersion === 0
-      ? { OR: [{ deliveryAuthorityVersion: 0 }, { deliveryAuthorityVersion: null }] }
-      : { deliveryAuthorityVersion: order.fulfillmentModeVersion };
-  }
+  // The pool and the generation rule are dispatch's own (dispatch-generation-keys.ts):
+  // the fact is read by the rule the search was written by.
+  const pool = poolForOrder(order);
+  if (pool === 'RIDER' && (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY')) return false;
   const exhausted = await db.dispatchSearch.findFirst({
-    where: { subjectId: order.id, subjectType: 'ORDER', status: 'EXHAUSTED', ...generation },
+    where: { subjectId: order.id, subjectType: 'ORDER', status: 'EXHAUSTED', ...journalAuthorityWhere(pool, order.fulfillmentModeVersion) },
     select: { id: true },
   });
   return exhausted != null;
