@@ -18,6 +18,12 @@ export async function getCartQuote(choices?: CartQuoteChoices): Promise<Cart> {
   return data ?? { items: [] };
 }
 
+/** [W5 · review S2] Take the promotion off the saved cart. A cart with a
+ *  promotion is ordered in the phone app for now (owner ruling, 8 Oct). */
+export async function removeCartPromotion(): Promise<void> {
+  await apiFetch('/api/v1/customer/cart/promo', { method: 'DELETE' });
+}
+
 /** [W5] The stores a cart's quote prices, from its own lines (sorted, so an
  *  unchanged cart gives an unchanged selection). */
 export function quoteStoreIds(items: Cart['items'] | null | undefined): string[] {

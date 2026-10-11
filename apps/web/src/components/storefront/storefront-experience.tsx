@@ -41,6 +41,7 @@ import {
 } from '@/lib/menu-options';
 import { useOptionalCustomerSession } from '@/components/customer-session';
 import { useOrderingContext } from '@/components/ordering-context';
+import { MODE_LOCKED } from '@/lib/ordering-mode-lock';
 import { FulfilmentChoice } from '@/components/checkout/fulfilment-choice';
 import { guestCart } from '@/lib/basket-projection';
 import { useGuestBasket } from '@/lib/basket-state';
@@ -806,7 +807,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             </div>
 
             <div className={styles.railBody}>
-              <FulfilmentChoice name="store-fulfilment" value={orderingMode} onChange={setOrderingMode} />
+              <FulfilmentChoice name="store-fulfilment" value={orderingMode} onChange={(mode) => setError(setOrderingMode(mode) ? null : MODE_LOCKED)} />
               {orderingMode === 'PICKUP' ? (
                 <p className={styles.railNote}>Pickup from {storeLabel || catalog.name} · No delivery fee</p>
               ) : null}

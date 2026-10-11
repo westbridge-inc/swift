@@ -56,6 +56,7 @@ let mmg = false;
 let pickupQuote: () => unknown = () => pickupCart(mmg);
 let deliveryQuote: () => unknown = () => deliveryCart(mmg);
 let checkoutReply: ApiReply | null = null;
+let removePromo: () => void = () => undefined;
 let fetchMock: ReturnType<typeof mockApi>;
 const ok = (data: unknown) => ({ body: { success: true, data } });
 const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(([url, init]) =>
@@ -71,6 +72,7 @@ beforeEach(async () => {
   pickupQuote = () => pickupCart(mmg);
   deliveryQuote = () => deliveryCart(mmg);
   checkoutReply = null;
+  removePromo = () => undefined;
   fetchMock = mockApi(({ url, method }: ApiRequest) => {
     if (url.pathname === '/api/v1/auth/me') return ok({ user: { id: 'c1' } });
     if (url.pathname === '/api/v1/market/depth') return ok({ visible: false, items: 0, vendors: 0 });
@@ -82,6 +84,7 @@ beforeEach(async () => {
     }
     if (url.pathname === '/api/v1/customer/addresses') return ok([{ id: 'a1', label: 'Home', addressLine1: 'Fixture street', city: 'Georgetown', isDefault: true }]);
     if (url.pathname === '/api/v1/customer/cart/address' && method === 'PUT') return ok({ cart: deliveryCart(mmg) });
+    if (url.pathname === '/api/v1/customer/cart/promo' && method === 'DELETE') { removePromo(); return ok({ message: 'Promo removed' }); }
     if (url.pathname === '/api/v1/customer/checkout' && method === 'POST') return checkoutReply ?? ok({ order: { id: 'o1' }, orders: [{ id: 'o1' }], paymentAction: null });
     return { status: 404, body: { success: false, error: { message: `unmocked ${method} ${url.pathname}` } } };
   });
@@ -182,7 +185,8 @@ describe('[W5] Delivery or Pickup at checkout', () => {
   });
 
   it('when no riders are online, offers pickup instead — it switches the choice and places nothing', async () => {
-    checkoutReply = { status: 409, body: { success: false, error: { code: 'NO_RIDERS', message: 'No delivery riders are online right now.' } } };
+    // The server's own reply (order.service.ts): 409 DELIVERY_NO_RIDERS.
+    checkoutReply = { status: 409, body: { success: false, error: { code: 'DELIVERY_NO_RIDERS', message: 'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.' } } };
     at('/checkout', <CheckoutPage />);
     const place = await screen.findByRole('button', { name: 'Place cash order · $2,100' });
     await waitFor(() => expect((place as HTMLButtonElement).disabled).toBe(false));
@@ -224,6 +228,70 @@ describe('[W5] what stays in the phone app for now (owner ruling, 8 Oct)', () =>
     expect(screen.queryByText(/discounted cash delivery/)).toBeNull();
     expect(screen.queryByRole('button', { name: /Place pickup order/ })).toBeNull();
     expect(calls('POST', '/api/v1/customer/checkout')).toHaveLength(0);
+  });
+});
+
+describe('[W5 · review S2] a promotion never leaves the web as an order', () => {
+  it('a promotion that discounts nothing under pickup is still locked (no $0 redemption); Remove promotion lets the order go ahead without it', async () => {
+    let promo = true;
+    removePromo = () => { promo = false; };
+    // A free-delivery code prices to a 0 discount under pickup, but the cart still carries it.
+    pickupQuote = () => ({ ...pickupCart(), ...(promo ? { promoCode: { code: 'FIXTURE-FREE-DELIVERY' } } : {}) });
+    deliveryQuote = () => ({ ...deliveryCart(), ...(promo ? { discount: 300, totalAmount: 1800, promoCode: { code: 'FIXTURE-FREE-DELIVERY' } } : {}) });
+    sessionStorage.setItem('swift_ordering_mode', 'PICKUP');
+    at('/checkout', <CheckoutPage />);
+    await waitFor(() => expect(cartReads().some((query) => query.get('fulfillmentSelections') === JSON.stringify({ v1: 'PICKUP' }))).toBe(true));
+    expect(await screen.findByText(/A cart with a promotion is ordered in the Swift app for now/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Place pickup order/ })).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove promotion' }));
+    const place = await screen.findByRole('button', { name: 'Place pickup order · $1,800' });
+    expect(calls('DELETE', '/api/v1/customer/cart/promo')).toHaveLength(1);
+    await waitFor(() => expect((place as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(place);
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/o1'));
+    const [[, init]] = calls('POST', '/api/v1/customer/checkout') as [[unknown, RequestInit]];
+    expect(JSON.parse(String(init.body))).not.toHaveProperty('promoCode');
+  });
+
+  it('a delivery cart with a promotion gets the same honest reason and the same way out', async () => {
+    deliveryQuote = () => ({ ...deliveryCart(), discount: 300, totalAmount: 1800, promoCode: { code: 'FIXTURE-FREE-DELIVERY' } });
+    at('/checkout', <CheckoutPage />);
+    expect(await screen.findByText(/A cart with a promotion is ordered in the Swift app for now/)).toBeTruthy();
+    expect(screen.queryByText(/discounted cash delivery/)).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Remove promotion' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Place cash order/ })).toBeNull();
+  });
+});
+
+describe('[W5 · review S3] every place that changes delivery or pickup waits for an unknown order outcome', () => {
+  const pendingAttempt = () => sessionStorage.setItem('swift_web_checkout_attempt:c1', JSON.stringify({ signature: 'earlier-order', key: 'earlier-key' }));
+
+  it('the order context bar above the checkout cannot switch it', async () => {
+    at('/checkout', <CheckoutPage />);
+    await screen.findByRole('button', { name: 'Place cash order · $2,100' });
+    pendingAttempt();
+    fireEvent.click(screen.getByRole('button', { name: /Change delivery or pickup/ }));
+    const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
+    fireEvent.click(within(sheet).getByRole('radio', { name: /^Pickup/ }));
+    expect(await within(sheet).findByText(/outcome is still unknown/)).toBeTruthy();
+    expect((within(sheet).getByRole('radio', { name: /^Delivery/ }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Done' }));
+    expect((within(await choice()).getByRole('radio', { name: /^Delivery/ }) as HTMLInputElement).checked).toBe(true);
+    expect(sessionStorage.getItem('swift_ordering_mode')).not.toBe('PICKUP');
+    expect(screen.getByRole('button', { name: 'Place cash order · $2,100' })).toBeTruthy();
+  });
+
+  it('nor can the store’s order panel', async () => {
+    at('/store/fixture-bakery', await StorefrontPage({ params: Promise.resolve({ slug: 'fixture-bakery' }), searchParams: Promise.resolve({}) }));
+    const rail = await screen.findByRole('complementary', { name: 'Your order and checkout' });
+    const group = await within(rail).findByRole('radiogroup', { name: 'How would you like your order?' });
+    await within(rail).findByRole('button', { name: /^Checkout ·/ });
+    pendingAttempt();
+    fireEvent.click(within(group).getByRole('radio', { name: /^Pickup/ }));
+    expect(await within(rail).findByText(/outcome is still unknown/)).toBeTruthy();
+    expect((within(group).getByRole('radio', { name: /^Delivery/ }) as HTMLInputElement).checked).toBe(true);
+    expect(rail.textContent).not.toContain('Pickup from');
+    expect(sessionStorage.getItem('swift_ordering_mode')).not.toBe('PICKUP');
   });
 });
 

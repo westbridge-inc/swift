@@ -21,7 +21,6 @@ import {
   cartQuoteFingerprint,
   checkout,
   checkoutAttemptSignature,
-  clearCart,
   clearCheckoutAttempt,
   getAddresses,
   getCart,
@@ -35,7 +34,7 @@ import {
   updateCartLine,
   type Cart,
 } from '@/lib/customer';
-import { getCartQuote, pickupChoices, quoteStoreIds } from '@/lib/cart-quote';
+import { getCartQuote, pickupChoices, quoteStoreIds, removeCartPromotion } from '@/lib/cart-quote';
 import type { NewAddress } from '@/components/checkout/new-address-form';
 import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { ApiRequestError } from '@/lib/auth';
@@ -161,10 +160,10 @@ export function CheckoutPanel() {
           ? 'Appointment checkout is not available on the web yet. Remove those lines to continue with a delivery order.'
           : 'This cart mixes or omits fulfilment modes, so Swift will not show or submit one aggregate total.');
     }
-    if (Number(c.discount ?? 0) > 0) {
-      return block(pickup
-        ? 'This saved cart has a promotion. A cart with a promotion is ordered in the Swift app for now; clear this cart to start again without it.'
-        : 'This saved cart has a delivery discount, but the server does not allow discounted cash delivery. Swift cannot remove only the promotion on the web yet; clear this cart to start again without it.');
+    // [W5 · review S2] Any promotion, even one that discounts nothing here (a
+    // free-delivery code under pickup): checkout would still spend its use.
+    if (c.promoCode?.code || Number(c.discount ?? 0) > 0) {
+      return block('This saved cart has a promotion. A cart with a promotion is ordered in the Swift app for now; remove the promotion to order it here.');
     }
     if (pickup) {
       // [W5] Never a delivery total under a pickup label: every store in the
@@ -404,7 +403,7 @@ export function CheckoutPanel() {
         paymentMethod,
         tipAmount: pickupOrder ? pickupOrder.tipAmount : tip,
         ...(pickupOrder ? { fulfillmentSelections: pickupOrder.fulfillmentSelections } : {}),
-        ...(liveCart.promoCode?.code ? { promoCode: liveCart.promoCode.code } : {}),
+        // [W5 · review S2] A web order never names a promotion.
         ...(total !== null ? { expectedTotal: total } : {}),
         expectedLines,
       };
@@ -468,7 +467,8 @@ export function CheckoutPanel() {
       if (e instanceof ApiRequestError && e.code?.startsWith('MMG_')) {
         setPaySelection(selectCartPaymentMethod('CASH', paymentCapabilities));
       }
-      if (message.includes('No delivery riders') || message.includes('NO_RIDERS')) setNoRiders(true);
+      // The server's own answer (order.service.ts): 409 DELIVERY_NO_RIDERS.
+      if (e instanceof ApiRequestError && e.code === 'DELIVERY_NO_RIDERS') setNoRiders(true);
       else setError(message);
       window.requestAnimationFrame(() => (errorMessage.current ?? checkoutRail.current)?.focus());
     } finally { checkoutBusy.current = false; setBusy(false); }
@@ -651,9 +651,9 @@ export function CheckoutPanel() {
           <div ref={safetyNotice} tabIndex={-1} className={`${styles.safety} ${cartSafety === 'blocked' ? styles.safetyBlocked : styles.safetyNotice}`} role={cartSafety === 'blocked' ? 'alert' : 'status'}>
             <div className={styles.panelStack}>
               <p>{cartSafetyMessage}</p>
-              {cartSafety === 'blocked' && discount > 0 ? (
-                <button type="button" disabled={busy} onClick={() => void mutateCart(() => clearCart())} className={`${styles.button} ${styles.buttonSecondary}`}>
-                  Clear saved cart and promotion
+              {cartSafety === 'blocked' && (cart.promoCode?.code || discount > 0) ? (
+                <button type="button" disabled={busy} onClick={() => void mutateCart(() => removeCartPromotion())} className={`${styles.button} ${styles.buttonSecondary}`}>
+                  Remove promotion
                 </button>
               ) : null}
               {cartSafety === 'blocked' ? (
