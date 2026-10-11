@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
+import { RouteAttribution } from '../../../components/RouteAttribution';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
@@ -239,6 +240,7 @@ export function CourierScreen({ navigation }: any) {
           <Polyline coordinates={[pickupLL, dropoffLL]} strokeColor={color.brand[500]} strokeWidth={4} />
         ) : null}
       </MapView>
+      <RouteAttribution top={insets.top + 56} />
 
       <View style={{ position: 'absolute', top: insets.top + space.sm, left: space['2xl'] }}>
         <CircleChip icon="chevron-left" label="Back" onPress={() => navigation?.goBack?.()} />

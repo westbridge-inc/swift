@@ -455,10 +455,13 @@ describe('[A-22] a promo window is a window in Guyana', () => {
       ...window(), maxUsesPerUser: 1,
     }, adminToken);
     const id = created.json().data.id; createdPromoIds.push(id);
-    const patched = await inject('PUT', `/api/v1/admin/promos/${id}`, { validUntil: '2026-12-31' }, adminToken);
+    // The window starts relative to today; its patched end must stay ahead of
+    // that start while still testing December 31's exact local end of day.
+    const nextYear = new Date().getUTCFullYear() + 1;
+    const patched = await inject('PUT', `/api/v1/admin/promos/${id}`, { validUntil: `${nextYear}-12-31` }, adminToken);
     expect(patched.statusCode, patched.body).toBe(200);
     const row = await app.prisma.promoCode.findUniqueOrThrow({ where: { id } });
-    expect(inGuyana(row.validUntil)).toBe('31/12/2026, 23:59:59');
+    expect(inGuyana(row.validUntil)).toBe(`31/12/${nextYear}, 23:59:59`);
   });
 });
 

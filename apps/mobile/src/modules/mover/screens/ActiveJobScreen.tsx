@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Platform, Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
+import { RouteAttribution } from '../../../components/RouteAttribution';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
@@ -567,6 +568,7 @@ export function ActiveJobScreen({ navigation }: any) {
   return (
     <View style={{ flex: 1, backgroundColor: dk.bg }}>
       {job ? (
+        <>
         <MapView
           provider={PROVIDER_DEFAULT}
           style={{ flex: 1 }}
@@ -584,6 +586,8 @@ export function ActiveJobScreen({ navigation }: any) {
             </>
           ) : null}
         </MapView>
+        <RouteAttribution top={insets.top + 56} />
+        </>
       ) : (
         <View style={{ flex: 1 }} />
       )}
