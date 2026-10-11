@@ -26,6 +26,8 @@ const LABELS: Record<string, string> = {
   trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
   self_declaration_unregistered: 'Unregistered business declaration',
+  // [MC-PR2] checklist photo types the queue and the activation checklist both name
+  storefront_photo: 'Storefront photo', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
   VENDOR_OWNER: 'Business owner', MOVER: 'Rider/Driver', CUSTOMER: 'Customer',
   RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
   CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',

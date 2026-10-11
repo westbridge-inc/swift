@@ -11,7 +11,7 @@ import {
   resolveRatingReport,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { useAskReason } from '@/components/mc/ReasonDialog';
 
 // ---------------------------------------------------------------------------
 // STORE-001 — the reviewer's side of moderation.
@@ -68,6 +68,9 @@ export default function ModerationPage() {
   const [note, setNote] = useState('');
   const [activeId, setActiveId] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<unknown>(null);
+  // [MC-PR3b] Every decision asks why in the page's own panel, never a browser
+  // prompt; cancelling it decides nothing.
+  const ask = useAskReason();
 
   const reports = useQuery({
     queryKey: ['moderation', 'content', status],
@@ -223,22 +226,22 @@ export default function ModerationPage() {
                           <CsaeCase
                             busy={busy}
                             proposedBy={r.dismissProposedBy ?? null}
-                            onAction={(csae) => { const reason = askReason({ action: 'record this child-safety enforcement' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason, csae }); }}
-                            onProposeDismiss={(disposition) => { const reason = askReason({ action: 'propose dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'PROPOSE_DISMISS', reason, csae: { disposition } }); }}
-                            onConfirmDismiss={(disposition) => { const reason = askReason({ action: 'confirm dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason, csae: { disposition } }); }}
+                            onAction={async (csae) => { const reason = await ask({ action: 'record this child-safety enforcement' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason, csae }); }}
+                            onProposeDismiss={async (disposition) => { const reason = await ask({ action: 'propose dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'PROPOSE_DISMISS', reason, csae: { disposition } }); }}
+                            onConfirmDismiss={async (disposition) => { const reason = await ask({ action: 'confirm dismissing this child-safety report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason, csae: { disposition } }); }}
                           />
                         ) : (
                         <div className="flex gap-2">
                           <button
                             disabled={busy}
-                            onClick={() => { const reason = askReason({ action: 'record this report as actioned' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason }); }}
+                            onClick={async () => { const reason = await ask({ action: 'record this report as actioned' }); if (reason) decideReport.mutate({ id: r.id, next: 'ACTIONED', reason }); }}
                             className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
                           >
                             Record as actioned
                           </button>
                           <button
                             disabled={busy}
-                            onClick={() => { const reason = askReason({ action: 'dismiss this report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason }); }}
+                            onClick={async () => { const reason = await ask({ action: 'dismiss this report' }); if (reason) decideReport.mutate({ id: r.id, next: 'DISMISSED', reason }); }}
                             className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                           >
                             Dismiss
@@ -265,7 +268,7 @@ export default function ModerationPage() {
                         {r.status === 'PENDING' ? (
                         <button
                           disabled={busy}
-                          onClick={() => { const reason = askReason({ action: 'claim this report for review' }); if (reason) decideReport.mutate({ id: r.id, next: 'REVIEWING', reason }); }}
+                          onClick={async () => { const reason = await ask({ action: 'claim this report for review' }); if (reason) decideReport.mutate({ id: r.id, next: 'REVIEWING', reason }); }}
                             className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                           >
                             Claim (reviewing)
@@ -316,14 +319,14 @@ export default function ModerationPage() {
                   <div className="flex gap-2 mt-3">
                     <button
                       disabled={busy || !r.rating}
-                      onClick={() => { const reason = askReason({ action: 'uphold this report and remove the review' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'uphold', reason }); }}
+                      onClick={async () => { const reason = await ask({ action: 'uphold this report and remove the review' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'uphold', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
                     >
                       Uphold &amp; remove review
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => { const reason = askReason({ action: 'dismiss this review report' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'dismiss', reason }); }}
+                      onClick={async () => { const reason = await ask({ action: 'dismiss this review report' }); if (reason) decideRatingReport.mutate({ id: r.id, action: 'dismiss', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                     >
                       Dismiss
@@ -365,21 +368,21 @@ export default function ModerationPage() {
                   <div className="flex gap-2 mt-3">
                     <button
                       disabled={busy}
-                      onClick={() => { const reason = askReason({ action: 'publish this held review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'publish', reason }); }}
+                      onClick={async () => { const reason = await ask({ action: 'publish this held review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'publish', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 text-green-400 disabled:opacity-50"
                     >
                       Publish it
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => { const reason = askReason({ action: 'remove this review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'remove', reason }); }}
+                      onClick={async () => { const reason = await ask({ action: 'remove this review' }); if (reason) decideHeld.mutate({ id: h.id, action: 'remove', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-red-500/20 text-red-400 disabled:opacity-50"
                     >
                       Remove
                     </button>
                     <button
                       disabled={busy}
-                      onClick={() => { const reason = askReason({ action: 'exclude this review from the rating' }); if (reason) decideHeld.mutate({ id: h.id, action: 'exclude', reason }); }}
+                      onClick={async () => { const reason = await ask({ action: 'exclude this review from the rating' }); if (reason) decideHeld.mutate({ id: h.id, action: 'exclude', reason }); }}
                       className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                     >
                       Exclude from average

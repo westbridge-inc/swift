@@ -13,7 +13,8 @@ import {
   suspendAdvertiser,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
-import { askReason, reasonTooShort } from '@/lib/ask-reason';
+import { reasonTooShort } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 // ---------------------------------------------------------------------------
 // Swift Ads has two gates, and until now neither had a human standing at it.
@@ -70,6 +71,8 @@ export default function AdsReviewPage() {
     setMutationError(null);
   };
   const onError = (e: unknown) => setMutationError(e);
+  // [MC-PR3b] Approve and reinstate ask why in the page (no browser prompt) and show the server's answer.
+  const actions = useActionRunner(() => { void queryClient.invalidateQueries({ queryKey: ['ads'] }); });
 
   const advertiserAction = useMutation({
     mutationFn: ({ id, action, reason: stated }: { id: string; action: 'approve' | 'reject' | 'suspend' | 'reinstate'; reason: string }) => {
@@ -122,6 +125,7 @@ export default function AdsReviewPage() {
         </button>
       </div>
 
+      {actions.banner}
       {mutationError ? <MutationError error={mutationError} label="ads review decision" /> : null}
 
       {tab === 'advertisers' ? (
@@ -205,19 +209,31 @@ export default function AdsReviewPage() {
                       {status === 'PENDING_REVIEW' || status === 'SUSPENDED' ? (
                         <button
                           disabled={busy}
-                          onClick={() => { const stated = askReason({ action: 'approve this advertiser', subject: a.companyName }); if (stated) advertiserAction.mutate({ id: a.id, action: 'approve', reason: stated }); }}
+                          onClick={() => void actions.run({
+                            title: `Approve ${a.companyName}?`,
+                            body: <p>They can book ad slots. Each creative still needs its own approval before it is shown.</p>,
+                            confirmLabel: 'Approve advertiser',
+                            submit: ({ reason: stated }) => approveAdvertiser(a.id, stated),
+                            success: () => `${a.companyName} is approved.`,
+                          })}
                           className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 text-green-400 disabled:opacity-50"
                         >
-                          Approve
+                          Approve…
                         </button>
                       ) : null}
                       {status === 'REJECTED' || status === 'SUSPENDED' ? (
                         <button
                           disabled={busy}
-                          onClick={() => { const stated = askReason({ action: 'reinstate this advertiser', subject: a.companyName }); if (stated) advertiserAction.mutate({ id: a.id, action: 'reinstate', reason: stated }); }}
+                          onClick={() => void actions.run({
+                            title: `Reinstate ${a.companyName}?`,
+                            body: <p>They can book ad slots again.</p>,
+                            confirmLabel: 'Reinstate advertiser',
+                            submit: ({ reason: stated }) => reinstateAdvertiser(a.id, stated),
+                            success: () => `${a.companyName} is reinstated.`,
+                          })}
                           className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                         >
-                          Reinstate
+                          Reinstate…
                         </button>
                       ) : null}
                       {status === 'PENDING_REVIEW' || status === 'APPROVED' ? (

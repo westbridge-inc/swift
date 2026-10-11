@@ -91,6 +91,26 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
         next: `${NOTHING_CHANGED} Featuring opens once a business registration is approved for the owner.`,
         link: { label: 'Open in Review Center', href: reviewCenterHref(ctx.applicantId) },
       };
+    case 'DISCLOSURE_INCOMPLETE':
+      return {
+        tone: 'refused',
+        title: "The store's supplier information is incomplete",
+        next: `${NOTHING_CHANGED} Its documents are approved; it goes live by itself once the missing details are complete.`,
+      };
+    case 'FEE_UNPAID':
+      return {
+        tone: 'refused',
+        title: 'This store is held by its weekly fee',
+        next: `${NOTHING_CHANGED} Its weekly fee is unpaid or its billing is stopped. The fee must be paid through the MMG checkout page first. Billing suspensions lift automatically after confirmed payment; admin suspensions still need Reinstate. The console cannot lift a fee hold.`,
+      };
+    case 'OWNER_ACCOUNT_RESTRICTED':
+      return { tone: 'refused', title: 'The owner’s account is banned or suspended', next: `${NOTHING_CHANGED} The owner's account must be reinstated first. Then refresh this store's checklist.` };
+    case 'ACCOUNT_CLOSED':
+      return { tone: 'refused', title: 'The owner closed their Swift account', next: `${NOTHING_CHANGED} A closed account's store is not reopened from the console.` };
+    case 'STORE_CLOSED':
+      return { tone: 'refused', title: 'This store is closed', next: `${NOTHING_CHANGED} A closed store is not reopened from the console.` };
+    case 'ACTIVATION_HELD':
+      return { tone: 'refused', title: 'The store changed while you were acting', next: `${NOTHING_CHANGED} Refresh and check its documents before trying again.` };
     case 'ALREADY_ACTIVE':
       return { tone: 'refused', title: 'This store is already live', next: 'Nothing more is needed. Refresh to see its current status.' };
     case 'STEP_UP_REQUIRED':

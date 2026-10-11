@@ -12,7 +12,8 @@ import {
   fetchCustodyCases,
 } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
-import { askReason } from '@/lib/ask-reason';
+import { maskedPhone } from '@/lib/review-center';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 // ---------------------------------------------------------------------------
 // [AF-MOB-006] CUSTODY CASES — deliveries that went wrong AFTER pickup.
@@ -23,6 +24,10 @@ import { askReason } from '@/lib/ask-reason';
 // goods by itself: a relay completes only when the relay rider types the
 // holder's code, and a return completes when the store (or, failing that, an
 // operator) confirms the goods are back.
+//
+// [MISSION CONTROL · PR-3b] Each decision is one in-page panel — the relay
+// rider's id and the reason together, no browser prompts — and the server's
+// answer stays on screen. Phones are masked.
 // ---------------------------------------------------------------------------
 
 type Outcome = 'SUPPORT_HOLD' | 'RELAY_REQUIRED' | 'RETURN_REQUIRED';
@@ -46,16 +51,8 @@ function CaseDetail({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
   const onError = (e: unknown) => setError(e instanceof Error ? e.message : 'The action failed.');
   const claim = useMutation({ mutationFn: () => claimCustodyCase(id), onSuccess: refresh, onError });
-  const direct = useMutation({
-    mutationFn: ({ outcome, reason }: { outcome: Outcome; reason: string }) => directCustodyCase(id, outcome, reason),
-    onSuccess: refresh, onError,
-  });
-  const relay = useMutation({
-    mutationFn: ({ riderId, reason }: { riderId: string; reason: string }) => assignCustodyRelay(id, riderId, reason),
-    onSuccess: refresh, onError,
-  });
-  const back = useMutation({ mutationFn: (reason: string) => confirmCustodyReturn(id, reason), onSuccess: refresh, onError });
-  const busy = claim.isPending || direct.isPending || relay.isPending || back.isPending;
+  const actions = useActionRunner(refresh);
+  const busy = claim.isPending;
 
   if (isLoading) return <div className="h-24 rounded-xl bg-[var(--panel)] animate-pulse" />;
   const k = data?.data;
@@ -66,7 +63,44 @@ function CaseDetail({ id }: { id: string }) {
   // a return while a relay rider is on the way (call the handoff off first).
   const directable = (['SUPPORT_HOLD', 'RELAY_REQUIRED', 'RETURN_REQUIRED'] as const)
     .filter((o) => o !== k.state && !(k.state === 'TRANSFER_IN_PROGRESS' && o === 'RETURN_REQUIRED'));
-  const person = (r: any) => (r ? `${r.user?.firstName ?? ''} ${r.user?.lastName ?? ''}`.trim() + (r.user?.phone ? ` · ${r.user.phone}` : '') + (r.isOnline ? ' · online' : ' · offline') : '—');
+  const person = (r: any) => (r ? `${r.user?.firstName ?? ''} ${r.user?.lastName ?? ''}`.trim() + (r.user?.phone ? ` · ${maskedPhone(r.user.phone)}` : '') + (r.isOnline ? ' · online' : ' · offline') : '—');
+  const order = `order ${k.order?.orderNumber ?? ''}`.trim();
+
+  const direct = (o: Outcome) => {
+    setError(null);
+    void actions.run({
+      title: `${OUTCOME_LABEL[o]} — ${order}?`,
+      body: o === 'RETURN_REQUIRED'
+        ? <p>The rider is told to take the goods back to where they came from.</p>
+        : o === 'RELAY_REQUIRED'
+          ? <p>The goods go to another rider; name them next. The handoff completes only when the relay rider types the holder&apos;s code.</p>
+          : <p>The rider keeps the goods where they are until support decides what happens next.</p>,
+      confirmLabel: OUTCOME_LABEL[o],
+      submit: ({ reason }) => directCustodyCase(id, o, reason),
+      success: () => `${order}: ${OUTCOME_LABEL[o].toLowerCase()}.`,
+    });
+  };
+  const nameRelay = () => {
+    setError(null);
+    void actions.run({
+      title: `Name the relay rider for ${order}?`,
+      body: <p>The handoff completes only when the relay rider types the holder&apos;s code — naming them moves nothing by itself.</p>,
+      confirmLabel: 'Name relay rider',
+      fields: [{ kind: 'text', name: 'riderId', label: 'Relay rider id', hint: 'From the Riders list', required: true, maxLength: 64 }],
+      submit: ({ reason, values }) => assignCustodyRelay(id, String(values['riderId']), reason),
+      success: () => `The relay rider is named for ${order}.`,
+    });
+  };
+  const confirmBack = () => {
+    setError(null);
+    void actions.run({
+      title: `Record that the goods for ${order} are back?`,
+      body: <p>Do this only when the store (or sender) cannot confirm it themselves.</p>,
+      confirmLabel: 'Confirm the goods are back',
+      submit: ({ reason }) => confirmCustodyReturn(id, reason),
+      success: () => `${order}: the goods are recorded as back.`,
+    });
+  };
 
   return (
     <div className="mt-4 space-y-4">
@@ -83,6 +117,7 @@ function CaseDetail({ id }: { id: string }) {
       ) : null}
 
       {error ? <p className="text-sm text-red-400">{error}</p> : null}
+      {actions.banner}
 
       {open ? (
         <div className="flex flex-wrap gap-2">
@@ -95,40 +130,28 @@ function CaseDetail({ id }: { id: string }) {
             <button
               key={o}
               disabled={busy}
-              onClick={() => {
-                const reason = askReason({ action: OUTCOME_LABEL[o].toLowerCase(), subject: `order ${k.order?.orderNumber}` });
-                if (reason) direct.mutate({ outcome: o, reason });
-              }}
+              onClick={() => direct(o)}
               className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
             >
-              {OUTCOME_LABEL[o]}
+              {OUTCOME_LABEL[o]}…
             </button>
           ))}
           {k.state === 'RELAY_REQUIRED' ? (
             <button
               disabled={busy}
-              onClick={() => {
-                const riderId = window.prompt('Rider id of the relay rider (from Riders):')?.trim();
-                if (!riderId) return;
-                const reason = askReason({ action: 'name this relay rider', subject: `order ${k.order?.orderNumber}` });
-                if (reason) relay.mutate({ riderId, reason });
-              }}
+              onClick={nameRelay}
               className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] disabled:opacity-50"
             >
-              Name the relay rider
+              Name the relay rider…
             </button>
           ) : null}
           {k.state === 'RETURN_REQUIRED' && k.order?.status === 'RETURNING' ? (
             <button
               disabled={busy}
-              onClick={() => {
-                if (!window.confirm('Record that the goods are back where they came from? Do this only when the store (or sender) cannot confirm it themselves.')) return;
-                const reason = askReason({ action: 'confirm this return', subject: `order ${k.order?.orderNumber}` });
-                if (reason) back.mutate(reason);
-              }}
+              onClick={confirmBack}
               className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
             >
-              Confirm the goods are back
+              Confirm the goods are back…
             </button>
           ) : null}
         </div>

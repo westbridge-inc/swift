@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useId, cloneElement } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchPromos, createPromo, type CreatePromoInput, type Promo } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 const EMPTY: CreatePromoInput = {
   code: '',
@@ -19,25 +19,31 @@ export default function PromosPage() {
   const { data, isLoading } = useQuery({ queryKey: ['promos'], queryFn: fetchPromos });
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<CreatePromoInput>(EMPTY);
-  const [error, setError] = useState<string | null>(null);
 
-  const create = useMutation({
-    mutationFn: (reason: string) =>
-      createPromo({
+  // [MC-PR3b] A promo code is platform pricing (a second admin approves it):
+  // the reason is asked in the page, a refusal stays in that panel with the
+  // form still filled behind it, and "sent for approval" stays on screen.
+  const actions = useActionRunner(() => {
+    void qc.invalidateQueries({ queryKey: ['promos'] });
+    setOpen(false);
+    setForm(EMPTY);
+  });
+  const create = () => {
+    const code = form.code.trim();
+    void actions.run({
+      title: `Create promo code ${code}?`,
+      body: <p>Customers can use it as soon as a second admin approves it, until {form.validUntil}.</p>,
+      confirmLabel: 'Send for approval',
+      submit: ({ reason }) => createPromo({
         ...form,
-        code: form.code.trim(),
+        code,
         discountValue: Number(form.discountValue),
         ...(form.minOrderAmount != null ? { minOrderAmount: Number(form.minOrderAmount) } : {}),
         ...(form.maxUses != null ? { maxUses: Number(form.maxUses) } : {}),
       }, reason),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['promos'] });
-      setOpen(false);
-      setForm(EMPTY);
-      setError(null);
-    },
-    onError: (e) => setError((e as Error).message || 'Could not create promo.'),
-  });
+      success: () => `Promo code ${code} is created.`,
+    });
+  };
 
   const set = (patch: Partial<CreatePromoInput>) => setForm((f) => ({ ...f, ...patch }));
 
@@ -46,13 +52,14 @@ export default function PromosPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Promo Codes</h1>
         <button
-          onClick={() => { setError(null); setOpen(true); }}
+          onClick={() => { actions.clear(); setOpen(true); }}
           className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80"
         >
           Create Promo
         </button>
       </div>
 
+      {actions.banner}
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -141,12 +148,11 @@ export default function PromosPage() {
                 </Field>
               </div>
             </div>
-            {error && <p className="mt-3 text-sm text-[var(--accent)]">{error}</p>}
             <div className="flex justify-end gap-3 mt-5">
               <button onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
-              <button onClick={() => { const reason = askReason({ action: `create this promo code`, subject: form.code.trim() }); if (reason) create.mutate(reason); }} disabled={create.isPending || form.code.trim().length < 2 || !form.description.trim()}
+              <button onClick={create} disabled={form.code.trim().length < 2 || !form.description.trim()}
                 className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
-                {create.isPending ? 'Creating…' : 'Create'}
+                Create…
               </button>
             </div>
           </div>

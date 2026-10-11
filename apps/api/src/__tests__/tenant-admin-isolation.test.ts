@@ -709,6 +709,12 @@ describe('tenant-qualified admin access', () => {
     for (const response of responses) expectNotFound(response);
   });
 
+  it('[MC-PR2] returns 404 instead of reading the activation checklist of a store or mover in another tenant', async () => {
+    expectNotFound(await adminRequest('GET', `/api/v1/admin/vendors/${tenantBVendorId}/activation-checklist`));
+    expectNotFound(await adminRequest('GET', `/api/v1/admin/riders/${TENANT_B_RIDER_ID}/activation-checklist`));
+    expectNotFound(await adminRequest('GET', `/api/v1/admin/drivers/${TENANT_B_DRIVER_ID}/activation-checklist`));
+  });
+
   it('returns 404 instead of reading a rider or driver from another tenant', async () => {
     const rider = await adminRequest('GET', `/api/v1/admin/riders/${TENANT_B_RIDER_ID}`);
     const driver = await adminRequest('GET', `/api/v1/admin/drivers/${TENANT_B_DRIVER_ID}`);

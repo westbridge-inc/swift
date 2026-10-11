@@ -64,32 +64,3 @@ export function BackLink({ href, label }: { href: string; label: string }) {
 }
 
 export const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
-
-/** Confirm-then-mutate button used by the action bars. */
-export function ActionButton({
-  label,
-  confirm,
-  onClick,
-  disabled,
-  danger,
-}: {
-  label: string;
-  confirm: string;
-  onClick: () => void;
-  disabled?: boolean;
-  danger?: boolean;
-}) {
-  return (
-    <button
-      onClick={() => {
-        if (window.confirm(confirm)) onClick();
-      }}
-      disabled={disabled}
-      className={`px-4 py-2 rounded-lg text-sm disabled:opacity-50 transition-colors ${
-        danger ? 'bg-[var(--accent)] hover:bg-[var(--accent)]/80' : 'border border-[var(--border)] hover:bg-white/10'
-      }`}
-    >
-      {label}
-    </button>
-  );
-}
