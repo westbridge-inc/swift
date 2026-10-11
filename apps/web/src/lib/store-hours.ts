@@ -5,12 +5,10 @@
  */
 export type OpeningHours = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
+/** Guyana keeps UTC−4 all year (no daylight saving), so its calendar day is
+ *  the UTC day four hours earlier. */
 export function guyanaWeekday(now: Date = new Date()): number {
-  const short = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'America/Guyana' }).format(now);
-  const day = WEEKDAYS.indexOf(short);
-  return day >= 0 ? day : now.getUTCDay();
+  return new Date(now.getTime() - 4 * 3_600_000).getUTCDay();
 }
 
 /** "Today 07:00 – 19:00", "Closed today", or null when the store published no hours. */

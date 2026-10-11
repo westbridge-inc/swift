@@ -1,12 +1,11 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from '@/app/(app)/layout';
 import CheckoutPage from '@/app/(app)/checkout/page';
 import { StorefrontPage } from '@/components/storefront/storefront-page';
 import { storefrontFixture } from '@/test/storefront-fixture';
-import { getCart, pickupChoices } from '@/lib/customer';
-import { cartPricingChoices } from '../../../../mobile/src/modules/cart/cartQuote';
+import { getCartQuote, pickupChoices } from '@/lib/cart-quote';
 // The item sheet's code is split from the page; load it up front.
 import '@/components/storefront/item-options-panel';
 
@@ -26,7 +25,7 @@ vi.mock('next/navigation', () => ({
 }));
 
 const ITEM = { id: 'i1', name: 'Bake and saltfish', description: 'Fixture', basePrice: 900, customerPrice: 900, imageUrl: null, isAvailable: true, fulfillment: 'DELIVERY', optionGroups: [] };
-// Every day 07:00–19:00 except Sunday, so the "today" line is predictable whatever day the suite runs.
+// Every day 07:00–19:00, so the "today" line is predictable whatever day the suite runs.
 const HOURS = [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, openTime: '07:00', closeTime: '19:00', isClosed: false }));
 const STORE = {
   id: 'v1', name: 'Fixture Bakery', slug: 'fixture-bakery', vendorType: 'RESTAURANT', cuisineTypes: [], coverImageUrl: null,
@@ -44,8 +43,18 @@ const deliveryCart = (mmg = false) => ({
 });
 const pickupCart = (mmg = false) => ({ ...deliveryCart(mmg), deliveryFee: 0, totalAmount: 1800, vendors: [vendorRow('PICKUP', 0)] });
 
+// The phone app's own pricing choices, loaded at run time (as
+// test/mobile-ads-launch.test.tsx loads phone modules) so the website's type
+// check does not take in the phone's service layer behind cartQuote.ts.
+type PhonePricingState = { mode: 'DELIVERY' | 'PICKUP'; express: boolean; storeIds: readonly string[]; bookingsOnly: boolean; selectedTip: number | null; promoCode: string | null };
+let cartPricingChoices: (_state: PhonePricingState) => unknown;
+beforeAll(async () => {
+  ({ cartPricingChoices } = await import(new URL('../../../../mobile/src/modules/cart/cartQuote.ts', import.meta.url).pathname));
+});
+
 let mmg = false;
 let pickupQuote: () => unknown = () => pickupCart(mmg);
+let deliveryQuote: () => unknown = () => deliveryCart(mmg);
 let checkoutReply: ApiReply | null = null;
 let fetchMock: ReturnType<typeof mockApi>;
 const ok = (data: unknown) => ({ body: { success: true, data } });
@@ -60,6 +69,7 @@ beforeEach(async () => {
   state.push.mockReset();
   mmg = false;
   pickupQuote = () => pickupCart(mmg);
+  deliveryQuote = () => deliveryCart(mmg);
   checkoutReply = null;
   fetchMock = mockApi(({ url, method }: ApiRequest) => {
     if (url.pathname === '/api/v1/auth/me') return ok({ user: { id: 'c1' } });
@@ -68,7 +78,7 @@ beforeEach(async () => {
     if (url.pathname === '/api/v1/public/storefronts/fixture-bakery') return ok(storefrontFixture({ ...STORE, addressLine1: '12 Fixture Road', city: 'Georgetown', operatingHours: HOURS }));
     if (url.pathname === '/api/v1/customer/cart' && method === 'GET') {
       const selections = url.searchParams.get('fulfillmentSelections');
-      return ok(selections && JSON.parse(selections).v1 === 'PICKUP' ? pickupQuote() : deliveryCart(mmg));
+      return ok(selections && JSON.parse(selections).v1 === 'PICKUP' ? pickupQuote() : deliveryQuote());
     }
     if (url.pathname === '/api/v1/customer/addresses') return ok([{ id: 'a1', label: 'Home', addressLine1: 'Fixture street', city: 'Georgetown', isDefault: true }]);
     if (url.pathname === '/api/v1/customer/cart/address' && method === 'PUT') return ok({ cart: deliveryCart(mmg) });
@@ -90,7 +100,7 @@ async function choosePickup() {
 describe('[W5] the pickup quote', () => {
   it('asks the server for a pickup quote for every store in the basket, with no rider tip — the phone app’s own choices', async () => {
     expect(pickupChoices(['v2', 'v1'])).toEqual(cartPricingChoices({ mode: 'PICKUP', express: false, storeIds: ['v2', 'v1'], bookingsOnly: false, selectedTip: null, promoCode: null }));
-    await getCart({ choices: pickupChoices(['v1']) });
+    await getCartQuote(pickupChoices(['v1']));
     const [query] = cartReads();
     expect(JSON.parse(query!.get('fulfillmentSelections')!)).toEqual({ v1: 'PICKUP' });
     expect(query!.get('tipAmount')).toBe('0');
@@ -141,6 +151,8 @@ describe('[W5] Delivery or Pickup at checkout', () => {
     mmg = true;
     at('/checkout', <CheckoutPage />);
     await choosePickup();
+    // The payment choice is locked while Swift checks the pickup quote; wait for that quote first.
+    expect(await screen.findByRole('button', { name: 'Place pickup order · $1,800' })).toBeTruthy();
     const pay = await screen.findByRole('radiogroup', { name: 'Payment' });
     expect(within(pay).getAllByRole('radio').map((radio) => radio.closest('label')?.textContent)).toEqual([expect.stringContaining('Pay at the counter'), expect.stringContaining('Pay with MMG')]);
     fireEvent.click(within(pay).getByRole('radio', { name: /Pay with MMG/ }));
@@ -188,6 +200,30 @@ describe('[W5] Delivery or Pickup at checkout', () => {
     await choosePickup();
     expect(await screen.findByText(/unresolved server outcome/)).toBeTruthy();
     expect((within(await choice()).getByRole('radio', { name: /^Delivery/ }) as HTMLInputElement).checked).toBe(true);
+  });
+});
+
+describe('[W5] what stays in the phone app for now (owner ruling, 8 Oct)', () => {
+  it('a pickup-only item: checkout says it is ordered in the Swift app and places nothing', async () => {
+    const pickupOnly = { ...line, fulfillment: 'PICKUP' };
+    deliveryQuote = () => ({ ...deliveryCart(), items: [pickupOnly] });
+    pickupQuote = () => ({ ...pickupCart(), items: [pickupOnly] });
+    at('/checkout', <CheckoutPage />);
+    expect(await screen.findByText('Pickup-only items are ordered in the Swift app for now. Remove those lines to order on the web.')).toBeTruthy();
+    await choosePickup();
+    expect(await screen.findByText(/Pickup-only items are ordered in the Swift app/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Place (cash|pickup) order/ })).toBeNull();
+    expect(calls('POST', '/api/v1/customer/checkout')).toHaveLength(0);
+  });
+
+  it('a cart with a promotion: pickup checkout says it is ordered in the Swift app — never a delivery-discount reason', async () => {
+    pickupQuote = () => ({ ...pickupCart(), discount: 200, totalAmount: 1600, promoCode: { code: 'FIXTURE' } });
+    at('/checkout', <CheckoutPage />);
+    await choosePickup();
+    expect(await screen.findByText(/A cart with a promotion is ordered in the Swift app for now/)).toBeTruthy();
+    expect(screen.queryByText(/discounted cash delivery/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Place pickup order/ })).toBeNull();
+    expect(calls('POST', '/api/v1/customer/checkout')).toHaveLength(0);
   });
 });
 

@@ -11,6 +11,10 @@ describe('[W5] a store’s hours today', () => {
     expect(guyanaWeekday(mondayUtc)).toBe(0);
     expect(todayHours(week, mondayUtc)).toBe('Closed today');
     expect(todayHours(week, new Date('2026-10-12T15:00:00Z'))).toBe('Today 01:00 – 18:00');
+    // Guyana's midnight is 04:00 UTC, all year.
+    expect(guyanaWeekday(new Date('2026-10-12T03:59:59Z'))).toBe(0);
+    expect(guyanaWeekday(new Date('2026-10-12T04:00:00Z'))).toBe(1);
+    expect(guyanaWeekday(new Date('2026-07-05T03:30:00Z'))).toBe(6);
   });
 
   it('says nothing rather than inventing hours a store never published', () => {
