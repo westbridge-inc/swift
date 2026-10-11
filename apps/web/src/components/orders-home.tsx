@@ -15,7 +15,7 @@ import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { catalogueName } from '@/lib/catalogue-name';
 import {
-  DAY_LABELS, billingSummary, financialDeltaLabel, fmtWhen, guyanaDate, guyanaDayKey, hasTrailingGuyanaDays, hoursSummary,
+  DAY_LABELS, billingSummary, canAttestPayment, financialDeltaLabel, fmtWhen, guyanaDate, guyanaDayKey, hasTrailingGuyanaDays, hoursSummary,
   numericFact, orderActions, reconciledRevenueDays, storeStatusEyebrow, subscriptionTone, windowTotals,
 } from '@/lib/vendor-hub';
 import {
@@ -23,17 +23,16 @@ import {
   money, rejectOrder, toggleOpen, toggleOrders, updateProfile, type VendorOrder,
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
+import { pickProfileStore, type HubStore } from '@/lib/profile-store';
+// Plain app files, imported as is (and copied into the web image by the Dockerfile).
+import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../mobile/src/modules/vendor/order-dispute';
 
-/** The store's own record, as the app reads it (GET /vendor/profile). */
-export interface HubStore {
-  id?: string; name?: string; vendorType?: string; status?: string; isVerified?: boolean;
-  isCurrentlyOpen?: boolean; acceptingOrders?: boolean; selfDeliveryEnabled?: boolean;
-  operatingHours?: unknown; _count?: { orders?: number; items?: number };
-}
+export type { HubStore };
 
 export function useHubStore() {
   const storeId = useStoreId();
-  return useQuery<HubStore>({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
+  const q = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
+  return { ...q, data: pickProfileStore(q.data, storeId) };
 }
 function useOverview(enabled: boolean) {
   const storeId = useStoreId();
@@ -348,30 +347,36 @@ function Switch({ on }: { on: boolean }) {
 export function StoreStatusCard({ store, manager }: { store: HubStore; manager: boolean }) {
   const storeId = useStoreId();
   const client = useQueryClient();
-  const refresh = () => {
-    void client.invalidateQueries({ queryKey: storeKey(storeId, 'profile') });
-    void client.invalidateQueries({ queryKey: storeKey(storeId, 'overview') });
-    void client.invalidateQueries({ queryKey: ['stores'] });
-  };
+  // The server FLIPS the stored value (it ignores the body), so a second tap
+  // before the fresh state lands would flip it straight back: each control
+  // stays locked until the store has been re-read.
+  const refresh = () => Promise.all([
+    client.invalidateQueries({ queryKey: storeKey(storeId, 'profile') }),
+    client.invalidateQueries({ queryKey: storeKey(storeId, 'overview') }),
+    client.invalidateQueries({ queryKey: ['stores'] }),
+  ]);
   const open = !!store.isCurrentlyOpen;
   const accepting = !!store.acceptingOrders;
+  // A store that is not live yet (being reviewed) cannot open: as in the app,
+  // the switch is locked and Pause is not offered.
+  const inPreview = store.status != null && store.status !== 'ACTIVE';
   const openMut = useMutation({ mutationFn: () => toggleOpen(!open), onSettled: refresh });
   const ordersMut = useMutation({ mutationFn: () => toggleOrders(!accepting), onSettled: refresh });
   const text = (
     <span className="min-w-0 flex-1">
       <span className="flex items-center gap-2 font-semibold"><span className={`h-2.5 w-2.5 rounded-full ${open && accepting ? 'bg-[var(--swift-success)]' : 'bg-[var(--swift-muted)]'}`} aria-hidden="true" />
-        {!open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}</span>
-      <span className="sw-caption mt-1 block">{!open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}</span>
+        {inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}</span>
+      <span className="sw-caption mt-1 block">{inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}</span>
     </span>
   );
   return (
     <section aria-label="Store status" className="sw-card p-5">
       {manager ? (
-        <button type="button" role="switch" aria-label="Store open to customers" aria-checked={open} disabled={openMut.isPending} onClick={() => openMut.mutate()}
-          className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">{text}<Switch on={open} /></button>
+        <button type="button" role="switch" aria-label="Store open to customers" aria-checked={!inPreview && open} disabled={inPreview || openMut.isPending} onClick={() => openMut.mutate()}
+          className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">{text}<Switch on={!inPreview && open} /></button>
       ) : <div className="flex min-h-12 items-center">{text}</div>}
       {openMut.isError && <p className="mt-2 text-[13px] text-[var(--swift-error)]">Store status didn’t update — check your connection and try again.</p>}
-      {manager && (
+      {manager && !inPreview && (
         <button type="button" disabled={ordersMut.isPending} onClick={() => ordersMut.mutate()} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
           {accepting ? 'Pause new orders' : 'Resume orders'}
         </button>
@@ -388,10 +393,11 @@ export function SelfDeliveryCard({ store }: { store: HubStore }) {
   const selfDelivery = !!store.selfDeliveryEnabled;
   const mut = useMutation({
     mutationFn: () => updateProfile({ selfDeliveryEnabled: !selfDelivery }),
-    onSettled: () => {
-      void client.invalidateQueries({ queryKey: storeKey(storeId, 'profile') });
-      void client.invalidateQueries({ queryKey: storeKey(storeId, 'orders') });
-    },
+    // Locked until the store is re-read, so a quick second tap cannot send the stale opposite.
+    onSettled: () => Promise.all([
+      client.invalidateQueries({ queryKey: storeKey(storeId, 'profile') }),
+      client.invalidateQueries({ queryKey: storeKey(storeId, 'orders') }),
+    ]),
   });
   return (
     <section aria-label="Who delivers" className="sw-card p-5">
@@ -433,11 +439,33 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
     onSettled: refresh,
   });
   const reject = useMutation({ mutationFn: (why: string) => rejectOrder(order.id, why), onSettled: () => { setRejecting(false); refresh(); } });
-  const actions = orderActions(order);
-  if (actions.length === 0) return null;
+  // The app card's MMG step (VendorOrderCard): the payment's state, and the
+  // store's confirmation where money plausibly landed. Payment-first — the
+  // server accepts an MMG order only after that confirmation — so an unpaid
+  // MMG order offers the confirmation instead of an Accept it would refuse.
+  const status = (order.status || '').toUpperCase();
+  const isMmg = order.paymentMethod === 'MOBILE_MONEY';
+  const mmgPaid = order.paymentStatus === 'CAPTURED';
+  const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes(status);
+  const attestable = isMmg && canAttestPayment(order.paymentStatus) && !terminal;
+  const canConfirm = attestable && order.canConfirmPayment === true;
+  const paused = mmgDisputePaused(order);
+  const actions = orderActions(order).filter((a) => !(a.action === 'accept' && isMmg && !mmgPaid));
+  if (actions.length === 0 && !isMmg && !paused) return null;
   const busy = act.isPending || reject.isPending;
   return (
     <div className="mt-3 space-y-2">
+      {isMmg && !terminal && (
+        <p className={`text-[13px] font-semibold ${mmgPaid ? 'text-[var(--swift-success)]' : 'text-[var(--swift-warning)]'}`}>{mmgPaid ? 'MMG payment received' : 'Awaiting MMG payment'}</p>
+      )}
+      {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Confirm MMG payment</button>}
+      {attestable && !canConfirm && <p className="sw-caption">Only the owner or a manager can confirm MMG payments.</p>}
+      {paused && (
+        <div role="alert" className="rounded-xl bg-[var(--swift-soft-warning)] p-3">
+          <p className="text-[13px] font-semibold">{MMG_DISPUTE_NOTICE.title}</p>
+          <p className="sw-caption mt-1">{MMG_DISPUTE_NOTICE.body}</p>
+        </div>
+      )}
       <MutationNotice errors={[act.error, reject.error]} />
       {rejecting ? (
         <div className="rounded-xl bg-[var(--swift-red-50)] p-3">
@@ -449,7 +477,7 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
             <button type="button" disabled={busy} onClick={() => setRejecting(false)} className="sw-btn sw-btn-md">Keep it</button>
           </div>
         </div>
-      ) : (
+      ) : actions.length > 0 && (
         <div className="flex gap-2">
           {actions.map((a) => (
             <button key={a.action} type="button" disabled={busy}

@@ -9,6 +9,7 @@ import { billingSummary, DAY_LABELS, hoursSummary, orderActions, storeStatusEyeb
 // This census holds every copied function and constant identical to the app.
 const MOBILE = join(__dirname, '..', '..', '..', 'mobile', 'src', 'modules', 'vendor');
 const SHARED = readFileSync(join(MOBILE, 'shared.tsx'), 'utf8');
+const ORDER_STATUS = readFileSync(join(__dirname, '..', '..', '..', 'mobile', 'src', 'lib', 'orderStatus.ts'), 'utf8');
 const OPS = readFileSync(join(MOBILE, 'screens', 'VendorOps.tsx'), 'utf8');
 const WEB = readFileSync(join(__dirname, 'vendor-hub.ts'), 'utf8');
 
@@ -33,6 +34,10 @@ describe('the web board helpers are the app\'s, word for word', () => {
   });
   it.each(FROM_OPS)('%s matches apps/mobile/src/modules/vendor/screens/VendorOps.tsx', (name) => {
     expect(fn(WEB, name)).toBe(fn(OPS, name));
+  });
+  it('canAttestPayment matches apps/mobile/src/lib/orderStatus.ts', () => {
+    expect(fn(WEB, 'canAttestPayment')).toBe(fn(ORDER_STATUS, 'canAttestPayment'));
+    expect(line(WEB, 'export const ATTESTABLE_PAYMENT_STATUSES')).toBe(line(ORDER_STATUS, 'export const ATTESTABLE_PAYMENT_STATUSES'));
   });
   it('copies the constants and types the functions read', () => {
     for (const start of ["export type VendorMemberRole", "export type VendorOrderActionKind", "const COURIER_ACTIVE = [", "const MONTHS = [", "export const DAY_LABELS = ["]) {

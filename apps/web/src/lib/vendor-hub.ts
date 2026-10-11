@@ -266,3 +266,10 @@ export type VendorMemberRole = 'OWNER' | 'MANAGER' | 'STAFF';
 export function safeVendorRole(value: unknown): VendorMemberRole | undefined {
   return value === 'OWNER' || value === 'MANAGER' || value === 'STAFF' ? value : undefined;
 }
+
+// From apps/mobile/src/lib/orderStatus.ts (copied: that file's word tables are not needed here).
+export const ATTESTABLE_PAYMENT_STATUSES = ['PENDING', 'AUTHORIZED'] as const;
+
+export function canAttestPayment(paymentStatus: string | null | undefined): boolean {
+  return (ATTESTABLE_PAYMENT_STATUSES as readonly string[]).includes(String(paymentStatus ?? ''));
+}

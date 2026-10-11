@@ -6,6 +6,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
+import { useStoreRole } from '@/lib/store-role';
+import { pickProfileStore, type HubStore } from '@/lib/profile-store';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -121,9 +123,13 @@ function HoursEditor() {
 
 function SubscriptionCard() {
   const storeId = useStoreId();
-  const sub = useQuery({ queryKey: storeKey(storeId, 'subscription'), queryFn: getSubscription });
+  // Billing is the owner's (GET /vendor/subscription is owner-only): a manager or
+  // staff login must not be told "No subscription on this store yet".
+  const { role } = useStoreRole();
+  const owner = role === 'OWNER';
+  const sub = useQuery({ queryKey: storeKey(storeId, 'subscription'), queryFn: getSubscription, enabled: owner });
   const s = sub.data;
-  if (sub.isLoading) return null;
+  if (!owner || sub.isLoading) return null;
   return (
     <div className="sw-card p-6">
       <h2 className="font-bold">Subscription</h2>
@@ -238,7 +244,8 @@ function SettlementsCard() {
 export default function AccountPage() {
   const storeId = useStoreId();
   const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
-  const p = profile.data;
+  // The profile answers { vendors: [...] }: this page shows the selected store.
+  const p = pickProfileStore(profile.data, storeId) as (HubStore & { city?: string | null; description?: string | null }) | undefined;
 
   return (
     <div className="max-w-3xl space-y-6">

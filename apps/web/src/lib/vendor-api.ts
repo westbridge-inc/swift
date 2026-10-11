@@ -92,6 +92,8 @@ export interface VendorOrder {
   paymentStatus?: string | null;
   placedAt: string;
   appointmentSlot?: string | null;
+  /** Set while the customer disputes the store's MMG claim: the order is paused (order-dispute.ts). */
+  mmgClaimMismatchAt?: string | null;
   /** The server's accept deadline for a PENDING order (order/response-sla.ts); null otherwise. */
   respondBy?: string | null;
   acceptedAt?: string | null;

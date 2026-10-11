@@ -10,6 +10,7 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
 import { useStoreRole } from '@/lib/store-role';
+import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../../../mobile/src/modules/vendor/order-dispute';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
@@ -293,7 +294,9 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   );
 
   const s = (o.status || '').toUpperCase();
-  const actions = actionsFor(o);
+  // A disputed MMG order is paused: only Reject stays, as on the card and in the app (order-dispute.ts).
+  const paused = mmgDisputePaused(o);
+  const actions = paused ? actionsFor(o).filter((a) => a.kind === 'reject') : actionsFor(o);
   const pickable = ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   // [W-25] The old predicate was "not captured and not cancelled", so a
@@ -420,6 +423,12 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         <p className="mt-3 text-sm text-[var(--swift-muted)]">Customer collects with a pickup code.</p>
       )}
 
+      {paused && (
+        <div role="alert" className="mt-3 rounded-lg bg-[var(--swift-soft-warning)] p-3">
+          <p className="text-sm font-semibold">{MMG_DISPUTE_NOTICE.title}</p>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">{MMG_DISPUTE_NOTICE.body}</p>
+        </div>
+      )}
       {pickable && <PickList order={o} onBusy={act.isPending} />}
 
       <div className="mt-5 flex flex-wrap items-center gap-2">
@@ -624,6 +633,10 @@ export default function OrdersPage() {
   </article>;
   const newOrders = byBucket.get('new') ?? [];
   const activeCount = (['new', 'kitchen', 'handoff', 'moving'] as const).reduce((n, key) => n + (byBucket.get(key)?.length ?? 0), 0);
+  // "All caught up" only when truly nothing is open: an order in a status this
+  // build does not know may still be open, so it keeps the board up.
+  const openOrUnknown = activeCount + (byBucket.get('unknown')?.length ?? 0);
+  const storeLive = store.data?.status == null || store.data.status === 'ACTIVE';
   const lastOrderAt = all.map((o) => o.placedAt).filter(Boolean).sort().at(-1);
   return <div className="space-y-6">
     <NewOrderTakeover orders={all} />
@@ -640,7 +653,7 @@ export default function OrdersPage() {
         the known orders on screen under the banner above (review S2-1). Only
         the calm "nothing here" texts need the last read to have succeeded. */}
     {orders.data && <>
-      {!orders.isError && activeCount === 0 ? (
+      {!orders.isError && openOrUnknown === 0 ? (
         store.data?._count?.orders === 0
           ? <FirstOrderGuide store={store.data} manager={manager} listening={!orders.isError} />
           : <BoardQuiet lastOrderAt={lastOrderAt} />
@@ -661,7 +674,7 @@ export default function OrdersPage() {
     {manager ? <ManageGrid store={store.data} owner={role === 'OWNER'} onOrderHistory={() => setBucket('done')} /> : <StaffAvailability />}
     {store.data && <div className="grid gap-4 wide:grid-cols-2">
       <StoreStatusCard store={store.data} manager={manager} />
-      {manager && <SelfDeliveryCard store={store.data} />}
+      {manager && storeLive && <SelfDeliveryCard store={store.data} />}
     </div>}
     <p className="text-center text-[13px] text-[var(--swift-muted)]">You keep 100% of every order — Swift takes no commission.</p>
     {selected && <div ref={dialog} className="sw-scrim items-start overflow-y-auto p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] wide:items-center" role="dialog" aria-modal="true" aria-label="Order details" onKeyDown={e => { if (e.key === 'Escape') setSelected(null); else trapTab(e); }}>

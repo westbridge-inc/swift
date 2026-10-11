@@ -16,14 +16,16 @@ import { guyanaDayKey } from '@/lib/vendor-hub';
 type Role = 'OWNER' | 'MANAGER' | 'STAFF';
 interface Opts {
   role?: Role; lifetime?: number; open?: boolean; accepting?: boolean; selfDelivery?: boolean;
-  orders?: unknown[]; storeRoles?: Record<string, Role>;
+  orders?: unknown[]; storeRoles?: Record<string, Role>; status?: string; holdProfileRefetch?: Promise<{ body: unknown }>;
 }
 
 const writes: Array<{ method: string; path: string; body: unknown }> = [];
 const reads: string[] = [];
 
 function hubApi(opts: Opts = {}) {
-  const { role = 'OWNER', lifetime = 40, open = true, accepting = true, selfDelivery = false, orders = [], storeRoles } = opts;
+  const { role = 'OWNER', lifetime = 40, open = true, accepting = true, selfDelivery = false, orders = [], storeRoles, status = 'ACTIVE' } = opts;
+  const profileHold = opts.holdProfileRefetch;
+  let profileReads = 0;
   const daily = Array.from({ length: 13 }, (_, i) => {
     const offset = i - 13; // -13 … -1: the series ends yesterday, as the server's does
     return { date: guyanaDayKey(offset), revenue: offset === -7 ? 10000 : 2000, orders: 1 };
@@ -44,11 +46,21 @@ function hubApi(opts: Opts = {}) {
       } } };
     }
     if (path === '/vendor/profile') {
+      // The server's real shape (vendor.routes.ts GET /profile; staff-roles.test.ts):
+      // { id, userId, vendors: [...], myRole }. The selected store is NOT first here,
+      // so a page that took vendors[0] would show the wrong store.
+      if (profileHold && profileReads++ > 0) return profileHold;
       return { body: { success: true, data: {
-        id: 'store-1', name: 'Sample Kitchen', vendorType: 'RESTAURANT', status: 'ACTIVE', isVerified: true,
-        isCurrentlyOpen: open, acceptingOrders: accepting, selfDeliveryEnabled: selfDelivery,
-        operatingHours: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })),
-        _count: { orders: lifetime, items: 3 },
+        id: 'owner-1', userId: 'user-1', myRole: storeRoles?.[store] ?? role,
+        vendors: [
+          { id: 'store-2', name: 'Sample Shop', vendorType: 'STORE', status: 'ACTIVE', isVerified: true, isCurrentlyOpen: false, acceptingOrders: false, selfDeliveryEnabled: false, operatingHours: [], _count: { orders: 9, items: 1 } },
+          {
+            id: 'store-1', name: 'Sample Kitchen', vendorType: 'RESTAURANT', status, isVerified: true,
+            isCurrentlyOpen: open, acceptingOrders: accepting, selfDeliveryEnabled: selfDelivery,
+            operatingHours: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })),
+            _count: { orders: lifetime, items: 3 },
+          },
+        ],
       } } };
     }
     if (path === '/vendor/analytics/overview') {
@@ -239,3 +251,114 @@ describe('the new-order takeover counts down like the app', () => {
     expect(screen.getByText(/the customer is watching this clock too/)).toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Opus review of #1615 (11 Oct), S1-1 and follow-ups: the store's state comes
+// from the selected entry of GET /vendor/profile's `vendors`, and the open /
+// pause / self-delivery endpoints FLIP the stored value, so the controls must
+// read the real state and stay locked until it has been re-read.
+// ---------------------------------------------------------------------------
+describe('the store controls read the real server state', () => {
+  it('a live store taking orders shows "Open for orders" and offers to pause', async () => {
+    hubApi({ open: true, accepting: true });
+    const view = renderWithQuery(<OrdersPage />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Sample Kitchen' })).toBeTruthy();
+    expect(screen.getByText(/^OPEN( · TODAY .+)?$/)).toBeTruthy();
+    expect(await screen.findByText('Open for orders')).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Store open to customers' }).getAttribute('aria-checked')).toBe('true');
+    await view.user.click(screen.getByRole('button', { name: 'Pause new orders' }));
+    await waitFor(() => expect(writes).toEqual([{ method: 'PUT', path: '/vendor/vendor/toggle-orders', body: { acceptingOrders: false } }]));
+  });
+
+  it('a paused store says so and offers to resume', async () => {
+    hubApi({ open: true, accepting: false });
+    renderWithQuery(<OrdersPage />);
+    expect(await screen.findByText('Orders paused')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Resume orders' })).toBeTruthy();
+  });
+
+  it('self-delivery that is on reads on, and turning it off sends false', async () => {
+    hubApi({ selfDelivery: true });
+    const view = renderWithQuery(<OrdersPage />);
+    const control = await screen.findByRole('switch', { name: 'Deliver my own orders' });
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+    expect(screen.getByText('You deliver your orders yourself — Swift won’t send a rider.')).toBeTruthy();
+    await view.user.click(control);
+    await waitFor(() => expect(writes).toEqual([{ method: 'PUT', path: '/vendor/profile', body: { selfDeliveryEnabled: false } }]));
+  });
+
+  it('a quick second tap cannot flip the store back before its new state is read', async () => {
+    let release!: (_reply: { body: unknown }) => void;
+    const held = new Promise<{ body: unknown }>((resolve) => { release = resolve; });
+    hubApi({ open: true, holdProfileRefetch: held });
+    const view = renderWithQuery(<OrdersPage />);
+    const control = await screen.findByRole('switch', { name: 'Store open to customers' });
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+    await view.user.click(control);
+    await waitFor(() => expect(writes.length).toBe(1));
+    await view.user.click(control);
+    await view.user.click(screen.getByRole('switch', { name: 'Store open to customers' }));
+    expect(writes).toEqual([{ method: 'PUT', path: '/vendor/vendor/toggle-open', body: { isCurrentlyOpen: false } }]);
+    release({ body: { success: true, data: { id: 'owner-1', userId: 'user-1', myRole: 'OWNER', vendors: [] } } });
+  });
+
+  it('a store that is not live yet cannot be opened, paused or switched to self-delivery', async () => {
+    hubApi({ status: 'PENDING_REVIEW', open: false });
+    renderWithQuery(<OrdersPage />);
+    expect(await screen.findByText('Not open yet')).toBeTruthy();
+    expect((screen.getByRole('switch', { name: 'Store open to customers' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: /Pause new orders|Resume orders/ })).toBeNull();
+    expect(screen.queryByRole('switch', { name: 'Deliver my own orders' })).toBeNull();
+  });
+});
+
+describe('MMG orders on the board follow the app', () => {
+  it('an unpaid MMG order offers the payment confirmation, not an Accept the server refuses', async () => {
+    hubApi({ orders: [wireVendorOrder({ id: 'o-mmg', orderNumber: 'SW-7201', status: 'PENDING', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', canConfirmPayment: true })] });
+    const view = renderWithQuery(<OrdersPage />);
+    const later = await screen.findByText(/View later/).catch(() => null);
+    if (later) await view.user.click(later);
+    const card = await screen.findByRole('article', { name: 'Order SW-7201' });
+    expect(within(card).getByText('Awaiting MMG payment')).toBeTruthy();
+    expect(within(card).queryByRole('button', { name: 'Accept' })).toBeNull();
+    expect(within(card).getByRole('button', { name: 'Reject' })).toBeTruthy();
+    await view.user.click(within(card).getByRole('button', { name: 'Confirm MMG payment' }));
+    expect(await screen.findByRole('dialog', { name: 'Order details' })).toBeTruthy();
+  });
+
+  it('a disputed MMG order says why it is paused, on the card and in the order window, and offers no forward step', async () => {
+    const disputed = wireVendorOrder({ id: 'o-disp', orderNumber: 'SW-7202', status: 'PREPARING', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', mmgClaimMismatchAt: '2026-10-11T12:00:00Z' });
+    hubApi({ orders: [disputed] });
+    const view = renderWithQuery(<OrdersPage />);
+    const card = await screen.findByRole('article', { name: 'Order SW-7202' });
+    expect(within(card).getByText('Payment under review — order paused')).toBeTruthy();
+    expect(within(card).queryByRole('button', { name: 'Mark ready' })).toBeNull();
+    await view.user.click(within(card).getByText('#SW-7202'));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByText('Payment under review — order paused')).toBeTruthy();
+    expect(within(dialog).queryByRole('button', { name: 'Mark ready' })).toBeNull();
+  });
+});
+
+describe('the board and clock details follow the app', () => {
+  it('an order in an unknown status keeps the board up instead of "all caught up"', async () => {
+    hubApi({ orders: [wireVendorOrder({ id: 'o-odd', orderNumber: 'SW-7301', status: 'SOMETHING_NEW' })] });
+    renderWithQuery(<OrdersPage />);
+    expect(await screen.findByRole('button', { name: /Unrecognised · 1/ })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'New orders' })).toBeTruthy();
+    expect(screen.queryByText('You are all caught up')).toBeNull();
+  });
+
+  it('the accept clock disappears once its deadline has passed', async () => {
+    const first = wireVendorOrder({ id: 'o-old', orderNumber: 'SW-7400', status: 'PREPARING' });
+    let orders: unknown[] = [first];
+    mockApi(({ url }) => (url.pathname.endsWith('/vendor/orders') ? { body: { success: true, data: orders, meta: { total: orders.length } } } : { status: 404, body: { success: false } }));
+    const { queryClient } = renderWithQuery(<OrdersPage />);
+    await screen.findByText('#SW-7400');
+    orders = [first, wireVendorOrder({ id: 'o-late', orderNumber: 'SW-7401', status: 'PENDING', respondBy: new Date(Date.now() - 60_000).toISOString() })];
+    await act(async () => { await queryClient.refetchQueries(); });
+    expect(await screen.findByText(/NEW ORDER/, {}, { timeout: 5000 })).toBeTruthy();
+    expect(screen.queryByText(/Accept within/)).toBeNull();
+  });
+});
+

@@ -120,14 +120,16 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   // while the decision is open.
   const head = queue[0];
   const respondByMs = head?.respondBy ? Date.parse(head.respondBy) : NaN;
-  const clockActive = (head?.status || '').toUpperCase() === 'PENDING' && Number.isFinite(respondByMs);
+  const clockOpen = (head?.status || '').toUpperCase() === 'PENDING' && Number.isFinite(respondByMs);
   const [nowTs, setNowTs] = useState(() => Date.now());
+  // As in the app, the clock is drawn only until the deadline passes.
+  const clockActive = clockOpen && respondByMs > nowTs;
   useEffect(() => {
-    if (!clockActive) return;
+    if (!clockOpen) return;
     setNowTs(Date.now());
     const t = setInterval(() => setNowTs(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [clockActive, respondByMs]);
+  }, [clockOpen, respondByMs]);
 
   const current = queue[0];
   if (!current) return null;
