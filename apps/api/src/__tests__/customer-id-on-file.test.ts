@@ -48,6 +48,8 @@ function jpeg(width: number, height: number, salt = nanoid(12)): Buffer {
   return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, com, sof0, Buffer.from([0xff, 0xd9])]);
 }
 const readable = () => jpeg(1600, 1000);
+/** #1534 makes a reviewer type the number to approve a customer ID; main ignores the field. */
+const typedNumber = () => `SYN${nanoid(8).replace(/[^A-Za-z0-9]/g, '7')}`;
 
 async function customer(extra: Record<string, unknown> = {}) {
   const user = await runWithoutTenant(() => app.prisma.user.create({ data: {
@@ -310,7 +312,7 @@ describe('(1) an automatic check holds the ID for a person', () => {
   it('a person decides a held ID: approval unlocks L2 and only then may the app say it was checked', async () => {
     const c = await customer();
     const doc = await expectHeld(c, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) }, 'TOO_SMALL');
-    const approved = await admin('PUT', `/api/v1/admin/verification/${doc.id}/approve`, {});
+    const approved = await admin('PUT', `/api/v1/admin/verification/${doc.id}/approve`, { documentNumber: typedNumber() });
     expect(approved.statusCode, approved.body).toBe(200);
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('CHECKED');
@@ -324,6 +326,7 @@ describe('(1) an admin can withdraw an ID at any time — back to L1', () => {
     await app.prisma.user.update({ where: { id: c.id }, data: { trustLevel: 'L3' } });
     const revoked = await admin('PUT', `/api/v1/admin/verification/${doc.id}/revoke`, { reason: 'Synthetic: the picture is not an ID' });
     expect(revoked.statusCode, revoked.body).toBe(200);
+    expect(revoked.json().data.accountTrustLevel).toBe('L1');
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     // ...and the taxi gate refuses again (the big-order gate keys on the same L1, orders.test).
     expect(() => assertL2({ id: c.id, tenantId: 't', countryCode: 'GY', trustLevel: 'L1', selfieCapturedAt: new Date() })).toThrow(/ID on file/);
@@ -333,6 +336,85 @@ describe('(1) an admin can withdraw an ID at any time — back to L1', () => {
     const next = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) });
     expect(next.json().data).toMatchObject({ status: 'PENDING', idCheck: 'WAITING' });
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+  });
+});
+
+describe('a withdrawal outlives the document (review S1, S3)', () => {
+  const erase = (token: string, id: string) => app.inject({
+    method: 'POST', url: '/api/v1/verification/dsar/documents/erase',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, payload: { documentIds: [id] },
+  });
+  const heldFor = async (docId: string) => String(((await audit(docId)).find((a) => a.action === 'CUSTOMER_ID_HELD')?.changes as { reason?: string } | null)?.reason);
+
+  it('revoke, then the customer erases the withdrawn ID, then re-uploads (even the same picture): held, stays L1', async () => {
+    const c = await customer();
+    const bytes = readable();
+    const doc = (await submit(c.token, { idDocumentUrl: await upload(c.token, bytes) })).json().data;
+    expect((await admin('PUT', `/api/v1/admin/verification/${doc.id}/revoke`, { reason: 'Synthetic: not an ID card' })).statusCode).toBe(200);
+    expect((await erase(c.token, doc.id)).json().data[0]).toMatchObject({ outcome: 'DESTROYED' });
+    const again = (await submit(c.token, { idDocumentUrl: await upload(c.token, bytes) })).json().data;
+    expect(again).toMatchObject({ status: 'PENDING', idCheck: 'WAITING' });
+    expect(await heldFor(again.id)).toContain('EARLIER_DECISION');
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+  });
+
+  it('a held ID a person approved, then withdrew, then the customer erased: the next upload still waits', async () => {
+    const c = await customer();
+    const held = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) })).json().data;
+    expect((await admin('PUT', `/api/v1/admin/verification/${held.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
+    expect((await admin('PUT', `/api/v1/admin/verification/${held.id}/revoke`, { reason: 'Synthetic: withdrawn after review' })).statusCode).toBe(200);
+    expect((await erase(c.token, held.id)).json().data[0]).toMatchObject({ outcome: 'DESTROYED' });
+    const again = (await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) })).json().data;
+    expect(again).toMatchObject({ status: 'PENDING' });
+    expect(await heldFor(again.id)).toContain('EARLIER_DECISION');
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+  });
+
+  it('the promotion never raises an account whose ID no longer stands (a withdrawal or erasure in between wins)', async () => {
+    const c = await customer();
+    const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+    await (service as unknown as { promoteToL2: (u: string, b: 'ON_FILE') => Promise<void> }).promoteToL2(c.id, 'ON_FILE');
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+    expect((await notices(c.id)).map((n) => n.title)).not.toContain('Your ID is on file');
+  });
+
+  it('two uploads at once: one goes on file, the other waits for a person', async () => {
+    const c = await customer();
+    const [a, b] = await Promise.all([upload(c.token, readable()), upload(c.token, readable())]);
+    const results = await Promise.all([submit(c.token, { idDocumentUrl: a }), submit(c.token, { idDocumentUrl: b })]);
+    const docs = results.map((r) => r.json().data as { id: string; status: string });
+    expect(docs.map((d) => d.status).sort()).toEqual(['APPROVED', 'PENDING']);
+    expect(await heldFor(docs.find((d) => d.status === 'PENDING')!.id)).toContain('OPEN_SUBMISSION');
+    expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
+  });
+
+  it('a second approved ID replaces the first (one stands per person); withdrawing the standing one says L1', async () => {
+    const c = await customer();
+    const first = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) })).json().data;
+    const second = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(420, 300)) })).json().data;
+    for (const d of [first, second]) expect((await admin('PUT', `/api/v1/admin/verification/${d.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: first.id } })).state).toBe('SUPERSEDED');
+    expect((await admin('PUT', `/api/v1/admin/verification/${first.id}/revoke`, { reason: 'Synthetic: replaced ID' })).statusCode).toBe(409);
+    const last = await admin('PUT', `/api/v1/admin/verification/${second.id}/revoke`, { reason: 'Synthetic: withdrawn after review' });
+    expect(last.statusCode, last.body).toBe(200);
+    expect(last.json().data.accountTrustLevel).toBe('L1');
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+    expect((await notices(c.id)).map((n) => n.title)).toContain('Your ID is no longer on file');
+  });
+
+  it("the customer's own status shows a neutral line for a withdrawn ID, never the reviewer's reason", async () => {
+    const c = await customer();
+    const doc = (await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) })).json().data;
+    await admin('PUT', `/api/v1/admin/verification/${doc.id}/revoke`, { reason: 'Synthetic staff-only reason text' });
+    const status = await app.inject({ method: 'GET', url: '/api/v1/verification/status', headers: { authorization: `Bearer ${c.token}` } });
+    const row = (status.json().data.documents as Array<{ id: string; reviewNote: string | null }>).find((d) => d.id === doc.id);
+    expect(row?.reviewNote).toBe('Withdrawn by our team');
+    expect(status.body).not.toContain('Synthetic staff-only reason text');
+  });
+
+  it('an account above L1 with no customer ID on record is not said to have one on file', async () => {
+    const c = await customer({ trustLevel: 'L2' });
+    expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('NONE');
   });
 });
 
@@ -377,7 +459,7 @@ describe('partner, driver and rider review is UNCHANGED', () => {
     const checked = await customer();
     await app.prisma.rider.create({ data: { userId: checked.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } });
     const held = (await submit(checked.token, { idDocumentUrl: await upload(checked.token, jpeg(400, 300)) })).json().data;
-    expect((await admin('PUT', `/api/v1/admin/verification/${held.id}/approve`, {})).statusCode).toBe(200);
+    expect((await admin('PUT', `/api/v1/admin/verification/${held.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
     expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { userId: checked.id } })).floatLimit)).toBe(Number(cfg.floatL2));
   });
 });

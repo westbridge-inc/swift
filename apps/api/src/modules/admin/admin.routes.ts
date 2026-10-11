@@ -5408,8 +5408,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const doc = await verification.revokeDocument(id, request.user.userId, body.reason);
     await audit(request.user.userId, 'REVOKE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
-
-    return { success: true, data: doc };
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] Additive: the account level after the withdrawal, so
+    // the console says "back to L1" only when it is (another customer ID may still stand).
+    const after = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { trustLevel: true } });
+    return { success: true, data: { ...doc, accountTrustLevel: after?.trustLevel ?? null } };
   });
 
   // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────

@@ -322,11 +322,14 @@ export class VerificationService {
    *  paused (KYC latency), cannot land new PII after the purge committed. */
   private async createDocumentLively(
     data: Prisma.VerificationDocumentUncheckedCreateInput,
-    review: { queue: ReviewQueue; extraction?: ExtractionPlan; authority?: SubmissionAuthority } = { queue: 'STANDARD' },
+    review: { queue: ReviewQueue; extraction?: ExtractionPlan; authority?: SubmissionAuthority; customerIdHolds?: CustomerIdHoldReason[] } = { queue: 'STANDARD' },
   ) {
     const doc = await this.projectionTransaction(async (tx) => {
+      // A customer-ID intake takes the user row FOR UPDATE, like revoke and purge, so two uploads
+      // (or an upload and a withdrawal) are decided one after the other, never side by side.
+      const exclusive = review.authority || review.customerIdHolds;
       const alive = await tx.$queryRaw<{ status: string; tenantId: string; countryCode: string }[]>(
-        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} ${review.authority ? Prisma.sql`FOR UPDATE` : Prisma.sql`FOR SHARE`}`,
+        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} ${exclusive ? Prisma.sql`FOR UPDATE` : Prisma.sql`FOR SHARE`}`,
       );
       const status = alive[0]?.status;
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
@@ -338,6 +341,19 @@ export class VerificationService {
         catch (err) {
           if (!(err instanceof IdentityReviewRequiredError)) throw err;
           data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
+          review.customerIdHolds?.push('IDENTITY_REVIEW');
+        }
+      }
+      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] One ID goes on file at a time: if another customer ID
+      // of this account is waiting or on file now (a parallel upload committed first), this one waits
+      // for a person. Read under the lock above, so it cannot race.
+      if (review.customerIdHolds && data.status === 'APPROVED') {
+        const live = await tx.verificationDocument.count({
+          where: { userId: data.userId, docType: IDENTITY_DOC_TYPE, status: { in: ['APPROVED', 'PENDING'] }, state: { notIn: ['PURGED', 'SUPERSEDED'] } },
+        });
+        if (live > 0) {
+          data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
+          review.customerIdHolds.push('OPEN_SUBMISSION');
         }
       }
       await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
@@ -706,6 +722,7 @@ export class VerificationService {
     const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, IDENTITY_DOC_TYPE, result, { startedAt, finishedAt });
     result = gateAutoApproval(result, extraction, registryType);
     const processorRead = this.kyc.engine?.name !== 'manual-review';
+    const lateHolds: CustomerIdHoldReason[] = [];
 
     const doc = await this.createDocumentLively({
         userId,
@@ -722,7 +739,12 @@ export class VerificationService {
         // Never a person's id: an ID on file was not reviewed by anyone (customer-id.ts).
         ...(result.status === 'approved' && { reviewedBy: processorRead ? 'kyc:auto' : ON_FILE_REVIEWER, reviewedAt: new Date() }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
-    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction });
+    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction, customerIdHolds: lateHolds });
+    // A hold decided inside the creation transaction (identity graph, a parallel upload) is named too.
+    if (doc.status === 'PENDING' && lateHolds.length > 0) {
+      holdReasons = [...(holdReasons ?? []), ...lateHolds];
+      result = { ...result, reason: `Held for a person by the automatic checks: ${holdReasons.join(', ')}` };
+    }
 
     // The hold reasons are for the reviewers (audit trail and the admin notice) — never on the
     // customer's own document row: "the same picture is on another account" must not leak.
@@ -1198,13 +1220,27 @@ export class VerificationService {
   async revokeDocument(docId: string, adminId: string, reason: string): Promise<VerificationDocument> {
     const doc = await this.prisma.verificationDocument.findUnique({ where: { id: docId }, select: { id: true, userId: true, docType: true } });
     if (!doc) throw new NotFoundError('VerificationDocument', docId);
+    let noneStands = false;
     const revoked = await this.projectionTransaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${doc.userId} FOR UPDATE /* verification-document-decision-authority */`;
       const won = await hopDocState(tx, { id: docId, userId: doc.userId }, 'COMMITTED', 'REVOKED', {
         status: 'REJECTED', reviewedBy: adminId, reviewedAt: new Date(), reviewNote: `REVOKED: ${reason}`,
       });
       if (!won) throw new AppError(409, 'NOT_COMMITTED', 'Only a committed (approved) document can be revoked');
-      if (doc.docType === IDENTITY_DOC_TYPE) await this.demoteIfNoCustomerIdStands(tx, doc.userId);
+      if (doc.docType === IDENTITY_DOC_TYPE) {
+        // [Owner ruling 8 Oct 2026 — CUSTOMER ID] A withdrawal is a person's decision and must outlive
+        // the row: the customer can erase a withdrawn ID (it becomes PURGED), and the next upload must
+        // still wait for a person (customer-id.ts EARLIER_DECISION reads REJECT decisions). Review
+        // cases and decisions are never purged with the document.
+        const tenantId = (await tx.user.findUniqueOrThrow({ where: { id: doc.userId }, select: { tenantId: true } })).tenantId;
+        const now = new Date();
+        const closed = await tx.reviewCase.create({ data: { submissionId: docId, tenantId, queue: 'STANDARD', slaDueAt: now, closedAt: now } });
+        await tx.reviewDecision.create({ data: {
+          caseId: closed.id, tenantId, reviewerId: adminId, outcome: 'REJECT', reasonCode: 'REVOKED',
+          actorFacingCategory: 'OTHER', internalNote: reason, timeOnCaseMs: 0,
+        } });
+        noneStands = await this.demoteIfNoCustomerIdStands(tx, doc.userId);
+      }
       await projectProviderVerificationLocked(tx, doc.userId);
       await this.projectVendorActivation(tx, doc.userId);
       return tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
@@ -1214,11 +1250,14 @@ export class VerificationService {
     // [DOC-1 §3.11 · P3-4] A revoked vehicle document reaches every driver assigned to the vehicle.
     await this.propagateVehicleLapse({ id: doc.id, userId: doc.userId, docType: doc.docType, subjectId: revoked.subjectId }, 'was revoked');
     if (doc.docType === IDENTITY_DOC_TYPE) {
+      // Only say the account has no ID on file when none stands (the database keeps one committed
+      // customer ID per person, so this is the normal case; the other line is defence in depth).
       await this.notifications.send({
         userId: doc.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Your ID is no longer on file',
-        body: 'Our team withdrew the ID on your account. Taxi rides and orders over the ID limit need a new ID — add it in the app and a person will look at it.',
+        ...(noneStands
+          ? { title: 'Your ID is no longer on file', body: 'Our team withdrew the ID on your account. Taxi rides and orders over the ID limit need a new ID — add it in the app and a person will look at it.' }
+          : { title: 'An ID on your account was withdrawn', body: 'Our team withdrew one of the IDs on your account. Another ID is still on file.' }),
         audience: 'customer',
         data: { kind: 'verification_rejected' },
       });
@@ -1399,7 +1438,10 @@ export class VerificationService {
     const documents = (await this.prisma.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
-    })).filter((d) => d.state !== 'SUPERSEDED');
+    })).filter((d) => d.state !== 'SUPERSEDED')
+      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a withdrawn customer ID shows a neutral line; the
+      // reviewer's reason ("REVOKED: …") stays in the staff record.
+      .map((d) => (d.docType === IDENTITY_DOC_TYPE && d.state === 'REVOKED' ? { ...d, reviewNote: 'Withdrawn by our team' } : d));
 
     const approved = new Set(
       documents
@@ -1993,21 +2035,32 @@ export class VerificationService {
    * is withdrawn (revoke) or destroyed (purge), the account goes back to L1 — an earned L3 too, it
    * stood on the ID — inside the caller's transaction; the rider float follows the level.
    */
-  private async demoteIfNoCustomerIdStands(tx: Prisma.TransactionClient, userId: string): Promise<void> {
+  /** Returns true when no customer ID stands any more (the account is L1 after this). */
+  private async demoteIfNoCustomerIdStands(tx: Prisma.TransactionClient, userId: string): Promise<boolean> {
     const standing = await tx.verificationDocument.count({ where: { userId, docType: IDENTITY_DOC_TYPE, state: 'COMMITTED' } });
-    if (standing > 0) return;
+    if (standing > 0) return false;
     await tx.user.updateMany({ where: { id: userId, trustLevel: { not: 'L1' } }, data: { trustLevel: 'L1' } });
     await new FloatService(tx).recomputeForUser(userId);
+    return true;
   }
 
   /** L1 → L2. `basis` keeps the notice truthful (owner ruling 8 Oct 2026, customer-id.ts): an ID
    *  that is only ON FILE is never called verified; only a person's approval is. An account
    *  already above L1 (an earned L3) is never lowered by a second approval. */
   private async promoteToL2(userId: string, basis: 'ON_FILE' | 'PERSON' = 'PERSON') {
-    await this.prisma.user.updateMany({ where: { id: userId, trustLevel: 'L1' }, data: { trustLevel: 'L2' } });
-    // D.3 — a higher trust level means a higher float limit (no-op for non-riders; an ID that is
-    // only on file never lifts a rider's float — FloatService.recomputeForUser / floatTrustLevel).
-    await new FloatService(this.prisma).recomputeForUser(userId);
+    // Under the same user lock revoke and purge take, and only while a committed customer ID still
+    // stands: a withdrawal or an erasure that landed after the document committed is never undone.
+    const promoted = await this.projectionTransaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* customer-id-promotion-authority */`;
+      const standing = await tx.verificationDocument.count({ where: { userId, docType: IDENTITY_DOC_TYPE, state: 'COMMITTED' } });
+      if (standing === 0) return false;
+      const raised = await tx.user.updateMany({ where: { id: userId, trustLevel: 'L1' }, data: { trustLevel: 'L2' } });
+      // D.3 — a higher trust level means a higher float limit (no-op for non-riders; an ID that is
+      // only on file never lifts a rider's float — FloatService.recomputeForUser / floatTrustLevel).
+      await new FloatService(tx).recomputeForUser(userId);
+      return raised.count === 1;
+    });
+    if (!promoted) return;
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',

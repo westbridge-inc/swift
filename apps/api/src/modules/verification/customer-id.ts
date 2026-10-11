@@ -16,9 +16,10 @@
  *  - DUPLICATE_IMAGE     the same file (byte-identical) is already on another account;
  *  - LINKED_ACCOUNT      another account linked to the same person (identity graph) already sent one;
  *  - OPEN_SUBMISSION     an earlier ID from this account is still waiting for a person;
- *  - PRIOR_HOLD          an earlier ID from this account was held and no person approved it (e.g. the
+ *  - PRIOR_HOLD          an earlier ID from this account was held and no person decided it (e.g. the
  *                        customer erased it while it waited) — a new upload cannot step around a hold;
- *  - EARLIER_DECISION    a person rejected an earlier ID from this account, or withdrew one;
+ *  - EARLIER_DECISION    a person rejected an earlier ID from this account, or withdrew one — even if
+ *                        the customer erased it since (decisions outlive the document row);
  *  - VELOCITY            too many ID uploads from this account in a day;
  *  - TOO_SMALL           the picture is too small to read;
  *  - NOT_MEASURABLE      the file cannot be measured (a PDF, a damaged image, storage unavailable);
@@ -182,15 +183,19 @@ export async function readCustomerIdFacts(db: Db, input: CustomerIdFactsInput): 
     where: { submissionId: { in: mine.map((d) => d.id) } },
     select: { submissionId: true, decisions: { select: { outcome: true } } },
   });
-  const approvedByPerson = new Set(cases.filter((c) => c.decisions.some((x) => x.outcome === 'APPROVE')).map((c) => c.submissionId));
+  // Decided = a person approved or rejected (a withdrawal records a REJECT); those are judged by
+  // EARLIER_DECISION. A held submission nobody decided that is no longer open (erased while it
+  // waited) is a PRIOR_HOLD.
+  const decided = new Set(cases.filter((c) => c.decisions.some((x) => x.outcome === 'APPROVE' || x.outcome === 'REJECT')).map((c) => c.submissionId));
   const held = new Set(cases.map((c) => c.submissionId));
-  const priorHolds = mine.filter((d) => held.has(d.id) && !approvedByPerson.has(d.id) && !isOpen(d)).length;
+  const priorHolds = mine.filter((d) => held.has(d.id) && !decided.has(d.id) && !isOpen(d)).length;
   const windowStart = new Date(now.getTime() - VELOCITY_WINDOW_HOURS * 3_600_000);
   const earlierSubmissionsInWindow = mine.filter((d) => d.createdAt >= windowStart).length;
   const revoked = mine.some((d) => d.state === 'REVOKED');
-  const rejectedIds = mine.filter((d) => d.status === 'REJECTED').map((d) => d.id);
-  const personRejected = rejectedIds.length > 0 && (await db.reviewDecision.count({
-    where: { outcome: 'REJECT', case: { submissionId: { in: rejectedIds } } },
+  // A person's REJECT decision on ANY earlier customer ID — a rejection, or a withdrawal (revoke
+  // records one) — whatever became of the row since: decisions survive the customer's erasure.
+  const personRejected = mine.length > 0 && (await db.reviewDecision.count({
+    where: { outcome: 'REJECT', case: { submissionId: { in: mine.map((d) => d.id) } } },
   })) > 0;
 
   const { identityAuthority } = await import('../integrity/identity-review');
@@ -262,7 +267,12 @@ export async function floatTrustLevel(db: Db, userId: string, trustLevel: TrustL
 export type CustomerIdCheck = 'NONE' | 'ON_FILE' | 'CHECKED' | 'WAITING' | 'NOT_ACCEPTED';
 
 export async function customerIdCheck(db: Db, userId: string, trustLevel: TrustLevel): Promise<CustomerIdCheck> {
-  if (trustLevel !== 'L1') return (await customerIdBasis(db, userId)) === 'PERSON' ? 'CHECKED' : 'ON_FILE';
+  if (trustLevel !== 'L1') {
+    // An account above L1 with no committed customer ID (a level that predates this record) has no
+    // ID on file to speak of: say nothing rather than "on file".
+    const basis = await customerIdBasis(db, userId);
+    return basis === 'PERSON' ? 'CHECKED' : basis === 'AUTOMATIC' ? 'ON_FILE' : 'NONE';
+  }
   const latest = await db.verificationDocument.findFirst({
     where: { userId, docType: CUSTOMER_ID_DOC_TYPE, state: { notIn: ['SUPERSEDED', 'PURGED'] } },
     orderBy: { createdAt: 'desc' },

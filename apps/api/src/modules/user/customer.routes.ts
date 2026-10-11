@@ -846,7 +846,8 @@ export async function customerRoutes(app: FastifyInstance) {
         // [Owner ruling 8 Oct 2026 — CUSTOMER ID] What the app may say about the customer's ID,
         // truthfully (additive): NONE · ON_FILE (unlocked, no person reviewed it) · CHECKED (a person
         // approved it) · WAITING (held for a person) · NOT_ACCEPTED.
-        idCheck: await customerIdCheck(app.prisma, userId, user.trustLevel),
+        // Never fails the profile: an unreadable answer is left out, and the app then claims nothing.
+        idCheck: await customerIdCheck(app.prisma, userId, user.trustLevel).catch(() => undefined),
         role: user.activeRole,
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
