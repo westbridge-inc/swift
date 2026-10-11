@@ -48,6 +48,7 @@ const fx = vi.hoisted(() => {
     server: (event: string, payload?: unknown) => { for (const s of sockets) if (s.connected) s.fire(event, payload); },
   };
 });
+vi.mock('../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('socket.io-client', () => ({ io: fx.io }));
 vi.mock('react-native', async () => {
   const R = await import('react');

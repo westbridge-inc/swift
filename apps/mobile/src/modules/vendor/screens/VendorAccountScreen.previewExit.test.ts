@@ -199,6 +199,7 @@ const fx = vi.hoisted(() => {
   };
 });
 
+vi.mock('../../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown> & { default?: Record<string, unknown> }>();
   const hooks = { ...fx.hooks, useLayoutEffect: fx.hooks.useEffect };

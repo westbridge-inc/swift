@@ -6,7 +6,7 @@ import Image from 'next/image';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bike, Clock, Heart, Info, MapPin, Minus, Plus, Share2, Star, X } from 'lucide-react';
-import { getVendor, addToCart, getItemSlots, savePendingAppointment, money, type VendorDetail, type MenuItem } from '@/lib/customer';
+import { getVendor, addToCart, getItemSlots, savePendingAppointment, money, type VendorDetail, type MenuItem, type OptionGroup } from '@/lib/customer';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay, formatAppointmentSlot } from '@/lib/appointmentTime';
 import { useCustomerSession } from '@/components/customer-session';
 import { MenuSkeleton, STORE_HERO } from '@/components/customer-skeletons';
@@ -19,6 +19,7 @@ import { Modal } from '@/components/modal';
 import { signInPath } from '@/lib/customer-routes';
 import { cartItemCount, customerCartKey, readShellCart } from '@/lib/shell-data';
 import { parseAmount } from '@/lib/money';
+import { photo } from '@/lib/media';
 import { fromPage, vendorDetailKey } from '@/lib/browse-keys';
 import { useStoreSeed } from '@/components/browse-seed';
 
@@ -37,6 +38,12 @@ function nextDays(n: number) {
     out.push({ key, label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : formatAppointmentDay(key) });
   }
   return out;
+}
+
+/** [F4] A choice the store has marked sold out is never offered, pre-selected
+ *  or sent (the server refuses it too, for every app). */
+function liveOptions(group: OptionGroup) {
+  return group.options.filter((o) => o.isAvailable !== false);
 }
 
 function itemPrice(item: MenuItem, sel: Record<string, string>) {
@@ -134,9 +141,12 @@ export default function VendorPage() {
   function openItem(item: MenuItem) {
     if (!item.isAvailable) return;
     if (item.fulfillment === 'APPOINTMENT') { setBday(appointmentDayKey(new Date())); setBook(item); return; }
+    // A required group starts on the store's default only while it is on
+    // sale; a sold-out default is never chosen for the customer, and neither
+    // is some other choice they did not pick: the group waits for them.
     const defaults: Record<string, string> = {};
     for (const g of item.optionGroups ?? []) {
-      const d = g.options.find((o) => o.isDefault) ?? g.options[0];
+      const d = liveOptions(g).find((o) => o.isDefault);
       if (g.isRequired && d) defaults[g.id] = d.id;
     }
     setSel(defaults); setQty(1); setModal(item);
@@ -144,13 +154,20 @@ export default function VendorPage() {
 
   async function confirmAdd() {
     if (!modal || !v) return;
+    // Only choices still on sale in this menu are sent.
+    const chosen: Record<string, string> = {};
     for (const g of modal.optionGroups ?? []) {
-      if (g.isRequired && !sel[g.id]) { setToast(`Choose an option for “${g.name}”.`); return; }
+      const pick = liveOptions(g).find((o) => o.id === sel[g.id]);
+      if (pick) chosen[g.id] = pick.id;
+      else if (g.isRequired) {
+        setToast(liveOptions(g).length ? `Choose an option for “${g.name}”.` : `“${g.name}” is sold out right now.`);
+        return;
+      }
     }
     setBusy(true);
     try {
       if (!(await signedInToOrder(modal))) return;
-      await addToCart({ vendorId: v.id, itemId: modal.id, quantity: qty, selectedOptions: sel });
+      await addToCart({ vendorId: v.id, itemId: modal.id, quantity: qty, selectedOptions: chosen });
       setModal(null); setToast('Added to your cart');
       void queryClient.invalidateQueries({ queryKey: ['customer', 'cart'] });
       setTimeout(() => setToast(null), 2500);
@@ -296,7 +313,7 @@ export default function VendorPage() {
                     <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <span className="text-[17px] font-semibold leading-6">{it.name}</span>
                       {it.description ? <span className="line-clamp-2 text-[13px] leading-[18px] text-[var(--swift-muted)]">{it.description}</span> : null}
-                      {it.imageUrl ? <span className="relative mt-2 block h-16 w-16 overflow-hidden rounded-xl"><Image src={it.imageUrl} alt="" fill unoptimized sizes="64px" loading="lazy" className="object-cover" /></span> : null}
+                      {photo(it.imageUrl) ? <span className="relative mt-2 block h-16 w-16 overflow-hidden rounded-xl"><Image {...photo(it.imageUrl)!} alt="" fill sizes="64px" loading="lazy" className="object-cover" /></span> : null}
                     </span>
                     <span className="flex flex-col items-end justify-between gap-2">
                       <span className="sw-money text-[var(--swift-red)]">{money(it.customerPrice ?? it.basePrice)}</span>
@@ -341,7 +358,7 @@ export default function VendorPage() {
               {(modal.optionGroups ?? []).map((g) => (
                 <fieldset key={g.id}>
                   <legend className="sw-heading">{g.name} {g.isRequired ? <span className="text-[13px] font-semibold text-[var(--swift-red)]">Required</span> : null}</legend>
-                  {g.options.filter((o) => o.isAvailable).map((o) => (
+                  {liveOptions(g).map((o) => (
                     <label key={o.id} className="flex min-h-14 cursor-pointer items-center gap-3 border-b border-[var(--swift-border)] py-2">
                       <input type="radio" name={g.id} checked={sel[g.id] === o.id} onChange={() => setSel((cur) => ({ ...cur, [g.id]: o.id }))} className="h-5 w-5 accent-[var(--swift-red)]" />
                       <span className="flex-1 text-[15px] font-semibold leading-5">{o.name}</span>
