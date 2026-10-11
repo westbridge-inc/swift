@@ -735,7 +735,7 @@ function TaxiBooking({ navigation }: any) {
           ) : null}
           {needsL2 ? (
             <PillButton
-              label="Verify your ID — takes a minute"
+              label="Add your ID — takes a minute"
               variant="outline"
               style={{ marginTop: space.md }}
               onPress={() => navigation?.navigate?.('IdentityVerification')}
@@ -829,7 +829,7 @@ function TaxiBooking({ navigation }: any) {
               ) : null}
               {queueDoor === 'identity' ? (
                 <PillButton
-                  label="Verify your ID — takes a minute"
+                  label="Add your ID — takes a minute"
                   variant="outline"
                   style={{ marginTop: space.sm }}
                   onPress={() => navigation?.navigate?.('IdentityVerification')}

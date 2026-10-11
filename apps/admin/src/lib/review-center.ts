@@ -8,6 +8,8 @@ export interface ReviewDocument {
   id: string; userId: string; docType: string; role: string; status: ReviewStatus;
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
+  /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
+  reviewedBy?: string | null;
   user?: {
     id: string; firstName?: string; lastName?: string; phone?: string; countryCode?: string;
     driver?: { licensePlate?: string; vehicleMake?: string; vehicleModel?: string; vehicleType?: string } | null;
@@ -16,7 +18,7 @@ export interface ReviewDocument {
 export interface Applicant { id: string; name: string; phone: string; documents: ReviewDocument[]; oldest: number }
 // Shared vocabulary for the queue, facts, dialogs and custody timeline.
 const LABELS: Record<string, string> = {
-  national_id: 'National ID', owner_national_id: 'National ID', passport: 'Passport',
+  national_id: 'National ID', owner_national_id: 'National ID', passport: 'Passport', identity_l2: 'Customer ID',
   drivers_licence: "Driver's licence", gra_restaurant_licence: 'GRA restaurant licence',
   business_registration: 'Business registration', police_clearance: 'Police clearance',
   fitness_cert: 'Vehicle fitness certificate', vehicle_insurance: 'Vehicle insurance',
@@ -73,6 +75,9 @@ export function timelineLabel(what: string): string {
       'AUDIT DSAR_RECTIFICATION_REQUESTED': 'Correction requested by the applicant',
       'AUDIT KYC_AUTO_APPROVE': 'Automatically approved',
       'AUDIT KYC_AUTO_REJECT': 'Automatically rejected',
+      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] the intake's two outcomes, in words that claim no review.
+      'AUDIT CUSTOMER_ID_ON_FILE': 'ID on file — the automatic checks found nothing to hold (no person reviewed it)',
+      'AUDIT CUSTOMER_ID_HELD': 'Held for a person by the automatic checks',
       'AUDIT VERIFICATION_SUBMIT': 'Document submitted',
     };
     if (decisionAudit[what]) return decisionAudit[what];
@@ -83,7 +88,28 @@ export function timelineLabel(what: string): string {
   }
   return 'Document activity recorded';
 }
-export interface ReviewTimelineEvent { at: string; actor: string | null; what: string; detail?: { reasonCode?: unknown } }
+export interface ReviewTimelineEvent { at: string; actor: string | null; what: string; detail?: { reasonCode?: unknown; reason?: unknown } }
+/** [Owner ruling 8 Oct 2026 — CUSTOMER ID] Why the automatic checks held a customer ID (server customer-id.ts codes). */
+export const CUSTOMER_ID_HOLD_WORDS: Record<string, string> = {
+  DUPLICATE_IMAGE: 'the same picture is on another account',
+  LINKED_ACCOUNT: 'a linked account already sent an ID',
+  OPEN_SUBMISSION: 'an earlier ID is still waiting',
+  PRIOR_HOLD: 'an earlier ID was held and never approved',
+  EARLIER_DECISION: 'an earlier ID was rejected or withdrawn',
+  VELOCITY: 'too many uploads in a day',
+  TOO_SMALL: 'the picture is too small to read',
+  NOT_MEASURABLE: 'the file could not be measured (for example a PDF)',
+  ACCOUNT_HOLD: 'the account is under an integrity hold',
+  IDENTITY_REVIEW: 'the identity graph needs a person',
+  STRIKES: 'the account is restricted after failed cash payments',
+  PROCESSOR_REFERRED: 'the document processor referred it',
+  CHECKS_UNAVAILABLE: 'the checks could not run',
+};
+function heldBecause(detail: ReviewTimelineEvent['detail']): string {
+  const reason = typeof detail?.reason === 'string' ? detail.reason : '';
+  const words = (reason.match(/[A-Z][A-Z_]{3,}/g) ?? []).map((code) => CUSTOMER_ID_HOLD_WORDS[code]).filter(Boolean);
+  return words.length ? `: ${words.join('; ')}` : '';
+}
 function sameEscalationTime(event: ReviewTimelineEvent, other: ReviewTimelineEvent): boolean {
   const audit = event.what === 'AUDIT ESCALATE_VERIFICATION_DOC' ? event : other;
   const decision = audit === event ? other : event;
@@ -100,6 +126,7 @@ export function reviewTimeline(events: ReviewTimelineEvent[]): Array<ReviewTimel
   return events.flatMap((event, index) => {
     if (consumed.has(index)) return [];
     let label = timelineLabel(event.what);
+    if (event.what === 'AUDIT CUSTOMER_ID_HELD') label += heldBecause(event.detail);
     // A decision and its audit row may describe the same escalation. Pair once,
     // only for the same reviewer and recorded second, retaining the reason.
     const escalation = (what: string) => {

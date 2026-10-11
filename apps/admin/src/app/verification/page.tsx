@@ -6,6 +6,7 @@ import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
 import { MutationError } from '@/components/MutationError';
 import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
+import { CustomerIdOnFile } from '@/components/verification/CustomerIdOnFile';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
@@ -248,6 +249,16 @@ export default function VerificationPage() {
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
+            <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc) => {
+              setNotice(`Withdrew the customer ID for ${applicant.name}. The account is back to L1.`);
+              await Promise.all([
+                client.invalidateQueries({ queryKey: ['verification'] }),
+                client.invalidateQueries({ queryKey: ['verification-history'] }),
+                client.invalidateQueries({ queryKey: ['verification-counts'] }),
+                client.invalidateQueries({ queryKey: ['document-custody', doc.id] }),
+              ]);
+              openApplicant(null);
+            }} />
             {selected.status === 'PENDING' && (needsExpiry || isInsurance) && <div className="rc-fields">
               {needsExpiry && <label>Expiry printed on the document (required)<input type="date" aria-label="Expiry printed on the document" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} disabled={busy} />{!expiryOk && <small>{expiresAt ? 'That date has already passed; an expired document cannot be approved.' : 'This document type expires — key the date from the document.'}</small>}</label>}
               {isInsurance && <fieldset disabled={busy}><legend>Insurance 5-point check</legend>
