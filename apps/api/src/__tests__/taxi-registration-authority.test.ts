@@ -122,9 +122,11 @@ describe('every taxi approval path checks stored vehicle authority', () => {
         return null;
       });
     });
-    // The car now in use on that plate is a taxi: its private plate is refused for the reason that matters.
-    await refused(doc.id, 'WRONG_PLATE_CLASS');
-    // A fresh submission is taken (no dead end), but automatic processing never approves it.
+    // [#1551] The vehicle change withdrew the paper that was awaiting review: it can never be approved.
+    await expect(system(() => service.approveDocument(doc.id, reviewerId))).rejects.toMatchObject({ code: 'NOT_PENDING' });
+    expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).toMatchObject({ state: 'EXPIRED' });
+    // A fresh submission is taken (no dead end), but automatic processing never approves it, and the
+    // car now in use on that plate is a taxi: its private plate is refused for the reason that matters.
     const fileKey = await system(() => ownedVerificationFixture(app.prisma, doc.userId, 'auto-approve'));
     const again = await system(() => service.submitDocument(doc.userId, 'MOVER', 'vehicle_registration', fileKey, 'test-v1', 'DRIVER'));
     expect(again.status).toBe('PENDING');
