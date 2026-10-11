@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StorefrontDetail } from '@/lib/api';
 import type * as CustomerModule from '@/lib/customer';
 import { storefrontVerticalVariables } from '@/lib/design-tokens';
+import { stubIntersectionObserver } from '@/test/test-utils';
 
 // ---------------------------------------------------------------------------
 // [W6 · size] The item sheet's code (choices, quantity, Add) and the design
@@ -40,26 +41,31 @@ type Gate = { release: () => void; fail: boolean };
 /**
  * A fresh store page whose item-sheet code is held back until `gate.release()`
  * (or fails to arrive while `gate.fail` is set), like a slow or dropped fetch.
+ * `preloaded`: the code is already evaluated, so it lands within microtasks of
+ * the release (a fetch that completes at a precise moment).
  */
-async function freshPage(gate: Gate) {
+async function freshPage(gate: Gate, options: { preloaded?: boolean; liveMenu?: Promise<unknown>; cart?: unknown } = {}) {
   vi.resetModules();
   let open!: () => void;
   let held = new Promise<void>((resolve) => { open = resolve; });
   gate.release = () => open();
+  const ready = options.preloaded ? await vi.importActual('./item-sheet') : null;
   vi.doMock('@/components/storefront/item-sheet', async (importOriginal) => {
     await held;
     if (gate.fail) {
       held = new Promise<void>((resolve) => { open = resolve; });
       throw new Error('The sheet could not be fetched.');
     }
-    return importOriginal();
+    return ready ?? importOriginal();
   });
   const customer: typeof CustomerModule = await import('@/lib/customer');
   const auth = await import('@/lib/auth');
   vi.spyOn(auth, 'sessionProbe').mockResolvedValue({ ok: true } as Awaited<ReturnType<typeof auth.sessionProbe>>);
   vi.spyOn(customer, 'getPublicStorefront').mockResolvedValue(store);
-  vi.spyOn(customer, 'getPublicVendor').mockResolvedValue({ ...store, description: undefined } as unknown as CustomerModule.VendorDetail);
-  vi.spyOn(customer, 'getCart').mockResolvedValue(emptyCart as unknown as CustomerModule.Cart);
+  const vendor = { ...store, description: undefined } as unknown as CustomerModule.VendorDetail;
+  if (options.liveMenu) vi.spyOn(customer, 'getPublicVendor').mockImplementation(() => options.liveMenu!.then(() => vendor));
+  else vi.spyOn(customer, 'getPublicVendor').mockResolvedValue(vendor);
+  vi.spyOn(customer, 'getCart').mockResolvedValue((options.cart ?? emptyCart) as unknown as CustomerModule.Cart);
   vi.spyOn(customer, 'getAddresses').mockResolvedValue([]);
   vi.spyOn(customer, 'addToCart').mockResolvedValue(emptyCart as never);
   return import('./storefront-experience');
@@ -138,6 +144,29 @@ describe('[W6] the item sheet is not in the store page’s first load', () => {
     await waitFor(() => expect(document.activeElement).toBe(within(sheet).getByRole('button', { name: 'Close item options' })));
   });
 
+  it('a sheet opened by a link (?item=) appears even when its code lands between the opening render and that render’s effects', async () => {
+    const gate: Gate = { release: () => undefined, fail: false };
+    let menuArrives!: () => void;
+    const liveMenu = new Promise<void>((resolve) => { menuArrives = resolve; });
+    const cart = { ...emptyCart, vendor: { id: store.id, name: store.name },
+      items: [{ id: 'line', itemId: 'curry', name: 'Curry & roti', quantity: 1, customerPrice: 1200, fulfillment: 'DELIVERY' }] };
+    const report = stubIntersectionObserver();
+    const { StorefrontExperience } = await freshPage(gate, { preloaded: true, liveMenu, cart });
+    render(<StorefrontExperience store={store} returnPath="/store/sample-kitchen" initialItemId="soup" />);
+    const orderPanel = document.getElementById('checkout')!;
+    await waitFor(() => expect(orderPanel.textContent).toContain('1× Curry & roti'));
+    report(orderPanel, false);
+    const dock = await screen.findByRole('link', { name: /View your order/ });
+    // The render that opens the sheet takes the floating button away. The
+    // sheet's code lands right then, before React runs that render's effects.
+    const watcher = new MutationObserver(() => { if (!dock.isConnected) { watcher.disconnect(); gate.release(); } });
+    watcher.observe(document.body, { childList: true, subtree: true });
+    menuArrives();
+    const sheet = await screen.findByRole('dialog', { name: 'Pumpkin soup' }, { timeout: 3000 });
+    await waitFor(() => expect(document.activeElement).toBe(within(sheet).getByRole('button', { name: 'Close item options' })));
+    watcher.disconnect();
+  }, 15_000);
+
   it('if its code cannot be fetched, the customer is told, and the next tap fetches it again', async () => {
     const gate: Gate = { release: () => undefined, fail: true };
     const { StorefrontExperience } = await freshPage(gate);
@@ -150,5 +179,7 @@ describe('[W6] the item sheet is not in the store page’s first load', () => {
     await chooseCurry();
     gate.release();
     expect(await screen.findByRole('dialog', { name: 'Curry & roti' }, ARRIVAL)).toBeTruthy();
+    // Once the sheet has opened, the failure is no longer news anywhere on the page.
+    expect(screen.queryAllByText('Swift could not open this item. Check your connection and try again.')).toHaveLength(0);
   });
 });

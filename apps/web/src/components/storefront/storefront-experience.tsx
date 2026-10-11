@@ -97,6 +97,7 @@ export function loadItemSheet(): Promise<typeof import('./item-sheet')> {
   return itemSheetLoading;
 }
 if (typeof window !== 'undefined') void loadItemSheet().catch(() => undefined);
+const ITEM_SHEET_UNAVAILABLE = 'Swift could not open this item. Check your connection and try again.';
 
 // `value || 0` used to turn NaN (a missing/unparsable server figure) into
 // "GY$0" — an INVENTED zero, indistinguishable from a real one and the worst
@@ -653,14 +654,23 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // the code cannot be fetched, the customer is told instead of a tap doing
   // nothing (and the next tap fetches it again).
   useEffect(() => {
-    if (!modalItem || itemSheetModule) return;
+    if (!modalItem) return;
+    // The code can land after the render that opened the sheet (a link or the
+    // return from sign-in open it from an effect) but before this effect:
+    // render again so the sheet shows now, not at the next unrelated update.
+    if (itemSheetModule) { setItemSheetLoaded(true); return; }
     let alive = true;
-    loadItemSheet().then(() => { if (alive) setItemSheetLoaded(true); }, () => {
+    loadItemSheet().then(() => {
       if (!alive) return;
-      const message = 'Swift could not open this item. Check your connection and try again.';
+      setItemSheetLoaded(true);
+      // An earlier failed fetch is no longer news once the sheet opens.
+      setError((current) => (current === ITEM_SHEET_UNAVAILABLE ? null : current));
+      setFloatingError((current) => (current === ITEM_SHEET_UNAVAILABLE ? null : current));
+    }, () => {
+      if (!alive) return;
       setModalItem(null);
-      setError(message);
-      setFloatingError(message);
+      setError(ITEM_SHEET_UNAVAILABLE);
+      setFloatingError(ITEM_SHEET_UNAVAILABLE);
       window.setTimeout(() => setFloatingError(null), 4200);
     });
     return () => { alive = false; };
