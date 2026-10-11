@@ -17,7 +17,9 @@ import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
-import { readDunningClock } from '../modules/billing/dunning-clock';
+import type { Prisma } from '@prisma/client';
+import { lockBillingAuthority, readDunningClock } from '../modules/billing/dunning-clock';
+import { restoreBillingAccess } from '../modules/billing/billing-access';
 
 // ---------------------------------------------------------------------------
 // [ACTIVATION AUTHORITY — task #2 slice 1] Document truth drives activation:
@@ -191,6 +193,127 @@ describe('STRAND-1 — checklist completion IS vendor activation, atomically', (
     await svc.approveDocument(again.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     expect(fresh.isVerified).toBe(false); // purged evidence no longer counts
+  });
+});
+
+describe('[#1516 review S4] a store awaiting approval whose weekly fee billing holds', () => {
+  const DAY = 86_400_000;
+  /** A pending store that already holds a fee subscription in `status`, with
+   *  three approved documents and the fourth awaiting review. */
+  async function pendingStoreWithFee(status: 'SUSPENDED' | 'CHURNED' | 'ACTIVE', lastApproved = false) {
+    const owner = await makeUser(`Fee${status}`);
+    const vendor = await makePendingVendor(owner.id);
+    const paidThrough = status === 'ACTIVE' ? new Date(Date.now() + 5 * DAY) : new Date(Date.now() - 3 * DAY);
+    const sub = await app.prisma.subscription.create({
+      data: {
+        vendorId: vendor.id, type: 'SUPERMARKET', status, suspendedAt: status === 'ACTIVE' ? null : new Date(Date.now() - DAY),
+        weeklyRate: 2100, billingMethod: 'CASH',
+        currentPeriodStart: new Date(paidThrough.getTime() - 7 * DAY), currentPeriodEnd: paidThrough, nextBillingDate: paidThrough,
+      },
+    });
+    for (const docType of SUPERMARKET_DOCS.slice(0, 3)) await approvedDoc(owner.id, docType);
+    const last = await app.prisma.verificationDocument.create({
+      data: { userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'storefront_photo', fileUrl: `test/${marker}/fee-${status}`, status: lastApproved ? 'APPROVED' : 'PENDING', expiresAt: new Date(Date.now() + 365 * DAY) },
+    });
+    return { vendor, sub, last };
+  }
+
+  it.each(['SUSPENDED', 'CHURNED'] as const)('completing its documents makes it live under that billing hold (fee %s): never open while checkout refuses it, and a payment opens it', async (status) => {
+    const { vendor, sub, last } = await pendingStoreWithFee(status);
+
+    await svc.approveDocument(last.id, 'admin-test', new Date(Date.now() + 365 * DAY));
+
+    // The documents count (it is verified), but the store is held exactly as
+    // billing holds a live store whose fee went unpaid.
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ isVerified: true, status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false });
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe(status);
+
+    // The one restore a fee payment runs lifts it like any billing hold.
+    expect(await app.prisma.$transaction((tx) => restoreBillingAccess(tx, vendor.id))).toBe(true);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ status: 'ACTIVE', suspensionSource: null, acceptingOrders: true });
+  });
+
+  it.each(['SUSPENDED', 'CHURNED'] as const)('admin approval preserves the unpaid %s hold until settlement reopens intake', async (status) => {
+    const { vendor, sub, last } = await pendingStoreWithFee(status);
+    await svc.approveDocument(last.id, 'admin-test', new Date(Date.now() + 365 * DAY));
+    const response = await app.inject({
+      method: 'PUT', url: `/api/v1/admin/vendors/${vendor.id}/approve`,
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}` }, payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false });
+    await app.prisma.$transaction(async (tx) => {
+      await lockBillingAuthority(tx, sub.id);
+      await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null } });
+      expect(await restoreBillingAccess(tx, vendor.id)).toBe(true);
+    });
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ status: 'ACTIVE', suspensionSource: null, acceptingOrders: true });
+  });
+
+  it.each(['settled', 'payer-only'] as const)('activation waits for a settling payer before reading the fee and writing the store (%s)', async (stage) => {
+    const { vendor, sub } = await pendingStoreWithFee('SUSPENDED', true);
+    const owner = await app.prisma.vendorOwner.findUniqueOrThrow({ where: { id: vendor.ownerId } });
+    let releasePayment!: () => void;
+    const release = new Promise<void>((resolve) => { releasePayment = resolve; });
+    let paymentReady!: () => void;
+    const ready = new Promise<void>((resolve) => { paymentReady = resolve; });
+    // Hold exactly the payer/subscription locks used by confirmed settlement.
+    // Its restore sees the still-pending store and has nothing to reopen.
+    const payment = app.prisma.$transaction(async (tx) => {
+      if (stage === 'payer-only') {
+        // If projection takes a subscription before its payer, this schedule
+        // deadlocks when settlement advances to its next lock.
+        await tx.$queryRaw`SELECT id FROM users WHERE id = ${owner.userId} FOR UPDATE`;
+        paymentReady();
+        await release;
+      }
+      await lockBillingAuthority(tx, sub.id);
+      await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null } });
+      expect(await restoreBillingAccess(tx, vendor.id)).toBe(false);
+      if (stage === 'settled') {
+        paymentReady();
+        await release;
+      }
+    }, { timeout: 15000 });
+    await ready;
+    let activationDone = false;
+    let activationPid = 0;
+    const activation = app.prisma.$transaction(async (tx) => {
+      const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+      activationPid = backend!.pid;
+      // This is the projection transaction used by the daily replay.
+      await (svc as unknown as { projectVendorActivation(db: Prisma.TransactionClient, userId: string): Promise<void> })
+        .projectVendorActivation(tx, owner.userId);
+    }, { timeout: 15000 }).finally(() => { activationDone = true; });
+    let blocked = false;
+    try {
+      const deadline = Date.now() + 4000;
+      while (!activationDone && !blocked && Date.now() < deadline) {
+        if (activationPid) {
+          const [row] = await app.prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT cardinality(pg_blocking_pids(${activationPid}::int)) > 0 AS blocked`;
+          blocked = row!.blocked;
+        }
+        if (!blocked && !activationDone) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } finally {
+      releasePayment();
+      const outcomes = await Promise.allSettled([payment, activation]);
+      expect(outcomes.map((result) => result.status), 'settlement and activation must both commit without a lock-order deadlock').toEqual(['fulfilled', 'fulfilled']);
+    }
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).toMatchObject({ status: 'ACTIVE' });
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ status: 'ACTIVE', isVerified: true, suspensionSource: null, acceptingOrders: true });
+    expect(blocked).toBe(true);
+  });
+
+  it('a pending store whose fee is in good standing goes live as before', async () => {
+    const { vendor, last } = await pendingStoreWithFee('ACTIVE');
+    await svc.approveDocument(last.id, 'admin-test', new Date(Date.now() + 365 * DAY));
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ isVerified: true, status: 'ACTIVE', suspensionSource: null, acceptingOrders: true });
   });
 });
 

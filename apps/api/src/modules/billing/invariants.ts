@@ -12,6 +12,11 @@ export interface InvariantReport {
   walletsChecked: number;
   walletMismatches: { subscriptionId: string; ledger: number; balance: number }[];
   wrongfulSuspensions: string[]; // auto-healed subscription ids
+  /** Of those, the heals whose store stays closed because it is held for
+   *  another reason (an admin, safety, wind-down or unrecorded suspension, or
+   *  a store awaiting approval or closed): the fee is healed, the store is an
+   *  operator's decision [#1516 review S3]. */
+  healedWithStoreStillHeld: string[];
   earlyBillingSuspensions: string[]; // historical timing evidence; never clears unrelated restrictions
   enforcementLeaks: string[]; // ACTIVE but unpaid past grace+6h — alert only
   /** Subscriptions whose payer or shared clock could not be read, so neither
@@ -28,7 +33,7 @@ export interface InvariantReport {
 
 export async function runBillingInvariants(prisma: PrismaClient, now = new Date()): Promise<InvariantReport> {
   const report: InvariantReport = {
-    walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], earlyBillingSuspensions: [], enforcementLeaks: [], unjudgedSubscriptions: [], receiptGaps: [],
+    walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], healedWithStoreStillHeld: [], earlyBillingSuspensions: [], enforcementLeaks: [], unjudgedSubscriptions: [], receiptGaps: [],
     ledgerTrialImbalance: null, ledgerWalletMismatches: [],
   };
 
@@ -62,32 +67,42 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
     log().error({ err, subscriptionId }, '[billing invariants] subscription payer or clock unreadable; reported, the run continues');
   };
   for (const candidate of wrongful) {
-    let healed = false;
+    let healed: 'NO' | 'HEALED' | 'HEALED_STORE_HELD' = 'NO';
     try {
       healed = await prisma.$transaction(async (tx) => {
         const authority = await lockBillingAuthority(tx, candidate.id);
         const sub = await tx.subscription.findUniqueOrThrow({ where: { id: candidate.id }, include: { vendor: true } });
         const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: `suspended:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}` } });
         if (sub.status !== 'SUSPENDED' || !sub.autoRenew || authority.userStatus !== 'ACTIVE'
-          || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded
-          || (sub.vendor && sub.vendor.suspensionSource !== 'BILLING')) return false;
+          || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded) return 'NO' as const;
         await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null, failedAttempts: 0 } });
         // [SUSPENSION-HEAL · AUD-L8b-003 · owner ruling] The heal gives back
         // everything the billing suspension took, in this transaction: the
         // store's ACTIVE status AND its order intake (the same restore a real
-        // payment runs, billing-access.ts). An admin/safety/moderation hold is
-        // never a BILLING suspension and is refused above.
+        // payment runs, billing-access.ts). A store held for another reason
+        // (admin, safety, wind-down, or none recorded), awaiting approval or
+        // closed keeps that state: the subscription is healed, the store is not
+        // opened, and the report names it [#1516 review S3: never a silent skip].
+        // Admin suspension does not take the billing payer lock. Lock the
+        // store too, then read the resulting state rather than classifying
+        // the earlier subscription relation snapshot.
+        if (sub.vendor) await tx.$queryRaw`SELECT id FROM vendors WHERE id = ${sub.vendor.id} FOR UPDATE`;
         if (sub.vendor) await restoreBillingAccess(tx, sub.vendor.id);
+        const store = sub.vendor ? await tx.vendor.findUniqueOrThrow({ where: { id: sub.vendor.id } }) : null;
+        const storeHeld = store != null && store.status !== 'ACTIVE';
         await tx.billingEvent.create({ data: { subscriptionId: sub.id, type: 'REINSTATED',
           idempotencyKey: `wrongful-heal:${sub.id}:${now.toISOString().slice(0, 10)}`,
-          note: 'wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority and store access restored',
+          note: storeHeld
+            ? `wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority restored, store left held (${store!.status}, source ${store!.suspensionSource ?? 'none recorded'})`
+            : 'wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority and store access restored',
         } });
-        return true;
+        return storeHeld ? 'HEALED_STORE_HELD' as const : 'HEALED' as const;
       });
     } catch (err) {
       unjudged(candidate.id, err);
     }
-    if (healed) report.wrongfulSuspensions.push(candidate.id);
+    if (healed !== 'NO') report.wrongfulSuspensions.push(candidate.id);
+    if (healed === 'HEALED_STORE_HELD') report.healedWithStoreStillHeld.push(candidate.id);
   }
 
   // 3. The shared active-time clock also governs the detector. A confirmation

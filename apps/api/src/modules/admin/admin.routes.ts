@@ -1,3 +1,4 @@
+import { lockBillingAuthority } from '../billing/dunning-clock';
 import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -1393,10 +1394,17 @@ export async function adminRoutes(app: FastifyInstance) {
     // price this store refuses the approval here, with the config error, and
     // the store stays pending — never ACTIVE and searchable with no
     // subscription, which a failure after the CAS below used to leave behind.
-    const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
-      // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
-      // suspension source survives it for a later heal or payment to act on.
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' }, OR: [{ suspensionSource: null }, { suspensionSource: { not: 'WIND_DOWN' } }] }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
+    const updated = await subscriptions.withActivation({ vendorId: id }, async (tx, subscription) => {
+      // Approval confirms documents; an unpaid fee still closes intake. Use
+      // settlement's payer -> subscription order before touching the store,
+      // so a racing payment either precedes this decision or lifts its hold.
+      const { sub } = await lockBillingAuthority(tx, subscription.id);
+      const feeHeld = sub.status === 'SUSPENDED' || sub.status === 'CHURNED';
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' }, OR: [{ suspensionSource: null }, { suspensionSource: { not: 'WIND_DOWN' } }] }, data: {
+        status: feeHeld ? 'SUSPENDED' : 'ACTIVE', isVerified: true,
+        suspensionSource: feeHeld ? 'BILLING' : null,
+        ...(feeHeld ? { acceptingOrders: false } : {}),
+      } });
       if (won.count === 0) {
         // The store changed after the check above: say which way.
         const now = await tx.vendor.findUnique({ where: { id }, select: { suspensionSource: true } });
@@ -1417,7 +1425,9 @@ export async function adminRoutes(app: FastifyInstance) {
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Vendor Approved!',
-      body: `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
+      body: updated.suspensionSource === 'BILLING'
+        ? `${vendor.name}'s documents are approved. Pay the weekly fee to open the store for orders.`
+        : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
       data: { vendorId: id },
     });
 

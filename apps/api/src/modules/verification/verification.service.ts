@@ -32,6 +32,7 @@ import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApp
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../billing/billing-access';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
@@ -1523,6 +1524,7 @@ export class VerificationService {
     if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
       return this.projectVendorActivation(tx, userId);
     });
+    await lockVendorActivationBilling(db, userId);
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
       include: {
@@ -1574,6 +1576,10 @@ export class VerificationService {
           where: { id: vendor.id },
           data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
         });
+        // [#1516 review S4] A store whose weekly fee billing already holds goes
+        // live under that hold (billing-access.ts), never open while checkout
+        // refuses it; the promotion below then finds it no longer pending.
+        await holdActivationForUnpaidFee(db, vendor.id);
         await db.vendor.updateMany({
           where: { id: vendor.id, status: 'PENDING_APPROVAL' },
           data: { status: 'ACTIVE' },
