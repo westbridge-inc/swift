@@ -34,12 +34,23 @@ afterEach(() => vi.unstubAllGlobals());
 describe('launch support truth', () => {
   it('offers the published support line and email with working actions', () => {
     const rows = nodes(ContactUsScreen()).filter((node) => node.type === 'SettingsRow');
-    const phone = rows.find((node) => node.props.sub === '+592 716 3534');
+    const phone = rows.find((node) => node.props.label === 'Call support');
     expect(phone, 'published phone is reachable').toBeDefined();
+    expect(phone.props.sub).toBe('+592 716 3534');
     phone.props.onPress();
     expect(fx.open).toHaveBeenCalledWith('tel:+5927163534', expect.any(String));
     rows.find((node) => node.props.sub === 'support@swiftgy.com')!.props.onPress();
     expect(fx.open).toHaveBeenCalledWith('mailto:support@swiftgy.com', expect.any(String));
+  });
+  it('offers WhatsApp on the same support number (owner ruling 11 Oct)', () => {
+    const rows = nodes(ContactUsScreen()).filter((node) => node.type === 'SettingsRow');
+    const whatsapp = rows.find((node) => node.props.label === 'WhatsApp support');
+    expect(whatsapp, 'WhatsApp support is reachable').toBeDefined();
+    expect(whatsapp.props.sub).toBe('+592 716 3534');
+    whatsapp.props.onPress();
+    const [target, failure] = fx.open.mock.calls[0]!;
+    expect(target).toBe('https://wa.me/5927163534');
+    expect(failure).toContain('+592 716 3534');
   });
   it.each([undefined, {}, { totalAmount: '' }, { totalAmount: ' ' }, { totalAmount: 'broken' }, { totalAmount: NaN }, { fare: Infinity }, { fare: false }])('shows unavailable for an unknown job amount %j', (job) => {
     expect(jobAmount(job)).toBe('Amount unavailable');

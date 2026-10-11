@@ -5,10 +5,9 @@ import { useNavigation } from '@react-navigation/native';
 import { space } from '@swift/ui';
 import { Header, Screen, SettingsRow, T } from '../../../kit';
 import { openExternal } from '../../../lib/openExternal';
+import { SUPPORT_CONTACT } from '../../../lib/supportContact';
 
-// Published launch support channels.
-const SUPPORT_EMAIL = 'support@swiftgy.com';
-const SUPPORT_PHONE = { display: '+592 716 3534', dial: 'tel:+5927163534' } as const;
+// Published launch support channels, read from the one shared config.
 
 export function ContactUsScreen() {
   const navigation = useNavigation<any>();
@@ -34,16 +33,22 @@ export function ContactUsScreen() {
             onPress={() => navigation.navigate('ChatList')}
           />
           <SettingsRow
+            icon="message-square"
+            label="WhatsApp support"
+            sub={SUPPORT_CONTACT.phoneDisplay}
+            onPress={() => void openExternal(SUPPORT_CONTACT.whatsappUrl, `Couldn't open WhatsApp — message ${SUPPORT_CONTACT.phoneDisplay} on WhatsApp.`)}
+          />
+          <SettingsRow
             icon="phone"
             label="Call support"
-            sub={SUPPORT_PHONE.display}
-            onPress={() => void openExternal(SUPPORT_PHONE.dial, `Couldn't open your phone app — call ${SUPPORT_PHONE.display}.`)}
+            sub={SUPPORT_CONTACT.phoneDisplay}
+            onPress={() => void openExternal(SUPPORT_CONTACT.callUrl, `Couldn't open your phone app — call ${SUPPORT_CONTACT.phoneDisplay}.`)}
           />
           <SettingsRow
             icon="mail"
             label="Email support"
-            sub={SUPPORT_EMAIL}
-            onPress={() => void openExternal(`mailto:${SUPPORT_EMAIL}`, `Couldn't open your mail app — write to ${SUPPORT_EMAIL}.`)}
+            sub={SUPPORT_CONTACT.email}
+            onPress={() => void openExternal(`mailto:${SUPPORT_CONTACT.email}`, `Couldn't open your mail app — write to ${SUPPORT_CONTACT.email}.`)}
           />
           <SettingsRow
             icon="help-circle"
