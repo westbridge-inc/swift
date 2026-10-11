@@ -38,3 +38,23 @@ describe('the face-match line follows the server', () => {
     }
   });
 });
+
+// [REPLACE-PENDING · owner request 8 Oct 2026] a document waiting for review can be replaced, and says so once replaced.
+describe('a document waiting for review', () => {
+  it('offers to replace it, and says "Replaced — waiting for review" after', async () => {
+    const { pendingDocumentLabel } = await import('./documentChecklistPresentation');
+    expect(pendingDocumentLabel(false, '2026-10-08T12:00:00.000Z')).toBe('Submitted 8 Oct — in review · tap to replace');
+    expect(pendingDocumentLabel(false, null)).toBe('In review · tap to replace');
+    expect(pendingDocumentLabel(true, '2026-10-08T12:00:00.000Z')).toBe('Replaced — waiting for review · tap to replace again');
+  });
+
+  it('the card stays tappable while waiting (asks first), and only an approved document is locked', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const card = readFileSync(join(process.cwd(), 'src/components/onboarding/DocumentUploadCard.tsx'), 'utf8');
+    expect(card).toMatch(/<Pressable disabled=\{approved \|\| upload\.isPending\} onPress=\{pending \? confirmReplace : pick\}>/);
+    expect(card).toMatch(/Replace this document\?/);
+    const list = readFileSync(join(process.cwd(), 'src/components/onboarding/DocumentChecklist.tsx'), 'utf8');
+    expect(list).toMatch(/replaced=\{doc\?\.replaced === true\}/);
+  });
+});

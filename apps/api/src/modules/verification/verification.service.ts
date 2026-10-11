@@ -3,6 +3,7 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
+import { DOCUMENT_REPLACED, REPLACED_NOTE, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
@@ -364,6 +365,8 @@ export class VerificationService {
           data: { validTo: new Date() },
         });
       }
+      // [REPLACE-PENDING] A newer copy (not rejected outright) replaces any copy still waiting for review.
+      if (doc.status !== 'REJECTED') await supersedeAwaitingCopies(tx, doc);
       // [DOC-1 P4-5] A document waiting on a human has ONE open case, with the
       // SLA clock started here — in the same transaction, so a pending document
       // without a case cannot exist.
@@ -1058,9 +1061,11 @@ export class VerificationService {
       if (won.count !== 1) {
         const current = await tx.verificationDocument.findUnique({
           where: { id: docId },
-          select: { status: true },
+          select: { status: true, state: true },
         });
         if (!current) throw new NotFoundError('VerificationDocument', docId);
+        // [REPLACE-PENDING] The applicant replaced this copy: nothing to decide here — say so plainly.
+        if (current.state === 'SUPERSEDED') return { kind: 'REPLACED' as const, status: current.status };
         // [REPORT-007 / STRAND-2] A terminal retry is a repair opportunity for
         // stale derived state (the duplicate-submission path already repairs
         // before ALREADY_APPROVED). RETURN instead of throwing inside the
@@ -1135,6 +1140,9 @@ export class VerificationService {
       await this.projectVendorActivation(tx, updated.userId);
       return { kind: 'UPDATED' as const, document: updated };
     });
+    if (outcome.kind === 'REPLACED') {
+      throw new AppError(409, DOCUMENT_REPLACED, 'The applicant replaced this document with a newer copy. Open the newer copy in the queue.');
+    }
     if (outcome.kind === 'NOT_PENDING') {
       throw new AppError(400, 'NOT_PENDING', `Document is ${outcome.status}, only PENDING documents can be reviewed`);
     }
@@ -1337,10 +1345,15 @@ export class VerificationService {
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
     // out here, or the checklist would show an approval GO no longer counts.
-    const documents = (await this.prisma.verificationDocument.findMany({
+    const rows = await this.prisma.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
-    })).filter((d) => d.state !== 'SUPERSEDED');
+    });
+    // [REPLACE-PENDING] A copy waiting for review that replaced an earlier waiting copy says so
+    // ("Replaced — waiting for review"). Additive field; older apps ignore it.
+    const replacedTypes = new Set(rows.filter((d) => d.state === 'SUPERSEDED' && d.reviewNote === REPLACED_NOTE).map((d) => d.docType));
+    const documents = rows.filter((d) => d.state !== 'SUPERSEDED')
+      .map((d) => (d.status === 'PENDING' && replacedTypes.has(d.docType) ? { ...d, replaced: true } : d));
 
     const approved = new Set(
       documents
