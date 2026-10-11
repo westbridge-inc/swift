@@ -4,7 +4,8 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { CircleCheck, ChevronDown, MapPin, Search, X } from 'lucide-react';
-import { getAddresses, getHome, type HomeFeed, type PopularItem, type Vendor } from '@/lib/customer';
+import { getAddresses, getHome, getPublicHome, type HomeFeed, type PopularItem, type Vendor } from '@/lib/customer';
+import { BROWSE_STALE_MS, fromPage, homeFeedKey, type GuestRead } from '@/lib/browse-keys';
 import { isHomeFeed } from '@/lib/app-rules';
 import { currentCoords } from '@/lib/geolocate';
 import { readShellPerson, shellPersonKey } from '@/lib/shell-data';
@@ -69,7 +70,7 @@ export function greetingAt(date: Date): string {
   return hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
 }
 
-export function CustomerHome({ market }: { market: string }) {
+export function CustomerHome({ market, seed = null }: { market: string; seed?: GuestRead<HomeFeed> | null }) {
   // A guest's "near me" point lives in the shell for this page load, so Home
   // keeps its order when you come back to it; nothing about it is stored.
   const { status, scope, epoch, nearPoint: point, setNearPoint: setPoint } = useCustomerSession();
@@ -90,18 +91,28 @@ export function CustomerHome({ market }: { market: string }) {
   // guest from where the browser is, once they ask.
   const near = hasPoint(saved) ? { lat: saved.latitude, lng: saved.longitude } : status === 'guest' ? point : null;
 
-  // Asked for at once, beside the session probe: the server reads the cookie
-  // itself, so Home never waits on a round trip it does not need. When a
-  // delivery point turns up, the same person's stores re-sort in place (their
-  // previous answer stays on screen meanwhile) — but an answer never outlives
-  // its person: a new epoch starts from nothing.
+  // [W2] Two answers, never mixed. Until the server has said who this is —
+  // and for every guest — Home shows the PUBLIC feed: the one the server
+  // rendered into the page (so the stores are there before any script runs),
+  // read with no session at all. Once someone is signed in, their OWN feed (the
+  // live order, their usuals) is read with their session, under its own key;
+  // the public stores stay on screen while it arrives. When a delivery point
+  // turns up, the same person's stores re-sort in place — but an answer never
+  // outlives its person: a new epoch starts from nothing.
+  const owner = status === 'signed-in' ? 'me' : 'public';
   const feed = useQuery({
-    queryKey: ['customer', 'home', epoch, near?.lat ?? null, near?.lng ?? null],
+    queryKey: homeFeedKey(epoch, owner, near?.lat ?? null, near?.lng ?? null),
     queryFn: async (): Promise<HomeFeed> => {
-      const data = await getHome(near ?? undefined);
+      const data = owner === 'me' ? await getHome(near ?? undefined) : await getPublicHome(near ?? undefined);
       if (!isHomeFeed(data)) throw new Error('Swift sent an incomplete store list.');
       return data;
     },
+    // The guest feed is the same for everyone: fresh for a minute, no re-read
+    // on focus — and on the first page load it is the one the server drew
+    // into the page. A person's own feed is never seeded and keeps the app's
+    // default (it carries their live order).
+    ...(owner === 'public' ? { staleTime: BROWSE_STALE_MS, refetchOnWindowFocus: false } : {}),
+    ...(owner === 'public' && epoch === 0 && !near ? fromPage(seed) : {}),
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[2] === epoch ? previous : undefined),
   });
 
@@ -143,7 +154,9 @@ export function CustomerHome({ market }: { market: string }) {
       {locationError ? <p role="alert" className="mt-2 text-[13px] leading-[18px] text-[var(--swift-error)]">{locationError}</p> : null}
 
       <section aria-labelledby="home-title" className="flex flex-col">
-        <h1 id="home-title" className="sw-title mt-3">{firstName ? `${greeting}, ${firstName}` : greeting}</h1>
+        {/* [W2] The page can be served from the server's cache a little after
+            it was drawn; the browser's clock is the one that greets. */}
+        <h1 id="home-title" className="sw-title mt-3" suppressHydrationWarning>{firstName ? `${greeting}, ${firstName}` : greeting}</h1>
         <p className="sr-only">Order food, groceries and more from businesses in {market} — you pay them directly, cash or MMG.</p>
         <Link
           href="/order/search"

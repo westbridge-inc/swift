@@ -10,6 +10,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestPasswordResetOtp } from './helpers/otp';
+import { grantStepUp } from './helpers/step-up';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 
 const ADMIN_PHONE = '+5927009190';
@@ -396,6 +397,9 @@ describe('password-reset security transaction', () => {
   it('does not let a previously authenticated password change overwrite a completed recovery', async () => {
     const user = await createPasswordUser(SET_PASSWORD_RESET_RACE_PHONE);
     const session = await createSession(user.id, 'CUSTOMER');
+    // [L04 · MASTER-003] password/set needs a step-up on this session; grant it
+    // so the race below is still the one under test.
+    await grantStepUp(app, session.token);
     const attackerPassword = 'attacker-chosen-password';
 
     let passwordHashReached!: () => void;

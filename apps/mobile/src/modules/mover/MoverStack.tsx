@@ -25,6 +25,7 @@ import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 // [B-support] The ticket screen is role-agnostic (generic create+list); the
 // mover stack simply never registered it — an earner mid-shift had NO route
 // to a human. Registration, not a rewrite.
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 // [E12 §7.1] The shift identity check — go-online's 428 and the mid-shift
 // push both land here.
@@ -128,6 +129,7 @@ export function MoverStack() {
             asks for it used to route to Delivery — a screen this stack never
             mounts — so a safety question had nowhere to be answered. */}
         <Stack.Screen name="GuardianDriverConfirm" component={GuardianDriverConfirmScreen} />
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
       </Stack.Navigator>
       {preview ? <MoverPreviewBanner /> : null}
     </View>

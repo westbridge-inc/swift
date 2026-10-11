@@ -4,7 +4,7 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import TaxiPage from './app/(app)/taxi/page';
-import CustomerHomePage from './app/(app)/page';
+import { HomeScreen as CustomerHomePage } from './app/(app)/home-screen';
 import ExplorePage from './app/(app)/explore/page';
 import WelcomePage from './app/(marketing)/welcome/page';
 import FaqPage from './app/(marketing)/faq/page';

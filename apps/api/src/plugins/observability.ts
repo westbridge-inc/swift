@@ -1086,7 +1086,7 @@ export const tenantUnscopedAccessCounter = new client.Counter({
  *  a system query refused rather than moved out of a caller's transaction. */
 export const tenantBindCounter = new client.Counter({
   name: 'swift_tenant_bind_total',
-  help: 'RLS bindings by kind (tenant, tenant_fallback_in_tx, system, system_no_client, system_tx, system_refused_in_tx)',
+  help: 'RLS bindings by kind (tenant, tenant_fallback_in_tx, tenant_tx, tenant_switch_refused, raw_system, raw_unbound, system, system_no_client, system_tx, system_refused_in_tx)',
   labelNames: ['kind'] as const,
   registers: [registry],
 });

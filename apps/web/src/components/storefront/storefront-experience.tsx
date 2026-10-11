@@ -7,7 +7,6 @@ import { useRouter } from 'next/navigation';
 import {
   Banknote,
   Clock3,
-  ImageIcon,
   MapPin,
   Minus,
   Plus,
@@ -26,6 +25,7 @@ import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefron
 import {
   addToCart,
   checkoutAttemptSignature,
+  pricesAsSeen,
   cartQuoteFingerprint,
   checkout,
   clearCart,
@@ -46,8 +46,10 @@ import {
   type VendorDetail,
 } from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
+import { photo } from '@/lib/media';
 import { storefrontVertical, storefrontVerticalVariables } from '@/lib/design-tokens';
 import styles from './storefront.module.css';
+import { Pictogram } from '@/components/glyphs';
 
 type Address = {
   id: string;
@@ -79,7 +81,9 @@ const CATALOG_REFRESH_MS = 30_000;
 // 0 still renders "GY$0". Same guarantee as `money()` on the vendor side.
 // [W-13] One parser, one em-dash. `null` now reaches here from itemPrice and
 // optionPrice — a price the server never sent, which must never render as free.
-const gyMoney = (value: unknown) => formatAmount(value, 'GY$');
+// [WEB-REDESIGN] Customer prices read like the rest of the app (and the phone
+// app): `$2,500`, in Guyana dollars as the footer states.
+const gyMoney = (value: unknown) => formatAmount(value, '$');
 
 const verticalLabel: Record<ReturnType<typeof storefrontVertical>, string> = {
   food: 'Food',
@@ -171,6 +175,19 @@ function optionGuidance(group: OptionGroup): string {
   return `Choose up to ${group.maxSelect}`;
 }
 
+function ItemPhoto({ item, vertical }: { item: DisplayItem; vertical: ReturnType<typeof storefrontVertical> }) {
+  const [failed, setFailed] = useState(false);
+  return item.imageUrl && !failed ? (
+    <span className={styles.itemImage}>
+      <Image {...photo(item.imageUrl)!} alt={item.name} fill sizes="96px" className={styles.itemImageAsset} onError={() => setFailed(true)} />
+    </span>
+  ) : (
+    <span className={styles.itemImageFallback} aria-hidden="true">
+      <Pictogram name={vertical} size={28} />
+    </span>
+  );
+}
+
 export function StorefrontExperience({ store, returnPath, fromQr = false }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean }) {
   const router = useRouter();
   const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
@@ -215,6 +232,32 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
   const clearConfirmButton = useRef<HTMLButtonElement | null>(null);
   const clearReturnFocus = useRef<HTMLButtonElement | null>(null);
   const railHeading = useRef<HTMLHeadingElement | null>(null);
+  const orderPanel = useRef<HTMLElement | null>(null);
+  const page = useRef<HTMLElement | null>(null);
+  const orderDock = useRef<HTMLAnchorElement | null>(null);
+  // Keep the dock out of the way until the browser confirms the panel is off screen.
+  const [checkoutVisible, setCheckoutVisible] = useState(true);
+
+  useEffect(() => {
+    if (!orderPanel.current || typeof IntersectionObserver === 'undefined') return;
+    // One callback can carry several crossings, oldest first; only the newest says where the panel is now.
+    const observer = new IntersectionObserver((entries) => {
+      const latest = entries[entries.length - 1];
+      if (latest) setCheckoutVisible(latest.isIntersecting);
+    }, { threshold: 0 });
+    observer.observe(orderPanel.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const showOrder = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    orderPanel.current?.scrollIntoView({
+      // 'auto' follows the page's reduced-motion scroll rule and, unlike 'instant', no engine rejects it.
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'start',
+    });
+    railHeading.current?.focus({ preventScroll: true });
+  };
 
   const closeOptions = useCallback(() => {
     clearStorefrontContinuation();
@@ -353,6 +396,20 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
   const cartItems = cart?.items ?? [];
   const cartHydrationPending = signedIn && !cartHydrated;
   const itemCount = cartItems.reduce((sum, line) => sum + line.quantity, 0);
+  useEffect(() => {
+    const dock = orderDock.current;
+    if (!dock) return;
+    const measure = () => {
+      const height = dock.getBoundingClientRect().height;
+      // Retain the last visible height when hidden, including wrapped/zoomed text.
+      if (height > 0) page.current?.style.setProperty('--swift-order-dock-height', `${height}px`);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(dock);
+    return () => observer.disconnect();
+  }, [itemCount, checkoutVisible]);
   const fallbackSubtotal = cartItems.reduce(
     (sum, line) => sum + Number(line.customerPrice ?? 0) * line.quantity,
     0,
@@ -684,6 +741,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       const body = {
         paymentMethod: 'CASH' as const,
         tipAmount: riderTip,
+        ...pricesAsSeen(quotedCart),
         ...(quotedCart.promoCode?.code ? { promoCode: quotedCart.promoCode.code } : {}),
       };
       const signature = checkoutAttemptSignature(quotedCart, body);
@@ -740,7 +798,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
   };
 
   return (
-    <main className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
+    <main ref={page} className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
       <header className={styles.topbar}>
         <div className={styles.topbarInner}>
           <div className={styles.brandGroup}>
@@ -759,6 +817,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
             </Link>
             <a
               href="#checkout"
+              onClick={showOrder}
               className={styles.cartLink}
               aria-label={itemCount > 0 && directCheckoutBlocked ? `Your order, ${itemCount} items, review required` : `Your order, ${itemCount} items, ${orderAmountLabel}`}
             >
@@ -772,11 +831,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       {!fromQr && catalog.coverImageUrl ? (
         <div className={styles.hero}>
           <Image
-            src={catalog.coverImageUrl}
+            {...photo(catalog.coverImageUrl)!}
             alt={`${catalog.name} storefront`}
             fill
             priority
-            unoptimized
+            sizes="(min-width: 760px) 1200px, 100vw"
             className={styles.heroImage}
           />
         </div>
@@ -786,7 +845,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
         <section className={styles.storeCard} aria-labelledby="store-name">
           {catalog.logoUrl ? (
             <span className={styles.logo}>
-              <Image src={catalog.logoUrl} alt="" fill unoptimized className={styles.logoImage} />
+              <Image {...photo(catalog.logoUrl)!} alt="" fill sizes="64px" className={styles.logoImage} />
             </span>
           ) : (
             <span className={styles.logoFallback} aria-hidden="true">
@@ -986,15 +1045,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
                           <span className={styles.soldOut}>Sold out</span>
                         )}
 
-                        {item.imageUrl ? (
-                          <span className={styles.itemImage}>
-                            <Image src={item.imageUrl} alt={item.name} fill unoptimized className={styles.itemImageAsset} />
-                          </span>
-                        ) : (
-                          <span className={styles.itemImageFallback} aria-hidden="true">
-                            <ImageIcon size={24} />
-                          </span>
-                        )}
+                        <ItemPhoto key={item.imageUrl} item={item} vertical={currentVertical} />
                       </article>
                     );
                   })}
@@ -1003,12 +1054,12 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
             ))}
           </div>
 
-          <aside id="checkout" className={styles.rail} aria-label="Your order and checkout">
+          <aside ref={orderPanel} id="checkout" className={styles.rail} aria-label="Your order and checkout">
             <div className={styles.railHeader}>
               <p className={styles.railEyebrow}>
                 Your order{selectedAddress ? ` · delivery to ${selectedAddress.label}` : ''}
               </p>
-              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
+              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}><span className="sr-only">Your order, </span>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
             </div>
 
             <div className={styles.railBody}>
@@ -1228,8 +1279,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
         </div>
       </div>
 
-      {itemCount > 0 ? (
-        <a href="#checkout" className={styles.mobileDock}>
+      {itemCount > 0 && !checkoutVisible ? (
+        <a ref={orderDock} href="#checkout" onClick={showOrder} className={styles.mobileDock}>
           <span>View your order · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
           <span className={styles.mobileTotal}>{directCheckoutBlocked ? 'Review' : orderAmountLabel}</span>
         </a>

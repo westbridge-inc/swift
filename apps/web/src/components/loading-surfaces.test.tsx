@@ -6,7 +6,7 @@ import * as api from '@/lib/customer';
 import { CustomerHome } from './customer-home';
 import SearchPage from '@/app/(app)/order/search/page';
 import MenuPage from '@/app/(app)/order/vendor/[id]/page';
-import MarketPage from '@/app/(app)/market/page';
+import { MarketScreen as MarketPage } from '@/app/(app)/market/market-screen';
 import OrdersPage from '@/app/(app)/orders/page';
 import CartPage from '@/app/(app)/cart/page';
 import OrderPage from '@/app/(app)/orders/[id]/page';
@@ -34,7 +34,8 @@ const vendor = { id: 'v1', name: 'Local store', isCurrentlyOpen: true, displayRa
 describe('loading surfaces become content in the reserved layout', () => {
   it('Home reserves both horizontal rails and a grid of store cards', async () => {
     const response = pending<api.HomeFeed>();
-    vi.spyOn(api, 'getHome').mockReturnValue(response.promise);
+    // [W2] A guest's Home is the public feed, read with no session.
+    vi.spyOn(api, 'getPublicHome').mockReturnValue(response.promise);
     const view = mount(<CustomerHome market="Georgetown" />);
     const region = screen.getByLabelText('Loading home feed');
     expect(region.querySelectorAll('ul')).toHaveLength(2);

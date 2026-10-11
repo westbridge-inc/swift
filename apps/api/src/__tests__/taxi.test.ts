@@ -583,6 +583,8 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
       orderBy: { createdAt: 'desc' },
     });
     expect(note?.title).toContain('another driver');
+    // [73] The watchdog's ACTUAL payload names the taxi, so a tap opens Taxi, never Delivery.
+    expect(note?.data).toMatchObject({ orderType: 'TAXI', rideId: ride.id, orderId: ride.id, audience: 'customer', status: 'PENDING' });
 
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null } });
   });
@@ -682,6 +684,8 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
       where: { userId: customer.userId, title: 'Your driver lost signal' },
     });
     expect(note).not.toBeNull();
+    // [73] In custody too, the payload names the taxi.
+    expect(note?.data).toMatchObject({ orderType: 'TAXI', rideId: ride.id, orderId: ride.id, audience: 'customer' });
 
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null, currentRideId: null } });
   });

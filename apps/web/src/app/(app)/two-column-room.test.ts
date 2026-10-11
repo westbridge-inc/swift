@@ -67,6 +67,22 @@ describe('[WEB-REDESIGN] two-column pages split only where the main column has r
     for (const split of splits) expect(mainColumn(split), `split at ${split.at}px`).toBeGreaterThanOrEqual(MIN_MAIN);
   });
 
+  it('Send (the courier page) splits its Tailwind grid only where the main column has room', () => {
+    const page = read('src/app/(app)/courier/page.tsx');
+    const grid = page.match(/className="([^"]*grid-cols-\[minmax\(0,1fr\)_(\d+)px\][^"]*)"/);
+    expect(grid, 'Send has a two-column grid').not.toBeNull();
+    const classes = grid![1]!.split(/\s+/);
+    const split = classes.find((name) => /^[a-z]+:grid-cols-\[minmax\(0,1fr\)_\d+px\]$/.test(name));
+    expect(split, 'the split is behind a named breakpoint').toBeDefined();
+    const at = breakpointPx(split!.split(':')[0]!);
+    const gapClass = classes.find((name) => /^gap-x-\d+$/.test(name));
+    const gap = gapClass ? Number(gapClass.slice('gap-x-'.length)) * 4 : 0;
+    expect(mainColumn({ at, side: Number(grid![2]), gap }), `split at ${at}px`).toBeGreaterThanOrEqual(MIN_MAIN);
+    // The fee column only sticks once it sits beside the form.
+    const sticky = page.match(/className="[^"]*\b([a-z]+):sticky\b/);
+    expect(sticky?.[1], 'the side column sticks at the same breakpoint it splits at').toBe(split!.split(':')[0]);
+  });
+
   it('the split breakpoint itself leaves room for a 380 px side column with a 48 px gap', () => {
     expect(mainColumn({ at: breakpointPx('split'), side: 380, gap: 48 })).toBeGreaterThanOrEqual(MIN_MAIN);
   });
