@@ -46,7 +46,7 @@ export function toAmount(value: unknown): number | null {
  * the letters "$NaN" onto a vendor's own order total).
  *
  * A value that is not a finite number renders an em-dash. A real zero still
- * renders "GY$0".
+ * renders "$0".
  */
 export function money(value: unknown): string {
   return formatMoney(value);

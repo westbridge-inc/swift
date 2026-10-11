@@ -106,11 +106,11 @@ describe('[W-13] formatting never invents a figure', () => {
     expect(money('4000.00')).toBe('$4,000');
   });
 
-  it('the vendor and customer formatters read the same figure (GY$ for partners, $ for customers, as in the phone app)', () => {
+  it('the vendor and customer formatters print the same figure the same way ($, as in the phone app; the footer says Prices in GYD)', () => {
     expect(vendorMoney(undefined)).toBe(MONEY_UNKNOWN);
-    expect(vendorMoney('4500.00')).toBe('GY$4,500');
+    expect(vendorMoney('4500.00')).toBe('$4,500');
     expect(money('4500.00')).toBe('$4,500');
-    expect(vendorMoney('4500.00').replace('GY$', '')).toBe(money('4500.00').replace('$', ''));
+    expect(vendorMoney('4500.00')).toBe(money('4500.00'));
     expect(toAmount('4500.00')).toBe(4500);
     expect(toAmount('')).toBeNull();
   });
