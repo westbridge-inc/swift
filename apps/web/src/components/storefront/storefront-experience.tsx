@@ -11,7 +11,7 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
@@ -38,7 +38,6 @@ import {
   type VendorDetail,
 } from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
-import { storefrontVerticalVariables } from '@/lib/design-tokens';
 import {
   OptionSelectionError,
   basePrice,
@@ -55,7 +54,6 @@ import { guestCart } from '@/lib/basket-projection';
 import { useGuestBasket } from '@/lib/basket-state';
 import { useOrderingContext } from '@/components/ordering-context';
 import { Photo } from '@/components/order-ui';
-const ItemOptionsPanel = lazy(() => import('./item-options-panel').then(module => ({ default: module.ItemOptionsPanel })));
 import { StoreActions } from './store-actions';
 import styles from './storefront.module.css';
 
@@ -82,6 +80,27 @@ type DisplayVendor = VendorDetail & {
 };
 
 const CATALOG_REFRESH_MS = 30_000;
+
+/**
+ * [W6] An item's sheet (choices, quantity, Add) is only needed after a tap or
+ * a link that names an item, so its code is not in the store page's first
+ * load. In the browser it is fetched as soon as this page's own code has run
+ * (after the first-load JavaScript, never before it) and kept here, so a tap
+ * opens the sheet at once. A sheet asked for before its code has arrived
+ * opens as soon as it does; nothing stands in for it meanwhile.
+ */
+let itemSheetModule: typeof import('./item-sheet') | null = null;
+let itemSheetLoading: Promise<typeof import('./item-sheet')> | null = null;
+/** Fetches the item sheet's code once (and again after a failed fetch). */
+export function loadItemSheet(): Promise<typeof import('./item-sheet')> {
+  itemSheetLoading ??= import('./item-sheet').then(
+    (module) => (itemSheetModule = module),
+    (error: unknown) => { itemSheetLoading = null; throw error; },
+  );
+  return itemSheetLoading;
+}
+if (typeof window !== 'undefined') void loadItemSheet().catch(() => undefined);
+const ITEM_SHEET_UNAVAILABLE = 'Swift could not open this item. Check your connection and try again.';
 
 // `value || 0` used to turn NaN (a missing/unparsable server figure) into
 // "GY$0" — an INVENTED zero, indistinguishable from a real one and the worst
@@ -147,6 +166,7 @@ function selectedDefaults(groups: OptionGroup[]): Record<string, string[]> {
   );
 }
 
+/** What the person is told when the validator refuses their choices. */
 function choiceProblem(item: DisplayItem, error: unknown): { message: string; groupId: string | null } {
   if (!(error instanceof OptionSelectionError)) return { message: 'These choices have changed. Close this panel and check the menu again.', groupId: null };
   const group = (item.optionGroups ?? []).find((candidate) => candidate.name === error.groupName) ?? null;
@@ -180,7 +200,33 @@ function useActiveSection(ids: string[]): [string | null, (_id: string) => void]
   return [active, setActive];
 }
 
-export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string }) {
+/**
+ * [#1590] A menu photo that fails to load falls back to the same pictogram
+ * tile as an item without one; keyed by its address, it tries again when the
+ * live menu sends a new one.
+ */
+function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string | null | undefined }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <Photo
+      src={failed ? null : item.imageUrl}
+      alt={item.name}
+      vendorType={vendorType}
+      sizes="96px"
+      iconSize={26}
+      className={styles.itemImage}
+      dim={!item.isAvailable}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+/**
+ * `verticalStyle` is the store's vertical tint, worked out on the server
+ * (storefront-page.tsx) so the design-token tables stay out of the page's
+ * first-load JavaScript.
+ */
+export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties }) {
   const router = useRouter();
   // [W6] The store page lives inside the customer app's frame (rail, dock,
   // session). Its session can renew an expired access cookie before sending a
@@ -230,6 +276,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const [itemQuantity, setItemQuantity] = useState(1);
   const deepLinkOpened = useRef(false);
   const [modalError, setModalError] = useState<string | null>(null);
+  const [, setItemSheetLoaded] = useState(() => itemSheetModule !== null);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const mutationBusy = useRef(false);
   const addressBusy = useRef(false);
@@ -241,6 +288,32 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const clearConfirmButton = useRef<HTMLButtonElement | null>(null);
   const clearReturnFocus = useRef<HTMLButtonElement | null>(null);
   const railHeading = useRef<HTMLHeadingElement | null>(null);
+  const orderPanel = useRef<HTMLElement | null>(null);
+  const page = useRef<HTMLDivElement | null>(null);
+  const orderDock = useRef<HTMLAnchorElement | null>(null);
+  // Keep the dock out of the way until the browser confirms the panel is off screen.
+  const [checkoutVisible, setCheckoutVisible] = useState(true);
+
+  useEffect(() => {
+    if (!orderPanel.current || typeof IntersectionObserver === 'undefined') return;
+    // One callback can carry several crossings, oldest first; only the newest says where the panel is now.
+    const observer = new IntersectionObserver((entries) => {
+      const latest = entries[entries.length - 1];
+      if (latest) setCheckoutVisible(latest.isIntersecting);
+    }, { threshold: 0 });
+    observer.observe(orderPanel.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const showOrder = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    orderPanel.current?.scrollIntoView({
+      // 'auto' follows the page's reduced-motion scroll rule and, unlike 'instant', no engine rejects it.
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'start',
+    });
+    railHeading.current?.focus({ preventScroll: true });
+  };
 
   const closeOptions = useCallback(() => {
     clearStorefrontContinuation();
@@ -359,6 +432,21 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const cartItems = cart?.items ?? [];
   const cartHydrationPending = signedIn && !cartHydrated;
   const itemCount = cartItems.reduce((sum, line) => sum + line.quantity, 0);
+  useEffect(() => {
+    const dock = orderDock.current;
+    if (!dock) return;
+    const measure = () => {
+      const height = dock.getBoundingClientRect().height;
+      // Retain the last visible height when hidden, including wrapped/zoomed text.
+      if (height > 0) page.current?.style.setProperty('--swift-order-dock-height', `${height}px`);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(dock);
+    return () => observer.disconnect();
+    // The dock also hides while an item's sheet is open: measure it again when it comes back.
+  }, [itemCount, checkoutVisible, modalItem]);
   const fallbackSubtotal = cartItems.reduce(
     (sum, line) => sum + Number(line.customerPrice ?? 0) * line.quantity,
     0,
@@ -587,6 +675,32 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     setModalError(null);
     setModalItem(item);
   }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
+
+  // [W6] A sheet asked for before its code has arrived opens when it does. If
+  // the code cannot be fetched, the customer is told instead of a tap doing
+  // nothing (and the next tap fetches it again).
+  useEffect(() => {
+    if (!modalItem) return;
+    // The code can land after the render that opened the sheet (a link or the
+    // return from sign-in open it from an effect) but before this effect:
+    // render again so the sheet shows now, not at the next unrelated update.
+    if (itemSheetModule) { setItemSheetLoaded(true); return; }
+    let alive = true;
+    loadItemSheet().then(() => {
+      if (!alive) return;
+      setItemSheetLoaded(true);
+      // An earlier failed fetch is no longer news once the sheet opens.
+      setError((current) => (current === ITEM_SHEET_UNAVAILABLE ? null : current));
+      setFloatingError((current) => (current === ITEM_SHEET_UNAVAILABLE ? null : current));
+    }, () => {
+      if (!alive) return;
+      setModalItem(null);
+      setError(ITEM_SHEET_UNAVAILABLE);
+      setFloatingError(ITEM_SHEET_UNAVAILABLE);
+      window.setTimeout(() => setFloatingError(null), 4200);
+    });
+    return () => { alive = false; };
+  }, [modalItem]);
 
   const subtractItem = async (item: DisplayItem) => {
     // [W6] The row's "−" takes one from the item's plain line only (what "+"
@@ -825,7 +939,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const modalUnitPrice = modalItem ? optionPrice(modalItem, selectedOptions) : null;
 
   return (
-    <div className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
+    <div ref={page} className={styles.page} style={verticalStyle}>
       <div className={styles.content}>
         <section className={styles.storeHead} aria-labelledby="store-name">
           {!fromQr ? (
@@ -1037,15 +1151,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                             ) : null}
                           </div>
                         </div>
-                        <Photo
-                          src={item.imageUrl}
-                          alt={item.name}
-                          vendorType={catalog.vendorType}
-                          sizes="96px"
-                          iconSize={26}
-                          className={styles.itemImage}
-                          dim={!item.isAvailable}
-                        />
+                        <ItemPhoto key={item.imageUrl ?? ''} item={item} vendorType={catalog.vendorType} />
                       </article>
                     );
                   })}
@@ -1054,12 +1160,12 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             ))}
           </div>
 
-          <aside id="checkout" className={styles.rail} aria-label="Your order and checkout">
+          <aside ref={orderPanel} id="checkout" className={styles.rail} aria-label="Your order and checkout">
             <div className={styles.railHeader}>
               <p className={styles.railEyebrow}>
                 Your order{selectedAddress ? ` · delivery to ${selectedAddress.label}` : ''}
               </p>
-              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
+              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}><span className="sr-only">Your order, </span>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
             </div>
 
             <div className={styles.railBody}>
@@ -1277,21 +1383,34 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
         </div>
       </div>
 
-      {itemCount > 0 && !modalItem ? (
-        <a href="#checkout" className={styles.mobileDock}>
+      {itemCount > 0 && !modalItem && !checkoutVisible ? (
+        <a ref={orderDock} href="#checkout" onClick={showOrder} className={styles.mobileDock}>
           <span>View your order · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
           <span className={styles.mobileTotal}>{directCheckoutBlocked ? 'Review' : orderAmountLabel}</span>
         </a>
       ) : null}
 
-      {modalItem ? (
-        <Suspense fallback={<p role="status">Loading item options…</p>}><ItemOptionsPanel modalItem={modalItem} vendorType={catalog.vendorType} selectedOptions={selectedOptions} chooseOption={chooseOption} itemQuantity={itemQuantity} setItemQuantity={setItemQuantity} busyItem={busyItem} modalError={modalError} modalUnitPrice={modalUnitPrice} cartHydrationPending={cartHydrationPending} closeOptions={closeOptions} confirmOptions={confirmOptions} /></Suspense>
+      {modalItem && itemSheetModule ? (
+        <itemSheetModule.ItemSheet
+          item={modalItem}
+          vendorType={catalog.vendorType}
+          selectedOptions={selectedOptions}
+          onChoose={chooseOption}
+          quantity={itemQuantity}
+          onQuantity={setItemQuantity}
+          error={modalError}
+          busy={busyItem !== null}
+          cartLoading={cartHydrationPending}
+          unitPrice={modalUnitPrice}
+          onConfirm={confirmOptions}
+          onClose={closeOptions}
+        />
       ) : null}
 
       {notice ? (
         <div className={styles.notice} role="status">
           <span>{notice.message}</span>
-          {notice.added ? <a href="#checkout" className={styles.noticeLink}>View order</a> : null}
+          {notice.added ? <a href="#checkout" onClick={showOrder} className={styles.noticeLink}>View order</a> : null}
         </div>
       ) : null}
       {floatingError ? <p className={styles.errorNotice} role="alert">{floatingError}</p> : null}

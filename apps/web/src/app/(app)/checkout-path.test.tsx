@@ -1,14 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mockApi, stubIntersectionObserver, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
 import { StorefrontPage } from '@/components/storefront/storefront-page';
+import { loadItemSheet } from '@/components/storefront/storefront-experience';
 import { storefrontFixture } from '@/test/storefront-fixture';
 import CartPage from './cart/page';
 import OrderDetailPage from './orders/[id]/page';
-// The item sheet's code is split from the page; load it up front so a busy
-// test run waits on the sheet's behaviour, not on fetching its code.
-import '@/components/storefront/item-options-panel';
 
 const state = vi.hoisted(() => ({ pathname: '/', params: {} as Record<string, string>, push: vi.fn(), back: vi.fn(), replace: vi.fn() }));
 vi.mock('next/navigation', () => ({
@@ -68,6 +66,11 @@ let fetchMock: ReturnType<typeof mockApi>;
 const ok = (data: unknown) => ({ body: { success: true, data } });
 const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(([url, init]) =>
   new URL(String(url)).pathname === pathname && (init?.method ?? 'GET').toUpperCase() === method);
+
+// [W6] As in a browser shortly after the store page is up: the item sheet's
+// code has arrived, so a tap opens the sheet at once (item-sheet-loading.test.tsx
+// covers a tap that comes before it).
+beforeAll(() => loadItemSheet());
 
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
@@ -135,6 +138,7 @@ describe('[Q7b] store → cart', () => {
   });
 
   it('a signed-in customer back on the item adds it, options and all, to the server cart', async () => {
+    const report = stubIntersectionObserver();
     window.history.replaceState({}, '', '/store/shanta-kitchen?item=i1');
     at('/store/shanta-kitchen', {}, await storePage({ item: 'i1' }));
     // The link's ?item= reopens the item it named.
@@ -144,7 +148,9 @@ describe('[Q7b] store → cart', () => {
     await screen.findByText('Pepperpot bowl added to your order.');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
-    // The order is on this page: its panel, reached from the floating button.
+    // The order is on this page: its panel, reached from the floating button
+    // (#1590: shown once the panel has scrolled off a phone's screen).
+    report(screen.getByRole('complementary', { name: 'Your order and checkout' }), false);
     expect(screen.getByRole('link', { name: /View your order/ }).getAttribute('href')).toBe('#checkout');
   });
 });

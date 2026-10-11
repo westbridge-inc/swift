@@ -451,7 +451,7 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
  * [WEB-REDESIGN] Customer prices read the way the phone app writes them
  * (apps/mobile/src/lib/money.ts): `$2,500`. Every price on Swift is in Guyana
  * dollars, which the footer states on every page ("Prices in GYD"); the
- * partner consoles keep their `GY$` (lib/money.ts formatMoney). Unparseable
+ * partner consoles print the same `$` (lib/money.ts formatMoney). Unparseable
  * money is still the em-dash, never a zero.
  */
 export const money = (n: unknown) => formatAmount(n, '$');

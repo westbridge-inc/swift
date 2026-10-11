@@ -13,9 +13,7 @@ import type { StorefrontDetail } from '@/lib/api';
 import * as api from '@/lib/api';
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
-// The item sheet's code is split from the page; load it up front so a busy
-// test run waits on the sheet's behaviour, not on fetching its code.
-import './item-options-panel';
+import { stubIntersectionObserver } from '@/test/test-utils';
 
 const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), query: '' }));
 vi.mock('next/navigation', () => ({ useRouter: () => nav, useSearchParams: () => new URLSearchParams(nav.query), notFound: () => { throw new Error('not found'); } }));
@@ -98,7 +96,11 @@ describe('the actual /store/[slug] QR arrival', () => {
       vendor: { id: store.id, name: store.name, isCurrentlyOpen: true, acceptingOrders: true }, subtotalCustomer: 800,
     });
     vi.spyOn(customer, 'getAddresses').mockResolvedValue([]);
+    const report = stubIntersectionObserver();
     render(await page({ src: 'qr' }));
+    await screen.findByText('1× Pumpkin roti');
+    // #1590: the floating link shows once the order panel has scrolled off a phone's screen.
+    report(screen.getByRole('complementary', { name: 'Your order and checkout' }), false);
     await screen.findByRole('link', { name: /View your order/ });
     const dismiss = screen.getByRole('button', { name: 'Dismiss dining-in message' });
     const slot = dismiss.parentElement!;
