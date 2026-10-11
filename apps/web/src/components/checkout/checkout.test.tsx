@@ -1,16 +1,15 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mockApi, type ApiRequest, type ApiReply, stubIntersectionObserver } from '@/test/test-utils';
 import AppLayout from '@/app/(app)/layout';
 import CartPage from '@/app/(app)/cart/page';
 import CheckoutPage from '@/app/(app)/checkout/page';
 import { StorefrontPage } from '@/components/storefront/storefront-page';
 import { storefrontFixture } from '@/test/storefront-fixture';
 import { customerRoute } from '@/lib/customer-routes';
-// The item sheet's code is split from the page; load it up front.
-import '@/components/storefront/item-options-panel';
+import { loadItemSheet } from '@/components/storefront/storefront-experience';
 
 // ---------------------------------------------------------------------------
 // [W4] ONE checkout. Every web order is placed on one page (/checkout, which
@@ -47,6 +46,9 @@ let fetchMock: ReturnType<typeof mockApi>;
 const ok = (data: unknown) => ({ body: { success: true, data } });
 const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(([url, init]) =>
   new URL(String(url)).pathname === pathname && (init?.method ?? 'GET').toUpperCase() === method);
+
+// As in a browser shortly after the store page is up: the item sheet's code has arrived.
+beforeAll(() => loadItemSheet());
 
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
@@ -143,7 +145,12 @@ describe('[W4] the store page sends the customer to the one checkout', () => {
   });
 
   it('the floating basket button on a phone is one tap to the checkout, never a jump to a panel behind the bars', async () => {
+    const report = stubIntersectionObserver();
     at('/store/fixture-bakery', await storePage());
+    // [#1590] The button shows once the order panel has scrolled off the phone's screen.
+    const orderPanel = await screen.findByRole('complementary', { name: 'Your order and checkout' });
+    await waitFor(() => expect(orderPanel.textContent).toMatch(/2×|×\s?2|2 items/));
+    report(orderPanel, false);
     const dock = await screen.findByRole('link', { name: /^Checkout · 2 items/ });
     expect(dock.getAttribute('href')).toBe('/checkout');
   });

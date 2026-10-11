@@ -37,6 +37,7 @@ import {
   type Place,
 } from '@/lib/customer';
 import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
+import { photo } from '@/lib/media';
 import { ApiRequestError } from '@/lib/auth';
 import {
   cartPaymentOptions,
@@ -507,7 +508,7 @@ export function CheckoutPanel() {
           {cart.items.map((l) => (
             <article key={l.id} className={styles.itemCard}>
               <span className={styles.thumb}>
-                {l.imageUrl ? <Image src={l.imageUrl} alt="" fill unoptimized sizes="64px" loading="lazy" className="object-cover" /> : <Pictogram name="food" size={26} />}
+                {photo(l.imageUrl) ? <Image {...photo(l.imageUrl)!} alt="" fill sizes="64px" loading="lazy" className="object-cover" /> : <Pictogram name="food" size={26} />}
               </span>
               <div className={styles.itemCopy}>
                 <div className={styles.itemTop}>
