@@ -186,6 +186,27 @@ function useActiveSection(ids: string[]): [string | null, (_id: string) => void]
   return [active, setActive];
 }
 
+/**
+ * [#1590] A menu photo that fails to load falls back to the same pictogram
+ * tile as an item without one; keyed by its address, it tries again when the
+ * live menu sends a new one.
+ */
+function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string | null | undefined }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <Photo
+      src={failed ? null : item.imageUrl}
+      alt={item.name}
+      vendorType={vendorType}
+      sizes="96px"
+      iconSize={26}
+      className={styles.itemImage}
+      dim={!item.isAvailable}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string }) {
   const router = useRouter();
   // [W6] The store page lives inside the customer app's frame (rail, dock,
@@ -239,6 +260,32 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const clearConfirmButton = useRef<HTMLButtonElement | null>(null);
   const clearReturnFocus = useRef<HTMLButtonElement | null>(null);
   const railHeading = useRef<HTMLHeadingElement | null>(null);
+  const orderPanel = useRef<HTMLElement | null>(null);
+  const page = useRef<HTMLDivElement | null>(null);
+  const orderDock = useRef<HTMLAnchorElement | null>(null);
+  // Keep the dock out of the way until the browser confirms the panel is off screen.
+  const [checkoutVisible, setCheckoutVisible] = useState(true);
+
+  useEffect(() => {
+    if (!orderPanel.current || typeof IntersectionObserver === 'undefined') return;
+    // One callback can carry several crossings, oldest first; only the newest says where the panel is now.
+    const observer = new IntersectionObserver((entries) => {
+      const latest = entries[entries.length - 1];
+      if (latest) setCheckoutVisible(latest.isIntersecting);
+    }, { threshold: 0 });
+    observer.observe(orderPanel.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const showOrder = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    orderPanel.current?.scrollIntoView({
+      // 'auto' follows the page's reduced-motion scroll rule and, unlike 'instant', no engine rejects it.
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'start',
+    });
+    railHeading.current?.focus({ preventScroll: true });
+  };
 
   const closeOptions = useCallback(() => {
     clearStorefrontContinuation();
@@ -357,6 +404,21 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const cartItems = cart?.items ?? [];
   const cartHydrationPending = signedIn && !cartHydrated;
   const itemCount = cartItems.reduce((sum, line) => sum + line.quantity, 0);
+  useEffect(() => {
+    const dock = orderDock.current;
+    if (!dock) return;
+    const measure = () => {
+      const height = dock.getBoundingClientRect().height;
+      // Retain the last visible height when hidden, including wrapped/zoomed text.
+      if (height > 0) page.current?.style.setProperty('--swift-order-dock-height', `${height}px`);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(dock);
+    return () => observer.disconnect();
+    // The dock also hides while an item's sheet is open: measure it again when it comes back.
+  }, [itemCount, checkoutVisible, modalItem]);
   const fallbackSubtotal = cartItems.reduce(
     (sum, line) => sum + Number(line.customerPrice ?? 0) * line.quantity,
     0,
@@ -805,7 +867,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const modalUnitPrice = modalItem ? optionPrice(modalItem, selectedOptions) : null;
 
   return (
-    <div className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
+    <div ref={page} className={styles.page} style={storefrontVerticalVariables(catalog.vendorType)}>
       <div className={styles.content}>
         <section className={styles.storeHead} aria-labelledby="store-name">
           {!fromQr ? (
@@ -1017,15 +1079,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                             ) : null}
                           </div>
                         </div>
-                        <Photo
-                          src={item.imageUrl}
-                          alt={item.name}
-                          vendorType={catalog.vendorType}
-                          sizes="96px"
-                          iconSize={26}
-                          className={styles.itemImage}
-                          dim={!item.isAvailable}
-                        />
+                        <ItemPhoto key={item.imageUrl ?? ''} item={item} vendorType={catalog.vendorType} />
                       </article>
                     );
                   })}
@@ -1034,12 +1088,12 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             ))}
           </div>
 
-          <aside id="checkout" className={styles.rail} aria-label="Your order and checkout">
+          <aside ref={orderPanel} id="checkout" className={styles.rail} aria-label="Your order and checkout">
             <div className={styles.railHeader}>
               <p className={styles.railEyebrow}>
                 Your order{selectedAddress ? ` · delivery to ${selectedAddress.label}` : ''}
               </p>
-              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
+              <h2 ref={railHeading} tabIndex={-1} className={styles.railTitle}><span className="sr-only">Your order, </span>{itemCount > 0 && directCheckoutBlocked ? 'Review saved cart' : catalog.name}</h2>
             </div>
 
             <div className={styles.railBody}>
@@ -1259,8 +1313,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
         </div>
       </div>
 
-      {itemCount > 0 && !modalItem ? (
-        <a href="#checkout" className={styles.mobileDock}>
+      {itemCount > 0 && !modalItem && !checkoutVisible ? (
+        <a ref={orderDock} href="#checkout" onClick={showOrder} className={styles.mobileDock}>
           <span>View your order · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
           <span className={styles.mobileTotal}>{directCheckoutBlocked ? 'Review' : orderAmountLabel}</span>
         </a>
@@ -1352,7 +1406,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       {notice ? (
         <div className={styles.notice} role="status">
           <span>{notice.message}</span>
-          {notice.added ? <a href="#checkout" className={styles.noticeLink}>View order</a> : null}
+          {notice.added ? <a href="#checkout" onClick={showOrder} className={styles.noticeLink}>View order</a> : null}
         </div>
       ) : null}
       {floatingError ? <p className={styles.errorNotice} role="alert">{floatingError}</p> : null}

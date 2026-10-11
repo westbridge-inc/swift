@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
+import { mockApi, stubIntersectionObserver, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
 import { StorefrontPage } from '@/components/storefront/storefront-page';
 import { storefrontFixture } from '@/test/storefront-fixture';
@@ -131,6 +131,7 @@ describe('[Q7b] store → cart', () => {
   });
 
   it('a signed-in customer back on the item adds it, options and all, to the server cart', async () => {
+    const report = stubIntersectionObserver();
     window.history.replaceState({}, '', '/store/shanta-kitchen?item=i1');
     at('/store/shanta-kitchen', {}, await storePage({ item: 'i1' }));
     // The link's ?item= reopens the item it named.
@@ -140,7 +141,9 @@ describe('[Q7b] store → cart', () => {
     await screen.findByText('Pepperpot bowl added to your order.');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
-    // The order is on this page: its panel, reached from the floating button.
+    // The order is on this page: its panel, reached from the floating button
+    // (#1590: shown once the panel has scrolled off a phone's screen).
+    report(screen.getByRole('complementary', { name: 'Your order and checkout' }), false);
     expect(screen.getByRole('link', { name: /View your order/ }).getAttribute('href')).toBe('#checkout');
   });
 });
