@@ -122,7 +122,7 @@ describe('[Q7b] store → cart', () => {
     signedIn = false;
     at('/store/shanta-kitchen', {}, await storePage());
     await choose('Pepperpot bowl');
-    // The item sheet's code loads on first open, so the sheet arrives a moment later.
+    // The item sheet opens once its code is in (loaded up front here: beforeAll).
     const sheet = await screen.findByRole('dialog', { name: 'Pepperpot bowl' });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $1,800' }));
     expect(state.push).not.toHaveBeenCalled();
