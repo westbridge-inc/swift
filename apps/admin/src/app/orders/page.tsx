@@ -1,145 +1,145 @@
 'use client';
 
+import { useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchOrders, cancelOrder } from '@/lib/api';
-import { statusClass } from '@/lib/status';
-import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { ENUM_LABELS, label } from '@/lib/labels';
+import { EMPTY_LIST_STATE, listQueryString, type ListState } from '@/lib/list-query';
+import type { Outcome } from '@/lib/outcome';
+import { ActionResult } from '@/components/mc/ActionResult';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { StatusBadge } from '@/components/mc/StatusBadge';
+import { Truncate } from '@/components/mc/Truncate';
+import { DataTable } from '@/components/mc/DataTable';
+import { ListToolbar, Pager } from '@/components/mc/ListControls';
+
+// ---------------------------------------------------------------------------
+// [MISSION CONTROL · PR-3] Orders.
+//
+// Server paging, search (order number or address), status and type filters,
+// test data hidden by default, plain words. Cancelling goes through the reason
+// panel, which names the order and the store and states what happens to the
+// money — and the server's answer is shown.
+// ---------------------------------------------------------------------------
 
 // Orders past these states can't be cancelled/refunded by an operator.
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
 
+interface OrderRow {
+  id: string;
+  orderNumber: string;
+  orderType: string;
+  fulfillment?: string | null;
+  status: string;
+  paymentMethod?: string | null;
+  paymentStatus?: string | null;
+  totalAmount: number;
+  placedAt?: string | null;
+  customer?: { firstName?: string | null; lastName?: string | null } | null;
+  vendor?: { id: string; name: string } | null;
+}
+
+const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
+const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
+
+function payment(o: OrderRow): string {
+  const method = label('PaymentMethod', o.paymentMethod);
+  if (o.paymentMethod === 'MOBILE_MONEY') return `${method} · ${o.paymentStatus === 'CAPTURED' ? 'paid' : 'not paid yet'}`;
+  return method;
+}
+
 export default function OrdersPage() {
-  const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['orders'], queryFn: () => fetchOrders() });
-  const cancelMutation = useMutation({
-    // [ADM-006] The reason was the constant 'Cancelled by admin'. A customer
-    // asking why their order was cancelled deserves the actual answer.
-    mutationFn: ({ id, refund, reason }: { id: string; refund: boolean; reason: string }) =>
-      cancelOrder(id, { refund }, reason),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['orders'] }),
-  });
+  const qc = useQueryClient();
+  const dialog = useActionDialog();
+  const [state, setState] = useState<ListState>(EMPTY_LIST_STATE);
+  const [result, setResult] = useState<Outcome | null>(null);
+  const list = useQuery({ queryKey: ['orders', state], queryFn: () => fetchOrders(listQueryString(state)), placeholderData: keepPreviousData });
+  const rows: OrderRow[] = list.data?.data ?? [];
+
+  const cancel = async (o: OrderRow, refund: boolean) => {
+    const store = o.vendor?.name ?? 'the store';
+    const outcome = await dialog.run({
+      title: refund ? `Cancel order ${o.orderNumber} and record a refund owed?` : `Cancel order ${o.orderNumber}?`,
+      body: refund ? (
+        <p>
+          This records that {store} OWES the customer a refund. It does not mark anything refunded — settle it on the
+          order page once the reference and the amount handed back are known.
+        </p>
+      ) : o.paymentMethod === 'MOBILE_MONEY' ? (
+        <p>MMG payment stays between customer and store. If paid, it is refunded by {store}; Swift cannot refund it.</p>
+      ) : (
+        <p>The customer and {store} are told the order is cancelled.</p>
+      ),
+      confirmLabel: refund ? 'Cancel and record refund owed' : 'Cancel order',
+      reason: { hint: 'The customer is owed the real reason; it is kept on the permanent record.' },
+      submit: ({ reason }) => cancelOrder(o.id, { refund }, reason),
+      success: () => (refund ? `Order ${o.orderNumber} is cancelled; ${store} owes the customer a refund.` : `Order ${o.orderNumber} is cancelled.`),
+    });
+    if (!outcome) return;
+    setResult(outcome);
+    void qc.invalidateQueries({ queryKey: ['orders'] });
+  };
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">Orders</h1>
-      {cancelMutation.error && (
-        <div className="mb-4">
-          <MutationError error={cancelMutation.error} label="Order action did not record" />
-        </div>
+    <div className="mc-page">
+      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>Orders</h1>
+      <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-4" />
+      <ListToolbar
+        state={state}
+        onChange={setState}
+        searchLabel="Search by order number or address"
+        filters={[
+          { key: 'status', label: 'Status', options: [['', 'Any status'], ...Object.entries(ENUM_LABELS.OrderStatus)] },
+          { key: 'type', label: 'Type', options: [['', 'All types'], ...Object.entries(ENUM_LABELS.OrderType)] },
+        ]}
+      />
+      {list.isLoading ? (
+        <div className="mc-card" aria-busy="true">Loading orders…</div>
+      ) : list.isError ? (
+        <QueryFailed error={list.error} what="the order list" onRetry={() => void list.refetch()} retrying={list.isFetching} />
+      ) : (
+        <>
+          <DataTable<OrderRow>
+            label="Orders"
+            rows={rows}
+            rowKey={(o) => o.id}
+            empty={state.search || Object.values(state.filters).some(Boolean) ? 'No order matches this search.' : 'No orders yet.'}
+            columns={[
+              {
+                key: 'order', header: 'Order', width: '18%', primary: true,
+                cell: (o) => (
+                  <Link href={`/orders/${o.id}`} className="block min-w-0">
+                    <Truncate text={o.orderNumber} />
+                    <span className="mc-cell-sub">
+                      {label('OrderType', o.orderType)}{o.fulfillment === 'PICKUP' ? ' · customer pickup' : o.fulfillment === 'APPOINTMENT' ? ' · appointment' : ''}
+                    </span>
+                  </Link>
+                ),
+              },
+              { key: 'store', header: 'Store', width: '17%', cell: (o) => <Truncate text={o.vendor?.name ?? '—'} /> },
+              { key: 'customer', header: 'Customer', width: '15%', cell: (o) => <Truncate text={[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || '—'} /> },
+              { key: 'status', header: 'Status', width: '18%', cell: (o) => <StatusBadge group="OrderStatus" value={o.status} /> },
+              { key: 'payment', header: 'Payment', width: '13%', cell: (o) => payment(o) },
+              { key: 'total', header: 'Total', width: '10%', align: 'right', cell: (o) => <span className="mc-numbers">{gyd(o.totalAmount)}</span> },
+              { key: 'placed', header: 'Placed', width: '12%', cell: (o) => when(o.placedAt) },
+              {
+                key: 'actions', header: 'Actions', width: '13rem', align: 'right',
+                cell: (o) => (TERMINAL.includes(o.status) ? null : (
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <button type="button" className="mc-btn" aria-label={`Cancel order ${o.orderNumber}…`} onClick={() => void cancel(o, false)}>Cancel…</button>
+                    {o.paymentMethod === 'CASH' ? (
+                      <button type="button" className="mc-btn mc-btn-danger" aria-label={`Record refund owed for ${o.orderNumber}…`} onClick={() => void cancel(o, true)}>Refund owed…</button>
+                    ) : null}
+                  </div>
+                )),
+              },
+            ]}
+          />
+          <Pager meta={list.data?.meta} shown={rows.length} onPage={(page) => setState({ ...state, page })} onShowTestData={() => setState({ ...state, showTestData: true, page: 1 })} />
+        </>
       )}
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Order #</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Type</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Fulfillment</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Payment</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Vendor</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Total</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading ? (
-              [0, 1, 2, 3, 4].map((i) => (
-                <tr key={i} className="border-b border-[var(--border)]">
-                  <td colSpan={8} className="p-4">
-                    <div className="h-5 w-full rounded bg-[var(--panel-2)] animate-pulse" />
-                  </td>
-                </tr>
-              ))
-            ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={8} className="p-8 text-center text-[var(--muted)]">No orders yet</td></tr>
-            ) : (
-              data?.data?.map((order: any) => (
-                <tr key={order.id} className="border-b border-[var(--border)] hover:bg-white/5">
-                  <td className="p-4 font-mono">
-                    <Link href={`/orders/${order.id}`} className="hover:text-[var(--accent)] transition-colors">
-                      {order.orderNumber}
-                    </Link>
-                  </td>
-                  <td className="p-4">{order.orderType}</td>
-                  <td className="p-4">
-                    {order.fulfillment === 'PICKUP' ? (
-                      <span className="text-[var(--accent)] font-medium">
-                        {/* [A-15] the pickup code is the customer's credential and the
-                            vendor verifies it — the board says a collection is due, never the value */}
-                        Takeaway
-                      </span>
-                    ) : (
-                      <span className="text-[var(--muted)]">
-                        {order.fulfillment === 'APPOINTMENT' ? 'Appointment' : 'Delivery'}
-                      </span>
-                    )}
-                  </td>
-                  <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs ${statusClass(order.status)}`}>{order.status}</span>
-                  </td>
-                  <td className="p-4">
-                    {order.paymentMethod === 'MOBILE_MONEY' ? (
-                      order.paymentStatus === 'CAPTURED' ? (
-                        <span className="px-2 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">MMG {'\u00b7'} paid</span>
-                      ) : (
-                        <span className="px-2 py-1 rounded-full text-xs bg-amber-500/15 text-amber-400">MMG {'\u00b7'} awaiting</span>
-                      )
-                    ) : (
-                      <span className="text-[var(--muted)] text-xs">{order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod || '\u2014'}</span>
-                    )}
-                  </td>
-                  <td className="p-4">{order.vendor?.name || '\u2014'}</td>
-                  <td className="p-4 text-right">${Number(order.totalAmount).toLocaleString()}</td>
-                  <td className="p-4 text-right">
-                    {TERMINAL.includes(order.status) ? (
-                      <span className="text-[var(--muted)]">—</span>
-                    ) : (
-                      <div className="flex gap-2 justify-end">
-                        <button
-                          onClick={() => {
-                            const storeName = order.vendor?.name ?? 'the store';
-                            const mmgNote = order.paymentMethod === 'MOBILE_MONEY'
-                              ? `\n\nMMG payment stays between customer and store. If paid, it is refunded by ${storeName}; Swift cannot refund it.`
-                              : '';
-                            if (!window.confirm(`Cancel order ${order.orderNumber}?${mmgNote}`)) return;
-                            const reason = askReason({ action: 'cancel this order', subject: order.orderNumber });
-                            if (reason) cancelMutation.mutate({ id: order.id, refund: false, reason });
-                          }}
-                          disabled={cancelMutation.isPending}
-                          className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] text-white hover:bg-white/10 disabled:opacity-50"
-                        >
-                          Cancel
-                        </button>
-                        {order.paymentMethod === 'CASH' && (
-                          <button
-                            onClick={() => {
-                              const storeName = order.vendor?.name ?? 'the store';
-                              if (window.confirm(
-                                `Cancel order ${order.orderNumber} and record that ${storeName} OWES the customer a refund?`
-                                + '\n\nThis does not mark anything refunded — settle it on the order page'
-                                + ' once the reference and the amount handed back are known.',
-                              )) {
-                                const reason = askReason({ action: 'cancel this order and record a refund owed', subject: order.orderNumber });
-                                if (reason) cancelMutation.mutate({ id: order.id, refund: true, reason });
-                              }
-                            }}
-                            disabled={cancelMutation.isPending}
-                            className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent)]/80 disabled:opacity-50"
-                          >
-                            Record refund owed
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }

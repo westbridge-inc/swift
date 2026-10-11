@@ -37,25 +37,8 @@ export interface ReasonPrompt {
   subject?: string;
 }
 
-/**
- * Ask for a reason. Returns the trimmed reason, or null if the operator
- * cancelled — in which case the caller must do NOTHING.
- *
- * @deprecated [MISSION CONTROL · PR-1] A browser prompt. Pages move to the
- * in-page panel (components/mc/ReasonDialog): `useAskReason()` takes this same
- * argument and returns a Promise of this same `string | null`, and
- * `useActionDialog().run` also keeps the server's refusal in the panel.
- */
-export function askReason({ action, subject }: ReasonPrompt): string | null {
-  const target = subject ? ` for ${subject}` : '';
-  const answer = window.prompt(
-    `Why are you about to ${action}${target}?\n\nThis goes on the permanent record and is what an appeal or an audit will be answered with. At least ${REASON_MIN} characters.`,
-  );
-  if (answer === null) return null; // cancelled: nothing happens
-  const reason = answer.trim();
-  if (reason.length < REASON_MIN) {
-    window.alert(`Say why in at least ${REASON_MIN} characters — a word is not a reason anyone can review. Nothing was changed.`);
-    return null;
-  }
-  return reason;
-}
+// [MISSION CONTROL · MONEY] `askReason` — a browser prompt — is retired. Every
+// page asks in the in-page panel (components/mc/ReasonDialog): `useActionDialog
+// ().run` asks, runs the action and keeps the server's refusal in the panel;
+// `useAskReason()` takes this file's `ReasonPrompt` and resolves the reason, or
+// null when the operator cancels — never a default.

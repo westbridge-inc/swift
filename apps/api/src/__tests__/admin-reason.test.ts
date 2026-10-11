@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -214,20 +214,37 @@ describe('[ADM-006] the law itself', () => {
   it('the console asks; it does not answer for the operator', () => {
     const consoleSrc = join(process.cwd(), '..', 'admin', 'src');
     const code = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-    const pages = ['app/users/[id]/page.tsx', 'app/users/page.tsx', 'app/orders/page.tsx', 'app/orders/[id]/page.tsx', 'app/vendors/[id]/page.tsx', 'app/moderation/page.tsx']
-      .map((f) => readFileSync(join(consoleSrc, f), 'utf8')).join('\n');
+    const read = (f: string) => readFileSync(join(consoleSrc, f), 'utf8');
+    const pages = ['app/users/[id]/page.tsx', 'app/users/page.tsx', 'app/orders/page.tsx', 'app/vendors/[id]/page.tsx', 'app/moderation/page.tsx',
+      'app/config/page.tsx', 'app/zones/page.tsx', 'app/compliance/page.tsx', 'app/discovery/page.tsx', 'app/promos/page.tsx', 'app/jobs/page.tsx',
+      'app/broadcast/page.tsx', 'app/custody/page.tsx', 'app/ads/page.tsx',
+      'app/orders/[id]/page.tsx', 'app/claims/page.tsx', 'app/finance/page.tsx', 'app/returns/page.tsx', 'app/subscriptions/page.tsx'];
     // the comments SAY the old constants, on purpose — they record what was
     // removed. Grade the code.
-    expect(code(pages)).not.toMatch(/'(Suspended|Banned|Cancelled|Waived) by admin'/);
-    expect(pages).toMatch(/askReason\(/);
-    // that a cancelled prompt cancels the ACTION — never falling back to a
+    expect(code(pages.map(read).join('\n'))).not.toMatch(/'(Suspended|Banned|Cancelled|Waived) by admin'/);
+    // [MISSION CONTROL · PR-3b] They ask in the page's own reason panel — never
+    // a browser prompt, whose answer and whose refusal both vanished with the
+    // box.
+    for (const page of pages) {
+      expect(code(read(page)), page).toMatch(/useActionDialog\(|useActionRunner\(|useAskReason\(/);
+      expect(code(read(page)), page).not.toMatch(/askReason\(|window\.prompt\(|window\.confirm\(/);
+    }
+    // [MISSION CONTROL · MONEY] And no page anywhere in the console prompts:
+    // the money screens were the last, and the helper itself is retired.
+    const stillPrompting = (readdirSync(join(consoleSrc, 'app'), { recursive: true }) as string[])
+      .filter((f) => f.endsWith('page.tsx'))
+      .filter((f) => /askReason\(|window\.prompt\(|window\.confirm\(/.test(code(read(join('app', f)))))
+      .map((f) => f.split('\\').join('/'))
+      .sort();
+    expect(stillPrompting).toEqual([]);
+    expect(code(read(join('lib', 'ask-reason.ts')))).not.toMatch(/function askReason/);
+    // that a cancelled panel cancels the ACTION — never falling back to a
     // default, which is the shape that produced the canned strings — is
-    // behaviour, and is graded as behaviour next to the helper itself
-    // (apps/admin/src/lib/ask-reason.test.ts). A source scan of it looked
-    // convincing and proved nothing: it survived the mutation that made a
-    // cancelled prompt return 'Suspended by admin'.
-    expect(readFileSync(join(consoleSrc, 'lib', 'ask-reason.test.ts'), 'utf8'))
-      .toMatch(/a CANCELLED prompt returns nothing/);
+    // behaviour, and is graded as behaviour next to the panel itself
+    // (apps/admin/src/components/mc/primitives.test.tsx). A source scan of it
+    // looked convincing and proved nothing: it survived the mutation that made
+    // a cancelled prompt return 'Suspended by admin'.
+    expect(read(join('components', 'mc', 'primitives.test.tsx'))).toMatch(/Esc cancels \(resolves null, nothing runs\)/);
   });
 
   it('the census: every C3-C5 route is covered by the law, and no C0-C2 route is', () => {

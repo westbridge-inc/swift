@@ -1,11 +1,12 @@
 'use client';
 
-import { Fragment, useState, useRef } from 'react';
+import { Fragment, useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, fetchBillingEvents } from '@/lib/api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { fetchSubscriptions, waiveSubscriptionFee, fetchBillingEvents } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
-import { askReason, reasonTooShort } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -20,9 +21,10 @@ function holder(s: any): { name: string; kind: string; href?: string } {
 }
 
 function BillingEvents({ id }: { id: string }) {
-  const { data, isLoading } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
   const events: any[] = data?.data ?? [];
   if (isLoading) return <p className="text-xs text-[var(--muted)] p-3">Loading billing trail…</p>;
+  if (isError) return <QueryFailed error={error} what="the billing trail" onRetry={() => void refetch()} retrying={isFetching} />;
   if (events.length === 0) return <p className="text-xs text-[var(--muted)] p-3">No billing events.</p>;
   return (
     <div className="p-3 space-y-1.5">
@@ -41,38 +43,28 @@ export default function SubscriptionsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('ALL');
   const [openTrail, setOpenTrail] = useState<string | null>(null);
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['subscriptions', filter],
     queryFn: () => fetchSubscriptions(filter === 'ALL' ? 'limit=50' : `limit=50&status=${filter}`),
   });
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['subscriptions'] });
+  const actions = useActionRunner(() => void qc.invalidateQueries({ queryKey: ['subscriptions'] }));
   // [A-12] The reason used to be the constant 'Waived by admin' — a field that
   // was always filled and never said anything. This is Swift's own revenue
   // being given away; the operator says why, in their own words, and that is
-  // what is stored.
-  const waive = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => waiveSubscriptionFee(id, reason),
-    onSuccess: invalidate,
+  // what is stored. [MC-MONEY] Asked in the page's panel; a waiver is money, so
+  // it goes to a second admin and the page says so instead of going quiet.
+  const waive = (s: any, name: string) => void actions.run({
+    title: `Waive this period's fee for ${name}?`,
+    body: <p>This is revenue Swift gives up. A second admin approves it before it applies; the reason is kept with it.</p>,
+    confirmLabel: 'Waive fee',
+    reason: { hint: 'Say why Swift is giving this up — the reason is kept.' },
+    submit: ({ reason }) => waiveSubscriptionFee(s.id, reason),
+    success: () => `${name}'s fee for this period is waived.`,
   });
-  // [M-08] The idempotency key belongs to the ATTEMPT: minted when the admin
-  // confirms an amount, reused if that same top-up is retried after an error
-  // or a lost response, and released only once the server has answered. A
-  // different amount for the same subscription is a new attempt.
-  const attempts = useRef(new Map<string, string>());
-  const topup = useMutation({
-    // [A-12] The transfer's reference is part of the attempt, not an optional
-    // note: a different transfer is a different top-up even for the same
-    // subscription and the same amount.
-    mutationFn: async ({ id, amount, reference, reason }: { id: string; amount: number; reference: string; reason: string }) => {
-      const attempt = `${id}:${amount}:${reference}`;
-      const key = attempts.current.get(attempt) ?? crypto.randomUUID();
-      attempts.current.set(attempt, key);
-      const res = await topUpSubscription(id, amount, reference, key, reason);
-      attempts.current.delete(attempt);
-      return res;
-    },
-    onSuccess: invalidate,
-  });
+  // [MC-MONEY · coordinator ruling under GUARDRAILS] There is no "Top up" here.
+  // A partner pays the weekly fee only through the MMG checkout page (card
+  // later), and a payment is credited only after the provider's own lookup
+  // confirms it — never from a reference an operator types.
 
   const rows: any[] = data?.data ?? [];
 
@@ -95,8 +87,10 @@ export default function SubscriptionsPage() {
         </div>
       </div>
       <p className="text-[var(--muted)] text-sm mb-6">
-        The weekly flat fee is Swift&apos;s only revenue — this queue is the business.
+        The weekly flat fee is Swift&apos;s only revenue — this queue is the business. Partners pay it through the
+        MMG checkout page; a payment counts once MMG confirms it, so there is no manual top-up here.
       </p>
+      {actions.banner}
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
@@ -112,6 +106,9 @@ export default function SubscriptionsPage() {
           <tbody>
             {isLoading ? (
               <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+            ) : isError ? (
+              // [DS768 E2] an outage is not "no subscriptions" — this queue is the revenue
+              <tr><td colSpan={5} className="p-4"><QueryFailed error={error} what="the subscriptions" onRetry={() => void refetch()} retrying={isFetching} /></td></tr>
             ) : rows.length === 0 ? (
               <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">No subscriptions match.</td></tr>
             ) : (
@@ -145,38 +142,13 @@ export default function SubscriptionsPage() {
                           >
                             {openTrail === s.id ? 'Hide trail' : 'Billing trail'}
                           </button>
-                          <button
-                            onClick={() => {
-                              const amt = window.prompt(`Record a cash/bank top-up for ${h.name} (whole GYD):`);
-                              const n = Number(amt);
-                              if (!amt || !Number.isInteger(n) || n <= 0) return;
-                              const reference = window.prompt(
-                                'Bank or MMG reference for the transfer that arrived (this is the proof, and one transfer credits one account):',
-                              );
-                              if (!reference) return;
-                              // The clause asks for a confirmation naming the TARGET and the DELTA.
-                              if (!window.confirm(`Credit ${h.name} with GY$${n.toLocaleString()} against transfer ${reference}?`)) return;
-                              const reason = askReason({ action: 'record this top-up', subject: `${h.name} (${reference})` });
-                              if (reason) topup.mutate({ id: s.id, amount: n, reference, reason });
-                            }}
-                            disabled={topup.isPending}
-                            className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
-                          >
-                            Top up
-                          </button>
                           {!s.feeWaived && (
                             <button
-                              onClick={() => {
-                                const reason = window.prompt(
-                                  `Waive this period's fee for ${h.name}? Say why — this is revenue Swift is giving up, and the reason is kept:`,
-                                );
-                                if (!reason || reasonTooShort(reason)) return;
-                                waive.mutate({ id: s.id, reason: reason.trim() });
-                              }}
-                              disabled={waive.isPending}
+                              onClick={() => waive(s, h.name)}
+                              aria-label={`Waive fee for ${h.name}…`}
                               className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                             >
-                              Waive fee
+                              Waive fee…
                             </button>
                           )}
                         </div>

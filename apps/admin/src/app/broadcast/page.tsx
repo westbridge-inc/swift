@@ -1,9 +1,8 @@
 'use client';
 
-import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useId, useState } from 'react';
 import { broadcastNotification } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 const AUDIENCES = [
   { value: '', label: 'Everyone (all active users)' },
@@ -17,19 +16,31 @@ export default function BroadcastPage() {
   const [body, setBody] = useState('');
   const [role, setRole] = useState('');
   const [category, setCategory] = useState<'service' | 'marketing'>('service');
-  const [lastSent, setLastSent] = useState<number | null>(null);
+  const ids = useId();
 
-  const send = useMutation({
-    mutationFn: (reason: string) => broadcastNotification({ title: title.trim(), body: body.trim(), category, ...(role ? { role } : {}) }, reason),
-    onSuccess: (res: any) => {
-      setLastSent(res?.data?.sent ?? 0);
-      setTitle('');
-      setBody('');
-    },
-  });
-
+  // [MC-PR3b] One panel replaces the browser confirm + prompt pair: it shows
+  // what will land on the phones, says it cannot be recalled, asks why, and
+  // keeps the answer — "sent for a second admin's approval" (a broadcast is a
+  // platform action) or the refusal — on screen. The draft is cleared once it
+  // has gone, so it is not sent twice.
+  const actions = useActionRunner(() => { setTitle(''); setBody(''); });
   const audience = AUDIENCES.find((a) => a.value === role)?.label ?? 'Everyone';
-  const canSend = title.trim().length > 0 && body.trim().length > 0 && !send.isPending;
+  const canSend = title.trim().length > 0 && body.trim().length > 0;
+  const send = () => {
+    const message = { title: title.trim(), body: body.trim(), category, ...(role ? { role } : {}) };
+    void actions.run({
+      title: `Send this to ${audience}?`,
+      body: (
+        <>
+          <p><b>{message.title}</b><br />{message.body}</p>
+          <p>{category === 'marketing' ? 'Marketing: only people who said yes receive it. ' : 'Service notice: everyone in the audience receives it. '}Once it is sent it cannot be recalled. A second admin approves it first.</p>
+        </>
+      ),
+      confirmLabel: 'Send broadcast',
+      submit: ({ reason }) => broadcastNotification(message, reason),
+      success: (res: any) => `Delivered to ${Number(res?.data?.sent ?? 0).toLocaleString()} users.`,
+    });
+  };
 
   return (
     <div className="max-w-2xl">
@@ -37,11 +48,13 @@ export default function BroadcastPage() {
       <p className="text-[var(--muted)] text-sm mb-6">
         Push + in-app announcement to a whole audience. It lands on real phones — read it twice.
       </p>
+      {actions.banner}
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 space-y-4">
         <div>
-          <label className="block text-xs text-[var(--muted)] mb-1.5">Audience</label>
+          <label htmlFor={`${ids}-aud`} className="block text-xs text-[var(--muted)] mb-1.5">Audience</label>
           <select
+            id={`${ids}-aud`}
             value={role}
             onChange={(e) => setRole(e.target.value)}
             className="w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
@@ -54,8 +67,9 @@ export default function BroadcastPage() {
           </select>
         </div>
         <div>
-          <label className="block text-xs text-[var(--muted)] mb-1.5">Purpose</label>
+          <label htmlFor={`${ids}-pur`} className="block text-xs text-[var(--muted)] mb-1.5">Purpose</label>
           <select
+            id={`${ids}-pur`}
             value={category}
             onChange={(e) => setCategory(e.target.value as 'service' | 'marketing')}
             className="w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
@@ -68,8 +82,9 @@ export default function BroadcastPage() {
           </p>
         </div>
         <div>
-          <label className="block text-xs text-[var(--muted)] mb-1.5">Title (max 150)</label>
+          <label htmlFor={`${ids}-tit`} className="block text-xs text-[var(--muted)] mb-1.5">Title (max 150)</label>
           <input
+            id={`${ids}-tit`}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             maxLength={150}
@@ -78,8 +93,9 @@ export default function BroadcastPage() {
           />
         </div>
         <div>
-          <label className="block text-xs text-[var(--muted)] mb-1.5">Message (max 1000)</label>
+          <label htmlFor={`${ids}-msg`} className="block text-xs text-[var(--muted)] mb-1.5">Message (max 1000)</label>
           <textarea
+            id={`${ids}-msg`}
             value={body}
             onChange={(e) => setBody(e.target.value)}
             maxLength={1000}
@@ -101,22 +117,12 @@ export default function BroadcastPage() {
         )}
 
         <button
-          onClick={() => {
-            if (window.confirm(`Send this to ${audience}? This cannot be recalled.`)) {
-              const reason = askReason({ action: `broadcast this notification to ${audience}` });
-              if (reason) send.mutate(reason);
-            }
-          }}
+          onClick={send}
           disabled={!canSend}
           className="w-full py-2.5 rounded-lg text-sm font-semibold bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50 transition-colors"
         >
-          {send.isPending ? 'Sending…' : `Send to ${audience}`}
+          {`Send to ${audience}…`}
         </button>
-
-        {lastSent != null && (
-          <p className="text-sm text-emerald-400 text-center">Delivered to {lastSent.toLocaleString()} users.</p>
-        )}
-        {send.isError && <p className="text-sm text-red-400 text-center">Send failed — try again.</p>}
       </div>
     </div>
   );

@@ -18,7 +18,7 @@ import { reasonTooShort } from '@/lib/ask-reason';
 /**
  * [SAN spec Part 4] The agent-cash rail.
  *
- * Partners pay their weekly fee IN CASH at an MMG agent, quoting their SAN.
+ * This screen resolves historical cash already received; it never offers agent payment intake.
  * Money that resolves to nobody is HELD as UNMATCHED — never rejected, because
  * rejecting it would mean a partner paid and Swift has no record of the money.
  *
@@ -54,7 +54,8 @@ export default function CashPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1">Cash rail</h1>
+      <h1 className="text-2xl font-bold mb-1">Agent cash already received</h1>
+      <p className="text-sm mb-3">Resolve money already received: attach it to the partner who paid or record its refund. This is not a way to collect new payments. Partners pay through MMG checkout.</p>
       <p className={`text-sm mb-6 ${TONE[health.state]}`}>{health.line}</p>
 
       {k && (
@@ -72,7 +73,7 @@ export default function CashPage() {
 
       <div className="flex flex-wrap gap-2 mb-6">
         {([
-          ['unmatched', `Unmatched${rows.length ? ` (${rows.length})` : ''}`],
+          ['unmatched', `Received cash${rows.length ? ` (${rows.length})` : ''}`],
           ['collections', 'Collections'],
           ['batches', 'Settlement batches'],
         ] as Array<[Tab, string]>).map(([key, label]) => (

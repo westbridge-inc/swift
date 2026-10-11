@@ -61,7 +61,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Approvals', href: '/approvals', icon: Stamp },
       { label: 'Finance', href: '/finance', icon: DollarSign },
       { label: 'Subscriptions', href: '/subscriptions', icon: RefreshCw },
-      { label: 'Cash rail', href: '/cash', icon: Banknote },
+      { label: 'Received agent cash', href: '/cash', icon: Banknote },
       // Support finds a partner's MMG weekly-fee payment by either id or their phone.
       { label: 'MMG payments', href: '/mmg-payments', icon: Receipt },
       { label: 'Claims', href: '/claims', icon: ShieldAlert },

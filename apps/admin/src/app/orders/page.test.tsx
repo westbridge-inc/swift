@@ -48,12 +48,17 @@ async function targetRow() {
   return within(row);
 }
 
+const REASON = 'Repeated no-shows after three written warnings';
+
 describe('order list money controls', () => {
+  // [MC-PR3] The confirmation and the reason are one in-page panel (owner ruling: no browser prompts). Every
+  // guarantee of the old confirm/prompt test is kept: the panel names the visible row's order and store, a
+  // dismissed panel sends nothing, and confirming sends exactly this order's cash-refund request.
   it('binds the visible row to the exact cash-refund request and store-attributed confirmation', async () => {
-    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const confirm = vi.fn();
+    const prompt = vi.fn();
     vi.stubGlobal('confirm', confirm);
-    // [ADM-006] the operator is asked why; the reason is theirs, not a template
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
+    vi.stubGlobal('prompt', prompt);
     const fetchMock = mockApi(
       ordersHandler((request) => {
         if (
@@ -67,33 +72,33 @@ describe('order list money controls', () => {
     );
     const { user } = renderWithQuery(<OrdersPage />);
     const row = await targetRow();
-    const refundButton = row.getByRole('button', { name: 'Record refund owed' });
+    const refundButton = row.getByRole('button', { name: 'Record refund owed for ORDER-TARGET…' });
 
     await user.click(refundButton);
-    expect(confirm).toHaveBeenNthCalledWith(
-      1,
-      'Cancel order ORDER-TARGET and record that Target Store OWES the customer a refund?'
-      + '\n\nThis does not mark anything refunded — settle it on the order page'
-      + ' once the reference and the amount handed back are known.',
-    );
+    let dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TARGET and record a refund owed?' });
+    expect(dialog.textContent).toContain('This records that Target Store OWES the customer a refund.');
+    expect(dialog.textContent).toContain('It does not mark anything refunded — settle it on the order page once the reference and the amount handed back are known.');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
     await user.click(refundButton);
+    dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TARGET and record a refund owed?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel and record refund owed' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-target/cancel`);
     expect(init?.method).toBe('PUT');
     expect(JSON.parse(String(init?.body))).toEqual({
-      reason: 'Repeated no-shows after three written warnings',
+      reason: REASON,
       refund: true,
     });
+    expect((await screen.findByRole('status')).textContent).toContain('Target Store owes the customer a refund.');
+    expect(confirm).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it('does not offer a Swift refund for MMG and explains the store-direct rail', async () => {
-    const confirm = vi.fn().mockReturnValue(false);
-    vi.stubGlobal('confirm', confirm);
-    // [ADM-006] the operator is asked why; the reason is theirs, not a template
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const mmgOrder = {
       ...targetOrder,
       paymentMethod: 'MOBILE_MONEY',
@@ -107,12 +112,12 @@ describe('order list money controls', () => {
     const { user } = renderWithQuery(<OrdersPage />);
     const row = await targetRow();
 
-    expect(row.queryByRole('button', { name: 'Record refund owed' })).toBeNull();
-    await user.click(row.getByRole('button', { name: 'Cancel' }));
+    expect(row.queryByRole('button', { name: /Record refund owed/ })).toBeNull();
+    await user.click(row.getByRole('button', { name: 'Cancel order ORDER-TARGET…' }));
 
-    expect(confirm).toHaveBeenCalledWith(
-      'Cancel order ORDER-TARGET?\n\nMMG payment stays between customer and store. If paid, it is refunded by Target Store; Swift cannot refund it.',
-    );
+    const dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TARGET?' });
+    expect(dialog.textContent).toContain('MMG payment stays between customer and store. If paid, it is refunded by Target Store; Swift cannot refund it.');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
 });
