@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid';
 import { AdsCronService } from '../modules/ads/cron.service';
 import { AdsLifecycleService } from '../modules/ads/lifecycle.service';
 import { AdsRefundService, backfillAdRefundIntents, scanAdRefunds } from '../modules/ads/refund.service';
+import { mondayOf } from '../modules/ads/ads-weeks';
 
 // ---------------------------------------------------------------------------
 // [R045-ADS-01 · 02 · 03 · 08 · 09] The ad refund obligation is durable.
@@ -24,9 +25,11 @@ const refunds = new AdsRefundService(prisma, io);
 const lifecycle = new AdsLifecycleService(prisma, io);
 const cron = new AdsCronService(prisma, io);
 
-const NOW = new Date('2026-09-16T12:00:00Z'); // Wed
-const WK_THIS = new Date('2026-09-14T00:00:00Z');
-const WK_FUTURE = new Date('2026-10-05T00:00:00Z');
+// The admin-kill path uses the live clock; injected policy times and booking
+// phases must stay aligned with it, including after a calendar rollover.
+const NOW = new Date();
+const WK_THIS = mondayOf(NOW);
+const WK_FUTURE = new Date(WK_THIS.getTime() + 21 * 86_400_000);
 const advertiserIds: string[] = []; const placementIds: string[] = []; const campaignIds: string[] = []; const invoiceIds: string[] = [];
 
 beforeAll(async () => { await prisma.$connect(); delete process.env['AD_REFUND_EXECUTION_KILL']; });
