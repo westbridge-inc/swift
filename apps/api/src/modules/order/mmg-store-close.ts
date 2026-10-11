@@ -37,10 +37,18 @@ type CloseFacts = Pick<Order, 'status' | 'paymentMethod' | 'paymentStatus' | 'mm
 /** Why this order cannot be closed this way, or null when it can. The order
  *  screen and the locked write read the same rule. */
 export function mmgStoreCloseRefusal(order: CloseFacts): { code: string; message: string } | null {
-  if (order.paymentMethod !== 'MOBILE_MONEY' || order.paymentStatus !== 'CLAIMED' || !order.vendorId) {
+  if (order.paymentMethod !== 'MOBILE_MONEY' || !order.vendorId) {
     return {
       code: 'MMG_STORE_CLOSE_NOT_ELIGIBLE',
-      message: 'Only an order the store has marked as paid by MMG can be closed as "refund handled by the store".',
+      message: 'This is a cash order (or has no store), so there is no MMG payment for the store to refund. Use Cancel order instead.',
+    };
+  }
+  if (order.paymentStatus !== 'CLAIMED') {
+    return {
+      code: 'MMG_STORE_CLOSE_NOT_ELIGIBLE',
+      message: order.paymentStatus === 'CAPTURED'
+        ? 'This MMG payment was confirmed by MMG itself, not only by the store, so it cannot be closed this way.'
+        : 'The store has not marked this MMG payment as received, so there is nothing for it to refund yet. Use Cancel order instead.',
     };
   }
   if (!ORDER_TRANSITIONS.CANCELLED.includes(order.status)) {
@@ -82,6 +90,7 @@ export interface MmgStoreCloseInput {
  */
 export async function closeMmgOrderAsStoreRefund(orderService: Pick<OrderService, 'transitionOrderAtomically'>, input: MmgStoreCloseInput) {
   let obligationId = '';
+  let owed: Prisma.Decimal | null = null;
   const committed = await orderService.transitionOrderAtomically({
     orderId: input.orderId,
     target: 'CANCELLED',
@@ -123,22 +132,30 @@ export async function closeMmgOrderAsStoreRefund(orderService: Pick<OrderService
         select: { id: true },
       });
       obligationId = obligation.id;
+      owed = amount;
       await input.audit(tx, { disposition: MMG_STORE_CLOSE_DISPOSITION, claimRevision: locked.mmgClaimRevision, obligationId });
     },
   });
-  return { order: committed.order, obligationId };
+  return { order: committed.order, obligationId, amount: owed as Prisma.Decimal | null };
 }
 
-/** The plain-words notices, one per party. Swift is never the one who refunds. */
-export function mmgStoreCloseNotices(orderNumber: string) {
+/** The plain-words notices, one per party. Swift is never the one who
+ *  refunds. They name the amount owed back (the recorded obligation), and a
+ *  booking speaks of the provider, as every booking message does [E20]. */
+export function mmgStoreCloseNotices(orderNumber: string, amount: Prisma.Decimal | number, booking = false) {
+  const gyd = `GY$${Number(amount).toLocaleString('en-US')}`;
+  const noun = booking ? 'Booking' : 'Order';
+  const party = booking ? 'provider' : 'store';
   return {
     customer: {
-      title: 'Order closed — the store refunds you',
-      body: `Order ${orderNumber} could not be completed, so Swift support closed it. You paid the store by MMG, so the store refunds you directly from its MMG account. Swift never holds your money. If the refund does not arrive, contact support from the order screen.`,
+      title: `${noun} closed — the ${party} refunds you`,
+      body: `${noun} ${orderNumber} could not be completed, so Swift support closed it. You paid the ${party} by MMG, so the ${party} refunds you ${gyd} directly from its MMG account. Swift never holds your money. If the refund does not arrive, contact support from the order screen.`,
     },
     store: {
-      title: 'Order closed — refund the customer',
-      body: `Order ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid your store by MMG: refund them directly from your MMG account. Swift never holds or moves order money.`,
+      title: `${noun} closed — refund the customer`,
+      body: booking
+        ? `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid you by MMG: as the provider, refund them ${gyd} directly from your MMG account. Swift never holds or moves order money.`
+        : `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid your store by MMG: refund them ${gyd} directly from your MMG account. Swift never holds or moves order money.`,
     },
   };
 }

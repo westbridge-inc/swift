@@ -2663,7 +2663,7 @@ export async function adminRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     const reason = reasonOf(request.body, request.headers) ?? '';
     const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
-    const { order } = await closeMmgOrderAsStoreRefund(orderService, {
+    const { order, amount } = await closeMmgOrderAsStoreRefund(orderService, {
       orderId: id,
       adminUserId: request.user.userId,
       expectedClaimRevision: body.expectedClaimRevision,
@@ -2675,7 +2675,7 @@ export async function adminRoutes(app: FastifyInstance) {
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED' });
     // Told after the commit, each on its own key (a retry of the notice cannot
     // double it). Neither is told the refund happened — only who makes it.
-    const words = mmgStoreCloseNotices(order.orderNumber);
+    const words = mmgStoreCloseNotices(order.orderNumber, amount ?? 0, order.fulfillment === 'APPOINTMENT');
     const ownerUserId = order.vendorId
       ? (await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { owner: { select: { userId: true } } } }))?.owner.userId
       : undefined;
