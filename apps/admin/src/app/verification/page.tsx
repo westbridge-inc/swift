@@ -9,7 +9,7 @@ import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_STATUSES, applicantId, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_STATUSES, applicantId, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -223,7 +223,9 @@ export default function VerificationPage() {
           {!filtered.length ? <p className="rc-empty"><span>{groups.length ? 'No applicants match these filters.' : 'No documents'}</span> {groups.length ? 'Clear a filter to see more applicants.' : 'This lane has no documents with the selected status.'}</p> :
             <table className="rc-queue-table"><thead><tr><th>Applicant</th><th>Role / documents</th><th>Waiting for</th><th><span className="sr-only">Action</span></th></tr></thead><tbody>{filtered.map((a) => <tr key={a.id}>
               <td><strong>{a.name}</strong><small>{maskedPhone(a.phone)}</small></td>
-              <td><span>{[...new Set(a.documents.map((d) => roleLabel(d.role)))].join(', ')}</span><small>{a.documents.length} {a.documents.length === 1 ? 'document' : 'documents'} · {a.documents.map((d) => docLabel(d.docType)).join(', ')}</small></td>
+              <td><span>{[...new Set(a.documents.map((d) => roleLabel(d.role)))].join(', ')}</span><small>{a.documents.length} {a.documents.length === 1 ? 'document' : 'documents'} · {a.documents.map((d) => docLabel(d.docType)).join(', ')}</small>
+                {/* [MC-AD1] a re-submission or a renewal is marked; a first upload is not */}
+                {a.documents.filter((d) => d.previousDecision).map((d) => <span key={d.id} className={`rc-chip rc-chip-${d.previousDecision?.kind === 'RENEWAL' ? 'renewal' : 'resubmitted'}`}>{resubmissionLabel(d)}{d.previousDecision?.kind === 'RESUBMITTED_AFTER_REJECTION' && `: ${d.previousDecision.reviewNote || 'No reason recorded'}`}</span>)}</td>
               <td><time dateTime={a.oldest ? new Date(a.oldest).toISOString() : undefined}>{waitingSince(a.oldest, now)}</time></td>
               <td><button className="rc-primary" onClick={() => openApplicant(a)}>Review</button></td>
             </tr>)}</tbody></table>}
@@ -246,6 +248,11 @@ export default function VerificationPage() {
           </nav>
           <div className="rc-review-body">
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
+            {selected.previousDecision && <aside role="note" aria-label="Earlier decision" className="rc-previous">
+              <strong>{resubmissionLabel(selected)}</strong>
+              <span>{previousDecisionLine(selected.previousDecision)}</span>
+              {selected.previousDecision.reviewNote && <span>Last time: {selected.previousDecision.reviewNote}</span>}
+            </aside>}
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
             {selected.status === 'PENDING' && (needsExpiry || isInsurance) && <div className="rc-fields">
