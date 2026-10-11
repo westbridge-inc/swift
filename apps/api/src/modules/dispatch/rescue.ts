@@ -323,13 +323,21 @@ export async function deliverRescueNotice(deps: RescueDeps, notice: RescueNotice
         vendor: { select: { name: true, owner: { select: { userId: true } } } },
       },
     });
-    // Nothing to tell about an order that is gone or was never cancelled by the cutoff.
-    if (!order || order.status !== 'CANCELLED' || order.cancellationReason !== FOOD_TOO_OLD_REASON) return { complete: true, sent, failed };
+    // The cutoff's cancellation, still in its cancelled family: an operator may
+    // have moved it on to REFUNDED (a declared edge) before an owed notice was
+    // drained, and the notices are still owed then. Anything else — the order
+    // gone, or not cancelled by the cutoff — closes the obligation, loudly.
+    const deliverable = !!order && order.cancellationReason === FOOD_TOO_OLD_REASON
+      && (order.status === 'CANCELLED' || order.status === 'REFUNDED');
+    if (!order || !deliverable) {
+      log().warn({ orderId: notice.orderId, status: order?.status ?? null, reason: order?.cancellationReason ?? null }, 'rescue: an owed food-age notice was closed undelivered — the order is gone or no longer the cutoff\'s cancellation');
+      return { complete: true, sent, failed };
+    }
 
     await withdrawOfferOfClosedOrder(deps, order.id);
     await deps.redis.del(...dispatchKeys(order.id, notice.deliveryAuthorityVersion)).catch(() => {});
     // A hint for open screens: they re-read the order, so a repeat is harmless.
-    deps.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: 'CANCELLED', timestamp: (order.cancelledAt ?? new Date()).toISOString() });
+    deps.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: order.status, timestamp: (order.cancelledAt ?? new Date()).toISOString() });
 
     const attempt = async (role: 'customer' | 'business' | 'admin', deliver: () => Promise<boolean>) => {
       try {
