@@ -72,8 +72,6 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },
   'modules/verification/mover-document-authority.ts': { sites: 2, role: 'SHARED' },
   'modules/verification/object-authority.ts': { sites: 3, role: 'SHARED' },
-  // Identity edits lock their own pending review cases inside authenticated mover transactions.
-  'modules/verification/vehicle-retirement.ts': { sites: 1, role: 'REQUEST' },
   'modules/verification/subjects.ts': { sites: 1, role: 'SHARED' },
   'plugins/prisma.ts': { sites: 2, role: 'INFRA' },
   'plugins/readiness.ts': { sites: 2, role: 'INFRA' },
