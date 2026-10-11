@@ -244,6 +244,8 @@ phone or a laptop, open https://staging.swiftgy.com: browse stores, sign in
 with a real SMS code, place an order, track it, and open the business
 dashboard.
 
+To limit the staging name to people who have a password, see 3e.
+
 To turn the website off, empty WEB_HOST and rerun pilot-up.sh (Caddy stops
 serving the name), then remove the idle container:
 
@@ -408,6 +410,78 @@ To turn the console off, empty ADMIN_HOST and ADMIN_BASIC_AUTH_HASH and rerun
 pilot-up.sh (Caddy stops serving the name), then remove the idle container:
 
     docker compose -f deploy/docker-compose.yml --profile admin rm --stop --force admin
+
+## 3e. A password on the staging website
+
+The staging website (3b) can be limited to the people who have a password:
+HTTP basic authentication on WEB_HOST, before any of its pages. It is
+optional and off until WEB_BASIC_AUTH_HASH is set. The browser asks once for
+the user `tester` and the password, then remembers them for that name.
+
+What stays open without the password:
+
+- The public names (WEB_ALIAS_HOSTS, 3c). swiftgy.com and www keep answering
+  everyone: the stores' privacy-policy and account-deletion links point there.
+- On WEB_HOST itself, MMG's payment returns under `/pay/mmg/` (MMG sends the
+  payer back there in the middle of a payment; that page needs nothing else
+  from the site) and the app-link files under `/.well-known/`. A path that
+  climbs (`..`) is never one of them.
+- The API's names and the admin console's name (the console has its own
+  gate, 3d).
+
+What asks for it: every other page on WEB_HOST, including "Continue on the
+web" from the MMG return page and, while APP_PUBLIC_URL names the staging
+site (3b), the QR codes and the trip and parcel links shared from staging.
+Point APP_PUBLIC_URL at the public name if those must open without one.
+
+1. Choose the password and make its hash on this host, as swift-deploy, with
+   the Caddy image the stack already runs:
+
+       docker run --rm -it --network none caddy:2.10 caddy hash-password --bcrypt-cost 12
+
+   It asks for the password twice at a prompt that does not show what is
+   typed, and prints only the hash (`$2a$12$…`). The password goes into that
+   prompt and nowhere else: never into a command argument, a chat, a log, a
+   ticket or git. Give it to testers the way you would hand over a key.
+   A hash made the console's way (3d) works the same: `htpasswd -nBC 12
+   tester` on your own computer, keeping only the part after `tester:`
+   (a `$2y$12$…` hash).
+2. Put the hash (never the password) in deploy/.env, in single quotes:
+
+       WEB_BASIC_AUTH_HASH='$2a$12$…'
+
+   The single quotes matter: without them Compose reads the `$` signs as
+   variables. pilot-up.sh refuses anything but a quoted bcrypt hash of cost
+   10 or more, and a hash without WEB_HOST, before anything changes, and it
+   never prints the value.
+3. Deploy as usual: `./deploy/pilot-up.sh "$APPROVED_SHA"`. With the password
+   on, the website is ready when its container reports healthy, its app-link
+   file `https://$WEB_HOST/.well-known/apple-app-site-association` answers
+   200, and `https://$WEB_HOST/` answers exactly 401. A website that serves
+   its home page without the password it was configured with fails the
+   deploy. The last website line reads `WEBSITE READY at https://$WEB_HOST
+   (exact SHA …; password gate on)`.
+
+Caddy does the checking: the website's container never holds the hash, and
+Caddy strips the password from each request it checked before passing it on.
+
+Verify:
+
+    WEB_HOST='staging.swiftgy.com'
+    curl -sSI --resolve "$WEB_HOST:443:127.0.0.1" "https://$WEB_HOST/" |
+      grep -iE '^HTTP|^www-authenticate'
+    curl -sSI --resolve "$WEB_HOST:443:127.0.0.1" \
+      "https://$WEB_HOST/.well-known/apple-app-site-association" | grep -iE '^HTTP'
+    ./deploy/doctor.sh
+
+The first prints `HTTP/2 401` and a `www-authenticate: Basic` line, the second
+`HTTP/2 200`, and the doctor `ok    website https://staging.swiftgy.com → 401
+(password gate on)`. Then, in a browser, https://staging.swiftgy.com asks for
+`tester` and the password, and https://swiftgy.com still opens without one.
+
+To change the password, make a new hash, replace the old one and redeploy.
+To turn the password off, empty WEB_BASIC_AUTH_HASH and redeploy: the staging
+name answers everyone again.
 
 ## 4. Start and verify off-site backups
 
