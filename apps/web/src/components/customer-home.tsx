@@ -38,7 +38,7 @@ const SERVICES: { key: string; label: string; href?: string; sub: string; pictog
   { key: 'groceries', label: 'Groceries', href: '/order/browse?type=SUPERMARKET', sub: 'Markets & pharmacies', pictogram: 'groceries' },
   { key: 'taxi', label: 'Taxi', href: '/taxi', sub: 'Book in the Swift mobile app', pictogram: 'taxi' },
   { key: 'send', label: 'Send', href: '/courier', sub: 'A parcel across town', pictogram: 'send' },
-  { key: 'services', label: 'Services', href: '/order/browse?type=SERVICE', sub: 'Book a local pro', pictogram: 'services' },
+  { key: 'services', label: 'Services', href: '/services', sub: 'Book a local pro', pictogram: 'services' },
   { key: 'orders', label: 'Orders', href: '/orders', sub: 'Track and reorder', pictogram: 'orders' },
   { key: 'favourites', label: 'Favourites', href: '/account/favourites', sub: 'Stores you saved', pictogram: 'favourites' },
   { key: 'scan', label: 'Scan', sub: 'Open a store from its Swift code', pictogram: 'scan' },

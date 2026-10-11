@@ -79,6 +79,17 @@ const RULES: RouteRule[] = [
     match: exact('/order/location'), public: false, tab: 'profile', parent: '/account',
     door: { title: 'Sign in to manage your addresses', body: 'Delivery addresses are saved on your account.' },
   },
+  // [W11] Local pros: browsing is public, like the app; a person's own
+  // requests are their account's.
+  { match: exact('/services'), public: true, tab: 'home', parent: HOME_PATH },
+  {
+    match: exact('/services/requests'), public: false, tab: 'home', parent: '/services',
+    door: { title: 'Sign in to see your requests', body: 'Your requests to local pros, and their quotes, are kept on your account.' },
+  },
+  {
+    match: under('/services/requests'), public: false, tab: 'home', parent: '/services/requests',
+    door: { title: 'Sign in to see this request', body: 'A request opens for the account that sent it.' },
+  },
   {
     match: exact('/courier'), public: false, tab: 'home', parent: HOME_PATH,
     door: { title: 'Sign in to send a package', body: 'A courier is booked from your account, so the rider knows who to call.' },

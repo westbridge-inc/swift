@@ -10,7 +10,7 @@ import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { customerRoute } from '@/lib/customer-routes';
 import { AuthError, AuthHeading, AuthPage, CodeBoxes, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/auth-ui';
 
-const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie', '/market'];
+const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie', '/market', '/services'];
 
 /** [Q7b] The customer app's Home is `/` itself — the one customer address a
  *  prefix cannot name, since every path starts with a slash. */

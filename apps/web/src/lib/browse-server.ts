@@ -12,6 +12,8 @@ import { cache } from 'react';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 import { isHomeFeed, marketTabVisible } from '@/lib/app-rules';
 import type { HomeFeed, MarketCategory, MarketDepth, MarketItem, Vendor, VendorDetail } from '@/lib/customer';
+import type { ServiceCatalog } from '@swift/types';
+import type { ProviderPage } from '@/lib/service-jobs';
 import { retailCategories, type GuestRead } from '@/lib/browse-keys';
 
 export type { GuestRead };
@@ -104,4 +106,32 @@ export async function marketSeed(category: string): Promise<MarketSeed> {
       (data) => isObject(data) && Array.isArray(data['items']))
     : null;
   return { depth, categories, items };
+}
+
+// ── [W11] Local services ──────────────────────────────────────────────────────
+
+/** The services taxonomy changes with a release, not by the minute. */
+export const CATALOG_REVALIDATE_SECONDS = 600;
+
+export interface ServicesSeed {
+  trade: string;
+  catalog: GuestRead<ServiceCatalog> | null;
+  providers: GuestRead<ProviderPage> | null;
+}
+
+/**
+ * The services page's first screen: the public catalogue, and — only for a
+ * trade the catalogue itself says takes requests — that trade's first
+ * providers. A made-up `?trade=` never reaches the API.
+ */
+export async function servicesSeed(trade: string): Promise<ServicesSeed> {
+  const catalog = await guestRead<ServiceCatalog>('/api/v1/services/catalog', CATALOG_REVALIDATE_SECONDS, ['browse:services'],
+    (data) => isObject(data) && Array.isArray(data['categories']));
+  const requestable = Boolean(trade) && catalog !== null
+    && catalog.data.categories.some((category) => category.id === trade && category.quoteRequestsEnabled && category.modes.includes('QUOTE_JOB'));
+  const providers = requestable
+    ? await guestRead<ProviderPage>(`/api/v1/services/providers?${new URLSearchParams({ trade })}`, BROWSE_REVALIDATE_SECONDS, ['browse:services'],
+      (data) => isObject(data) && Array.isArray(data['providers']))
+    : null;
+  return { trade, catalog, providers };
 }
