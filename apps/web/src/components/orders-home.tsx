@@ -24,7 +24,7 @@ import {
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
-import { mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
+import { mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../mobile/src/modules/vendor/order-dispute';
 
@@ -473,7 +473,7 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
     <div className="mt-3 space-y-2">
       {isMmg && !terminal && !blockedReason && (
         <p className={`text-[13px] font-semibold ${moneyMoved ? 'text-[var(--swift-success)]' : 'text-[var(--swift-warning)]'}`}>
-          {order.paymentStatus === 'CAPTURED' ? 'MMG payment received' : order.paymentStatus === 'CLAIMED' ? 'Payment confirmed by your store' : 'Awaiting MMG payment'}
+          {moneyMoved ? mmgMovedLabel(order.paymentStatus) : 'Awaiting MMG payment'}
         </p>
       )}
       {blockedReason && <p className="sw-caption">{blockedReason}</p>}

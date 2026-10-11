@@ -3,12 +3,20 @@
  * board's cards and the order window.
  *
  * Money has moved when the provider captured it (CAPTURED) or the store has
- * confirmed it landed (CLAIMED — the store's own confirmation is never
- * recorded as CAPTURED). The server lets both proceed (order.service.ts
+ * reported it landed (CLAIMED — the store's own report is never recorded
+ * as CAPTURED). The server lets both proceed (order.service.ts
  * MMG_MONEY_MOVED).
  */
+export const MMG_MONEY_MOVED = ['CAPTURED', 'CLAIMED'] as const;
 export function mmgMoneyMoved(paymentStatus: string | null | undefined): boolean {
-  return paymentStatus === 'CAPTURED' || paymentStatus === 'CLAIMED';
+  return (MMG_MONEY_MOVED as readonly string[]).includes(String(paymentStatus ?? ''));
+}
+
+/** What a moved payment is called. A store's own report is never "confirmed":
+ *  only the provider confirms (the receipt says "reported received by the
+ *  store — not confirmed by the provider"). */
+export function mmgMovedLabel(paymentStatus: string | null | undefined): string {
+  return paymentStatus === 'CAPTURED' ? 'MMG payment received' : 'MMG payment reported received by your store';
 }
 
 /** Why a payment cannot be confirmed here, said instead of a button; null when there is nothing to say. */

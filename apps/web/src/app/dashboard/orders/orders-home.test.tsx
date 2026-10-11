@@ -376,9 +376,10 @@ describe('MMG payment states on the card', () => {
     if (later) await view.user.click(later);
     return screen.findByRole('article', { name: 'Order SW-7501' });
   }
-  it('a payment the store has confirmed (CLAIMED) offers Accept, says it is confirmed, and asks for nothing more', async () => {
+  it('a payment the store reported received (CLAIMED) offers Accept, never says "confirmed", and asks for nothing more', async () => {
     const c = await card('CLAIMED');
-    expect(within(c).getByText('Payment confirmed by your store')).toBeTruthy();
+    expect(within(c).getByText('MMG payment reported received by your store')).toBeTruthy();
+    expect(within(c).queryByText(/confirmed/i)).toBeNull();
     expect(within(c).queryByText('Awaiting MMG payment')).toBeNull();
     expect(within(c).getByRole('button', { name: 'Accept' })).toBeTruthy();
     expect(within(c).queryByRole('button', { name: 'Confirm MMG payment' })).toBeNull();
