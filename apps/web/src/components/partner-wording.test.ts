@@ -9,7 +9,11 @@ import { describe, expect, it } from 'vitest';
 
 const SRC = join(__dirname, '..');
 const ROOTS = ['app/dashboard', 'app/portal', 'app/advertiser'];
-const FILES = ['components/console-shell.tsx', 'components/business-status.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx'];
+const FILES = ['components/console-shell.tsx', 'components/business-status.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx',
+  // The weekly-fee page every partner pays through, and its MMG words. (lib/card-fee.ts is
+  // byte-identical to the phone copy by census and still says "added to your balance" for a
+  // banked card payment: it has to be renamed in both apps together, so it is not scanned here.)
+  'components/weekly-fee.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts'];
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
