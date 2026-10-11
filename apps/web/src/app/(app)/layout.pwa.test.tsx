@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import AppLayout from './layout';
+import { loadInstallCard } from '@/components/install-prompt';
 import CartPage from './cart/page';
 import * as api from '@/lib/customer';
 
@@ -29,6 +30,10 @@ function installEvent() {
 }
 
 const card = () => screen.queryByRole('complementary', { name: 'Install Swift' });
+
+// [PWA-1] As once an offer is possible on Home: the card's code has arrived
+// (install-prompt-loading.test.tsx covers an offer that comes before it).
+beforeAll(() => loadInstallCard());
 
 beforeEach(() => {
   state.pathname = '/';
