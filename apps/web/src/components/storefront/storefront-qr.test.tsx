@@ -90,7 +90,16 @@ describe('the actual /store/[slug] QR arrival', () => {
   );
 
   it('preserves the menu/cart flow slot and computed layout styles on dismissal', async () => {
+    // A signed-in customer with a line in the order, so the floating
+    // "View your order" link exists and the cart-link checks below bite.
+    vi.mocked(auth.sessionProbe).mockResolvedValue({ ok: true });
+    vi.mocked(customer.getCart).mockResolvedValue({
+      items: [{ id: 'line', itemId: 'roti', name: 'Pumpkin roti', quantity: 1, customerPrice: 800, isAvailable: true, fulfillment: 'DELIVERY' }],
+      vendor: { id: store.id, name: store.name, isCurrentlyOpen: true, acceptingOrders: true }, subtotalCustomer: 800,
+    });
+    vi.spyOn(customer, 'getAddresses').mockResolvedValue([]);
     render(await page({ src: 'qr' }));
+    await screen.findByRole('link', { name: /View your order/ });
     const dismiss = screen.getByRole('button', { name: 'Dismiss dining-in message' });
     const slot = dismiss.parentElement!;
     const menu = screen.getByRole('region', { name: 'Menu' });
@@ -99,7 +108,8 @@ describe('the actual /store/[slug] QR arrival', () => {
     // order" link joins it once something is in the order. (The old
     // store-branded top bar and its cart link are gone: the app's frame holds
     // the page now.)
-    const cartLinks = screen.queryAllByRole('link', { name: /Your order/ });
+    const cartLinks = screen.queryAllByRole('link', { name: /your order/i });
+    expect(cartLinks.length).toBeGreaterThan(0);
     const layoutStyles = (element: Element) => {
       const computed = getComputedStyle(element);
       return Object.fromEntries([
