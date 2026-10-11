@@ -2104,6 +2104,25 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         self.assertEqual(status, 200, out[-300:])
         self.assertIn("authorization=[]", out)
 
+    @unittest.skipUnless(shutil.which("htpasswd"), "htpasswd is not installed")
+    def test_live_a_hash_made_with_htpasswd_opens_the_gate_too(self):
+        # The console's runbook makes its hash with htpasswd ($2y$), and the
+        # website's may be made the same way: Caddy takes it as it is.
+        password = secrets.token_urlsafe(18)
+        made = subprocess.run(["htpasswd", "-niBC", "12", "tester"], input=password + "\n",
+                              text=True, capture_output=True, timeout=60)
+        self.assertEqual(made.returncode, 0, made.stderr[-300:])
+        user, _, hashed = made.stdout.strip().partition(":")
+        self.assertEqual(user, "tester")
+        self.assertRegex(hashed, BCRYPT_SHAPE)
+        self.assertTrue(hashed.startswith("$2y$12$"))
+        name = self.serve(self.env(WEB_BASIC_AUTH_HASH=hashed))
+        self.assertEqual(self.fetch(name, f"https://{WEB_HOST}/")[0], 401)
+        self.assertEqual(self.fetch(name, f"https://{WEB_HOST}/", "tester:not-the-password")[0], 401)
+        status, out = self.fetch(name, f"https://{WEB_HOST}/", f"tester:{password}")
+        self.assertEqual(status, 200, out[-300:])
+        self.reached_website(out, "/")
+
     def test_live_without_the_gate_the_website_answers_everyone_exactly_as_before(self):
         name = self.serve(self.env(web_gate=False, admin_gate=False))
         status, out = self.fetch(name, f"https://{WEB_HOST}/")

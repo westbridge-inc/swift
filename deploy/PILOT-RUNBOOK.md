@@ -443,6 +443,9 @@ Point APP_PUBLIC_URL at the public name if those must open without one.
    typed, and prints only the hash (`$2a$12$…`). The password goes into that
    prompt and nowhere else: never into a command argument, a chat, a log, a
    ticket or git. Give it to testers the way you would hand over a key.
+   A hash made the console's way (3d) works the same: `htpasswd -nBC 12
+   tester` on your own computer, keeping only the part after `tester:`
+   (a `$2y$12$…` hash).
 2. Put the hash (never the password) in deploy/.env, in single quotes:
 
        WEB_BASIC_AUTH_HASH='$2a$12$…'
