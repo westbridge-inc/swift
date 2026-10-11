@@ -106,6 +106,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'prep-shadow-grade': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'prep-stats-nightly': { policy: 'SAFE_REPLAY', why: 'Recomputes every vendor prep-time distribution from a trailing window. The input is the window, not the previous run.' },
   'process-billing': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'process-settlements': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file. (Dispatched behind a !== guard, so the census missed it until it learned that form.)' },
   'promote-sos-grace': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'qr-attribution-purge': { policy: 'SAFE_REPLAY', why: 'Hard-deletes attribution rows already past their expiry. A second run finds nothing left to delete.' },
   'rating-actor-fold': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -119,7 +120,9 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'scheduler-heartbeat': { policy: 'SAFE_REPLAY', why: 'Writes one Redis key and pages on pool saturation through opsPageOnce, which dedupes. A second run overwrites the same key.' },
   'stale-movers': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'supply-watch-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'sync-vendor': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file. (Dispatched behind a !== guard, so the census missed it until it learned that form.)' },
   'tier-recalc': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'vendor-alert-escalate': { policy: 'RECONCILE_FIRST', why: 'Re-alerts and texts a store about an order still waiting for its answer. It stops on its own once the order is no longer PENDING, but a run that failed after sending can send again, so it is never retried automatically. Ops may replay it once they have checked the order is still waiting and the store was not already reached.' },
 };
 
 export type JobName =
@@ -167,6 +170,7 @@ export type JobName =
   | 'prep-shadow-grade'
   | 'prep-stats-nightly'
   | 'process-billing'
+  | 'process-settlements'
   | 'promote-sos-grace'
   | 'qr-attribution-purge'
   | 'rating-actor-fold'
@@ -180,7 +184,9 @@ export type JobName =
   | 'scheduler-heartbeat'
   | 'stale-movers'
   | 'supply-watch-scan'
-  | 'tier-recalc';
+  | 'sync-vendor'
+  | 'tier-recalc'
+  | 'vendor-alert-escalate';
 
 /** The answer for a job name, including one this file has never heard of —
  *  which is refused, not assumed safe. */

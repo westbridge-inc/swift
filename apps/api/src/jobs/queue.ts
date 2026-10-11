@@ -491,6 +491,9 @@ async function runWithReplayPolicy(job: Job, processor: (job: Job) => Promise<vo
     if (certified || err instanceof UnrecoverableError) throw err;
     const final = new UnrecoverableError(err instanceof Error ? err.message : String(err));
     if (err instanceof Error && err.stack) final.stack = err.stack;
+    // Logs and error reports keep the original: its code and its cause.
+    const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+    Object.assign(final, { cause: err, ...(code !== undefined ? { code } : {}) });
     throw final;
   }
 }
