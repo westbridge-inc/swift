@@ -1574,7 +1574,7 @@ export class BillingService {
         await notifyAdmins(this.prisma, this.notifications, {
           tenantId: await tenantOfSubscription(this.prisma, sub.id),
           title: '💳 A card charge was captured with no local payment — repaired',
-          body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or a wallet liability; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
+          body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or fee paid ahead; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
           data: { kind: 'billing_invariants', alert: 'card-captured-without-local-payment', subscriptionId: sub.id, paymentId: row.id },
         }).catch(() => {});
         continue;
@@ -1733,7 +1733,7 @@ export class BillingService {
       select: { balance: true, currencyCode: true },
     });
     if (balanceRow && balanceRow.currencyCode !== sub.currencyCode) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'Wallet currency does not match the issued weekly fee; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The fee paid ahead is in a different currency from the issued weekly fee; reconciliation is required');
     }
     if (balanceRow && Number(balanceRow.balance) >= amount) {
       return { ok: true, ref: 'prepaid', spendPrepaid: amount };
@@ -1909,7 +1909,7 @@ export class BillingService {
 
     // Prepaid already tried and came up short above; no usable external rail
     // (a CASH sub with an empty balance, or a CARD/MMG sub missing credentials).
-    return { ok: false, reason: 'Insufficient prepaid balance' };
+    return { ok: false, reason: 'Not enough fee paid ahead to cover this week' };
   }
 
   private async applySuccessfulCharge(
@@ -2197,14 +2197,14 @@ export class BillingService {
     if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
     const wallet = await this.lockWalletInTx(tx, opts.subscriptionId, opts.currencyCode);
     if (wallet.currencyCode !== opts.currencyCode) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'Received money and wallet currencies differ; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The payment and the fee paid ahead are in different currencies; reconciliation is required');
     }
     const credited = await tx.prepaidBalance.updateMany({
       where: { subscriptionId: opts.subscriptionId, currencyCode: opts.currencyCode },
       data: { balance: { increment: opts.amount } },
     });
     if (credited.count !== 1) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'Wallet currency changed before credit; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The currency of the fee paid ahead changed before this payment was applied; reconciliation is required');
     }
     const event = await tx.billingEvent.create({
       data: {
@@ -2885,7 +2885,7 @@ export class BillingService {
       const otherApprovalHeld = await this.subscriptionHasConfirmationHold(tx, sub.id, payment.id, now);
       if (covered || authority.bankInsteadOfAdvance || otherApprovalHeld) {
         const walletHold = await this.holdWalletCurrencyMismatch(tx, payment, originalAttempt!.currencyCode, evidence.transactionId);
-        if (walletHold) return { kind: 'held' as const, reason: 'Captured payment currency differs from the wallet', paymentId: payment.id, notify: walletHold.notify };
+        if (walletHold) return { kind: 'held' as const, reason: 'Captured payment currency differs from the fee paid ahead', paymentId: payment.id, notify: walletHold.notify };
       }
 
       const claimed = await tx.subscriptionPayment.updateMany({
@@ -2990,8 +2990,8 @@ export class BillingService {
       await this.notifications.send({
         userId: this.payerUserId(sub),
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'MMG payment received — added to your balance',
-        body: `Your MMG approval of $${result.amount.toLocaleString()} ${result.currencyCode} arrived after ${result.reason}. It's banked as balance and has not changed your subscription state.`,
+        title: 'MMG payment received — kept as fee paid ahead',
+        body: `Your MMG approval of $${result.amount.toLocaleString()} ${result.currencyCode} arrived after ${result.reason}. It is kept as fee paid ahead for a coming week and has not changed your subscription state.`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_banked', subscriptionId: sub.id },
       }).catch(() => {});
@@ -4075,7 +4075,7 @@ export class BillingService {
       channel?: string;
     },
   ) {
-    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'A fee payment must be more than zero');
     await lockSubscriptionPayer(tx, input.subscriptionId);
     const sub = await tx.subscription.findUnique({
       where: { id: input.subscriptionId },
@@ -4174,8 +4174,8 @@ export class BillingService {
       await this.notifications.send({
         userId: this.payerUserId(sub as SubWithRelations),
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Top-up received',
-        body: `$${amount.toLocaleString()} ${sub.currencyCode} added to your subscription balance.`,
+        title: 'Weekly fee paid ahead',
+        body: `$${amount.toLocaleString()} ${sub.currencyCode} received as fee paid ahead. It pays your coming weekly fees.`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_topup', subscriptionId },
       });
@@ -4190,7 +4190,7 @@ export class BillingService {
   }
 
   async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference: string | undefined, clientKey: string) {
-    if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'A fee payment must be more than zero');
 
     // Idempotency [SWIFT-030]: this is the only live collection path, so a retry
     // (network retry, admin double-tap) MUST NOT credit twice. The caller's
@@ -4200,7 +4200,7 @@ export class BillingService {
     // idempotencyKey is the DB-level guard inside the credit transaction, so
     // a replay rolls back its entire conditional wallet increment as well.
     if (!isUsableTopUpKey(clientKey)) {
-      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an idempotency key of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A recorded fee payment needs an idempotency key of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
     const eventKey = `topup:${subscriptionId}:${clientKey}`;
 
@@ -4250,15 +4250,15 @@ export class BillingService {
      *  as its evidence; without it the row this command always wrote stands. */
     onAudit?: OnAudit;
   }): Promise<{ replayed: boolean; commandId: string; result: TopUpCommandResult }> {
-    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'A fee payment must be more than zero');
     if (!isUsableTopUpKey(input.idempotencyKey)) {
-      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A recorded fee payment needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
     const where = { adminId_idempotencyKey: { adminId: input.adminId, idempotencyKey: input.idempotencyKey } };
     const replay = (row: { id: string; requestHash: string; result: unknown }) => {
       if (row.requestHash !== input.requestHash) {
         billingTopupDuplicateFingerprintCounter.inc();
-        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'This key was already used for a different top-up — a new top-up needs a new key.');
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'This key was already used for a different fee payment — a new fee payment needs a new key.');
       }
       return { replayed: true, commandId: row.id, result: row.result as TopUpCommandResult };
     };

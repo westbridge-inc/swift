@@ -141,7 +141,7 @@ export default function PortalHome() {
             Stores owe you {money(settlements.data?.summary?.owed)} in delivery fees ({settlements.data?.summary?.count ?? owedRows.length} MMG orders)
           </p>
           <p className="mt-1 text-sm text-amber-800/80">
-            When a customer pays the store&apos;s MMG, your fee lands in their wallet — collect it in cash and confirm here.
+            When a customer pays the store&apos;s MMG, your fee lands in the store&apos;s MMG account — collect it in cash and confirm here.
           </p>
           <MutationNotice errors={[confirm.error]} className="mt-2" />
           <div className="mt-3 space-y-2">

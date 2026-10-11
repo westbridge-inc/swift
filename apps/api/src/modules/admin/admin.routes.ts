@@ -280,7 +280,7 @@ const broadcastSchema = z.object({
 // no evidence of which payment it was, and the same payment could be credited
 // again tomorrow under a fresh idempotency key.
 const topUpSchema = z.object({
-  amount: zMoneyWhole.refine((n) => n > 0, 'A top-up must be more than zero'),
+  amount: zMoneyWhole.refine((n) => n > 0, 'A recorded fee payment must be more than zero'),
   reference: z.string(),
 });
 
@@ -3621,12 +3621,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // written together. Rollback is hold-only (BILLING_TOPUP_HOLD=1 refuses
     // every top-up); there is no way back to an unkeyed mutation.
     if (process.env['BILLING_TOPUP_HOLD'] === '1') {
-      throw new AppError(503, 'TOPUP_ON_HOLD', 'Top-ups are on hold by operations — nothing was recorded. Try again once the hold is lifted.');
+      throw new AppError(503, 'TOPUP_ON_HOLD', 'Recording fee payments by hand is on hold by operations — nothing was recorded. Try again once the hold is lifted.');
     }
     const clientKey = request.headers['idempotency-key'];
     if (!isUsableTopUpKey(clientKey)) {
       billingTopupMissingKeyCounter.inc();
-      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A recorded fee payment needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
     // [A-12] Normalised the same way every other manual-rail reference is, so
     // the same transfer typed two ways cannot occupy two rows and defeat the

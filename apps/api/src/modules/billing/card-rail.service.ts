@@ -697,8 +697,8 @@ export class CardRailService {
     await this.notifications.send({
       userId: session.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Card payment received — added to your balance',
-      body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and added to your balance. It did not change your plan; your balance pays a coming weekly fee.`,
+      title: 'Card payment received — kept as fee paid ahead',
+      body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and kept as fee paid ahead. It did not change your plan; it pays a coming weekly fee.`,
       audience: sub?.vendorId ? 'business' : 'earner',
       data: { kind: 'billing_banked', subscriptionId: session.subscriptionId },
       dedupeKey: `card-paynow-banked:${paymentId}`,

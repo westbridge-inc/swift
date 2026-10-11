@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, fetchBillingEvents } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
 import { askReason, reasonTooShort } from '@/lib/ask-reason';
+import { label } from '@/lib/labels';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -29,7 +30,7 @@ function BillingEvents({ id }: { id: string }) {
       {events.map((e: any) => (
         <div key={e.id} className="flex items-center gap-3 text-xs">
           <span className="text-[var(--muted)] w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
-          <span>{String(e.type ?? e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
+          <span>{e.type ? label('BillingEventType', e.type) : String(e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
           {e.amount != null && <span className="ml-auto font-medium">{gyd(e.amount)}</span>}
         </div>
       ))}
@@ -147,7 +148,7 @@ export default function SubscriptionsPage() {
                           </button>
                           <button
                             onClick={() => {
-                              const amt = window.prompt(`Record a cash/bank top-up for ${h.name} (whole GYD):`);
+                              const amt = window.prompt(`Record a weekly-fee payment received by cash/bank for ${h.name} (whole GYD):`);
                               const n = Number(amt);
                               if (!amt || !Number.isInteger(n) || n <= 0) return;
                               const reference = window.prompt(
@@ -156,13 +157,13 @@ export default function SubscriptionsPage() {
                               if (!reference) return;
                               // The clause asks for a confirmation naming the TARGET and the DELTA.
                               if (!window.confirm(`Credit ${h.name} with GY$${n.toLocaleString()} against transfer ${reference}?`)) return;
-                              const reason = askReason({ action: 'record this top-up', subject: `${h.name} (${reference})` });
+                              const reason = askReason({ action: 'record this fee payment', subject: `${h.name} (${reference})` });
                               if (reason) topup.mutate({ id: s.id, amount: n, reference, reason });
                             }}
                             disabled={topup.isPending}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
-                            Top up
+                            Record fee payment
                           </button>
                           {!s.feeWaived && (
                             <button

@@ -118,6 +118,16 @@ const PUBLISHED: Record<
     driver_agreement: '36543a0b037d488ff96076092c65a30939fa6adf14825bd80a35120a18097089',
     vendor_agreement: '8bbbb883fe61443878d3183f615bca68c78d787265954e7ddfb5bd823567d702',
   },
+  // [OWNER RULING 8 Oct, NO "WALLET" · legal] The Privacy Policy's "wallet
+  // credentials" (a payer's MMG sign-in) reads "mobile-money credentials". Only
+  // that phrase changes; the shared last-updated date changes all four hashes.
+  // The Terms' denial "offers no wallet or stored value" stays as written.
+  '2026-10-11': {
+    terms: '25897b1b30a4010dbee2134560af0d0c546fb973d4398208a05b7d12a3e2a572',
+    privacy: 'ccfdfc5dcb57c3e9463d5030966d6dbfc29e1de19640000a78feb1d31f10273f',
+    driver_agreement: 'c5c776fd4b4b2d3bdccf6139154be6c2f40bd2f6a16c70f3e36b88adc79c29ba',
+    vendor_agreement: '50c3b5717806a15389a8c0416c2cf4c6d210e713f608edc24f17c1304e4fdae8',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

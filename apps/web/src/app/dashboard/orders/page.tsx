@@ -302,7 +302,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
     isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED'
       ? {
           REFUNDED: 'This payment was refunded — a new payment is a new transaction.',
-          PARTIALLY_REFUNDED: 'This payment was partly refunded — support settles the balance.',
+          PARTIALLY_REFUNDED: 'This payment was partly refunded — support settles the rest.',
           FAILED: 'MMG reports this payment as failed. Contact support with the reference if money did reach you.',
           EXPIRED: 'The payment window closed — ask the customer to pay again.',
           UNKNOWN: 'This payment is unresolved with MMG. Support settles it; it cannot be marked received here.',

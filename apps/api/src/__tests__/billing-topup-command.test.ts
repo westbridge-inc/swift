@@ -231,12 +231,13 @@ describe('[M-08] a failpoint after the credit — the register’s second red te
     expect(drained.done).toBeGreaterThanOrEqual(1);
     command = await app.prisma.topUpCommand.findUniqueOrThrow({ where: { id: command.id } });
     expect(command.tailDoneAt).not.toBeNull();
-    expect(await app.prisma.notification.count({ where: { userId, title: 'Top-up received' } })).toBe(1);
+    // [OWNER RULING 8 Oct, NO "WALLET"] the notice says "fee paid ahead", never "top-up" or "balance".
+    expect(await app.prisma.notification.count({ where: { userId, title: 'Weekly fee paid ahead' } })).toBe(1);
     const sub2 = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(sub2.status).toBe('ACTIVE'); // the owed re-bill reinstated the payer
     // Draining again does nothing: the tail is done.
     const again = await billing.drainTopUpTails({ olderThanMs: 0 });
-    expect(await app.prisma.notification.count({ where: { userId, title: 'Top-up received' } })).toBe(1);
+    expect(await app.prisma.notification.count({ where: { userId, title: 'Weekly fee paid ahead' } })).toBe(1);
     expect(again.retried).toBe(0);
   });
 });

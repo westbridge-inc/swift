@@ -175,7 +175,7 @@ function SettlementsCard() {
       <h2 className="font-bold">Rider fees owed (MMG orders)</h2>
       <MutationNotice errors={[confirm.error]} className="mt-2" />
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
-        When a customer pays your MMG, the delivery fee lands in your wallet — hand the rider their fee in cash and
+        When a customer pays your MMG, the delivery fee lands in your MMG account — hand the rider their fee in cash and
         confirm here. Both sides confirm; then it{'’'}s settled.
       </p>
       {rows.length === 0 ? (

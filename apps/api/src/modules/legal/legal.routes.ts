@@ -25,8 +25,13 @@ import type { FastifyInstance } from 'fastify';
 // stays in every ledger that holds it, and these words get their own stamp.
 // [LEGAL-FEE · owner 2026-09-29] Partner weekly fees are paid through MMG's
 // checkout in the Swift app, or by card where offered. New words, new version.
-export const LEGAL_VERSION = '2026-10-04';
-const LAST_UPDATED = '4 October 2026'; // human form of LEGAL_VERSION
+// [OWNER RULING 8 Oct, NO "WALLET" · legal] Swift's words never say "wallet",
+// "top up" or a money "balance": the Privacy Policy's "wallet credentials" (a
+// payer's MMG sign-in) now reads "mobile-money credentials". The Terms keep
+// their denial that Swift "offers no wallet or stored value" — that sentence
+// is the protection, not the problem. New words, new version.
+export const LEGAL_VERSION = '2026-10-11';
+const LAST_UPDATED = '11 October 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -147,7 +152,7 @@ export const PRIVACY = page(
 </ul>
 
 <h2>2. What we do NOT collect</h2>
-<p>Swift never holds your order money, so we do not collect card numbers or wallet credentials. If you pay a business through MMG, that payment happens in MMG's own flow under MMG's terms — we only record that the business confirmed receiving it. Our websites and app carry no third-party advertising or cross-site tracking pixels.</p>
+<p>Swift never holds your order money, so we do not collect card numbers or mobile-money credentials. If you pay a business through MMG, that payment happens in MMG's own flow under MMG's terms — we only record that the business confirmed receiving it. Our websites and app carry no third-party advertising or cross-site tracking pixels.</p>
 
 <h2>3. Why we use it — and the legal bases</h2>
 <p>Under the Data Protection Act 2023, each use of your data rests on a legal basis:</p>
