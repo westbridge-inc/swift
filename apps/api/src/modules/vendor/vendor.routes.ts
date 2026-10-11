@@ -1008,7 +1008,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: {
         operatingHours: { orderBy: { dayOfWeek: 'asc' } },
         subscription: true,
-        categories: { orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: true } } } },
+        categories: { orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: { where: { archivedAt: null } } } } } },
         _count: { select: { orders: true, items: true } },
       },
     });
@@ -1977,7 +1977,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       note: z.string().max(300).optional(),
     }).parse(request.body);
 
-    const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds } } });
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds }, archivedAt: null } });
     if (!item) throw new NotFoundError('Item', request.params.id);
     if (item.stockQuantity == null) {
       throw new AppError(400, 'UNTRACKED', 'This item does not track stock — set a quantity on it first');
@@ -2461,7 +2461,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const query = vendorItemsQuerySchema.parse(request.query);
 
-    const where: Record<string, unknown> = { vendorId };
+    // [Item 62] A deleted (archived) listing is history, not menu.
+    const where: Record<string, unknown> = { vendorId, archivedAt: null };
     if (query.categoryId) where['categoryId'] = query.categoryId;
     if (query.isAvailable === 'true') where['isAvailable'] = true;
     if (query.isAvailable === 'false') where['isAvailable'] = false;
@@ -2872,7 +2873,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const file = await request.file();
@@ -2894,7 +2895,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     const item = await app.prisma.item.update({
-      where: { id: request.params.id },
+      where: { id: request.params.id, archivedAt: null },
       data: { imageUrl: url },
       select: { id: true, name: true, imageUrl: true },
     });
@@ -2907,7 +2908,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /items/:id — Update an item */
   app.put<{ Params: IdParam }>('/items/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const body = updateItemSchema.parse(request.body);
@@ -2937,7 +2938,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const stockTarget = body.stockQuantity;
 
     const item = await app.prisma.item.update({
-      where: { id: request.params.id },
+      where: { id: request.params.id, archivedAt: null },
       data: {
         ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
         ...(body.name !== undefined && { name: body.name.trim() }),
@@ -3005,17 +3006,29 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: withBulkWord(saved) };
   });
 
-  /** DELETE /items/:id — Delete an item and its option groups/options */
+  /** DELETE /items/:id — [Item 62] Delete a listing from the menu: the row is
+   *  ARCHIVED, not removed. Orders hold a loose reference to it (their lines
+   *  are snapshots) and bookings a real one (a hard delete cascaded and erased
+   *  the customer's reservation); an open order must still cancel and restock
+   *  against it. Archived means: off every menu, search and cart (it can never
+   *  be available again — the items_archived_unavailable check), refused by
+   *  every editor, and its option history kept. The response is unchanged. */
   app.delete<{ Params: IdParam }>('/items/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
-    await app.prisma.option.deleteMany({ where: { optionGroup: { itemId: request.params.id } } });
-    await app.prisma.optionGroup.deleteMany({ where: { itemId: request.params.id } });
-    await app.prisma.item.delete({ where: { id: request.params.id } });
+    // One compare-and-set: a concurrent delete or editor finds it archived.
+    // autoHiddenAt is cleared so a later cancellation restock (which re-shows
+    // only auto-hidden rows) can never put a deleted listing back on sale.
+    const archived = await app.prisma.item.updateMany({
+      where: { id: request.params.id, vendorId, archivedAt: null },
+      data: { archivedAt: new Date(), isAvailable: false, autoHiddenAt: null },
+    });
+    if (archived.count !== 1) throw new NotFoundError('Item', request.params.id);
 
-    // hard delete: no sweep could find this row later [SWIFT-UG-SRCH-01]
+    // Evict the search doc now [SWIFT-UG-SRCH-01]; the sync that follows sees
+    // an unavailable row and leaves it out.
     new SearchService(app.prisma).removeItemDoc(request.params.id).catch(() => {});
     scheduleVendorSearchSync(app, vendorId);
 
@@ -3025,14 +3038,14 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /items/:id/availability — Quick toggle availability */
   app.put<{ Params: IdParam }>('/items/:id/availability', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const body = itemAvailabilitySchema.parse(request.body ?? {});
     const newAvailability = body.isAvailable !== undefined ? body.isAvailable : !existing.isAvailable;
 
     const item = await app.prisma.item.update({
-      where: { id: request.params.id },
+      where: { id: request.params.id, archivedAt: null },
       data: { isAvailable: newAvailability },
       select: { id: true, name: true, isAvailable: true },
     });
@@ -3049,7 +3062,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/:itemId/option-groups — Add an option group to an item */
   app.post<{ Params: ItemIdParam }>('/items/:itemId/option-groups', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const item = await app.prisma.item.findFirst({ where: { id: request.params.itemId, vendorId } });
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.itemId, vendorId, archivedAt: null } });
     if (!item) throw new NotFoundError('Item', request.params.itemId);
 
     const body = addOptionGroupSchema.parse(request.body);
@@ -3094,9 +3107,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
 
     const body = updateOptionGroupSchema.parse(request.body);
 
@@ -3120,9 +3133,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
 
     await app.prisma.option.deleteMany({ where: { optionGroupId: request.params.id } });
     await app.prisma.optionGroup.delete({ where: { id: request.params.id } });
@@ -3139,9 +3152,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const group = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.groupId },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!group || group.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.groupId);
+    if (!group || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
 
     const body = addOptionSchema.parse(request.body);
 
@@ -3174,9 +3187,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
+      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
+    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
 
     const body = updateOptionSchema.parse(request.body);
 
@@ -3199,9 +3212,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
+      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
+    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
 
     await app.prisma.option.delete({ where: { id: request.params.id } });
 
@@ -3311,7 +3324,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       .parse(request.body);
 
     if (body.itemId) {
-      const item = await app.prisma.item.findFirst({ where: { id: body.itemId, vendorId }, select: { id: true } });
+      const item = await app.prisma.item.findFirst({ where: { id: body.itemId, vendorId, archivedAt: null }, select: { id: true } });
       if (!item) throw new NotFoundError('Listing', body.itemId);
     }
     const [y, m, d] = body.date.split('-').map(Number);
@@ -3366,7 +3379,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** The caller must own the item — every item-tag surface goes through this. */
   async function requireOwnItem(vendorId: string, itemId: string) {
-    const item = await app.prisma.item.findFirst({ where: { id: itemId, vendorId }, select: { id: true, name: true, description: true } });
+    const item = await app.prisma.item.findFirst({ where: { id: itemId, vendorId, archivedAt: null }, select: { id: true, name: true, description: true } });
     if (!item) throw new NotFoundError('Listing', itemId);
     return item;
   }

@@ -16,6 +16,8 @@ export class VendorMenuService {
       where: { vendorId },
       include: {
         items: {
+          // [Item 62] Deleted listings are archived history, not menu.
+          where: { archivedAt: null },
           orderBy: { sortOrder: 'asc' },
           include: { optionGroups: { orderBy: { sortOrder: 'asc' }, include: { options: { orderBy: { sortOrder: 'asc' } } } } },
         },

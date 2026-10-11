@@ -1660,6 +1660,11 @@ model Item {
   bookings          Booking[]
   optionGroups      OptionGroup[]
   isAvailable       Boolean           @default(true)
+  /// [Item 62] When the store deleted this listing. The row stays: orders
+  /// reference it (their lines are snapshots) and bookings hold it by key, so
+  /// a delete archives instead. Archived = off every menu and editor, never
+  /// available again (CHECK items_archived_unavailable), history kept.
+  archivedAt        DateTime?
   isPopular         Boolean           @default(false)
   sku               String?
   barcode           String?
