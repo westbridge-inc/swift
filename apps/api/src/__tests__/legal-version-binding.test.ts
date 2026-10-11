@@ -131,12 +131,14 @@ const PUBLISHED: Record<
   // [OWNER RULING 8 Oct, NO "WALLET" (2) + (3)] The Mover and Business
   // Agreements' fee paragraph adds: at most four weeks paid ahead; a fee paid
   // ahead is used only for the weekly fee; unstarted weeks are refunded and
-  // recorded before an account is deleted. The date re-pins all four.
+  // recorded before an account is deleted; money received above the limit is
+  // returned. The date re-pins all four. (Pinned while unpublished: these are
+  // the first words served under this version.)
   '2026-10-12': {
     terms: '160fd6666250987bbd4ad6390c0ad5f9956293ebb6fcc9cb02ca6960b59cce4d',
     privacy: 'f21df903fffd27d695aef64078fcae055ac4dcf1dc31110a9cc1dec0af5295ef',
-    driver_agreement: '794f070825da05aa3282a4afe71817407f2ec3de540360f6a5e37191b09aca75',
-    vendor_agreement: 'cd9ebe20311e0434a979d7b805bcd6bb33efe07b3cfb649f2d6166c0ccf3218b',
+    driver_agreement: '5976fc9c5508c29325449db48b7b821ac658a58775d12bf1b3703e9e7f00ff9d',
+    vendor_agreement: '0bd3f6dc34d89b10a3fcad7bbd00e4332b722b993caa180176de47b80dfaca62',
   },
 };
 
@@ -155,7 +157,7 @@ describe('legal version binding [F-035-08]', () => {
     ['Business Agreement', VENDOR_AGREEMENT],
   ])('%s states the four-week pay-ahead limit and the refund of unused weeks at closing [owner ruling 8 Oct]', (_name, agreement) => {
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
-    expect(feeParagraph).toContain('You may pay the weekly fee up to four weeks ahead, and no further.');
+    expect(feeParagraph).toContain('You may pay the weekly fee up to four weeks ahead, and no further. Money received above that limit is returned to you.');
     expect(feeParagraph).toContain('If you close your account, Swift refunds to you the weeks you paid ahead that have not started, records the refund, and then deletes the account; a week that has started is not refunded.');
   });
 

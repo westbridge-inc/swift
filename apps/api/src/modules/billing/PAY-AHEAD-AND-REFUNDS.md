@@ -27,6 +27,8 @@ What counts as ahead (`pay-ahead.ts`): the fee paid ahead (`prepaidBalance`) plu
 
 An agent payment held as `PAY_AHEAD_LIMIT` or `TOPUP_ON_HOLD` is refunded, not credited: use **Refund flag** on the agent-payments tab, return the money at MMG/agent level, and note the MMG reference. Money never moves automatically.
 
+**One refund per MMG payment.** One real payment can arrive as several observations (the agent webhook, MMG's statement). Refund flag closes the MMG transaction (`REFUNDED`): its other held observations are marked reconciled ("already refunded once"), and no later observation, attach, checkout or recorded payment can credit it. Refund only the row you flagged. If Refund flag answers that the payment was already credited to a weekly fee, do **not** refund it: the money already paid the partner's fee.
+
 ## 4. Production: no fee credited by hand
 
 Production runs with `BILLING_TOPUP_HOLD=1` (deploy settings example; the API also treats an unset value as a hold when `NODE_ENV=production`). With the hold on:
@@ -41,4 +43,6 @@ Only an explicit `BILLING_TOPUP_HOLD=0` opens it, on a test server.
 
 Account deletion waits while any fee paid ahead remains (`FEE_CREDIT` blocker; the partner is told the amount and to open Get help). Support refunds the unstarted weeks paid ahead (a week that has started is not refunded), records the refund (section 2, step 3), and then the deletion can proceed. No partner money is kept after they leave.
 
-Before card payments are switched on: the deletion blocker counts the fee paid ahead only; weeks paid ahead by card (a moved `nextBillingDate`) must be added to it first.
+Until the admin refund action for fee credit is live, a refund at closing is done by hand: return the unstarted weeks through MMG, keep the MMG reference, and escalate to the owner to record it (do not edit balances in the database). The deletion stays blocked until then.
+
+Before card payments are switched on: the deletion blocker counts the fee paid ahead only; weeks paid ahead by card (a moved `nextBillingDate`) must be added to it first, and an open card Pay now must count toward the four weeks at the door (today a capture that lands past the cap is kept and paged, section 1).

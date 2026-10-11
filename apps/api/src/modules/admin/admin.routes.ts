@@ -4716,20 +4716,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/billing/agent-payments/:id/refund-flag', { preHandler: [adminGuard] }, async (request) => {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ note: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const row = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
-    if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
-    if (row.status !== 'UNMATCHED') throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
+    // [REVIEW S3-2] One refund per MMG payment: the service closes the
+    // provider transaction and reconciles its other held observations.
     // [ADM-002] Flagging a payment for refund is a money decision. Its
     // subject is in the params, so the row needs no id override.
-    const updated = await tenantPrisma.$transaction(async (tx) => {
-      const row = await tx.mmgAgentPayment.update({
-        where: { id },
-        data: { status: 'REFUND_FLAGGED', note: body.note, resolvedBy: request.user.userId, resolvedAt: new Date() },
-      });
-      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-      return row;
-    });
-    return { success: true, data: updated };
+    const { AgentCashService } = await import('../billing/agent-cash.service');
+    const svc = new AgentCashService(tenantPrisma, billing);
+    const result = await svc.flagRefund(id, request.user.userId, body.note,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+    const updated = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
+    return { success: true, data: { ...updated, refund: result } };
   });
 
   /** Leave with note (stays in the queue). */

@@ -485,6 +485,19 @@ describe('[owner ruling 8 Oct] four weeks paid ahead at most', () => {
     expect(await capPages(s.subId)).toHaveLength(pages.length);
     await app.prisma.notification.deleteMany({ where: { id: { in: pages.map((p) => p.id) } } });
   });
+
+  it('[review S4] the over-cap page still goes out when the settlement recovery throws', async () => {
+    const s = await makeSub({ balance: 5 * 2100 });
+    const failing = vi.spyOn(billing, 'recoverConfirmationSettlements').mockRejectedValueOnce(new Error('recovery down'));
+    try {
+      await expect(billing.afterTopUpCommitted(s.subId, 0, { notify: false })).rejects.toThrow('recovery down');
+    } finally {
+      failing.mockRestore();
+    }
+    const pages = await capPages(s.subId);
+    expect(pages.length).toBeGreaterThan(0);
+    await app.prisma.notification.deleteMany({ where: { id: { in: pages.map((p) => p.id) } } });
+  });
 });
 
 describe('[F6] the MMG page is sealed at rest', () => {

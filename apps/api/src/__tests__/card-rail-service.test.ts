@@ -1061,4 +1061,17 @@ describe('[owner ruling 8 Oct] a card Pay now never takes an account past four w
     });
     expect(await app.prisma.cardSession.count({ where: { subscriptionId: four.subId } })).toBe(0);
   });
+
+  it('[review S3-1] a Pay now that lands after something else filled the room is kept, and operations are paged to refund the excess', async () => {
+    const three = await partner({ due: new Date(Date.now() + 3 * DAY + 21 * DAY) });
+    const session = await start(three, 'PAY_NOW');
+    // Meanwhile a week was paid ahead another way.
+    await app.prisma.prepaidBalance.upsert({ where: { subscriptionId: three.subId }, create: { subscriptionId: three.subId, balance: WEEKLY }, update: { balance: WEEKLY } });
+    await returnWith(await press(session.sessionId, 'APPROVE'));
+    expect(await card.confirm(session.sessionId)).toMatchObject({ status: 'SUCCEEDED', settlement: 'advanced' });
+    const pages = (await app.prisma.notification.findMany({ where: { data: { path: ['alert'], equals: 'pay-ahead-over-cap' } } }))
+      .filter((n) => (n.data as Record<string, unknown>)['subscriptionId'] === three.subId);
+    expect(pages.length).toBeGreaterThan(0);
+    await app.prisma.notification.deleteMany({ where: { id: { in: pages.map((p) => p.id) } } });
+  });
 });

@@ -1945,6 +1945,9 @@ export class BillingService {
     if (settled.disposition === 'held' && settlePaymentId) await this.pageUnpinnedCardCapture(sub, settlePaymentId);
     if (settled.disposition === 'skipped' || settled.disposition === 'held') return false;
     if (settled.disposition === 'advanced') await this.afterSuccessfulCharge({ ...sub, currencyCode: settled.currencyCode! }, settled.amount!, settled.periodKey!);
+    // [REVIEW S3-1] A card capture banked, or one that moved the paid week on,
+    // is kept; past four weeks ahead the operators are paged to refund it.
+    await this.pageIfPayAheadOverCap(sub.id);
     return true;
   }
 
@@ -4179,7 +4182,7 @@ export class BillingService {
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: await tenantOfSubscription(this.prisma, subscriptionId),
         title: 'Weekly fees paid ahead past the 4-week limit — refund owed',
-        body: `A partner now has ${money(position.heldAhead)} of weekly fees paid ahead, more than the ${PAY_AHEAD_MAX_WEEKS}-week limit (${money(position.heldAhead - position.excess)}). Refund the ${money(position.excess)} above the limit to the partner (finance procedure: weekly fees paid ahead). The money had already arrived, so nothing was refused.`,
+        body: `A partner now has ${money(position.heldAhead)} of weekly fees paid ahead, more than the ${PAY_AHEAD_MAX_WEEKS}-week limit (${money(position.cap)}${position.due ? `, plus ${money(position.weeklyFee)} for the week now due` : ''}). Refund the ${money(position.excess)} above the limit to the partner (finance procedure: weekly fees paid ahead). The money had already arrived, so nothing was refused.`,
         data: { kind: 'billing_invariants', alert: 'pay-ahead-over-cap', subscriptionId, excess: position.excess, currencyCode: position.currencyCode },
         dedupeKey: `pay-ahead-over-cap:${subscriptionId}:${position.heldAhead}`,
       });
@@ -4192,8 +4195,13 @@ export class BillingService {
    * method: it moves no money; the billing engine's own event keys make an
    * immediate re-bill idempotent. */
   async afterTopUpCommitted(subscriptionId: string, amount: number, opts: { notify?: boolean } = {}): Promise<void> {
-    await this.recoverConfirmationSettlements(subscriptionId);
-    await this.pageIfPayAheadOverCap(subscriptionId);
+    // [REVIEW S4] The over-cap page runs even when the settlement recovery
+    // throws (after it, so a week the recovery applies is not paged).
+    try {
+      await this.recoverConfirmationSettlements(subscriptionId);
+    } finally {
+      await this.pageIfPayAheadOverCap(subscriptionId);
+    }
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: {

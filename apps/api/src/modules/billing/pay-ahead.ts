@@ -103,8 +103,13 @@ export const PAY_AHEAD_LIMIT = 'PAY_AHEAD_LIMIT';
 const PROCEDURE = 'finance procedure: weekly fees paid ahead';
 
 /** The refusal, in words for the person in front of it. */
-export function payAheadRefusal(position: PayAheadPosition, audience: 'partner' | 'admin'): AppError {
+export function payAheadRefusal(position: PayAheadPosition, audience: 'partner' | 'admin' | 'attach'): AppError {
   const details = { maxWeeks: PAY_AHEAD_MAX_WEEKS, roomGyd: position.room, currencyCode: position.currencyCode };
+  if (audience === 'attach') {
+    // An agent payment is attached whole or not at all: refunding it is the only action.
+    return new AppError(409, PAY_AHEAD_LIMIT,
+      `Attaching this agent payment would put more than ${PAY_AHEAD_MAX_WEEKS} weeks of weekly fees paid ahead on this account. It is attached whole or not at all: refund it to the partner instead (${PROCEDURE}).`, details);
+  }
   if (audience === 'partner') {
     return new AppError(409, PAY_AHEAD_LIMIT,
       `Your weekly fee is already paid ahead as far as Swift allows (${PAY_AHEAD_MAX_WEEKS} weeks). You can pay again once a week has been used.`, details);

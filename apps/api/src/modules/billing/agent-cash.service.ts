@@ -13,6 +13,8 @@ import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
 import { amountDueNow } from './amount-due';
 import { PAY_AHEAD_LIMIT, payAheadRefusal, readPayAhead } from './pay-ahead';
+/** [REVIEW S3-2] A provider transaction whose money was refunded to the payer. */
+export const PROVIDER_REFUNDED = 'REFUNDED';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AppError } from '../../utils/errors';
 
@@ -283,6 +285,12 @@ export class AgentCashService {
     //    own later attach.
     const identity = await this.identityFor(row, p.channel);
     if (identity.conflict) return this.suspense(row.id, 'PROVIDER_ID_CONFLICT');
+    // [REVIEW S3-2] A payment already refunded to the payer is never credited:
+    // a later observation of it is reconciled against the refund (no money).
+    if (identity.payment.status === PROVIDER_REFUNDED) {
+      const refunded = await this.prisma.mmgAgentPayment.findFirst({ where: { providerPaymentId: identity.payment.id, status: 'REFUND_FLAGGED' }, select: { id: true } });
+      return this.reconcileAgainst(row.id, refunded?.id ?? identity.payment.id, 'observed after its refund');
+    }
     if (identity.payment.status === 'CREDITED' && identity.payment.creditedPaymentId && identity.payment.creditedPaymentId !== row.id) {
       agentCashDuplicateCreditsCounter.labels(p.channel, 'observed').inc();
       return this.reconcileAgainst(row.id, identity.payment.creditedPaymentId, 'observed after credit');
@@ -486,6 +494,9 @@ export class AgentCashService {
         || Number(identity.amount) !== Number(payment.amount) || identity.currencyCode !== payment.currencyCode) {
         throw new Error('PROVIDER_ID_CONFLICT');
       }
+      if (identity.status === PROVIDER_REFUNDED) {
+        throw new AppError(409, 'PAYMENT_REFUNDED', 'This MMG payment was refunded to the payer, so it cannot be credited. Nothing changed.');
+      }
       if (identity.status !== 'OPEN' && !(identity.status === 'CREDITED' && identity.creditedPaymentId)) {
         throw new Error('PROVIDER_ID_CONFLICT');
       }
@@ -509,7 +520,7 @@ export class AgentCashService {
       });
       const position = wouldCredit ? await readPayAhead(tx, requestedSubscriptionId, new Date()) : null;
       if (position && Math.round(p.amount * 100) / 100 > position.room) {
-        if (resolution.expectedStatus === 'UNMATCHED') throw payAheadRefusal(position, 'admin');
+        if (resolution.expectedStatus === 'UNMATCHED') throw payAheadRefusal(position, 'attach');
         await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'UNMATCHED', failureCode: PAY_AHEAD_LIMIT } });
         return { paymentId, subscriptionId: requestedSubscriptionId, credited: false, duplicateOf: null, payAheadLimit: true as const };
       }
@@ -718,6 +729,48 @@ export class AgentCashService {
         RETURNING "status"`;
     });
     return row ? (row.status as 'RECEIVED' | 'UNMATCHED') : null;
+  }
+
+  /** [REVIEW S3-2 · owner 11 Oct] Refund a held agent payment — ONCE per MMG
+   *  transaction. Under the hold every agent payment is held for a refund, and
+   *  one payment can arrive as several observations (webhook, statement). The
+   *  refund closes the provider transaction (status REFUNDED: no later
+   *  observation, attach, checkout or top-up can credit it) and reconciles its
+   *  other held observations, so nobody refunds it twice. A transaction
+   *  another channel already credited is never also refunded. Money never
+   *  moves here: the refund is made at MMG/the agent, outside Swift. */
+  async flagRefund(paymentId: string, adminId: string, note: string, onAudit?: OnAudit): Promise<{ status: 'refund_flagged' | 'already_refunded'; paymentId: string; refundedPaymentId: string }> {
+    return this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const [row] = await tx.$queryRaw<MmgAgentPayment[]>`SELECT * FROM "mmg_agent_payments" WHERE "id" = ${paymentId} FOR UPDATE`;
+      if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
+      if (row.status !== 'UNMATCHED') throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
+      const now = new Date();
+      if (row.providerPaymentId) {
+        const [identity] = await tx.$queryRaw<ProviderPayment[]>`SELECT * FROM "provider_payments" WHERE "id" = ${row.providerPaymentId} FOR UPDATE`;
+        if (identity?.status === 'CREDITED') {
+          throw new AppError(409, 'ALREADY_CREDITED', 'This MMG payment was already credited to a weekly fee, so it is not refunded. Nothing changed.');
+        }
+        if (identity?.status === PROVIDER_REFUNDED) {
+          const first = await tx.mmgAgentPayment.findFirst({ where: { providerPaymentId: identity.id, status: 'REFUND_FLAGGED' }, select: { id: true } });
+          const refundedPaymentId = first?.id ?? identity.id;
+          await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'RECONCILED', note: `same MMG payment as ${refundedPaymentId}, already refunded once`, resolvedBy: adminId, resolvedAt: now } });
+          await onAudit?.(tx, { paymentId, refundedPaymentId, alreadyRefunded: true });
+          return { status: 'already_refunded' as const, paymentId, refundedPaymentId };
+        }
+        if (identity?.status === 'OPEN') {
+          const closed = await tx.providerPayment.updateMany({ where: { id: identity.id, status: 'OPEN' }, data: { status: PROVIDER_REFUNDED } });
+          if (closed.count !== 1) throw new Error('PROVIDER_ID_CONFLICT');
+          await tx.mmgAgentPayment.updateMany({
+            where: { providerPaymentId: identity.id, id: { not: paymentId }, status: 'UNMATCHED' },
+            data: { status: 'RECONCILED', note: `same MMG payment as ${paymentId}, refunded once`, resolvedBy: adminId, resolvedAt: now },
+          });
+        }
+      }
+      await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'REFUND_FLAGGED', note, resolvedBy: adminId, resolvedAt: now } });
+      await onAudit?.(tx, { paymentId, refundedPaymentId: paymentId, providerPaymentId: row.providerPaymentId });
+      return { status: 'refund_flagged' as const, paymentId, refundedPaymentId: paymentId };
+    });
   }
 
   /** Suspense resolution [spec 4.6]: attach to an account — credits via the

@@ -110,8 +110,8 @@ export default function RefundsPage() {
           {site.supportReplyBusinessDays} business days.
         </li>
         <li>
-          <b>Paying ahead.</b> You can pay the fee up to four weeks ahead, and no further. A fee paid ahead is only
-          ever used for your weekly fee.
+          <b>Paying ahead.</b> You can pay the fee up to four weeks ahead, and no further; money received above that
+          limit is returned to you. A fee paid ahead is only ever used for your weekly fee.
         </li>
         <li>
           <b>Stopping your plan.</b> When you stop your weekly plan, {site.tradeName} stops charging for the weeks
