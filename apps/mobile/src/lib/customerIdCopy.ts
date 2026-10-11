@@ -26,7 +26,7 @@ export function submittedCopy(check: CustomerIdCheck | null): { title: string; b
   switch (check) {
     case 'ON_FILE':
     case 'CHECKED':
-      return { title: 'Your ID is on file', body: 'Taxi rides and bigger orders are unlocked now.' };
+      return { title: 'Your ID is on file', body: 'Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' };
     case 'NOT_ACCEPTED':
       return { title: 'We couldn’t accept this ID', body: 'Check that the photo shows your whole ID clearly, then try again — or contact us from Help.' };
     case 'WAITING':
@@ -39,7 +39,7 @@ export function submittedCopy(check: CustomerIdCheck | null): { title: string; b
 /** The Profile row's line under "Your ID". */
 export function profileIdRowSub(check: unknown): string {
   switch (check) {
-    case 'ON_FILE': return 'On file — rides and bigger orders unlocked';
+    case 'ON_FILE': return 'On file — unlocks bigger orders and taxi rides';
     case 'CHECKED': return 'Checked by our team';
     case 'WAITING': return 'A person is checking it';
     case 'NOT_ACCEPTED': return 'Not accepted — add it again';

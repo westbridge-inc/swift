@@ -136,7 +136,7 @@ export function IdentityVerificationScreen({ navigation }: any) {
           }
         />
         <T variant="micro" tone="muted" center style={{ marginTop: space.md }}>
-          Your ID picture is stored encrypted and kept only while your account is open (DPA 2023).
+          Your ID picture is stored encrypted. Our Privacy Policy says how long we keep it (DPA 2023).
         </T>
       </ScrollView>
     </SafeAreaView>

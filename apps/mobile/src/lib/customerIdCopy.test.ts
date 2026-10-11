@@ -34,8 +34,9 @@ describe('the words stay truthful', () => {
   it('nothing says "verified"', () => {
     for (const line of [...all, ...rows]) expect(line).not.toMatch(/verif/i);
   });
-  it('on file says unlocked; waiting says a person looks first and promises no time', () => {
+  it('on file says unlocked (taxi rides also need the profile photo); waiting says a person looks first and promises no time', () => {
     expect(submittedCopy('ON_FILE')).toMatchObject({ title: 'Your ID is on file' });
+    expect(submittedCopy('ON_FILE').body).toMatch(/Taxi rides also need your profile photo/);
     expect(submittedCopy('WAITING').title).toMatch(/person/);
     expect(submittedCopy('WAITING').body).not.toMatch(/\d+\s*hours?/);
   });
@@ -55,6 +56,9 @@ describe('the screens ask for the ID alone and repeat the server', () => {
     expect(screen).not.toMatch(/Submit for verification/);
     expect(screen).toMatch(/submittedCopy\(outcome\)/);
     expect(screen).toMatch(/setOutcome\(idCheckOf\(/);
+    // No retention promise in a store binary beyond the Privacy Policy (bans keep the ID for the retention period).
+    expect(screen).not.toMatch(/kept only while your account is open/);
+    expect(screen).toMatch(/Privacy Policy says how long we keep it/);
   });
   it('the Profile row line comes from the server idCheck', () => {
     expect(src('modules/profile/screens/ProfileScreen.tsx')).toMatch(/sub=\{profileIdRowSub\(p\?\.idCheck\)\}/);

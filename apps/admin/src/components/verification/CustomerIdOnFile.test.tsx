@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { CustomerIdOnFile, customerIdFact } from './CustomerIdOnFile';
+import { CustomerIdOnFile, customerIdFact, withdrawNotice } from './CustomerIdOnFile';
 import { reviewTimeline, timelineLabel, docLabel } from '@/lib/review-center';
 import { mockApi, renderWithQuery, requestsByMethod } from '@/test/test-utils';
 
@@ -19,6 +19,8 @@ describe('the customer ID panel tells a reviewer what kind of ID this is', () =>
     expect(customerIdFact({ ...onFile, reviewedBy: 'kyc:auto' })).toMatch(/No person has reviewed this ID/);
     expect(customerIdFact({ ...onFile, reviewedBy: 'reviewer-user-id' })).toBe('On file — approved by a reviewer.');
     expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).toMatch(/Held for a person/);
+    // An older approved row that names nobody claims nobody.
+    expect(customerIdFact({ ...onFile, reviewedBy: null })).toBe('On file.');
   });
 
   it('partner, driver and rider documents never show it', () => {
@@ -33,19 +35,19 @@ describe('the customer ID panel tells a reviewer what kind of ID this is', () =>
 });
 
 describe('withdrawing an ID (back to L1)', () => {
-  it('asks why, sends the reason on the revoke route, then reports back', async () => {
+  it('asks why, sends the reason on the revoke route, then reports back the level the server gave', async () => {
     const fetch = mockApi((r) => {
-      if (r.method === 'PUT' && r.url.pathname === '/api/v1/admin/verification/cid-1/revoke') return { body: { success: true, data: { ...onFile, status: 'REJECTED' } } };
+      if (r.method === 'PUT' && r.url.pathname === '/api/v1/admin/verification/cid-1/revoke') return { body: { success: true, data: { ...onFile, status: 'REJECTED', accountTrustLevel: 'L1' } } };
       throw new Error(`Unexpected ${r.method} ${r.url.pathname}`);
     });
     const withdrawn = vi.fn();
     const { user } = renderWithQuery(<CustomerIdOnFile doc={onFile} onWithdrawn={withdrawn} />);
-    await user.click(screen.getByRole('button', { name: 'Withdraw this ID (back to L1)' }));
+    await user.click(screen.getByRole('button', { name: 'Withdraw this ID' }));
     const confirm = screen.getByRole('button', { name: 'Confirm withdrawal' });
     expect(confirm).toHaveProperty('disabled', true);
     await user.type(screen.getByLabelText('Why it is withdrawn'), REASON);
     await user.click(confirm);
-    await waitFor(() => expect(withdrawn).toHaveBeenCalledWith(onFile));
+    await waitFor(() => expect(withdrawn).toHaveBeenCalledWith(onFile, 'L1'));
     const [[, init]] = requestsByMethod(fetch, 'PUT');
     expect(JSON.parse(String(init?.body))).toEqual({ reason: REASON });
     expect(new Headers(init?.headers).get('x-swift-reason')).toBeTruthy();
@@ -54,6 +56,20 @@ describe('withdrawing an ID (back to L1)', () => {
   it('a held (pending) ID has no withdraw button — the reviewer approves or rejects it instead', () => {
     renderWithQuery(<CustomerIdOnFile doc={{ ...onFile, status: 'PENDING', reviewedBy: null }} onWithdrawn={() => {}} />);
     expect(screen.queryByRole('button', { name: /Withdraw/ })).toBeNull();
+  });
+});
+
+describe('"back to L1" is said only when the server reports it', () => {
+  it('L1 from the server; another level; no answer (an older server)', () => {
+    expect(withdrawNotice('Ann', 'L1')).toBe('Withdrew the customer ID for Ann. The account is back to L1.');
+    expect(withdrawNotice('Ann', 'L2')).toMatch(/still at L2/);
+    expect(withdrawNotice('Ann', undefined)).not.toMatch(/back to L1/);
+    expect(withdrawNotice('Ann', undefined)).toMatch(/did not report the account level/);
+  });
+  it('the panel itself never promises L1 before the server answers', () => {
+    renderWithQuery(<CustomerIdOnFile doc={onFile} onWithdrawn={() => {}} />);
+    expect(screen.getByRole('button', { name: 'Withdraw this ID' })).toBeTruthy();
+    expect(screen.queryByText(/back to L1/)).toBeNull();
   });
 });
 
@@ -69,5 +85,7 @@ describe('the Review Center shows the panel for the selected document', () => {
   it('page.tsx renders CustomerIdOnFile under the evidence', () => {
     const page = readFileSync(join(__dirname, '../../app/verification/page.tsx'), 'utf8');
     expect(page).toMatch(/<CustomerIdOnFile key=\{`cid-\$\{selected\.id\}`\} doc=\{selected\}/);
+    expect(page).toMatch(/setNotice\(withdrawNotice\(applicant\.name, accountTrustLevel\)\)/);
+    expect(page).not.toMatch(/The account is back to L1/);
   });
 });

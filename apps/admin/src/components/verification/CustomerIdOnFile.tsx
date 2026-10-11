@@ -20,37 +20,47 @@ const AUTOMATIC_REVIEWERS: ReadonlySet<string> = new Set(['auto:id-on-file', 'ky
 export function customerIdFact(doc: Pick<ReviewDocument, 'docType' | 'status' | 'reviewedBy'>): string | null {
   if (doc.docType !== CUSTOMER_ID_DOC_TYPE) return null;
   if (doc.status === 'APPROVED') {
-    return AUTOMATIC_REVIEWERS.has(doc.reviewedBy ?? '')
-      ? 'On file — the automatic checks found nothing to hold. No person has reviewed this ID.'
-      : 'On file — approved by a reviewer.';
+    if (AUTOMATIC_REVIEWERS.has(doc.reviewedBy ?? '')) return 'On file — the automatic checks found nothing to hold. No person has reviewed this ID.';
+    // A reviewer is named only when the row names one; an older row without it claims nothing.
+    return doc.reviewedBy ? 'On file — approved by a reviewer.' : 'On file.';
   }
   if (doc.status === 'PENDING') return 'Held for a person by the automatic checks — the history below says why. Approving it unlocks taxi rides and big orders.';
   return null;
 }
 
-export function CustomerIdOnFile({ doc, onWithdrawn }: { doc: ReviewDocument; onWithdrawn: (_withdrawn: ReviewDocument) => void | Promise<void> }) {
+/**
+ * The page's line after a withdrawal, from the SERVER's answer only: "back to L1" is said when the
+ * server reports L1, never assumed (a server without that answer, or another ID still standing).
+ */
+export function withdrawNotice(name: string, accountTrustLevel: unknown): string {
+  if (accountTrustLevel === 'L1') return `Withdrew the customer ID for ${name}. The account is back to L1.`;
+  if (typeof accountTrustLevel === 'string') return `Withdrew the customer ID for ${name}. The account is still at ${accountTrustLevel}: another ID stands.`;
+  return `Withdrew the customer ID for ${name}. The server did not report the account level — check it on the user page before relying on it.`;
+}
+
+export function CustomerIdOnFile({ doc, onWithdrawn }: { doc: ReviewDocument; onWithdrawn: (_withdrawn: ReviewDocument, _accountTrustLevel: unknown) => void | Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState('');
   const withdraw = useMutation({
     mutationFn: () => revokeDoc(doc.id, reason.trim()),
-    onSuccess: async () => { setOpen(false); setReason(''); await onWithdrawn(doc); },
+    onSuccess: async (result: { data?: { accountTrustLevel?: unknown } } | undefined) => { setOpen(false); setReason(''); await onWithdrawn(doc, result?.data?.accountTrustLevel); },
   });
   const fact = customerIdFact(doc);
   if (!fact) return null;
   const busy = withdraw.isPending;
   return <div className="rc-customer-id">
     <p>{fact}</p>
-    {doc.status === 'APPROVED' && <button disabled={busy} onClick={() => { setReason(''); withdraw.reset(); setOpen(true); }}>Withdraw this ID (back to L1)</button>}
+    {doc.status === 'APPROVED' && <button disabled={busy} onClick={() => { setReason(''); withdraw.reset(); setOpen(true); }}>Withdraw this ID</button>}
     {open && <Modal title="Withdraw customer ID" busy={busy} onClose={() => setOpen(false)}>
       <h2>Withdraw this customer ID</h2>
-      <p>The account goes back to L1 at once: taxi rides and orders over the ID limit lock again, and the next ID they send waits for a person.</p>
+      <p>With no other ID standing, the account goes back to L1: taxi rides and orders over the ID limit lock again, and the next ID they send waits for a person. The page shows the account level the server reports after you confirm.</p>
       <form onSubmit={(event) => {
         event.preventDefault();
         if (busy || reasonTooShort(reason) || reason.trim().length > 500) return;
         withdraw.mutate();
       }}>
         <label>Why it is withdrawn<textarea aria-label="Why it is withdrawn" rows={4} maxLength={500} value={reason} disabled={busy} onChange={(e) => setReason(e.target.value)} /></label>
-        <p className="rc-muted">At least 12 characters. Kept in the review record; the customer is told only that the ID was withdrawn.</p>
+        <p className="rc-muted">At least 12 characters. Kept in the staff record; the customer&apos;s app shows only that our team withdrew it.</p>
         <MutationError error={withdraw.error} label="Withdrawal failed" />
         <div className="rc-dialog-actions">
           <button type="button" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
