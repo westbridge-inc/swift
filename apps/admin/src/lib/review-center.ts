@@ -132,6 +132,23 @@ export const applicantId = (doc: ReviewDocument) => doc.userId || doc.user?.id |
 export const maskedPhone = (phone?: string) => phone ? `••• ••• ${phone.slice(-4)}` : 'No phone on file';
 
 /** Follow the server's page metadata. No partial success if a later page fails. */
+/**
+ * [Owner report 8 Oct 2026] New uploads did not appear in an open Review Center until a reload. The counts are
+ * polled lightly; when the server holds more documents in this lane than the page loaded, the page says how many
+ * are new and offers a refresh — the list a reviewer is working through never shifts under them.
+ */
+export function newSinceLoaded(
+  counts: { byStatus?: Record<string, number>; byLane?: Record<string, { customer: number; operator: number }> } | undefined,
+  status: ReviewStatus, lane: ReviewLane, loaded: number,
+): number {
+  if (!counts) return 0;
+  const onServer = lane === 'customer' ? counts.byLane?.[status]?.customer
+    : lane === 'operator' ? counts.byLane?.[status]?.operator
+      : counts.byStatus?.[status];
+  return typeof onServer === 'number' && onServer > loaded ? onServer - loaded : 0;
+}
+/** How often the lane counts are re-read while the Review Center is open (cheap: one grouped count). */
+export const REVIEW_COUNTS_POLL_MS = 30_000;
 export async function loadReviewQueue(status: ReviewStatus, lane: ReviewLane): Promise<ReviewDocument[]> {
   const docs = new Map<string, ReviewDocument>();
   for (let page = 1; ; page++) {
