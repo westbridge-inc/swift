@@ -14,7 +14,7 @@ import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
+import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt, freeBecauseNoMoverFound, readNoMoverFound, NO_MOVER_FREE_CANCEL_MESSAGE } from '../order/cancel-policy';
 import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
@@ -2583,7 +2583,10 @@ export async function customerRoutes(app: FastifyInstance) {
     // — the fee shown here and the marker recorded there can never drift
     // again. The hold exemption, the assignment guard and the scheduled-slot
     // branch all live inside it; this file no longer restates any of them.
-    const freeCancellation = canCancel && isFreeCancellation(order, previewNow);
+    // [Item 64] The dispatch journal's "no mover found" fact, read the same way
+    // the charge path reads it (there under the order lock).
+    const policyOrder = { ...order, noMoverFound: canCancel && await readNoMoverFound(app.prisma, order) };
+    const freeCancellation = canCancel && isFreeCancellation(policyOrder, previewNow);
 
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({
@@ -2720,8 +2723,11 @@ export async function customerRoutes(app: FastifyInstance) {
         // scheduled order is a countdown that expired hours before the window
         // it claims to describe.
         freeCancellationExpiresAt: canCancel
-          ? (freeCancellationExpiresAt(order, previewNow)?.toISOString() ?? null)
+          ? (freeCancellationExpiresAt(policyOrder, previewNow)?.toISOString() ?? null)
           : null,
+        // [Item 64] Why the cancel is free, in plain words — only when no
+        // mover was found (additive; older apps ignore it).
+        cancellationMessage: freeCancellation && freeBecauseNoMoverFound(policyOrder) ? NO_MOVER_FREE_CANCEL_MESSAGE : null,
       },
     };
   });

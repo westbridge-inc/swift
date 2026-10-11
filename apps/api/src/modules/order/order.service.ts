@@ -19,7 +19,7 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import { isFreeCancellation, freeBecauseNoMoverFound, readNoMoverFound, LATE_CANCEL_FEE } from './cancel-policy';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -2427,6 +2427,7 @@ export class OrderService {
       order: CancellationOrder;
       heldNow: boolean;
       freeCancellation: boolean;
+      noMoverFree: boolean;
       cancellationFee: number;
       cancelledSearches: number;
     } | undefined;
@@ -2488,7 +2489,12 @@ export class OrderService {
           // the job, and the order is held or still in its uncommitted status
           // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
           // inside the window.
-          const freeCancellation = isFreeCancellation(order, now);
+          // [Item 64] ...or the mover search came back empty — read here, under
+          // the order lock and before the searches are closed below, so a mover
+          // assigned after the customer's preview still ends the exemption.
+          const policyOrder = { ...order, noMoverFound: await readNoMoverFound(tx, order) };
+          const freeCancellation = isFreeCancellation(policyOrder, now);
+          const noMoverFree = freeCancellation && freeBecauseNoMoverFound(policyOrder);
           const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 
           // The row lock makes this update and every dependent release below one
@@ -2547,6 +2553,7 @@ export class OrderService {
             order,
             heldNow,
             freeCancellation,
+            noMoverFree,
             cancellationFee,
             cancelledSearches: searches.count,
           };
@@ -2562,7 +2569,7 @@ export class OrderService {
     }
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
-    const { order, heldNow, freeCancellation, cancellationFee, cancelledSearches } = committed;
+    const { order, heldNow, freeCancellation, noMoverFree, cancellationFee, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
@@ -2614,13 +2621,15 @@ export class OrderService {
     // above are the server's and are unchanged. Food keeps its exact words.
     const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : 'Order';
     const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+    // [Item 64] The plain reason, when the platform found nobody to do the job.
+    const cancelled = noMoverFree ? `${noun} cancelled — no mover was found, so there is no fee.` : null;
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
-        message: `${noun} cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`,
+        message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
         cancellationFee,
       };
     }
-    return { message: freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`, cancellationFee };
+    return { message: cancelled ?? (freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`), cancellationFee };
   }
 
   async updateStatus(

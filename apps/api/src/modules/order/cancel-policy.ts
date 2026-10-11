@@ -35,7 +35,74 @@ export type CancellationSnapshot = {
    *  acceptance. Optional because a delivery row never carries one; both the
    *  charge path and the preview hold full order rows, so it flows unchanged. */
   appointmentSlot?: Date | null;
+  /** [Item 64] The mover search for this order's current delivery generation
+   *  came back with nobody. A dispatch-journal fact, not an order column: both
+   *  callers read it with `readNoMoverFound` (the charge path under the order
+   *  lock) and pass it in. Absent means "not known to be true". */
+  noMoverFound?: boolean;
 };
+
+/** [Item 64] What the preview tells the customer when no mover was found. */
+export const NO_MOVER_FREE_CANCEL_MESSAGE = 'No mover was found. You can cancel without a fee.';
+
+/**
+ * [Item 64 · owner ruling 5 Oct: "no rider → no fee + plain message"] The
+ * cancel is free because the platform could not find anyone to do the job: the
+ * mover search came back empty and still nobody holds it. Read by the one
+ * predicate below and by the callers' wording — never re-derived.
+ */
+export function freeBecauseNoMoverFound(order: Pick<CancellationSnapshot, 'riderId' | 'driverId' | 'noMoverFound'>): boolean {
+  return order.noMoverFound === true && order.riderId == null && order.driverId == null;
+}
+
+/** The fields the dispatch-journal read needs; both callers hold full rows. */
+export type NoMoverSubject = {
+  id: string;
+  orderType: string;
+  fulfillment: string | null;
+  fulfillmentMode: string | null;
+  fulfillmentModeVersion: number;
+  riderId: string | null;
+  driverId: string | null;
+};
+
+/** Structural on purpose, like the snapshot: the app client and a transaction
+ *  client both fit, and this file still imports nothing from Prisma. */
+export interface DispatchJournalReader {
+  dispatchSearch: { findFirst(args: unknown): Promise<unknown> };
+}
+
+/**
+ * [Item 64] Did the mover search for this order's CURRENT delivery generation
+ * come back with nobody? True when nobody holds the job and the dispatch
+ * journal has an EXHAUSTED search for the platform pool that serves it:
+ *  - a taxi: the driver pool's searches (they carry no delivery generation);
+ *  - everything else: only platform-rider delivery (never a pickup or a
+ *    store's own delivery, which have no rider search by design), and only a
+ *    search of the order's current generation — an exhaustion from before the
+ *    store switched who delivers says nothing about the search now. A search
+ *    with no generation recorded predates generations and is generation 0
+ *    (the dispatch journal's own rule).
+ * An exhaustion followed by a retry still counts: the search already came back
+ * empty once for this generation, and the customer has been waiting since.
+ */
+export async function readNoMoverFound(db: DispatchJournalReader, order: NoMoverSubject): Promise<boolean> {
+  if (order.riderId != null || order.driverId != null) return false;
+  let generation: Record<string, unknown>;
+  if (order.orderType === 'TAXI') {
+    generation = { deliveryAuthorityVersion: null };
+  } else {
+    if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY') return false;
+    generation = order.fulfillmentModeVersion === 0
+      ? { OR: [{ deliveryAuthorityVersion: 0 }, { deliveryAuthorityVersion: null }] }
+      : { deliveryAuthorityVersion: order.fulfillmentModeVersion };
+  }
+  const exhausted = await db.dispatchSearch.findFirst({
+    where: { subjectId: order.id, subjectType: 'ORDER', status: 'EXHAUSTED', ...generation },
+    select: { id: true },
+  });
+  return exhausted != null;
+}
 
 /** The real moment the work is scheduled to happen, or null for "now".
  * Both appointmentSlot and scheduledFor are true instants. */
@@ -99,6 +166,9 @@ function scheduledMoment(appointmentSlot: Date | null | undefined, scheduledFor:
 export function isFreeCancellation(order: CancellationSnapshot, now: Date = new Date()): boolean {
   const unassigned = order.riderId == null && order.driverId == null;
   if (!unassigned) return false;
+  // [Item 64] Nothing was committed TO the customer either: no mover could be
+  // found. Whatever the store has prepared, the platform failed to deliver it.
+  if (freeBecauseNoMoverFound(order)) return true;
   if (order.holdExpiresAt != null && order.holdExpiresAt > now) return true;
   const uncommittedStatus = order.status === 'PENDING'
     || (order.orderType === 'COURIER' && order.status === 'READY_FOR_PICKUP');
@@ -125,10 +195,12 @@ export function isFreeCancellation(order: CancellationSnapshot, now: Date = new 
  * the two answers come from one place.
  *
  * Returns null when the cancel is not free right now; there is no window to
- * promise.
+ * promise. [Item 64] Also null when it is free because no mover was found:
+ * that lasts until a mover takes the job, so there is no moment to count to.
  */
 export function freeCancellationExpiresAt(order: CancellationSnapshot, now: Date = new Date()): Date | null {
   if (!isFreeCancellation(order, now)) return null;
+  if (freeBecauseNoMoverFound(order)) return null;
   // Held and unassigned: the hold IS the window.
   if (order.holdExpiresAt != null && order.holdExpiresAt > now) return order.holdExpiresAt;
   const candidates = [new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60_000)];
