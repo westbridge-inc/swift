@@ -85,7 +85,7 @@ async function makeVendor(owned: { userId: string }, opts: { verified: boolean }
   return vendor.id;
 }
 
-function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
+function inject(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown, token?: string) {
   return app.inject({
     method,
     url,
@@ -407,5 +407,111 @@ describe('One code path for all four vendor types', () => {
     const kinds = new Set(items.map((i) => i.fulfillment));
     expect(kinds.has('DELIVERY')).toBe(true);
     expect(kinds.has('APPOINTMENT')).toBe(true);
+  });
+});
+
+
+describe('deleting a menu item archives its order and booking references', () => {
+  // This block's orders and bookings reference the shared customer: remove
+  // them before the file's own cleanup deletes the people.
+  const fixtureOrderIds: string[] = [];
+  afterAll(async () => {
+    await app.prisma.booking.deleteMany({ where: { customerId } });
+    await app.prisma.cart.deleteMany({ where: { customerId } });
+    await app.prisma.order.deleteMany({ where: { id: { in: fixtureOrderIds } } });
+  });
+
+  async function archiveFixture(fulfillment: 'DELIVERY' | 'APPOINTMENT' = 'DELIVERY') {
+    const category = await app.prisma.category.create({ data: { vendorId, name: `Archive ${nanoid(8)}` } });
+    const item = await app.prisma.item.create({ data: {
+      vendorId, categoryId: category.id, name: 'Archive fixture', basePrice: 500, fulfillment,
+      stockQuantity: 0, isAvailable: false, autoHiddenAt: new Date(),
+      optionGroups: { create: { name: 'Size', options: { create: { name: 'Small', additionalPrice: 0 } } } },
+    } });
+    const order = await app.prisma.order.create({ data: {
+      orderNumber: `ARCHIVE-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment,
+      customerId, vendorId, status: 'PENDING', paymentMethod: 'CASH',
+      deliveryAddress: 'Fixture', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 500, subtotalMarkup: 0, subtotalCustomer: 500, deliveryFee: 0, totalAmount: 500,
+      items: { create: { itemId: item.id, name: item.name, quantity: 1, basePrice: 500, markedUpPrice: 500, markupAmount: 0, totalBase: 500, totalMarkup: 0, totalCustomer: 500 } },
+    } });
+    fixtureOrderIds.push(order.id);
+    const response = await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken);
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().data.deleted).toBe(true); // keep the shipped client contract
+    return { item, order, category };
+  }
+
+  it('retains the item and option history while hiding it from the editable menu', async () => {
+    const { item } = await archiveFixture();
+    const stored = await app.prisma.item.findUnique({ where: { id: item.id }, include: { optionGroups: { include: { options: true } } } });
+    expect(stored).toMatchObject({ isAvailable: false, autoHiddenAt: null, archivedAt: expect.any(Date) });
+    expect(stored?.optionGroups[0]?.options).toHaveLength(1);
+    const menu = await inject('GET', '/api/v1/vendor/items', undefined, vendorToken);
+    expect(menu.statusCode).toBe(200);
+    expect(menu.json().data.some((row: { id: string }) => row.id === item.id)).toBe(false);
+    const categories = await inject('GET', '/api/v1/vendor/categories', undefined, vendorToken);
+    expect(categories.json().data.some((row: { items: Array<{ id: string }> }) => row.items.some((entry) => entry.id === item.id))).toBe(false);
+  });
+
+  it('an open order still cancels and restocks once without making an archived item saleable', async () => {
+    const { item, order } = await archiveFixture();
+    const response = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture cancellation' }, customerToken);
+    expect(response.statusCode, response.body).toBe(200);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('CANCELLED');
+    expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ stockQuantity: 1, isAvailable: false, autoHiddenAt: null });
+    expect(await app.prisma.stockMovement.count({ where: { orderId: order.id, itemId: item.id, reason: 'CANCEL_RESTOCK' } })).toBe(1);
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture retry' }, customerToken)).statusCode).toBe(400);
+  });
+
+  it('a stale menu editor cannot restore an archived item to availability', async () => {
+    const { item } = await archiveFixture();
+    for (const suffix of ['', '/availability']) {
+      const response = await inject('PUT', `/api/v1/vendor/items/${item.id}${suffix}`, { isAvailable: true }, vendorToken);
+      expect(response.statusCode, response.body).toBe(404);
+    }
+    expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ isAvailable: false, archivedAt: expect.any(Date) });
+  });
+
+  it('every editor of a listing treats an archived one as gone, and a second delete finds nothing', async () => {
+    const { item } = await archiveFixture();
+    const attempts: Array<[string, () => ReturnType<typeof inject>]> = [
+      ['adjust stock', () => inject('POST', `/api/v1/vendor/items/${item.id}/adjust`, { delta: 1, reason: 'RECEIVED' }, vendorToken)],
+      ['add an option group', () => inject('POST', `/api/v1/vendor/items/${item.id}/option-groups`, { name: 'Extra' }, vendorToken)],
+      ['read its category suggestions', () => inject('GET', `/api/v1/vendor/items/${item.id}/category-suggestions`, undefined, vendorToken)],
+      ['close a date for it', () => inject('POST', '/api/v1/vendor/bookings/exceptions', { itemId: item.id, date: '2031-01-06' }, vendorToken)],
+      ['delete it again', () => inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)],
+    ];
+    for (const [what, attempt] of attempts) {
+      const response = await attempt();
+      expect(response.statusCode, `${what}: ${response.body}`).toBe(404);
+    }
+    expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ isAvailable: false, stockQuantity: 0, archivedAt: expect.any(Date) });
+  });
+
+  it('an archived listing is not on the storefront and cannot be added to a cart', async () => {
+    const { item } = await archiveFixture();
+    const store = await inject('GET', `/api/v1/customer/vendors/${vendorId}`, undefined, customerToken);
+    expect(store.statusCode, store.body).toBe(200);
+    expect(JSON.stringify(store.json().data)).not.toContain(item.id);
+    const add = await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: item.id, quantity: 1 }, customerToken);
+    expect(add.statusCode).toBe(404);
+  });
+
+  it('the database itself refuses to make an archived listing available again', async () => {
+    const { item } = await archiveFixture();
+    await expect(app.prisma.item.update({ where: { id: item.id }, data: { isAvailable: true } })).rejects.toThrow(/items_archived_unavailable/);
+    await expect(app.prisma.item.update({ where: { id: item.id }, data: { autoHiddenAt: new Date() } })).rejects.toThrow(/items_archived_unavailable/);
+    expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ isAvailable: false, autoHiddenAt: null });
+  });
+
+  it('does not erase an existing booking when the service listing is deleted', async () => {
+    const category = await app.prisma.category.create({ data: { vendorId, name: `Archive service ${nanoid(8)}` } });
+    const item = await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Booked fixture', basePrice: 500, fulfillment: 'APPOINTMENT' } });
+    const held = await app.prisma.booking.create({ data: { itemId: item.id, customerId, slotStart: new Date(Date.now() + DAY), slotEnd: new Date(Date.now() + DAY + 1800000) } });
+    expect((await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)).statusCode).toBe(200);
+    expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: item.id, status: 'RESERVED' });
+    await booking.cancelBooking(held.id, customerId);
+    expect((await app.prisma.booking.findUniqueOrThrow({ where: { id: held.id } })).status).toBe('CANCELLED');
   });
 });
