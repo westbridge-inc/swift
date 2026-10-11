@@ -46,6 +46,11 @@ const TERMINAL: Record<string, string> = {
   RETURNED: 'Returned to sender',
 };
 
+/** Share the status map's finished-order rule with other order lists. */
+export function isTerminalOrderStatus(status: unknown): boolean {
+  return Object.prototype.hasOwnProperty.call(TERMINAL, String(status ?? '').toUpperCase());
+}
+
 /** A ride. No store, no picking, no packing — a driver and a car. */
 const TAXI: Record<string, string> = {
   PENDING: 'Finding you a driver',
