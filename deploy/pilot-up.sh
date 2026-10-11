@@ -261,6 +261,18 @@ if [ "$PILOT_ENV" = production ]; then
     "" | 0) ;;
     *) die "PILOT_ENV=production refuses WEB_ALLOW_SITE_TOKENS: the public site never shows unfilled company details" ;;
   esac
+  # Owner ruling, 8 Oct: production launches with admin top-ups ON HOLD. The
+  # API refuses every manual credit of fee paid ahead (503 TOPUP_ON_HOLD,
+  # nothing recorded) exactly when BILLING_TOPUP_HOLD=1, read from this file.
+  [ "$(env_setting BILLING_TOPUP_HOLD)" = 1 ] ||
+    die "PILOT_ENV=production needs BILLING_TOPUP_HOLD=1: admin top-ups stay on hold in production (owner ruling, 8 Oct)"
+  # Partners pay the weekly fee only on the MMG checkout page, never through an
+  # agent or a Swift Number. The agent-cash webhook answers 503 while its
+  # secret is unset, so production never sets it (named, never echoed).
+  for agent_cash_name in AGENT_CASH_WEBHOOK_SECRET AGENT_CASH_WEBHOOK_SECRET_FILE; do
+    [ -z "$(env_setting "$agent_cash_name")" ] ||
+      die "PILOT_ENV=production refuses the agent-cash webhook ($agent_cash_name is set): partners pay the weekly fee only on the MMG checkout page"
+  done
 fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 # [PROD-PATH] The production stack obtains certificates for every name it

@@ -44,9 +44,11 @@ const makeKey = (name: string) => {
 const PUB = { alice: makeKey('alice'), bob: makeKey('bob'), mallory: makeKey('mallory') };
 const PINNED = `alice ${PUB.alice}\nbob ${PUB.bob}\n`;
 const APPROVE = join(process.cwd(), '../../deploy/seed-approve.sh');
+/** With no terminal, seed-approve.sh takes the request's own nonce as the typed yes. */
+const yesFor = (request: string) => ({ SEED_APPROVE_YES: /^nonce: ([0-9a-f]+)$/m.exec(request)?.[1] ?? 'missing-nonce' });
 /** `name` signs `request` with the private key of `keyOf` through the real deploy/seed-approve.sh. */
 function sign(name: string, keyOf: string, request: string): SignedApproval {
-  const out = execFileSync('bash', [APPROVE, name, join(KEYDIR, keyOf)], { input: request, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', SEED_APPROVE_YES: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const out = execFileSync('bash', [APPROVE, name, join(KEYDIR, keyOf)], { input: request, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...yesFor(request) }, stdio: ['pipe', 'pipe', 'pipe'] });
   return JSON.parse(out.trim()) as SignedApproval;
 }
 const both = (request: string) => [sign('alice', 'alice', request), sign('bob', 'bob', request)];
@@ -398,18 +400,39 @@ describe('[PROD-PATH] the real seed entry point on a production target', () => {
       'database: swift on postgres, deployment dep-x (production)', 'config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD', 'admin phone: none',
     ] });
     const runApprove = (input: string, env: Record<string, string>, name = 'alice') => spawnSync('bash', [APPROVE, name, join(KEYDIR, 'alice')], { input, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...env } });
-    const good = runApprove(`\n${okRequest.replace(/\n/g, '\r\n')}\n\n`, { SEED_APPROVE_YES: '1' });
+    const good = runApprove(`\n${okRequest.replace(/\n/g, '\r\n')}\n\n`, yesFor(okRequest));
     expect(good.status, good.stderr).toBe(0);
     const line = JSON.parse(good.stdout.trim()) as SignedApproval;
     expect(Buffer.from(line.request, 'base64').toString('utf8')).toBe(okRequest);
     expect(good.stdout.trim().split('\n')).toHaveLength(1);
-    expect(runApprove('hello\n', { SEED_APPROVE_YES: '1' }).status).not.toBe(0);
-    expect(runApprove(okRequest + 'extra: line\n', { SEED_APPROVE_YES: '1' }).status).not.toBe(0);
-    expect(runApprove(okRequest, { SEED_APPROVE_YES: '1' }, 'Alice Smith').status).not.toBe(0);
+    expect(runApprove('hello\n', yesFor(okRequest)).status).not.toBe(0);
+    expect(runApprove(okRequest + 'extra: line\n', yesFor(okRequest)).status).not.toBe(0);
+    expect(runApprove(okRequest, yesFor(okRequest), 'Alice Smith').status).not.toBe(0);
     // No terminal and no explicit yes: nothing is signed.
     const unconfirmed = runApprove(okRequest, {});
     expect(unconfirmed.status).not.toBe(0);
     expect(unconfirmed.stdout).toBe('');
+  });
+
+  // #1448 review (Sol 8 Oct S4, DS838): a blanket SEED_APPROVE_YES=1 left in
+  // an approver's shell signed every later request unread. The stand-in for
+  // the typed yes is now this request's own nonce, so a setting carried over
+  // from anywhere else signs nothing.
+  it('deploy/seed-approve.sh: an inherited SEED_APPROVE_YES signs nothing; only the request\'s own nonce stands in for the typed yes', () => {
+    const facts = { change: 'plan' as const, target: 'a'.repeat(64), subject: 'b'.repeat(64), admin: 'none',
+      shows: ['database: swift on postgres, deployment dep-x (production)', 'config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD', 'admin phone: none'] };
+    const first = approvalRequest(facts);
+    const second = approvalRequest(facts);
+    const run = (input: string, env: Record<string, string>) => spawnSync('bash', [APPROVE, 'alice', join(KEYDIR, 'alice')], { input, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...env } });
+    for (const inherited of ['1', 'yes', yesFor(first).SEED_APPROVE_YES]) {
+      const r = run(second, { SEED_APPROVE_YES: inherited });
+      expect(r.status, `SEED_APPROVE_YES=${inherited}`).not.toBe(0);
+      expect(r.stdout).toBe('');
+      expect(r.stderr).toContain('SEED_APPROVE_YES does not name this request');
+    }
+    const own = run(second, yesFor(second));
+    expect(own.status, own.stderr).toBe(0);
+    expect(Buffer.from((JSON.parse(own.stdout.trim()) as SignedApproval).request, 'base64').toString('utf8')).toBe(second);
   });
 });
 
@@ -450,7 +473,7 @@ describe('[PROD-PATH] the seed ceremony is bound to what the approvers read', ()
       await prisma.platformConfig.deleteMany({ where: { key: KEY } });
       const plan = await buildSeedPlan(prisma, URL_, desiredFor(50));
       const request = planApprovalRequest(plan, { fxGydPerUsd: 212.5, adminPhone: PHONE });
-      const out = spawnSync('bash', [APPROVE, 'alice', join(KEYDIR, 'alice')], { input: request, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', SEED_APPROVE_YES: '1' } });
+      const out = spawnSync('bash', [APPROVE, 'alice', join(KEYDIR, 'alice')], { input: request, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...yesFor(request) } });
       expect(out.status, out.stderr).toBe(0);
       // The readable summary (before the exact signed text) says it all.
       const summary = out.stderr.split('Signed exactly as')[0]!;
@@ -468,7 +491,7 @@ describe('[PROD-PATH] the seed ceremony is bound to what the approvers read', ()
     const facts = { change: 'plan' as const, target: 'a'.repeat(64), subject: 'b'.repeat(64), admin: 'none',
       shows: ['database: swift on postgres, deployment dep-x (production)', 'config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD', 'admin phone: none'] };
     const ok = approvalRequest(facts);
-    const run = (input: string) => spawnSync('bash', [APPROVE, 'alice', join(KEYDIR, 'alice')], { input, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', SEED_APPROVE_YES: '1' } });
+    const run = (input: string) => spawnSync('bash', [APPROVE, 'alice', join(KEYDIR, 'alice')], { input, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...yesFor(ok) } });
     expect(run(ok).status).toBe(0);
     expect(run(ok.split('\n').filter((l) => !l.startsWith('database: ')).join('\n')).status).not.toBe(0);
     expect(run(ok.split('\n').filter((l) => !l.startsWith('config: ')).join('\n')).status).not.toBe(0);

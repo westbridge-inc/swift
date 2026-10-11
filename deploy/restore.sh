@@ -10,11 +10,11 @@
 # public and swift_qr the scratch copy must equal the source in every table's
 # row count AND content checksum, column definitions and defaults, the RLS
 # switches, policies, constraints, indexes, triggers, function definitions,
-# grants and sequence positions (POSTURE_SQL below). Use it on a quiet
-# database, right after the backup: any row written to the live database
-# since the dump is a mismatch, reported by table. The backup and rehearsal
-# heartbeats in platform_config are left out — backup.sh writes them after
-# the dump by design.
+# view definitions and options, grants and sequence positions (POSTURE_SQL
+# below). Use it on a quiet database, right after the backup: any row written
+# to the live database since the dump is a mismatch, reported by table. The
+# backup and rehearsal heartbeats in platform_config are left out — backup.sh
+# writes them after the dump by design.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -137,6 +137,8 @@ check() {
 #   trigger    user trigger: definition and enabled state;
 #   function   function: kind, language, security definer, settings, volatility,
 #              and a checksum of its body;
+#   view       view or materialized view: kind, options (security_invoker,
+#              security_barrier, check_option) and a checksum of its definition;
 #   grant      table, sequence, function and schema privileges, default privileges;
 #   sequence   sequence: last value;   extension  extension: version.
 # Sorted, so two equal databases give byte-equal snapshots. The session pins
@@ -185,6 +187,11 @@ SELECT line FROM (
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
   WHERE n.nspname IN ('public', 'swift_qr')
   UNION ALL
+  SELECT format('view|%s.%s|kind=%s|options=%s|definition=%s', n.nspname, c.relname, c.relkind,
+    coalesce(c.reloptions::text, ''), md5(pg_get_viewdef(c.oid, true)))
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('v', 'm')
+  UNION ALL
   SELECT format('grant|relation|%s.%s|%s', n.nspname, c.relname, coalesce(c.relacl::text, ''))
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
@@ -219,9 +226,10 @@ compare_with_source() {
       $1 == "index" { indexes++ }
       $1 == "trigger" { triggers++ }
       $1 == "function" { functions++ }
+      $1 == "view" { views++ }
       $1 == "grant" { grants++ }
       $1 == "sequence" { sequences++ }
-      END { printf "%s: %d tables, %d rows, %d columns, RLS enabled on %d, forced on %d, %d policies, %d constraints, %d indexes, %d triggers, %d functions, %d grant entries, %d sequences\n", who, tables, rows, columns, rls, forced, policies, constraints, indexes, triggers, functions, grants, sequences }'
+      END { printf "%s: %d tables, %d rows, %d columns, RLS enabled on %d, forced on %d, %d policies, %d constraints, %d indexes, %d triggers, %d functions, %d views, %d grant entries, %d sequences\n", who, tables, rows, columns, rls, forced, policies, constraints, indexes, triggers, functions, views, grants, sequences }'
   }
   summarize "$live_snapshot" "source ($LIVE_DB)"
   summarize "$scratch_snapshot" "scratch ($SCRATCH)"
@@ -230,7 +238,7 @@ compare_with_source() {
     diff <(printf '%s\n' "$live_snapshot") <(printf '%s\n' "$scratch_snapshot") | grep -E '^[<>]' | cut -c1-240 | head -40 || true
     die "the restore does not match its source; scratch database retained"
   fi
-  echo "compare-source: in schemas public and swift_qr the scratch restore equals its source in every table's row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, grants and sequence positions"
+  echo "compare-source: in schemas public and swift_qr the scratch restore equals its source in every table's row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, view definitions and options, grants and sequence positions"
 }
 if [ "$COMPARE_SOURCE" -eq 1 ]; then
   compare_with_source

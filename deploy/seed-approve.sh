@@ -61,7 +61,15 @@ esac
   echo "Signed exactly as (the digests bind the database and the change):"
   printf '%s\n' "$REQUEST" | sed 's/^/    | /'
 } >&2
-if [ "${SEED_APPROVE_YES:-}" != 1 ]; then
+# The typed yes. Without a terminal (the test suites), the only stand-in is
+# SEED_APPROVE_YES set to THIS request's nonce: a setting left in a shell or
+# inherited from anywhere else names another request and signs nothing.
+NONCE="$(printf '%s\n' "$REQUEST" | sed -n 's/^nonce: //p' | head -1)"
+[[ "$NONCE" =~ ^[0-9a-f]{32}$ ]] || die "the request has no nonce line; ask the operator for the full request"
+if [ -n "${SEED_APPROVE_YES:-}" ]; then
+  [ "$SEED_APPROVE_YES" = "$NONCE" ] ||
+    die "SEED_APPROVE_YES does not name this request's nonce; unset it and type yes in your own terminal"
+else
   [ -r /dev/tty ] || die "no terminal to confirm on; read the request and run this in your own terminal"
   printf 'Type yes to sign: ' >&2
   read -r answer < /dev/tty

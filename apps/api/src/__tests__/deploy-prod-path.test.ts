@@ -146,6 +146,8 @@ const PRODUCTION = {
   BACKUP_BUCKET: 'prod-backups', STORAGE_PROVIDER: 's3', CORS_ORIGIN: 'https://example.org',
   // Production also requires the public origins the API hands out (#1448 review).
   API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://example.org',
+  // Admin top-ups stay on hold in production (owner ruling, 8 Oct).
+  BILLING_TOPUP_HOLD: '1',
 };
 const STAGING = { ...PRODUCTION, PILOT_ENV: 'staging', NODE_ENV: 'development', API_HOST: 'api-staging.example.org', STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' };
 
@@ -275,6 +277,48 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('AWS_SECRET_ACCESS_KEY is not in the encrypted store');
     expect(changedNothing(r.calls)).toEqual([]);
+  });
+
+  // Owner ruling, 8 Oct: production launches with admin top-ups on hold
+  // (BILLING_TOPUP_HOLD=1: every manual credit of fee paid ahead is refused,
+  // nothing recorded). The API reads it from deploy/.env, so the production
+  // host never starts without it.
+  it('production refuses to start unless admin top-ups are on hold (BILLING_TOPUP_HOLD=1), before anything changes; staging is not asked', () => {
+    for (const hold of [undefined, '', '0', 'true', 'yes']) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, BILLING_TOPUP_HOLD: hold });
+      expect(r.status, `BILLING_TOPUP_HOLD=${hold}`).not.toBe(0);
+      expect(r.stderr).toContain('PILOT_ENV=production needs BILLING_TOPUP_HOLD=1');
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+    for (const args of [[SHA], ['--data-only', SHA]]) {
+      writeFileSync(log, '');
+      const dataOnly = runPilot({ ...PRODUCTION, BILLING_TOPUP_HOLD: '0' }, { args, env: { DNS_MAP: '' } });
+      expect(dataOnly.status).not.toBe(0);
+      expect(dataOnly.stderr).toContain('PILOT_ENV=production needs BILLING_TOPUP_HOLD=1');
+    }
+    writeFileSync(log, '');
+    const staging = runPilot({ ...STAGING, BILLING_TOPUP_HOLD: undefined });
+    expect(staging.status, staging.stderr).toBe(0);
+  });
+
+  // Guardrail: partners pay the weekly fee only on the MMG checkout page, never
+  // through an agent or a Swift Number. The agent-cash webhook stays 503 while
+  // its secret is unset, so the production host refuses to wire one.
+  it('production refuses the agent-cash (Swift Number) webhook secret, wired or written in, without echoing it; staging is not asked', () => {
+    const secretValue = 'agentcash-'.padEnd(40, 'q');
+    const withStore = [...STORE, 'AGENT_CASH_WEBHOOK_SECRET'].join(' ');
+    for (const wiring of [{ AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { AGENT_CASH_WEBHOOK_SECRET: secretValue }]) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, ...wiring }, { env: { STORE_NAMES: withStore } });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('PILOT_ENV=production refuses the agent-cash webhook');
+      expect(r.stderr + r.stdout).not.toContain(secretValue);
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+    writeFileSync(log, '');
+    const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
+    expect(staging.stderr).not.toContain('refuses the agent-cash webhook');
   });
 });
 
@@ -659,6 +703,7 @@ CREATE POLICY tenant_isolation ON public.users USING (status <> 'hidden');
 CREATE FUNCTION public.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
 CREATE TRIGGER users_touch BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch();
 GRANT SELECT ON public.users TO PUBLIC;
+CREATE VIEW public.active_users AS SELECT id FROM public.users WHERE status = 'ACTIVE';
 INSERT INTO public.users VALUES ('u1', 100.00, 'ACTIVE'), ('u2', 0, 'SUSPENDED');
 INSERT INTO public.platform_config VALUES ('c1', 'fee', '1', '2026-10-05 00:00:00');
 INSERT INTO swift_qr.tokens VALUES ('t1', 'v1');
@@ -707,8 +752,8 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
   it('passes an exact copy (no user table needed), summarises both sides and says exactly what it proved', () => {
     const r = drill(null);
     expect(r.status, r.stderr + r.stdout).toBe(0);
-    expect(r.stdout).toMatch(/source \(swift_test_rcmp_\w+\): 3 tables, 4 rows, \d+ columns, RLS enabled on 1, forced on 1, 1 policies, \d+ constraints, \d+ indexes, 1 triggers, 1 functions, \d+ grant entries, 1 sequences/);
-    expect(r.stdout).toContain('in schemas public and swift_qr the scratch restore equals its source in every table\'s row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, grants and sequence positions');
+    expect(r.stdout).toMatch(/source \(swift_test_rcmp_\w+\): 3 tables, 4 rows, \d+ columns, RLS enabled on 1, forced on 1, 1 policies, \d+ constraints, \d+ indexes, 1 triggers, 1 functions, 1 views, \d+ grant entries, 1 sequences/);
+    expect(r.stdout).toContain('in schemas public and swift_qr the scratch restore equals its source in every table\'s row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, view definitions and options, grants and sequence positions');
     expect(r.stdout).toContain('RESTORE OK');
   });
 
@@ -722,6 +767,12 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
     ['an advanced sequence', `SELECT nextval('public.ticket_seq')`, 'sequence|public.ticket_seq|'],
     ['an RLS switch turned off', `ALTER TABLE public.users NO FORCE ROW LEVEL SECURITY`, 'rls|public.users|'],
     ['a dropped policy', `DROP POLICY tenant_isolation ON public.users`, 'policy|public.users|tenant_isolation'],
+    // #1448 review (Sol 8 Oct S4, DS838): view definitions are part of the
+    // database's behaviour (consent_current is a view) and were not compared.
+    ['a changed view definition', `CREATE OR REPLACE VIEW public.active_users AS SELECT id FROM public.users WHERE status <> 'ACTIVE'`, 'view|public.active_users|'],
+    ['a view switched to run with its caller\'s rights', `ALTER VIEW public.active_users SET (security_invoker = true)`, 'view|public.active_users|'],
+    // Positive control: default privileges were compared already.
+    ['a new default privilege', `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC`, 'grant|default|public|'],
   ])('fails on %s, names it, and keeps the scratch database', (_what, change, named) => {
     const r = drill(change);
     expect(r.status, r.stdout).not.toBe(0);

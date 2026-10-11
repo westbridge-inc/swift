@@ -627,8 +627,9 @@ from issue at most) bounds that window.
        ./deploy/seed-approve.sh <their-name> ~/.ssh/swift_seed_approver < request.txt
 
    Never sign for someone else: the control is two people with two keys.
-   Never export SEED_APPROVE_YES in a shell: it skips the typed yes and is
-   for the tests only.
+   SEED_APPROVE_YES is for the test suites only (they have no terminal): it
+   stands in for the typed yes only when it equals this request's `nonce:`
+   line, so a value left in a shell signs nothing else. Never set it.
 
 4. The operator re-runs with both lines, against the same deployment (the
    request is bound to this database's fingerprint, which includes the
@@ -851,6 +852,12 @@ anything changes:
   STORAGE_ALLOW_LOCAL must be unset) and WEB_ALLOW_SITE_TOKENS;
 - a store without AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (the backup
   keys);
+- any BILLING_TOPUP_HOLD but exactly `1`: admin top-ups stay on hold in
+  production (owner ruling, 8 Oct; the API refuses each one with 503
+  TOPUP_ON_HOLD and records nothing);
+- AGENT_CASH_WEBHOOK_SECRET or AGENT_CASH_WEBHOOK_SECRET_FILE set: partners
+  pay the weekly fee only on the MMG checkout page, never through an agent or
+  a Swift Number (the agent-cash webhook answers 503 without its secret);
 - any setting Compose fills from `${…}` that is also set in the operator's
   shell (Compose prefers the shell to deploy/.env, which is what every check
   reads), and the COMPOSE_* switches. Run it from a clean shell;
@@ -940,8 +947,8 @@ seed uses (section 6), never on a host install.
 Back up and rehearse the restore (sections 4 and 5, with `--compare-source`:
 in schemas public and swift_qr it compares every table's row count and
 content checksum, column definitions and defaults, RLS switches, policies,
-constraints, indexes, triggers, function definitions, grants and sequence
-positions).
+constraints, indexes, triggers, function definitions, view definitions and
+options (consent_current is a view), grants and sequence positions).
 
 ### The spine seed: a two-person ceremony
 

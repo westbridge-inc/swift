@@ -37,8 +37,10 @@ import { ACTIVE_CONFIRMATION_STATES, activeOverdueMs, currentDunningClock, proje
 // or its clock is still held (feePauseHoldsBilling), so whichever job runs
 // first after a way to pay comes back, no fee is fixed before its
 // reactivation is on record and its paused time is off its clock. The
-// operate gate and the billing entry points also check noLivePayPath
-// directly, so nothing is enforced in the moments before the first tick.
+// operate gate (both its row and database forms) and the billing entry
+// points read the same persisted hold through readFeePause, which answers
+// "held" straight from noLivePayPath too, so nothing is enforced in the
+// moments before the first tick and nothing while a repair is pending.
 // ---------------------------------------------------------------------------
 
 export const MMG_PAUSE_CLOCKS_KEY = 'billing.mmg_pause.clocks';
