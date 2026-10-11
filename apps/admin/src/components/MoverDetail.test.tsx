@@ -53,6 +53,8 @@ describe('[MC-PR2] rider page', () => {
     expect(within(panel).getByText('1 of 2 approved')).toBeTruthy();
     expect(within(panel).getByText(/Waiting for documents\. Decide each one in the Review Center/)).toBeTruthy();
     expect(within(panel).getByRole('link', { name: 'Open in Review Center' }).getAttribute('href')).toBe('/verification?applicant=user-rider');
+    // [Owner 8 Oct] what's missing links straight to each document waiting for review (the approved one has no link).
+    expect(within(panel).getAllByRole('link', { name: 'Review this document' }).map((l) => l.getAttribute('href'))).toEqual(['/verification?applicant=user-rider&document=d-drivers_licence']);
     expect(screen.queryByRole('button', { name: /^Verify/ })).toBeNull();
   });
 

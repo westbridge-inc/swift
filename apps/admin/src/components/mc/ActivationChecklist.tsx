@@ -71,6 +71,10 @@ export function ActivationChecklist({ title, items, applicantId, verdict, childr
                 <p className="font-semibold">{documentName(item.docType)}</p>
                 {more ? <p className="mc-muted text-xs">{more}</p> : null}
                 {item.state === 'REJECTED' && item.note ? <p className="text-xs mt-1">Reviewer: {item.note}</p> : null}
+                {/* [Owner 8 Oct] what's missing, with a link straight to each document waiting for review */}
+                {item.state === 'PENDING' && item.documentId ? (
+                  <Link href={reviewCenterHref(applicantId, item.documentId)} className="text-xs font-semibold underline underline-offset-2">Review this document</Link>
+                ) : null}
               </div>
               <span className={`mc-badge${state.tone === 'neutral' ? '' : ` mc-tone-${state.tone}`}`}>{state.words}</span>
             </li>

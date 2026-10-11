@@ -54,8 +54,10 @@ export interface OutcomeContext {
 export const APPROVALS_HREF = '/approvals';
 
 /** The Review Center, opened on one applicant when we know who. */
-export function reviewCenterHref(applicantId?: string): string {
-  return applicantId ? `/verification?applicant=${encodeURIComponent(applicantId)}` : '/verification';
+export function reviewCenterHref(applicantId?: string, documentId?: string): string {
+  if (!applicantId) return '/verification';
+  // [Owner 8 Oct] "what's missing" links straight to each waiting document, not only to the applicant.
+  return `/verification?applicant=${encodeURIComponent(applicantId)}${documentId ? `&document=${encodeURIComponent(documentId)}` : ''}`;
 }
 
 /** A success, in the words the page chose ("Target Store is live."). */
