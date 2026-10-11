@@ -1,6 +1,6 @@
 import { screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import SettingsPage from '@/app/dashboard/settings/page';
+import SettingsPage from '@/app/dashboard/account/page';
 import PortalHome from '@/app/portal/page';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 

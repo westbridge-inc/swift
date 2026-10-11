@@ -64,6 +64,14 @@ COPY apps/mobile/src/kit apps/mobile/src/kit
 # anything but @swift/types (packages/, copied above), so exactly these files.
 COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# The business console reuses the app's plain board files by path (PR A): the
+# role matrix, the accept clock, the MMG-dispute pause, the store-delivery rule
+# and the market-calendar helpers. None imports anything but @swift/types.
+COPY apps/mobile/src/lib/vendorRbac.ts apps/mobile/src/lib/vendorRbac.ts
+COPY apps/mobile/src/lib/appointmentTime.ts apps/mobile/src/lib/appointmentTime.ts
+COPY apps/mobile/src/modules/vendor/acceptClock.ts apps/mobile/src/modules/vendor/acceptClock.ts
+COPY apps/mobile/src/modules/vendor/order-dispute.ts apps/mobile/src/modules/vendor/order-dispute.ts
+COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/modules/vendor/screens/delivery-owner.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

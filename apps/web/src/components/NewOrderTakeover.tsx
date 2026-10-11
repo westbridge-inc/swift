@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { acceptOrder, money, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
+// The app's own clock wording (plain file, imported as is).
+import { acceptClockLabel } from '../../../mobile/src/modules/vendor/acceptClock';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 
 /**
@@ -113,8 +115,23 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     onError: (e) => setError((e as Error).message),
   });
 
+  // The draining accept clock, as in the app: the server's own deadline
+  // (`respondBy`), recomputed from the wall clock every second, and drawn only
+  // while the decision is open.
+  const head = queue[0];
+  const respondByMs = head?.respondBy ? Date.parse(head.respondBy) : NaN;
+  const clockActive = (head?.status || '').toUpperCase() === 'PENDING' && Number.isFinite(respondByMs);
+  const [nowTs, setNowTs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!clockActive) return;
+    setNowTs(Date.now());
+    const t = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [clockActive, respondByMs]);
+
   const current = queue[0];
   if (!current) return null;
+  const remainSecs = clockActive ? Math.max(0, Math.ceil((respondByMs - nowTs) / 1000)) : 0;
   const customer = [current.customer?.firstName, current.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
 
   return (
@@ -139,6 +156,11 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
             </p>
           ))}
         </div>
+        {clockActive && (
+          <p className="mt-3 text-sm text-[var(--swift-muted)]">
+            Accept within <b className="text-[var(--swift-ink)]">{acceptClockLabel(remainSecs)}</b> — the customer is watching this clock too.
+          </p>
+        )}
 
         <div className="mt-5 flex flex-col items-stretch gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-center">
           {current.fulfillment !== 'APPOINTMENT' && <select

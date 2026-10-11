@@ -171,7 +171,9 @@ describe('[W-04] unsaved work is discarded by DECISION, never by surprise', () =
 
 describe('[W-04] the dashboard actually uses it', () => {
   const src = (p: string) => readFileSync(join(process.cwd(), 'src/app/dashboard', p), 'utf8');
-  const pages = ['page.tsx', 'orders/page.tsx', 'inventory/page.tsx', 'settings/page.tsx'];
+  // The old Today page (page.tsx) and settings/page.tsx are now redirects to the
+  // Orders home and Account (PR A); their work lives in these files.
+  const pages = ['orders/page.tsx', 'inventory/page.tsx', 'account/page.tsx', 'insights/page.tsx', '../../components/orders-home.tsx'];
 
   it('no dashboard query key is storeless — only the store LIST is', () => {
     for (const p of [...pages, 'dashboard-shell.tsx']) {
@@ -209,6 +211,6 @@ describe('[W-04] the dashboard actually uses it', () => {
   });
 
   it('the hours editor declares when it holds unsaved work', () => {
-    expect(src('settings/page.tsx')).toMatch(/setDraftDirty\(HOURS_DRAFT, true\)/);
+    expect(src('account/page.tsx')).toMatch(/setDraftDirty\(HOURS_DRAFT, true\)/);
   });
 });

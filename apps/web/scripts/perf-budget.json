@@ -8,6 +8,19 @@
     "/(app)/order/browse/page": 154,
     "/(app)/cart/page": 158,
     "/login/page": 118,
-    "/signup/page": 126
+    "/signup/page": 126,
+    "/dashboard/orders/page": 162,
+    "/dashboard/inventory/page": 152,
+    "/dashboard/inventory/import/page": 149,
+    "/dashboard/insights/page": 144,
+    "/dashboard/account/page": 149,
+    "/dashboard/weekly-fee/page": 152,
+    "/dashboard/notifications/page": 145,
+    "/portal/page": 141,
+    "/portal/history/page": 139,
+    "/portal/documents/page": 142,
+    "/portal/weekly-fee/page": 146,
+    "/portal/account/page": 140,
+    "/advertiser/page": 139
   }
 }

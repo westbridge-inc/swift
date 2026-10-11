@@ -69,6 +69,8 @@ const PRIVATE_PAGES = [
   'dashboard/inventory/page.tsx',
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',
+  'dashboard/account/page.tsx',
+  'dashboard/insights/page.tsx',
   'dashboard/settings/page.tsx',
   'dashboard/weekly-fee/page.tsx',
   'portal/page.tsx',

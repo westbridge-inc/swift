@@ -184,10 +184,12 @@ describe('vendor order board — money is never invented', () => {
     expect(screen.getByText(/Ring the bell twice/)).toBeTruthy();
   });
 
-  it('renders an empty bucket without inventing a figure', async () => {
+  it('renders an empty board without inventing a figure', async () => {
     mockApi(boardHandler([], wireVendorOrderDetail()));
     renderWithQuery(<OrdersPage />);
-    expect(await screen.findAllByText('Nothing here right now')).toHaveLength(3);
+    // Nothing open: the app's quiet board (PR A) instead of three empty lanes.
+    expect(await screen.findByText('You are all caught up')).toBeTruthy();
+    expect(screen.getByText('No active orders shown')).toBeTruthy();
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
   });
 });
@@ -234,7 +236,8 @@ describe('delivery owner controls', () => {
   it('requires an explicit handoff confirmation before closing a self-delivery', async () => {
     const { user, fetchMock } = await openDeliveryOwner({ fulfillmentMode: 'VENDOR_DELIVERY' });
 
-    await user.click(screen.getByRole('button', { name: 'Confirm delivered' }));
+    // The card offers "Confirm delivered" too, and opens this same window for it.
+    await user.click(within(screen.getByRole('dialog', { name: 'Order details' })).getByRole('button', { name: 'Confirm delivered' }));
     expect(screen.getByRole('dialog', { name: 'Confirm store delivery' })).toBeTruthy();
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/delivered'))).toBe(false);
 

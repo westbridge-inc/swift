@@ -20,7 +20,7 @@ const read = (p: string) => strip(readFileSync(join(process.cwd(), p), 'utf8'));
 
 const vendorApi = read('src/lib/vendor-api.ts');
 const moverApi = read('src/lib/mover-api.ts');
-const storePage = read('src/app/dashboard/settings/page.tsx');
+const storePage = read('src/app/dashboard/account/page.tsx');
 const riderPage = read('src/app/portal/page.tsx');
 
 describe('[W-26] the confirmation carries its amount', () => {
