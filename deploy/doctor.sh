@@ -124,13 +124,22 @@ if [ -z "${WEB_URL:-}" ] && [ -f "$HERE/.env" ]; then
   WEB_HOST="$(grep -E '^WEB_HOST=' "$HERE/.env" | head -1 | cut -d= -f2- || true)"
   [ -z "$WEB_HOST" ] || WEB_URL="https://$WEB_HOST"
 fi
+# [WEB-GATE] With WEB_BASIC_AUTH_HASH set in deploy/.env the website's own name
+# sits behind a password: a 401 IS it answering, and a page served to a
+# stranger means the password is missing. The value is never printed.
+WEB_GATE=off
+if [ -f "$HERE/.env" ] && [ -n "$(grep -E '^WEB_BASIC_AUTH_HASH=' "$HERE/.env" | head -1 | cut -d= -f2- || true)" ]; then
+  WEB_GATE=on
+fi
 if [ -n "${WEB_URL:-}" ]; then
   # On no response curl still writes 000 for %{http_code}; it just exits nonzero.
   SITE=$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$WEB_URL/" 2>/dev/null || true)
-  case "${SITE:-000}" in
-    2*|3*) ok "website $WEB_URL → $SITE" ;;
-    000)   bad "website unreachable at $WEB_URL — WEB_HOST is set, so it should answer (DNS, certificate, or the web container)" ;;
-    *)     bad "website $WEB_URL/ → $SITE" ;;
+  case "$WEB_GATE ${SITE:-000}" in
+    "on 401")      ok "website $WEB_URL → 401 (password gate on)" ;;
+    "on 2"*|"on 3"*) bad "website $WEB_URL answered $SITE without its password gate (WEB_BASIC_AUTH_HASH is set in deploy/.env)" ;;
+    "off 2"*|"off 3"*) ok "website $WEB_URL → $SITE" ;;
+    *" 000")       bad "website unreachable at $WEB_URL — WEB_HOST is set, so it should answer (DNS, certificate, or the web container)" ;;
+    *)             bad "website $WEB_URL/ → $SITE" ;;
   esac
 fi
 

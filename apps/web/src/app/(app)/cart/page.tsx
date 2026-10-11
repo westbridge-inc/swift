@@ -36,6 +36,7 @@ import {
 } from '@/lib/customer';
 import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { ApiRequestError } from '@/lib/auth';
+import { photo } from '@/lib/media';
 import {
   cartPaymentOptions,
   checkoutPaymentMethod,
@@ -353,10 +354,19 @@ export default function CartPage() {
         window.requestAnimationFrame(() => errorMessage.current?.focus());
         return;
       }
+      // [L09 · price lock] The total and line prices this page showed: the
+      // server refuses with PRICE_CHANGED (old → new) if the order would
+      // charge anything else, so a price changed since is never charged unseen.
+      const expectedLines = cart.items.flatMap((line) => {
+        const unitPrice = parseAmount(line.customerPrice);
+        return unitPrice === null ? [] : [{ lineId: line.id, unitPrice }];
+      });
       const body = {
         paymentMethod,
         tipAmount: tip,
         ...(liveCart.promoCode?.code ? { promoCode: liveCart.promoCode.code } : {}),
+        ...(total !== null ? { expectedTotal: total } : {}),
+        expectedLines,
       };
       const signature = checkoutAttemptSignature(liveCart, body);
       const storedAttempt = checkoutAttempt.current ?? readCheckoutAttempt();
@@ -481,7 +491,7 @@ export default function CartPage() {
           {cart.items.map((l) => (
             <article key={l.id} className={styles.itemCard}>
               <span className={styles.thumb}>
-                {l.imageUrl ? <Image src={l.imageUrl} alt="" fill unoptimized sizes="64px" loading="lazy" className="object-cover" /> : <Pictogram name="food" size={26} />}
+                {photo(l.imageUrl) ? <Image {...photo(l.imageUrl)!} alt="" fill sizes="64px" loading="lazy" className="object-cover" /> : <Pictogram name="food" size={26} />}
               </span>
               <div className={styles.itemCopy}>
                 <div className={styles.itemTop}>
