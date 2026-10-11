@@ -2635,4 +2635,3 @@ describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
     expect(await identityOf(ledgerOf(txn))).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
   });
 });
-
