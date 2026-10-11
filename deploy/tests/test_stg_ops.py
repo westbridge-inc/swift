@@ -15,6 +15,8 @@ import os
 import re
 import secrets
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -631,8 +633,12 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
         # [WEB-GATE] The website's password gate names WEB_HOST in its own
         # matcher, beside a reserved name, so it is never argument-less; the
         # API/website split still keys on the API host alone.
+        # [WEB-GATE-SW] The retiring worker and the refusal page name it the
+        # same way.
         self.assertEqual([line for line in code if "$WEB_HOST" in line],
                          ["{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {$ADMIN_HOST} {",
+                          "@web_refused host {$WEB_HOST} web.invalid",
+                          "host {$WEB_HOST} web.invalid",
                           "host {$WEB_HOST} web.invalid"])
         body = "\n".join(self.blocks(API_HOST=API_HOST, WEB_HOST=WEB_HOST)[0][1])
         self.assertRegex(
@@ -646,7 +652,17 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
 
     def test_the_website_keeps_its_own_security_headers(self):
         # next.config.ts sets them; the proxy neither duplicates nor overrides any.
-        self.assertNotRegex(self.TEXT, r"(?m)^\s*header\b")
+        # [WEB-GATE-SW] The only `header` lines set the two fixed answers the
+        # proxy makes itself (the retiring worker and the refusal page), which
+        # never carry a response from the website.
+        code = code_lines(self.TEXT)
+        fixed = block_from(code, "handle @web_retire_worker {") + block_from(code, "handle @web_refused {")
+        headers = [line for line in code if line.startswith("header ")]
+        self.assertEqual(len(headers), 7)
+        self.assertTrue(all(line in fixed for line in headers), headers)
+        for route in ("handle @admin {", "handle @api {", "handle @web_gate {"):
+            with self.subTest(route=route):
+                self.assertFalse(any(line.startswith("header ") for line in block_from(code, route)))
 
 
 def with_global_options(text: str, options: str) -> str:
@@ -1910,7 +1926,14 @@ class WebGateCaddyfile(unittest.TestCase):
             "}",
             "}",
         ])
-        self.assertEqual(sum("WEB_BASIC_AUTH" in line for line in code), 2)
+        # The gate's matcher and its account, plus the retiring worker's
+        # matcher (it answers only while the gate is on); nothing else.
+        self.assertEqual([line for line in code if "WEB_BASIC_AUTH" in line], [
+            'expression `"{$WEB_BASIC_AUTH_USER}" != ""`',
+            'expression `"{$WEB_BASIC_AUTH_USER}" != ""`',
+            "{$WEB_BASIC_AUTH_USER} {$WEB_BASIC_AUTH_HASH}",
+        ])
+        self.assertIn('expression `"{$WEB_BASIC_AUTH_USER}" != ""`', block_from(code, "@web_retire_worker {"))
         # The website's catch-all (the public names, the open paths, and every
         # website request while the gate is off) is exactly what it was, and last.
         self.assertEqual(code[-4:], ["handle {", "reverse_proxy web:3000", "}", "}"])
@@ -1934,10 +1957,79 @@ class WebGateCaddyfile(unittest.TestCase):
     def test_routes_keep_their_order_and_the_api_and_console_routes_are_unchanged(self):
         _, body = self.site(API_HOST=API_HOST, WEB_HOST=WEB_HOST, ADMIN_HOST=ADMIN_HOST)
         self.assertEqual([line for line in body if line.startswith("handle")],
-                         ["handle @admin {", "handle @api {", "handle @web_gate {", "handle {"])
+                         ["handle @admin {", "handle @api {", "handle_errors 401 {", "handle @web_refused {",
+                          "handle @web_retire_worker {", "handle @web_gate {", "handle {"])
         self.assertEqual(block_from(body, "handle @api {"),
                          ["handle @api {", "@metrics path /metrics", "respond @metrics 403", "reverse_proxy api:3000", "}"])
         self.assertEqual(body[-3:], ["handle {", "reverse_proxy web:3000", "}"])
+
+    def test_the_retiring_worker_answers_on_the_website_name_alone_and_only_while_the_gate_is_on(self):
+        code = code_lines(self.TEXT)
+        self.assertEqual(block_from(code, "@web_retire_worker {"), [
+            "@web_retire_worker {",
+            "host {$WEB_HOST} web.invalid",
+            'expression `"{$WEB_BASIC_AUTH_USER}" != ""`',
+            "path /sw.js",
+            "}",
+        ])
+        block = block_from(code, "handle @web_retire_worker {")
+        self.assertEqual(block[1:4], ['header Content-Type "text/javascript; charset=utf-8"',
+                                      "header Cache-Control no-store", "header X-Content-Type-Options nosniff"])
+        # A fixed answer: nothing in it reaches the website.
+        self.assertFalse(any("reverse_proxy" in line for line in block))
+
+    def test_the_retiring_worker_clears_the_sites_caches_and_unregisters_without_reloading(self):
+        script = WEB_RETIRE_WORKER(self.TEXT)
+        for needed in ("self.skipWaiting()", "caches.keys()", "name.startsWith('swift-')", "caches.delete(name)",
+                       "self.registration.unregister()"):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, script)
+        # It takes no request (a fetch handler would answer pages again), and
+        # it moves no page: the site registers /sw.js on every load, so a
+        # reload or navigate would never end.
+        for absent in ("'fetch'", "clients", "navigate", "reload", "location"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, script)
+        # Braces are Caddy placeholders: the script is written without them.
+        self.assertNotIn("{", script)
+        self.assertNotIn("}", script)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_the_retiring_worker_is_valid_javascript(self):
+        tmp = Path(tempfile.mkdtemp(prefix="swift-retire-worker-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "sw.js").write_text(WEB_RETIRE_WORKER(self.TEXT))
+        checked = subprocess.run(["node", "--check", str(tmp / "sw.js")], text=True, capture_output=True, timeout=60)
+        self.assertEqual(checked.returncode, 0, checked.stderr[-300:])
+
+    def test_a_refusal_on_the_website_name_explains_itself_and_no_other_refusal_changes(self):
+        code = code_lines(self.TEXT)
+        block = block_from(code, "handle_errors 401 {")
+        self.assertEqual(block[:6], [
+            "handle_errors 401 {",
+            "@web_refused host {$WEB_HOST} web.invalid",
+            "handle @web_refused {",
+            'header Content-Type "text/html; charset=utf-8"',
+            "header Cache-Control no-store",
+            "header X-Content-Type-Options nosniff",
+        ])
+        self.assertEqual(block[6:], [
+            "header Content-Security-Policy \"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'\"",
+            block[7], "}", "}"])
+        page = block[7]
+        self.assertTrue(page.startswith("respond `<!doctype html>") and page.endswith("` 401"), page[:60])
+        self.assertIn("This test site needs the tester password. Reload the page to sign in.", page)
+        # Self-contained and inert: no script, no outside file, no placeholder.
+        for absent in ("<script", "src=", "href=", "http", "{", "}", "#"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, page[len("respond `"):-len("` 401")])
+
+
+def WEB_RETIRE_WORKER(text: str) -> str:
+    """The script the retiring-worker route answers with."""
+    [line] = [line for line in block_from(code_lines(text), "handle @web_retire_worker {") if line.startswith("respond `")]
+    assert line.endswith("` 200"), line[-20:]
+    return line[len("respond `"):-len("` 200")]
 
 
 @unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
@@ -1977,7 +2069,8 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         adapted = self.caddy("adapt", env)
         self.assertEqual(adapted.returncode, 0, adapted.stderr[-600:])
         inner = json.loads(adapted.stdout)["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][0]["routes"]
-        [gate] = [r for r in inner if any("web.invalid" in m.get("host", []) for m in r.get("match", []))]
+        [gate] = [r for r in inner if any("web.invalid" in m.get("host", []) and "path" not in m
+                                           for m in r.get("match", []))]
         return inner, gate
 
     def test_the_runbook_way_of_hashing_makes_a_hash_pilot_up_accepts(self):
@@ -2137,6 +2230,119 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         status, out = self.fetch(name, f"https://{WEB_HOST}/orders", "anyone:anything")
         self.assertEqual(status, 200, out[-300:])
         self.reached_website(out, "/orders", authorization="Basic YW55b25lOmFueXRoaW5n")
+
+    def test_with_the_gate_the_retiring_worker_and_the_refusal_page_belong_to_the_website_name(self):
+        env = self.env()
+        adapted = self.caddy("adapt", env)
+        self.assertEqual(adapted.returncode, 0, adapted.stderr[-600:])
+        server = json.loads(adapted.stdout)["apps"]["http"]["servers"]["srv0"]
+        inner = server["routes"][0]["handle"][0]["routes"]
+        [worker] = [r for r in inner if any(m.get("path") == ["/sw.js"] for m in r.get("match", []))]
+        self.assertEqual(worker["match"][0]["host"], [WEB_HOST, "web.invalid"])
+        self.assertEqual(worker["match"][0]["expression"]["expr"], '"tester" != ""')
+        # The worker comes before the gate, so it never asks for the password.
+        self.assertLess(inner.index(worker), inner.index(self.routes(env)[1]))
+        errors = json.dumps(server["errors"])
+        # Only a 401, and inside it only the website name, gets the page.
+        self.assertIn("{http.error.status_code} in [401]", errors)
+        self.assertIn('"match": [{"host": ["%s", "web.invalid"]}]' % WEB_HOST, errors)
+        self.assertEqual(errors.count('"static_response"'), 1)
+        self.assertIn("This test site needs the tester password.", errors)
+
+    def test_live_the_website_name_answers_sw_js_with_the_retiring_worker_password_or_not(self):
+        name = self.serve(self.env())
+        for path, credential in (("/sw.js", None), ("/sw.js", f"tester:{self.web_password}"),
+                                 ("/sw.js", "tester:not-the-password"), ("/x/%2e%2e/sw.js", None)):
+            with self.subTest(path=path, credential=bool(credential)):
+                status, out = self.fetch(name, f"https://{WEB_HOST}{path}", credential)
+                self.assertEqual(status, 200, out[-300:])
+                self.assertIn("self.registration.unregister()", out)
+                self.assertNotIn("authorization=[", out)
+        # The public names, and the website name with the gate off, keep the site's own worker.
+        for host in PUBLIC_ALIASES.split():
+            with self.subTest(host=host):
+                status, out = self.fetch(name, f"https://{host}/sw.js")
+                self.assertEqual(status, 200, out[-300:])
+                self.reached_website(out, "/sw.js", host=host)
+        open_site = self.serve(self.env(web_gate=False, admin_gate=False))
+        status, out = self.fetch(open_site, f"https://{WEB_HOST}/sw.js")
+        self.assertEqual(status, 200, out[-300:])
+        self.reached_website(out, "/sw.js")
+
+    def serve_on_a_local_port(self, env) -> int:
+        """The live Caddy with :443 on a loopback port, for the headers and body
+        of a refusal (the container's wget shows neither)."""
+        tmp = Path(tempfile.mkdtemp(prefix="swift-web-gate-caddy-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "Caddyfile").write_text(with_global_options((DEPLOY / "Caddyfile").read_text(), self.LIVE_OPTIONS)
+                                       + self.STAND_IN)
+        name = f"swift-web-gate-caddy-test-{secrets.token_hex(4)}"
+        args = ["docker", "run", "-d", "--name", name, "-p", "127.0.0.1::443"]
+        for host in ("api", "web", "admin"):
+            args += ["--add-host", f"{host}:127.0.0.1"]
+        for key, value in env.items():
+            args += ["-e", f"{key}={value}"]
+        args += ["-v", f"{tmp / 'Caddyfile'}:/etc/caddy/Caddyfile:ro", "caddy:2.10",
+                 "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+        started = subprocess.run(args, text=True, capture_output=True, timeout=60)
+        self.assertEqual(started.returncode, 0, started.stderr[-400:])
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
+        mapped = subprocess.run(["docker", "port", name, "443/tcp"], text=True, capture_output=True, timeout=30)
+        port = int(mapped.stdout.split()[0].rsplit(":", 1)[1])
+        for _ in range(60):
+            try:
+                if raw_https(port, API_HOST, "/metrics")[0] == 403:
+                    return port
+            except OSError:
+                pass
+            time.sleep(0.5)
+        self.fail("the test Caddy never answered")
+
+    def test_live_a_refusal_keeps_the_password_box_and_says_what_to_do(self):
+        port = self.serve_on_a_local_port(self.env())
+        for path, credential in (("/", None), ("/orders", "tester:not-the-password"),
+                                 ("/_next/static/chunks/main.js", None)):
+            with self.subTest(path=path):
+                status, headers, body = raw_https(port, WEB_HOST, path, credential)
+                self.assertEqual(status, 401)
+                self.assertEqual(headers.get("www-authenticate"), 'Basic realm="restricted"')
+                self.assertEqual(headers.get("content-type"), "text/html; charset=utf-8")
+                self.assertEqual(headers.get("cache-control"), "no-store")
+                self.assertEqual(headers.get("x-content-type-options"), "nosniff")
+                self.assertIn("frame-ancestors 'none'", headers.get("content-security-policy", ""))
+                self.assertIn("This test site needs the tester password. Reload the page to sign in.", body)
+        status, headers, body = raw_https(port, WEB_HOST, "/sw.js")
+        self.assertEqual((status, headers.get("content-type"), headers.get("cache-control")),
+                         (200, "text/javascript; charset=utf-8", "no-store"))
+        self.assertIn("self.registration.unregister()", body)
+        # The password still opens the site, and the console's refusal is what it was.
+        status, _, body = raw_https(port, WEB_HOST, "/", f"tester:{self.web_password}")
+        self.assertEqual(status, 200, body[-300:])
+        self.assertIn(f"authorization=[] uri=[/] host=[{WEB_HOST}]", body)
+        status, headers, body = raw_https(port, ADMIN_HOST, "/login")
+        self.assertEqual((status, headers.get("www-authenticate"), body), (401, 'Basic realm="restricted"', ""))
+        self.assertNotIn("text/html", headers.get("content-type", ""))
+
+
+def raw_https(port: int, host: str, path: str, credential=None):
+    """(status, lower-cased headers, body) of one HTTP/1.1 request to the test
+    Caddy on a loopback port, sent with the site's name for SNI and Host."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n"
+    if credential:
+        request += f"Authorization: Basic {base64.b64encode(credential.encode()).decode()}\r\n"
+    data = b""
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        with context.wrap_socket(sock, server_hostname=host) as tls:
+            tls.sendall((request + "\r\n").encode())
+            while chunk := tls.recv(65536):
+                data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    lines = head.decode().split("\r\n")
+    headers = {key.strip().lower(): value.strip() for key, _, value in (line.partition(":") for line in lines[1:])}
+    return int(lines[0].split()[1]), headers, body.decode()
 
 
 FAKE_WEB_GATE_CURL = r'''#!/usr/bin/env python3

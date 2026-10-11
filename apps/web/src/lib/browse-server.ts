@@ -34,19 +34,30 @@ function building(): boolean {
   return process.env['NEXT_PHASE'] === 'phase-production-build';
 }
 
+/**
+ * One guest GET that tells "not there" from "could not ask": null only when
+ * the API itself answered 404; it throws on anything else (no answer, a
+ * timeout, a 5xx, an answer that cannot be read, or the build, which asks
+ * nothing).
+ */
+async function guestLookup<T>(path: string, revalidate: number, tags: string[], valid: (_data: unknown) => boolean): Promise<GuestRead<T> | null> {
+  if (building()) throw new Error('The Swift API is not read during the build.');
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: { Accept: 'application/json' },
+    next: { revalidate, tags },
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`The Swift API answered ${response.status}.`);
+  const body = await response.json().catch(() => null);
+  if (!body || body.success === false || !valid(body.data)) throw new Error('The Swift API answer could not be read.');
+  const stamped = Date.parse(response.headers.get('date') ?? '');
+  return { data: body.data as T, at: Number.isFinite(stamped) ? Math.min(stamped, Date.now()) : Date.now() };
+}
+
 /** One guest GET. Any failure is "no answer" — the page then loads it in the browser as before. */
 export async function guestRead<T>(path: string, revalidate: number, tags: string[], valid: (_data: unknown) => boolean): Promise<GuestRead<T> | null> {
-  if (building()) return null;
   try {
-    const response = await fetch(`${API_URL}${path}`, {
-      headers: { Accept: 'application/json' },
-      next: { revalidate, tags },
-    });
-    if (!response.ok) return null;
-    const body = await response.json().catch(() => null);
-    if (!body || body.success === false || !valid(body.data)) return null;
-    const stamped = Date.parse(response.headers.get('date') ?? '');
-    return { data: body.data as T, at: Number.isFinite(stamped) ? Math.min(stamped, Date.now()) : Date.now() };
+    return await guestLookup<T>(path, revalidate, tags, valid);
   } catch {
     return null;
   }
@@ -57,15 +68,20 @@ const isObject = (value: unknown): value is Record<string, unknown> => Boolean(v
 export const fetchGuestHome = cache(() =>
   guestRead<HomeFeed>('/api/v1/customer/home', BROWSE_REVALIDATE_SECONDS, ['browse:home'], isHomeFeed));
 
+/** A store by id. Null only when the API says it has no such store; throws when it could not be checked. */
 export const fetchGuestVendor = cache((id: string) =>
-  guestRead<VendorDetail>(`/api/v1/customer/vendors/${encodeURIComponent(id)}`, STORE_REVALIDATE_SECONDS, [`store:${id}`],
+  guestLookup<VendorDetail>(`/api/v1/customer/vendors/${encodeURIComponent(id)}`, STORE_REVALIDATE_SECONDS, [`store:${id}`],
     (data) => isObject(data) && data['id'] === id && Array.isArray(data['categories'])));
 
 export const fetchGuestVendors = cache((type: string) =>
   guestRead<Vendor[]>(`/api/v1/customer/vendors${type ? `?type=${encodeURIComponent(type)}` : ''}`, BROWSE_REVALIDATE_SECONDS, ['browse:vendors'],
     (data) => Array.isArray(data)));
 
-/** A store's menu, read on the server only for an id that can be a store id. */
+/**
+ * A store's menu, read on the server only for an id that can be a store id.
+ * Null when there is no such store (an id that cannot be one, or the API's
+ * own 404); throws when the store could not be checked.
+ */
 const STORE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 export async function vendorSeed(id: string): Promise<GuestRead<VendorDetail> | null> {
   return STORE_ID.test(id) ? fetchGuestVendor(id) : null;
