@@ -110,7 +110,7 @@ export interface VendorDetail extends Vendor {
   description?: string;
   categories: Array<{ id: string; name: string; items: MenuItem[] }>;
 }
-export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptionNames?: string[]; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
+export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptions?: Record<string, string | string[]> | null; selectedOptionNames?: string[]; specialInstructions?: string | null; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
 export interface Cart {
   items: CartLine[];
   subtotal?: number;
