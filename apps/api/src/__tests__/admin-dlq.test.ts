@@ -357,6 +357,12 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
     });
     expect(res.statusCode, res.body).toBe(200);
     expect(await job.getState()).toBe('waiting');
+    // [Item 63] The audited manual replay authorizes ONE fresh execution, even
+    // when the dead job's last worker had started it (the automatic-replay
+    // guard refuses a re-start it did not authorize). The attempt history stays.
+    const retried = await testQueue.getJob(job.id!);
+    expect(retried!.attemptsStarted).toBe(0);
+    expect(retried!.attemptsMade).toBe(1);
   });
 
   it('every listed dead job carries its own policy — one blanket promise no longer stands for 53', async () => {
