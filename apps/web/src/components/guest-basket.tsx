@@ -4,10 +4,19 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { useCustomerSession } from './customer-session';
-import { addGuestLine, changeGuestQuantity, clearGuestBasket, guestCart, readGuestBasket, useGuestBasket } from '@/lib/basket';
+import { addGuestLine, changeGuestQuantity, clearGuestBasket, discardGuestBasket, guestCart, readGuestBasket, useGuestBasket } from '@/lib/basket';
 import { uploadGuestBasket, type GuestMergeResult } from '@/lib/basket-merge';
 import { getSessionPrincipal } from '@/lib/auth';
 import { clearCart, money, readCheckoutAttempt } from '@/lib/customer';
+
+/** [#1594 review S3] The way out of a basket frozen mid-upload (another
+ *  account on this browser, or a server that keeps failing). Nothing is
+ *  ordered or sent; the person confirms first. */
+const DISCARD_QUESTION = 'Discard this browser basket? Nothing is ordered. If an earlier upload reached an account, its items stay in that account’s saved cart.';
+function discardBasket(): boolean {
+  if (!window.confirm(DISCARD_QUESTION)) return false;
+  discardGuestBasket(); return true;
+}
 
 /** Mounted once in the shell. Sign-in uploads the browser basket, but never
  * places an order. Conflicts keep both baskets intact for an explicit choice. */
@@ -59,6 +68,7 @@ export function GuestBasketSync() {
         <button className="sw-btn-secondary" disabled={busy} onClick={() => { clearGuestBasket(); setScopedResult(null); }}>Keep saved cart</button>
         <button className="sw-btn-secondary" disabled={busy} onClick={() => { if (readCheckoutAttempt()) { setError('An earlier checkout still has an unresolved outcome. Check Orders before replacing this cart.'); return; } if (window.confirm('Replace the saved cart with this browser basket?')) void clearCart().then(sync).catch(e => setError(e.message)); }}>Replace saved cart</button>
       </> : null}
+      <button className="sw-btn-secondary" disabled={busy} onClick={() => { if (discardBasket()) { setScopedResult(null); setScopedError(null); } }}>Discard this browser basket</button>
       <Link href="/cart" className="sw-btn-secondary">Review basket</Link>
     </div>
   </section>;
@@ -82,6 +92,7 @@ export function GuestCart() {
           await queries.invalidateQueries({ queryKey: ['customer', 'cart'] }); router.refresh();
         } catch (e) { setError((e as Error).message); }
       })}>Place order</button>
+      <button className="sw-btn-secondary ml-3" onClick={() => { if (discardBasket()) setError(null); }}>Discard this browser basket</button>
     </>}{error ? <p role="alert">{error}</p> : null}
   </section>;
 }

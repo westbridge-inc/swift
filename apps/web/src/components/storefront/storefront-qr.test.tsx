@@ -190,14 +190,15 @@ describe('the actual /store/[slug] QR arrival', () => {
   });
 
   it('keeps QR items in a guest basket and signs in only at Place order', async () => {
-    render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
+    // The scanned template code (t=card) survives into the sign-in return path.
+    render(await page({ src: 'qr', c: 'BCDFGHJKMN', t: 'card' }));
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(add);
     expect(nav.push).not.toHaveBeenCalled(); expect(customer.addToCart).not.toHaveBeenCalled();
     await waitFor(() => expect(readGuestBasket().lines[0]).toMatchObject({ itemId: 'roti', quantity: 1, unitPrice: 800 }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fgarden-kitchen%3Fsrc%3Dqr%26c%3DBCDFGHJKMN'));
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`/login?next=${encodeURIComponent('/store/garden-kitchen?src=qr&c=BCDFGHJKMN&t=card')}`));
   });
 
   it('places an order from the scanned menu after sign-in, without the banner blocking checkout', async () => {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { addGuestLine, changeGuestQuantity, clearGuestBasket, readGuestBasket, guestCart, prepareGuestMerge, settleGuestMerge } from './basket';
+import { addGuestLine, changeGuestQuantity, clearGuestBasket, discardGuestBasket, readGuestBasket, guestCart, prepareGuestMerge, settleGuestMerge } from './basket';
 const soup = { vendorId: 'v1', storeSlug: 'sample-kitchen', vendorName: 'Sample Kitchen', itemId: 'soup', name: 'Soup', quantity: 1, unitPrice: 800, selectedOptions: {} };
 beforeEach(() => localStorage.clear());
 describe('the guest basket', () => {
@@ -29,6 +29,13 @@ describe('the guest basket', () => {
     settleGuestMerge(first.key, false); expect(readGuestBasket().lines).toHaveLength(1);
     const next = prepareGuestMerge('customer-a')!; expect(next.key).not.toBe(first.key);
     settleGuestMerge(next.key, true); expect(readGuestBasket().lines).toEqual([]);
+  });
+  it('can always discard the browser copy, even frozen mid-upload: the server receipt is the record', () => {
+    addGuestLine(soup); prepareGuestMerge('customer-a');
+    expect(() => clearGuestBasket()).toThrow(/retry/i);
+    discardGuestBasket();
+    expect(readGuestBasket()).toEqual({ version: 1, lines: [] });
+    expect(prepareGuestMerge('customer-b')).toBeNull();
   });
   it('ignores corrupt storage and never accepts an unbounded or malformed price', () => {
     localStorage.setItem('swift_guest_basket_v1', '{broken'); expect(readGuestBasket().lines).toEqual([]);
