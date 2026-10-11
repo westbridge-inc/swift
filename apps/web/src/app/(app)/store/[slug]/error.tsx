@@ -18,6 +18,7 @@ export default function StorefrontError({
 
   return (
     <QrState
+      embedded
       eyebrow="Menu temporarily unavailable"
       title="Swift could not load this store right now"
       retryAction={reset}
