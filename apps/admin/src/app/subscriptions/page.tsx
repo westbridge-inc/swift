@@ -76,6 +76,11 @@ export default function SubscriptionsPage() {
   });
 
   const rows: any[] = data?.data ?? [];
+  // [OWNER 8 Oct (4)] Partners pay the weekly fee only through the MMG checkout
+  // page; production holds recording a payment by hand (BILLING_TOPUP_HOLD),
+  // so the button is not offered while the server says the hold is on.
+  const recordingHeld = (data as any)?.manualFeeRecording === 'held';
+  const recordError = topup.error as { message?: string } | null;
 
   return (
     <div>
@@ -98,6 +103,14 @@ export default function SubscriptionsPage() {
       <p className="text-[var(--muted)] text-sm mb-6">
         The weekly flat fee is Swift&apos;s only revenue — this queue is the business.
       </p>
+      {recordingHeld ? (
+        <p className="text-[var(--muted)] text-xs -mt-4 mb-6">
+          Recording fee payments by hand is on hold: partners pay through the MMG checkout page. A payment that arrived another way is refunded.
+        </p>
+      ) : null}
+      {recordError?.message ? (
+        <p role="alert" className="text-red-400 text-xs -mt-4 mb-6">{recordError.message}</p>
+      ) : null}
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
@@ -146,7 +159,7 @@ export default function SubscriptionsPage() {
                           >
                             {openTrail === s.id ? 'Hide trail' : 'Billing trail'}
                           </button>
-                          <button
+                          {!recordingHeld && <button
                             onClick={() => {
                               const amt = window.prompt(`Record a weekly-fee payment received by cash/bank for ${h.name} (whole GYD):`);
                               const n = Number(amt);
@@ -164,7 +177,7 @@ export default function SubscriptionsPage() {
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
                             Record fee payment
-                          </button>
+                          </button>}
                           {!s.feeWaived && (
                             <button
                               onClick={() => {

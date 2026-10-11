@@ -51,6 +51,7 @@ import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
@@ -3536,7 +3537,8 @@ export async function adminRoutes(app: FastifyInstance) {
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
       return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority };
     }));
-    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }) };
+    // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
+    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {
@@ -3620,8 +3622,10 @@ export async function adminRoutes(app: FastifyInstance) {
     // ledger posting, the audit row and the durable notice / re-bill tail are
     // written together. Rollback is hold-only (BILLING_TOPUP_HOLD=1 refuses
     // every top-up); there is no way back to an unkeyed mutation.
-    if (process.env['BILLING_TOPUP_HOLD'] === '1') {
-      throw new AppError(503, 'TOPUP_ON_HOLD', 'Recording fee payments by hand is on hold by operations — nothing was recorded. Try again once the hold is lifted.');
+    // [OWNER 8 Oct 22:20 + 23:58 (4)] Production holds it (fails closed when
+    // unset there); only BILLING_TOPUP_HOLD=0 opens it on a test server.
+    if (manualFeeCreditHeld()) {
+      throw new AppError(503, 'TOPUP_ON_HOLD', MANUAL_FEE_CREDIT_HELD_MESSAGE);
     }
     const clientKey = request.headers['idempotency-key'];
     if (!isUsableTopUpKey(clientKey)) {

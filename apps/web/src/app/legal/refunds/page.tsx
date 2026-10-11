@@ -10,11 +10,15 @@ import { site, launch } from '@/site.config';
  *  - cancelling follows the ONE cancel-policy predicate in the API
  *    (modules/order/cancel-policy.ts) and its charge path (order.service.ts);
  *  - the weekly partner fee is paid in advance, one week at a time, and
- *    stopping a plan ends future charges (modules/billing/billing.service.ts).
+ *    stopping a plan ends future charges (modules/billing/billing.service.ts);
+ *  - it can be paid at most four weeks ahead (modules/billing/pay-ahead.ts),
+ *    and closing an account waits until the unstarted weeks paid ahead are
+ *    refunded (modules/user/partner-wind-down.ts, FEE_CREDIT).
  * Approved by the owner, 1 Oct 2026: the business commitments marked below.
+ * Owner ruling, 8 Oct 2026: the four-week limit and the refund at closing.
  */
 
-const UPDATED = '1 October 2026';
+const UPDATED = '12 October 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -106,8 +110,16 @@ export default function RefundsPage() {
           {site.supportReplyBusinessDays} business days.
         </li>
         <li>
+          <b>Paying ahead.</b> You can pay the fee up to four weeks ahead, and no further. A fee paid ahead is only
+          ever used for your weekly fee.
+        </li>
+        <li>
           <b>Stopping your plan.</b> When you stop your weekly plan, {site.tradeName} stops charging for the weeks
           after it. A week that has already started is not refunded, and a fee already owed stays owed.
+        </li>
+        <li>
+          <b>Closing your account.</b> {site.tradeName} refunds the weeks you paid ahead that have not started, records
+          the refund, and then deletes your account. A week that has already started is not refunded.
         </li>
       </ul>
 

@@ -10,6 +10,7 @@ import { log } from '../../utils/logger';
 import { getTenantContext } from '../../plugins/tenant-context';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { CARD_PAY_NOW_KEY_PREFIX, cardChargesInFlight, cardExpiredAt, closeUnsentCardIntents, type BillingService } from './billing.service';
+import { assertPayAheadRoom } from './pay-ahead';
 import { sealVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
 import {
@@ -211,6 +212,9 @@ export class CardRailService {
             || current.nextBillingDate.getTime() !== priced.periodStart.getTime()) {
             throw new AppError(409, 'MOVER_FEE_PRICE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
           }
+          // [OWNER RULING 8 Oct (2)] A Pay now pays the next unpaid week: four
+          // weeks paid ahead at most, refused before any page exists.
+          await assertPayAheadRoom(tx, sub.id, priced.amount, now, 'partner');
         }
         await lockBillingAuthority(tx, sub.id);
         const created = await tx.cardSession.create({
@@ -703,6 +707,8 @@ export class CardRailService {
       data: { kind: 'billing_banked', subscriptionId: session.subscriptionId },
       dedupeKey: `card-paynow-banked:${paymentId}`,
     }).catch(() => {});
+    // [OWNER RULING 8 Oct (2)] Kept, never refused; past four weeks ahead the operators refund the excess.
+    await this.billing.pageIfPayAheadOverCap(session.subscriptionId);
   }
 
   private async resultOf(session: CardSession): Promise<CardConfirmResult> {

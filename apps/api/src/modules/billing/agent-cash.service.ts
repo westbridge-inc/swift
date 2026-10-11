@@ -12,6 +12,9 @@ import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-co
 import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
 import { amountDueNow } from './amount-due';
+import { PAY_AHEAD_LIMIT, payAheadRefusal, readPayAhead } from './pay-ahead';
+import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
+import { AppError } from '../../utils/errors';
 
 // Agent-cash ingestion [san spec PART 4] — three channels, ONE pipeline:
 //   persist raw → idempotency → sanity → cross-channel dedupe → resolve SAN
@@ -295,6 +298,10 @@ export class AgentCashService {
     const res = await resolveSan(this.prisma, p.sanRaw, { tenantId: row.tenantId }); // [AX363-F2] this tenant's accounts only
     if (!res.ok) return this.suspense(row.id, res.code);
 
+    // [OWNER 8 Oct (4)] Production credits no fee by agent (BILLING_TOPUP_HOLD):
+    //    the money is recorded and held for a person, who refunds it.
+    if (manualFeeCreditHeld()) return this.suspense(row.id, 'TOPUP_ON_HOLD');
+
     // 5. Credit through the SAME pipeline every rail uses.
     return this.credit(row.id, res.subscription.id, p, onAudit);
   }
@@ -489,6 +496,24 @@ export class AgentCashService {
         throw new Error('DESTINATION_TENANT_MISMATCH');
       }
 
+      // [OWNER RULING 8 Oct (2)] Four weeks paid ahead at most, decided under
+      // the payer lock and BEFORE the provider transaction is marked credited.
+      // Arriving money past the cap is held for a person (refund), never
+      // credited and never dropped; an admin attaching it is refused in words.
+      // Only an observation that would really credit is measured: a second
+      // observation of a transaction already credited is reconciled below
+      // (no money moves), and a legacy credit is linked, never re-credited.
+      const wouldCredit = identity.status === 'OPEN' && !await tx.billingEvent.findFirst({
+        where: { type: 'PREPAID_TOPUP', idempotencyKey: { endsWith: `:agent:${p.channel}:${p.externalId}` } },
+        select: { id: true },
+      });
+      const position = wouldCredit ? await readPayAhead(tx, requestedSubscriptionId, new Date()) : null;
+      if (position && Math.round(p.amount * 100) / 100 > position.room) {
+        if (resolution.expectedStatus === 'UNMATCHED') throw payAheadRefusal(position, 'admin');
+        await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'UNMATCHED', failureCode: PAY_AHEAD_LIMIT } });
+        return { paymentId, subscriptionId: requestedSubscriptionId, credited: false, duplicateOf: null, payAheadLimit: true as const };
+      }
+
       // [M-18] THE single CAS: exactly one observation of a provider
       // transaction ever credits. A concurrent channel, or a later attach of
       // the unmatched original, waits on this row, re-reads the predicate
@@ -560,6 +585,10 @@ export class AgentCashService {
     if ('conflict' in committed && committed.conflict) {
       if (resolution.expectedStatus === 'UNMATCHED') throw new Error('PROVIDER_ID_CONFLICT');
       return { status: 'received_unmatched', paymentId, failureCode: 'PROVIDER_ID_CONFLICT' };
+    }
+    if ('payAheadLimit' in committed && committed.payAheadLimit) {
+      log().warn({ paymentId, subscriptionId: committed.subscriptionId }, 'agent payment held: it would take the weekly fee past four weeks paid ahead; a person refunds it');
+      return { status: 'received_unmatched', paymentId, failureCode: PAY_AHEAD_LIMIT };
     }
     if (committed.duplicateOf) {
       // [M-18] A credit attempt on an already-credited transaction: the race
@@ -696,6 +725,8 @@ export class AgentCashService {
    *  transaction was credited by another channel meanwhile, the attach is
    *  answered `reconciled` and moves nothing. */
   async attach(paymentId: string, subscriptionId: string, adminId: string, onAudit?: OnAudit): Promise<IngestResult> {
+    // [OWNER 8 Oct (4)] Under the hold an agent payment is refunded, never credited by hand.
+    if (manualFeeCreditHeld()) throw new AppError(503, 'TOPUP_ON_HOLD', MANUAL_FEE_CREDIT_HELD_MESSAGE);
     const row = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
     if (row.status !== 'UNMATCHED') throw new Error('NOT_UNMATCHED');
     // [AX363-F1] The provider identity first, resolved (or minted) and

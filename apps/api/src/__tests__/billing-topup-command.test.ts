@@ -259,6 +259,46 @@ describe('[M-08 · operations] rollback is hold-only', () => {
 
 
 // ---------------------------------------------------------------------------
+// [OWNER RULING 8 Oct, NO "WALLET" (2) + (4)] Weekly fees are paid at most four
+// weeks ahead, and production credits no fee by hand. A recorded payment that
+// would go past four weeks is refused with the most that can still be recorded
+// (the rest is refunded to the partner); nothing is written.
+// ---------------------------------------------------------------------------
+describe('[owner ruling 8 Oct] a recorded fee payment never takes an account past four weeks paid ahead', () => {
+  it('names the most that can be recorded, records nothing over it, and refuses anything once four weeks are held', async () => {
+    const { sub } = await makeVendorSub();
+    const over = await topup(sub.id, { amount: 8401, reference: refFor('CAP1') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(over.statusCode).toBe(409);
+    expect(over.json().error).toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
+    expect(over.json().error.message).toContain('Record at most GY$8,400 now and refund the rest to the partner');
+    expect(await facts(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, audits: 0, commands: 0, balance: 0 });
+
+    const fits = await topup(sub.id, { amount: 8400, reference: refFor('CAP2') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(fits.statusCode).toBe(200);
+    expect((await facts(sub.id)).balance).toBe(8400);
+
+    const full = await topup(sub.id, { amount: 1, reference: refFor('CAP3') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    expect(full.statusCode).toBe(409);
+    expect(full.json().error.message).toContain('already has 4 weeks of weekly fees paid ahead');
+    expect((await facts(sub.id)).credits).toBe(1);
+  });
+
+  it('a hold switch written wrongly still holds (only BILLING_TOPUP_HOLD=0 opens it)', async () => {
+    const { sub } = await makeVendorSub();
+    process.env['BILLING_TOPUP_HOLD'] = 'yes';
+    try {
+      const held = await topup(sub.id, { amount: 2100, reference: refFor('HOLDYES') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+      expect(held.statusCode).toBe(503);
+      expect(held.json().error?.code ?? held.json().code).toBe('TOPUP_ON_HOLD');
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+    expect((await facts(sub.id)).credits).toBe(0);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
 // [A-12] THE IDEMPOTENCY KEY IS NOT THE TRANSFER'S IDENTITY.
 //
 // M-08 made the same REQUEST safe to repeat: a key, scoped to one admin, that

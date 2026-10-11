@@ -29,13 +29,14 @@ import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { amountDueNow } from './amount-due';
 import { weeklyFeeAmount } from './subscription-fee';
 import { payInfo } from './agent-cash.service';
+import { assertPayAheadRoom, readPayAhead, PAY_AHEAD_MAX_WEEKS } from './pay-ahead';
 import { claimProviderPaymentInTx, ProviderIdentityError, subscriptionTenantInTx } from './provider-identity';
 import { cardRailKilled, cardRailV2Enabled } from '../../utils/card-rail';
 import {
   assertNever, bindingOf, chargeMatchesIntent, describeBinding, sameBinding,
   type CardChargeOutcome, type CardRailBinding, type CardRailProvider, type CardRailSource, type ChargedAmount,
 } from '../../providers/card/card-provider';
-import { toProviderMinor } from '../../utils/currency-amount';
+import { formatMoney, toProviderMinor } from '../../utils/currency-amount';
 import { openVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
 import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
@@ -2998,6 +2999,7 @@ export class BillingService {
     } else if (result.kind === 'advanced') {
       await this.afterSuccessfulCharge(result.current, result.amount, result.periodKey);
     }
+    if (result.kind === 'banked') await this.pageIfPayAheadOverCap(sub.id);
     return result.kind;
   }
 
@@ -4073,10 +4075,20 @@ export class BillingService {
       expectedTenantId?: string;
       /** The rail the money came by, when the caller names it (MMG_CHECKOUT). */
       channel?: string;
+      /** [OWNER RULING 8 Oct (2)] A payment a person records by hand is refused
+       *  past four weeks paid ahead (they refund the rest). Money that arrived
+       *  without anyone choosing it (a checkout MMG confirmed) is never refused:
+       *  afterTopUpCommitted pages the operators to refund any excess. */
+      payAheadLimit?: 'refuse';
     },
   ) {
     if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'A fee payment must be more than zero');
     await lockSubscriptionPayer(tx, input.subscriptionId);
+    // A replay of a payment already recorded is answered as a replay (the
+    // credit's unique event key), never refused by the limit it already fits.
+    if (input.payAheadLimit === 'refuse' && !await tx.billingEvent.findUnique({ where: { idempotencyKey: input.eventKey }, select: { id: true } })) {
+      await assertPayAheadRoom(tx, input.subscriptionId, input.amount, new Date(), 'admin');
+    }
     const sub = await tx.subscription.findUnique({
       where: { id: input.subscriptionId },
       select: { id: true, currencyCode: true },
@@ -4153,11 +4165,35 @@ export class BillingService {
     return recovered;
   }
 
+  /** [OWNER RULING 8 Oct (2)] Money that reached a weekly fee without anyone
+   *  choosing to pay ahead (a checkout MMG confirmed, an agent payment, a late
+   *  approval or card capture for a week already paid) is never refused once it
+   *  is Swift's to hold. When it leaves more than four weeks paid ahead, the
+   *  operators are paged, once per amount, to refund the part above the cap.
+   *  Best-effort and after the commit: it moves no money. */
+  async pageIfPayAheadOverCap(subscriptionId: string): Promise<void> {
+    try {
+      const position = await readPayAhead(this.prisma, subscriptionId, new Date());
+      if (!position || !(position.excess > 0)) return;
+      const money = (n: number) => formatMoney(n, position.currencyCode);
+      await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: await tenantOfSubscription(this.prisma, subscriptionId),
+        title: 'Weekly fees paid ahead past the 4-week limit — refund owed',
+        body: `A partner now has ${money(position.heldAhead)} of weekly fees paid ahead, more than the ${PAY_AHEAD_MAX_WEEKS}-week limit (${money(position.heldAhead - position.excess)}). Refund the ${money(position.excess)} above the limit to the partner (finance procedure: weekly fees paid ahead). The money had already arrived, so nothing was refused.`,
+        data: { kind: 'billing_invariants', alert: 'pay-ahead-over-cap', subscriptionId, excess: position.excess, currencyCode: position.currencyCode },
+        dedupeKey: `pay-ahead-over-cap:${subscriptionId}:${position.heldAhead}`,
+      });
+    } catch (err) {
+      log().error({ err, subscriptionId }, '[billing] the pay-ahead limit page could not be sent; the excess stays visible on the account');
+    }
+  }
+
   /** Post-commit effects for a durable top-up. A caller may safely retry this
    * method: it moves no money; the billing engine's own event keys make an
    * immediate re-bill idempotent. */
   async afterTopUpCommitted(subscriptionId: string, amount: number, opts: { notify?: boolean } = {}): Promise<void> {
     await this.recoverConfirmationSettlements(subscriptionId);
+    await this.pageIfPayAheadOverCap(subscriptionId);
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: {
@@ -4213,6 +4249,7 @@ export class BillingService {
           recordedBy,
           reference,
           eventKey,
+          payAheadLimit: 'refuse',
         }),
       );
     } catch (error) {
@@ -4290,6 +4327,7 @@ export class BillingService {
           recordedBy: input.adminId,
           reference: input.reference,
           eventKey,
+          payAheadLimit: 'refuse',
         });
         const event = await tx.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: eventKey }, select: { id: true } });
         // The operational evidence is part of the command, not a hope after it.

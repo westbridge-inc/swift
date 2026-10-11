@@ -1044,3 +1044,21 @@ describe('shared confirmation authority fences card PAY_NOW', () => {
     expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [OWNER RULING 8 Oct, NO "WALLET" (2)] A card Pay now pays the next unpaid
+// week, so weeks paid by card count toward the four-week cap the same as fees
+// paid ahead. The door refuses a fifth week in plain words; nothing is opened.
+// ---------------------------------------------------------------------------
+describe('[owner ruling 8 Oct] a card Pay now never takes an account past four weeks paid ahead', () => {
+  it('three weeks already paid by card leave room for one more; four leave none', async () => {
+    const three = await partner({ due: new Date(Date.now() + 3 * DAY + 21 * DAY) });
+    expect(await start(three, 'PAY_NOW')).toMatchObject({ purpose: 'PAY_NOW', amount: WEEKLY });
+    const four = await partner({ due: new Date(Date.now() + 3 * DAY + 28 * DAY) });
+    await expect(start(four, 'PAY_NOW')).rejects.toMatchObject({
+      statusCode: 409, code: 'PAY_AHEAD_LIMIT',
+      message: 'Your weekly fee is already paid ahead as far as Swift allows (4 weeks). You can pay again once a week has been used.',
+    });
+    expect(await app.prisma.cardSession.count({ where: { subscriptionId: four.subId } })).toBe(0);
+  });
+});

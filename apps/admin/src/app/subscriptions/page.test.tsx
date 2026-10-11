@@ -143,3 +143,37 @@ describe('[A-12] a waived fee carries the operator’s own words', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// [OWNER 8 Oct (4)] Production records no fee payment by hand (BILLING_TOPUP_HOLD):
+// partners pay through the MMG checkout page. The server says when the hold is on,
+// and the console then offers no "Record fee payment" button. When it is offered and
+// the server refuses (the hold, or four weeks already paid ahead), its words show.
+// ---------------------------------------------------------------------------
+describe('[owner 8 Oct] recording a fee payment by hand', () => {
+  it('is not offered while the server says the hold is on', async () => {
+    mockApi((request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [subscription], manualFeeRecording: 'held' } };
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Record fee payment' })).toBeNull();
+    expect(screen.getByText(/Recording fee payments by hand is on hold/)).toBeTruthy();
+  });
+
+  it('shows the server’s words when it refuses one', async () => {
+    vi.stubGlobal('prompt', vi.fn((msg: string) => {
+      if (String(msg).includes('reference')) return 'BANK-9100';
+      if (String(msg).includes('Why are you about to')) return 'Amount and reference match the deposit slip';
+      return '9000';
+    }));
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const refusal = 'This would put more than 4 weeks of weekly fees paid ahead on this account. Record at most GY$8,400 now and refund the rest to the partner (finance procedure: weekly fees paid ahead).';
+    mockApi(handler(() => ({ status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT', message: refusal } } })));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('Record at most GY$8,400');
+  });
+});
