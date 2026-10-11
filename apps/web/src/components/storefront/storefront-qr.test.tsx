@@ -90,7 +90,17 @@ describe('the actual /store/[slug] QR arrival', () => {
   );
 
   it('preserves the menu/cart flow slot and computed layout styles on dismissal', async () => {
+    // A signed-in customer with a line in the order, so the floating
+    // order link exists and the cart-link checks below bite. ([W4] It reads
+    // "Checkout · N items" and opens the one checkout.)
+    vi.mocked(auth.sessionProbe).mockResolvedValue({ ok: true });
+    vi.mocked(customer.getCart).mockResolvedValue({
+      items: [{ id: 'line', itemId: 'roti', name: 'Pumpkin roti', quantity: 1, customerPrice: 800, isAvailable: true, fulfillment: 'DELIVERY' }],
+      vendor: { id: store.id, name: store.name, isCurrentlyOpen: true, acceptingOrders: true }, subtotalCustomer: 800,
+    });
+    vi.spyOn(customer, 'getAddresses').mockResolvedValue([]);
     render(await page({ src: 'qr' }));
+    await screen.findByRole('link', { name: /^Checkout · 1 item/ });
     const dismiss = screen.getByRole('button', { name: 'Dismiss dining-in message' });
     const slot = dismiss.parentElement!;
     const menu = screen.getByRole('region', { name: 'Menu' });
@@ -99,7 +109,8 @@ describe('the actual /store/[slug] QR arrival', () => {
     // order" link joins it once something is in the order. (The old
     // store-branded top bar and its cart link are gone: the app's frame holds
     // the page now.)
-    const cartLinks = screen.queryAllByRole('link', { name: /Your order/ });
+    const cartLinks = screen.queryAllByRole('link', { name: /your order|^Checkout ·/i });
+    expect(cartLinks.length).toBeGreaterThan(0);
     const layoutStyles = (element: Element) => {
       const computed = getComputedStyle(element);
       return Object.fromEntries([
@@ -180,15 +191,18 @@ describe('the actual /store/[slug] QR arrival', () => {
   });
 
   it('keeps QR items in a guest basket and signs in only at Place order', async () => {
-    render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
+    // The scanned template code (t=card) survives into the sign-in return path.
+    render(await page({ src: 'qr', c: 'BCDFGHJKMN', t: 'card' }));
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(add);
     expect(nav.push).not.toHaveBeenCalled(); expect(customer.addToCart).not.toHaveBeenCalled();
     await waitFor(() => expect(readGuestBasket().lines[0]).toMatchObject({ itemId: 'roti', quantity: 1, unitPrice: 800 }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
-    // [W4] The code brings the customer to the one checkout.
+    // [W4] The code brings the customer to the one checkout; the scanned
+    // store address, template code included, stays with the basket.
     await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/login?next=%2Fcheckout'));
+    expect(readGuestBasket().lines[0]?.returnPath).toBe('/store/garden-kitchen?src=qr&c=BCDFGHJKMN&t=card');
   });
 
   it('takes a signed-in customer from the scanned menu to the one checkout, without the banner blocking it', async () => {
