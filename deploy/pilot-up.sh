@@ -2,8 +2,9 @@
 # Single-host STAGING cutover. Invoke with an approved full origin/main SHA.
 # This script intentionally stops the old API/worker before migration. When
 # deploy/.env sets WEB_HOST it also builds and serves the website (apps/web)
-# for the same SHA; without WEB_HOST it does nothing more. ADMIN_HOST does the
-# same for the admin console (apps/admin), behind an optional second gate.
+# for the same SHA, behind an optional password; without WEB_HOST it does
+# nothing more. ADMIN_HOST does the same for the admin console (apps/admin),
+# behind an optional second gate.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -121,20 +122,33 @@ if [ -n "$ADMIN_HOST" ]; then
   esac
   COMPOSE+=(--profile admin)
 fi
-# The optional second gate in front of the console: a bcrypt hash of cost 10 or
-# more, in single quotes (unquoted, Compose would read its `$` signs as
-# variables). A refusal names the setting, never its value.
+# The optional gates (the console's second gate, the website's password) are
+# each a bcrypt hash of cost 10 or more, in single quotes (unquoted, Compose
+# would read its `$` signs as variables). A refusal names the setting, never
+# its value.
+bcrypt_re='^[$]2[aby][$](1[0-9]|2[0-9]|3[01])[$][./A-Za-z0-9]{53}$'
+quoted_bcrypt() {
+  local inner=""
+  case "$1" in
+    \'*\') inner="${1:1:${#1}-2}" ;;
+  esac
+  [[ "$inner" =~ $bcrypt_re ]]
+}
 if [ -n "$ADMIN_BASIC_AUTH_HASH" ]; then
   [ -n "$ADMIN_HOST" ] ||
     die "ADMIN_BASIC_AUTH_HASH needs ADMIN_HOST: the gate stands in front of the admin console, which is off without it"
-  bcrypt_re='^[$]2[aby][$](1[0-9]|2[0-9]|3[01])[$][./A-Za-z0-9]{53}$'
-  gate_hash=""
-  case "$ADMIN_BASIC_AUTH_HASH" in
-    \'*\') gate_hash="${ADMIN_BASIC_AUTH_HASH:1:${#ADMIN_BASIC_AUTH_HASH}-2}" ;;
-  esac
-  [[ "$gate_hash" =~ $bcrypt_re ]] ||
+  quoted_bcrypt "$ADMIN_BASIC_AUTH_HASH" ||
     die "ADMIN_BASIC_AUTH_HASH must be a bcrypt hash of cost 10 or more in single quotes (see PILOT-RUNBOOK.md 3d), or empty for no gate"
-  unset gate_hash
+fi
+# [WEB-GATE] The optional password in front of the website's own name
+# (WEB_HOST only; the public names stay open). It stands in front of the
+# website, so it needs WEB_HOST.
+WEB_BASIC_AUTH_HASH="$(env_value WEB_BASIC_AUTH_HASH)"
+if [ -n "$WEB_BASIC_AUTH_HASH" ]; then
+  [ -n "$WEB_HOST" ] ||
+    die "WEB_BASIC_AUTH_HASH needs WEB_HOST: the password stands in front of the website, which is off without it"
+  quoted_bcrypt "$WEB_BASIC_AUTH_HASH" ||
+    die "WEB_BASIC_AUTH_HASH must be a bcrypt hash of cost 10 or more in single quotes (see PILOT-RUNBOOK.md 3e), or empty for no password"
 fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 
@@ -274,22 +288,53 @@ done
 # only a client of that API, so it needs no migration and is simply replaced.
 # Ready means its own probe is healthy AND Caddy serves its home page over
 # HTTPS on this host (the certificate for WEB_HOST included).
+# [WEB-GATE] With the password on, the home page must instead refuse a
+# stranger with exactly 401 (a website reachable without the password it was
+# configured with fails the deploy, as the console does), and the website's
+# own answer comes from an open path with no side effects: the app-link file
+# it serves under /.well-known/ must answer exactly 200. Never /pay/mmg/,
+# which posts to a billing endpoint.
+web_status() {
+  curl -sS -o /dev/null -w '%{http_code}' --resolve "$WEB_HOST:443:127.0.0.1" \
+    --connect-timeout 5 --max-time 8 "https://$WEB_HOST$1" 2>/dev/null || true
+}
 if [ -n "$WEB_HOST" ]; then
   "${COMPOSE[@]}" up -d --no-deps --force-recreate web
+  WEB_GATE=off
+  [ -z "$WEB_BASIC_AUTH_HASH" ] || WEB_GATE=on
+  WEB_FILE=/.well-known/apple-app-site-association
   WEB_READY=0
+  WEB_WHY="the web container never reported healthy"
   for _ in $(seq 1 90); do
     WEB_ID="$("${COMPOSE[@]}" ps -q web)"
     if [ -n "$WEB_ID" ] &&
-       [ "$(docker inspect -f '{{.State.Health.Status}}' "$WEB_ID")" = healthy ] &&
-       curl -fsS --resolve "$WEB_HOST:443:127.0.0.1" --connect-timeout 5 --max-time 8 "https://$WEB_HOST/" >/dev/null 2>&1; then
-      WEB_READY=1
-      break
+       [ "$(docker inspect -f '{{.State.Health.Status}}' "$WEB_ID")" = healthy ]; then
+      if [ "$WEB_GATE" = off ]; then
+        if curl -fsS --resolve "$WEB_HOST:443:127.0.0.1" --connect-timeout 5 --max-time 8 "https://$WEB_HOST/" >/dev/null 2>&1; then
+          WEB_READY=1
+          break
+        fi
+      else
+        WEB_FILE_ANSWER="$(web_status "$WEB_FILE")"
+        WEB_HOME_ANSWER="$(web_status /)"
+        if [ "$WEB_FILE_ANSWER" != 200 ]; then
+          WEB_WHY="https://$WEB_HOST$WEB_FILE answered ${WEB_FILE_ANSWER:-000}, not 200"
+        elif [ "$WEB_HOME_ANSWER" != 401 ]; then
+          WEB_WHY="https://$WEB_HOST/ answered ${WEB_HOME_ANSWER:-000}, not 401"
+        else
+          WEB_READY=1
+          break
+        fi
+      fi
     fi
     sleep 2
   done
-  [ "$WEB_READY" = 1 ] ||
+  if [ "$WEB_READY" != 1 ]; then
+    [ "$WEB_GATE" = off ] ||
+      die "the website is not ready at https://$WEB_HOST: $WEB_WHY (password gate on; the API is serving $SHA); inspect: docker compose -f deploy/docker-compose.yml --profile web logs --tail=100 web caddy"
     die "the website did not become ready at https://$WEB_HOST (the API is serving $SHA); inspect: docker compose -f deploy/docker-compose.yml --profile web logs --tail=100 web caddy"
-  echo "WEBSITE READY at https://$WEB_HOST (exact SHA $SHA)"
+  fi
+  echo "WEBSITE READY at https://$WEB_HOST (exact SHA $SHA; password gate $WEB_GATE)"
 fi
 
 # [ADMIN-CONSOLE] The console starts once the API it calls is ready; like the
