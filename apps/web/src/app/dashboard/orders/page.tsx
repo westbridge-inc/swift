@@ -10,6 +10,7 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
 import { useStoreRole } from '@/lib/store-role';
+import { mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../../../mobile/src/modules/vendor/order-dispute';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
@@ -312,17 +313,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const showConfirmPay = attestablePay && o.canConfirmPayment === true;
   const confirmPayNeedsManager = attestablePay && o.canConfirmPayment !== true;
   // and when it is NOT attestable, the screen says why rather than going quiet
-  const payBlockedReason =
-    isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED'
-      ? {
-          REFUNDED: 'This payment was refunded — a new payment is a new transaction.',
-          PARTIALLY_REFUNDED: 'This payment was partly refunded — support settles the rest.',
-          FAILED: 'MMG reports this payment as failed. Contact support with the reference if money did reach you.',
-          EXPIRED: 'The payment window closed — ask the customer to pay again.',
-          UNKNOWN: 'This payment is unresolved with MMG. Support settles it; it cannot be marked received here.',
-          CANCELLED: 'This payment was superseded.',
-        }[String(o.paymentStatus ?? '')] ?? null
-      : null;
+  const payBlockedReason = isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED' ? mmgPayBlockedReason(o.paymentStatus) : null;
   const customer = [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
   const riderName = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : '';
   const riderAssigned = Boolean(o.riderId || o.rider);
@@ -673,8 +664,8 @@ export default function OrdersPage() {
     </>}
     {manager ? <ManageGrid store={store.data} owner={role === 'OWNER'} onOrderHistory={() => setBucket('done')} /> : <StaffAvailability />}
     {store.data && <div className="grid gap-4 wide:grid-cols-2">
-      <StoreStatusCard store={store.data} manager={manager} />
-      {manager && storeLive && <SelfDeliveryCard store={store.data} />}
+      <StoreStatusCard store={store.data} manager={manager} readFailed={store.isError} onRetryRead={() => void store.refetch()} />
+      {manager && storeLive && <SelfDeliveryCard store={store.data} readFailed={store.isError} />}
     </div>}
     <p className="text-center text-[13px] text-[var(--swift-muted)]">You keep 100% of every order — Swift takes no commission.</p>
     {selected && <div ref={dialog} className="sw-scrim items-start overflow-y-auto p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] wide:items-center" role="dialog" aria-modal="true" aria-label="Order details" onKeyDown={e => { if (e.key === 'Escape') setSelected(null); else trapTab(e); }}>

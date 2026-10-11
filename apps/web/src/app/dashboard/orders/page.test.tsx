@@ -317,7 +317,9 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
       const { fetchMock } = await openMmgDetail(paymentStatus);
       expect(screen.queryByRole('button', { name: /received in my MMG/i })).toBeNull();
       // and the screen is not silent about it
-      expect(screen.getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
+      // Said in the order window — and on the card, as in the app (VendorOrderCard payBlockedReason).
+      expect(within(screen.getByRole('dialog', { name: 'Order details' })).getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
+      expect(within(screen.getByRole('article', { name: 'Order SW-1001' })).getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
       expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
     },
   );

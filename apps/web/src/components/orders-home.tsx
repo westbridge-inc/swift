@@ -24,6 +24,7 @@ import {
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
+import { mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../mobile/src/modules/vendor/order-dispute';
 
@@ -31,7 +32,10 @@ export type { HubStore };
 
 export function useHubStore() {
   const storeId = useStoreId();
-  const q = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
+  // Re-read every 20 s, as the app does (vendorops.ts useVendorProfile): the
+  // open / pause endpoints flip the stored value, so a tab left open must not
+  // act on a state the phone has since changed.
+  const q = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile, refetchInterval: 20_000 });
   return { ...q, data: pickProfileStore(q.data, storeId) };
 }
 function useOverview(enabled: boolean) {
@@ -344,7 +348,17 @@ function Switch({ on }: { on: boolean }) {
 }
 
 /** The store status card: open switch and pause for owners and managers, the state for everyone. */
-export function StoreStatusCard({ store, manager }: { store: HubStore; manager: boolean }) {
+/** Said when the store's state could not be re-read: the controls wait for a fresh read. */
+function ReadFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <p role="alert" className="mt-3 text-[13px] text-[var(--swift-error)]">
+      Couldn’t check your store’s current state, so these controls are paused.{' '}
+      <button type="button" onClick={onRetry} className="font-semibold underline">Try again</button>
+    </p>
+  );
+}
+
+export function StoreStatusCard({ store, manager, readFailed = false, onRetryRead = () => {} }: { store: HubStore; manager: boolean; readFailed?: boolean; onRetryRead?: () => void }) {
   const storeId = useStoreId();
   const client = useQueryClient();
   // The server FLIPS the stored value (it ignores the body), so a second tap
@@ -372,22 +386,23 @@ export function StoreStatusCard({ store, manager }: { store: HubStore; manager: 
   return (
     <section aria-label="Store status" className="sw-card p-5">
       {manager ? (
-        <button type="button" role="switch" aria-label="Store open to customers" aria-checked={!inPreview && open} disabled={inPreview || openMut.isPending} onClick={() => openMut.mutate()}
+        <button type="button" role="switch" aria-label="Store open to customers" aria-checked={!inPreview && open} disabled={inPreview || readFailed || openMut.isPending} onClick={() => openMut.mutate()}
           className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">{text}<Switch on={!inPreview && open} /></button>
       ) : <div className="flex min-h-12 items-center">{text}</div>}
       {openMut.isError && <p className="mt-2 text-[13px] text-[var(--swift-error)]">Store status didn’t update — check your connection and try again.</p>}
       {manager && !inPreview && (
-        <button type="button" disabled={ordersMut.isPending} onClick={() => ordersMut.mutate()} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
+        <button type="button" disabled={readFailed || ordersMut.isPending} onClick={() => ordersMut.mutate()} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
           {accepting ? 'Pause new orders' : 'Resume orders'}
         </button>
       )}
       <MutationNotice errors={[ordersMut.error]} className="mt-2" />
+      {manager && readFailed && <ReadFailed onRetry={onRetryRead} />}
     </section>
   );
 }
 
 /** "Deliver my own orders" — the store-wide self-delivery setting (owners and managers). */
-export function SelfDeliveryCard({ store }: { store: HubStore }) {
+export function SelfDeliveryCard({ store, readFailed = false }: { store: HubStore; readFailed?: boolean }) {
   const storeId = useStoreId();
   const client = useQueryClient();
   const selfDelivery = !!store.selfDeliveryEnabled;
@@ -401,7 +416,7 @@ export function SelfDeliveryCard({ store }: { store: HubStore }) {
   });
   return (
     <section aria-label="Who delivers" className="sw-card p-5">
-      <button type="button" role="switch" aria-label="Deliver my own orders" aria-checked={selfDelivery} disabled={mut.isPending} onClick={() => mut.mutate()}
+      <button type="button" role="switch" aria-label="Deliver my own orders" aria-checked={selfDelivery} disabled={readFailed || mut.isPending} onClick={() => mut.mutate()}
         className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">
         <span className="min-w-0 flex-1">
           <span className="block font-semibold">Deliver my own orders</span>
@@ -445,19 +460,23 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
   // MMG order offers the confirmation instead of an Accept it would refuse.
   const status = (order.status || '').toUpperCase();
   const isMmg = order.paymentMethod === 'MOBILE_MONEY';
-  const mmgPaid = order.paymentStatus === 'CAPTURED';
+  const moneyMoved = mmgMoneyMoved(order.paymentStatus);
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes(status);
   const attestable = isMmg && canAttestPayment(order.paymentStatus) && !terminal;
   const canConfirm = attestable && order.canConfirmPayment === true;
+  const blockedReason = isMmg && !moneyMoved && !attestable && !terminal ? mmgPayBlockedReason(order.paymentStatus) : null;
   const paused = mmgDisputePaused(order);
-  const actions = orderActions(order).filter((a) => !(a.action === 'accept' && isMmg && !mmgPaid));
+  const actions = orderActions(order).filter((a) => !(a.action === 'accept' && isMmg && !moneyMoved));
   if (actions.length === 0 && !isMmg && !paused) return null;
   const busy = act.isPending || reject.isPending;
   return (
     <div className="mt-3 space-y-2">
-      {isMmg && !terminal && (
-        <p className={`text-[13px] font-semibold ${mmgPaid ? 'text-[var(--swift-success)]' : 'text-[var(--swift-warning)]'}`}>{mmgPaid ? 'MMG payment received' : 'Awaiting MMG payment'}</p>
+      {isMmg && !terminal && !blockedReason && (
+        <p className={`text-[13px] font-semibold ${moneyMoved ? 'text-[var(--swift-success)]' : 'text-[var(--swift-warning)]'}`}>
+          {order.paymentStatus === 'CAPTURED' ? 'MMG payment received' : order.paymentStatus === 'CLAIMED' ? 'Payment confirmed by your store' : 'Awaiting MMG payment'}
+        </p>
       )}
+      {blockedReason && <p className="sw-caption">{blockedReason}</p>}
       {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Confirm MMG payment</button>}
       {attestable && !canConfirm && <p className="sw-caption">Only the owner or a manager can confirm MMG payments.</p>}
       {paused && (

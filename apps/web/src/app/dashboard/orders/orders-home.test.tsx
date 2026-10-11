@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import OrdersPage from './page';
 import { mockApi, renderWithQuery, stubAudioContext, type ApiRequest } from '@/test/test-utils';
 import { wireVendorOrder } from '@/test/vendor-wire-fixtures';
@@ -16,7 +16,7 @@ import { guyanaDayKey } from '@/lib/vendor-hub';
 type Role = 'OWNER' | 'MANAGER' | 'STAFF';
 interface Opts {
   role?: Role; lifetime?: number; open?: boolean; accepting?: boolean; selfDelivery?: boolean;
-  orders?: unknown[]; storeRoles?: Record<string, Role>; status?: string; holdProfileRefetch?: Promise<{ body: unknown }>;
+  orders?: unknown[]; storeRoles?: Record<string, Role>; status?: string; holdProfileRefetch?: Promise<{ body: unknown }>; failProfileRefetch?: boolean;
 }
 
 const writes: Array<{ method: string; path: string; body: unknown }> = [];
@@ -49,7 +49,9 @@ function hubApi(opts: Opts = {}) {
       // The server's real shape (vendor.routes.ts GET /profile; staff-roles.test.ts):
       // { id, userId, vendors: [...], myRole }. The selected store is NOT first here,
       // so a page that took vendors[0] would show the wrong store.
-      if (profileHold && profileReads++ > 0) return profileHold;
+      if (profileHold && profileReads > 0) { profileReads += 1; return profileHold; }
+      if (opts.failProfileRefetch && profileReads > 0) { profileReads += 1; return { status: 503, body: { success: false, error: { message: 'Service unavailable' } } }; }
+      profileReads += 1;
       return { body: { success: true, data: {
         id: 'owner-1', userId: 'user-1', myRole: storeRoles?.[store] ?? role,
         vendors: [
@@ -359,6 +361,74 @@ describe('the board and clock details follow the app', () => {
     await act(async () => { await queryClient.refetchQueries(); });
     expect(await screen.findByText(/NEW ORDER/, {}, { timeout: 5000 })).toBeTruthy();
     expect(screen.queryByText(/Accept within/)).toBeNull();
+  });
+});
+
+// Opus delta review of #1615: the store's own confirmation lands as CLAIMED
+// (never CAPTURED), and the server counts CLAIMED as money moved — so a
+// confirmed MMG order offers Accept again and says so truthfully.
+describe('MMG payment states on the card', () => {
+  const mmgOrder = (paymentStatus: string) => wireVendorOrder({ id: 'o-mmg', orderNumber: 'SW-7501', status: 'PENDING', paymentMethod: 'MOBILE_MONEY', paymentStatus, canConfirmPayment: true });
+  async function card(paymentStatus: string) {
+    hubApi({ orders: [mmgOrder(paymentStatus)] });
+    const view = renderWithQuery(<OrdersPage />);
+    const later = await screen.findByText(/View later/).catch(() => null);
+    if (later) await view.user.click(later);
+    return screen.findByRole('article', { name: 'Order SW-7501' });
+  }
+  it('a payment the store has confirmed (CLAIMED) offers Accept, says it is confirmed, and asks for nothing more', async () => {
+    const c = await card('CLAIMED');
+    expect(within(c).getByText('Payment confirmed by your store')).toBeTruthy();
+    expect(within(c).queryByText('Awaiting MMG payment')).toBeNull();
+    expect(within(c).getByRole('button', { name: 'Accept' })).toBeTruthy();
+    expect(within(c).queryByRole('button', { name: 'Confirm MMG payment' })).toBeNull();
+  });
+  it('a provider-captured payment (CAPTURED) offers Accept and says it was received', async () => {
+    const c = await card('CAPTURED');
+    expect(within(c).getByText('MMG payment received')).toBeTruthy();
+    expect(within(c).getByRole('button', { name: 'Accept' })).toBeTruthy();
+  });
+  it('a pending payment offers the confirmation step instead of Accept', async () => {
+    const c = await card('PENDING');
+    expect(within(c).getByText('Awaiting MMG payment')).toBeTruthy();
+    expect(within(c).getByRole('button', { name: 'Confirm MMG payment' })).toBeTruthy();
+    expect(within(c).queryByRole('button', { name: 'Accept' })).toBeNull();
+  });
+  it('a failed payment says why, instead of "Awaiting"', async () => {
+    const c = await card('FAILED');
+    expect(within(c).getByText(/MMG reports this payment as failed/)).toBeTruthy();
+    expect(within(c).queryByText('Awaiting MMG payment')).toBeNull();
+    expect(within(c).queryByRole('button', { name: 'Accept' })).toBeNull();
+  });
+});
+
+// Opus delta review, S3-5: the store's state is re-read every 20 s like the
+// app, and a control never unlocks on a state it could not re-read.
+describe('the store state stays current', () => {
+  it('re-reads the store every 20 seconds', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      hubApi({});
+      renderWithQuery(<OrdersPage />);
+      await screen.findByRole('heading', { level: 1, name: 'Sample Kitchen' });
+      const before = reads.filter((p) => p === '/vendor/profile').length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(21_000); });
+      await waitFor(() => expect(reads.filter((p) => p === '/vendor/profile').length).toBeGreaterThan(before));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the controls locked, and says so, when the store cannot be re-read after a change', async () => {
+    hubApi({ open: true, failProfileRefetch: true });
+    const view = renderWithQuery(<OrdersPage />);
+    const control = await screen.findByRole('switch', { name: 'Store open to customers' });
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+    await view.user.click(control);
+    expect(await screen.findByText(/Couldn.t check your store.s current state/)).toBeTruthy();
+    expect((screen.getByRole('switch', { name: 'Store open to customers' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Pause new orders' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(writes.length).toBe(1);
   });
 });
 
