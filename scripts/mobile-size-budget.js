@@ -2,7 +2,10 @@
 /* eslint-env node */
 const fs = require('node:fs');
 const path = require('node:path');
-const LIMITS = { androidJs: 8 * 1024 ** 2, iosJs: 8 * 1024 ** 2, apk: 100 * 1024 ** 2, aab: 100 * 1024 ** 2 };
+// Calibrated 12 Oct 2026 on main: JS ~8.02 MiB per platform (after Sentry and
+// expo-updates). 10 MiB keeps ~2 MiB headroom; native ceilings catch gross
+// regressions only (reference arm64 build ~47 MB APK / ~37 MB AAB with R8).
+const LIMITS = { androidJs: 10 * 1024 ** 2, iosJs: 10 * 1024 ** 2, apk: 100 * 1024 ** 2, aab: 100 * 1024 ** 2 };
 function measureMobileArtifacts(files) {
   const sizes = {};
   for (const platform of ['android','ios']) {
