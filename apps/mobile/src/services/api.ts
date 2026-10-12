@@ -8,7 +8,7 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthSessionSnapshot } from '../lib/authSession';
 import { explainSessionEnded } from '../lib/accountBlockedAlert';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
@@ -998,6 +998,53 @@ export const riderApi = {
     })),
 };
 
+/** Resolve a lost response against the same driver's authority. Offers return
+ * the held assignment on repeat; board acceptance first checks the active ride. */
+async function acceptDriver(path: string, body: object, boardId?: string) {
+  const owner = getAuthSessionSnapshot();
+  const currentSession = () => {
+    const current = owner && authSessionForPrincipal(getAuthSessionSnapshot(), owner);
+    if (owner && !current) throw new Error('Your session changed. Please check your active ride.');
+    return current ?? undefined;
+  };
+  const config = () => capturedAuthConfig(currentSession());
+  const heldRide = async () => {
+    const active = await api.get('/driver/rides/active', config());
+    currentSession();
+    return active.data?.data?.id === boardId ? active : null;
+  };
+  try {
+    const result = await api.post(path, body, config());
+    currentSession();
+    return result;
+  } catch (error) {
+    if (!owner || !axios.isAxiosError(error) || error.response ||
+        !['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'].includes(error.code ?? '') ||
+        !authSessionForPrincipal(getAuthSessionSnapshot(), owner)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    if (boardId) {
+      const held = await heldRide();
+      if (held) return held;
+    }
+    try {
+      const result = await api.post(path, body, config());
+      currentSession();
+      return result;
+    } catch (retryError) {
+      // The first accept may finish between the active read and the retry:
+      // the retry is then refused (UNAVAILABLE before the claim, or
+      // ALREADY_TAKEN / DRIVER_BUSY when it lands during the claim). Only the
+      // server's own current ride, matched by exact id, counts as held.
+      if (boardId && axios.isAxiosError(retryError) &&
+          ['UNAVAILABLE', 'ALREADY_TAKEN', 'DRIVER_BUSY'].includes(retryError.response?.data?.error?.code)) {
+        const held = await heldRide();
+        if (held) return held;
+      }
+      throw retryError;
+    }
+  }
+}
+
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
 export const driverApi = {
   profile: () => api.get('/driver/profile'),
@@ -1020,12 +1067,12 @@ export const driverApi = {
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
   // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
-  accept: (id: string) => api.post(`/driver/rides/${id}/accept`, {}),
+  accept: (id: string) => acceptDriver(`/driver/rides/${id}/accept`, {}, id),
   /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
    * passenger's ride alive, frees this driver, and matches another driver. */
   handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
-  acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => acceptDriver('/driver/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
