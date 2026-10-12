@@ -853,7 +853,7 @@ export class OrderService {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Ordering is disabled on this account after repeated failed deliveries. Contact support.');
     }
     if (restriction === 'restricted') {
-      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
+      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering needs your ID on file. Add your ID in the app — a person will look at it before ordering unlocks.');
     }
 
     // [E27] No profile selfie to place an ordinary order (food, grocery,
@@ -1187,7 +1187,7 @@ export class OrderService {
     const orderCurrency = (await this.countryConfig.getByCode(user.countryCode).catch(() => null))?.currencyCode ?? 'GYD';
     if (user.trustLevel === 'L1' && grandTotal >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need ID verification. Verify once in the app and this limit is gone.`,
+        `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need your ID on file. Add it once in the app to lift this limit.`,
         { threshold: gateLocal, total: grandTotal });
     }
 
@@ -1201,7 +1201,7 @@ export class OrderService {
     // one trust boundary, tunable per country, no new magic number.
     if (user.trustLevel === 'L1' && discount >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `This promo needs ID verification to use. Verify once in the app and it's yours to keep.`,
+        `This promo needs your ID on file. Add it once in the app and it's yours to keep.`,
         { threshold: gateLocal, discount });
     }
 
