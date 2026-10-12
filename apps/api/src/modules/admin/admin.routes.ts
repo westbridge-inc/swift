@@ -6217,7 +6217,14 @@ export async function adminRoutes(app: FastifyInstance) {
     if (refusal) throw new AppError(409, 'REPLAY_NOT_CERTIFIED', refusal, { jobName: job.name, ...recoveryFor(job.name) });
     await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, async () => {
       try {
-        await job.retry();
+        // [Item 63] The operator authorizes ONE fresh execution: reset the
+        // started-run counter the automatic-replay guard reads. A certified
+        // class keeps its attempt history (attemptsMade) visible; an
+        // uncertified one (RECONCILE_FIRST) starts both counters again, so a
+        // worker dying during THIS run is a prior start the guard refuses —
+        // the one replay can never become two.
+        const certified = recoveryFor(job.name).policy === 'SAFE_REPLAY';
+        await job.retry('failed', { resetAttemptsStarted: true, ...(certified ? {} : { resetAttemptsMade: true }) });
       } catch (err) {
         // BullMQ's reprocess refused: the job is no longer in the failed set
         // (a Discard claimed it, or another Retry already moved it).

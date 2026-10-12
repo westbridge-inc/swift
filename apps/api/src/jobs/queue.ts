@@ -1,4 +1,4 @@
-import { Queue, Worker, type Job, type ConnectionOptions } from 'bullmq';
+import { Queue, Worker, UnrecoverableError, type Job, type ConnectionOptions } from 'bullmq';
 import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -8,6 +8,7 @@ import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
 import { GUYANA_TZ } from '../modules/prep/prep-time';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
+import { recoveryFor } from './recovery-policy';
 import {
   requireActiveDiscoveryTenant,
   runForActiveDiscoveryTenants,
@@ -65,13 +66,16 @@ export function bullConnectionOpts(redis: Redis): ConnectionOptions {
   };
 }
 
-/** Bounded retry with exponential backoff on EVERY job. All jobs are idempotent
- *  — money jobs guard with DB-level uniqueness/CAS, the repeatable ticks
- *  recompute their window — so a transient blip (DB/Redis/provider hiccup) is
- *  retried in seconds instead of silently lost until the next scheduled tick or
- *  reconcile sweep. removeOnFail keeps the last failures for inspection only
- *  AFTER the attempts are exhausted. Env-tunable so ops can widen it without a
- *  deploy. Exported so a test can pin the policy without opening a Redis socket. */
+/** Bounded retry with exponential backoff — for the job classes CERTIFIED as
+ *  safe to repeat (SAFE_REPLAY in recovery-policy.ts), so a transient blip
+ *  (DB/Redis/provider hiccup) is retried in seconds instead of silently lost
+ *  until the next scheduled tick or reconcile sweep. [Item 63] Every other
+ *  class fails on its first error whatever these options say: `inJobContext`
+ *  turns the error final, and the job stays on the dead-letter list for a
+ *  person (the admin DLQ page, which applies the same certification).
+ *  removeOnFail keeps the last failures for inspection. Env-tunable so ops can
+ *  widen it without a deploy. Exported so a test can pin the policy without
+ *  opening a Redis socket. */
 /**
  * [C2 · WS-0.2] When OSRM is configured but a call times out, errors, or
  * returns no route, `OsrmMapsProvider` degrades to the straight-line estimate
@@ -453,7 +457,45 @@ export function jobCapability(queue: string, jobName: string | undefined): strin
  *  itself with runWithTenant inside. Covers the standalone worker and the
  *  combined API process alike: both build their consumers here. */
 export function inJobContext(queue: string, processor: (job: Job) => Promise<void>): (job: Job) => Promise<void> {
-  return (job: Job) => runAsSystem(jobCapability(queue, job?.name), () => processor(job));
+  return (job: Job) => runAsSystem(jobCapability(queue, job?.name), () => runWithReplayPolicy(job, processor));
+}
+
+/** [Item 63] The refusal a stalled, uncertified job meets. */
+export const UNCERTIFIED_AUTOMATIC_REPLAY = 'Automatic replay is not certified for this job class';
+
+/**
+ * [Item 63] AN AUTOMATIC RETRY IS A REPLAY. BullMQ re-runs a job in two ways:
+ * after it throws (its `attempts`), and after its worker died mid-run (the
+ * stalled-job recovery puts it back in the queue). Either way the handler may
+ * already have made its effect — a fee charged, stock moved, a notice sent —
+ * so a second run can make it twice. The operator's replay button has refused
+ * that for every class not certified SAFE_REPLAY since [A-08]; BullMQ's own
+ * replay now obeys the same register:
+ *  - a certified class keeps its retries and backoff exactly as before;
+ *  - any other class (an unknown name included) fails on its first error:
+ *    the error is rethrown as final, with its own message, so the job lands
+ *    on the dead-letter list once;
+ *  - a run of an uncertified class that was STARTED before and never recorded
+ *    an outcome (attemptsStarted runs ahead of attemptsMade) is refused before
+ *    its handler runs. The operator's audited requeue resets that counter, so
+ *    an authorized replay runs once.
+ */
+async function runWithReplayPolicy(job: Job, processor: (job: Job) => Promise<void>): Promise<void> {
+  const certified = recoveryFor(job?.name ?? '').policy === 'SAFE_REPLAY';
+  if (!certified && job && job.attemptsStarted - job.attemptsMade > 1) {
+    throw new UnrecoverableError(`${UNCERTIFIED_AUTOMATIC_REPLAY}: "${job.name}" was started before and never finished, so it is left for a person to reconcile`);
+  }
+  try {
+    await processor(job);
+  } catch (err) {
+    if (certified || err instanceof UnrecoverableError) throw err;
+    const final = new UnrecoverableError(err instanceof Error ? err.message : String(err));
+    if (err instanceof Error && err.stack) final.stack = err.stack;
+    // Logs and error reports keep the original: its code and its cause.
+    const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+    Object.assign(final, { cause: err, ...(code !== undefined ? { code } : {}) });
+    throw final;
+  }
 }
 
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
