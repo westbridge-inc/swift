@@ -1248,7 +1248,9 @@ export class VerificationService {
         const closed = await tx.reviewCase.create({ data: { submissionId: docId, tenantId, queue: 'STANDARD', slaDueAt: now, closedAt: now } });
         await tx.reviewDecision.create({ data: {
           caseId: closed.id, tenantId, reviewerId: adminId, outcome: 'REJECT', reasonCode: 'REVOKED',
-          actorFacingCategory: 'OTHER', internalNote: reason, timeOnCaseMs: 0,
+          // The customer-facing category is neutral (their data-access export shows it); the
+          // reviewer's reason stays the internal note.
+          actorFacingCategory: 'WITHDRAWN', internalNote: reason, timeOnCaseMs: 0,
         } });
         noneStands = await this.demoteIfNoCustomerIdStands(tx, doc.userId);
       }

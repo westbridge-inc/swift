@@ -408,9 +408,19 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     const c = await customer();
     const [a, b] = await Promise.all([upload(c.token, readable()), upload(c.token, readable())]);
     const results = await Promise.all([submit(c.token, { idDocumentUrl: a }), submit(c.token, { idDocumentUrl: b })]);
-    const docs = results.map((r) => r.json().data as { id: string; status: string });
-    expect(docs.map((d) => d.status).sort()).toEqual(['APPROVED', 'PENDING']);
-    expect(await heldFor(docs.find((d) => d.status === 'PENDING')!.id)).toContain('OPEN_SUBMISSION');
+    // One goes on file. The other is held by the lock (OPEN_SUBMISSION) — or, if it arrived after the
+    // first had already raised the account, refused as ALREADY_VERIFIED. Never two on file.
+    const onFile = results.filter((r) => r.statusCode === 201 && r.json().data.status === 'APPROVED');
+    expect(onFile, results.map((r) => r.body).join(' | ')).toHaveLength(1);
+    const other = results.find((r) => r !== onFile[0])!;
+    if (other.statusCode === 201) {
+      expect(other.json().data.status).toBe('PENDING');
+      expect(await heldFor(other.json().data.id)).toContain('OPEN_SUBMISSION');
+    } else {
+      expect(other.statusCode, other.body).toBe(409);
+      expect(other.json().error.code).toBe('ALREADY_VERIFIED');
+    }
+    expect(await app.prisma.verificationDocument.count({ where: { userId: c.id, docType: 'identity_l2', state: 'COMMITTED' } })).toBe(1);
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
   });
 
@@ -436,6 +446,12 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     const row = (status.json().data.documents as Array<{ id: string; reviewNote: string | null }>).find((d) => d.id === doc.id);
     expect(row?.reviewNote).toBe('Withdrawn by our team');
     expect(status.body).not.toContain('Synthetic staff-only reason text');
+    // The data-access export names the decision by a neutral category (WITHDRAWN), never the reason.
+    const dsar = await app.inject({ method: 'GET', url: '/api/v1/verification/dsar/documents', headers: { authorization: `Bearer ${c.token}` } });
+    expect(dsar.statusCode, dsar.body).toBe(200);
+    const exported = (dsar.json().data.documents as Array<{ id: string; decisions: Array<{ outcome: string; category: string }> }>).find((d) => d.id === doc.id);
+    expect(exported?.decisions).toEqual([expect.objectContaining({ outcome: 'REJECT', category: 'WITHDRAWN' })]);
+    expect(dsar.body).not.toContain('Synthetic staff-only reason text');
   });
 
   it('an account above L1 with no customer ID on record is not said to have one on file', async () => {
