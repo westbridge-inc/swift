@@ -23,23 +23,58 @@ export const AWAITING_REVIEW_STATES = ['REVIEW_QUEUED', 'IN_REVIEW', 'INFO_REQUE
 export const REPLACED_NOTE = 'REPLACED: the applicant uploaded a newer copy before review';
 export const DOCUMENT_REPLACED = 'DOCUMENT_REPLACED';
 
-/** Supersedes every earlier copy still awaiting review; returns their ids. Runs in the upload's transaction. */
-export async function supersedeAwaitingCopies(tx: Tx, doc: { id: string; userId: string; role: string; docType: string }): Promise<string[]> {
-  // Two uploads of the same document at once: the second waits for the first, then replaces it.
+/** The note a replaced copy carries, naming the copy that replaced it — so "replaced" belongs to that copy only. */
+export function replacedNoteFor(replacementId: string): string {
+  return `${REPLACED_NOTE} (${replacementId})`;
+}
+export function isReplacedNote(note: string | null | undefined): boolean {
+  return !!note && note.startsWith(REPLACED_NOTE);
+}
+
+type Copy = { id: string; userId: string; role: string; docType: string; createdAt: Date; state?: string | null };
+/** Which of two copies is newer: later createdAt, then the larger id (a stable tie-break). */
+const newerThan = (a: { id: string; createdAt: Date }, b: { id: string; createdAt: Date }) =>
+  a.createdAt.getTime() > b.createdAt.getTime() || (a.createdAt.getTime() === b.createdAt.getTime() && a.id > b.id);
+
+export interface ReplaceOutcome {
+  /** Earlier copies this upload replaced. */
+  readonly replaced: string[];
+  /** The upload itself turned out older than a copy already waiting (two uploads raced), so it was replaced instead. */
+  readonly selfReplaced: boolean;
+}
+
+/**
+ * Supersedes every OLDER copy still awaiting review, in the upload's transaction. If a NEWER copy is
+ * already waiting (two uploads raced and the newer one committed first), the newest copy still wins:
+ * this upload, if it is itself waiting, is the one replaced.
+ */
+export async function supersedeAwaitingCopies(tx: Tx, doc: Copy): Promise<ReplaceOutcome> {
+  // Two uploads of the same document at once: the second waits for the first, then decides.
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`document-replace:${doc.userId}:${doc.role}:${doc.docType}`}))::text AS locked`;
-  const earlier = await tx.verificationDocument.findMany({
+  const others = await tx.verificationDocument.findMany({
     where: { userId: doc.userId, role: doc.role as never, docType: doc.docType, id: { not: doc.id }, state: { in: [...AWAITING_REVIEW_STATES] }, legalHoldId: null },
-    select: { id: true },
+    select: { id: true, createdAt: true },
   });
-  if (earlier.length === 0) return [];
-  const ids = earlier.map((row) => row.id);
-  // Lock order: a review case BEFORE its document — the order the reviewer paths take.
+  const newest = others.find((other) => newerThan(other, doc));
+  const selfAwaiting = (AWAITING_REVIEW_STATES as readonly string[]).includes(doc.state ?? '');
+  if (newest && selfAwaiting) {
+    const replaced = await supersede(tx, doc.userId, [doc.id], newest.id);
+    return { replaced: [], selfReplaced: replaced.length > 0 };
+  }
+  const older = others.filter((other) => !newerThan(other, doc)).map((other) => other.id);
+  return { replaced: await supersede(tx, doc.userId, older, doc.id), selfReplaced: false };
+}
+
+async function supersede(tx: Tx, userId: string, ids: string[], replacementId: string): Promise<string[]> {
+  if (ids.length === 0) return [];
+  // Lock the cases being closed. Deadlock safety rests on the per-document advisory lock above and on
+  // the identity-authority lock every submission and decision takes first, not on this order.
   await tx.$queryRaw`SELECT id FROM review_case WHERE "submissionId" = ANY(${ids}) ORDER BY id FOR UPDATE`;
   const replaced: string[] = [];
   for (const id of ids) {
     // SUPERSEDED has no legacy status of its own; EXPIRED keeps every status-only reader from treating
     // the replaced copy as waiting, approved or rejected.
-    if (await hopDocState(tx, { id, userId: doc.userId }, [...AWAITING_REVIEW_STATES], 'SUPERSEDED', { status: 'EXPIRED', reviewNote: REPLACED_NOTE })) replaced.push(id);
+    if (await hopDocState(tx, { id, userId }, [...AWAITING_REVIEW_STATES], 'SUPERSEDED', { status: 'EXPIRED', reviewNote: replacedNoteFor(replacementId) })) replaced.push(id);
   }
   if (replaced.length > 0) {
     await tx.reviewCase.updateMany({ where: { submissionId: { in: replaced }, closedAt: null }, data: { closedAt: new Date() } });

@@ -115,6 +115,35 @@ describe('replace a document while it waits for review', () => {
     expect(await system(() => service.approveDocument(second.id, reviewerId))).toMatchObject({ status: 'APPROVED' });
   });
 
+  it('"replaced" belongs to the copy that replaced one: after replace, reject and a new upload, the new copy replaced nothing', async () => {
+    const m = await mover();
+    await upload(m.userId);
+    const second = await upload(m.userId);
+    await system(() => service.rejectDocument(second.id, reviewerId, 'Photo is unreadable', 'UNREADABLE'));
+    const third = await upload(m.userId);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/verification/status?role=MOVER', headers: { authorization: `Bearer ${m.token}` } });
+    expect(res.statusCode, res.body).toBe(200);
+    const docs = (res.json().data.documents as Array<{ id: string; replaced?: boolean }>);
+    const fresh = docs.find((d) => d.id === third.id);
+    expect(fresh, 'the new copy is listed').toBeTruthy();
+    expect(fresh!.replaced ?? false).toBe(false);
+  });
+
+  it('a copy that turns out OLDER than one already waiting never replaces the newer one (two uploads racing)', async () => {
+    const m = await mover();
+    // The newer copy's transaction committed first (its createdAt is later than the upload that lands now).
+    const newer = await system(async () => app.prisma.verificationDocument.create({ data: {
+      userId: m.userId, role: 'MOVER', docType: 'national_id', fileUrl: await ownedVerificationFixture(app.prisma, m.userId),
+      status: 'PENDING', state: 'REVIEW_QUEUED', consentAt: new Date(), privacyNoticeVersion: 'test-v1', createdAt: new Date(Date.now() + 60_000),
+    } }));
+    await system(() => app.prisma.reviewCase.create({ data: { submissionId: newer.id, slaDueAt: new Date(Date.now() + 86_400_000) } }));
+    const older = await upload(m.userId);
+    expect(await read(newer.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
+    expect(await openCases(newer.id)).toHaveLength(1);
+    expect(await read(older.id)).toMatchObject({ state: 'SUPERSEDED' });
+    expect(await openCases(older.id)).toHaveLength(0);
+  });
+
   it('an approved document stays locked; a rejected copy stays rejected when a new one is sent', async () => {
     const m = await mover();
     const approved = await upload(m.userId);

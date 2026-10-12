@@ -3,7 +3,7 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
-import { DOCUMENT_REPLACED, REPLACED_NOTE, supersedeAwaitingCopies } from './replace-pending';
+import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
@@ -355,7 +355,7 @@ export class VerificationService {
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      let doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
       // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
       // created on another account's subject — the impostor's link never survives a rejection,
       // and a later resubmission starts a fresh pending assignment.
@@ -366,7 +366,10 @@ export class VerificationService {
         });
       }
       // [REPLACE-PENDING] A newer copy (not rejected outright) replaces any copy still waiting for review.
-      if (doc.status !== 'REJECTED') await supersedeAwaitingCopies(tx, doc);
+      // Two uploads racing: if a newer copy already waits, this older one is the one replaced (no case for it).
+      if (doc.status !== 'REJECTED' && (await supersedeAwaitingCopies(tx, doc)).selfReplaced) {
+        doc = await tx.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
+      }
       // [DOC-1 P4-5] A document waiting on a human has ONE open case, with the
       // SLA clock started here — in the same transaction, so a pending document
       // without a case cannot exist.
@@ -1061,11 +1064,12 @@ export class VerificationService {
       if (won.count !== 1) {
         const current = await tx.verificationDocument.findUnique({
           where: { id: docId },
-          select: { status: true, state: true },
+          select: { status: true, state: true, reviewNote: true },
         });
         if (!current) throw new NotFoundError('VerificationDocument', docId);
         // [REPLACE-PENDING] The applicant replaced this copy: nothing to decide here — say so plainly.
-        if (current.state === 'SUPERSEDED') return { kind: 'REPLACED' as const, status: current.status };
+        // (A copy superseded for another reason — a vehicle change, say — keeps the ordinary answer.)
+        if (current.state === 'SUPERSEDED' && isReplacedNote(current.reviewNote)) return { kind: 'REPLACED' as const, status: current.status };
         // [REPORT-007 / STRAND-2] A terminal retry is a repair opportunity for
         // stale derived state (the duplicate-submission path already repairs
         // before ALREADY_APPROVED). RETURN instead of throwing inside the
@@ -1351,9 +1355,10 @@ export class VerificationService {
     });
     // [REPLACE-PENDING] A copy waiting for review that replaced an earlier waiting copy says so
     // ("Replaced — waiting for review"). Additive field; older apps ignore it.
-    const replacedTypes = new Set(rows.filter((d) => d.state === 'SUPERSEDED' && d.reviewNote === REPLACED_NOTE).map((d) => d.docType));
+    // "Replaced" belongs to the copy that did the replacing (named in the replaced copy's note), never to a later copy.
+    const replacedNotes = new Set(rows.filter((d) => d.state === 'SUPERSEDED' && d.reviewNote).map((d) => d.reviewNote));
     const documents = rows.filter((d) => d.state !== 'SUPERSEDED')
-      .map((d) => (d.status === 'PENDING' && replacedTypes.has(d.docType) ? { ...d, replaced: true } : d));
+      .map((d) => (d.status === 'PENDING' && replacedNotes.has(replacedNoteFor(d.id)) ? { ...d, replaced: true } : d));
 
     const approved = new Set(
       documents
