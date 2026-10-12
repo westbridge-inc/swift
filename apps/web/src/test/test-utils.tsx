@@ -1,6 +1,6 @@
 import type { ReactElement, ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, type RenderResult } from '@testing-library/react';
+import { act, render, type RenderResult } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -38,6 +38,32 @@ export function mockApi(handler: (_request: ApiRequest) => ApiReply | Promise<Ap
 
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
+}
+
+/**
+ * [#1590] An IntersectionObserver the test drives, standing in for the
+ * browser's (happy-dom never reports). `report(target, onScreen)` tells every
+ * observer watching `target` that it is on or off screen, the way the store
+ * page learns that its order panel has scrolled away on a phone.
+ */
+export function stubIntersectionObserver(): (_target: Element, _isIntersecting: boolean) => void {
+  const watchers: Array<{ callback: IntersectionObserverCallback; targets: Set<Element> }> = [];
+  vi.stubGlobal('IntersectionObserver', class {
+    private readonly watcher: { callback: IntersectionObserverCallback; targets: Set<Element> };
+    constructor(callback: IntersectionObserverCallback) {
+      this.watcher = { callback, targets: new Set() };
+      watchers.push(this.watcher);
+    }
+    observe(target: Element) { this.watcher.targets.add(target); }
+    unobserve(target: Element) { this.watcher.targets.delete(target); }
+    disconnect() { this.watcher.targets.clear(); }
+    takeRecords() { return []; }
+  });
+  return (target, isIntersecting) => act(() => {
+    for (const watcher of watchers) {
+      if (watcher.targets.has(target)) watcher.callback([{ target, isIntersecting } as IntersectionObserverEntry], {} as IntersectionObserver);
+    }
+  });
 }
 
 // Explicit, NAMED return type. Inferring it drags in `debug`, whose signature
