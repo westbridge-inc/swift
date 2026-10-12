@@ -68,6 +68,27 @@ export function assertBinding(own: CardRailBinding, asked: CardRailBinding): voi
 
 export type CardSessionPurpose = 'ENROLL' | 'PAY_NOW';
 
+/** [CARDS S1] The service's answer to a provider about to send a completion (see `confirm`). */
+export type CompletionClaim = 'send' | 'closed' | 'claimed';
+
+/** [CARDS S1] How long a completion claimed and sent may still be answering:
+ *  the completion's own request deadline (30 s) plus a margin to record its
+ *  answer. Until then nobody treats its answer as lost, and finance never
+ *  closes its session. */
+export const COMPLETION_CLAIM_WAIT_MS = 35_000;
+
+/** Safe fields from the provider's own approved completion, never a browser return. */
+export type CardCompletionEvidence = {
+  Approved: true;
+  IsoResponseCode: '00';
+  TransactionType: 2;
+  TransactionIdentifier: string;
+  OrderIdentifier: string;
+  TotalAmount: number;
+  CurrencyCode: string;
+  RiskManagement: { ThreeDSecure: { AuthenticationStatus: string; Eci?: string } };
+};
+
 /** The five outcomes. A caller switches over all of them; `assertNever` makes
  *  a sixth a compile error rather than a silent default. */
 export type CardOutcomeStatus = 'succeeded' | 'failed' | 'unknown' | 'requires_action' | 'pending';
@@ -117,13 +138,17 @@ export type CreateCardSessionOutcome = Evidence & (
 /** The provider's server-side truth about one hosted session. */
 export type CardSessionOutcome = Evidence & (
   | { status: 'succeeded'; purpose: 'ENROLL'; card: VaultedCard }
-  | { status: 'succeeded'; purpose: 'PAY_NOW'; providerRef: string; amountMinor: number; currencyCode: string }
+  | { status: 'succeeded'; purpose: 'PAY_NOW'; providerRef: string; amountMinor: number; currencyCode: string; completionEvidence?: CardCompletionEvidence }
   | { status: 'failed'; reason: string }
   /** The cardholder still has to authenticate on the hosted page. */
   | { status: 'requires_action'; reason: string }
   /** Nothing has happened on the page yet. */
   | { status: 'pending' }
-  | { status: 'unknown'; reason: string }
+  /** [PT-4] `voidable`: the provider may have TAKEN money that Swift cannot
+   *  book (an approval without its proof, for another amount or transaction,
+   *  or an answer that was lost). The service voids it at once under a
+   *  durable claim, and holds it for a person when the void is not confirmed. */
+  | { status: 'unknown'; reason: string; voidable?: { providerRef: string } }
 );
 
 /** What the provider says it charged. Swift compares it with the intent
@@ -199,8 +224,23 @@ export interface CardRailProvider {
   /** Read what the browser brought back. Pure: no network, no write, no money. */
   parseReturn(params: Readonly<Record<string, string>>): CardReturnObservation;
 
-  /** The provider's server-side answer about a hosted session. */
-  confirm(input: { binding: CardRailBinding; providerSessionRef: string; purpose: CardSessionPurpose }): Promise<CardSessionOutcome>;
+  /** [PT-4] Optional. Called by the service for a session's FIRST VALID return
+   *  only (state, binding, window already checked), after its observation is
+   *  recorded. A provider whose server-side completion depends on what the
+   *  browser brought back (a 3-D Secure result) keeps its own decision here.
+   *  It never moves money and never makes `confirm` succeed by itself: it can
+   *  only make the provider decline to complete. */
+  noteReturn?(input: { binding: CardRailBinding; providerSessionRef: string; params: Readonly<Record<string, string>> }): Promise<void>;
+
+  /** The provider's server-side answer about a hosted session.
+   *  `beforeCompletion` [CARDS S1]: a provider whose answer needs a financial
+   *  instruction (a completion) asks the service, immediately before sending it,
+   *  to claim it DURABLY on the session. The service answers `send` (claimed
+   *  now: send it once), `closed` (the session closed first and no claim was
+   *  ever made: never send; nothing was taken) or `claimed` (a durable claim
+   *  already exists: a completion may already have been sent, so never send
+   *  again and treat the money as possibly taken). */
+  confirm(input: { binding: CardRailBinding; providerSessionRef: string; purpose: CardSessionPurpose; beforeCompletion?: (providerRef: string) => Promise<CompletionClaim> }): Promise<CardSessionOutcome>;
 
   /** Charge an enrolled card off-session (merchant-initiated). The key makes a
    *  retry the same instruction: the provider captures at most once per key. */
@@ -222,6 +262,10 @@ export interface CardRailProvider {
     currencyCode: string;
     idempotencyKey: string;
   }): Promise<CardRefundOutcome>;
+
+  /** [PT-4] Optional: cancel an approved payment before it settles, the whole
+   *  amount only. Same four outcomes and the same one-call-per-key rule as refund. */
+  voidPayment?(input: { binding: CardRailBinding; providerRef: string; idempotencyKey: string }): Promise<CardRefundOutcome>;
 }
 
 /** Where a v2 provider comes from, resolved lazily: only v2 work ever asks. */
