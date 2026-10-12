@@ -11,6 +11,7 @@ import { getTenantContext } from '../../plugins/tenant-context';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import type { OnAudit } from '../../lib/audit-writer';
 import { CARD_PAY_NOW_KEY_PREFIX, cardChargesInFlight, cardExpiredAt, closeUnsentCardIntents, type BillingService } from './billing.service';
+import { assertPayAheadRoom } from './pay-ahead';
 import { sealVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
 import {
@@ -269,6 +270,9 @@ export class CardRailService {
             || current.nextBillingDate.getTime() !== priced.periodStart.getTime()) {
             throw new AppError(409, 'MOVER_FEE_PRICE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
           }
+          // [OWNER RULING 8 Oct (2)] A Pay now pays the next unpaid week: four
+          // weeks paid ahead at most, refused before any page exists.
+          await assertPayAheadRoom(tx, sub.id, priced.amount, now, 'partner');
         }
         await lockBillingAuthority(tx, sub.id);
         const created = await tx.cardSession.create({
@@ -1032,12 +1036,14 @@ export class CardRailService {
     await this.notifications.send({
       userId: session.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Card payment received — added to your balance',
-      body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and added to your balance. It did not change your plan; your balance pays a coming weekly fee.`,
+      title: 'Card payment received — kept as fee paid ahead',
+      body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and kept as fee paid ahead. It did not change your plan; it pays a coming weekly fee.`,
       audience: sub?.vendorId ? 'business' : 'earner',
       data: { kind: 'billing_banked', subscriptionId: session.subscriptionId },
       dedupeKey: `card-paynow-banked:${paymentId}`,
     }).catch(() => {});
+    // [OWNER RULING 8 Oct (2)] Kept, never refused; past four weeks ahead the operators refund the excess.
+    await this.billing.pageIfPayAheadOverCap(session.subscriptionId);
   }
 
   private async resultOf(session: CardSession): Promise<CardConfirmResult> {

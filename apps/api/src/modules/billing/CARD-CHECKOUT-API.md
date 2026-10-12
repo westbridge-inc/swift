@@ -222,7 +222,7 @@ type CardSessionView = {
 |---|---|---|
 | `OPEN` | the partner has not finished on the page, or the provider has not answered yet | "Finish on the card page." After returning: "Checking with the bank…" |
 | `UNKNOWN` | the provider has not answered; Swift keeps asking (Pay now only) | "Checking with the bank. Don't pay again." |
-| `SUCCEEDED` | ENROLL: the card is saved. PAY_NOW: the provider took the payment and it is booked | ENROLL: "Card added: VISA ending 4242." PAY_NOW, `advanced`: "Paid: <amount> received." PAY_NOW, `banked`: "Payment received and added to your balance." |
+| `SUCCEEDED` | ENROLL: the card is saved. PAY_NOW: the provider took the payment and it is booked | ENROLL: "Card added: VISA ending 4242." PAY_NOW, `advanced`: "Paid: <amount> received." PAY_NOW, `banked`: "Payment received. It is kept as fee paid ahead and pays a coming weekly fee." (owner ruling 8 Oct: never "wallet", "top up" or "balance") |
 | `FAILED` | the bank declined, or the card has expired | "The card was not added." / "The payment didn't go through. You can try again." |
 | `EXPIRED` | the page ran out of time with nothing done | "This page expired. You can start again." |
 | `CANCELLED` | the provider could not open the page | "Try again in a moment." |
@@ -319,7 +319,7 @@ Pressing a button sends the browser to the return page, exactly as a real provid
 - **A weekly charge the bank wants the partner to confirm (3-D Secure):** kind `billing_card_action_required`.
   - It is not a penalty.
   - The words name only the ways to pay that exist today.
-- **A Pay now banked to the balance:** kind `billing_banked`.
+- **A Pay now kept as fee paid ahead** (settlement `banked`): kind `billing_banked`.
 - No new notification kind is introduced by PT-2.
 
 ## 11. Not in this contract yet
