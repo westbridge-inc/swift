@@ -396,7 +396,6 @@ const config: SwiftExpoConfig = {
     // Android half of the api.swiftgy.com TLS pinning (iOS half: NSPinnedDomains
     // in infoPlist above).
     './plugins/withTlsPinning.js',
-    './plugins/withReleaseShrinking.js',
   ],
   extra: {
     ...(process.env['EAS_PROJECT_ID'] ? { eas: { projectId: process.env['EAS_PROJECT_ID'] } } : {}),

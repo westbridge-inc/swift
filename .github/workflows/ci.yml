@@ -600,7 +600,7 @@ jobs:
         env:
           ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
         run: npx expo prebuild --platform android --no-install
-      - name: Build reference release APK and AAB with R8
+      - name: Build reference release APK and AAB
         working-directory: apps/mobile/android
         env:
           ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
