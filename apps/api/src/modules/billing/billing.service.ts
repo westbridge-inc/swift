@@ -31,13 +31,14 @@ import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { amountDueNow } from './amount-due';
 import { weeklyFeeAmount } from './subscription-fee';
 import { payInfo } from './agent-cash.service';
+import { assertPayAheadRoom, readPayAhead, PAY_AHEAD_MAX_WEEKS } from './pay-ahead';
 import { claimProviderPaymentInTx, ProviderIdentityError, subscriptionTenantInTx } from './provider-identity';
 import { cardRailKilled, cardRailV2Enabled } from '../../utils/card-rail';
 import {
   assertNever, bindingOf, chargeMatchesIntent, describeBinding, sameBinding,
   type CardChargeOutcome, type CardRailBinding, type CardRailProvider, type CardRailSource, type ChargedAmount,
 } from '../../providers/card/card-provider';
-import { toProviderMinor } from '../../utils/currency-amount';
+import { formatMoney, toProviderMinor } from '../../utils/currency-amount';
 import { openVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
 import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
@@ -1598,7 +1599,7 @@ export class BillingService {
         await notifyAdmins(this.prisma, this.notifications, {
           tenantId: await tenantOfSubscription(this.prisma, sub.id),
           title: '💳 A card charge was captured with no local payment — repaired',
-          body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or a wallet liability; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
+          body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or fee paid ahead; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
           data: { kind: 'billing_invariants', alert: 'card-captured-without-local-payment', subscriptionId: sub.id, paymentId: row.id },
         }).catch(() => {});
         continue;
@@ -1768,7 +1769,7 @@ export class BillingService {
       select: { balance: true, currencyCode: true },
     });
     if (balanceRow && balanceRow.currencyCode !== sub.currencyCode) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'Wallet currency does not match the issued weekly fee; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The fee paid ahead is in a different currency from the issued weekly fee; reconciliation is required');
     }
     if (balanceRow && Number(balanceRow.balance) >= amount) {
       return { ok: true, ref: 'prepaid', spendPrepaid: amount };
@@ -1956,7 +1957,7 @@ export class BillingService {
 
     // Prepaid already tried and came up short above; no usable external rail
     // (a CASH sub with an empty balance, or a CARD/MMG sub missing credentials).
-    return { ok: false, reason: 'Insufficient prepaid balance' };
+    return { ok: false, reason: 'Not enough fee paid ahead to cover this week' };
   }
 
   private async applySuccessfulCharge(
@@ -1991,6 +1992,9 @@ export class BillingService {
     if (settled.disposition === 'held' && settlePaymentId) await this.pageUnpinnedCardCapture(sub, settlePaymentId);
     if (settled.disposition === 'skipped' || settled.disposition === 'held') return false;
     if (settled.disposition === 'advanced') await this.afterSuccessfulCharge({ ...sub, currencyCode: settled.currencyCode! }, settled.amount!, settled.periodKey!);
+    // [REVIEW S3-1] A card capture banked, or one that moved the paid week on,
+    // is kept; past four weeks ahead the operators are paged to refund it.
+    await this.pageIfPayAheadOverCap(sub.id);
     return true;
   }
 
@@ -2254,14 +2258,14 @@ export class BillingService {
     if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
     const wallet = await this.lockWalletInTx(tx, opts.subscriptionId, opts.currencyCode);
     if (wallet.currencyCode !== opts.currencyCode) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'Received money and wallet currencies differ; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The payment and the fee paid ahead are in different currencies; reconciliation is required');
     }
     const credited = await tx.prepaidBalance.updateMany({
       where: { subscriptionId: opts.subscriptionId, currencyCode: opts.currencyCode },
       data: { balance: { increment: opts.amount } },
     });
     if (credited.count !== 1) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'Wallet currency changed before credit; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The currency of the fee paid ahead changed before this payment was applied; reconciliation is required');
     }
     const event = await tx.billingEvent.create({
       data: {
@@ -2942,7 +2946,7 @@ export class BillingService {
       const otherApprovalHeld = await this.subscriptionHasConfirmationHold(tx, sub.id, payment.id, now);
       if (covered || authority.bankInsteadOfAdvance || otherApprovalHeld) {
         const walletHold = await this.holdWalletCurrencyMismatch(tx, payment, originalAttempt!.currencyCode, evidence.transactionId);
-        if (walletHold) return { kind: 'held' as const, reason: 'Captured payment currency differs from the wallet', paymentId: payment.id, notify: walletHold.notify };
+        if (walletHold) return { kind: 'held' as const, reason: 'Captured payment currency differs from the fee paid ahead', paymentId: payment.id, notify: walletHold.notify };
       }
 
       const claimed = await tx.subscriptionPayment.updateMany({
@@ -3047,14 +3051,15 @@ export class BillingService {
       await this.notifications.send({
         userId: this.payerUserId(sub),
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'MMG payment received — added to your balance',
-        body: `Your MMG approval of $${result.amount.toLocaleString()} ${result.currencyCode} arrived after ${result.reason}. It's banked as balance and has not changed your subscription state.`,
+        title: 'MMG payment received — kept as fee paid ahead',
+        body: `Your MMG approval of $${result.amount.toLocaleString()} ${result.currencyCode} arrived after ${result.reason}. It is kept as fee paid ahead for a coming week and has not changed your subscription state.`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_banked', subscriptionId: sub.id },
       }).catch(() => {});
     } else if (result.kind === 'advanced') {
       await this.afterSuccessfulCharge(result.current, result.amount, result.periodKey);
     }
+    if (result.kind === 'banked') await this.pageIfPayAheadOverCap(sub.id);
     return result.kind;
   }
 
@@ -4152,10 +4157,20 @@ export class BillingService {
       expectedTenantId?: string;
       /** The rail the money came by, when the caller names it (MMG_CHECKOUT). */
       channel?: string;
+      /** [OWNER RULING 8 Oct (2)] A payment a person records by hand is refused
+       *  past four weeks paid ahead (they refund the rest). Money that arrived
+       *  without anyone choosing it (a checkout MMG confirmed) is never refused:
+       *  afterTopUpCommitted pages the operators to refund any excess. */
+      payAheadLimit?: 'refuse';
     },
   ) {
-    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'A fee payment must be more than zero');
     await lockSubscriptionPayer(tx, input.subscriptionId);
+    // A replay of a payment already recorded is answered as a replay (the
+    // credit's unique event key), never refused by the limit it already fits.
+    if (input.payAheadLimit === 'refuse' && !await tx.billingEvent.findUnique({ where: { idempotencyKey: input.eventKey }, select: { id: true } })) {
+      await assertPayAheadRoom(tx, input.subscriptionId, input.amount, new Date(), 'admin');
+    }
     const sub = await tx.subscription.findUnique({
       where: { id: input.subscriptionId },
       select: { id: true, currencyCode: true },
@@ -4232,11 +4247,40 @@ export class BillingService {
     return recovered;
   }
 
+  /** [OWNER RULING 8 Oct (2)] Money that reached a weekly fee without anyone
+   *  choosing to pay ahead (a checkout MMG confirmed, an agent payment, a late
+   *  approval or card capture for a week already paid) is never refused once it
+   *  is Swift's to hold. When it leaves more than four weeks paid ahead, the
+   *  operators are paged, once per amount, to refund the part above the cap.
+   *  Best-effort and after the commit: it moves no money. */
+  async pageIfPayAheadOverCap(subscriptionId: string): Promise<void> {
+    try {
+      const position = await readPayAhead(this.prisma, subscriptionId, new Date());
+      if (!position || !(position.excess > 0)) return;
+      const money = (n: number) => formatMoney(n, position.currencyCode);
+      await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: await tenantOfSubscription(this.prisma, subscriptionId),
+        title: 'Weekly fees paid ahead past the 4-week limit — refund owed',
+        body: `A partner now has ${money(position.heldAhead)} of weekly fees paid ahead, more than the ${PAY_AHEAD_MAX_WEEKS}-week limit (${money(position.cap)}${position.due ? `, plus ${money(position.weeklyFee)} for the week now due` : ''}). Refund the ${money(position.excess)} above the limit to the partner (finance procedure: weekly fees paid ahead). The money had already arrived, so nothing was refused.`,
+        data: { kind: 'billing_invariants', alert: 'pay-ahead-over-cap', subscriptionId, excess: position.excess, currencyCode: position.currencyCode },
+        dedupeKey: `pay-ahead-over-cap:${subscriptionId}:${position.heldAhead}`,
+      });
+    } catch (err) {
+      log().error({ err, subscriptionId }, '[billing] the pay-ahead limit page could not be sent; the excess stays visible on the account');
+    }
+  }
+
   /** Post-commit effects for a durable top-up. A caller may safely retry this
    * method: it moves no money; the billing engine's own event keys make an
    * immediate re-bill idempotent. */
   async afterTopUpCommitted(subscriptionId: string, amount: number, opts: { notify?: boolean } = {}): Promise<void> {
-    await this.recoverConfirmationSettlements(subscriptionId);
+    // [REVIEW S4] The over-cap page runs even when the settlement recovery
+    // throws (after it, so a week the recovery applies is not paged).
+    try {
+      await this.recoverConfirmationSettlements(subscriptionId);
+    } finally {
+      await this.pageIfPayAheadOverCap(subscriptionId);
+    }
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: {
@@ -4253,8 +4297,8 @@ export class BillingService {
       await this.notifications.send({
         userId: this.payerUserId(sub as SubWithRelations),
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Top-up received',
-        body: `$${amount.toLocaleString()} ${sub.currencyCode} added to your subscription balance.`,
+        title: 'Weekly fee paid ahead',
+        body: `$${amount.toLocaleString()} ${sub.currencyCode} received as fee paid ahead. It pays your coming weekly fees.`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_topup', subscriptionId },
       });
@@ -4269,7 +4313,7 @@ export class BillingService {
   }
 
   async recordTopUp(subscriptionId: string, amount: number, recordedBy: string, reference: string | undefined, clientKey: string) {
-    if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    if (amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'A fee payment must be more than zero');
 
     // Idempotency [SWIFT-030]: this is the only live collection path, so a retry
     // (network retry, admin double-tap) MUST NOT credit twice. The caller's
@@ -4279,7 +4323,7 @@ export class BillingService {
     // idempotencyKey is the DB-level guard inside the credit transaction, so
     // a replay rolls back its entire conditional wallet increment as well.
     if (!isUsableTopUpKey(clientKey)) {
-      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an idempotency key of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A recorded fee payment needs an idempotency key of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
     const eventKey = `topup:${subscriptionId}:${clientKey}`;
 
@@ -4292,6 +4336,7 @@ export class BillingService {
           recordedBy,
           reference,
           eventKey,
+          payAheadLimit: 'refuse',
         }),
       );
     } catch (error) {
@@ -4329,15 +4374,15 @@ export class BillingService {
      *  as its evidence; without it the row this command always wrote stands. */
     onAudit?: OnAudit;
   }): Promise<{ replayed: boolean; commandId: string; result: TopUpCommandResult }> {
-    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Top-up must be positive');
+    if (input.amount <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'A fee payment must be more than zero');
     if (!isUsableTopUpKey(input.idempotencyKey)) {
-      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A recorded fee payment needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
     const where = { adminId_idempotencyKey: { adminId: input.adminId, idempotencyKey: input.idempotencyKey } };
     const replay = (row: { id: string; requestHash: string; result: unknown }) => {
       if (row.requestHash !== input.requestHash) {
         billingTopupDuplicateFingerprintCounter.inc();
-        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'This key was already used for a different top-up — a new top-up needs a new key.');
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'This key was already used for a different fee payment — a new fee payment needs a new key.');
       }
       return { replayed: true, commandId: row.id, result: row.result as TopUpCommandResult };
     };
@@ -4369,6 +4414,7 @@ export class BillingService {
           recordedBy: input.adminId,
           reference: input.reference,
           eventKey,
+          payAheadLimit: 'refuse',
         });
         const event = await tx.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: eventKey }, select: { id: true } });
         // The operational evidence is part of the command, not a hope after it.
