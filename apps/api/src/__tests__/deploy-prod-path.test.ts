@@ -399,6 +399,10 @@ describe('[PROD-PATH] pilot-up.sh: production routing and address search', () =>
     const ok = runPilot(PRODUCTION);
     expect(ok.status, ok.stderr).toBe(0);
     const probe = indexOf(ok.calls, 'photon:2322/api?q=Georgetown');
+    // DS964 (S4): bounded per attempt, and only a named place with coordinates counts.
+    expect(ok.calls[probe]).toContain('AbortSignal.timeout(5000)');
+    expect(ok.calls[probe]).toContain('f.geometry.coordinates.length === 2');
+    expect(ok.calls[probe]).toContain('f.properties.name');
     expect(probe).toBeGreaterThan(indexOf(ok.calls, 'up -d --wait osrm photon'));
     expect(probe).toBeLessThan(indexOf(ok.calls, 'stop api worker'));
     writeFileSync(log, '');

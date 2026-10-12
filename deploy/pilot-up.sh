@@ -498,12 +498,13 @@ docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA"
 # [PROD-PATH · DS963] Address search, the same way, before the running API is
 # stopped: Photon has no healthcheck, so `up --wait` returns while its first
 # start is still downloading and importing the index. A Georgetown search must
-# answer with a place. Until it does, nothing was stopped or migrated.
+# answer, within 5 seconds, with a named place that has coordinates (what the
+# API's provider keeps). Until it does, nothing was stopped or migrated.
 if [ "$PLACES_PHOTON" -eq 1 ]; then
   PHOTON_READY=0
   for _ in $(seq 1 90); do
     if docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" \
-      -e "fetch('http://photon:2322/api?q=Georgetown&limit=1').then(async r => { const d = r.ok ? await r.json() : null; if (!d || !Array.isArray(d.features) || d.features.length === 0) process.exit(1) }).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      -e "fetch('http://photon:2322/api?q=Georgetown&limit=1', { signal: AbortSignal.timeout(5000) }).then(async r => { const d = r.ok ? await r.json() : null; const usable = d && Array.isArray(d.features) && d.features.some(f => f && f.geometry && Array.isArray(f.geometry.coordinates) && f.geometry.coordinates.length === 2 && f.properties && f.properties.name); if (!usable) process.exit(1) }).catch(() => process.exit(1))" >/dev/null 2>&1; then
       PHOTON_READY=1
       break
     fi
