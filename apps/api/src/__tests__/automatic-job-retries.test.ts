@@ -96,18 +96,18 @@ describe('[Item 63] automatic retries require certified replay safety', () => {
     const queueName = `retry-policy-cause-${randomUUID()}`;
     const queue = new Queue(queueName, { connection });
     const original = Object.assign(new Error('store said no'), { code: 'STORE_REFUSED' });
-    let seen: unknown;
     const worker = new Worker(queueName, inJobContext(queueName, async () => { throw original; }), { connection, autorun: false });
-    worker.on('failed', (_job, err) => { seen = err; });
+    // Wait for the worker's OWN failed event: the queue-events stream can report
+    // the failure before the worker emits it locally, so waiting on the job
+    // alone raced (main a5ef9bf1 saw `undefined`).
+    const seen = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the worker never reported the failure')), 15_000);
+      worker.once('failed', (_job, err) => { clearTimeout(timer); resolve(err); });
+    });
     try {
-      const events = new QueueEvents(queueName, { connection });
-      await events.waitUntilReady();
-      const job = await queue.add('process-billing', {}, { attempts: 3 });
-      const finished = job.waitUntilFinished(events, 15_000).catch(() => undefined);
+      await queue.add('process-billing', {}, { attempts: 3 });
       void worker.run();
-      await finished;
-      await events.close();
-      expect(seen).toMatchObject({ message: 'store said no', code: 'STORE_REFUSED', cause: original });
+      expect(await seen).toMatchObject({ message: 'store said no', code: 'STORE_REFUSED', cause: original });
     } finally {
       await worker.close();
       await queue.obliterate({ force: true });
