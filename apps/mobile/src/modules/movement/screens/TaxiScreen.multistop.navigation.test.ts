@@ -134,6 +134,8 @@ vi.mock('../../../kit', async () => {
   return {
     T, Eyebrow: T, PopupTitle: T, Card: Box,
     PillButton,
+    LabeledInput: (p: any) => h('input', { value: p.value ?? '', readOnly: true }),
+    TonePill: (p: any) => h('span', null, p.label),
     Money: (p: any) => h('span', null, money(p.amount)),
     CircleChip: (p: any) => h('button', { type: 'button', 'aria-label': p.label, onClick: p.onPress }, ''),
     StatePill: (p: any) => h('span', { 'data-pill': '', style: { borderWidth: 1, borderStyle: 'solid', borderColor: color.border.subtle, borderRadius: 99, padding: '2px 8px', fontSize: 11 } }, p.label),
@@ -149,7 +151,15 @@ vi.mock('../../../kit/toast', () => ({ toast: { show: vi.fn(), error: vi.fn(), s
 vi.mock('../../../kit/map-style', () => ({ rideMapProps: () => ({}) }));
 vi.mock('../map/useInterpolatedDriver', () => ({ useInterpolatedDriver: () => ({ hasFix: false, stale: false, animatedProps: {} }) }));
 // The real ride hooks, through the real API client; nothing else from the hooks barrel.
-vi.mock('../../../hooks', async () => ({ ...(await vi.importActual<typeof import('../../../hooks/rides')>('../../../hooks/rides')) }));
+vi.mock('../../../hooks', async () => ({
+  ...(await vi.importActual<typeof import('../../../hooks/rides')>('../../../hooks/rides')),
+  ...(await vi.importActual<typeof import('../../../hooks/courier')>('../../../hooks/courier')),
+}));
+vi.mock('../../../kit/journey-rail', async () => {
+  const R = await import('react');
+  return { JourneyRail: (p: any) => R.createElement('div', null, p.start, p.end) };
+});
+vi.mock('../../../hooks/mover', () => ({ evidenceFix: () => { throw new Error('No mover evidence in a customer quote test'); } }));
 vi.mock('../../../hooks/customer', () => ({ customerKeys: { homeAll: ['customer', 'home'] } }));
 vi.mock('../../../hooks/useDeviceLocation', () => ({ useDeviceLocation: () => ({ resolve: vi.fn() }) }));
 vi.mock('../../../services/socket', () => ({ connectSocket: vi.fn(), getSocket: () => fx.socket, subscribeToOrder: vi.fn() }));
@@ -193,6 +203,7 @@ vi.mock('../../../stores/authStore', () => {
 
 import { api } from '../../../services/api';
 import { TaxiScreen } from './TaxiScreen';
+import { CourierScreen } from './CourierScreen';
 
 const LAMAHA = { lat: 6.82, lng: -58.16, label: 'Lamaha Street' };
 const CAMP = { lat: CAMP_STREET.lat, lng: CAMP_STREET.lng, label: CAMP_STREET.address };
@@ -576,5 +587,61 @@ describe('the live ride', () => {
     await act(async () => fx.fire('order:status_changed', { orderId: 'cm-ride-3', status: 'DELIVERED', fare: { total: 2400 } }));
     await settle();
     expect(byTestId('post-trip')?.textContent).toBe('no breakdown');
+  });
+});
+
+
+describe('a road-routing outage is explained on single-stop quote screens', () => {
+  it('taxi says routing is unavailable instead of blaming the destination', async () => {
+    fx.routes['post /rides/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    expect(text()).toContain('Road routing is unavailable. Try again in a moment.');
+    expect(text()).not.toContain('Try another destination');
+    expect(requestButton()?.hasAttribute('disabled') ?? true).toBe(true);
+  });
+  it('courier explains the outage and leaves a working retry control', async () => {
+    fx.routes['get /courier/orders'] = () => ok([]);
+    fx.routes['post /courier/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await act(async () => root.render(React.createElement(QueryClientProvider, { client }, React.createElement(CourierScreen, { navigation }))));
+    await settle();
+    await pickFromSearch(byLabel('Set drop-off location'), LAMAHA);
+    expect(text()).toContain('Road routing is unavailable. Try again in a moment.');
+    const before = sent('post /courier/estimate').length;
+    await click(byLabel('Retry'));
+    expect(sent('post /courier/estimate').length).toBeGreaterThan(before);
+    expect(byLabel('Send parcel')?.hasAttribute('disabled')).toBe(true);
+  });
+});
+
+describe('a cached road quote does not hide a later routing refusal', () => {
+  it('taxi removes the old fare and disables booking after a failed refresh', async () => {
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    expect(requestButton()?.hasAttribute('disabled')).toBe(false);
+    fx.routes['post /rides/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await act(async () => { await client.invalidateQueries({ queryKey: ['rides', 'estimate'] }); });
+    await settle();
+    expect(text()).toContain('Road routing is unavailable. Try again in a moment.');
+    expect(requestButton()?.hasAttribute('disabled')).toBe(true);
+    expect(requestButton()?.textContent).toBe('Request ride');
+  });
+  it('courier hides a stale price and its retry can recover a real quote', async () => {
+    const price = { totalFee: 1100, distanceKm: 3, estimatedMinutes: 12 };
+    fx.routes['get /courier/orders'] = () => ok([]);
+    fx.routes['post /courier/estimate'] = () => ok(price);
+    await act(async () => root.render(React.createElement(QueryClientProvider, { client }, React.createElement(CourierScreen, { navigation }))));
+    await settle();
+    await pickFromSearch(byLabel('Set drop-off location'), LAMAHA);
+    expect(byLabel('Send parcel · $1,100')).toBeTruthy();
+    fx.routes['post /courier/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await act(async () => { await client.invalidateQueries({ queryKey: ['courier', 'estimate'] }); });
+    await settle();
+    expect(text()).toContain('Road routing is unavailable. Try again in a moment.');
+    expect(byLabel('Send parcel · $1,100')).toBeNull();
+    fx.routes['post /courier/estimate'] = () => ok(price);
+    await click(byLabel('Retry'));
+    expect(byLabel('Send parcel · $1,100')).toBeTruthy();
+    expect(text()).not.toContain('Road routing is unavailable.');
   });
 });

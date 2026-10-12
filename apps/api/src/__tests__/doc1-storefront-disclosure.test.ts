@@ -29,6 +29,9 @@ import { docStateMachineDdl } from '../modules/verification/doc-state';
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { rlsDdlFor, tenantLineageDdl } from '../lib/tenant-rls';
+import crypto from 'node:crypto';
+import { encryptBuffer, generateDek, getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
+import { packCiphertext } from '../modules/verification/extraction-ledger';
 
 grantSuiteCapability('ddl');
 
@@ -150,5 +153,35 @@ describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
     process.env['SUPPORT_EMAIL'] = savedOp;
     await system(() => projection.projectVendorActivation(app.prisma, userId));
     expect(await vendorOf(vendorId)).toMatchObject({ isVerified: true, status: 'ACTIVE' });
+  });
+
+  it('[VERIFY-DOCS · ruling 5] a food handler’s permit shows "on file", never its number — it is a person’s permit; a business licence still shows its number', async () => {
+    const prevKek = process.env['MASTER_KEK'];
+    process.env['MASTER_KEK'] = crypto.randomBytes(32).toString('base64');
+    resetKeyProviderForTests();
+    try {
+      const { userId, vendorId } = await store(4);
+      /** The number a reviewer or processor read, stored as the ledger stores it (encrypted under a run key). */
+      const withNumber = async (submissionId: string, fieldCode: string, value: string) => {
+        const dek = generateDek();
+        const wrappedDek = await getKeyProvider()!.wrapDek(dek);
+        await system(() => app.prisma.extractionRun.create({ data: {
+          submissionId, profileCode: 'UNPROFILED', engineName: 'disclosure-test', engineVersion: '1', startedAt: new Date(), finishedAt: new Date(), outcome: 'OK',
+          wrappedDek: new Uint8Array(wrappedDek),
+          fields: { create: [{ submissionId, fieldCode, valueCt: new Uint8Array(packCiphertext(encryptBuffer(Buffer.from(value, 'utf8'), dek))), source: 'PROVIDER' }] },
+        } }));
+      };
+      const permit = await approved(userId, 'food_handler_cert');
+      const trade = await approved(userId, 'trade_licence');
+      await withNumber(permit.id, 'permit_number', `FH-${NUM}`);
+      await withNumber(trade.id, 'licence_number', `TL-${NUM}`);
+      const block = await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }));
+      expect(block.licences.find((l) => l.docType === 'trade_licence')?.value).toBe(`TL-${NUM}`);
+      expect(block.licences.find((l) => l.docType === 'food_handler_cert')?.value).toBe('on file');
+      expect(JSON.stringify(block)).not.toContain(`FH-${NUM}`);
+    } finally {
+      if (prevKek === undefined) delete process.env['MASTER_KEK']; else process.env['MASTER_KEK'] = prevKek;
+      resetKeyProviderForTests();
+    }
   });
 });
