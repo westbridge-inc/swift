@@ -139,7 +139,10 @@ describe('the Privacy Policy DRAFT and Terms say what the code does', () => {
     expect(PRIVACY).toMatch(/goes on your account straight away — no person reviews it first — unless automatic checks hold it for our verification team/);
     expect(PRIVACY).toMatch(/Our team can withdraw an ID at any time/);
     expect(PRIVACY).toMatch(/We keep it while your account is open[^.]*and we delete it when your account is closed/);
-    expect(PRIVACY).toMatch(/Only our verification staff can open it, and every view is logged/);
+    // The audit row is written when a staff member opens it (the short-lived link is issued), not per
+    // page render inside the link's few minutes: say "each opening", never "every view" (DS972 S3).
+    expect(PRIVACY).toMatch(/Only our verification staff can open it, through a short-lived link, and each opening is logged/);
+    expect(PRIVACY).not.toMatch(/every view is logged/);
     expect(PRIVACY).toMatch(/A customer's ID is kept while the account is open and deleted when the account is closed/);
   });
 

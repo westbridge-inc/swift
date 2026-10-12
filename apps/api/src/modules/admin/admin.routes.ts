@@ -1264,9 +1264,8 @@ export async function adminRoutes(app: FastifyInstance) {
       userAgent: request.headers['user-agent'],
     }, { lifts: 'BANNED' });
 
-    // [Owner rulings 8 + 11 Oct 2026 — CUSTOMER ID] the account is open again: its customer ID is
-    // kept while it is open, so the ban's deletion clock comes off the customer ID (only).
-    await verification.keepCustomerIdWhileOpen(id);
+    // [Owner rulings 8 + 11 Oct 2026 — CUSTOMER ID] the ban's deletion clock comes off the customer
+    // ID inside the transition's own commit (mover-authority transitionUserStatusAuthority).
 
     // Status only: the sessions a ban deleted are not recreated (the person
     // signs in again) and the device tokens it silenced are re-registered by

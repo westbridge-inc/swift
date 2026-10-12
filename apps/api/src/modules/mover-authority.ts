@@ -20,6 +20,7 @@ import {
 } from './rides/passenger-custody';
 import { positiveDurationMs, withTimeout } from '../utils/async-lifecycle';
 import { disconnectUserSockets } from '../utils/socket-revocation';
+import { CUSTOMER_ID_DOC_TYPE } from './verification/retention-policy';
 
 /**
  * Serialize every server-side role-authority transition on the User row.
@@ -750,6 +751,18 @@ export async function transitionUserStatusAuthority(
       data: { status: targetStatus },
       select: ACCOUNT_STATUS_RESULT_SELECT,
     });
+    if (targetStatus === 'ACTIVE' && lifts === 'BANNED') {
+      // [Owner rulings 8 + 11 Oct 2026 — CUSTOMER ID] A ban starts the retention clock on every
+      // document (admin /ban, scheduleDocumentRetention). Lifting it opens the account again, and a
+      // customer's ID is kept while the account is open: its clock comes off IN THIS COMMIT, under
+      // the same user lock, so a lifted ban can never leave the ID due for deletion. The customer
+      // ID only (retention-policy keptWhileAccountOpen: identity_l2 sent as CUSTOMER) — partner,
+      // driver and rider documents keep their clocks; a legal hold (legalHoldId) is untouched.
+      await tx.verificationDocument.updateMany({
+        where: { userId, docType: CUSTOMER_ID_DOC_TYPE, role: 'CUSTOMER', purgedAt: null, retentionExpiresAt: { not: null } },
+        data: { retentionExpiresAt: null },
+      });
+    }
     if (targetStatus === 'BANNED') {
       await tx.session.deleteMany({ where: { userId } });
       // A ban is a global security revocation, not merely an API-session
