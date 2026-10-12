@@ -1422,7 +1422,8 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { vendorId: id },
     });
 
-    return { success: true, data: updated };
+    // [VERIFY-DOCS V5] The owner's VAT billing number never rides an admin store reply.
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   app.put('/vendors/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
@@ -1452,7 +1453,7 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { vendorId: id },
     });
 
-    return { success: true, data: updated };
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   app.put('/vendors/:id/feature', { preHandler: [adminGuard] }, async (request) => {
@@ -1473,7 +1474,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     await audit(request.user.userId, 'TOGGLE_FEATURED_VENDOR', 'Vendor', id, { isFeatured }, request);
 
-    return { success: true, data: updated };
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   // ─── Riders ────────────────────────────────────────────────────────────
