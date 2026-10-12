@@ -33,7 +33,9 @@ const keyOf = (init: RequestInit | undefined) => (init?.headers as Record<string
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe('the top-up key belongs to the attempt', () => {
+// [OWNER RULING 8 Oct, NO "WALLET"] The console never says "top up": the button that
+// records a weekly-fee payment that arrived by cash or bank is "Record fee payment".
+describe('the recorded fee payment key belongs to the attempt', () => {
   it('sends an Idempotency-Key, reuses it when the same attempt is retried after an error, and mints a new one for the next attempt', async () => {
     // [A-12] A top-up now names the transfer it is evidence of, and confirms the
     // target and the delta before it credits anything.
@@ -49,7 +51,7 @@ describe('the top-up key belongs to the attempt', () => {
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
+    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const first = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(first[0]).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/topup`);
@@ -58,14 +60,14 @@ describe('the top-up key belongs to the attempt', () => {
     expect(key).toMatch(/^[0-9a-f-]{36}$/);
 
     // The same attempt again (the admin retries after the error): the same key.
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Top up' }) as HTMLButtonElement).disabled).toBe(false));
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Record fee payment' }) as HTMLButtonElement).disabled).toBe(false));
+    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(2));
     expect(keyOf(requestsByMethod(fetchMock, 'POST')[1]![1])).toBe(key);
 
     // Answered — the next top-up is a new attempt with a new key.
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Top up' }) as HTMLButtonElement).disabled).toBe(false));
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Record fee payment' }) as HTMLButtonElement).disabled).toBe(false));
+    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(3));
     const third = keyOf(requestsByMethod(fetchMock, 'POST')[2]![1]);
     expect(third).toMatch(/^[0-9a-f-]{36}$/);
@@ -86,7 +88,7 @@ describe('[A-12] the console cannot satisfy the evidence requirement by itself',
     const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
+    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
   });
 
@@ -97,7 +99,7 @@ describe('[A-12] the console cannot satisfy the evidence requirement by itself',
     const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
+    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('GY$5,000'));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('BANK-9002'));
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
@@ -109,7 +111,7 @@ describe('[A-12] the console cannot satisfy the evidence requirement by itself',
     const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Top up' }));
+    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
   });
 });
@@ -139,5 +141,39 @@ describe('[A-12] a waived fee carries the operator’s own words', () => {
       await user.click(screen.getAllByRole('button', { name: 'Waive fee' })[0]!);
       expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [OWNER 8 Oct (4)] Production records no fee payment by hand (BILLING_TOPUP_HOLD):
+// partners pay through the MMG checkout page. The server says when the hold is on,
+// and the console then offers no "Record fee payment" button. When it is offered and
+// the server refuses (the hold, or four weeks already paid ahead), its words show.
+// ---------------------------------------------------------------------------
+describe('[owner 8 Oct] recording a fee payment by hand', () => {
+  it('is not offered while the server says the hold is on', async () => {
+    mockApi((request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [subscription], manualFeeRecording: 'held' } };
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Record fee payment' })).toBeNull();
+    expect(screen.getByText(/Recording fee payments by hand is on hold/)).toBeTruthy();
+  });
+
+  it('shows the server’s words when it refuses one', async () => {
+    vi.stubGlobal('prompt', vi.fn((msg: string) => {
+      if (String(msg).includes('reference')) return 'BANK-9100';
+      if (String(msg).includes('Why are you about to')) return 'Amount and reference match the deposit slip';
+      return '9000';
+    }));
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const refusal = 'This would put more than 4 weeks of weekly fees paid ahead on this account. Record at most GY$8,400 now and refund the rest to the partner (finance procedure: weekly fees paid ahead).';
+    mockApi(handler(() => ({ status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT', message: refusal } } })));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('Record at most GY$8,400');
   });
 });
