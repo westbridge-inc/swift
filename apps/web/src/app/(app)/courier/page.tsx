@@ -64,6 +64,14 @@ export default function CourierPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [locating, setLocating] = useState(false);
+  // Any pickup the sender chooses (typed, searched or pinned) outdates a device
+  // fix still on its way: a late answer must never replace their choice.
+  const pickupChoice = useRef(0);
+  function choosePickup(text: string, place: PickedPlace | null) {
+    pickupChoice.current += 1;
+    setPickupText(text);
+    setPickup(place);
+  }
 
   /** [review S3-1] The device is asked for its location only when the sender
    *  taps for it, as in the pin picker — never on page load, where a surprise
@@ -71,6 +79,7 @@ export default function CourierPage() {
   function locateMe() {
     if (locating) return;
     setLocating(true);
+    const ticket = pickupChoice.current;
     // [F-027-02] This one never fabricated a coordinate — it just failed
     // SILENTLY, leaving "Locating…" on screen forever with no way to know the
     // prompt had been denied. Fail closed AND say so.
@@ -79,6 +88,7 @@ export default function CourierPage() {
     // sender pins or searches the pickup instead.
     currentFix('set your pickup')
       .then(({ lat, lng, accuracyM }) => {
+        if (ticket !== pickupChoice.current) return;
         if (accuracyM === null || accuracyM > MAX_ACCURACY_M) {
           setPickup(null);
           setPickupError(accuracyM === null
@@ -90,7 +100,7 @@ export default function CourierPage() {
         setPickupText('Current location');
         setPickupError(null);
       })
-      .catch((e: Error) => { setPickup(null); setPickupError(e.message); })
+      .catch((e: Error) => { if (ticket === pickupChoice.current) { setPickup(null); setPickupError(e.message); } })
       .finally(() => setLocating(false));
   }
 
@@ -151,7 +161,7 @@ export default function CourierPage() {
             label="Pick up from"
             text={pickupText}
             place={pickup}
-            onChange={(t, p) => { setPickupText(t); setPickup(p); }}
+            onChange={(t, p) => choosePickup(t, p)}
             near={pickup}
           />
           <button type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" disabled={locating} onClick={locateMe}>
@@ -166,7 +176,7 @@ export default function CourierPage() {
                 title="Pin the pickup"
                 mapLabel="Pickup pin map"
                 start={pickup ? { latitude: pickup.lat, longitude: pickup.lng } : null}
-                onUse={(place) => { setPickupText(place.label); setPickup(place); setPickupError(null); closePin('pickup'); }}
+                onUse={(place) => { choosePickup(place.label, place); setPickupError(null); closePin('pickup'); }}
                 onCancel={() => closePin('pickup')}
               />
             </Suspense>

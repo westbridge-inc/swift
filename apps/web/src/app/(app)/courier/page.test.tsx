@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '@/test/test-utils';
 import { mapPixel, pixelPoint } from '@/lib/store-pin';
@@ -85,6 +85,32 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     fireEvent.click(button('Use my location as the pickup'));
     expect(await screen.findByDisplayValue('Current location')).toBeTruthy();
     expect(geolocation.getCurrentPosition).toHaveBeenCalledTimes(1);
+  });
+
+  it('a location that arrives after the sender chose another pickup does not replace it', async () => {
+    let answer: PositionCallback = () => undefined;
+    vi.spyOn(navigator, 'geolocation', 'get').mockReturnValue({ getCurrentPosition: vi.fn((success: PositionCallback) => { answer = success; }) } as unknown as Geolocation);
+    render(<CourierPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
+    // While the device is still answering, the sender types the pickup themselves.
+    const pickupBox = screen.getAllByPlaceholderText('Search address…')[0]!;
+    fireEvent.change(pickupBox, { target: { value: 'Sample Market' } });
+    await act(async () => { answer({ coords: DEVICE as unknown as GeolocationCoordinates, timestamp: Date.now() } as GeolocationPosition); });
+    expect((pickupBox as HTMLInputElement).value).toBe('Sample Market');
+    expect(screen.queryByDisplayValue('Current location')).toBeNull();
+    expect(button('Use my location as the pickup').disabled).toBe(false);
+  });
+
+  it('a location refusal that arrives after the sender chose another pickup neither wipes it nor shows an error', async () => {
+    let refuse: PositionErrorCallback = () => undefined;
+    vi.spyOn(navigator, 'geolocation', 'get').mockReturnValue({ getCurrentPosition: vi.fn((_ok: PositionCallback, fail?: PositionErrorCallback | null) => { refuse = fail!; }) } as unknown as Geolocation);
+    render(<CourierPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
+    const pickupBox = screen.getAllByPlaceholderText('Search address…')[0]!;
+    fireEvent.change(pickupBox, { target: { value: 'Sample Market' } });
+    await act(async () => { refuse({ code: 3, PERMISSION_DENIED: 1, TIMEOUT: 3 } as GeolocationPositionError); });
+    expect((pickupBox as HTMLInputElement).value).toBe('Sample Market');
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('pins the drop-off: the estimate and the order carry the pinned point and its name', async () => {
