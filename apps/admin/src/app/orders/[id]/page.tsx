@@ -318,7 +318,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 <span>{gyd(isRide ? (o.taxiFareTotal ?? o.totalAmount) : o.totalAmount)}</span>
               </div>
               <p className="text-xs text-[var(--muted)] pt-1">
-                {isMmg ? 'Paid to the vendor’s MMG wallet — Swift moves no money.' : 'Cash at handover — Swift moves no money.'}
+                {isMmg ? 'Paid to the vendor’s MMG account — Swift moves no money.' : 'Cash at handover — Swift moves no money.'}
               </p>
             </div>
           </Section>

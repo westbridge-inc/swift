@@ -1,5 +1,5 @@
 import type { PrismaClient, CountryConfig, VehicleType, Prisma } from '@prisma/client';
-import { registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
 import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
@@ -375,11 +375,23 @@ export class CountryConfigService {
     // a role with no such list is not offered the tier and keeps its standard set.
     const unregistered = tier === UNREGISTERED_TIER;
     const fromRegistry = await registryChecklist(this.prisma, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : undefined);
-    if (fromRegistry) return fromRegistry;
+    if (fromRegistry) return fromRegistry.filter((docType) => !isNeverAcceptedDocType(docType));
     const config = await this.getByCode(code);
     const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
-    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!;
-    return lists[roleKey] ?? [];
+    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
+    return (lists[roleKey] ?? []).filter((docType) => !isNeverAcceptedDocType(docType));
+  }
+
+  /**
+   * Optional documents for a role key: the `<ROLE>_OPTIONAL` list, never a type the
+   * role already requires (`required`: the caller's checklist for this person — a
+   * required type is never shown twice). Display and upload only — no gate reads it.
+   * [VERIFY-DOCS]
+   */
+  async getOptionalDocuments(code: string, roleKey: string, required: readonly string[]): Promise<string[]> {
+    const config = await this.getByCode(code);
+    const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
+    return optionalFrom(lists, [roleKey], required);
   }
 
   /**
@@ -389,18 +401,39 @@ export class CountryConfigService {
    * (config/vehicle-classes) — the single source of truth — so the base three
    * keep their exact lists while new vehicles (buses, box trucks) pull their
    * own profiles (e.g. MOVER_COMMERCIAL) on top of the base:
-   *   BICYCLE    → MOVER base (identity + police clearance — master plan §3.2)
+   *   BICYCLE    → MOVER base + MOVER_NO_LICENCE (the national ID)
    *   MOTORCYCLE → base + MOVER_MOTOR (licence, registration, insurance)
-   *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, plate photo,
-   *                exterior car photo, fitness — master plan §3.1)
+   *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, the car photo with
+   *                the plate showing, fitness — master plan §3.1)
+   * [VERIFY-DOCS · owner rulings 6 Oct 2026] the base itself is empty: police
+   * clearance is optional for every mover, and a licence holder's national ID
+   * is optional (getMoverOptionalDocuments).
    * An unseeded profile key resolves to no extra documents. Used both to display
    * the checklist and to gate live operation.
    */
   async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
     const config = await this.getByCode(code, db);
-    const lists = config.documentChecklists as Record<string, string[]>;
-    const base = lists['MOVER'] ?? [];
-    const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
-    return [...new Set([...base, ...extra])];
+    return moverRequiredFrom(config.documentChecklists as Record<string, string[]>, vehicleType);
   }
+
+  /** The documents a mover on this vehicle MAY add (the `_OPTIONAL` lists of the base and
+   *  of each profile), minus what the vehicle requires. Display and upload only. [VERIFY-DOCS] */
+  async getMoverOptionalDocuments(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
+    const config = await this.getByCode(code, db);
+    const lists = config.documentChecklists as Record<string, string[]>;
+    return optionalFrom(lists, ['MOVER', ...docProfilesFor(vehicleType)], moverRequiredFrom(lists, vehicleType));
+  }
+}
+
+/** The REQUIRED mover list from a checklist map: the MOVER base plus the vehicle's profiles. */
+export function moverRequiredFrom(lists: Record<string, string[]>, vehicleType: VehicleType): string[] {
+  const base = lists['MOVER'] ?? [];
+  const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
+  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
+}
+
+/** The union of the keys' `_OPTIONAL` lists, without anything already required. */
+export function optionalFrom(lists: Record<string, string[]>, keys: readonly string[], required: readonly string[]): string[] {
+  const optional = keys.flatMap((key) => lists[`${key}${OPTIONAL_LIST_SUFFIX}`] ?? []);
+  return [...new Set(optional)].filter((docType) => !required.includes(docType) && !isNeverAcceptedDocType(docType));
 }

@@ -19,7 +19,7 @@ vi.mock('react-native', async () => {
   const View = ({ children }: any) => R.createElement('div', null, children);
   return { View, ScrollView: View, RefreshControl: () => null, AppState: { addEventListener: () => ({ remove: () => undefined }) } };
 });
-vi.mock('@react-navigation/native', () => ({ useFocusEffect: () => undefined }));
+vi.mock('@react-navigation/native', () => ({ useFocusEffect: () => undefined, useNavigation: () => ({ navigate: vi.fn() }) }));
 vi.mock('expo-web-browser', () => ({ openAuthSessionAsync: vi.fn() }));
 vi.mock('expo-crypto', () => ({ randomUUID: () => `synthetic-scope-${++fx.sequence}` }));
 vi.mock('@swift/ui', () => ({ space: {} }));
