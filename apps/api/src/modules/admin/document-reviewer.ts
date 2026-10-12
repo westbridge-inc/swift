@@ -31,7 +31,7 @@ export { DOCUMENT_REVIEWER_CAPABILITY };
 export const DOCUMENT_REVIEWER_REQUIRED = 'DOCUMENT_REVIEWER_REQUIRED';
 /** What the console shows. Plain words, and it says what to do next. */
 export const DOCUMENT_REVIEWER_MESSAGE =
-  'You need the document-reviewer permission — ask a super-admin, or grant it to yourself in Staff & roles';
+  'You need the document-reviewer permission to open or decide documents. A super-admin grants it under Document reviewers at the top of the Review Center.';
 
 export function documentReviewerRequired(): AppError {
   return new AppError(403, DOCUMENT_REVIEWER_REQUIRED, DOCUMENT_REVIEWER_MESSAGE);
