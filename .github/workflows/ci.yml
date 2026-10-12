@@ -284,6 +284,10 @@ jobs:
         env:
           NEXT_PUBLIC_ALLOW_SITE_TOKENS: '1'
           NEXT_PUBLIC_API_URL: https://api.swiftgy.com
+      # [W2] What a phone downloads before a page can run (its scripts and its
+      # layouts' scripts, gzip) may not grow past the page's ceiling.
+      - name: Size budget (first-load JavaScript per page)
+        run: node apps/web/scripts/perf-budget.mjs
       # [GRD-1 §2 / WS-15] See the admin job: the inlining happens at build
       # time, so the artefact is the only place the leak is real.
       # [SCR-006] What the build IS: its manifest (every file's digest, the entrypoints, the commit), so the gate

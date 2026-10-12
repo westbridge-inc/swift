@@ -240,7 +240,10 @@ describe('BullMQ lifecycle', () => {
     const ctx = context();
     const upsert = vi.fn().mockResolvedValue({});
     const policies = registered ? ['audit_logs', 'sensitive_read_logs'].map(dataClass => ({ dataClass, enabled: true, retainDays: 7 })) : [];
-    ctx.prisma = { retentionPolicy: { upsert, findMany: async () => policies } } as unknown as JobContext['prisma'];
+    // The same daily sweep re-runs every account erasure whose deletion marker
+    // has committed; this fixture has none, so the census pages once and stops.
+    const erasureCensus = vi.fn().mockResolvedValue([]);
+    ctx.prisma = { retentionPolicy: { upsert, findMany: async () => policies }, user: { findMany: erasureCensus } } as unknown as JobContext['prisma'];
     const queues = createQueues(ctx.redis, ctx.log);
     const workers = await createWorkers(ctx, queues);
     try {
@@ -254,6 +257,8 @@ describe('BullMQ lifecycle', () => {
           { c: 'sensitive_read_logs', reason: 'policy-unapproved' },
         ],
       }, 'retention sweep complete');
+      expect(erasureCensus).toHaveBeenCalledOnce();
+      expect(erasureCensus).toHaveBeenCalledWith(expect.objectContaining({ where: { phone: { startsWith: 'deleted:' } } }));
     } finally {
       await workers.cleanup();
       await Promise.all(Object.values(queues).map(queue => queue.close()));

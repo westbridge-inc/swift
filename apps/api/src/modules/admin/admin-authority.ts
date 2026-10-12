@@ -179,6 +179,8 @@ const E = {
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
+  // A ticket has no tenant column: its requester must be the caller's tenant.
+  supportTicket: { model: 'supportTicket', fields: ['status', 'resolution', 'resolvedAt', 'resolvedById'], tenantVia: ['user'] },
   // [AF-MOB-006] A custody recovery case: who owns it, where it stands, who holds the goods.
   custodyCase: { model: 'custodyRecoveryCase', fields: ['state', 'ownerUserId', 'holderRiderId', 'relayRiderId', 'resolvedAt', 'escalationCount'] },
 } as const satisfies Record<string, AdminRouteEntity>;
@@ -443,6 +445,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /audit-logs': c('C1', 'audit.read'),
   'GET /support': c('C1', 'support.read'),
   'PUT /support/:id/resolve': c('C2', 'support.resolve'),
+  // [DELETION-INTEGRITY] Completes an in-app closure request: the account is
+  // closed and de-identified. Consequential and irreversible, so a reason is owed.
+  'POST /support/:id/complete-account-closure': c('C3', 'user.close', E.supportTicket),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),

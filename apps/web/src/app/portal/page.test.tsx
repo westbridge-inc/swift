@@ -6,7 +6,7 @@ import { mockApi, renderWithQuery } from '@/test/test-utils';
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('portal money presentation', () => {
-  it('uses GY$ for real earnings and an em-dash for absent or unreadable fees', async () => {
+  it('uses $ for real earnings and an em-dash for absent or unreadable fees', async () => {
     mockApi(({ url }) => {
       const path = url.pathname;
       if (path === '/api/v1/rider/profile') return { body: { data: { id: 'rider-1' } } };
@@ -23,7 +23,7 @@ describe('portal money presentation', () => {
       throw new Error(`Unexpected request: ${path}`);
     });
     renderWithQuery(<PortalHome />);
-    expect(await screen.findByText('GY$3,500')).toBeTruthy();
+    expect(await screen.findByText('$3,500')).toBeTruthy();
     expect(screen.getByText(/Stores owe you — in delivery fees/)).toBeTruthy();
     expect(screen.getByText(/—\/week/)).toBeTruthy();
     expect(screen.queryByText(/\$NaN|GY\$0\/week|\$0\/week/)).toBeNull();

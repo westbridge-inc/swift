@@ -51,6 +51,7 @@ import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -1367,6 +1368,8 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+    // [DELETION-INTEGRITY] A store wound down with its owner's closed account never reopens.
+    if (vendor.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
 
     // [ACTIVATION AUTHORITY / EV-ACT-11] This button is no longer a
     // checklist-free ACTIVE writer. The founder invariant is: submit owner ID
@@ -1393,8 +1396,13 @@ export async function adminRoutes(app: FastifyInstance) {
     const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
       // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
       // suspension source survives it for a later heal or payment to act on.
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
-      if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' }, OR: [{ suspensionSource: null }, { suspensionSource: { not: 'WIND_DOWN' } }] }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
+      if (won.count === 0) {
+        // The store changed after the check above: say which way.
+        const now = await tx.vendor.findUnique({ where: { id }, select: { suspensionSource: true } });
+        if (now?.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
+        throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+      }
       return tx.vendor.findUniqueOrThrow({ where: { id } });
     });
 
@@ -2549,7 +2557,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // audit, booking/search closure, stock, float, and mover release share one
     // transaction. This closes both the crash window and the stale riderId race
     // against a direct board assignment. Socket/push remain post-commit below.
-    await orderService.transitionOrderAtomically({
+    const cancellation = await orderService.transitionOrderAtomically({
       orderId: id,
       target: newStatus,
       allowedFrom,
@@ -2572,11 +2580,15 @@ export async function adminRoutes(app: FastifyInstance) {
       // able to leave a cancelled order with no record of it.
       ...(refund
         ? {
-          withinTransaction: async (tx: Prisma.TransactionClient) => {
+          // [M066] The amount owed is the total on the LOCKED row. The
+          // pre-read above is only for the status gate and the notices; an
+          // adjustment that commits between it and the lock must not leave a
+          // stale (smaller or larger) obligation on record.
+          withinTransaction: async (tx: Prisma.TransactionClient, lockedSource: { totalAmount: Prisma.Decimal }) => {
             await tx.order.update({
               where: { id },
               data: {
-                refundOwedAmount: order.totalAmount,
+                refundOwedAmount: lockedSource.totalAmount,
                 refundOwedAt: new Date(),
                 refundOwedById: request.user.userId,
               },
@@ -2629,7 +2641,8 @@ export async function adminRoutes(app: FastifyInstance) {
       data: {
         orderId: id,
         status: newStatus,
-        refundOwed: refund ? String(order.totalAmount) : null,
+        // [M066] Echo the obligation exactly as it was committed.
+        refundOwed: refund ? String(cancellation.order.refundOwedAmount) : null,
       },
     };
   });
@@ -5542,12 +5555,19 @@ export async function adminRoutes(app: FastifyInstance) {
     // and the record of who made it commit together. `E.returnRequest` is
     // declared, so the subject comes from the params.
     const updated = await tenantPrisma.$transaction(async (tx) => {
-      const row = await mutationOrNotFound('ReturnRequest', id, () => tx.returnRequest.update({
-        where: { id },
+      // The pre-read above is a fast refusal, not the guard: two admins can
+      // both read REQUESTED. Only the writer that still sees REQUESTED decides
+      // and audits; the other gets 409 and writes nothing, so a refusal can
+      // never overwrite an owed refund (or the reverse).
+      const changed = await tx.returnRequest.updateMany({
+        where: { id, status: 'REQUESTED' },
         data: { status: body.status, resolutionNote: body.note, reviewedBy: request.user.userId, reviewedAt: new Date() },
-      }));
+      });
+      if (changed.count !== 1) {
+        throw new AppError(409, 'ALREADY_RESOLVED', 'This return was resolved by someone else a moment ago. Refresh to see the decision.');
+      }
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-      return row;
+      return tx.returnRequest.findUniqueOrThrow({ where: { id } });
     });
     if (body.status === 'REFUND_DUE') returnRefundCounter.labels('owed').inc();
     return { success: true, data: updated };
@@ -5920,6 +5940,51 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
+  // [DELETION-INTEGRITY] A business or advertiser asks for closure in the app
+  // and gets a ticket. This completes it, through the same erasure a person's
+  // own deletion runs: every obligation check still applies, so live work or
+  // open cash refuses with the person's own message and the request stays
+  // open. Only a request confirmed in the app qualifies, and a staff account
+  // is never closed from the support queue.
+  app.post('/support/:id/complete-account-closure', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const ticket = await tenantPrisma.supportTicket.findUnique({
+      where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
+    });
+    if (!ticket) throw new NotFoundError('SupportTicket', id);
+    // The subject alone can be typed by anyone; the confirmation record is
+    // written only by the in-app request, behind the deletion step-up.
+    const confirmedInApp = ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT
+      && await app.prisma.auditLog.findFirst({
+        where: { userId: ticket.userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
+      });
+    if (!confirmedInApp) {
+      throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request confirmed in the app can be completed here.');
+    }
+    if (ticket.status === 'RESOLVED') throw new AppError(409, 'ALREADY_RESOLVED', 'This closure request is already resolved.');
+    const [subject, staffGrant] = await Promise.all([
+      tenantPrisma.user.findUnique({ where: { id: ticket.userId }, select: { roles: true } }),
+      app.prisma.admin.findUnique({ where: { userId: ticket.userId }, select: { userId: true } }),
+    ]);
+    if (!subject) throw new NotFoundError('User', ticket.userId);
+    if (ticket.userId === request.user.userId || staffGrant
+      || subject.roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
+      throw new ForbiddenError('A staff account is not closed from the support queue.');
+    }
+    const outcome = await new AccountService(app).deleteAccount(ticket.userId);
+    const complete = 'deleted' in outcome && outcome.deleted === true;
+    await tenantPrisma.supportTicket.updateMany({
+      where: { id, status: { not: 'RESOLVED' } },
+      data: {
+        status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedById: request.user.userId, resolvedAt: new Date(),
+        adminNote: complete
+          ? 'Account closed and personal data de-identified; financial and legal records are retained.'
+          : 'Account closed; the remaining erasure is pending and retried automatically.',
+      },
+    });
+    return { success: true, data: { ticketId: id, outcome } };
+  });
+
   // =========================================================================
   // COMPLIANCE — the liability shield: audit runs, violations, re-reviews
   // =========================================================================
@@ -6152,7 +6217,14 @@ export async function adminRoutes(app: FastifyInstance) {
     if (refusal) throw new AppError(409, 'REPLAY_NOT_CERTIFIED', refusal, { jobName: job.name, ...recoveryFor(job.name) });
     await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, async () => {
       try {
-        await job.retry();
+        // [Item 63] The operator authorizes ONE fresh execution: reset the
+        // started-run counter the automatic-replay guard reads. A certified
+        // class keeps its attempt history (attemptsMade) visible; an
+        // uncertified one (RECONCILE_FIRST) starts both counters again, so a
+        // worker dying during THIS run is a prior start the guard refuses —
+        // the one replay can never become two.
+        const certified = recoveryFor(job.name).policy === 'SAFE_REPLAY';
+        await job.retry('failed', { resetAttemptsStarted: true, ...(certified ? {} : { resetAttemptsMade: true }) });
       } catch (err) {
         // BullMQ's reprocess refused: the job is no longer in the failed set
         // (a Discard claimed it, or another Retry already moved it).
