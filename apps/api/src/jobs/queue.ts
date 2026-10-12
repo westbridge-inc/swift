@@ -1228,20 +1228,48 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ).catch(() => {});
           }
         }
-        // [M-11] Publish whatever a request's immediate drain could not: a
-        // queue outage, a crash after the commit, a lapsed lease.
-        const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
-        const result = await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { limit: 200 });
-        if (result.processed + result.failed > 0) ctx.log.info(result, '[M-11] checkout outbox sweep');
-        // [ORDER-SPINE S1-6] Direct-MMG claim notices the request could not
-        // finish. Never handed to a queue (a published row is consumed on
-        // acceptance): delivered here, deduplicated per (order, generation,
-        // role), and kept owed — backed off — until every recipient holds it.
-        const { drainMmgClaimNotices } = await import('../modules/order/mmg-claim.service');
+        // [RESCUE S1 · review S3-2] Each drain runs on its own: an
+        // infrastructure error in one is logged and never skips the drains
+        // after it. The first error still fails the job once all have run, so
+        // the dead-letter alarm sees a drain that keeps failing.
+        let drainFailure: unknown;
+        const drain = async (name: string, run: () => Promise<void>) => {
+          try {
+            await run();
+          } catch (err) {
+            drainFailure ??= err;
+            ctx.log.error({ err, drain: name }, 'checkout-outbox sweep: a drain failed; the other drains still ran');
+          }
+        };
         const { NotificationService: ClaimNoticeNS } = await import('../modules/notification/notification.service');
-        const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
-        if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
-        else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
+        await drain('checkout-outbox', async () => {
+          // [M-11] Publish whatever a request's immediate drain could not: a
+          // queue outage, a crash after the commit, a lapsed lease.
+          const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
+          const result = await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { limit: 200 });
+          if (result.processed + result.failed > 0) ctx.log.info(result, '[M-11] checkout outbox sweep');
+        });
+        await drain('mmg-claim-notice', async () => {
+          // [ORDER-SPINE S1-6] Direct-MMG claim notices the request could not
+          // finish. Never handed to a queue (a published row is consumed on
+          // acceptance): delivered here, deduplicated per (order, generation,
+          // role), and kept owed — backed off — until every recipient holds it.
+          const { drainMmgClaimNotices } = await import('../modules/order/mmg-claim.service');
+          const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
+          if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
+          else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
+        });
+        await drain('rescue-notice', async () => {
+          // [RESCUE S1 · CX04] The food-age cutoff commits its notices as an
+          // obligation with the cancellation; whatever its own fast path could
+          // not finish (a crash, an outage, a page nobody took) is delivered
+          // here on the same terms: in process, deduplicated, owed until held.
+          const { drainRescueNotices } = await import('../modules/dispatch/rescue');
+          const rescueNotices = await drainRescueNotices({ prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
+          if (rescueNotices.owed + rescueNotices.failed > 0) ctx.log.warn(rescueNotices, '[RESCUE S1] food-age cutoff notices still owed — retrying with backoff');
+          else if (rescueNotices.delivered > 0) ctx.log.info(rescueNotices, '[RESCUE S1] food-age cutoff notices delivered');
+        });
+        if (drainFailure !== undefined) throw drainFailure;
         return;
       }
       if (job.name === 'mover-revocation-outbox') {
