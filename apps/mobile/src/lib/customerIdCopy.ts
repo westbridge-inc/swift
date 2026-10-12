@@ -39,10 +39,11 @@ export function submittedCopy(check: CustomerIdCheck | null): { title: string; b
 /** The Profile row's line under "Your ID". */
 export function profileIdRowSub(check: unknown): string {
   switch (check) {
-    case 'ON_FILE': return 'On file — unlocks bigger orders and taxi rides';
+    // Taxi rides also need the profile photo, so the short line claims only what the ID unlocks.
+    case 'ON_FILE': return 'On file — bigger orders unlocked';
     case 'CHECKED': return 'Checked by our team';
     case 'WAITING': return 'A person is checking it';
     case 'NOT_ACCEPTED': return 'Not accepted — add it again';
-    default: return 'Unlocks bigger orders and rides';
+    default: return 'Needed for bigger orders and taxi rides';
   }
 }

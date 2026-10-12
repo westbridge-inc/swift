@@ -43,7 +43,11 @@ describe('the words stay truthful', () => {
   it('only a person-reviewed ID is "checked" on the Profile row', () => {
     expect(profileIdRowSub('CHECKED')).toBe('Checked by our team');
     expect(profileIdRowSub('ON_FILE')).toMatch(/^On file/);
-    expect(profileIdRowSub(undefined)).toBe('Unlocks bigger orders and rides');
+    expect(profileIdRowSub(undefined)).toBe('Needed for bigger orders and taxi rides');
+  });
+  it('no short line says the ID alone unlocks taxi rides (they also need the profile photo)', () => {
+    for (const line of rows) expect(line).not.toMatch(/unlock[^.]*rides|rides[^.]*unlock/i);
+    expect(profileIdRowSub('ON_FILE')).toBe('On file — bigger orders unlocked');
   });
 });
 
