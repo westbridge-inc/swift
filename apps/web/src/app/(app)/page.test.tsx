@@ -47,6 +47,7 @@ async function freshAuth() {
 
 beforeEach(async () => {
   await freshAuth();
+  sessionStorage.clear();
   state.coords.mockReset();
   api = ({ url }) => {
     if (url.pathname === '/api/v1/auth/me') return { status: 401, body: { success: false } };
@@ -107,7 +108,9 @@ describe('[Q7b] / is the ordering home', () => {
     renderHome();
     await screen.findByRole('region', { name: 'Open now' });
     expect(screen.queryByRole('region', { name: /Sign in/ })).toBeNull();
-    fireEvent.click(await screen.findByRole('button', { name: 'Show stores near me' }));
+    // [owner, staging] One place control on Home: the stores near me are found from its sheet.
+    fireEvent.click(await screen.findByRole('button', { name: /^Delivery, address at checkout/ }));
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delivery or pickup' })).getByRole('button', { name: 'Show stores near me' }));
     const near = await screen.findByRole('region', { name: 'Nearby' });
     // Nearby first, then the rest, each store once.
     expect(within(near).getAllByRole('link').map((link) => link.textContent)).toEqual([
@@ -133,8 +136,16 @@ describe('[Q7b] / is the ordering home', () => {
       return base(request);
     })(api);
     renderHome();
-    const deliverTo = await screen.findByRole('link', { name: /12 Main St/ });
-    expect(deliverTo.getAttribute('href')).toBe('/order/location');
+    // [owner, staging] ONE place control at the top of Home: delivery and the address together,
+    // the address changed from its sheet. The app frame draws no second bar here.
+    const deliverTo = await screen.findByRole('button', { name: /^Delivery to 12 Main St, as soon as possible/ });
+    expect(screen.getAllByRole('button', { name: /Change delivery or pickup/ })).toEqual([deliverTo]);
+    expect(screen.getAllByText(/12 Main St/)).toHaveLength(1);
+    expect(screen.queryByText(/address at checkout/)).toBeNull();
+    fireEvent.click(deliverTo);
+    const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
+    expect(within(sheet).getByRole('link', { name: 'Change delivery address' }).getAttribute('href')).toBe('/order/location');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Done' }));
     expect((await screen.findByRole('link', { name: /Track your live order SW-1001/ })).getAttribute('href')).toBe('/orders/o1');
     await waitFor(() => {
       const last = homeRequests().at(-1)!;
@@ -160,7 +171,7 @@ describe('[Q7b] / is the ordering home', () => {
     renderHome();
     await screen.findByRole('link', { name: /Track your live order SW-1001/ });
     await waitFor(() => expect(homeRequests().some((url) => url.searchParams.get('lat') === '6.81')).toBe(true));
-    await screen.findByRole('link', { name: /12 Main St/ });
+    await screen.findByRole('button', { name: /^Delivery to 12 Main St/ });
 
     session = false;
     const auth = await import('@/lib/auth');
@@ -169,7 +180,39 @@ describe('[Q7b] / is the ordering home', () => {
     expect(screen.queryByRole('link', { name: /Track your live order/ })).toBeNull();
     expect(screen.queryByText('Shanta Kitchen')).toBeNull();
     expect(screen.getByLabelText('Loading home feed')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Show stores near me' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Delivery, address at checkout/ })).toBeTruthy();
+    expect(screen.queryByText(/12 Main St/)).toBeNull();
+  });
+
+  it('[owner, staging] in pickup mode Home shows no delivery address — one control, "Pickup from the store"', async () => {
+    sessionStorage.setItem('swift_ordering_mode', 'PICKUP');
+    api = ((base) => (request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/auth/me') return { body: { success: true, data: { user: { id: 'c1' } } } };
+      if (request.url.pathname === '/api/v1/customer/addresses') {
+        return { body: { success: true, data: [{ id: 'a1', label: 'Home', addressLine1: '12 Main St', isDefault: true, latitude: 6.81, longitude: -58.16 }] } };
+      }
+      return base(request);
+    })(api);
+    renderHome();
+    const control = await screen.findByRole('button', { name: /^Pickup from the store, as soon as possible/ });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => new URL(String(url)).pathname === '/api/v1/customer/addresses')).toBe(true));
+    await screen.findByRole('region', { name: 'Open now' });
+    expect(screen.getAllByRole('button', { name: /Change delivery or pickup/ })).toEqual([control]);
+    expect(screen.queryByText(/12 Main St/)).toBeNull();
+    expect(screen.queryByRole('link', { name: /delivery address/i })).toBeNull();
+    // The promise row is true for pickup: no delivery fee, and no "pay cash when it arrives".
+    expect(screen.getByText('0% fees, no markups')).toBeTruthy();
+    expect(screen.getByText(/pickup has no delivery fee/)).toBeTruthy();
+    expect(screen.queryByText(/when it arrives/)).toBeNull();
+  });
+
+  it('[owner, staging] the promise row never reads as "no fees at all" next to a delivery fee', async () => {
+    renderHome();
+    await screen.findByRole('region', { name: 'Open now' });
+    expect(screen.getByText('0% fees, no markups')).toBeTruthy();
+    expect(screen.getByText(/Prices are the business’s own\. Swift adds nothing to your order — the delivery fee is shown at checkout\./)).toBeTruthy();
+    expect(screen.queryByText(/0% fees, always/)).toBeNull();
+    expect(screen.queryByText(/when it arrives/)).toBeNull();
   });
 
   it('says it could not load the stores — never "no stores" — and tries again on request', async () => {

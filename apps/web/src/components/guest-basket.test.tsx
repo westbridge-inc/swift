@@ -106,3 +106,14 @@ it('offers the same way out when the upload keeps failing on the server', async 
   await waitFor(() => expect(screen.queryByText('Your basket needs a check')).toBeNull());
   expect(readGuestBasket()).toEqual({ version: 1, lines: [] });
 });
+
+it('[owner, staging] its buttons are Swift’s buttons and it speaks plainly about what is confirmed after sign-in', async () => {
+  addGuestLine(fixtureLine);
+  render(signedInAs('account-b', <GuestCart />));
+  const place = await screen.findByRole('button', { name: 'Place order' });
+  expect(place.className.split(/\s+/)).toContain('sw-btn');
+  expect(place.className.split(/\s+/)).not.toContain('sw-btn-outline');
+  expect(screen.getByRole('button', { name: 'Discard this browser basket' }).className.split(/\s+/)).toEqual(expect.arrayContaining(['sw-btn', 'sw-btn-outline']));
+  expect(screen.getByText(/We confirm the delivery fee and the final total after you sign in\./)).toBeTruthy();
+  expect(screen.queryByText(/server/i)).toBeNull();
+});
