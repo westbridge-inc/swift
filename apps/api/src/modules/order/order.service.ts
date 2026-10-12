@@ -15,7 +15,7 @@ import type {
 } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
-import { clampDriverFare, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
+import { generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
@@ -672,10 +672,6 @@ export class OrderService {
       riderId: string;
       changedBy: string;
       note?: string;
-      /** Rider-chosen delivery fee (CASH rail only) — the seam derives the
-       *  clamp and the total delta from the LOCKED row, never from a route
-       *  preview [REPORT-005 F-005-01]. */
-      requestedFee?: number;
       moverUserId: string;
     },
   ): Promise<RiderAssignmentSnapshot & { dispatchAssignmentSequence: number }> {
@@ -703,26 +699,8 @@ export class OrderService {
       }
     }
 
-    // [REPORT-005 F-005-01] Rider price choice is a CASH feature: the customer
-    // pays the (lower) total at the door. An MMG total was already paid — or
-    // externally instructed — at checkout; repricing after capture rewrites
-    // money the store received. Fee applied as an atomic delta off the locked
-    // row so a stale preview can never smuggle in an absolute total.
-    let repricing: Prisma.OrderUncheckedUpdateManyInput = {};
-    if (input.requestedFee != null && paymentGate) {
-      const marketFee = Number(paymentGate.deliveryFee);
-      const chosenFee = clampDriverFare(input.requestedFee, marketFee);
-      if (chosenFee !== marketFee) {
-        if (paymentGate.paymentMethod !== 'CASH') {
-          throw new AppError(
-            409,
-            'MMG_PRICE_LOCKED',
-            'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
-          );
-        }
-        repricing = { deliveryFee: chosenFee, totalAmount: { decrement: marketFee - chosenFee } };
-      }
-    }
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The seam takes no price:
+    // the delivery fee and the total stay exactly as booked at checkout.
 
     const claimed = await tx.order.updateMany({
       where: {
@@ -744,7 +722,6 @@ export class OrderService {
       data: {
         riderId: input.riderId,
         status: 'RIDER_ASSIGNED',
-        ...repricing,
       },
     });
     if (claimed.count === 0) {
