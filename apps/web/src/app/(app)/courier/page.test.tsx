@@ -34,10 +34,10 @@ const bodyOf = (call: unknown[]) => JSON.parse(String((call[1] as RequestInit).b
 const button = (name: string | RegExp) => screen.getByRole('button', { name }) as HTMLButtonElement;
 const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
 
-function device(fix: 'ok' | 'denied') {
+function device(fix: 'ok' | 'denied' | 'rough') {
   const getCurrentPosition = vi.fn((success: PositionCallback, fail?: PositionErrorCallback | null) => {
     if (fix === 'denied') fail?.({ code: 1, PERMISSION_DENIED: 1 } as GeolocationPositionError);
-    else success({ coords: DEVICE as unknown as GeolocationCoordinates, timestamp: Date.now() } as GeolocationPosition);
+    else success({ coords: (fix === 'rough' ? { ...DEVICE, accuracy: 4800 } : DEVICE) as unknown as GeolocationCoordinates, timestamp: Date.now() } as GeolocationPosition);
   });
   vi.spyOn(navigator, 'geolocation', 'get').mockReturnValue({ getCurrentPosition } as unknown as Geolocation);
 }
@@ -143,14 +143,31 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     const map = await pinDropoff();
     fireEvent.keyDown(map, { key: 'ArrowDown' });
     loadMap();
+    // Until Swift has named the pin, it cannot be used — the phone waits for
+    // the name too — so a quick tap never sends "Dropped pin" for a named spot.
+    expect(button('Finding the address…').disabled).toBe(true);
     await screen.findByText(`Near ${reverseLabel}`);
     fireEvent.click(button('Use this pin'));
+    // Focus goes back to where the map was opened from.
+    await waitFor(() => expect(document.activeElement).toBe(button('Pin drop-off on the map')));
     expect(await screen.findByText('$1,160')).toBeTruthy();
     expect(button('Add the recipient’s name').disabled).toBe(true);
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
     expect(button('Add the recipient’s phone').disabled).toBe(true);
     fireEvent.click(button('Add the recipient’s phone'));
     expect(calls('POST', '/api/v1/courier/order')).toHaveLength(0);
+  });
+
+  it('a rough device fix is not taken as the pickup: the sender pins or searches it', async () => {
+    device('rough');
+    render(<CourierPage />);
+    expect(await screen.findByText(/only within about 4800 m/)).toBeTruthy();
+    expect(screen.queryByDisplayValue('Current location')).toBeNull();
+    fireEvent.click(button('Pin pickup on the map'));
+    await screen.findByRole('application', { name: 'Pickup pin map' });
+    fireEvent.click(button('Cancel'));
+    await waitFor(() => expect(document.activeElement).toBe(button('Pin pickup on the map')));
+    expect(calls('POST', '/api/v1/courier/estimate')).toHaveLength(0);
   });
 
   it('a pin outside Guyana cannot be used', async () => {

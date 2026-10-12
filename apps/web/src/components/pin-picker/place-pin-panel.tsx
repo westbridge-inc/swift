@@ -39,7 +39,9 @@ export function PlacePinPanel({ title, mapLabel, start, onUse, onCancel }: {
   }, []);
 
   function use() {
-    if (!pin) return;
+    // The phone names a pin before confirming it: a tap before Swift's lookup
+    // answers would send "Dropped pin" for a spot that has a name.
+    if (!pin?.named) return;
     const label = pin.address?.trim().slice(0, 200) || DROPPED_PIN;
     onUse({ label, lat: pin.latitude, lng: pin.longitude, placeId: `pin:${pin.latitude.toFixed(6)},${pin.longitude.toFixed(6)}` });
   }
@@ -49,7 +51,7 @@ export function PlacePinPanel({ title, mapLabel, start, onUse, onCancel }: {
       <h3 ref={heading} id={`${id}-title`} tabIndex={-1} className="sw-heading outline-none">{title}</h3>
       <PinPicker mapLabel={mapLabel} start={start} saved={saved} onChange={setPin} />
       <div className="flex gap-2">
-        <button type="button" className="sw-btn sw-btn-md flex-1" disabled={!pin} onClick={use}>Use this pin</button>
+        <button type="button" className="sw-btn sw-btn-md flex-1" disabled={!pin?.named} onClick={use}>{pin && !pin.named ? 'Finding the address…' : 'Use this pin'}</button>
         <button type="button" className="sw-btn sw-btn-outline sw-btn-md flex-1" onClick={onCancel}>Cancel</button>
       </div>
     </section>

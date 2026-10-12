@@ -1,11 +1,11 @@
 'use client';
 
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pictogram } from '@/components/glyphs';
 import { courierEstimate, requestCourier, money } from '@/lib/customer';
-import { currentCoords } from '@/lib/geolocate';
-import { submittablePlace, type PickedPlace } from '@/lib/place';
+import { currentFix } from '@/lib/geolocate';
+import { MAX_ACCURACY_M, submittablePlace, type PickedPlace } from '@/lib/place';
 // [W-18] The field moved to components/location-field.tsx and the TAXI form
 // now uses the same one — it had the identical defect and its own copy of the
 // search box. A shared field is why there cannot be a third.
@@ -49,6 +49,15 @@ export default function CourierPage() {
   // `notes`, so a "notes for the rider" box was silently thrown away.
   const [contents, setContents] = useState('');
   const [pinning, setPinning] = useState<'pickup' | 'dropoff' | null>(null);
+  // Where focus returns when the map closes: the button that opened it.
+  const pinButtons = { pickup: useRef<HTMLButtonElement>(null), dropoff: useRef<HTMLButtonElement>(null) };
+  const returnFocus = useRef<'pickup' | 'dropoff' | null>(null);
+  useEffect(() => {
+    if (pinning || !returnFocus.current) return;
+    pinButtons[returnFocus.current].current?.focus();
+    returnFocus.current = null;
+  });
+  function closePin(end: 'pickup' | 'dropoff') { returnFocus.current = end; setPinning(null); }
   const [estimate, setEstimate] = useState<{ totalFee?: number; fare?: number } | null>(null);
   const [estimateFailed, setEstimateFailed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -58,8 +67,18 @@ export default function CourierPage() {
     // [F-027-02] This one never fabricated a coordinate — it just failed
     // SILENTLY, leaving "Locating…" on screen forever with no way to know the
     // prompt had been denied. Fail closed AND say so.
-    currentCoords('set your pickup')
-      .then(({ lat, lng }) => {
+    // [WEB-PIN] A fix is only as good as the device says (lib/place.ts): past
+    // 250 m it is a neighbourhood, and a rider would be sent to a guess. The
+    // sender pins or searches the pickup instead.
+    currentFix('set your pickup')
+      .then(({ lat, lng, accuracyM }) => {
+        if (accuracyM === null || accuracyM > MAX_ACCURACY_M) {
+          setPickup(null);
+          setPickupError(accuracyM === null
+            ? 'Your device didn’t say how accurate its location is, so Swift won’t guess your pickup.'
+            : `Your device placed you only within about ${Math.round(accuracyM)} m — too rough to send a rider to.`);
+          return;
+        }
         setPickup({ lat, lng, label: 'Current location', placeId: 'device' });
         setPickupText('Current location');
         setPickupError(null);
@@ -136,12 +155,12 @@ export default function CourierPage() {
                 title="Pin the pickup"
                 mapLabel="Pickup pin map"
                 start={pickup ? { latitude: pickup.lat, longitude: pickup.lng } : null}
-                onUse={(place) => { setPickupText(place.label); setPickup(place); setPickupError(null); setPinning(null); }}
-                onCancel={() => setPinning(null)}
+                onUse={(place) => { setPickupText(place.label); setPickup(place); setPickupError(null); closePin('pickup'); }}
+                onCancel={() => closePin('pickup')}
               />
             </Suspense>
           ) : (
-            <button type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" onClick={() => setPinning('pickup')}>Pin pickup on the map</button>
+            <button ref={pinButtons.pickup} type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" onClick={() => setPinning('pickup')}>Pin pickup on the map</button>
           )}
 
           <LocationField
@@ -157,12 +176,12 @@ export default function CourierPage() {
                 title="Pin the drop-off"
                 mapLabel="Drop-off pin map"
                 start={dropoff ? { latitude: dropoff.lat, longitude: dropoff.lng } : null}
-                onUse={(place) => { setDropoffText(place.label); setDropoff(place); setPinning(null); }}
-                onCancel={() => setPinning(null)}
+                onUse={(place) => { setDropoffText(place.label); setDropoff(place); closePin('dropoff'); }}
+                onCancel={() => closePin('dropoff')}
               />
             </Suspense>
           ) : (
-            <button type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" onClick={() => setPinning('dropoff')}>Pin drop-off on the map</button>
+            <button ref={pinButtons.dropoff} type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" onClick={() => setPinning('dropoff')}>Pin drop-off on the map</button>
           )}
 
           <h2 className="sw-heading mt-3">What are you sending?</h2>
