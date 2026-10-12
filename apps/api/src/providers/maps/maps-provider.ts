@@ -37,11 +37,18 @@ export interface RouteEstimate {
   minutes: number | null;
 }
 
-/** A production taxi/courier quote needs the road the customer will travel.
- * `source` already distinguishes every deterministic fallback, including a
- * deliberately configured straight-line provider. Keep that signal intact. */
+/** THE one rule: a production taxi/courier quote needs the road the customer
+ * will travel. `source` already distinguishes every deterministic fallback,
+ * including a deliberately configured straight-line provider (whose routes say
+ * degraded: false, because the estimate IS its engine). Keep that signal
+ * intact. A single-leg quote and a route with stops both ask this. [DS981] */
+export function isRoadQuote(route: Pick<RouteEstimate, 'source'>): boolean {
+  return !isProduction() || route.source === 'osrm';
+}
+
+/** A single-leg quote that is not a road quote is refused in plain words. */
 export function assertRoadQuoteAvailable(route: RouteEstimate): void {
-  if (isProduction() && route.source !== 'osrm') {
+  if (!isRoadQuote(route)) {
     throw new AppError(503, 'ROUTE_UNAVAILABLE', 'Road routing is unavailable. Try again in a moment.');
   }
 }

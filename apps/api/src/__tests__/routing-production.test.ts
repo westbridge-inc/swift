@@ -110,3 +110,31 @@ describe('production taxi and courier need a road route', () => {
     expect(await app.prisma.order.count({ where: { customerId: userId } })).toBe(before);
   });
 });
+
+describe('production prices a ride with stops only from the real road (DS981)', () => {
+  // Outside every zone, so the formula prices it and no zone fare refuses it first.
+  const FAR_PICKUP = { lat: 6.90, lng: -58.10 };
+  const FAR_STOP = { lat: 6.91, lng: -58.09, address: 'Test stop' };
+  const FAR_DESTINATION = { lat: 6.95, lng: -58.05 };
+  const withStops = { pickup: FAR_PICKUP, dropoff: FAR_DESTINATION, stops: [FAR_STOP] };
+  const roadWithStops = () => vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ code: 'Ok',
+    routes: [{ distance: 10150, duration: 1620, legs: [{ distance: 4000, duration: 600 }, { distance: 6150, duration: 1020 }] }] }))));
+
+  it('a configured straight-line provider cannot price a production fare with stops', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    await expect(new FareService(app.prisma, new HaversineMapsProvider()).estimateItineraryTiers(FAR_PICKUP, [FAR_STOP], FAR_DESTINATION, 'GY'))
+      .rejects.toMatchObject({ statusCode: 503, code: 'ROUTE_UNAVAILABLE', details: { stopCount: 1 } });
+  });
+  it('production /rides/estimate with stops refuses unreachable OSRM in plain words', async () => {
+    vi.stubEnv('NODE_ENV', 'production'); vi.stubEnv('TAXI_MAX_STOPS', '1'); outage();
+    const res = await post('/api/v1/rides/estimate', withStops);
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ success: false, error: { code: 'ROUTE_UNAVAILABLE', message: expect.stringMatching(/try again/i) } });
+  });
+  it('production /rides/estimate still prices a ride with stops from the real road', async () => {
+    vi.stubEnv('NODE_ENV', 'production'); vi.stubEnv('TAXI_MAX_STOPS', '1'); roadWithStops();
+    const res = await post('/api/v1/rides/estimate', withStops);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ routeSource: 'osrm', billableKm: 10.15, stopCount: 1, tiers: expect.any(Array), currencyCode: 'GYD' });
+  });
+});
