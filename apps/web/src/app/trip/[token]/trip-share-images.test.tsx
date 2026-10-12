@@ -7,7 +7,9 @@ import { TripShareClient, ownedImageSrc } from './trip-share-client';
 // ---------------------------------------------------------------------------
 // [M053] The public trip page carries its bearer token in the address. It
 // draws only Swift's own images (https on the API's origin), never a URL a
-// profile field happens to hold, sends no referrer with anything it loads,
+// profile field happens to hold, never tells anything it loads the page's
+// address (its images and links go with no referrer; the map's OSM tiles send
+// the site's origin only, as OSM's tile policy requires — tile-map.test.tsx),
 // and the site serves the page itself with Referrer-Policy: no-referrer.
 // ---------------------------------------------------------------------------
 

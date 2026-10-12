@@ -22,6 +22,7 @@ import { isDuplicateOn } from '../money/evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import type { BillingService } from './billing.service';
 import { payInfo } from './agent-cash.service';
+import { assertPayAheadRoom } from './pay-ahead';
 import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
@@ -516,6 +517,9 @@ export class MmgCheckoutService {
       // [I1] Priced here, from payInfo's own amount due.
       const priced = await payInfo(this.prisma, sub);
       const amountGyd = checkoutAmountGyd(priced);
+      // [OWNER RULING 8 Oct (2)] Four weeks paid ahead at most: refused before
+      // any page exists (and again under the locks below).
+      await assertPayAheadRoom(this.prisma, sub.id, amountGyd, now, 'partner');
       const quoteBasis = checkoutQuoteBasis(sub);
       const quotedAuthority = await readFeeCollectionAuthority(this.prisma, sub.id);
       const merchantTransactionId = newMerchantTransactionId(now);
@@ -549,6 +553,7 @@ export class MmgCheckoutService {
             || quoteBasis !== checkoutQuoteBasis(fresh) || freshAmount !== amountGyd
             || Number(wallet?.balance ?? 0) !== priced.walletBalanceGyd
             || !await mmgCheckoutLive(tx, fresh, input.platform, this.checkout)) return { kind: 'quoteChanged' as const };
+          await assertPayAheadRoom(tx, sub.id, amountGyd, new Date(), 'partner');
 
           const created = await tx.mmgCheckoutIntent.create({
             data: {

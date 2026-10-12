@@ -52,6 +52,7 @@ import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
@@ -281,7 +282,7 @@ const broadcastSchema = z.object({
 // no evidence of which payment it was, and the same payment could be credited
 // again tomorrow under a fresh idempotency key.
 const topUpSchema = z.object({
-  amount: zMoneyWhole.refine((n) => n > 0, 'A top-up must be more than zero'),
+  amount: zMoneyWhole.refine((n) => n > 0, 'A recorded fee payment must be more than zero'),
   reference: z.string(),
 });
 
@@ -3563,7 +3564,8 @@ export async function adminRoutes(app: FastifyInstance) {
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
       return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority };
     }));
-    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }) };
+    // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
+    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {
@@ -3647,13 +3649,15 @@ export async function adminRoutes(app: FastifyInstance) {
     // ledger posting, the audit row and the durable notice / re-bill tail are
     // written together. Rollback is hold-only (BILLING_TOPUP_HOLD=1 refuses
     // every top-up); there is no way back to an unkeyed mutation.
-    if (process.env['BILLING_TOPUP_HOLD'] === '1') {
-      throw new AppError(503, 'TOPUP_ON_HOLD', 'Top-ups are on hold by operations — nothing was recorded. Try again once the hold is lifted.');
+    // [OWNER 8 Oct 22:20 + 23:58 (4)] Production holds it (fails closed when
+    // unset there); only BILLING_TOPUP_HOLD=0 opens it on a test server.
+    if (manualFeeCreditHeld()) {
+      throw new AppError(503, 'TOPUP_ON_HOLD', MANUAL_FEE_CREDIT_HELD_MESSAGE);
     }
     const clientKey = request.headers['idempotency-key'];
     if (!isUsableTopUpKey(clientKey)) {
       billingTopupMissingKeyCounter.inc();
-      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A recorded fee payment needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
     // [A-12] Normalised the same way every other manual-rail reference is, so
     // the same transfer typed two ways cannot occupy two rows and defeat the
@@ -4739,20 +4743,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/billing/agent-payments/:id/refund-flag', { preHandler: [adminGuard] }, async (request) => {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ note: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const row = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
-    if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
-    if (row.status !== 'UNMATCHED') throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
+    // [REVIEW S3-2] One refund per MMG payment: the service closes the
+    // provider transaction and reconciles its other held observations.
     // [ADM-002] Flagging a payment for refund is a money decision. Its
     // subject is in the params, so the row needs no id override.
-    const updated = await tenantPrisma.$transaction(async (tx) => {
-      const row = await tx.mmgAgentPayment.update({
-        where: { id },
-        data: { status: 'REFUND_FLAGGED', note: body.note, resolvedBy: request.user.userId, resolvedAt: new Date() },
-      });
-      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-      return row;
-    });
-    return { success: true, data: updated };
+    const { AgentCashService } = await import('../billing/agent-cash.service');
+    const svc = new AgentCashService(tenantPrisma, billing);
+    const result = await svc.flagRefund(id, request.user.userId, body.note,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+    const updated = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
+    return { success: true, data: { ...updated, refund: result } };
   });
 
   /** Leave with note (stays in the queue). */
@@ -5435,8 +5435,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const doc = await verification.revokeDocument(id, request.user.userId, body.reason);
     await audit(request.user.userId, 'REVOKE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
-
-    return { success: true, data: doc };
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] Additive: the account level after the withdrawal, so
+    // the console says "back to L1" only when it is (another customer ID may still stand).
+    const after = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { trustLevel: true } });
+    return { success: true, data: { ...doc, accountTrustLevel: after?.trustLevel ?? null } };
   });
 
   // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────
