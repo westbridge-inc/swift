@@ -306,10 +306,13 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
   });
 
   it('an admin top-up bills instantly and reinstates — vendor returns to browse', async () => {
+    // [OWNER RULING 8 Oct (2)] At most four weeks paid ahead: with GY$10,000
+    // already held and the owed week of GY$20,000, the most an operator can
+    // record is GY$90,000 (was GY$100,000, five weeks ahead, now refused).
     const res = await injectWithApproval(app, {
       method: 'POST',
       url: `/api/v1/admin/subscriptions/${subId}/topup`,
-      payload: { amount: 100000, reference: `BANK-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
+      payload: { amount: 90000, reference: `BANK-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
       headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(res.statusCode).toBe(200);
@@ -319,7 +322,7 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     expect(sub.failedAttempts).toBe(0);
 
     const balance = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } });
-    expect(Number(balance.balance)).toBe(10000 + 100000 - 20000);
+    expect(Number(balance.balance)).toBe(10000 + 90000 - 20000); // four weeks paid ahead, the cap
 
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
     expect(vendor.status).toBe('ACTIVE');

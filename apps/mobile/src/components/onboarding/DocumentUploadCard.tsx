@@ -19,7 +19,8 @@ function humanize(docType: string) {
 
 // Friendly names for known checklist docs; unknown slugs fall back to humanize().
 const DOC_LABELS: Record<string, string> = {
-  national_id: 'National ID',
+  // [VERIFY-DOCS · ruling 4] the new Digital ID card is accepted as the national ID
+  national_id: 'National ID or Digital ID card',
   drivers_licence: "Driver's Licence",
   vehicle_registration: 'Vehicle Registration',
   vehicle_insurance: 'Vehicle Insurance',
@@ -28,9 +29,10 @@ const DOC_LABELS: Record<string, string> = {
   vehicle_plate_photo: 'Vehicle Plate Photo',
   police_clearance: 'Police Clearance Certificate',
   fitness_cert: 'Fitness Certificate',
-  // Owner ruling 2026-10-01: a taxi may be any colour; the H plate must show.
-  vehicle_exterior_photo: 'Car exterior photo (H plate visible)',
-  owner_national_id: 'Owner National ID',
+  // Owner ruling 2026-10-01: a taxi may be any colour. [VERIFY-DOCS · ruling 5] This one photo
+  // replaces the separate plate photo, so the plate must be readable in it.
+  vehicle_exterior_photo: 'Car photo (plate clearly visible)',
+  owner_national_id: 'Owner National ID or Digital ID card',
   business_registration: 'Business Registration',
   tin_certificate: 'TIN Certificate',
   gra_restaurant_licence: 'GRA Restaurant Licence',
@@ -65,6 +67,7 @@ export function DocumentUploadCard({
   isNext,
   replaced = false,
   faceMatched = false,
+  optionalHint,
 }: {
   role: string;
   docType: string;
@@ -77,6 +80,9 @@ export function DocumentUploadCard({
   replaced?: boolean;
   /** The server says it compares this document with the profile selfie (documentChecklistPresentation). */
   faceMatched?: boolean;
+  /** [VERIFY-DOCS] Set for a document the person MAY add: what it is for. Never a gate, so no
+   *  "keep operating" copy and no "next step" nudge. */
+  optionalHint?: string;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -167,7 +173,9 @@ function explainPermissionDenied(
   // Docs are photographed at the counter/kerb more often than they sit in the
   // gallery — offer the camera first, library as the alternative.
   const pick = () =>
-    Alert.alert(label(docType), 'Add a clear, well-lit photo. All corners visible, no glare.', [
+    Alert.alert(label(docType), docType === 'vehicle_exterior_photo'
+      ? 'Show the whole car, with its number plate clearly readable. Well lit, no glare.'
+      : 'Add a clear, well-lit photo. All corners visible, no glare.', [
       { text: 'Take photo', onPress: fromCamera },
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
@@ -192,16 +200,20 @@ function explainPermissionDenied(
       : expiringSoon
         ? `Expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'} — tap to upload the renewal`
         : expired
-          ? 'Expired — upload the renewal to keep operating'
+          ? optionalHint
+            ? 'Expired — optional, upload a new one any time'
+            : 'Expired — upload the renewal to keep operating'
           : pending
             ? pendingLabel
             : rejected
               ? reviewNote
                 ? `Rejected: ${reviewNote} — tap to re-upload`
                 : 'Rejected — tap to re-upload'
-              : isNext
-                ? 'Recommended next step'
-                : 'Get started';
+              : optionalHint
+                ? 'Optional'
+                : isNext
+                  ? 'Recommended next step'
+                  : 'Get started';
 
   return (
     <Pressable disabled={approved || upload.isPending} onPress={pending ? confirmReplace : pick}>
@@ -232,6 +244,11 @@ function explainPermissionDenied(
           {/* [Owner, 1 Oct · truth] Only when the server says it face-matches
               this document. It used to show under every ID, while the
               server's face-matching was switched off. */}
+          {optionalHint ? (
+            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
+              {optionalHint}
+            </T>
+          ) : null}
           {faceMatched ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               Face-matched against your profile selfie
