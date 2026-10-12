@@ -19,6 +19,7 @@ import {
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { rejectReasonsFor } from '../rejectReasons';
+import { renewalBannerCopy } from '../renewal-banner';
 import {
   BoardFirstRun,
   BoardFirstRunRow,
@@ -860,7 +861,10 @@ export function VendorOps({ store, navigation }: any) {
       (d: any) => d.docType === dt && d.status === 'APPROVED' && (!d.expiresAt || new Date(d.expiresAt) > new Date()),
     ),
   ).length;
-  const failingDocs: string[] = store.isVerified === false
+  // [NO-DEAD-ENDS] The documents are the owner's: the status read is the
+  // viewer's own, so only the owner's names the failing ones (renewal-banner.ts).
+  const isStoreOwner = myRole === 'OWNER';
+  const failingDocs: string[] = isStoreOwner && store.isVerified === false
     ? (vstatus.data?.checklist ?? []).filter((dt: string) => {
         const docs = (vstatus.data?.documents ?? []).filter((d: any) => d.docType === dt);
         return !docs.some((d: any) => d.status === 'APPROVED' && (!d.expiresAt || new Date(d.expiresAt) > new Date()));
@@ -997,14 +1001,12 @@ export function VendorOps({ store, navigation }: any) {
             Only a store that has BEEN live can be suspended; pending stores get
             the preview banner above instead. */}
         {!inPreview && store.isVerified === false ? (
-          <Pressable onPress={() => navigation?.navigate?.('Account')}>
+          <Pressable disabled={!isStoreOwner} onPress={() => navigation?.navigate?.('Account')}>
             {({ pressed }) => (
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.danger, padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
                 <Feather name="alert-circle" size={15} color={color.error} style={{ marginTop: 1 }} />
                 <T variant="label" tone="error" style={{ flex: 1 }}>
-                  {failingDocs.length > 0
-                    ? `Store suspended — ${failingDocs.map((d) => docLabel(d)).join(', ')} ${failingDocs.length === 1 ? 'needs' : 'need'} renewal, so new orders are off. Tap to fix it under Account.`
-                    : 'Store suspended — a required document is missing or expired, so new orders are off. Tap to renew it under Account.'}
+                  {renewalBannerCopy(isStoreOwner, failingDocs.map((d) => docLabel(d)))}
                 </T>
               </View>
             )}

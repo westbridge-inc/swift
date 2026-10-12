@@ -140,3 +140,63 @@ describe('[A-18] a failed queue is not an empty queue', () => {
     expect(await screen.findByText(/no open tickets/i)).toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// [DELETION-INTEGRITY] A business or advertiser asks for closure in the app and
+// the request lands here. The queue completes it: the server closes the account
+// through the same erasure checks the person's own deletion runs, so a request
+// with live work stays open and the console shows what is outstanding.
+// ---------------------------------------------------------------------------
+const closureTicket = {
+  ...safetyTicket,
+  id: 'ticket-closure',
+  category: 'ACCOUNT',
+  subject: 'Account closure request',
+  message: 'Please close my Swift account. This request was confirmed in the app.',
+};
+
+describe('[DELETION-INTEGRITY] an in-app closure request is completed from the queue', () => {
+  it('offers completion only on a closure request', async () => {
+    mockApi(listOf([closureTicket, ordinaryTicket]));
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Cold food');
+    expect(screen.getAllByRole('button', { name: /complete account closure/i })).toHaveLength(1);
+  });
+
+  it('needs a stated reason, sends nothing on cancel, then completes with that reason', async () => {
+    const user = userEvent.setup();
+    const fetchMock = mockApi(listOf([closureTicket]));
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Account closure request');
+
+    await user.click(screen.getByRole('button', { name: /complete account closure/i }));
+    await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+
+    await user.click(screen.getByRole('button', { name: /complete account closure/i }));
+    const confirm = await screen.findByRole('button', { name: /^close the account$/i });
+    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText(/why you are closing this account/i), 'Listings and campaigns wound down with the owner.');
+    expect((confirm as HTMLButtonElement).disabled).toBe(false);
+    await user.click(confirm);
+
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(String(url)).toContain('/api/v1/admin/support/ticket-closure/complete-account-closure');
+    expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe('Listings and campaigns wound down with the owner.');
+  });
+
+  it('shows what is still outstanding when the server refuses', async () => {
+    const user = userEvent.setup();
+    mockApi((request) => {
+      if (request.method === 'GET') return { body: { success: true, data: { tickets: [closureTicket], total: 1 } } };
+      return { status: 409, body: { success: false, error: { code: 'ACTIVE_ORDERS', message: 'Finish or cancel your active orders and jobs before deleting your account.' } } };
+    });
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Account closure request');
+    await user.click(screen.getByRole('button', { name: /complete account closure/i }));
+    await user.type(screen.getByLabelText(/why you are closing this account/i), 'Owner confirmed by phone call.');
+    await user.click(screen.getByRole('button', { name: /^close the account$/i }));
+    expect(await screen.findByText(/finish or cancel your active orders/i)).toBeTruthy();
+  });
+});

@@ -18,7 +18,7 @@ it('locks payer and sorted sources before winding down subscriptions and vendor 
     },
     item: { updateMany: vi.fn(async () => ({ count: 1 })) },
     vendorStaff: { deleteMany: vi.fn(async () => ({ count: 1 })) },
-    rider: { findUnique: vi.fn(async () => ({ id: 'rider-1' })) },
+    rider: { findUnique: vi.fn(async () => ({ id: 'rider-1' })), update: vi.fn(async () => ({})) },
     driver: { findUnique: vi.fn(async () => null) },
     subscription: {
       updateMany: vi.fn(async () => { writes.push('subscription'); return { count: 1 }; }),
