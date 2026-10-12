@@ -2,6 +2,8 @@ import { Image } from 'react-native';
 
 export interface UploadFile { uri: string; name: string; type: string }
 
+const SIZE_READ_TIMEOUT_MS = 8_000;
+
 /** Decode on device, preserve aspect ratio, and keep the original for retries.
  * Documents retain extra detail for human review. PDFs bypass image encoding.
  *
@@ -10,7 +12,7 @@ export interface UploadFile { uri: string; name: string; type: string }
  * read, or the decoder fails on a low-memory phone), the ORIGINAL photo is
  * sent instead. Pickup and delivery proof are mandatory on the server. */
 export async function prepareUploadImage(file: UploadFile, document = false): Promise<UploadFile> {
-  if (!file.type.startsWith('image/')) return file;
+  if (typeof file.type !== 'string' || !file.type.startsWith('image/')) return file;
   try {
     return await resizeForUpload(file, document);
   } catch {
@@ -29,9 +31,13 @@ async function hasImageManipulator(): Promise<boolean> {
 
 async function resizeForUpload(file: UploadFile, document: boolean): Promise<UploadFile> {
   if (!(await hasImageManipulator())) return file;
+  // A corrupt file can leave the native size callback unanswered; give up
+  // and send the original rather than hold the upload forever.
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const { width, height } = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('size read timed out')), SIZE_READ_TIMEOUT_MS);
     Image.getSize(file.uri, (width, height) => resolve({ width, height }), reject);
-  });
+  }).finally(() => clearTimeout(timer));
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return file;
   const edge = document ? 1600 : 1280;
   const actions = Math.max(width, height) > edge

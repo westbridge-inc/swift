@@ -2,16 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const native = vi.hoisted(() => ({
   width: 4000, height: 3000,
   sizeError: null as Error | null,
+  sizeHangs: false,
   moduleShipped: true,
   manipulateAsync: vi.fn(async (..._args: unknown[]) => ({ uri: 'file:///resized.jpg' })),
 }));
-vi.mock('react-native', () => ({ Image: { getSize: (_uri: string, ok: (w: number, h: number) => void, fail: (e: Error) => void) => native.sizeError ? fail(native.sizeError) : ok(native.width, native.height) } }));
+vi.mock('react-native', () => ({ Image: { getSize: (_uri: string, ok: (w: number, h: number) => void, fail: (e: Error) => void) => native.sizeHangs ? undefined : native.sizeError ? fail(native.sizeError) : ok(native.width, native.height) } }));
 vi.mock('expo', () => ({ requireOptionalNativeModule: (name: string) => (native.moduleShipped && name === 'ExpoImageManipulator' ? {} : null) }));
 vi.mock('expo-image-manipulator', () => ({ manipulateAsync: native.manipulateAsync, SaveFormat: { JPEG: 'jpeg' } }));
 import { prepareUploadImage } from './uploadImage';
 const file = { uri: 'file:///original.heic', name: 'capture.heic', type: 'image/heic' };
 beforeEach(() => {
-  native.width = 4000; native.height = 3000; native.sizeError = null; native.moduleShipped = true;
+  native.width = 4000; native.height = 3000; native.sizeError = null; native.sizeHangs = false; native.moduleShipped = true;
   native.manipulateAsync.mockReset(); native.manipulateAsync.mockImplementation(async () => ({ uri: 'file:///resized.jpg' }));
 });
 describe('never drops an upload when preparation fails', () => {
@@ -24,6 +25,20 @@ describe('never drops an upload when preparation fails', () => {
     native.manipulateAsync.mockRejectedValue(new Error('OutOfMemoryError'));
     expect(await prepareUploadImage(file)).toBe(file);
     expect(await prepareUploadImage(file, true)).toBe(file);
+  });
+  it('uploads the original when the size read never answers (corrupt file)', async () => {
+    vi.useFakeTimers();
+    try {
+      native.sizeHangs = true;
+      const prepared = prepareUploadImage(file);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await prepared).toBe(file);
+      expect(native.manipulateAsync).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+  it('uploads a file with no type unchanged instead of throwing', async () => {
+    const untyped = { uri: 'file:///x', name: 'x' } as unknown as typeof file;
+    expect(await prepareUploadImage(untyped)).toBe(untyped);
   });
   it('uploads the original when this binary does not ship the image module, without loading it', async () => {
     native.moduleShipped = false;
