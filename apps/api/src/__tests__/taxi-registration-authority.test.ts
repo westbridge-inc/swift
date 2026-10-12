@@ -132,6 +132,39 @@ describe('every taxi approval path checks stored vehicle authority', () => {
     expect(again.status).toBe('PENDING');
     await refused(again.id, 'WRONG_PLATE_CLASS');
   });
+  // [Opus review 12 Oct, S2-1] The car on that plate counts whatever mode the applicant is in at approval:
+  // switching to Rider (or Customer) mode before the review must not bring the motorbike's exemption back.
+  it.each(['RIDER', 'CUSTOMER'] as const)('the class change is still refused when the applicant is in %s mode at approval', async (mode) => {
+    const plate = `PAD${nanoid(6).replace(/[^a-z0-9]/gi, '0').toUpperCase()}`;
+    const doc = await pending(plate, plate);
+    await system(async () => {
+      await app.prisma.driver.delete({ where: { userId: doc.userId } });
+      await app.prisma.rider.create({ data: { userId: doc.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', licensePlate: plate } });
+      await app.prisma.user.update({ where: { id: doc.userId }, data: { lastMoverRole: 'RIDER' } });
+      await app.prisma.vehicleProfile.update({ where: { subjectId: doc.subjectId! }, data: { vehicleKind: 'MOTORCYCLE' } });
+      await new PartnerService(app.prisma).changeVehicleWithAuthority(doc.userId, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: plate } }, async (tx) => {
+        await tx.user.update({ where: { id: doc.userId }, data: { activeRole: 'DRIVER', lastMoverRole: 'DRIVER', roles: ['MOVER', 'RIDER', 'DRIVER', 'CUSTOMER'] } });
+        return null;
+      });
+      // Both profiles are kept; the applicant now switches mode before the reviewer acts.
+      expect(await app.prisma.rider.findUnique({ where: { userId: doc.userId } })).not.toBeNull();
+      await app.prisma.user.update({ where: { id: doc.userId }, data: { activeRole: mode } });
+    });
+    await refused(doc.id, 'WRONG_PLATE_CLASS');
+  });
+
+  // [Opus review 12 Oct, S3-1] A mover holding both profiles, in Customer mode, is not a reason to refuse
+  // the reviewer: a valid H registration on the car is approved.
+  it('a dual-profile mover in Customer mode: the reviewer can approve a valid H registration', async () => {
+    const plate = `HD${nanoid(6).replace(/[^a-z0-9]/gi, '0').toUpperCase()}`;
+    const doc = await pending(plate, plate);
+    await system(async () => {
+      await app.prisma.rider.create({ data: { userId: doc.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', licensePlate: `PME${nanoid(5).replace(/[^a-z0-9]/gi, '0').toUpperCase()}` } });
+      await app.prisma.user.update({ where: { id: doc.userId }, data: { roles: ['MOVER', 'RIDER', 'DRIVER', 'CUSTOMER'], activeRole: 'CUSTOMER' } });
+    });
+    expect(await system(() => service.approveDocument(doc.id, reviewerId))).toMatchObject({ status: 'APPROVED', state: 'COMMITTED' });
+  });
+
   it('a car corrected to a wagon car on the same H plate can still submit and be approved', async () => {
     const plate = `HC${nanoid(6).replace(/[^a-z0-9]/gi, '0').toUpperCase()}`;
     const doc = await pending(plate, plate);

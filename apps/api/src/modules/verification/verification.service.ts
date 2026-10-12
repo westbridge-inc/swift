@@ -362,7 +362,7 @@ export class VerificationService {
       if (finalVerdict === 'APPROVED') {
         try { await this.assertStoredVehicleApproval(tx, created); }
         catch (error) {
-          if (!(error instanceof AppError) || !['VEHICLE_SUBJECT_REQUIRED', 'WRONG_PLATE_CLASS', 'MOVER_PROFILE_REQUIRED', 'VEHICLE_CLASS_CHANGED', 'INSURANCE_SCOPE_INSUFFICIENT'].includes(error.code)) throw error;
+          if (!(error instanceof AppError) || !['VEHICLE_SUBJECT_REQUIRED', 'WRONG_PLATE_CLASS', 'MOVER_PROFILE_REQUIRED', 'INSURANCE_SCOPE_INSUFFICIENT'].includes(error.code)) throw error;
           finalVerdict = 'PENDING';
           await tx.verificationDocument.update({ where: { id: created.id }, data: { reviewedBy: null, reviewedAt: null } });
         }
@@ -1007,13 +1007,21 @@ export class VerificationService {
       plate = vehicle.registrationMark;
       taxi = isPassengerVehicle(vehicleType);
       // [L06 · #1553 review] A mover who changed to a passenger vehicle but kept the plate reuses the
-      // subject recorded under the old class (a motorbike's private plate, say). The vehicle IN USE on
-      // that plate counts too, so the H rule and the hire insurance still apply to it. Never a refusal
-      // by class alone: a car corrected to a wagon car on the same H plate stays approvable.
-      const authority = await captureSubmissionAuthority(tx, doc.userId);
-      const inUse = authority.profile && normalizeRegistrationMark(authority.profile.licensePlate ?? '') === normalizeRegistrationMark(plate ?? '')
-        && authority.profile.vehicleType in VEHICLE_CLASSES ? authority.profile.vehicleType as VehicleType : null;
-      if (!taxi && inUse && isPassengerVehicle(inUse)) { vehicleType = inUse; taxi = true; }
+      // subject recorded under the old class (a motorbike's private plate, say). Every vehicle the account
+      // holds on that plate counts — the Rider AND the Driver profile, whatever mode the applicant is in
+      // right now (Opus 12 Oct: switching to Rider mode before review must not bring back the motorbike's
+      // exemption) — so the H rule and the hire insurance apply when any of them is a passenger vehicle.
+      // Never a refusal by class alone: a car corrected to a wagon car on the same H plate stays approvable,
+      // and holding both profiles is never itself a reason to refuse the reviewer.
+      const mark = normalizeRegistrationMark(plate ?? '');
+      const [riderOnAccount, driverOnAccount] = await Promise.all([
+        tx.rider.findUnique({ where: { userId: doc.userId }, select: { vehicleType: true, licensePlate: true } }),
+        tx.driver.findUnique({ where: { userId: doc.userId }, select: { vehicleType: true, licensePlate: true } }),
+      ]);
+      const passengerOnPlate = [driverOnAccount, riderOnAccount].find((profile) => !!profile && mark !== ''
+        && normalizeRegistrationMark(profile.licensePlate ?? '') === mark
+        && profile.vehicleType in VEHICLE_CLASSES && isPassengerVehicle(profile.vehicleType as VehicleType));
+      if (!taxi && passengerOnPlate) { vehicleType = passengerOnPlate.vehicleType as VehicleType; taxi = true; }
     } else {
       // A legacy unbound row cannot acquire today's chosen role as historical authority.
       const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });
