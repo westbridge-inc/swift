@@ -97,6 +97,14 @@ export function CheckoutPanel() {
   // [WEB-PIN] The server's own words when it will not price a just-pinned
   // address (e.g. past the store's delivery radius), shown where it was chosen.
   const [pinRefusal, setPinRefusal] = useState<string | null>(null);
+  // A cancelled address form hands focus back to the button that opened it.
+  const addAddressButton = useRef<HTMLButtonElement | null>(null);
+  const refocusAddAddress = useRef(false);
+  useEffect(() => {
+    if (addingAddr || !refocusAddAddress.current) return;
+    refocusAddAddress.current = false;
+    addAddressButton.current?.focus();
+  }, [addingAddr]);
   // [W5] The live store a pickup is collected from, read with the safety check.
   const [pickupStore, setPickupStore] = useState<{ address: string; hours: string | null } | null>(null);
   // [W5] The stores the last quote priced: a pickup quote names every one.
@@ -617,10 +625,10 @@ export function CheckoutPanel() {
                   saved addresses are all wrong for this order can pin another. */}
               {addingAddr ? (
                 <Suspense fallback={<p className={styles.stateCopy} role="status">Opening the map…</p>}>
-                  <NewAddressForm busy={busy} onSave={(fields) => void saveAddress(fields)} onCancel={() => setAddingAddr(false)} />
+                  <NewAddressForm busy={busy} onSave={(fields) => void saveAddress(fields)} onCancel={() => { refocusAddAddress.current = true; setAddingAddr(false); }} />
                 </Suspense>
               ) : (
-                <button type="button" disabled={busy} onClick={() => { setPinRefusal(null); setAddingAddr(true); }} className={`${styles.button} ${styles.buttonSecondary}`}>
+                <button ref={addAddressButton} type="button" disabled={busy} onClick={() => { setPinRefusal(null); setAddingAddr(true); }} className={`${styles.button} ${styles.buttonSecondary}`}>
                   {addresses.length > 0 ? 'Pin a new address on the map' : 'Add a delivery address'}
                 </button>
               )}

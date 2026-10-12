@@ -24,7 +24,8 @@ import {
 //   - never the Georgetown centre the map opens on, nor a rough device fix,
 //     until the customer has moved the map themselves (the phone's WR-015);
 //   - never a point outside Guyana, which it refuses in plain words;
-//   - the address Swift's reverse lookup gives for THAT exact point, or null.
+//   - the address Swift's reverse lookup gives for THAT exact point, or null,
+//     and whether that lookup has answered yet (`named`).
 // The pin goes to Swift's API only. The tiles name the map square being
 // viewed, as the store picker's do; no key, no third-party script.
 //
@@ -36,7 +37,8 @@ import {
 const SECONDARY = 'sw-btn sw-btn-outline sw-btn-md';
 
 export type PinPoint = StorePoint;
-export interface ChosenPin extends PinPoint { address: string | null }
+/** `named`: Swift's lookup for THIS point has answered (`address` may still be null). */
+export interface ChosenPin extends PinPoint { address: string | null; named: boolean }
 /** A saved address offered as a starting point (signed-in customers). */
 export interface SavedPin { id: string; label: string; addressLine1?: string | null; latitude: number | string; longitude: number | string }
 
@@ -147,8 +149,8 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
   // a pin (or a missing name) different from the one on screen, even for the
   // moment between a paint and passive effects in which a tap can land.
   useLayoutEffect(() => {
-    emit.current(confirmable ? { latitude: point.latitude, longitude: point.longitude, address: line } : null);
-  }, [confirmable, point, line]);
+    emit.current(confirmable ? { latitude: point.latitude, longitude: point.longitude, address: line, named: settled } : null);
+  }, [confirmable, point, line, settled]);
 
   function move(next: PinPoint) {
     revision.current += 1;
@@ -255,7 +257,9 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
             className="sw-input"
             value={query}
             autoComplete="off"
-            onChange={(event) => { searchTicket.current += 1; setSearching(false); setQuery(event.target.value); setSuggestions([]); }}
+            // Typing outdates everything still pending — an older search, and a
+            // picked place or device fix not yet answered — as in the store picker.
+            onChange={(event) => { revision.current += 1; searchTicket.current += 1; setSearching(false); setQuery(event.target.value); setSuggestions([]); }}
             onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void search(); } }}
           />
           <button type="button" className={`${SECONDARY} shrink-0`} disabled={searching || query.trim().length < 3} onClick={() => void search()}>

@@ -280,6 +280,8 @@ describe('[WEB-PIN] checkout: pin a delivery address on the map', () => {
     await openPicker('Pin a new address on the map');
     fireEvent.click(button('Cancel'));
     expect(screen.queryByRole('application', { name: 'Delivery pin map' })).toBeNull();
+    // Focus goes back to where the map was opened from.
+    await waitFor(() => expect(document.activeElement).toBe(button('Pin a new address on the map')));
     expect(calls('POST', '/api/v1/customer/addresses')).toHaveLength(0);
 
     const map = await openPicker('Pin a new address on the map');

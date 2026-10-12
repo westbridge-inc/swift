@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '@/test/test-utils';
 import { STORE_MAP_START } from '@/lib/store-pin';
@@ -6,7 +6,8 @@ import { PinPicker, PIN_CITY_CENTRE, type ChosenPin } from './pin-picker';
 
 // ---------------------------------------------------------------------------
 // [WEB-PIN] The shared customer pin picker, on its own: what it hands its
-// caller, and when. The checkout's whole path is in cart/pin-checkout.test.tsx.
+// caller, and when. The pages' whole paths are in their own tests (the
+// checkout's pin-checkout.test.tsx, the courier page's page.test.tsx).
 // Places, addresses and the reverse lookup answer in the API's real shapes.
 // ---------------------------------------------------------------------------
 
@@ -54,9 +55,32 @@ describe('[WEB-PIN] the pin picker', () => {
     const asked = new URL(String(calls('/api/v1/places/autocomplete')[0]![0]));
     expect(Number(asked.searchParams.get('lat'))).toBeCloseTo(STORE_MAP_START.latitude, 6);
     loadMap();
-    await waitFor(() => expect(last(onChange)).toEqual({ latitude: 6.8065, longitude: -58.1602, address: 'Sample Market, Georgetown' }));
+    await waitFor(() => expect(last(onChange)).toEqual({ latitude: 6.8065, longitude: -58.1602, address: 'Sample Market, Georgetown', named: true }));
     // The chosen result already names this exact point: no second guess from the reverse lookup.
     expect(calls('/api/v1/places/reverse')).toHaveLength(0);
+  });
+
+  it('typing a new search outdates a place still being looked up: the map does not jump to it', async () => {
+    let release: () => void = () => undefined;
+    fetchMock = mockApi(({ url }) => {
+      if (url.pathname === '/api/v1/places/autocomplete') return ok([SEARCHED]);
+      if (url.pathname === '/api/v1/places/details') return new Promise((resolve) => { release = () => resolve(ok(SEARCHED_POINT)); });
+      if (url.pathname === '/api/v1/places/reverse') return ok({ address: null });
+      return { status: 404, body: { success: false, error: { message: `unmocked ${url.pathname}` } } };
+    });
+    const onChange = vi.fn();
+    render(<PinPicker mapLabel="Test pin map" onChange={onChange} />);
+    const search = screen.getByRole('textbox', { name: 'Search for a street or place' });
+    fireEvent.change(search, { target: { value: 'Sample' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Find' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sample Market, Georgetown' }));
+    await waitFor(() => expect(calls('/api/v1/places/details')).toHaveLength(1));
+    // The customer moves on before the lookup answers.
+    fireEvent.change(search, { target: { value: 'Another place' } });
+    await act(async () => { release(); await new Promise((settle) => setTimeout(settle, 30)); });
+    loadMap();
+    expect(screen.getByText('Latitude 6.80130, Longitude -58.15510')).toBeTruthy();
+    expect(last(onChange)).toBeNull();
   });
 
   it('offers saved addresses as starting points', async () => {
@@ -64,7 +88,7 @@ describe('[WEB-PIN] the pin picker', () => {
     render(<PinPicker mapLabel="Test pin map" saved={[SAVED]} onChange={onChange} />);
     fireEvent.click(screen.getByRole('button', { name: 'Work — 3 Example Avenue' }));
     loadMap();
-    await waitFor(() => expect(last(onChange)).toEqual({ latitude: 6.8122, longitude: -58.1489, address: '3 Example Avenue' }));
+    await waitFor(() => expect(last(onChange)).toEqual({ latitude: 6.8122, longitude: -58.1489, address: '3 Example Avenue', named: true }));
   });
 
   it('says why when location is refused, and the map still works by keyboard', async () => {
@@ -80,6 +104,17 @@ describe('[WEB-PIN] the pin picker', () => {
     loadMap();
     await waitFor(() => expect(last(onChange)).toMatchObject({ address: null }));
     expect(last(onChange)!.latitude).toBeGreaterThan(STORE_MAP_START.latitude);
+  });
+
+  it('a real starting pin is handed over only once its map has been seen', async () => {
+    const onChange = vi.fn();
+    render(<PinPicker mapLabel="Test pin map" start={{ latitude: 6.8, longitude: -58.15 }} onChange={onChange} />);
+    expect(screen.getByText('Loading map…')).toBeTruthy();
+    expect(last(onChange)).toBeNull();
+    loadMap();
+    // Handed over at once (the coordinates are certain), and marked named once Swift's lookup answers.
+    expect(last(onChange)).toMatchObject({ latitude: 6.8, longitude: -58.15, named: false });
+    await waitFor(() => expect(last(onChange)).toMatchObject({ latitude: 6.8, longitude: -58.15, address: null, named: true }));
   });
 
   it('a map that failed to load gives no pin until it is retried and seen', async () => {
