@@ -4,9 +4,8 @@ import {
   calculateCourierFee,
   calculateTaxiFare,
   generateOrderNumber,
-  clampDriverFare,
-  DRIVER_FARE_FLOOR_PCT,
 } from './markup';
+import * as markup from './markup';
 
 // NOTE: customer markup has been removed (zero-commission model — customers pay
 // the vendor base price). The calculateMarkup/calculateCustomerPrice helpers and
@@ -152,40 +151,14 @@ describe('generateOrderNumber', () => {
 });
 
 // ---------------------------------------------------------------------------
-// clampDriverFare — movers set their own price, capped at the market rate
+// [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] No mover-set price exists: the
+// fare is the set formula (base fee plus km). The driver-set price clamp is gone
+// and must not come back.
 // ---------------------------------------------------------------------------
 
-describe('clampDriverFare', () => {
-  const market = 3000;
-  const floor = Math.ceil(market * DRIVER_FARE_FLOOR_PCT); // 1800
-
-  // The whole legal point: a driver can never charge above the market rate.
-  it('never exceeds the market max (no overcharging the customer)', () => {
-    expect(clampDriverFare(5000, market)).toBe(market);
-    expect(clampDriverFare(market + 1, market)).toBe(market);
-  });
-
-  it('allows charging exactly the market rate', () => {
-    expect(clampDriverFare(market, market)).toBe(market);
-  });
-
-  it('allows discounting down to the floor (compete on price)', () => {
-    expect(clampDriverFare(2000, market)).toBe(2000);
-    expect(clampDriverFare(floor, market)).toBe(floor);
-  });
-
-  it('clamps an under-floor request up to the floor', () => {
-    expect(clampDriverFare(100, market)).toBe(floor);
-    expect(clampDriverFare(0, market)).toBe(floor);
-  });
-
-  it('falls back to the market rate on invalid input (never trust the client)', () => {
-    expect(clampDriverFare(Number.NaN, market)).toBe(market);
-    expect(clampDriverFare(2000, 0)).toBe(0);
-  });
-
-  it('rounds fractional requests', () => {
-    expect(clampDriverFare(2000.4, market)).toBe(2000);
-    expect(clampDriverFare(2000.6, market)).toBe(2001);
+describe('no mover-set price', () => {
+  it('markup offers no clamp for a price a mover chooses', () => {
+    expect(Object.keys(markup)).not.toContain('clampDriverFare');
+    expect(Object.keys(markup)).not.toContain('DRIVER_FARE_FLOOR_PCT');
   });
 });

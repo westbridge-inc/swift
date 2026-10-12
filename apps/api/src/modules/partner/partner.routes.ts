@@ -9,6 +9,7 @@ import {
   transitionUserRoleAuthorityInTransaction,
 } from '../mover-authority';
 import { requireStepUp } from '../auth/step-up';
+import { consentSurfaceOf } from '../legal/consent-surface';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
@@ -73,8 +74,9 @@ export async function partnerRoutes(app: FastifyInstance) {
         request.user.userId,
         targetRole,
       ),
-      // [DCR-1] Ledger context for the role-agreement consent row.
-      { accepted: body.acceptAgreement === true, ip: request.ip },
+      // [DCR-1] Ledger context for the role-agreement consent row: the surface is the
+      // client's own (the web app's clickwrap is the web, not the app).
+      { accepted: body.acceptAgreement === true, ip: request.ip, surface: consentSurfaceOf(request) },
     );
     await completeUserRoleAuthorityTransition(app, authorityCleanup);
     reply.code(result.created ? 201 : 200);

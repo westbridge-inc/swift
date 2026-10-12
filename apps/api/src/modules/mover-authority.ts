@@ -630,6 +630,20 @@ export interface UserStatusTransitionAuditEvidence {
   userAgent?: string;
 }
 
+/**
+ * [Row 90] What a status transition hands back to its caller — and so what the
+ * admin suspend/unsuspend/ban/unban routes answer with. Never the whole User
+ * row: that carries the password hash, OTP and recovery material, phone, email
+ * and other personal data an operator's browser has no reason to receive.
+ */
+export const ACCOUNT_STATUS_RESULT_SELECT = {
+  id: true,
+  status: true,
+  roles: true,
+  activeRole: true,
+  updatedAt: true,
+} as const;
+
 export interface UserStatusTransitionOptions {
   /** For an ACTIVE target: the restriction being lifted. SUSPENDED (an
    *  unsuspend) unless the caller says BANNED (an unban), so a route can never
@@ -734,6 +748,7 @@ export async function transitionUserStatusAuthority(
     const updated = await tx.user.update({
       where: { id: userId },
       data: { status: targetStatus },
+      select: ACCOUNT_STATUS_RESULT_SELECT,
     });
     if (targetStatus === 'BANNED') {
       await tx.session.deleteMany({ where: { userId } });

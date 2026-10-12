@@ -856,24 +856,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         ctx.log.info({ headSeq: anchor ? String(anchor.headSeq) : null }, 'audit chain anchored');
       }
       if (job.name === 'backup-freshness') {
-        const { checkBackupFreshness } = await import('../modules/ops/backup-freshness');
-        const result = await checkBackupFreshness(ctx.prisma);
-        if (result.stale) {
-          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
-          await opsPageOnce(ctx, 'backup-freshness', 20 * 3600, () =>
-            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
-              // Platform-wide infrastructure alarm, not one tenant's event.
-              tenantId: null,
-              title: 'Backups are not safe',
-              body: result.reason,
-              data: {
-                kind: 'ops_backup_stale',
-                ageHours: result.ageHours,
-                offsite: result.offsite,
-              },
-            }),
-          );
-        }
+        // [75] A platform page: durable OpsAlert, SUPER_ADMINs in-app + push,
+        // on-call phones texted, escalated until acknowledged.
+        const { pageBackupFreshness } = await import('../modules/ops/backup-freshness');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { result } = await pageBackupFreshness({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
         ctx.log.info({ ...result }, 'backup freshness checked');
         return;
       }
@@ -929,6 +916,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
+        const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
+        await retryAccountErasures(ctx);
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
@@ -1239,20 +1228,48 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ).catch(() => {});
           }
         }
-        // [M-11] Publish whatever a request's immediate drain could not: a
-        // queue outage, a crash after the commit, a lapsed lease.
-        const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
-        const result = await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { limit: 200 });
-        if (result.processed + result.failed > 0) ctx.log.info(result, '[M-11] checkout outbox sweep');
-        // [ORDER-SPINE S1-6] Direct-MMG claim notices the request could not
-        // finish. Never handed to a queue (a published row is consumed on
-        // acceptance): delivered here, deduplicated per (order, generation,
-        // role), and kept owed — backed off — until every recipient holds it.
-        const { drainMmgClaimNotices } = await import('../modules/order/mmg-claim.service');
+        // [RESCUE S1 · review S3-2] Each drain runs on its own: an
+        // infrastructure error in one is logged and never skips the drains
+        // after it. The first error still fails the job once all have run, so
+        // the dead-letter alarm sees a drain that keeps failing.
+        let drainFailure: unknown;
+        const drain = async (name: string, run: () => Promise<void>) => {
+          try {
+            await run();
+          } catch (err) {
+            drainFailure ??= err;
+            ctx.log.error({ err, drain: name }, 'checkout-outbox sweep: a drain failed; the other drains still ran');
+          }
+        };
         const { NotificationService: ClaimNoticeNS } = await import('../modules/notification/notification.service');
-        const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
-        if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
-        else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
+        await drain('checkout-outbox', async () => {
+          // [M-11] Publish whatever a request's immediate drain could not: a
+          // queue outage, a crash after the commit, a lapsed lease.
+          const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
+          const result = await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { limit: 200 });
+          if (result.processed + result.failed > 0) ctx.log.info(result, '[M-11] checkout outbox sweep');
+        });
+        await drain('mmg-claim-notice', async () => {
+          // [ORDER-SPINE S1-6] Direct-MMG claim notices the request could not
+          // finish. Never handed to a queue (a published row is consumed on
+          // acceptance): delivered here, deduplicated per (order, generation,
+          // role), and kept owed — backed off — until every recipient holds it.
+          const { drainMmgClaimNotices } = await import('../modules/order/mmg-claim.service');
+          const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
+          if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
+          else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
+        });
+        await drain('rescue-notice', async () => {
+          // [RESCUE S1 · CX04] The food-age cutoff commits its notices as an
+          // obligation with the cancellation; whatever its own fast path could
+          // not finish (a crash, an outage, a page nobody took) is delivered
+          // here on the same terms: in process, deduplicated, owed until held.
+          const { drainRescueNotices } = await import('../modules/dispatch/rescue');
+          const rescueNotices = await drainRescueNotices({ prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
+          if (rescueNotices.owed + rescueNotices.failed > 0) ctx.log.warn(rescueNotices, '[RESCUE S1] food-age cutoff notices still owed — retrying with backoff');
+          else if (rescueNotices.delivered > 0) ctx.log.info(rescueNotices, '[RESCUE S1] food-age cutoff notices delivered');
+        });
+        if (drainFailure !== undefined) throw drainFailure;
         return;
       }
       if (job.name === 'mover-revocation-outbox') {
@@ -1444,8 +1461,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { getChannels } = await import('../providers/notifications/channels');
           const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
           await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
-          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[] }));
-          for (const id of esc.escalated) {
+          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
+          // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
+          for (const id of esc.platformPage) {
             await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
               pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
             ).catch(() => {});
@@ -1460,6 +1478,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { NotificationService: ShareNS } = await import('../modules/notification/notification.service');
           const rot = await rotateLegacyTripShareTokens(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch(() => null);
           if (rot && rot.rotated > 0) ctx.log.warn(rot, '[S-16] legacy plaintext trip-share tokens rotated');
+          // [L10 §2] A guardian who is a Swift user hears, in-app, how the monitoring they were given ended.
+          const { notifyTripShareGuardians } = await import('../modules/safety/trip-share.service');
+          await notifyTripShareGuardians(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch((err) => ctx.log.error({ err }, '[L10 §2] guardian outcome sweep failed'));
         }
         // [S-02] The retrigger log: import any legacy JSON history as rows,
         // then report lost sequences and oversized hot rows.

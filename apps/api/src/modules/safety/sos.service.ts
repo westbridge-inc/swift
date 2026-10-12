@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins, tenantOfUser, isReviewTenantId } from '../notification/notification.service';
-import { warRoomsFor } from './war-room';
+import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { stageEscalations, drainSosEscalations } from './sos-escalation';
@@ -256,7 +256,10 @@ export class SosService {
           // never by the other person on the ride. The ops page body stays
           // free of them (see sos-escalation.ts: it is pushed to phones and
           // repeated in the on-call SMS).
-          this.io.to(warRoomsFor(live.tenantId)).emit('sos:retrigger', {
+          // [GUARDRAILS §3] the store-review fiction's repeat press stays in its own tenant's room
+          const fiction = live.tenantId ? await runWithoutTenant(() => isReviewTenantId(this.prisma, live.tenantId!)) : false;
+          const rooms = warRoomsFor(live.tenantId).filter((room) => !(fiction && room === OPS_WAR_ROOM));
+          this.io.to(rooms).emit('sos:retrigger', {
             sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId,
             at: now, source, lat: input.lat ?? null, lng: input.lng ?? null,
             retriggerCount: merged.seq, note: input.note ?? null,
@@ -434,27 +437,48 @@ export class SosService {
     return this.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
   }
 
-  /** "I'm safe now" — flags the alert, notifies ops, but NEVER resolves it. */
+  /** "I'm safe now" — flags the alert, notifies ops, but NEVER resolves it.
+   *
+   *  [73] Idempotent: the first timestamp is a compare-and-set, never an
+   *  overwrite, and only a live (ACTIVE / ACKNOWLEDGED) alert can take it; a
+   *  pending or closed alert is returned as it stands. The ops notice is keyed
+   *  to that first timestamp, so a repeated tap, a lost response or a retry
+   *  after a crash between the flag and the notice delivers it at most once
+   *  per admin — and still delivers it. A notice that cannot be delivered is
+   *  logged, never turned into a failure of the person's own tap: the flag on
+   *  the alert (shown on the ops board) is the record. */
   async markSafe(id: string) {
+    await this.prisma.sosAlert.updateMany({
+      where: { id, userSafeFlaggedAt: null, status: { in: ['ACTIVE', 'ACKNOWLEDGED'] } },
+      data: { userSafeFlaggedAt: new Date() },
+    });
     const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
     if (!alert) throw new NotFoundError('SosAlert', id);
-    if (alert.status === 'RESOLVED' || alert.status === 'CANCELLED') return alert;
-    const updated = await this.prisma.sosAlert.update({ where: { id }, data: { userSafeFlaggedAt: new Date() } });
-    await notifyAdmins(this.prisma, this.notifications, {
-      title: 'SOS — user marked safe (verify)',
-      body: `The user on alert ${id} tapped "I'm safe". This does NOT close the case — call back to verify before resolving.`,
-      data: { kind: 'sos_marked_safe', sosAlertId: id },
-      // [F-026-15] scope the page to the alert's own tenant — see fanOut.
-      tenantId: alert.tenantId,
-    }).catch(() => {});
-    return updated;
+    if (alert.userSafeFlaggedAt && (alert.status === 'ACTIVE' || alert.status === 'ACKNOWLEDGED')) {
+      await notifyAdmins(this.prisma, this.notifications, {
+        title: 'SOS — user marked safe (verify)',
+        body: `The user on alert ${id} tapped "I'm safe". This does NOT close the case — call back to verify before resolving.`,
+        data: { kind: 'sos_marked_safe', sosAlertId: id },
+        // [F-026-15] scope the page to the alert's own tenant — see fanOut.
+        tenantId: alert.tenantId,
+        dedupeKey: `sos-mark-safe:${id}:${alert.userSafeFlaggedAt.toISOString()}`,
+      }).catch((err) => log().error({ err, sosAlertId: id }, '[73] the marked-safe notice could not be delivered — the flag on the alert stands; a retry re-delivers'));
+    }
+    return alert;
   }
 
   /** Ops acknowledges — ACTIVE → ACKNOWLEDGED. Ops-only (enforced at the route). */
   async ack(id: string, opsUserId: string) {
     const acked = await this.transition(id, 'ACKNOWLEDGED', { acknowledgedAt: new Date(), acknowledgedBy: opsUserId });
     // [S-19] A human acknowledged the emergency: the ops page's obligation is met.
-    await runWithoutTenant(() => acknowledgeOpsAlert(this.prisma, { sosAlertId: id, userId: opsUserId })).catch(() => null);
+    // [M076] The page keeps its own rule (only its audience can acknowledge
+    // it, with a receipt), so an SOS acknowledged by someone outside that
+    // audience leaves the page open and escalating: say so, never silently.
+    const page = await runWithoutTenant(() => acknowledgeOpsAlert(this.prisma, { sosAlertId: id, userId: opsUserId })).catch((err) => {
+      log().error({ err, sosAlertId: id }, '[S-19] SOS acknowledged, but acknowledging its ops page failed: the page stays open and escalates');
+      return null;
+    });
+    if (page && page.refused.length > 0) log().warn({ sosAlertId: id, opsUserId, refused: page.refused }, '[S-19] SOS acknowledged by someone outside its ops page audience: the page stays open and escalates');
     return acked;
   }
 

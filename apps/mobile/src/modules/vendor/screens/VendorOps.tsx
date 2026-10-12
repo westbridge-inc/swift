@@ -19,6 +19,7 @@ import {
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { rejectReasonsFor } from '../rejectReasons';
+import { renewalBannerCopy } from '../renewal-banner';
 import {
   BoardFirstRun,
   BoardFirstRunRow,
@@ -31,6 +32,7 @@ import {
   fmtClock as fmtLocalClock,
   fmtWhen,
   formatSlot,
+  MmgDisputeNotice,
   orderActions,
   type VendorOrderActionKind,
 } from '../shared';
@@ -102,6 +104,9 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   // recaptured a refund. The words live in lib/orderStatus (one vocabulary),
   // and the server enforces the same matrix.
   const attestable = isMmg && canAttestPayment(order.paymentStatus) && !terminal;
+  // [Row 52] Only the owner or a manager of THIS order's store confirms; the
+  // server says which on every order (and refuses staff regardless).
+  const canConfirm = attestable && order.canConfirmPayment === true;
   const payBlockedReason = isMmg && !mmgPaid && !attestable ? paymentAttestBlockedReason(order.paymentStatus) : null;
   const [mmgRef, setMmgRef] = useState('');
   const items = order.itemCount ?? order.items?.length ?? 0;
@@ -226,7 +231,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
               plausibly landed and nothing has reversed it — and only with the
               reference from its own wallet message, which is what a later
               reconciliation matches on. The server enforces the same matrix. */}
-          {attestable ? (
+          {canConfirm ? (
             <>
               <LabeledInput
                 label="MMG transaction reference"
@@ -245,6 +250,10 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
                 onPress={() => onAction('confirm-payment', mmgRef.trim())}
               />
             </>
+          ) : attestable ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              Only the owner or a manager can confirm MMG payments.
+            </T>
           ) : payBlockedReason ? (
             <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
               {payBlockedReason}
@@ -252,6 +261,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
           ) : null}
         </View>
       ) : null}
+      <MmgDisputeNotice order={order} />
       {actions.length > 0 ? (
         <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
           {actions.map((a) => (
@@ -851,7 +861,10 @@ export function VendorOps({ store, navigation }: any) {
       (d: any) => d.docType === dt && d.status === 'APPROVED' && (!d.expiresAt || new Date(d.expiresAt) > new Date()),
     ),
   ).length;
-  const failingDocs: string[] = store.isVerified === false
+  // [NO-DEAD-ENDS] The documents are the owner's: the status read is the
+  // viewer's own, so only the owner's names the failing ones (renewal-banner.ts).
+  const isStoreOwner = myRole === 'OWNER';
+  const failingDocs: string[] = isStoreOwner && store.isVerified === false
     ? (vstatus.data?.checklist ?? []).filter((dt: string) => {
         const docs = (vstatus.data?.documents ?? []).filter((d: any) => d.docType === dt);
         return !docs.some((d: any) => d.status === 'APPROVED' && (!d.expiresAt || new Date(d.expiresAt) > new Date()));
@@ -988,14 +1001,12 @@ export function VendorOps({ store, navigation }: any) {
             Only a store that has BEEN live can be suspended; pending stores get
             the preview banner above instead. */}
         {!inPreview && store.isVerified === false ? (
-          <Pressable onPress={() => navigation?.navigate?.('Account')}>
+          <Pressable disabled={!isStoreOwner} onPress={() => navigation?.navigate?.('Account')}>
             {({ pressed }) => (
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.danger, padding: space.md, marginBottom: space.lg, opacity: pressed ? 0.85 : 1 }}>
                 <Feather name="alert-circle" size={15} color={color.error} style={{ marginTop: 1 }} />
                 <T variant="label" tone="error" style={{ flex: 1 }}>
-                  {failingDocs.length > 0
-                    ? `Store suspended — ${failingDocs.map((d) => docLabel(d)).join(', ')} ${failingDocs.length === 1 ? 'needs' : 'need'} renewal, so new orders are off. Tap to fix it under Account.`
-                    : 'Store suspended — a required document is missing or expired, so new orders are off. Tap to renew it under Account.'}
+                  {renewalBannerCopy(isStoreOwner, failingDocs.map((d) => docLabel(d)))}
                 </T>
               </View>
             )}
