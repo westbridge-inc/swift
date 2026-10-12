@@ -37,15 +37,12 @@ describe('mover queries have no socket push', () => {
   });
 });
 
-// The vendor room carries order:new / order:status_changed / order:pick_state
-// and the chat room carries chat:message, so those polls are only a safety net.
+// The chat room carries chat:message, so its poll is only a safety net.
+// Vendor order polls stretch only with a bound store feed: vendorOrderFeed.test.ts.
 describe('pushed queries', () => {
-  it('stretch while connected and keep their normal cadence when not', () => {
+  it('chat stretches while connected and keeps its normal cadence when not', () => {
     expect(POLL.chatMessages()).toBe(4000);
-    expect(POLL.vendorOrders()).toBe(12000);
     fx.connected = true;
     expect(POLL.chatMessages()).toBe(15000);
-    expect(POLL.vendorOrders()).toBe(30000);
-    expect(POLL.vendorOrder()).toBe(30000);
   });
 });

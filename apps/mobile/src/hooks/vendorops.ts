@@ -1,4 +1,5 @@
 import { POLL } from '../lib/pollPolicy';
+import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
 import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
@@ -302,10 +303,6 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
     // Only the selected store's layer may (re)join its room: a store handoff
     // reconnects the shared socket, and a retired layer's handler can run
     // before React unmounts it.
-    const join = () => { if (useStoreSwitcher.getState().selectedStoreId === vendorId) s.emit('vendor:subscribe', { vendorId }); };
-    join();
-    s.on('connect', join); // rooms are per-connection — re-join after reconnects
-    const refresh = () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
     const onNew = (payload?: { orderId?: string; orderNumber?: string }) => {
       Vibration.vibrate(400);
       if (payload?.orderId) {
@@ -315,22 +312,15 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
             : [...q, { orderId: payload.orderId!, orderNumber: payload.orderNumber }],
         );
       }
-      refresh();
+      qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
     };
-    s.on('order:new', onNew);
-    s.on('order:status_changed', refresh);
-    s.on('order:prep_update', refresh);
     // Scheduling liveness nudge (spec 2.6): calendar + picker refetch the
     // moment a booking is made, moved or cancelled; the poll stays the floor.
-    const refreshBookings = () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
-    s.on('bookings:changed', refreshBookings);
-    return () => {
-      s.off('connect', join);
-      s.off('order:new', onNew);
-      s.off('order:status_changed', refresh);
-      s.off('order:prep_update', refresh);
-      s.off('bookings:changed', refreshBookings);
-    };
+    return bindVendorOrderFeed(s, vendorId, () => useStoreSwitcher.getState().selectedStoreId === vendorId, {
+      onNew,
+      refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+      refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
+    });
   }, [vendorId, qc, previewType]);
 
   const dismissTakeover = useCallback(
