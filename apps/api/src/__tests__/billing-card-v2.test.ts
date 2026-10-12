@@ -433,7 +433,8 @@ describe('CARD_RAIL_V2 defaults OFF', () => {
     await card(p);
     expect(await bill(p.subId)).toBe('failed');
     expect(fake.charges).toEqual([]);
-    expect((await facts(p.subId)).failureNotes).toEqual(['Insufficient prepaid balance']);
+    // [OWNER RULING 8 Oct, NO "WALLET"] the reason the partner's notice quotes says "fee paid ahead", never "prepaid balance".
+    expect((await facts(p.subId)).failureNotes).toEqual(['Not enough fee paid ahead to cover this week']);
   });
 });
 
