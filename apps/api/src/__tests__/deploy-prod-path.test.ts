@@ -837,7 +837,8 @@ function runCutover(settings: Record<string, string>, env: Record<string, string
     'line="$*"',
     'echo "docker $line" >> "$CALL_LOG"',
     'case "$line" in "context show") echo "${DOCKER_CURRENT_CONTEXT:-default}"; exit 0;; esac',
-    'case "$line" in *" ps -q api"|*" ps -q worker") [ "${PS_FAIL:-0}" = 1 ] && exit 1; [ "${API_STOPPED:-1}" = 1 ] || echo "${line##* }-id"; exit 0;; esac',
+    'case "$line" in *"build seed"*) [ "${API_STARTS_DURING_BUILD:-0}" = 1 ] && touch "$CALL_LOG.api-started";; esac',
+    'case "$line" in *" ps -q api"|*" ps -q worker") [ "${PS_FAIL:-0}" = 1 ] && exit 1; { [ "${API_STOPPED:-1}" = 1 ] && [ ! -e "$CALL_LOG.api-started" ]; } || echo "${line##* }-id"; exit 0;; esac',
     'case "$line" in *"exec -T postgres"*) sql="$(cat)"; echo "sql: $sql" >> "$CALL_LOG"',
     '  case "$sql" in *deployment_identity*) echo "$IDENTITY_ROW";; *billing_confirmation_missing_coverage*) echo "$CHECK_ROW";; esac; exit 0;; esac',
     'case "$line" in *"run --rm --no-TTY seed"*) exit "${RUN_STATUS:-0}";; esac',
@@ -888,6 +889,16 @@ describe('[PROD-PATH · #1448 review] billing-cutover.sh: the backfill through a
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain(message);
     expect(r.calls.filter((l) => /sql:|build seed|run --rm/.test(l))).toEqual([]);
+  });
+
+  // DS961 (S4): the writer check is repeated right before the backfill runs,
+  // so an API or worker started during the fetch or the build is caught.
+  it('refuses when the api or worker starts while the image builds, and never runs the backfill', () => {
+    const r = runCutover(PROD_CUTOVER, { API_STARTS_DURING_BUILD: '1' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('refuses while the api or worker is running');
+    expect(ranBackfill(r.calls)).toEqual([]);
+    expect(indexOf(r.calls, 'build seed')).toBeGreaterThan(-1);
   });
 
   it.each([

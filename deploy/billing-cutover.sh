@@ -75,13 +75,18 @@ if [ "$PILOT_ENV" = production ]; then
 fi
 
 # No old writer during the cutover (BILLING-CONFIRMATION-CUTOVER.md step 1).
-# Fail closed: no answer from Docker is not "not running".
-for service in api worker; do
-  running="$("${COMPOSE[@]}" ps -q "$service")" ||
-    die "could not ask Docker whether $service is running; refusing the cutover without that answer"
-  [ -z "$running" ] ||
-    die "refuses while the api or worker is running ($service is): stop both first (docker compose -f deploy/docker-compose.yml stop api worker)"
-done
+# Fail closed: no answer from Docker is not "not running". Asked here, and
+# again right before the backfill runs (one started during the build counts).
+no_writer() {
+  local service running
+  for service in api worker; do
+    running="$("${COMPOSE[@]}" ps -q "$service")" ||
+      die "could not ask Docker whether $service is running; refusing the cutover without that answer"
+    [ -z "$running" ] ||
+      die "refuses while the api or worker is running ($service is): stop both first (docker compose -f deploy/docker-compose.yml stop api worker)"
+  done
+}
+no_writer
 
 # The migration owner reads, inside the postgres container (the password stays
 # in the container's file). Only the named facts are captured.
@@ -117,6 +122,7 @@ git merge-base --is-ancestor "$SHA" origin/main ||
 export SWIFT_TAG="$SHA"
 "${COMPOSE[@]}" config --quiet || die "compose configuration is invalid"
 "${COMPOSE[@]}" build seed || die "the seed build-stage image could not be built"
+no_writer
 # Step 3: the backfill, once, in a removed one-off container. The target and
 # version are argv (names, not secrets); the database URL exists only in the
 # container's memory (dist/boot/secret-files.js), as in the seed.
