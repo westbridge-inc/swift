@@ -8,6 +8,7 @@ export interface ReviewDocument {
   id: string; userId: string; docType: string; role: string; status: ReviewStatus;
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
+  reviewerTypes?: Array<'documentNumber' | 'issuedOn'>;
   user?: {
     id: string; firstName?: string; lastName?: string; phone?: string; countryCode?: string;
     driver?: { licensePlate?: string; vehicleMake?: string; vehicleModel?: string; vehicleType?: string } | null;

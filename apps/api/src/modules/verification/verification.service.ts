@@ -33,7 +33,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
-import { approvedIdentityDocumentNumber } from './identity-signal-policy';
+import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import {
   projectProviderVerificationLocked,
@@ -103,6 +103,38 @@ export function docTypeExpires(docType: string): boolean {
  * A supplied date wins; otherwise the one already on the row stands; and for a
  * type that expires, one of them must exist and must be in the future.
  */
+/** [VERIFY-DOCS] What a reviewer types at approval (owner ruling, 6 Oct 2026). */
+export interface ReviewerTypedInput {
+  /** The ID or licence number, read off the document. Leaves the approval only as a blind index. */
+  documentNumber?: string;
+  /** A police clearance's issue date. */
+  issuedOn?: Date;
+  /** The reviewer console's contract: the fields this type needs must be typed. */
+  required?: boolean;
+}
+
+/** A police clearance is re-checked a year after it was issued. */
+export const CLEARANCE_RECHECK_DAYS = 365;
+
+/**
+ * [VERIFY-DOCS] A police clearance prints an ISSUE date, not an expiry: the
+ * reviewer types it, and the re-check falls due CLEARANCE_RECHECK_DAYS later.
+ * A date in the future is a typo; one more than a year old is already due.
+ */
+export function clearanceRecheckDate(issuedOn: Date | null, now: Date = new Date()): Date {
+  if (!issuedOn || Number.isNaN(issuedOn.getTime())) {
+    throw new AppError(400, 'ISSUE_DATE_REQUIRED', 'Type the issue date printed on the police clearance before approving it. It is re-checked a year after that date.');
+  }
+  if (issuedOn.getTime() > now.getTime()) {
+    throw new AppError(400, 'ISSUE_DATE_IN_FUTURE', 'That issue date is in the future. Check the date printed on the police clearance.');
+  }
+  const recheck = new Date(issuedOn.getTime() + CLEARANCE_RECHECK_DAYS * 86_400_000);
+  if (recheck.getTime() <= now.getTime()) {
+    throw new AppError(400, 'CLEARANCE_TOO_OLD', 'This police clearance was issued more than a year ago. Ask the person for a newer one.');
+  }
+  return recheck;
+}
+
 export function resolveApprovalExpiry(
   docType: string,
   supplied: Date | undefined,
@@ -772,7 +804,7 @@ export class VerificationService {
   // Manual review queue (admin)
   // -------------------------------------------------------------------------
 
-  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview) {
+  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview, typed: ReviewerTypedInput = {}) {
     // [DOC-1 §21.1 · P21] No approvals without the key service (production): fail closed.
     assertKeyServiceForAccess('approval');
     // [A-19] Read the candidate first: the expiry decision needs the document's
@@ -783,6 +815,37 @@ export class VerificationService {
       select: { docType: true, expiresAt: true, status: true, userId: true, role: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    // [VERIFY-DOCS · owner ruling 6 Oct 2026] What the reviewer must TYPE for
+    // this type: the ID/licence number (kept only as a blind-index identity
+    // key) or the police clearance's issue date (the re-check falls due a year
+    // after it). Asked only of a document still PENDING: an already-decided one
+    // keeps reporting NOT_PENDING from the transition below.
+    // `required` is the reviewer console's contract (the admin route sets it):
+    // a missing field is refused there. Internal callers may omit the fields;
+    // whatever IS typed is checked and used the same way.
+    let identitySignal: string | null = null;
+    let issuedOn: Date | null = null;
+    if (candidate.status === 'PENDING') {
+      if (REVIEWER_TYPED_NUMBER_DOC_TYPES.has(candidate.docType)) {
+        const supplied = typeof typed.documentNumber === 'string' && typed.documentNumber.trim().length > 0;
+        if (!supplied && typed.required) {
+          throw new AppError(400, 'DOCUMENT_NUMBER_REQUIRED',
+            `Type the number printed on the ${candidate.docType.replace(/_/g, ' ')} before approving it. It is kept only to stop one person opening several accounts.`);
+        }
+        if (supplied) {
+          identitySignal = reviewerTypedDocumentSignal(candidate.docType, typed.documentNumber);
+          if (!identitySignal) {
+            throw new AppError(400, 'DOCUMENT_NUMBER_INVALID', 'That number is too short to be the document number. Check it against the document.');
+          }
+        }
+      }
+      if (ISSUE_DATE_DOC_TYPES.has(candidate.docType) && (typed.required || typed.issuedOn)) {
+        issuedOn = typed.issuedOn ?? null;
+        expiresAt = clearanceRecheckDate(issuedOn);
+      }
+    }
+    // Never on any later write: the typed number leaves this method only as the blind index.
+    delete typed.documentNumber;
     // Vehicle checks run on the locked, stored subject at the decision boundary.
     // An already-decided document must report NOT_PENDING, not an expiry
     // complaint — the transition below owns that refusal, so only a genuine
@@ -804,7 +867,18 @@ export class VerificationService {
           hireClassConfirmed: insurance.hireClassConfirmed,
           plateCrossChecked: insurance.plateCrossChecked,
         }),
-    }, { reviewerId: adminId, approval: { expiresAt, insurance } });
+    }, { reviewerId: adminId, approval: { expiresAt, insurance, ...(issuedOn ? { issuedOn } : {}) } });
+
+    // [VERIFY-DOCS] The typed number becomes a HARD identity key BEFORE the
+    // trial decision below (afterApproval) — the same order as an extracted
+    // number. The service hashes it (HMAC blind index) and never throws.
+    if (identitySignal) {
+      const { IdentityService } = await import('../integrity/identity.service');
+      await new IdentityService(this.prisma).capture({
+        accountId: updated.userId, actorRole: String(updated.role),
+        type: 'ID_DOC_NUMBER', normalizedValue: identitySignal, source: 'REVIEWER_TYPED',
+      });
+    }
 
     if (updated.docType === IDENTITY_DOC_TYPE) {
       await this.promoteToL2(updated.userId);
@@ -1016,7 +1090,7 @@ export class VerificationService {
     docId: string,
     requestedStatus: 'APPROVED' | 'REJECTED',
     data: Prisma.VerificationDocumentUpdateManyMutationInput,
-    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string; fraud?: { reasonCode: RejectionReasonCode }; approval?: { expiresAt?: Date; insurance?: InsuranceReview } },
+    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string; fraud?: { reasonCode: RejectionReasonCode }; approval?: { expiresAt?: Date; insurance?: InsuranceReview; issuedOn?: Date } },
   ): Promise<VerificationDocument> {
     const candidate = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
@@ -1098,6 +1172,11 @@ export class VerificationService {
         // trigger demands (test_commit_requires_provenance); without it this hop is refused.
         const committed = await hopDocState(tx, { id: docId, userId: candidate.userId }, 'APPROVED', 'COMMITTED');
         if (!committed) throw new AppError(500, 'DOC_STATE_COMMIT_FAILED', 'The approval could not be committed');
+        // [VERIFY-DOCS] The typed issue date belongs to the kept record (the
+        // commit trigger above wrote it, without one): it outlives the image.
+        if (review.approval?.issuedOn) {
+          await tx.documentRecord.update({ where: { submissionId: docId }, data: { issuedOn: review.approval.issuedOn } });
+        }
       }
 
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
