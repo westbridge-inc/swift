@@ -573,7 +573,7 @@ jobs:
         run: node scripts/artifact-manifest.js apps/mobile/dist --app mobile --commit ${{ github.sha }} --entry ios/metadata.json --entry android/metadata.json --out artifact-mobile.manifest.json
       - name: Test and record mobile JS size budgets
         run: |
-          node --test scripts/mobile-size-budget.test.js
+          node --test scripts/mobile-size-budget.test.js apps/mobile/plugins/withReleaseShrinking.test.js
           node scripts/mobile-size-budget.js --manifest artifact-mobile.manifest.json --out artifact-mobile-size.json
       - name: No unlisted public variable reached the mobile bundles
         run: node scripts/public-secrets-gate.js --bundle apps/mobile/dist --manifest artifact-mobile.manifest.json --app mobile --commit ${{ github.sha }} --receipt artifact-mobile.receipt.json
@@ -600,7 +600,7 @@ jobs:
         env:
           ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
         run: npx expo prebuild --platform android --no-install
-      - name: Build reference release APK and AAB
+      - name: Build reference release APK and AAB with R8
         working-directory: apps/mobile/android
         env:
           ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
