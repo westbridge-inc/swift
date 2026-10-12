@@ -605,7 +605,14 @@ jobs:
         env:
           ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
           NODE_OPTIONS: --max-old-space-size=3072
-        run: ./gradlew :app:assembleRelease :app:bundleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2
+        # The template's 2 GB heap / 512 MB metaspace ran out of Metaspace once
+        # main added Sentry and expo-updates; lint-vital measures nothing here.
+        run: >-
+          ./gradlew :app:assembleRelease :app:bundleRelease
+          -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2
+          -x lintVitalAnalyzeRelease
+          "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1536m"
+          "-Pkotlin.daemon.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=1g"
       - name: Record and enforce native size budgets
         run: node scripts/mobile-size-budget.js --apk apps/mobile/android/app/build/outputs/apk/release/app-release.apk --aab apps/mobile/android/app/build/outputs/bundle/release/app-release.aab --out artifact-native-size.json
       - name: Keep mobile size measurements
