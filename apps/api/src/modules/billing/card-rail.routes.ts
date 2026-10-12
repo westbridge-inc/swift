@@ -577,6 +577,54 @@ export const HOSTED_CARD_PAGE_CSP = [
   "frame-ancestors 'none'",
 ].join('; ');
 
+/**
+ * [CARD embed] Swift's OWN web origin (APP_PUBLIC_URL): the website shows the card page
+ * inside its weekly-fee page, so it is the one other site that may frame these pages.
+ * https only; unset, plain http, credentials or unreadable: none.
+ */
+export function cardWebFrameOrigin(env: Record<string, string | undefined> = process.env): string | null {
+  try {
+    const url = new URL(env['APP_PUBLIC_URL'] ?? '');
+    return url.protocol === 'https:' && !url.username && !url.password ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The hosted card page's policy: HOSTED_CARD_PAGE_CSP, framed only by Swift's own web (else by nothing). */
+export function hostedCardPageCsp(web: string | null = cardWebFrameOrigin()): string {
+  return HOSTED_CARD_PAGE_CSP.replace("frame-ancestors 'none'", `frame-ancestors ${web ?? "'none'"}`);
+}
+
+/**
+ * [CARD embed] The return page's and the simulator's own policy: plain words and links,
+ * no script, nothing fetched. The return page may be framed by this API (Swift's card page
+ * frames the bank's form, which comes back here), by the card provider's frames, and by
+ * Swift's own web; the simulator by this API and Swift's own web. Never '*'.
+ */
+export function cardTextPageCsp(kind: 'return' | 'simulator', web: string | null = cardWebFrameOrigin()): string {
+  const ancestors = ["'self'", ...(kind === 'return' ? [CARD_PROVIDER_ORIGINS] : []), ...(web ? [web] : [])];
+  return [
+    "default-src 'none'",
+    "style-src 'unsafe-inline'",
+    `form-action ${kind === 'simulator' ? "'self'" : "'none'"}`,
+    "connect-src 'none'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    `frame-ancestors ${ancestors.join(' ')}`,
+  ].join('; ');
+}
+
+/** The policy is the authority on framing: X-Frame-Options agrees with it (DENY / SAMEORIGIN) or gives way. */
+function framing(reply: FastifyReply, csp: string): FastifyReply {
+  const ancestors = /frame-ancestors ([^;]+)/.exec(csp)?.[1]?.trim();
+  reply.header('content-security-policy', csp);
+  if (ancestors === "'none'") reply.header('x-frame-options', 'DENY');
+  else if (ancestors === "'self'") reply.header('x-frame-options', 'SAMEORIGIN');
+  else reply.removeHeader('x-frame-options');
+  return reply;
+}
+
 function simulatorPageHtml(ref: string, facts: NonNullable<Awaited<ReturnType<SimulatorCardRailProvider['pageFor']>>>): string {
   const what = facts.purpose === 'ENROLL'
     ? 'Add a card'
@@ -626,7 +674,7 @@ export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirm
       log().error({ err }, '[PT-2] a card return could not be finished; the sweep asks the provider again');
       state = 'PENDING';
     }
-    return privatePage(reply).send(returnPageHtml(state));
+    return framing(privatePage(reply), cardTextPageCsp('return')).send(returnPageHtml(state));
   };
   const returnOptions = {
     logLevel: 'silent' as const,
@@ -642,17 +690,17 @@ export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirm
     config: { rateLimit: { ...CARD_SIMULATOR_RATE, ...perSource, ...rateLimited } },
   };
   const simulatorMissing = (reply: FastifyReply, status = 404, words = 'There is no such test page.') =>
-    privatePage(reply).status(status).send(page(SIMULATOR_PAGE.title, `<h1>${escapeHtml(SIMULATOR_PAGE.title)}</h1><p>${escapeHtml(words)}</p>`));
+    framing(privatePage(reply), cardTextPageCsp('simulator')).status(status).send(page(SIMULATOR_PAGE.title, `<h1>${escapeHtml(SIMULATOR_PAGE.title)}</h1><p>${escapeHtml(words)}</p>`));
 
   /** [PT-4] Swift's page around the bank's card form. Never logged, never cached; its own strict policy. */
   app.get<{ Params: { ref: string } }>('/pay/:ref', simulatorOptions, async (request, reply) => {
     const provider = powerTranzOf(rt());
     const facts = provider && PAY_REF_SHAPE.test(request.params.ref) ? await provider.hostedPageFor(request.params.ref) : null;
     if (!facts) {
-      return privatePage(reply).status(404).send(page('Swift card payment', '<p class="brand">Swift</p><h1>There is no such card page</h1>'
+      return framing(privatePage(reply), hostedCardPageCsp()).status(404).send(page('Swift card payment', '<p class="brand">Swift</p><h1>There is no such card page</h1>'
         + `<p>Open the Swift app to see your weekly fee.</p><p><a href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a></p>`));
     }
-    return privatePage(reply).header('content-security-policy', HOSTED_CARD_PAGE_CSP).send(hostedCardPageHtml(facts));
+    return framing(privatePage(reply), hostedCardPageCsp()).send(hostedCardPageHtml(facts));
   });
 
   /** The simulator's page: four buttons, no inputs, a TEST PAGE label. */
@@ -661,7 +709,7 @@ export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirm
     if (!sim || !SIM_REF_SHAPE.test(request.params.ref)) return simulatorMissing(reply);
     const facts = await sim.pageFor(request.params.ref);
     if (!facts) return simulatorMissing(reply);
-    return privatePage(reply).send(simulatorPageHtml(request.params.ref, facts));
+    return framing(privatePage(reply), cardTextPageCsp('simulator')).send(simulatorPageHtml(request.params.ref, facts));
   });
 
   /** A button: the simulator records what the "bank" did, once, and the browser goes back to the return address. */
