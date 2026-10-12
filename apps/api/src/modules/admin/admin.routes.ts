@@ -31,6 +31,7 @@ import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
+import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
@@ -5546,12 +5547,17 @@ export async function adminRoutes(app: FastifyInstance) {
     // [VERIFY-DOCS V3] The link is minted FOR this reviewer: the render route
     // re-checks their grant on every load.
     const minted = mintRenderPath(id, request.user.userId, ttlSeconds);
-    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
+    // [Item 98] Face-matching is off (row 54): an identity document comes with the
+    // applicant's own signup selfie for the reviewer to compare by eye. Recorded
+    // in the same view audit.
+    const owner = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { id: true, avatar: true, selfieCapturedAt: true } });
+    const signupSelfie = await signupSelfieFor(doc.docType, owner);
+    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true, signupSelfieShown: !!signupSelfie }, request);
     // [DS110-15] A path RELATIVE to the API origin, on purpose. The console
     // resolves it against its configured API origin and loads it through its
     // own same-origin proxy; an origin built here from the Host header would
     // be client-supplied input, and the console discards it anyway.
-    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
+    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds, signupSelfie } };
   });
 
   // ─── [VERIFY-DOCS V3] Staff: the document reviewer grant ─────────────────

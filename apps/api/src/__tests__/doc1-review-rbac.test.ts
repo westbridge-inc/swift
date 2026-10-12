@@ -23,6 +23,7 @@ import {
   DOC_REVIEWER_CAPABILITIES, DOC_SENIOR_CAPABILITIES, DOC_ADMIN_CAPABILITIES, SUPPORT_OPERATOR_CAPABILITIES, holdsCapability,
 } from '../modules/admin/admin-authority';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
+import { ownedVerificationFixture } from './helpers/verification-object';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -163,5 +164,55 @@ describe('[DOC-1 P8-4] the review console roles, as capability presets the serve
     const senior = await admin(DOC_SENIOR_CAPABILITIES);
     expect((await call(senior.token, 'GET', '/verification/queue/counts')).statusCode).toBe(200);
     expect((await call(senior.token, 'POST', '/verification/legal-holds', { subjectUserId: subjectId, reviewBy: new Date(Date.now() + 30 * DAY).toISOString() })).statusCode).toBe(403);
+  });
+});
+
+// [Item 98] Face-matching is off at launch (row 54), so the reviewer compares
+// the applicant's own signup selfie with the identity document by eye. The
+// selfie travels only with an audited, granted document view of an identity
+// document, and only when the stored pointer is the applicant's own capture.
+describe('[Item 98] the signup selfie accompanies a granted identity-document view', () => {
+  async function identityDoc() {
+    return system(async () => {
+      const fileUrl = await ownedVerificationFixture(app.prisma, subjectId);
+      return app.prisma.verificationDocument.create({ data: { userId: subjectId, role: 'VENDOR_OWNER', docType: 'owner_national_id', fileUrl, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1' } });
+    });
+  }
+
+  it('supplies the applicant-owned captured selfie with an identity document, audited once with the view', async () => {
+    const capturedAt = new Date('2026-10-07T00:00:00.000Z');
+    await system(() => app.prisma.user.update({ where: { id: subjectId }, data: { avatar: `/uploads/avatars/${subjectId}/synthetic-selfie.jpg`, selfieCapturedAt: capturedAt } }));
+    const doc = await identityDoc();
+    const reviewer = await admin([...DOC_REVIEWER_CAPABILITIES, 'documents.review']);
+    const viewed = await call(reviewer.token, 'GET', `/verification/${doc.id}/document-url`);
+    expect(viewed.statusCode, viewed.body).toBe(200);
+    expect(viewed.json().data.signupSelfie).toEqual({ url: `/uploads/avatars/${subjectId}/synthetic-selfie.jpg`, capturedAt: capturedAt.toISOString() });
+    const audits = await system(() => app.prisma.auditLog.findMany({ where: { userId: reviewer.id, action: 'VIEW_VERIFICATION_DOC', entityId: doc.id } }));
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.changes).toMatchObject({ signupSelfieShown: true });
+    // Without the grant nothing is shown — not the document, not the selfie.
+    const presetOnly = await admin(DOC_REVIEWER_CAPABILITIES);
+    const refused = await call(presetOnly.token, 'GET', `/verification/${doc.id}/document-url`);
+    expect(refused.statusCode).toBe(403);
+    expect(refused.body).not.toContain('avatars');
+  });
+
+  it('never substitutes a pointer outside the applicant\'s own selfie folder, an uncaptured photo, or a non-identity document', async () => {
+    const reviewer = await admin([...DOC_REVIEWER_CAPABILITIES, 'documents.review']);
+    const doc = await identityDoc();
+    await system(() => app.prisma.user.update({ where: { id: subjectId }, data: { avatar: '/uploads/avatars/someone-else/synthetic.jpg', selfieCapturedAt: new Date() } }));
+    expect((await call(reviewer.token, 'GET', `/verification/${doc.id}/document-url`)).json().data.signupSelfie).toBeNull();
+    await system(() => app.prisma.user.update({ where: { id: subjectId }, data: { avatar: `/uploads/avatars/${subjectId}/../someone-else/x.jpg`, selfieCapturedAt: new Date() } }));
+    expect((await call(reviewer.token, 'GET', `/verification/${doc.id}/document-url`)).json().data.signupSelfie).toBeNull();
+    await system(() => app.prisma.user.update({ where: { id: subjectId }, data: { avatar: `/uploads/avatars/${subjectId}/..`, selfieCapturedAt: new Date() } }));
+    expect((await call(reviewer.token, 'GET', `/verification/${doc.id}/document-url`)).json().data.signupSelfie).toBeNull();
+    await system(() => app.prisma.user.update({ where: { id: subjectId }, data: { avatar: `/uploads/avatars/${subjectId}/synthetic.jpg`, selfieCapturedAt: null } }));
+    expect((await call(reviewer.token, 'GET', `/verification/${doc.id}/document-url`)).json().data.signupSelfie).toBeNull();
+    await system(() => app.prisma.user.update({ where: { id: subjectId }, data: { selfieCapturedAt: new Date() } }));
+    const business = await system(async () => {
+      const fileUrl = await ownedVerificationFixture(app.prisma, subjectId);
+      return app.prisma.verificationDocument.create({ data: { userId: subjectId, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1' } });
+    });
+    expect((await call(reviewer.token, 'GET', `/verification/${business.id}/document-url`)).json().data.signupSelfie).toBeNull();
   });
 });
