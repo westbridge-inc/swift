@@ -1138,10 +1138,16 @@ export class VerificationService {
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
       if (requestedStatus === 'APPROVED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
         const subject = await tx.subject.findUnique({ where: { id: updated.subjectId }, select: { createdById: true } });
-        const authority = await captureSubmissionAuthority(tx, updated.userId);
         const vehicle = await tx.vehicleProfile.findUnique({ where: { subjectId: updated.subjectId }, select: { registrationMark: true } });
-        if (subject?.createdById === updated.userId && vehicle && authority.profile
-          && normalizeRegistrationMark(authority.profile.licensePlate ?? '') === vehicle.registrationMark) {
+        // Any vehicle the registrant holds on that plate (Rider or Driver profile), whatever mode they are
+        // in right now: holding both profiles never blocks the reviewer's approval (Opus 12 Oct, S3-1).
+        const [riderOnAccount, driverOnAccount] = await Promise.all([
+          tx.rider.findUnique({ where: { userId: updated.userId }, select: { licensePlate: true } }),
+          tx.driver.findUnique({ where: { userId: updated.userId }, select: { licensePlate: true } }),
+        ]);
+        const mark = normalizeRegistrationMark(vehicle?.registrationMark ?? '');
+        const onPlate = mark !== '' && [riderOnAccount, driverOnAccount].some((profile) => !!profile && normalizeRegistrationMark(profile.licensePlate ?? '') === mark);
+        if (subject?.createdById === updated.userId && vehicle && onPlate) {
           await tx.subjectLink.updateMany({ where: { accountId: updated.userId, subjectId: updated.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null }, data: { approvedAt: now } });
         }
       }

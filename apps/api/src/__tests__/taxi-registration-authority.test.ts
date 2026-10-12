@@ -146,11 +146,16 @@ describe('every taxi approval path checks stored vehicle authority', () => {
         await tx.user.update({ where: { id: doc.userId }, data: { activeRole: 'DRIVER', lastMoverRole: 'DRIVER', roles: ['MOVER', 'RIDER', 'DRIVER', 'CUSTOMER'] } });
         return null;
       });
-      // Both profiles are kept; the applicant now switches mode before the reviewer acts.
       expect(await app.prisma.rider.findUnique({ where: { userId: doc.userId } })).not.toBeNull();
-      await app.prisma.user.update({ where: { id: doc.userId }, data: { activeRole: mode } });
     });
-    await refused(doc.id, 'WRONG_PLATE_CLASS');
+    // [#1551] The vehicle change withdrew the paper awaiting review; the car's paper is submitted again
+    // (the sandbox processor reads it, so it carries an expiry; automatic approval still holds it for a person).
+    const fileKey = await system(() => ownedVerificationFixture(app.prisma, doc.userId, 'auto-approve'));
+    const again = await system(() => service.submitDocument(doc.userId, 'MOVER', 'vehicle_registration', fileKey, 'test-v1', 'DRIVER'));
+    expect(again.status).toBe('PENDING');
+    // Both profiles are kept; the applicant now switches mode before the reviewer acts.
+    await system(() => app.prisma.user.update({ where: { id: doc.userId }, data: { activeRole: mode } }));
+    await refused(again.id, 'WRONG_PLATE_CLASS');
   });
 
   // [Opus review 12 Oct, S3-1] A mover holding both profiles, in Customer mode, is not a reason to refuse
