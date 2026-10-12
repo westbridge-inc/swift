@@ -60,7 +60,7 @@ export default function DocumentsPage() {
   return (
     <div className="max-w-3xl space-y-5">
       <div>
-        <h1 className="text-2xl font-extrabold">Documents</h1>
+        <h1 className="sw-title">Documents</h1>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           Upload renewals on a big screen — reviews usually finish within 24 hours. An expired document takes you
           offline until it is renewed.
@@ -94,7 +94,7 @@ export default function DocumentsPage() {
           const doc = latestByType.get(docType);
           const tone = doc ? statusTone(doc.status, doc.expiresAt) : null;
           return (
-            <div key={docType} className="rounded-2xl border border-black/5 bg-white p-5">
+            <div key={docType} className="sw-card p-5">
               <div className="flex flex-wrap items-center gap-3">
                 <p className="font-semibold">{pretty(docType)}</p>
                 {tone ? (
@@ -107,7 +107,7 @@ export default function DocumentsPage() {
                 )}
                 <button
                   onClick={() => { setUploadFor(uploadFor === docType ? null : docType); setConsent(false); setError(null); }}
-                  className="ml-auto rounded-lg border border-black/10 px-3 py-1.5 text-xs font-semibold hover:bg-[var(--swift-subtle)]"
+                  className="ml-auto rounded-lg border border-[var(--swift-border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--swift-subtle)]"
                 >
                   {doc ? 'Upload renewal' : 'Upload'}
                 </button>
@@ -117,7 +117,7 @@ export default function DocumentsPage() {
               )}
               {done === docType && <p className="mt-2 text-sm font-medium text-green-600">Submitted — it is in review ✓</p>}
               {uploadFor === docType && (
-                <div className="mt-3 space-y-3 border-t border-black/5 pt-3">
+                <div className="mt-3 space-y-3 border-t border-[var(--swift-border)] pt-3">
                   <label className="flex items-start gap-2 text-xs text-[var(--swift-muted)]">
                     <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--swift-red)]" />
                     <span>
