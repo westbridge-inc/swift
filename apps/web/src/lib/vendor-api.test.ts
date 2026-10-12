@@ -26,8 +26,8 @@ describe('toAmount — the one coercion seam', () => {
 
 describe('money — the honest formatter', () => {
   it('formats a real figure, including a real zero', () => {
-    expect(money('4500.00')).toBe(`GY$${(4500).toLocaleString()}`);
-    expect(money(0)).toBe('GY$0');
+    expect(money('4500.00')).toBe(`$${(4500).toLocaleString()}`);
+    expect(money(0)).toBe('$0');
   });
 
   it('renders an em-dash for anything that is not a finite number', () => {

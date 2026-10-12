@@ -73,9 +73,13 @@ export function formatAmount(value: unknown, prefix: string): string {
   return `${prefix}${Math.round(amount).toLocaleString()}`;
 }
 
-/** The single currency display used by orders and both business consoles. */
+/**
+ * The single currency display used by orders and both business consoles:
+ * `$2,500`, as in the phone app and the customer site (owner ruling, 4 Oct).
+ * The console footer says "Prices in GYD"; payment records name the currency.
+ */
 export function formatMoney(value: unknown): string {
-  return formatAmount(value, 'GY$');
+  return formatAmount(value, '$');
 }
 
 /** A receipt fallback may multiply a known unit price; missing prices stay unknown. */
