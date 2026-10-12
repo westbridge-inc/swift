@@ -1,4 +1,5 @@
 import { RetainedUploadPhotos } from '../../../lib/retainedUploadPhotos';
+import { MapCredits } from '../../../components/MapCredits';
 import { uploadHandoverPhoto } from '../../../hooks/mover';
 import type { AuthSessionSnapshot } from '../../../lib/authSession';
 /** @jsxImportSource react */
@@ -14,6 +15,7 @@ import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, Pop
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
+import { CustodyRecoverySection } from '../CustodyRecoverySection';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -697,6 +699,7 @@ export function ActiveJobScreen({ navigation }: any) {
           backgroundStyle={{ backgroundColor: dk.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20 }}
           handleIndicatorStyle={{ backgroundColor: dk.faint }}
         >
+          <MapCredits />
           <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
             {photoBusy || courierProof.isPending || courierPickupProof.isPending || courierReturnProof.isPending ? (
               <T variant="label" style={{ color: dk.muted, marginBottom: space.md }}>Still uploading — keep this screen open. If it fails, tap again to retry the saved photo.</T>
@@ -1110,6 +1113,13 @@ export function ActiveJobScreen({ navigation }: any) {
                 />
               </>
             )}
+
+            {/* [AF-MOB-006] After pickup the rider's problem is an owned case:
+                report it, then follow the decision (hold, return, or hand the
+                order to a relay rider with the code shown here). */}
+            {!isDriver && job?.id && !preview && (pickedUp || returning) ? (
+              <CustodyRecoverySection orderId={job.id} inCustody />
+            ) : null}
 
             {/* SOS after the action — anyone alone with a stranger on a cash
                 job needs an emergency path (driver AND rider; the general

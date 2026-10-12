@@ -89,8 +89,9 @@ async function resolveAndGo(dest: LinkDestination, request: number): Promise<voi
 let navReady = false;
 let latestRequest = 0;
 
+/** The two fixed fee returns: MMG's page and the card page (CARD-CHECKOUT-API section 7). */
 export function isWeeklyFeeReturn(url: string): boolean {
-  try { const parsed = new URL(url); return parsed.protocol === 'swift:' && parsed.hostname === 'pay' && parsed.pathname === '/mmg/return'; } catch { return false; }
+  try { const parsed = new URL(url); return parsed.protocol === 'swift:' && parsed.hostname === 'pay' && (parsed.pathname === '/mmg/return' || parsed.pathname === '/card/return'); } catch { return false; }
 }
 
 function handleUrl(url: string | null): boolean {

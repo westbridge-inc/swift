@@ -54,6 +54,9 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // Orders, the customer side of a journey
     'substitution_pending', 'line_refunded', 'handover_review', 'delivery_options', 'delivery_cash_settlement',
     'dispatch_retrying', 'dispatch_exhausted', 'converted_to_pickup', 'mover_session_revocation',
+    // [AF-MOB-006] A custody relay handoff: the holder and the relay rider. Standard
+    // (prompt, audible); promoting them to job_update is a product decision.
+    'custody_handoff_code', 'custody_relay_assigned', 'custody_relay_cancelled',
     'mmg_payment_confirmed', 'mmg_claim_disputed', 'mmg_claim_resolved', 'mmg_claim_mismatch',
     'mmg_unattested_cancellation', 'supply_returned',
     // Rides
@@ -62,19 +65,23 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'booking_confirmed', 'booking_slot_declined', 'booking_completed', 'booking_cancelled',
     'booking_reminder', 'booking_rescheduled',
     // Safety of the person receiving it (the driver confirm is a job update)
-    'guardian_checkin', 'trip_share_rotated', 'liveness_midshift_missed', 'liveness_locked',
+    'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',
     // Money a partner must act on (billing_suspended_nudge is about a suspension,
     // not a marketing nudge, so it stays loud)
     'billing_mmg_pending', 'billing_success', 'billing_failed', 'billing_final_warning',
     'billing_suspended', 'billing_suspended_nudge', 'billing_reminder', 'billing_banked',
-    'billing_churned', 'billing_topup', 'billing_card_action_required', 'fx_change_notice', 'usd_migration_notice',
+    'billing_churned', 'billing_topup', 'billing_mmg_checkout', 'billing_card_action_required', 'fx_change_notice',
+    'usd_migration_notice',
     'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
     // Verification and trust
     'verification_approved', 'verification_rejected', 'verification_expired',
     'verification_expiry_reminder', 'verification_forced_offline', 'verification_vehicle_lapsed',
     'verification_l2', 'trust_l3', 'compliance_review_failed',
+    // Account security: the password changed and other devices were signed out;
+    // password sign-in paused after many wrong attempts
+    'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
     'low_stock', 'staff_added', 'review_response', 'rating_removed', 'category_request_resolved',
     'category_backfill_review', 'vendor_tier_promoted', 'support_update', 'store_pin_moved',
@@ -85,7 +92,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',
     'safety_escrow_review', 'not_my_driver_discrepancy', 'ops_alert_escalated', 'ops_alert_drill',
     'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old',
-    'ops_taxi_driver_dropped', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
+    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low', 'rlp_reserve_provisioned',

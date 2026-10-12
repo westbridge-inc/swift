@@ -1,10 +1,18 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { liveCard } from '@/lib/card-fee';
+import { CardPay } from '@/components/card-pay';
+
+/** The dot beside the status word: colour is the second signal, the word is the first. */
+const STATUS_DOT: Record<string, string> = {
+  TRIAL: 'bg-[var(--swift-success)]', ACTIVE: 'bg-[var(--swift-success)]', PAST_DUE: 'bg-[var(--swift-warning)]',
+  SUSPENDED: 'bg-[var(--swift-error)]', CHURNED: 'bg-[var(--swift-error)]',
+};
 
 export function WeeklyFee({ family }: { family: FeeFamily }) {
   const storeId = useStoreId();
@@ -18,6 +26,9 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
   const base = `/api/v1/${family}/subscription`;
   const q = useQuery<FeeSubscription>({ queryKey, queryFn: () => apiFetch(base, undefined, { storeId }).then((r) => r.data), staleTime: 0, refetchInterval: 60_000 });
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
+  // A card Pay now that may still take money hides the MMG button too: one payment at a time.
+  const [cardPending, setCardPending] = useState(false);
+  const refreshFee = useCallback(() => { void client.invalidateQueries({ queryKey }); }, [client, queryKey]);
   const session = useMemo(() => new FeeCheckoutSession({
     start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, undefined, { storeId }).then((r) => r.data),
@@ -37,25 +48,47 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
   const sub = q.data;
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
-  const blocked = view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
-  return <section className="max-w-2xl space-y-6">
+  const mmgPending = view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const blocked = mmgPending || cardPending;
+  // The card choice exists only when the server says CARD is live.
+  const card = liveCard(sub.payActions);
+  return <section className="max-w-3xl space-y-6">
     <h1 className="text-2xl font-extrabold">Weekly fee</h1>
-    <div className="space-y-4 rounded-2xl border border-black/5 bg-white p-6">
-      <p className="text-xl font-bold">{dueLine(sub)}</p>
-      <p>{subscriptionWords(checkout?.subscriptionStatus ?? sub.status)}</p>
+    <div className="space-y-3 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
+      <p className="text-xs font-semibold uppercase tracking-wide text-[var(--swift-muted)]">Amount due</p>
+      <p className="text-2xl font-extrabold sm:text-3xl">{dueLine(sub)}</p>
+      <p className="flex items-center gap-2 text-sm font-semibold"><span aria-hidden="true" className={`h-2 w-2 rounded-full ${STATUS_DOT[checkout?.subscriptionStatus ?? sub.status] ?? 'bg-[var(--swift-muted)]'}`} />{subscriptionWords(checkout?.subscriptionStatus ?? sub.status)}</p>
       {checkout && <p role="status">{checkoutWords(checkout, view.returned)}</p>}
       {view.returned && !checkout && <p role="status">Waiting for MMG…</p>}
       {view.error && <p role="alert">{view.error}</p>}
-      {action && !blocked && <button disabled={view.busy} onClick={() => void session.pay()} className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
-        {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
-      </button>}
-      <div><button className="text-sm font-semibold underline" onClick={() => { void q.refetch(); session.focus(); }}>Refresh status</button></div>
+      <div><button className="min-h-11 text-sm font-semibold underline underline-offset-4" onClick={() => { void q.refetch(); session.focus(); }}>Refresh status</button></div>
+    </div>
+    {action && !blocked && card && <h2 className="text-lg font-bold">Choose how to pay</h2>}
+    <div className={`grid gap-4 ${action && !blocked && card ? 'md:grid-cols-2' : ''}`}>
+      {action && !blocked && <section aria-labelledby="mmg-pay-title" className="flex flex-col gap-4 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
+        <div className="flex items-start gap-3">
+          <span aria-hidden="true" className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--swift-red-50)] text-xs font-extrabold text-[var(--swift-red-600)]">MMG</span>
+          <div className="min-w-0">
+            <h3 id="mmg-pay-title" className="text-lg font-bold">Pay with MMG</h3>
+            <p className="text-sm text-[var(--swift-muted)]">Opens MMG&apos;s page, then brings you back to Swift.</p>
+          </div>
+        </div>
+        <button disabled={view.busy} onClick={() => void session.pay()} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
+          {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
+        </button>
+      </section>}
+      <CardPay family={family} storeId={storeId} card={card} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
     <h2 className="text-lg font-bold">Recent checkouts</h2>
-    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => <div key={c.ref} className="space-y-2 rounded-2xl border border-black/5 bg-white p-5">
-      <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</p>
-      <p>{checkoutWords(c.ref === view.checkout?.ref ? view.checkout : c, c.ref === view.checkout?.ref && view.returned)}</p>
-    </div>) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
+    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {
+      const shown = c.ref === view.checkout?.ref ? view.checkout : c;
+      return <div key={c.ref} className="space-y-2 rounded-2xl border border-black/5 bg-white p-5">
+        <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</p>
+        <p>{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</p>
+        {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
+        {checkoutReferences(shown).map((r) => <p key={r.label} className="text-sm text-[var(--swift-muted)]">{r.label}: <span className="font-mono">{r.value}</span></p>)}
+      </div>;
+    }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
   </section>;
 }

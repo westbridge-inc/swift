@@ -7,8 +7,8 @@ import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClass
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
-import { approvedEvidenceFor } from './evidence';
-import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
+import { approvedEvidenceFor, type EvidenceRow } from './evidence';
+import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
@@ -1554,11 +1554,11 @@ export class VerificationService {
     // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
     // store cannot go live with an incomplete disclosure block: it joins the checklist as a
     // go-live gate. Before activation the block is compiled and shown, but does not gate.
-    const country = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    const country = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true, tenantId: true } });
     const disclosureGate = country ? await disclosureGateEngaged(db, country.countryCode) : false;
     for (const vendor of owner.vendors) {
       const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
-      const verified = checklistOk && (!disclosureGate || (await compileStorefrontDisclosure(db, vendor.id)).complete);
+      const verified = checklistOk && (!disclosureGate || (country != null && (await compileActivationDisclosure(db, vendor.id, { accountId: userId, tenantId: country.tenantId })).complete));
       if (verified) {
         // [PR1270-S2-03] This projection is the one authority that makes a
         // store live, on every path (review, auto-approval, the reconcile
@@ -1961,6 +1961,8 @@ export class VerificationService {
     if (owner) {
       for (const vendor of owner.vendors) {
         if (!vendor.isVerified) continue;
+        // [REVIEW-PARTNER] The fiction's stores are never billed: no trial is born (createRow would refuse it).
+        if (await this.subscriptions.isFiction({ vendorId: vendor.id })) continue;
         // A newly-live vendor must be searchable now, not at the next boot [SWIFT-UG-SRCH-01].
         const search = new SearchService(this.prisma);
         void search.syncVendor(vendor.id).then(() => search.syncVendorItems(vendor.id)).catch(() => {});
@@ -1984,8 +1986,9 @@ export class VerificationService {
           type: 'PLATE', normalizedValue: normalizePlate(driver.licensePlate), source: 'ONBOARDING_DOC',
         });
       }
-      if (driver) await this.subscriptions.startTrialForDriver(driver.id);
-      if (rider) await this.subscriptions.startTrialForRider(rider.id);
+      // [REVIEW-PARTNER] The fiction's partners are never billed: no trial is born (createRow would refuse it).
+      if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
+      if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
 
   }
@@ -2150,4 +2153,63 @@ export class VerificationService {
     const row = await this.prisma.docType.findUnique({ where: { countryCode_legacyCode: { countryCode, legacyCode } }, select: { code: true, externalProcessingAllowed: true } });
     return { code: row?.code ?? `${countryCode}.${legacyCode}`, externalProcessingAllowed: row?.externalProcessingAllowed ?? null };
   }
+}
+
+/**
+ * [STA-1 Part 6 · REVIEW-PARTNER] One approved document for the store-review
+ * fiction's demo partner (review/partner-pack.ts). Written HERE because this
+ * service is the one writer of VerificationDocument (DOC-1 hard limit [7]).
+ *
+ * The legacy APPROVED-insert shape the state machine documents: COMMITTED on
+ * insert, its VALID document_record and renewal schedule written by the
+ * database's own triggers in the account's tenant. Deliberately NO review case
+ * and NO decision row — no human reviewed a fiction, and a decision would
+ * append a fictional reviewer to the platform-wide audit chain, outside the
+ * tenant. NO file (fileUrl '' is the code's "nothing stored" state: no image
+ * of any ID exists, and a purge touches no storage), NO consent row (no person
+ * consented to anything), NO notification, NO trial (afterApproval never runs).
+ *
+ * Refused for any account that is not a synthetic person of a REVIEW tenant,
+ * before anything is written.
+ */
+export async function commitReviewFixtureDocument(
+  db: Prisma.TransactionClient | PrismaClient,
+  input: {
+    userId: string;
+    docType: string;
+    expiresAt: Date | null;
+    reviewedBy: string;
+    reviewedAt: Date;
+    reviewNote: string;
+    /** The policy facts; applied to the insurance document only (this service names that type). */
+    insurance?: Pick<Prisma.VerificationDocumentUncheckedCreateInput, 'insurerName' | 'policyNumber' | 'coverageClass' | 'hireClassConfirmed' | 'plateCrossChecked'>;
+  },
+): Promise<string> {
+  const owner = await db.user.findUnique({ where: { id: input.userId }, select: { isSynthetic: true, tenant: { select: { kind: true } } } });
+  if (!owner || owner.tenant.kind !== 'REVIEW' || !owner.isSynthetic) {
+    throw new AppError(403, 'REVIEW_FIXTURE_REFUSED', 'Review fixture documents are written only for the store-review fiction.');
+  }
+  const doc = await db.verificationDocument.create({
+    data: {
+      userId: input.userId, role: 'MOVER', docType: input.docType, fileUrl: '', status: 'APPROVED',
+      expiresAt: input.expiresAt, reviewedBy: input.reviewedBy, reviewedAt: input.reviewedAt, reviewNote: input.reviewNote,
+      ...(input.docType === 'vehicle_insurance' ? (input.insurance ?? {}) : {}),
+    },
+    select: { id: true },
+  });
+  return doc.id;
+}
+
+/**
+ * [REVIEW-PARTNER] The hire-insurance facts the taxi go-online gate demands of the
+ * newest approved policy (getLiveOperationStatus): HIRE class, confirmed, plate
+ * cross-checked. Returns the policy's type when a held policy falls short, else
+ * null (an ABSENT policy is the checklist's to name). Used by the review seed to
+ * know a demo driver's evidence would pass the gate.
+ */
+export function hireInsuranceShortfall(rows: EvidenceRow[]): string | null {
+  const policy = rows.filter((r) => r.docType === 'vehicle_insurance')
+    .sort((a, b) => (b.reviewedAt?.getTime() ?? 0) - (a.reviewedAt?.getTime() ?? 0))[0];
+  if (!policy) return null;
+  return policy.coverageClass === 'HIRE' && policy.hireClassConfirmed && policy.plateCrossChecked ? null : policy.docType;
 }

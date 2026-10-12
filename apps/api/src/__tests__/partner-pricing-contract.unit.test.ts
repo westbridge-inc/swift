@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PrismaClient, VehicleType } from '@prisma/client';
+import { authorityTables } from './helpers/fee-authority-fixture';
 
 // ---------------------------------------------------------------------------
 // The Guyana partner weekly fee is ONE contract: the number the public price
@@ -12,7 +13,7 @@ import type { PrismaClient, VehicleType } from '@prisma/client';
 // Owner rate card (GYD per week, flat, independent of sales):
 //   delivery/courier rider on a standard vehicle   6,000   (owner, 2026-09-29; was 8,000)
 //   heavy delivery (canters, box trucks)            9,000
-//   taxi driver (any vehicle)                        9,000
+//   taxi driver (any vehicle)                        8,000   (owner, 2026-09-30)
 //   service provider                                8,000
 //   restaurant/store/grocery, < 1,000 active items  15,000
 //   1,000–9,999 active items                        20,000
@@ -58,7 +59,7 @@ type Tiers = Record<string, unknown>;
 type MoverKind = 'RIDER' | 'DRIVER';
 type VendorKind = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
 
-const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 9000, service: 8000, small: 15000, large: 20000, department: 60000 };
+const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 8000, service: 8000, small: 15000, large: 20000, department: 60000 };
 /** Every key the complete card carries — a Guyana card missing any one of them is no card at all. */
 const CARD_KEYS = [
   'mover', 'moverHeavy', 'taxiDriver', 'serviceVendor', 'smallVendor', 'largeVendor', 'departmentVendor',
@@ -112,28 +113,37 @@ type SignupSubject =
 /** An in-memory partner table for the REAL SubscriptionService: one partner of
  *  the given kind, optionally already holding a subscription, and a record of
  *  every subscription row the service creates. */
+
 function partnerPrisma(subject: SignupSubject, tiers: Tiers, countryCode = 'GY', opts: { existing?: boolean } = {}) {
   const created: Array<Record<string, unknown>> = [];
   const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     created.push(data);
     return { id: `sub-${created.length}`, ...data };
   });
-  const existing = opts.existing ? { id: 'sub-existing', weeklyRate: 12345, status: 'ACTIVE' } : null;
+  const user = { id: `user-${subject.kind.toLowerCase()}`, tenantId: 'swift-default', countryCode };
+  const profile = { userId: user.id, user, ...(subject.kind !== 'VENDOR' ? { vehicleType: subject.vehicleType } : {}) };
+  const decorate = (row: Record<string, unknown>) => ({ ...row,
+    type: subject.kind === 'DRIVER' ? 'TAXI_DRIVER' : 'DELIVERY_RIDER',
+    ...(subject.kind === 'RIDER' ? { riderId: 'rider-1', rider: profile } : subject.kind === 'DRIVER' ? { driverId: 'driver-1', driver: profile } : {}),
+  });
+  const existing = opts.existing ? decorate({ id: 'sub-existing', weeklyRate: 12345, status: 'ACTIVE' }) : null;
+  const authority = authorityTables(() => [...(existing ? [existing] : []), ...created.map((row, i) => decorate({ id: `sub-${i + 1}`, ...row }))], () => [user]);
   const prisma = {
+    ...authority,
     countryConfig: countryConfigFake({ [countryCode]: tiers }),
     rider: {
       findUnique: vi.fn(async () =>
         subject.kind === 'RIDER'
-          ? { riderType: subject.riderType ?? 'BOTH', vehicleType: subject.vehicleType, subscription: existing, user: { countryCode } }
+          ? { ...profile, riderType: subject.riderType ?? 'BOTH', subscription: existing }
           : null,
       ),
-      findUniqueOrThrow: vi.fn(async () => ({ userId: 'user-rider' })),
+      findUniqueOrThrow: vi.fn(async () => profile),
     },
     driver: {
       findUnique: vi.fn(async () =>
-        subject.kind === 'DRIVER' ? { vehicleType: subject.vehicleType, subscription: existing, user: { countryCode } } : null,
+        subject.kind === 'DRIVER' ? { ...profile, subscription: existing } : null,
       ),
-      findUniqueOrThrow: vi.fn(async () => ({ userId: 'user-driver' })),
+      findUniqueOrThrow: vi.fn(async () => profile),
     },
     vendor: {
       findUnique: vi.fn(async () =>
@@ -147,11 +157,15 @@ function partnerPrisma(subject: SignupSubject, tiers: Tiers, countryCode = 'GY',
       ),
       findUniqueOrThrow: vi.fn(async () => ({ owner: { userId: 'user-vendor' } })),
     },
-    subscription: { create, findFirstOrThrow: vi.fn() },
+    subscription: { ...authority.subscription, create, findFirstOrThrow: vi.fn() },
     enforcementAction: { create: vi.fn(() => Promise.resolve({})) },
-    $queryRaw: vi.fn(async () => []),
+    // [SAFE-B] The trial law reads the identity authority (no cluster here);
+    // `...authority` answers the identity advisory lock with no rows.
     identityClusterMember: { findUnique: vi.fn(async () => null) },
-    $transaction: vi.fn(async (callback: (tx: unknown) => unknown) => callback(prisma)),
+    $transaction: vi.fn(async (callback: (tx: unknown) => unknown) => {
+      const tx = Object.fromEntries(Object.entries(prisma).filter(([name]) => name !== '$transaction'));
+      return callback(tx);
+    }),
   } as unknown as PrismaClient;
   return { prisma, created };
 }
@@ -236,10 +250,17 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
     stage(where.id, to);
     return { count: 1 };
   };
+  const authority = authorityTables(() => [...moverRows, ...vendorRows].map((r) => ({ ...r, weeklyRate: rates.get(String(r['id'])) })),
+    () => [...moverRows, ...vendorRows].map((r) => (r['rider'] as any)?.user ?? (r['driver'] as any)?.user ?? (r['vendor'] as any)?.owner.user));
   const transaction = async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> => {
     const staged: { updates: Array<[string, number]>; events: Array<Record<string, unknown>> } = { updates: [], events: [] };
     const tx = {
+      ...authority,
+      countryConfig: countryConfigFake(tiersByCountry),
+      rider: { findUniqueOrThrow: vi.fn(async ({ where }: { where: { userId: string } }) => moverRows.find((r) => (r['rider'] as any)?.user.id === where.userId)?.['rider']) },
+      driver: { findUniqueOrThrow: vi.fn(async ({ where }: { where: { userId: string } }) => moverRows.find((r) => (r['driver'] as any)?.user.id === where.userId)?.['driver']) },
       subscription: {
+        ...authority.subscription,
         updateMany: vi.fn(async ({ where, data }: { where: { id: string; weeklyRate?: unknown }; data: { weeklyRate: number } }) =>
           compareAndSet(where, Number(data.weeklyRate), (id, rate) => staged.updates.push([id, rate])),
         ),
@@ -311,9 +332,9 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
   async function run(movers: MoverSubFixture[] = [], vendors: VendorSubFixture[] = []) {
     for (const s of [...movers, ...vendors]) if (!rates.has(s.id)) rates.set(s.id, s.weeklyRate);
     moverRows = movers.map((m) => {
-      const person = { vehicleType: m.vehicleType, user: { countryCode: m.countryCode ?? 'GY' } };
+      const person = { vehicleType: m.vehicleType, user: { id: `${m.id}-payer`, tenantId: 'swift-default', countryCode: m.countryCode ?? 'GY' } };
       return {
-        id: m.id,
+        id: m.id, type: m.kind === 'DRIVER' ? 'TAXI_DRIVER' : 'DELIVERY_RIDER',
         riderId: m.kind === 'RIDER' ? `${m.id}-rider` : null,
         driverId: m.kind === 'DRIVER' ? `${m.id}-driver` : null,
         weeklyRate: rates.get(m.id),
@@ -334,7 +355,7 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
       vendor: {
         id: `${v.id}-vendor`,
         vendorType: v.vendorType,
-        owner: { user: { countryCode: v.countryCode ?? 'GY', id: `${v.id}-owner` }, _count: { vendors: v.ownedStores ?? 1 } },
+        owner: { user: { countryCode: v.countryCode ?? 'GY', id: `${v.id}-owner`, tenantId: 'swift-default' }, _count: { vendors: v.ownedStores ?? 1 } },
       },
     }));
     itemCounts = new Map(vendors.map((v) => [`${v.id}-vendor`, v.activeItems]));
@@ -418,7 +439,7 @@ describe('Guyana partner rate card — owner rates are the seeded config', () =>
     // Guyana-only launch config, which this card is layered on; 2026-09-23.3
     // carried the 8,000 rider rate (applied on staging) before the owner's
     // 2026-09-29 change to 6,000.
-    for (const applied of ['2026-09-02.1', '2026-09-23.1', '2026-09-23.3']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
+    for (const applied of ['2026-09-02.1', '2026-09-23.1', '2026-09-23.3', '2026-09-29.1', '2026-09-30.1', '2026-10-01.1', '2026-10-01.2', '2026-10-04.1']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
   });
 
   it('the three mover classes together are exactly the fleet, split by the passenger-vehicle rule provisioning uses', () => {
@@ -561,7 +582,7 @@ describe('signup — the rate a partner is born on', () => {
     }
   });
 
-  it('every taxi driver 9,000, car or bus', async () => {
+  it('every taxi driver 8,000, car or bus', async () => {
     for (const vehicleType of TAXI_VEHICLES) {
       expect((await signup({ kind: 'DRIVER', vehicleType }, seededTiers('GY'))).weeklyRate).toBe(OWNER.taxi);
     }
@@ -721,7 +742,7 @@ describe('public price list — quote equals bill, for every partner', () => {
     const { body } = await priceList({ GY: seededTiers('GY') });
     const d = body.data!;
     expect(d.weekly).toEqual({
-      mover: OWNER.taxi,
+      mover: OWNER.courierHeavy, // Legacy clients show one figure to every mover; heavy delivery is the maximum.
       moverHeavy: OWNER.courierHeavy,
       serviceVendor: OWNER.service,
       smallVendor: OWNER.small,
@@ -856,7 +877,7 @@ describe('the complete card — every key present and valid, or the whole market
   it('replays the review: the fallbacks that quietly re-priced an incomplete card are refusals now', () => {
     // Deleting one key at a time, the review got 8,000 for a taxi driver, 15,000
     // for a service, 20,000 for a department store and no franchise discount — a
-    // different card each time, where the valid card says 9,000 / 8,000 / 60,000 / 7,500.
+    // different card each time, where the valid card says 8,000 / 8,000 / 60,000 / 7,500.
     const t = (tiers: Tiers) => tiers as pricing.SubscriptionTiers;
     const calls = [
       () => pricing.partnerRateFor(t(without('taxiDriver')), { kind: 'DRIVER', vehicleType: 'CAR' }),

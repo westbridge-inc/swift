@@ -92,3 +92,6 @@ gitleaks
 deploy/routing-data/
 # vroom-express writes its access log into the mounted conf directory.
 deploy/routing-conf/vroom/access.log
+
+# OpenNext build output (contains per-build preview-mode keys; never commit)
+.open-next/

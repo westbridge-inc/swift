@@ -9,6 +9,7 @@ import {
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthSessionSnapshot } from '../lib/authSession';
+import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
@@ -117,6 +118,11 @@ function capturedVendorAuthConfig(
 
 // Request interceptor to attach auth token
 api.interceptors.request.use((config) => {
+  // Weak mobile links need more time for reads. Writes keep their existing
+  // timeout/retry contracts, and explicit endpoint timeouts remain intact.
+  if ((config.method === 'get' || config.method === 'head') && config.timeout === 10000) {
+    config.timeout = 20000;
+  }
   if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);
@@ -382,8 +388,13 @@ export const customerApi = {
   // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
   exportAccount: (session?: AuthSessionSnapshot) =>
     api.get('/customer/account/export', capturedAuthConfig(session)),
+  requestAccountClosure: (session?: AuthSessionSnapshot) =>
+    api.post('/customer/account/closure-request', {}, capturedAuthConfig(session)),
+  // receipts=v2: this app shows every deletion receipt by its own message, so
+  // the server may answer a closure request or a pending erasure as such. An
+  // app that does not declare it is answered in the older build's words.
   deleteAccount: (session?: AuthSessionSnapshot) =>
-    api.delete('/customer/account', capturedAuthConfig(session)),
+    api.delete('/customer/account', capturedAuthConfig(session, { params: { receipts: 'v2' } })),
   switchRole: (role: string, session?: AuthSessionSnapshot) =>
     api.post('/customer/switch-role', { role }, capturedAuthConfig(session)),
   // In-app support / dispute channel.
@@ -469,6 +480,9 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
+    /** [L09 · price lock] The quote's total and line prices the customer saw. */
+    expectedTotal?: number;
+    expectedLines?: Array<{ lineId: string; unitPrice: number }>;
   }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
@@ -551,6 +565,8 @@ export interface TieredEstimate {
   currencyCode: string;
   distanceKm: number;
   durationMin: number;
+  /** Server routing provenance, separate from the native basemap provider. */
+  routeSource?: 'osrm' | 'haversine';
   /** Present on a quote WITH stops only (the multi-stop contract). */
   legs?: EstimateLeg[];
   maxStops?: number;
@@ -590,6 +606,8 @@ export const safetyApi = {
   // relative who does not have the app.
   shareTrip: (orderId: string, sendToPhone?: string) =>
     api.post(`/safety/trips/${orderId}/share`, sendToPhone ? { sendToPhone } : {}),
+  tripShares: (orderId: string) => api.get(`/safety/trips/${orderId}/shares`),
+  revokeAllTripShares: (orderId: string) => api.delete(`/safety/trips/${orderId}/shares`),
   revokeTripShare: (token: string) => api.delete(`/safety/share/${token}`),
   /** §5.1 — the "extra safety check-ins on my trips" toggle. The caller's OWN row. */
   monitoringPreference: () => api.get('/safety/monitoring-preference'),
@@ -755,6 +773,8 @@ export const placesApi = {
 type CourierSize = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type CourierSpeed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 export const courierApi = {
+  rotateTracking: (id: string) => api.post(`/courier/order/${id}/tracking`),
+  revokeTracking: (id: string) => api.delete(`/courier/order/${id}/tracking`),
   estimate: (data: { pickup: Point; dropoff: Point; packageSize: CourierSize; speed: CourierSpeed }) =>
     api.post('/courier/estimate', data),
   order: (data: {
@@ -917,6 +937,19 @@ export const partnerApi = {
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
 export const riderApi = {
   profile: () => api.get('/rider/profile'),
+  // [AF-MOB-006] Custody recovery after pickup. The holder reports a problem
+  // and reads the case (with the handoff code while a relay is pending); a
+  // relay rider reads their handoffs and completes one with the holder's code.
+  // The transfer carries an Idempotency-Key so an offline retry replays the
+  // original answer instead of spending a second attempt.
+  recovery: (orderId: string) => api.get(`/rider/orders/${orderId}/recovery`),
+  reportProblem: (orderId: string, body: { reason: string; note?: string; gps?: { lat: number; lng: number } }, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/orders/${orderId}/recovery`, body, capturedAuthConfig(session)),
+  relayTasks: () => api.get('/rider/recovery/relays'),
+  transferCustody: (caseId: string, body: { code: string; gps: { lat: number; lng: number }; version?: number }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/recovery/${caseId}/transfer`, body, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
+  // An absent reason is dropped by JSON; the server accepts a decline with or without one.
+  declineRelay: (caseId: string, reason?: string) => api.post(`/rider/recovery/${caseId}/decline`, { reason }),
   standing: () => api.get('/rider/standing'),
   currentOffer: () => api.get('/rider/offers/current'),
   offerSeen: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/seen', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
@@ -929,10 +962,11 @@ export const riderApi = {
   active: () => api.get('/rider/orders/active'),
   // [B6] Every live leg, primary first, plus the server-computed run summary.
   activeLegs: () => api.get('/rider/orders/active-legs'),
-  accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
+  // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
+  accept: (id: string) => api.post(`/rider/orders/${id}/accept`, {}),
   // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
   // this path acks the offer so it's never scored as a timeout [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   // Golden-rule handover: GPS is mandatory server-side (claims are impossible
   // without it) — an empty body 400s.
@@ -1000,12 +1034,13 @@ export const driverApi = {
     api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
-  accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
+  accept: (id: string) => api.post(`/driver/rides/${id}/accept`, {}),
   /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
    * passenger's ride alive, frees this driver, and matches another driver. */
   handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
@@ -1110,6 +1145,8 @@ export const vendorApi = {
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
+  /** [AF-MOB-006] The store confirms returned goods are back (closes the return). */
+  returnReceived: (id: string) => api.post(`/vendor/orders/${id}/recovery/return-received`, {}),
   items: () => api.get('/vendor/items'),
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
@@ -1308,6 +1345,37 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
     },
     read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {
       const response = await api.get(`${base}/${encodeURIComponent(ref)}`, config());
+      current(); return response.data.data;
+    },
+  };
+}
+
+/** The card half of the fee page (CARD-CHECKOUT-API): the same captured principal and store as
+ *  weeklyFeeApi. The server prices a Pay now; no amount and no card detail is ever sent. */
+export function cardFeeApi(family: import('../lib/cardFee').CardFamily, session: AuthSessionSnapshot | null, storeId?: string | null) {
+  const base = `/${family}/subscription`;
+  const signedOut = async (): Promise<never> => { throw new Error('Sign in to pay.'); };
+  if (!session) return { start: signedOut, read: signedOut, remove: signedOut };
+  const current = () => {
+    const now = getAuthSessionSnapshot();
+    if (!now || now.userId !== session.userId || now.generation !== session.generation || (family === 'vendor' && useStoreSwitcher.getState().selectedStoreId !== storeId)) throw new Error('The paying account changed.');
+    return now;
+  };
+  const config = (headers?: Record<string, string>) => family === 'vendor'
+    ? capturedVendorAuthConfig(current(), storeId, { headers })
+    : capturedAuthConfig(current(), { headers });
+  return {
+    start: async (purpose: import('../lib/cardFee').CardPurpose, key: string): Promise<import('../lib/cardFee').CardSessionStart> => {
+      const body = purpose === 'ENROLL' ? { purpose, consentVersion: CARD_CONSENT_VERSION } : { purpose };
+      const response = await api.post(`${base}/card-sessions`, body, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    read: async (sessionId: string): Promise<import('../lib/cardFee').CardSessionView> => {
+      const response = await api.get(`${base}/card-sessions/${encodeURIComponent(sessionId)}`, config());
+      current(); return response.data.data;
+    },
+    remove: async (cardId: string): Promise<unknown> => {
+      const response = await api.delete(`${base}/cards/${encodeURIComponent(cardId)}`, config());
       current(); return response.data.data;
     },
   };

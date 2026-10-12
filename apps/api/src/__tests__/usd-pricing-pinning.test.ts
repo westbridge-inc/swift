@@ -11,6 +11,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { BillingService } from '../modules/billing/billing.service';
 import { runFxChangeNotices } from '../modules/billing/fx-notices';
 import { enableModeB, sweepModeB } from '../modules/billing/usd-migration';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // System 2 ② — charge-time pinning. The laws under test: a priced charge
 // carries the immutable trio on BOTH events; a later rate change cannot touch
@@ -84,6 +85,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(prisma, subIds);
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });

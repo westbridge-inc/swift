@@ -3,6 +3,7 @@ import type { LightMyRequestResponse } from 'fastify';
 import {
   armDevelopmentSignupGeneration,
   issueSignupContinuation,
+  storePasswordResetOtp,
   storeSignupOtp,
 } from '../../modules/auth/signup-continuation';
 import { guyanaDayKey } from '../../utils/guyana-day';
@@ -17,6 +18,23 @@ import { guyanaDayKey } from '../../utils/guyana-day';
 const KNOWN_TEST_OTP = '246810';
 
 export async function requestOtp(app: FastifyInstance, phone: string): Promise<string> {
+  return requestCodeFor(app, phone, 'send-otp');
+}
+
+/**
+ * [L04 · AUTH-2] The password-reset twin of requestOtp: a reset code is asked
+ * for at /password/reset-request and lives in its own record, so only this
+ * code resets a password (a sign-in code from requestOtp is refused there).
+ */
+export async function requestPasswordResetOtp(app: FastifyInstance, phone: string): Promise<string> {
+  return requestCodeFor(app, phone, 'password/reset-request');
+}
+
+async function requestCodeFor(
+  app: FastifyInstance,
+  phone: string,
+  route: 'send-otp' | 'password/reset-request',
+): Promise<string> {
   // Reset the per-phone cooldown, the trial-integrity §5 hourly cap, AND the
   // daily SMS-budget counters so repeated test runs stay deterministic (these
   // caps are cost/abuse guardrails, not test gates — each cap is covered by
@@ -36,15 +54,16 @@ export async function requestOtp(app: FastifyInstance, phone: string): Promise<s
 
   const res = await app.inject({
     method: 'POST',
-    url: '/api/v1/auth/send-otp',
+    url: `/api/v1/auth/${route}`,
     payload: { phone },
     headers: { 'content-type': 'application/json' },
   });
   if (res.statusCode !== 200) {
-    throw new Error(`send-otp failed for ${phone}: ${res.statusCode} ${res.body}`);
+    throw new Error(`${route} failed for ${phone}: ${res.statusCode} ${res.body}`);
   }
 
-  await storeSignupOtp(app.redis, phone, KNOWN_TEST_OTP);
+  if (route === 'password/reset-request') await storePasswordResetOtp(app.redis, phone, KNOWN_TEST_OTP);
+  else await storeSignupOtp(app.redis, phone, KNOWN_TEST_OTP);
   return KNOWN_TEST_OTP;
 }
 

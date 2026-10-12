@@ -151,6 +151,12 @@ services:
       TEST_CONTROL_SECRET_FILE: /run/secrets/TEST_CONTROL_SECRET
       # The API process serves HTTP only; the worker service below owns jobs.
       RUN_WORKERS: "0"
+      STORAGE_DEPLOYMENT: managed
+      # Both processes inherit the same S3 target and credential-file settings
+      # from .env. Local storage is enabled ONLY by the shared-volume overlay;
+      # an acknowledgement in .env alone must never select container disks.
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      STORAGE_ALLOW_LOCAL: "0"
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     # No host port: Caddy is the only public entrance.
@@ -194,6 +200,12 @@ services:
       SCAN_IP_SALT_FILE: /run/secrets/SCAN_IP_SALT
       ADS_EVENT_SECRET_FILE: /run/secrets/ADS_EVENT_SECRET
       RUN_WORKERS: "1"
+      STORAGE_DEPLOYMENT: managed
+      # Both processes inherit the same S3 target and credential-file settings
+      # from .env. Local storage is enabled ONLY by the shared-volume overlay;
+      # an acknowledgement in .env alone must never select container disks.
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      STORAGE_ALLOW_LOCAL: "0"
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     # The API image's HEALTHCHECK fetches its own HTTP readiness endpoint, but
@@ -242,6 +254,12 @@ services:
       ADMIN_HOST: ${ADMIN_HOST:-}
       ADMIN_BASIC_AUTH_USER: ${ADMIN_BASIC_AUTH_HASH:+admin}
       ADMIN_BASIC_AUTH_HASH: ${ADMIN_BASIC_AUTH_HASH:-}
+      # [WEB-GATE] The optional password in front of the website's own name
+      # (WEB_HOST only; the public names stay open), the same way: a bcrypt
+      # hash, its user DERIVED from the same setting, `tester` exactly when
+      # the hash is set. The website itself never sees either.
+      WEB_BASIC_AUTH_USER: ${WEB_BASIC_AUTH_HASH:+tester}
+      WEB_BASIC_AUTH_HASH: ${WEB_BASIC_AUTH_HASH:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - swift-caddy-data:/data
@@ -277,14 +295,24 @@ services:
         # company detail is still a {{TOKEN}}; WEB_ALLOW_SITE_TOKENS=1 in
         # deploy/.env lets the staging site build with them (PILOT-RUNBOOK.md).
         NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}
-        # [Item 7] The pre-launch switch for the PUBLIC site (swiftgy.com and
-        # www): WEB_ORDERING=live in deploy/.env opens ordering there; empty
-        # (the default) shows the "Launching soon" front door. Every other host
-        # this image answers, staging included, keeps the full marketplace.
-        NEXT_PUBLIC_WEB_ORDERING: ${WEB_ORDERING:-}
     image: swift-web:${SWIFT_TAG:-local}
     restart: unless-stopped
     environment:
+      # [Item 7 · S1] The pre-launch switch for the PUBLIC site (swiftgy.com and
+      # www), read by the site while it runs (apps/web/src/lib/launch-switch.ts),
+      # never baked into the image: WEB_ORDERING=live in deploy/.env opens
+      # ordering there; empty (the default) shows the "Launching soon" front
+      # door. Changing it recreates this container with the new setting; no
+      # rebuild. Every other host this image answers, staging included, keeps
+      # the full marketplace.
+      SWIFT_WEB_ORDERING: ${WEB_ORDERING:-}
+      # [APP-LINKS] Android App Links verification reads
+      # /.well-known/assetlinks.json (apps/web/src/app/well-known/assetlinks.json/route.ts),
+      # built from this variable when the site starts. The web service has no
+      # env_file, so a value in deploy/.env reaches the site ONLY through this
+      # line; empty keeps the honest 404. Public certificate fingerprints, not
+      # a secret. Changing it recreates this container; no rebuild.
+      ANDROID_CERT_SHA256: ${ANDROID_CERT_SHA256:-}
       # V8 collects well below the container's ceiling, so a leak restarts the
       # site instead of pressing on the database's memory.
       NODE_OPTIONS: --max-old-space-size=384

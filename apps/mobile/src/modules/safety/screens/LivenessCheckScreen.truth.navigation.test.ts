@@ -28,6 +28,8 @@ const fx = vi.hoisted(() => ({
   resize: vi.fn(async () => ({ uri: 'file:///shift-selfie-small.jpg' })),
 }));
 vi.mock('expo-image-manipulator', () => ({ manipulateAsync: fx.resize, SaveFormat: { JPEG: 'jpeg' } }));
+// This binary ships the native image module, so the selfie is resized.
+vi.mock('expo', () => ({ requireOptionalNativeModule: (name: string) => (name === 'ExpoImageManipulator' ? {} : null) }));
 
 vi.mock('react-native', async () => {
   const R = await import('react');

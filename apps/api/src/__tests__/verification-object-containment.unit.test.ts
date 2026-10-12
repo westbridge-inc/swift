@@ -31,7 +31,7 @@ vi.mock('../providers/storage/storage-provider', async (original) => ({ ...await
 vi.mock('../modules/notification/notification.service', () => ({
   NotificationService: class {}, notifyAdmins: vi.fn(), tenantOfUser: vi.fn(async () => 'tenant-a'),
 }));
-vi.mock('../modules/user/partner-wind-down', () => ({ windDownPartner: vi.fn(async () => null) }));
+vi.mock('../modules/user/partner-wind-down', async (original) => ({ ...await original<object>(), windDownPartner: vi.fn(async () => null) }));
 
 const A = 'subject-a';
 const B = 'subject-b';
@@ -159,12 +159,18 @@ function harness() {
       }),
     },
     auditLog: { create: vi.fn() }, deletionReceipt: { create: vi.fn(), findFirst: vi.fn() },
-    vendor: { count: vi.fn(async () => 0) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
+    vendor: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => ({ count: 0 })) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
     serviceProvider: { findUnique: vi.fn(async () => null) }, vendorOwner: { findUnique: vi.fn(async () => null) },
     docType: { findUnique: vi.fn(async () => null) },
     advertiserMember: { findMany: vi.fn(async () => []), deleteMany: vi.fn() }, vendorStaff: { deleteMany: vi.fn() },
     extractionRun: { updateMany: vi.fn() }, extractedField: { updateMany: vi.fn() },
     integritySettings: { findUnique: vi.fn() },
+    // Account erasure keeps review scores but clears review words (owner
+    // decision 2026-10-05); no review rows exist in this harness.
+    rating: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    // The deletion census reads fee subscriptions; these subjects have none.
+    subscription: { findMany: vi.fn(async () => []) },
+    $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(async (fn: any) => fn(db)),
     $queryRaw: vi.fn(async (query: unknown, ...values: unknown[]) => rawSecurityCensus(people, orphans, query, values)
       ?? [{ id: String(values[0] ?? A), status: 'ACTIVE', tenantId: 'tenant-a', countryCode: 'GY' }]),
@@ -172,6 +178,9 @@ function harness() {
   for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart']) {
     db[name] = { deleteMany: vi.fn() };
   }
+  // The synthetic route session is not a fresh code sign-in, so deletion
+  // falls through to the step-up grant the route harness holds in Redis.
+  db.session.findUnique = vi.fn(async () => null);
   const provider = {
     engine: { name: 'test', version: '1', external: false },
     verifyDocument: vi.fn(async () => ({ status: 'pending_manual' as const, referenceToken: 'test' })),
@@ -218,7 +227,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllEnvs(); 
 // are not the subject of these tests; the input principal is explicitly bound.
 async function handlers(h: ReturnType<typeof harness>, routes: typeof verificationRoutes) {
   const registered = new Map<string, (...args: any[]) => any>();
-  const app: any = { prisma: h.db, io: {}, log: h.log, prefix: '', addHook: vi.fn() };
+  const app: any = { prisma: h.db, redis: { exists: vi.fn(async () => 1) }, io: {}, log: h.log, prefix: '', addHook: vi.fn() };
   h.db.$extends = () => h.db;
   for (const verb of ['get', 'post', 'put', 'patch', 'delete']) {
     app[verb] = (path: string, ...args: any[]) => { registered.set(`${verb} ${path}`, args.at(-1)); };
@@ -748,7 +757,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     });
     const routes = await handlers(h, customerRoutes);
     const reply = { code: vi.fn() };
-    const result = await routes.get('delete /account')!({ user: { userId: A } }, reply);
+    const result = await routes.get('delete /account')!({ user: { userId: A }, authSessionId: 'verified-synthetic-session' }, reply);
     expect(result).toMatchObject({ success: true, data: { deleted: false, status: 'PENDING_DOCUMENT_ERASURE' } });
     expect(reply.code).toHaveBeenCalledWith(202);
     expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({

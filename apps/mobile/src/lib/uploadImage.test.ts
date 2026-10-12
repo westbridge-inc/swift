@@ -1,13 +1,38 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const native = vi.hoisted(() => ({
   width: 4000, height: 3000,
-  manipulateAsync: vi.fn(async () => ({ uri: 'file:///resized.jpg' })),
+  sizeError: null as Error | null,
+  moduleShipped: true,
+  manipulateAsync: vi.fn(async (..._args: unknown[]) => ({ uri: 'file:///resized.jpg' })),
 }));
-vi.mock('react-native', () => ({ Image: { getSize: (_uri: string, ok: (w: number, h: number) => void) => ok(native.width, native.height) } }));
+vi.mock('react-native', () => ({ Image: { getSize: (_uri: string, ok: (w: number, h: number) => void, fail: (e: Error) => void) => native.sizeError ? fail(native.sizeError) : ok(native.width, native.height) } }));
+vi.mock('expo', () => ({ requireOptionalNativeModule: (name: string) => (native.moduleShipped && name === 'ExpoImageManipulator' ? {} : null) }));
 vi.mock('expo-image-manipulator', () => ({ manipulateAsync: native.manipulateAsync, SaveFormat: { JPEG: 'jpeg' } }));
 import { prepareUploadImage } from './uploadImage';
 const file = { uri: 'file:///original.heic', name: 'capture.heic', type: 'image/heic' };
-beforeEach(() => { native.width = 4000; native.height = 3000; native.manipulateAsync.mockClear(); });
+beforeEach(() => {
+  native.width = 4000; native.height = 3000; native.sizeError = null; native.moduleShipped = true;
+  native.manipulateAsync.mockReset(); native.manipulateAsync.mockImplementation(async () => ({ uri: 'file:///resized.jpg' }));
+});
+describe('never drops an upload when preparation fails', () => {
+  it('uploads the original when the size read fails', async () => {
+    native.sizeError = new Error('decode failed');
+    expect(await prepareUploadImage(file)).toBe(file);
+    expect(native.manipulateAsync).not.toHaveBeenCalled();
+  });
+  it('uploads the original when the decoder fails (low-memory phone)', async () => {
+    native.manipulateAsync.mockRejectedValue(new Error('OutOfMemoryError'));
+    expect(await prepareUploadImage(file)).toBe(file);
+    expect(await prepareUploadImage(file, true)).toBe(file);
+  });
+  it('uploads the original when this binary does not ship the image module, without loading it', async () => {
+    native.moduleShipped = false;
+    native.sizeError = new Error('must not be reached');
+    expect(await prepareUploadImage(file)).toBe(file);
+    expect(native.manipulateAsync).not.toHaveBeenCalled();
+  });
+});
+
 describe('on-device upload preparation', () => {
   it('resizes landscape proof to a 1280px long edge and JPEG 0.6', async () => {
     expect(await prepareUploadImage(file)).toEqual({ uri: 'file:///resized.jpg', name: 'capture.jpg', type: 'image/jpeg' });
@@ -18,9 +43,9 @@ describe('on-device upload preparation', () => {
     await prepareUploadImage(file, true);
     expect(native.manipulateAsync).toHaveBeenCalledWith(file.uri, [{ resize: { height: 1600 } }], { compress: 0.75, format: 'jpeg' });
   });
-  it('rejects invalid image dimensions before encoding', async () => {
+  it('uploads the original photo when the dimensions are unreadable, without encoding', async () => {
     native.width = 0;
-    await expect(prepareUploadImage(file)).rejects.toThrow('dimensions');
+    expect(await prepareUploadImage(file)).toBe(file);
     expect(native.manipulateAsync).not.toHaveBeenCalled();
   });
   it('does not upscale smaller images', async () => {
@@ -71,5 +96,15 @@ describe('retained proof photos', () => {
     const fresh = vi.fn(async () => 'file:///fresh.jpg');
     expect(await photos.capture('session/job/pickup', fresh)).toBe('file:///fresh.jpg');
     expect(fresh).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('image module that throws when loaded', () => {
+  it('uploads the original instead of propagating the load error', async () => {
+    vi.resetModules();
+    // Mirrors the real module body, which throws when the native side is absent.
+    vi.doMock('expo-image-manipulator', () => { throw new Error("Cannot find native module 'ExpoImageManipulator'"); });
+    const fresh = await import('./uploadImage');
+    expect(await fresh.prepareUploadImage(file)).toBe(file);
   });
 });

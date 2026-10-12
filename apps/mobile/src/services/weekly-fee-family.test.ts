@@ -18,6 +18,7 @@ const fx = vi.hoisted(() => {
     owner: { userId: 'dual-owner', generation: 1, accessToken: 'test-access', refreshToken: 'test-refresh' },
   };
 });
+vi.mock('../modules/profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react', async (original) => {
   const actual = await original<typeof import('react')>();
   const hooks = { useState: (initial: unknown) => [initial, vi.fn()], useEffect: (fn: () => void) => { fx.effects.push(fn); }, useMemo: (fn: () => unknown) => fn(), useRef: (current: unknown) => ({ current }), useCallback: (fn: unknown) => fn };
@@ -27,6 +28,8 @@ vi.mock('react-native', () => ({ Platform: { OS: 'ios' }, Pressable: 'Pressable'
 vi.mock('@react-navigation/native', () => ({
   createNavigationContainerRef: () => ({ isReady: () => true, navigate: (screen: string, params?: object) => fx.dispatch(screen, params) }),
   useFocusEffect: () => {},
+  // The fee screen's own navigation (its held-payment support door) goes through the same dispatch.
+  useNavigation: () => ({ navigate: (screen: string, params?: object) => fx.dispatch(screen, params) }),
 }));
 vi.mock('@react-navigation/native-stack', () => ({ createNativeStackNavigator: () => ({ Navigator: 'Navigator', Screen: 'Screen' }) }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0 }) }));

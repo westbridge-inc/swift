@@ -425,7 +425,7 @@ export function useGoOffline(kind: MoverKind) {
 export function useAcceptJob(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ id, fare }: { id: string; fare?: number }) => unwrap(svc(kind).accept(id, fare)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  const m = useMutation({ mutationFn: ({ id }: { id: string }) => unwrap(svc(kind).accept(id)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
   return pv ? PV.previewMutation() : m;
 }
 /** Accept a dispatch OFFER (the offer card), not a board grab. Hits
@@ -434,7 +434,7 @@ export function useAcceptJob(kind: MoverKind) {
 export function useAcceptOffer(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ orderId, fare, offerAttemptId }: { orderId: string; fare?: number; offerAttemptId?: string }) => unwrap(svc(kind).acceptOffer(orderId, fare, offerAttemptId)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  const m = useMutation({ mutationFn: ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => unwrap(svc(kind).acceptOffer(orderId, offerAttemptId)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
   return pv ? PV.previewMutation() : m;
 }
 /** Explicit pass on a dispatch offer — tells the cascade to move to the next
