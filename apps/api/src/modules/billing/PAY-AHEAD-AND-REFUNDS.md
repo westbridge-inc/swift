@@ -27,7 +27,14 @@ What counts as ahead (`pay-ahead.ts`): the fee paid ahead (`prepaidBalance`) plu
 
 An agent payment held as `PAY_AHEAD_LIMIT` or `TOPUP_ON_HOLD` is refunded, not credited: use **Refund flag** on the agent-payments tab, return the money at MMG/agent level, and note the MMG reference. Money never moves automatically.
 
-**One refund per MMG payment.** One real payment can arrive as several observations (the agent webhook, MMG's statement). Refund flag closes the MMG transaction (`REFUNDED`): its other held observations are marked reconciled ("already refunded once"), and no later observation, attach, checkout or recorded payment can credit it. Refund only the row you flagged. If Refund flag answers that the payment was already credited to a weekly fee, do **not** refund it: the money already paid the partner's fee.
+**One refund per MMG payment.** One real payment can arrive as several observations (the agent webhook, MMG's statement). Refund flag closes the MMG transaction (`REFUNDED`): its other observations, held or still being processed, are marked reconciled ("refunded once"), and no later observation, attach, checkout or recorded payment can credit it or bring it back to the queue. Refund only the row you flagged.
+
+Refund flag refuses, and nothing is refunded, when:
+
+- the payment was already credited to a weekly fee (`409 ALREADY_CREDITED`): do **not** refund it, the money already paid the partner's fee;
+- the same MMG payment was already flagged for refund (`409 ALREADY_REFUNDED`, "Do not refund this payment…"): do **not** refund it again; the row is closed as a duplicate of the first refund;
+- the row is a second record of a payment already credited or refunded, or already flagged (`409 NOT_UNMATCHED`, "Do not refund…");
+- the row disagrees with MMG's record of the same transaction (`409 PROVIDER_ID_CONFLICT`: amount, currency or reference): finance checks it against the MMG statement first. A refund of another record of that payment never closes a conflict row; it stays in the queue for a person. There is no in-app action for a conflict row yet: escalate it to the owner with the MMG statement line, and do not edit the database.
 
 ## 4. Production: no fee credited by hand
 
