@@ -433,6 +433,18 @@ describe('[V5 · ruling 7] TIN and the VAT number', () => {
     expect(pending.body).not.toContain('vatRegistrationNumber');
   });
 
+  it('admin store actions (suspend, feature, approve) answer without the owner’s VAT billing number', async () => {
+    const s = await store();
+    expect((await put(s.token, { vatRegistrationNumber: '123456789' })).statusCode).toBe(200);
+    const headers = { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': 'Synthetic review of the store record for this test' };
+    for (const action of ['suspend', 'feature', 'approve'] as const) {
+      const res = await app.inject({ method: 'PUT', url: `/api/v1/admin/vendors/${s.vendorId}/${action}`, headers, payload: action === 'suspend' ? { reason: 'Synthetic review of the store record for this test' } : {} });
+      expect(res.body, `${action} answered ${res.statusCode}`).not.toContain('123456789');
+      expect(res.body).not.toContain('vatRegistrationNumber');
+      if (action === 'suspend') expect(res.statusCode, res.body).toBe(200);
+    }
+  });
+
   it('it is never public: the storefront a customer or a guest opens does not carry it', async () => {
     const s = await store();
     expect((await put(s.token, { vatRegistrationNumber: '987654321' })).statusCode).toBe(200);
