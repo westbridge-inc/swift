@@ -167,6 +167,11 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     const told = await notices(c.id);
     expect(told.map((n) => n.title)).toContain('Your ID is on file');
     for (const n of told) expect(`${n.title} ${n.body}`).not.toMatch(/verified/i);
+    // Taxi rides also need the profile photo (rides.service SELFIE_REQUIRED): the notice never says
+    // rides are unlocked by the ID alone, nor promises orders "of any size".
+    const onFile = told.find((n) => n.title === 'Your ID is on file');
+    expect(onFile?.body).toMatch(/Taxi rides also need your profile photo/);
+    expect(onFile?.body).not.toMatch(/any size|Taxi rides and/);
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('ON_FILE');
   });
 
@@ -316,6 +321,11 @@ describe('(1) an automatic check holds the ID for a person', () => {
     expect(approved.statusCode, approved.body).toBe(200);
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('CHECKED');
+    // The person-checked notice is truthful too: bigger orders, and taxi rides need the profile photo.
+    const checked = (await notices(c.id)).find((n) => n.title === 'Identity verified');
+    expect(checked?.body).toMatch(/A person on our team checked your ID/);
+    expect(checked?.body).toMatch(/Taxi rides also need your profile photo/);
+    expect(checked?.body).not.toMatch(/any size/);
   });
 });
 
@@ -367,6 +377,22 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     const again = (await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) })).json().data;
     expect(again).toMatchObject({ status: 'PENDING' });
     expect(await heldFor(again.id)).toContain('EARLIER_DECISION');
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+  });
+
+  it('a withdrawal that commits after the automatic checks read the facts still holds the upload (re-read under the lock)', async () => {
+    const c = await customer();
+    const bytes = readable();
+    const doc = (await submit(c.token, { idDocumentUrl: await upload(c.token, bytes) })).json().data;
+    expect((await admin('PUT', `/api/v1/admin/verification/${doc.id}/revoke`, { reason: 'Synthetic: not an ID card' })).statusCode).toBe(200);
+    expect((await erase(c.token, doc.id)).json().data[0]).toMatchObject({ outcome: 'DESTROYED' });
+    // The facts read lands BEFORE the withdrawal committed: it sees no earlier decision.
+    const stale = vi.spyOn(app.prisma.reviewDecision, 'count').mockResolvedValueOnce(0);
+    try {
+      const again = (await submit(c.token, { idDocumentUrl: await upload(c.token, bytes) })).json().data;
+      expect(again).toMatchObject({ status: 'PENDING', idCheck: 'WAITING' });
+      expect(await heldFor(again.id)).toContain('EARLIER_DECISION');
+    } finally { stale.mockRestore(); }
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
   });
 

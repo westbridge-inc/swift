@@ -354,6 +354,17 @@ export class VerificationService {
         if (live > 0) {
           data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
           review.customerIdHolds.push('OPEN_SUBMISSION');
+        } else {
+          // A person's rejection or withdrawal that committed after the automatic checks read the
+          // facts (outside this lock) still holds the upload: decisions are re-read here too.
+          const earlier = await tx.verificationDocument.findMany({ where: { userId: data.userId, docType: IDENTITY_DOC_TYPE }, select: { id: true } });
+          const decided = earlier.length > 0 && (await tx.reviewDecision.count({
+            where: { outcome: 'REJECT', case: { submissionId: { in: earlier.map((d) => d.id) } } },
+          })) > 0;
+          if (decided) {
+            data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
+            review.customerIdHolds.push('EARLIER_DECISION');
+          }
         }
       }
       await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
@@ -2065,8 +2076,9 @@ export class VerificationService {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       ...(basis === 'ON_FILE'
-        ? { title: 'Your ID is on file', body: 'Taxi rides and orders of any size are now unlocked.' }
-        : { title: 'Identity verified', body: 'You are now ID-verified and can place orders of any size.' }),
+        // Truthful: the ID unlocks bigger orders; a taxi ride also needs the profile photo (SELFIE_REQUIRED).
+        ? { title: 'Your ID is on file', body: 'Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' }
+        : { title: 'Identity verified', body: 'A person on our team checked your ID. Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' }),
       audience: 'customer',
       data: { kind: 'verification_l2' },
     });
