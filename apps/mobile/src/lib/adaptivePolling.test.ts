@@ -32,7 +32,7 @@ it('shares the banner slow signal and clears it on session cache removal', async
 it('wires dynamic intervals into chat, mover and vendor queries', () => {
   for (const name of ['chat', 'mover', 'vendorops']) {
     const source = readFileSync(new URL(`../hooks/${name}.ts`, import.meta.url), 'utf8');
-    expect(source).toContain('adaptivePollInterval(');
+    expect(source).toMatch(/refetchInterval:[^\n]*POLL\./);
     expect(source).not.toMatch(/refetchInterval:\s*(?:4000|10000|12000|15000|20000|20_000),/);
   }
 });

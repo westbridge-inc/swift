@@ -3,7 +3,7 @@ import { connectSocket, getSocket } from '../services/socket';
 import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
 import { samePrincipalBoundary } from '../lib/authSession';
 import { bindChatRoom } from '../lib/chatRoomSubscription';
-import { adaptivePollInterval } from '../lib/adaptivePolling';
+import { POLL } from '../lib/pollPolicy';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { chatApi } from '../services/api';
 
@@ -38,7 +38,7 @@ export function useChatMessages(roomId?: string) {
     queryKey: ['chat', 'messages', roomId],
     queryFn: () => unwrap<any[]>(chatApi.messages(roomId!)),
     enabled: !!roomId,
-    refetchInterval: () => adaptivePollInterval(4000, 15000),
+    refetchInterval: POLL.chatMessages,
   });
 }
 
