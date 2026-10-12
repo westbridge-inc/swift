@@ -150,15 +150,16 @@ export function signupContinuationOf(request: Pick<FastifyRequest, 'headers' | '
   return proof;
 }
 
-// The runtime posture comes from THE parser, never a bare NODE_ENV comparison —
-// `runtime-mode.ts` exists because "is this production?" was answered a dozen
-// different ways, and a census enforces it. A cookie's `Secure` flag is exactly
-// the kind of answer that must not be a second opinion.
-const secure = (env: Record<string, string | undefined> = process.env): boolean => isProduction(env);
+// Production always requires Secure. HTTPS staging does too: Fastify's
+// protocol respects TRUST_PROXY; never interpret forwarded headers ourselves.
+function secure(reply: FastifyReply, env: Record<string, string | undefined> = process.env): boolean {
+  if (isProduction(env) || reply.request?.protocol === 'https') return true;
+  try { return new URL(env['API_PUBLIC_URL'] ?? '').protocol === 'https:'; } catch { return false; }
+}
 
-function cookie(name: string, value: string, path: string, maxAgeS: number, env?: Record<string, string | undefined>): string {
+function cookie(reply: FastifyReply, name: string, value: string, path: string, maxAgeS: number, env?: Record<string, string | undefined>): string {
   const parts = [`${name}=${encodeURIComponent(value)}`, `Path=${path}`, `Max-Age=${maxAgeS}`, 'HttpOnly', 'SameSite=Strict'];
-  if (secure(env)) parts.push('Secure');
+  if (secure(reply, env)) parts.push('Secure');
   return parts.join('; ');
 }
 
@@ -180,16 +181,16 @@ function appendSetCookies(reply: FastifyReply, values: string[]): void {
 /** Issue the session as cookies. Called only in cookie mode; the body carries no credential. */
 export function setSessionCookies(reply: FastifyReply, tokens: { accessToken: string; refreshToken: string }, env?: Record<string, string | undefined>): void {
   appendSetCookies(reply, [
-    cookie(ACCESS_COOKIE, tokens.accessToken, ACCESS_COOKIE_PATH, ACCESS_COOKIE_MAX_AGE_S, env),
-    cookie(REFRESH_COOKIE, tokens.refreshToken, REFRESH_COOKIE_PATH, REFRESH_COOKIE_MAX_AGE_S, env),
+    cookie(reply, ACCESS_COOKIE, tokens.accessToken, ACCESS_COOKIE_PATH, ACCESS_COOKIE_MAX_AGE_S, env),
+    cookie(reply, REFRESH_COOKIE, tokens.refreshToken, REFRESH_COOKIE_PATH, REFRESH_COOKIE_MAX_AGE_S, env),
   ]);
   browserSessionCounter.labels('cookie_issued').inc();
 }
 
 export function clearSessionCookies(reply: FastifyReply, env?: Record<string, string | undefined>): void {
   appendSetCookies(reply, [
-    cookie(ACCESS_COOKIE, '', ACCESS_COOKIE_PATH, 0, env),
-    cookie(REFRESH_COOKIE, '', REFRESH_COOKIE_PATH, 0, env),
+    cookie(reply, ACCESS_COOKIE, '', ACCESS_COOKIE_PATH, 0, env),
+    cookie(reply, REFRESH_COOKIE, '', REFRESH_COOKIE_PATH, 0, env),
   ]);
   browserSessionCounter.labels('cookie_cleared').inc();
 }
@@ -200,6 +201,7 @@ export function setSignupContinuationCookie(
   env?: Record<string, string | undefined>,
 ): void {
   appendSetCookies(reply, [cookie(
+    reply,
     SIGNUP_CONTINUATION_COOKIE,
     registrationProof,
     SIGNUP_CONTINUATION_COOKIE_PATH,
@@ -210,6 +212,7 @@ export function setSignupContinuationCookie(
 
 export function clearSignupContinuationCookie(reply: FastifyReply, env?: Record<string, string | undefined>): void {
   appendSetCookies(reply, [cookie(
+    reply,
     SIGNUP_CONTINUATION_COOKIE,
     '',
     SIGNUP_CONTINUATION_COOKIE_PATH,

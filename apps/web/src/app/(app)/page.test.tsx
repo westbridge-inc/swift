@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
-import HomePage from './page';
+import { HomeScreen as HomePage } from './home-screen';
 
 const state = vi.hoisted(() => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn(), coords: vi.fn() }));
 vi.mock('next/navigation', () => ({ usePathname: () => '/', useRouter: () => ({ push: state.push, back: state.back, replace: state.replace }) }));
@@ -93,7 +93,8 @@ describe('[Q7b] / is the ordering home', () => {
     expect(bowl.textContent).toMatch(/\$1,800/);
     expect(bowl.textContent).not.toMatch(/GY\$/);
     const open = screen.getByRole('region', { name: 'Open now' });
-    expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/order/vendor/v1');
+    // [W6] A store card opens the store's one page, by its name.
+    expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/store/shanta-kitchen');
     expect(within(screen.getByRole('region', { name: 'Closed now' })).getByText('Late Night Roti')).toBeTruthy();
     expect(homeRequests()).toHaveLength(1);
   });
