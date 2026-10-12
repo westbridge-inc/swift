@@ -47,7 +47,8 @@ export function CardPageSheet({ url, apiOrigin, WebView, watch, onDone }: {
     return () => { stopped = true; clearInterval(timer); };
   }, [watch, finish]);
 
-  return <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={finish}>
+  // Android back (onRequestClose) and an iOS swipe-down of the page sheet (onDismiss) both close it.
+  return <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={finish} onDismiss={finish}>
     <View testID="card-page-sheet" style={{ flex: 1, backgroundColor: color.surface.base }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.lg, paddingVertical: space.md }}>
         <View style={{ flex: 1 }}>

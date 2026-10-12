@@ -172,6 +172,16 @@ describe('the card page inside Swift', () => {
     expect(host.cardRead).toHaveBeenCalledWith('card-session-1');
   });
 
+  it('an iOS swipe-down of the sheet closes it the same way', async () => {
+    const s = sub(MMG, cardLive());
+    await openSheet(s);
+    (nodes(tree).find((n) => n.type === 'Modal')!.props['onDismiss'] as () => void)();
+    await vi.advanceTimersByTimeAsync(0);
+    settle(s);
+    expect(nodes(tree).some((n) => n.props.testID === 'card-page-sheet')).toBe(false);
+    expect(host.cardRead).toHaveBeenCalledWith('card-session-1');
+  });
+
   it('the main frame leaving Swift and the card provider closes the sheet (Android reports frames only here)', async () => {
     const s = sub(MMG, cardLive());
     await openSheet(s);
