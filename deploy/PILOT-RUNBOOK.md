@@ -868,6 +868,15 @@ checkout moves to the requested SHA; everything else before that):
 - AGENT_CASH_WEBHOOK_SECRET or AGENT_CASH_WEBHOOK_SECRET_FILE set: partners
   pay the weekly fee only on the MMG checkout page, never through an agent or
   a Swift Number (the agent-cash webhook answers 503 without its secret);
+- for the whole stack and `--no-public` (not `--data-only`), no address-search
+  provider: `PLACES_PROVIDER=osm` with `PHOTON_URL=http://photon:2322` (the
+  script then also starts the private Photon service from the routing file's
+  geocoding profile, never Nominatim; its South America index is about 6.7 GB
+  on first start), or `PLACES_PROVIDER=google` with
+  `GOOGLE_MAPS_API_KEY_BACKEND_FILE=/run/secrets/GOOGLE_MAPS_API_KEY_BACKEND`
+  (the owner's key in the store). The choice is the owner's. Every host also
+  needs `MAPS_PROVIDER=osrm` and `OSRM_URL=http://osrm:5000` (road fares and
+  ETAs; without them taxi and courier quotes are refused);
 - any setting Compose fills from `${…}` that is also set in the operator's
   shell (Compose prefers the shell to deploy/.env, which is what every check
   reads), and the COMPOSE_* switches. Run it from a clean shell;

@@ -150,6 +150,9 @@ const PRODUCTION = {
   API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://example.org',
   // Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
+  // Address search (the API refuses production without it once #1563 lands;
+  // osm or google is the owner's choice).
+  PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon:2322',
 };
 const STAGING = { ...PRODUCTION, PILOT_ENV: 'staging', NODE_ENV: 'development', API_HOST: 'api-staging.example.org', STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' };
 
@@ -327,6 +330,84 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
     expect(staging.stderr).not.toContain('refuses the agent-cash webhook');
+  });
+});
+
+// Coordinator, 12 Oct: production routing and address search. A taxi or
+// courier quote needs OSRM (MAPS_PROVIDER=osrm, OSRM_URL; #1555 refuses every
+// quote without it), and the API refuses to boot in production without an
+// address-search provider (#1563): osm (the private Photon service, which
+// pilot-up then starts) or google (the owner's key in the store). The choice is
+// the owner's; the database-only stage needs neither, so it never waits on it.
+const routingUp = (lines: string[]) => lines.filter((l) => l.includes('docker-compose.routing.yml') && / up /.test(` ${l} `));
+describe('[PROD-PATH] pilot-up.sh: production routing and address search', () => {
+  it.each([
+    ['MAPS_PROVIDER', undefined, 'pilot requires MAPS_PROVIDER=osrm'],
+    ['MAPS_PROVIDER', 'google', 'pilot requires MAPS_PROVIDER=osrm'],
+    ['OSRM_URL', undefined, 'OSRM_URL must use the private routing service'],
+    ['OSRM_URL', 'https://router.example.org', 'OSRM_URL must use the private routing service'],
+  ])('refuses %s=%j before anything changes (characterises the existing guard)', (name, value, message) => {
+    const r = runPilot({ ...PRODUCTION, [name]: value });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(message);
+    expect(changedNothing(r.calls)).toEqual([]);
+  });
+
+  it.each([undefined, '', 'local', 'OSM', 'photon'])('refuses PLACES_PROVIDER=%j for the whole stack and --no-public, before anything changes', (provider) => {
+    for (const opts of [{}, { args: ['--no-public', SHA], env: { DNS_MAP: '', CADDY_STOPPED: '1' } }]) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, PLACES_PROVIDER: provider }, opts);
+      expect(r.status, JSON.stringify(opts)).not.toBe(0);
+      expect(r.stderr).toContain('PILOT_ENV=production needs PLACES_PROVIDER=osm or google');
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  it.each([
+    [{ PLACES_PROVIDER: 'osm', PHOTON_URL: undefined }, 'PLACES_PROVIDER=osm needs PHOTON_URL=http://photon:2322'],
+    [{ PLACES_PROVIDER: 'osm', PHOTON_URL: 'https://photon.komoot.io' }, 'PLACES_PROVIDER=osm needs PHOTON_URL=http://photon:2322'],
+    [{ PLACES_PROVIDER: 'google', PHOTON_URL: undefined }, 'PLACES_PROVIDER=google needs GOOGLE_MAPS_API_KEY_BACKEND_FILE=/run/secrets/GOOGLE_MAPS_API_KEY_BACKEND'],
+  ])('refuses an incomplete provider (%j) before anything changes', (places, message) => {
+    const r = runPilot({ ...PRODUCTION, ...places });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(message);
+    expect(changedNothing(r.calls)).toEqual([]);
+  });
+
+  it('osm: starts the private Photon service with OSRM (never Nominatim), and checks the geocoding profile publishes no port', () => {
+    const r = runPilot(PRODUCTION);
+    expect(r.status, r.stderr).toBe(0);
+    const up = routingUp(r.calls);
+    expect(up).toHaveLength(1);
+    expect(up[0]).toContain('--profile geocoding');
+    expect(up[0]!.endsWith('up -d --wait osrm photon')).toBe(true);
+    expect(r.calls.filter((l) => l.includes('nominatim'))).toEqual([]);
+    expect(r.calls.some((l) => l.includes('docker-compose.routing.yml') && l.includes('--profile geocoding') && l.includes('config --format json'))).toBe(true);
+    expect(indexOf(r.calls, 'up -d --wait osrm photon')).toBeLessThan(indexOf(r.calls, 'up -d --no-deps --force-recreate api worker'));
+  });
+
+  it('google: the key is wired from the store; no Photon is started', () => {
+    const r = runPilot(
+      { ...PRODUCTION, PLACES_PROVIDER: 'google', PHOTON_URL: undefined, GOOGLE_MAPS_API_KEY_BACKEND_FILE: '/run/secrets/GOOGLE_MAPS_API_KEY_BACKEND' },
+      { env: { STORE_NAMES: [...STORE, 'GOOGLE_MAPS_API_KEY_BACKEND'].join(' ') } },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(routingUp(r.calls).map((l) => l.replace(/.* up /, 'up '))).toEqual(['up -d --wait osrm']);
+    expect(r.calls.filter((l) => l.includes('--profile geocoding'))).toEqual([]);
+  });
+
+  it('the database-only stage needs no address-search choice, and starts no Photon', () => {
+    const r = runPilot({ ...PRODUCTION, PLACES_PROVIDER: undefined, PHOTON_URL: undefined }, { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1' } });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.calls.filter((l) => l.includes('photon') || l.includes('--profile geocoding'))).toEqual([]);
+  });
+
+  it('staging is unchanged: no address-search requirement and no Photon start', () => {
+    const r = runPilot({ ...STAGING, PLACES_PROVIDER: undefined, PHOTON_URL: undefined });
+    expect(r.status, r.stderr).toBe(0);
+    const withOsm = runPilot(STAGING);
+    expect(withOsm.status, withOsm.stderr).toBe(0);
+    expect(withOsm.calls.filter((l) => l.includes('photon') || l.includes('--profile geocoding'))).toEqual([]);
   });
 });
 

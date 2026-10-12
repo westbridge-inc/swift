@@ -34,6 +34,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 DATA_ONLY=0
 NO_PUBLIC=0
+PLACES_PHOTON=0
 if [ "${1:-}" = "--data-only" ]; then DATA_ONLY=1; shift;
 elif [ "${1:-}" = "--no-public" ]; then NO_PUBLIC=1; shift; fi
 SHA="${1:-}"
@@ -284,6 +285,24 @@ if [ "$PILOT_ENV" = production ]; then
     [ -z "$(env_setting "$agent_cash_name")" ] ||
       die "PILOT_ENV=production refuses the agent-cash webhook ($agent_cash_name is set): partners pay the weekly fee only on the MMG checkout page"
   done
+  # Address search (the API refuses to boot in production without a provider,
+  # #1563): osm, the private Photon service this script then starts, or
+  # google, the owner's key in the encrypted store. Which one is the owner's
+  # decision. Only a stage that starts the API asks; --data-only does not.
+  if [ "$DATA_ONLY" -eq 0 ]; then
+    case "$(env_setting PLACES_PROVIDER)" in
+      osm)
+        [ "$(env_setting PHOTON_URL)" = http://photon:2322 ] ||
+          die "PLACES_PROVIDER=osm needs PHOTON_URL=http://photon:2322: the private Photon service (geocoding profile) this script starts"
+        ROUTING+=(--profile geocoding)
+        PLACES_PHOTON=1 ;;
+      google)
+        [ "$(env_setting GOOGLE_MAPS_API_KEY_BACKEND_FILE)" = /run/secrets/GOOGLE_MAPS_API_KEY_BACKEND ] ||
+          die "PLACES_PROVIDER=google needs GOOGLE_MAPS_API_KEY_BACKEND_FILE=/run/secrets/GOOGLE_MAPS_API_KEY_BACKEND: the owner's key, in the encrypted store" ;;
+      *)
+        die "PILOT_ENV=production needs PLACES_PROVIDER=osm or google (the owner's choice): production has no local-only address search" ;;
+    esac
+  fi
 fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 # [PROD-PATH] The production stack obtains certificates for every name it
@@ -453,6 +472,7 @@ fi
 # Pull versioned infrastructure images, then build the exact checked-out API.
 "${COMPOSE[@]}" pull postgres redis meilisearch caddy
 "${ROUTING[@]}" pull osrm
+[ "$PLACES_PHOTON" -eq 0 ] || "${ROUTING[@]}" pull photon
 "${COMPOSE[@]}" build api
 # [Q11] The website's image for the same exact commit, built before anything
 # is stopped: a site that does not build leaves the running stack untouched.
@@ -464,7 +484,13 @@ if [ -n "$ADMIN_HOST" ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; the
   "${COMPOSE[@]}" build admin
 fi
 "${COMPOSE[@]}" up -d --wait postgres redis meilisearch
-"${ROUTING[@]}" up -d --wait osrm
+# [PROD-PATH] Photon only with PLACES_PROVIDER=osm on production; never
+# Nominatim (the geocoding profile's other, heavy member).
+if [ "$PLACES_PHOTON" -eq 1 ]; then
+  "${ROUTING[@]}" up -d --wait osrm photon
+else
+  "${ROUTING[@]}" up -d --wait osrm
+fi
 
 # Check routing from the same private Docker network that the API uses.
 docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" \
