@@ -311,7 +311,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect([d1.driverId, d2.driverId]).toContain(db.driverId);
   });
 
-  it('commits the server-clamped direct fare with assignment, or rolls both back on abort', async () => {
+  it('commits the formula fare with assignment, or rolls both back on abort', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const ride = await app.prisma.order.create({
@@ -353,13 +353,15 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
       throw new Error('forced direct-fare transaction abort');
     }, options)) as never);
     try {
-      await expect(dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER', { requestedFare: 1200 }))
+      await expect(dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER'))
         .rejects.toThrow('forced direct-fare transaction abort');
     } finally {
       transaction.mockRestore();
     }
 
-    expect(staged).toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 1200, logs: 1 });
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The claim takes no price: the
+    // formula fare (2,000) is staged and committed. (Was: a driver-set 1,200.)
+    expect(staged).toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 2000, logs: 1 });
     const [rolledBackRide, rolledBackDriver, rolledBackLogs] = await Promise.all([
       app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } }),
       app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
@@ -371,12 +373,12 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
       .toEqual({ available: true, pointer: null });
     expect(rolledBackLogs).toBe(0);
 
-    const committed = await dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER', { requestedFare: 1200 });
+    const committed = await dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER');
     expect({ status: committed.status, driverId: committed.driverId, fare: Number(committed.taxiFareTotal) })
-      .toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 1200 });
+      .toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 2000 });
     const durable = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect({ fare: Number(durable.taxiFareTotal), total: Number(durable.totalAmount) })
-      .toEqual({ fare: 1200, total: 1200 });
+      .toEqual({ fare: 2000, total: 2000 });
   });
 
   it('ratings record both ways after completion', async () => {

@@ -13,6 +13,7 @@
 import PDFDocument from 'pdfkit';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { NotFoundError } from '../../utils/errors';
+import { isRetiredPlaceholder } from './doc-registry';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -69,7 +70,9 @@ export async function custodyNarrative(db: Db, submissionId: string): Promise<Cu
   const extraction = doc.extractionRuns.map((r) => ({
     runId: r.id, engine: r.engineName, engineVersion: r.engineVersion, modelSha256: r.modelSha256 ?? null, profile: r.profileCode, startedAt: r.startedAt.toISOString(), finishedAt: iso(r.finishedAt),
     durationMs: r.durationMs ?? null, outcome: r.outcome, errorClass: r.errorClass ?? null, ranExternally: r.ranExternally, processorRef: r.processorRef ?? null,
-    fields: r.fields.map((f) => ({ code: f.fieldCode, present: f.valueCt !== null, illegible: f.isIllegible, correctedBy: f.correctedBy ?? null, correctedAt: iso(f.correctedAt) })),
+    // [VERIFY-DOCS] an empty placeholder for a field Swift no longer collects is left out of the trail
+    fields: r.fields.filter((f) => !isRetiredPlaceholder(doc.docType, f.fieldCode, f.valueCt))
+      .map((f) => ({ code: f.fieldCode, present: f.valueCt !== null, illegible: f.isIllegible, correctedBy: f.correctedBy ?? null, correctedAt: iso(f.correctedAt) })),
   }));
   const validations = doc.validationResults.map((v) => ({ code: v.validatorCode, status: v.status, detailCode: v.detailCode ?? null, blocking: v.isBlocking, at: v.evaluatedAt.toISOString() }));
   const review = (cases as Array<Prisma.ReviewCaseGetPayload<{ include: { decisions: true } }> & { holds?: Array<{ id: string; placedBy: string; reason: string; placedAt: Date; vaultStatus: string }> }>).map((c) => ({

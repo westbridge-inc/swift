@@ -1,10 +1,13 @@
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
+import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
+import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
+import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
 import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
@@ -15,7 +18,7 @@ import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
+import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt, freeBecauseNoMoverFound, readNoMoverFound, NO_MOVER_FREE_CANCEL_MESSAGE } from '../order/cancel-policy';
 import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
@@ -430,9 +433,13 @@ async function buildCartResponse(
       where: { userId: cart.customerId, isDefault: true },
     });
   }
-  const promoCodeRecord = cart.promoCodeId
+  const storedPromoCode = cart.promoCodeId
     ? await app.prisma.promoCode.findUnique({ where: { id: cart.promoCodeId } })
     : null;
+  // Old carts can predate the attachment wall. Their saved pointer grants
+  // neither access to another tenant's terms nor a discount on this quote.
+  const promoCodeRecord = storedPromoCode && await promoBelongsToCallerTenant(app.prisma, storedPromoCode, userId)
+    ? storedPromoCode : null;
   // The fee is about where the order is GOING: the chosen delivery address
   // wins over device coords (those are only a fallback before an address is
   // set). Same routing source as checkout, so the quote equals the final fee.
@@ -1865,6 +1872,15 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: cart };
   });
 
+  app.post('/cart/merge', async (request: AuthRequest) => {
+    const body = cartMergeSchema.parse(request.body);
+    const key = request.headers['idempotency-key'];
+    if (typeof key !== 'string') throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'A basket upload needs an Idempotency-Key.');
+    const result = await mergeGuestCart(app.prisma, request.user.userId, key, body);
+    await app.redis.del(`cart:${request.user.userId}`).catch(() => {});
+    return { success: true, data: { ...result, cart: await buildCartResponse(app, request.user.userId) } };
+  });
+
   app.post('/cart/items', async (request: AuthRequest, reply: FastifyReply) => {
     assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
@@ -2592,7 +2608,10 @@ export async function customerRoutes(app: FastifyInstance) {
     // — the fee shown here and the marker recorded there can never drift
     // again. The hold exemption, the assignment guard and the scheduled-slot
     // branch all live inside it; this file no longer restates any of them.
-    const freeCancellation = canCancel && isFreeCancellation(order, previewNow);
+    // [Item 64] The dispatch journal's "no mover found" fact, read the same way
+    // the charge path reads it (there under the order lock).
+    const policyOrder = { ...order, noMoverFound: canCancel && await readNoMoverFound(app.prisma, order) };
+    const freeCancellation = canCancel && isFreeCancellation(policyOrder, previewNow);
 
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({
@@ -2729,8 +2748,11 @@ export async function customerRoutes(app: FastifyInstance) {
         // scheduled order is a countdown that expired hours before the window
         // it claims to describe.
         freeCancellationExpiresAt: canCancel
-          ? (freeCancellationExpiresAt(order, previewNow)?.toISOString() ?? null)
+          ? (freeCancellationExpiresAt(policyOrder, previewNow)?.toISOString() ?? null)
           : null,
+        // [Item 64] Why the cancel is free, in plain words — only when no
+        // mover was found (additive; older apps ignore it).
+        cancellationMessage: freeCancellation && freeBecauseNoMoverFound(policyOrder) ? NO_MOVER_FREE_CANCEL_MESSAGE : null,
       },
     };
   });
@@ -3183,6 +3205,13 @@ export async function customerRoutes(app: FastifyInstance) {
         orderId: id, customerId: userId, reason, refundKind: refund.kind, refundAmount: refund.amount, refundSentence: refund.sentence,
         refundBasis: refund.basis, refundInferredAmount: refund.inferredAmount, refundFunder: refund.funder,
       },
+    }).catch((error: unknown) => {
+      // The earlier read preserves the normal retry response; the database
+      // also arbitrates simultaneous requests that both observed no return.
+      if (isDuplicateOn(error, 'orderId')) {
+        throw new AppError(409, 'RETURN_EXISTS', 'A return has already been requested for this order');
+      }
+      throw error;
     });
     reply.code(201);
     return { success: true, data: created };
@@ -3403,7 +3432,12 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { code: code.toUpperCase().trim() },
     });
 
-    if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    // [L04] A code of another tenant (a platform code for anyone outside
+    // production, or another tenant's store code) is answered exactly as an
+    // unknown code — and is never attached to this cart.
+    if (!(await promoBelongsToCallerTenant(app.prisma, promo, userId)) || !promo) {
+      throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
 
     const now = new Date();
