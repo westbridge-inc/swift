@@ -577,10 +577,16 @@ class Q11WebsiteRenderedByCompose(unittest.TestCase):
         web = model["services"]["web"]
         self.assertNotIn("ports", web)
         self.assertEqual(list((web.get("networks") or {}).keys()), ["private"])
-        # [S1] Besides its memory limit, the site's only setting is the public
-        # site's pre-launch switch, read while it runs (closed unless WEB_ORDERING=live).
-        self.assertEqual(sorted((web.get("environment") or {}).keys()), ["NODE_OPTIONS", "SWIFT_WEB_ORDERING"])
+        # [S1] Besides its memory limit, the site's settings are the public
+        # site's pre-launch switch, read while it runs (closed unless WEB_ORDERING=live),
+        # and [#1608] the Android signing fingerprint it publishes in
+        # /.well-known/assetlinks.json: a public value, empty unless deploy/.env sets it.
+        # No other setting, and never a settings file, reaches the website.
+        self.assertEqual(sorted((web.get("environment") or {}).keys()),
+                         ["ANDROID_CERT_SHA256", "NODE_OPTIONS", "SWIFT_WEB_ORDERING"])
         self.assertEqual(web["environment"]["SWIFT_WEB_ORDERING"], "")
+        self.assertEqual(web["environment"]["ANDROID_CERT_SHA256"], "")
+        self.assertNotIn("env_file", web)
         self.assertNotIn("NEXT_PUBLIC_WEB_ORDERING", web["build"]["args"])
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_API_URL"], "https://api-staging.example.invalid")
         self.assertEqual(web["build"]["args"]["SWIFT_WEB_CHANNEL"], "staging")

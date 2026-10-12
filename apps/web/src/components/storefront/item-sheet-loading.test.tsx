@@ -79,8 +79,10 @@ async function chooseCurry() {
   return choose;
 }
 
+// No vi.doUnmock here: vitest resolves queued mock and unmock calls
+// concurrently, so an unmock queued after one test could land after the next
+// test's doMock and silently remove it. Each fresh page sets its own mock.
 afterEach(() => {
-  vi.doUnmock('@/components/storefront/item-sheet');
   vi.resetModules();
 });
 
