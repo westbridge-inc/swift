@@ -118,6 +118,11 @@ function capturedVendorAuthConfig(
 
 // Request interceptor to attach auth token
 api.interceptors.request.use((config) => {
+  // Weak mobile links need more time for reads. Writes keep their existing
+  // timeout/retry contracts, and explicit endpoint timeouts remain intact.
+  if ((config.method === 'get' || config.method === 'head') && config.timeout === 10000) {
+    config.timeout = 20000;
+  }
   if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);
@@ -938,10 +943,11 @@ export const riderApi = {
   active: () => api.get('/rider/orders/active'),
   // [B6] Every live leg, primary first, plus the server-computed run summary.
   activeLegs: () => api.get('/rider/orders/active-legs'),
-  accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
+  // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
+  accept: (id: string) => api.post(`/rider/orders/${id}/accept`, {}),
   // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
   // this path acks the offer so it's never scored as a timeout [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   // Golden-rule handover: GPS is mandatory server-side (claims are impossible
   // without it) — an empty body 400s.
@@ -1011,12 +1017,13 @@ export const driverApi = {
     api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
-  accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
+  accept: (id: string) => api.post(`/driver/rides/${id}/accept`, {}),
   /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
    * passenger's ride alive, frees this driver, and matches another driver. */
   handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),

@@ -813,10 +813,10 @@ export async function driverRoutes(app: FastifyInstance) {
   // 1. Accept ride
   app.post('/rides/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    // [REPORT-011 F-04] fare 0 = "no choice", never the 60% floor (a
-    // forged/legacy client must not clamp the driver's own fare down).
-    const { fare: rawFare } = z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
-    const fare = rawFare && rawFare > 0 ? rawFare : undefined;
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A driver never sets the
+    // price: base fee plus km, as booked. An older app's `fare` is read (never
+    // refused) and ignored.
+    z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
     const driver = await getDriver(request.user.userId);
 
     if (!driver.isOnline || !driver.locationSessionId) {
@@ -852,10 +852,9 @@ export async function driverRoutes(app: FastifyInstance) {
     // Shared claim: the DB compare-and-set means two drivers tapping
     // accept at the same instant resolve to exactly one winner — the old
     // check-then-update here could double-assign.
-    // Assignment, mover reservation, immutable evidence, and the driver's
-    // server-clamped fare share one commit. A crash cannot leave a durable
-    // winner carrying the old fare (or a fare write on an unassigned ride).
-    const responseOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER', { requestedFare: fare });
+    // Assignment, mover reservation and immutable evidence share one commit;
+    // the booked formula fare is never rewritten by the claim.
+    const responseOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER');
 
     // Customer-facing publication is after the canonical claim and therefore
     // best-effort. A socket/push outage cannot tell the driver a durable winner
@@ -911,15 +910,14 @@ export async function driverRoutes(app: FastifyInstance) {
    *  quietly decayed by the un-acked offer's timeout.) */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
-    const { orderId, fare, offerAttemptId } = z.object({
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] `fare` from an older app
+    // is read (never refused) and ignored: the booked formula fare stands.
+    const { orderId, offerAttemptId } = z.object({
       orderId: z.string().min(1).max(64),
       fare: zMoneyWhole.optional(),
       offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
     }).parse(request.body);
-    // [REPORT-010 F-07] fare 0 is never a legitimate choice — a recovered
-    // card missing its board row must not silently clamp pay to the 60%
-    // floor. Zero means "no choice"; the market fare applies.
-    const order = await dispatch.acceptOffer(orderId, request.user.userId, fare && fare > 0 ? fare : undefined, offerAttemptId);
+    const order = await dispatch.acceptOffer(orderId, request.user.userId, undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
 
