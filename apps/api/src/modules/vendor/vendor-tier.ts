@@ -16,6 +16,7 @@
  * order value the tier may transact per rolling week — the same exposure the cap was
  * written to bound.
  */
+import { guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { Prisma, PrismaClient, Vendor, VendorTier } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import type { CountryConfigService } from '../country/country-config.service';
@@ -55,7 +56,9 @@ export interface TierUsage { ordersToday: number; grossThisWeek: number; dayStar
  *  commitments the store will see unless cancelled); the STORE's own view
  *  (`storeView`) counts only orders its board shows [Q12]. */
 export async function tierUsage(db: Db, vendorId: string, now: Date, opts: { storeView?: boolean } = {}): Promise<TierUsage> {
-  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  // "Today" is the GUYANA day, as the store's own counters count it — never the
+  // UTC day, which in Guyana ends at 8 pm, in the middle of the evening's orders.
+  const dayStart = startOfGuyanaDay(guyanaDayKey(now));
   const weekStart = new Date(now.getTime() - 7 * 86_400_000);
   const visible = opts.storeView ? { AND: [vendorVisibleFilter(db)] } : {};
   const [ordersToday, gross] = await Promise.all([
@@ -162,7 +165,7 @@ export async function nudgeOwnerOnce(
   now: Date,
 ): Promise<boolean> {
   if (!verdict.nudge) return false;
-  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const dayStart = startOfGuyanaDay(guyanaDayKey(now));
   const already = await db.notification.findFirst({
     where: { data: { path: ['kind'], equals: 'vendor_tier_nudge' }, AND: [{ data: { path: ['vendorId'], equals: vendor.id } }], createdAt: { gte: dayStart } },
     select: { id: true },

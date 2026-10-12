@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Prisma, TaxiStopStatus } from '@prisma/client';
+import { CustodyRecoveryState, Prisma, TaxiStopStatus } from '@prisma/client';
 import {
   TERMINAL_ORDER_STATUSES,
   LIVE_ORDER_STATUSES,
@@ -10,6 +10,8 @@ import {
   TAXI_STOP_OPEN_STATUSES,
   TAXI_STOP_TRANSITIONS,
   isTaxiStopOpen,
+  CUSTODY_CASE_LAW,
+  CUSTODY_CASE_OPEN_STATES,
 } from '../modules/order/order-status';
 
 // ---------------------------------------------------------------------------
@@ -211,5 +213,54 @@ describe('[TAXI multi-stop] the stop law has ONE definition', () => {
       if (TYPED_STOP_LITERAL.test(code)) offenders.push(`${rel(file)}: a literal typed as TaxiStopStatus`);
     }
     expect(offenders, 'import TAXI_STOP_OPEN_STATUSES / TAXI_STOP_TRANSITIONS from modules/order/order-status instead').toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [AF-MOB-006] A custody recovery case's states are the ELEVENTH member of
+// this family, with the same two guarantees: an exhaustive Record in the owner
+// (a new state fails the BUILD), and no other file re-declaring a case-state
+// list or a case edge. A list is a case list when it carries two or more names
+// that no other enum uses (SUPPORT_HOLD, RELAY_REQUIRED, ...). The migration
+// SQL is history and is graded against the law by custody-recovery-schema.
+// ---------------------------------------------------------------------------
+
+describe('[AF-MOB-006] the custody case law has ONE definition', () => {
+  const files = walk(SRC);
+  const rel = (f: string) => f.replace(SRC, 'src');
+  const CASE_STATES = Object.values(CustodyRecoveryState) as string[];
+  const OTHER_ENUM_VALUES = new Set(Prisma.dmmf.datamodel.enums
+    .filter((e) => e.name !== 'CustodyRecoveryState')
+    .flatMap((e) => e.values.map((v) => v.name)));
+  const CASE_ONLY = CASE_STATES.filter((s) => !OTHER_ENUM_VALUES.has(s));
+  const CASE_EDGE = new RegExp(`\\b(${CASE_STATES.join('|')})\\s*:\\s*\\[\\s*'(${CASE_ONLY.join('|')})'`);
+  const TYPED_CASE_LITERAL = /CustodyRecoveryState\[\]\s*=\s*\[|Set<CustodyRecoveryState>\(\s*\[|satisfies\s+(readonly\s+)?CustodyRecoveryState\[\]/;
+
+  it('the scan has something to recognise: the open states belong to no other enum', () => {
+    expect(CASE_ONLY).toEqual(expect.arrayContaining(['SUPPORT_HOLD', 'RETURN_REQUIRED', 'RELAY_REQUIRED', 'TRANSFER_IN_PROGRESS']));
+  });
+
+  it('the owner derives the open list from an exhaustive Record rather than hand-writing it', () => {
+    const owner = readFileSync(join(SRC, OWNER), 'utf8');
+    expect(owner).toMatch(/Record<CustodyRecoveryState,/);
+    expect(stripComments(owner)).toMatch(/CUSTODY_CASE_OPEN_STATES[^=\n]*=[^;]*\.filter\(/);
+    expect(Object.keys(CUSTODY_CASE_LAW).sort()).toEqual([...CASE_STATES].sort());
+    expect(CUSTODY_CASE_OPEN_STATES.length).toBeGreaterThan(0);
+  });
+
+  it('no file re-declares a case-state list or a case edge, in TypeScript or in SQL', () => {
+    const offenders: string[] = [];
+    for (const file of files) {
+      if (file.endsWith(OWNER)) continue;
+      const code = stripComments(readFileSync(file, 'utf8'));
+      const lists = [...(code.match(/\[[^[\]]*\]/g) ?? []), ...(code.match(/\bIN\s*\([^)]*\)/gi) ?? [])];
+      for (const list of lists) {
+        const names = list.match(/'[A-Z_]+'/g)?.map((q) => q.slice(1, -1)) ?? [];
+        if (names.filter((n) => CASE_ONLY.includes(n)).length >= 2) offenders.push(`${rel(file)}: ${list.replace(/\s+/g, ' ').slice(0, 90)}`);
+      }
+      if (CASE_EDGE.test(code)) offenders.push(`${rel(file)}: a case transition table`);
+      if (TYPED_CASE_LITERAL.test(code)) offenders.push(`${rel(file)}: a literal typed as CustodyRecoveryState`);
+    }
+    expect(offenders, 'import CUSTODY_CASE_OPEN_STATES / CUSTODY_CASE_TRANSITIONS from modules/order/order-status instead').toEqual([]);
   });
 });

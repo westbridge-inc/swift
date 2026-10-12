@@ -273,6 +273,7 @@ const CENSUS: Case[] = [
   { k: 'safety_escrow_review', d: { holds: [] }, to: null, why: 'admins — [AG-XF-013] a deleted account\u2019s emergency contact details are still escrowed because a safety hold never closed. Confirming the hold is still real, or closing the case so erasure completes, is an ops act — and the person it concerns has already left, so there is no mobile destination' },
   { k: 'not_my_driver_discrepancy', d: { missingCase: [], missingDispatch: [], repaired: [] }, to: null, why: 'admins — [S-13] a not-my-driver decision lacked its case or its dispatch command; an ops surface' },
   { k: 'trip_share_rotated', d: { ...O }, to: DELIVERY('o1'), why: 'sharer — [S-16] their share link was reset; routes by orderId like every trip kind (the trip screen is Taxi — GAP shared with guardian_checkin)' },
+  { k: 'trip_share_ended', d: { outcome: 'STOPPED_BY_RIDER' }, to: null, why: 'guardian — [L10 §2] the trip someone shared with them ended (stopped, completed, cancelled, or contact lost); they follow a trip, they own no order, so the notice is the whole message' },
   { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: null, why: 'admins — [S-19] an ops page nobody acknowledged by its deadline; the alert list is an ops surface' },
   { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: null, why: 'admins — [S-19] a scheduled or manual drill of the paging path; an ops surface' },
   { k: 'safety_sweep_slo', d: { workType: 'guardian.open', stalled: true, passAgeSeconds: 1200 }, to: null, why: 'admins — [S-05] a safety sweep whose pass stalled past the SLO or whose rows keep failing; an ops surface, not mobile' },
@@ -283,6 +284,7 @@ const CENSUS: Case[] = [
   { k: 'ops_dispatch_exhausted', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
+  { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
   { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
   { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },
 
@@ -291,6 +293,9 @@ const CENSUS: Case[] = [
   { k: 'ride_queue_expired', d: { audience: 'customer', rideClass: 'STANDARD' }, to: { screen: 'Taxi' }, why: 'customer — queue timed out, request again' },
   { k: 'ride_released_no_drivers', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — ride released' },
   { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1', expiresAt: '2026-09-24T20:00:20.000Z' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
+  { k: 'custody_handoff_code', d: { ...O, caseId: 'c1' }, to: { screen: 'ActiveJob' }, why: 'RIDER holding the goods — [AF-MOB-006] a relay rider is coming; the handoff code is on their live job, which MoverStack mounts' },
+  { k: 'custody_relay_cancelled', d: { caseId: 'c1', reason: 'called_off' }, to: { screen: 'Main' }, why: 'RELAY RIDER — [AF-MOB-006 · DS667] the handoff they were asked to make was called off or expired; their dashboard no longer shows it' },
+  { k: 'custody_relay_assigned', d: { caseId: 'c1' }, to: { screen: 'Main' }, why: 'RELAY RIDER — [AF-MOB-006] asked to take an order over; the order is not theirs until the code is verified, so it opens their dashboard, never the order' },
   { k: 'prep_ready', d: { ...O, audience: 'earner' }, to: { screen: 'ActiveJob' }, why: 'RIDER — the kitchen marked the bag ready; ActiveJob is their live job, which MoverStack mounts [Q10]. It sat in the customer group aimed at Delivery, which MoverStack never mounts, so the tap opened nothing' },
 
   // ── Bookings + service jobs [the S0 this pass closed].
@@ -333,6 +338,8 @@ const CENSUS: Case[] = [
   { k: 'trust_l3', to: null, why: 'GAP: rider trust tier raised' },
   { k: 'liveness_midshift_prompt', d: { respondBy: '2026-01-01T00:00:00.000Z', profile: 'DRIVER' }, to: { screen: 'LivenessCheck', params: { profile: 'DRIVER', respondBy: '2026-01-01T00:00:00.000Z' } }, why: 'E12: the timed selfie check, deadline riding along' },
   { k: 'liveness_midshift_missed', to: { screen: 'LivenessCheck', params: { profile: 'DRIVER' } }, why: 'E12: a fresh PASS is the only way back online' },
+  { k: 'password_changed', to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'I did not change my password' } }, why: '[L04 · MASTER-003] security notice after a password change: if it was not the owner, support is the only way back' },
+  { k: 'password_sign_in_paused', to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Someone is trying my password' } }, why: '[L04 · MASTER-056] password sign-in paused after many wrong attempts; code sign-in still works, help is the door if it was not the owner' },
   { k: 'liveness_locked', to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } }, why: 'E12: only support clears a lock' },
   { k: 'incident_interim_lifted', d: { caseNumber: 'INC-1' }, to: null, why: 'GAP: suspension lifted' },
   { k: 'incident_shadow_restricted', d: { caseNumber: 'INC-1' }, to: null, why: 'GAP: account restricted' },
@@ -483,6 +490,9 @@ describe('every destination is a route the app actually registers', () => {
     dispatch_offer: 'the earner has an offer with a running clock',
     claim_over_gate: 'the rider is owed a delivery guarantee',
     prep_ready: 'the rider is told the bag is packed at the counter',
+    custody_handoff_code: 'the rider holding the goods is told a relay rider is coming',
+    custody_relay_assigned: 'a relay rider is asked to take an order over',
+    custody_relay_cancelled: 'a relay rider is told the handoff is off',
   };
 
   it('a push aimed at a MOVER lands on a screen MoverStack mounts', () => {
@@ -549,6 +559,7 @@ const NOT_PUSH_KINDS = new Set([
   'stall',                                        // scheduler-health union
   'advanced', 'banked', 'held', 'lost',           // MMG settlement outcome union (billing.service.ts)
   'churned', 'dunned', 'nudged', 'preserved', 'skipped', // dunning/repair outcome unions (billing.service.ts)
+  'blocked', 'reserved', 'unproven',              // pay-session start and terminal-repair unions (card-rail, mmg-checkout, billing.service.ts)
 ]);
 
 function filesUnder(dir: string, ext: '.ts' | '.tsx'): string[] {

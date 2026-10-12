@@ -7,12 +7,15 @@ import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { ErrorState, LoadingBlock } from '../../kit';
 import { useMyAdvertisers } from '../../hooks/advertiser';
+import { useAdsEnabled } from '../../hooks/useAdsEnabled';
+import { RolePickerScreen } from '../../screens/auth/RolePickerScreen';
 import { AdvertiserRegisterScreen } from './screens/AdvertiserRegisterScreen';
 import { AdvertiserHomeScreen } from './screens/AdvertiserHomeScreen';
 import { NewCampaignScreen } from './screens/NewCampaignScreen';
 import { CampaignDetailScreen } from './screens/CampaignDetailScreen';
 import { AdvertiserBillingScreen } from './screens/AdvertiserBillingScreen';
 import { AdvertiserTeamScreen } from './screens/AdvertiserTeamScreen';
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 
 // The advertiser surface (ads-platform spec §14) — role-routed like the vendor
@@ -47,6 +50,11 @@ function AdvertiserTabs() {
 }
 
 export function AdvertiserStack() {
+  const adsEnabled = useAdsEnabled();
+  return adsEnabled ? <EnabledAdvertiserStack /> : <RolePickerScreen />;
+}
+
+function EnabledAdvertiserStack() {
   const me = useMyAdvertisers();
 
   if (me.isLoading) {
@@ -80,6 +88,7 @@ export function AdvertiserStack() {
           <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         </>
       )}
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
     </Stack.Navigator>
   );
 }

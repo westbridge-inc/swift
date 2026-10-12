@@ -331,6 +331,12 @@ export class IncidentService {
     const fingerprint = input.source ? intakeFingerprint(input.source) : null;
     if (fingerprint) {
       const existing = await tx.incidentCase.findUnique({ where: { sourceFingerprint: fingerprint } });
+      // [M069] Under the subject lock: a replayed source must carry the tuple it
+      // was first used with, so two racing requests with one key and different
+      // ids can never hand the second the first one's case.
+      if (existing && (existing.subjectUserId !== input.subjectUserId || (existing.orderId ?? null) !== (input.orderId ?? null) || (existing.sosAlertId ?? null) !== (input.sosAlertId ?? null))) {
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'That key already logged a different case.');
+      }
       if (existing) {
         const replayed = await tx.incidentCase.update({ where: { id: existing.id }, data: { replayCount: { increment: 1 } } });
         return { kase: replayed, patternFrom: null, suspensionNotificationId: null, replayed: true };

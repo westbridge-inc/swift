@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
@@ -29,6 +30,8 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
+import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 
@@ -715,6 +718,7 @@ export function DeliveryScreen() {
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
   const mmgClaim = parseMmgClaimView(o.mmgClaim);
+  const custodyRecovery = parsePartyCaseView(o.custodyRecovery);
   const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
   const ringHidden = terminal || mmgCaptured || !o.canCancel;
   // Hold lifecycle and cancel eligibility are separate server facts. A paid or
@@ -978,6 +982,7 @@ export function DeliveryScreen() {
           ...elevation.raised,
         }}
       >
+        {initialRegion ? <MapCredits /> : null}
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
           {/* The "#NNNN · held" caption moved onto the map as the reference's
               floating chip — one statement of the state, where it belongs. */}
@@ -1166,25 +1171,18 @@ export function DeliveryScreen() {
             />
           ) : null}
 
-          {/* [B9] The recipient's half of Send. GET /courier/track/:token has
-              been public since launch and NOTHING generated the link — the
-              sender had no way to hand tracking to the person waiting for the
-              parcel. Web twin: /track/[token]. Sender-scoped token, in-flight
-              only (the token never expires, so a settled parcel stops
-              advertising it). */}
-          {!terminal && o?.orderType === 'COURIER' && o?.courierTrackingToken ? (
-            <PillButton
-              label="Share tracking with the recipient"
-              variant="soft"
-              icon="share-2"
-              style={{ marginTop: space.md }}
-              onPress={() => {
-                const who = o?.courierRecipientName ? `${o.courierRecipientName}, track` : 'Track';
-                void Share.share({
-                  message: `${who} your Swift parcel live: ${WEB_URL}/track/${o.courierTrackingToken}`,
-                }).catch(() => toast.show("Couldn't open the share sheet."));
-              }}
-            />
+          {!terminal && o?.orderType === 'COURIER' ? (
+            <View style={{ marginTop: space.md, gap: space.sm }}>
+              <PillButton label="Share a new tracking link" variant="soft" icon="share-2"
+                onPress={() => {
+                  void courierApi.rotateTracking(o.id).then((res) => Share.share({
+                    message: `Track your Swift parcel live: ${WEB_URL}/track/${res.data.data.trackingToken}`,
+                  })).catch(() => toast.show("Couldn't share tracking. Try again."));
+                }} />
+              <T variant="caption" tone="muted">A new link replaces the previous link. Tracking expires 12 hours after booking.</T>
+              <PillButton label="Stop tracking sharing" variant="outline"
+                onPress={() => { void courierApi.revokeTracking(o.id).then(() => toast.show('Tracking sharing stopped.')).catch(() => toast.show('Could not stop sharing. Try again.')); }} />
+            </View>
           ) : null}
 
           {cancelled || failed ? (
@@ -1415,6 +1413,10 @@ export function DeliveryScreen() {
               />
             </View>
           ) : null}
+
+          {/* [AF-MOB-006] After pickup, a delivery problem is an owned case:
+              the server's sentence says who is handling it and what happens. */}
+          {partyCaseWorthShowing(custodyRecovery) ? <CustodyRecoveryNotice view={custodyRecovery} /> : null}
 
           {mmgClaim && !cancelled && !failed ? (
             <MmgPaymentClaimCard

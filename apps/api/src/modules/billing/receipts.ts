@@ -16,10 +16,11 @@ export async function issueReceipt(
     amount: number;
     channel?: string;
     mmgRef?: string;
-    tenantId?: string;
+    tenantId: string;
   },
 ): Promise<{ receiptNumber: string }> {
-  const tenantId = input.tenantId ?? 'swift-default';
+  const tenantId = input.tenantId;
+  if (!tenantId) throw new Error('RECEIPT_TENANT_REQUIRED');
   const year = new Date().getUTCFullYear();
   // Lock-and-increment in one statement — the RETURNING value IS the claim;
   // two concurrent issuers serialize on the row lock, so numbers are gapless

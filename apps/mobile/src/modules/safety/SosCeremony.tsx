@@ -50,6 +50,13 @@ function isOffline(err: unknown): boolean {
   return isAxiosError(err) && !err.response;
 }
 
+/** [REVIEW-PARTNER] The App Review demo's answer: nobody was alerted. Its words are the server's. */
+function reviewDemoSosMessage(err: unknown): string | null {
+  if (!isAxiosError(err) || err.response?.status !== 403) return null;
+  const error = (err.response.data as { error?: { code?: string; message?: string } } | undefined)?.error;
+  return error?.code === 'REVIEW_DEMO_NO_SOS' && typeof error.message === 'string' ? error.message : null;
+}
+
 /** Exactly the server's "the grace window closed" answer — nothing else is that. */
 function isSosNotCancellable(err: unknown): boolean {
   return isAxiosError(err) && err.response?.status === 409
@@ -88,6 +95,7 @@ export function SosCeremony({
 
   const raisePending = jobSos.isPending || svcSos.isPending;
   const raiseError = ('orderId' in context ? jobSos.isError : svcSos.isError) && !alert;
+  const demoMessage = raiseError ? reviewDemoSosMessage('orderId' in context ? jobSos.error : svcSos.error) : null;
 
   // The grace countdown reads the SERVER deadline; when it passes, the worker
   // is promoting — say that, don't keep a dead countdown alive.
@@ -235,7 +243,16 @@ export function SosCeremony({
               </T>
             </View>
           ) : null}
-          {raiseError ? (
+          {demoMessage ? (
+            <View style={{ alignSelf: 'stretch', borderRadius: 12, backgroundColor: withAlpha(color.error, 0.1), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md, marginTop: space.md }}>
+              <T variant="label" tone="error" weight="semibold">
+                App Review demo — nobody was alerted.
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                {demoMessage}
+              </T>
+            </View>
+          ) : raiseError ? (
             <View style={{ alignSelf: 'stretch', borderRadius: 12, backgroundColor: withAlpha(color.error, 0.1), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md, marginTop: space.md }}>
               <T variant="label" tone="error" weight="semibold">
                 Swift was NOT alerted — the request failed.

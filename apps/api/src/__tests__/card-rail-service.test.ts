@@ -1,3 +1,4 @@
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import Redis from 'ioredis';
@@ -10,6 +11,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BillingService, type BillingObserver } from '../modules/billing/billing.service';
+import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { CARD_ON_FILE_CONSENT_VERSION, CARD_SESSION_TTL_MS, CardRailService } from '../modules/billing/card-rail.service';
 import { cardRailWorkerSource, sweepCardSessions } from '../modules/billing/card-rail-worker';
 import { openVaultToken } from '../modules/billing/card-vault';
@@ -130,14 +132,17 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   delete process.env['CARD_RAIL_V2'];
   delete process.env['MASTER_KEK'];
   resetKeyProviderForTests();
+  // Purge the synthetic payers before their preserved authority sources.
   // Deleting the subscriptions cascades their cards, sessions and payments;
   // observations are append-only evidence and stay, keyed to this run's ids.
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
@@ -284,6 +289,24 @@ describe('[C5 · C8] a return is an observation: the wrong one grants nothing, a
 });
 
 describe('PAY_NOW: server-priced, booked ONCE through applySuccessfulCharge, which reinstates', () => {
+  it('taxi activation after the delivery quote opens no stale-price page; retry uses the shared 8,000 fee', async () => {
+    const p = await partner();
+    const driver = await app.prisma.driver.create({ data: { userId: p.userId, vehicleType: 'CAR', vehicleMake: 'Test', vehicleModel: 'Fixture',
+      vehicleYear: 2020, vehicleColor: 'White', licensePlate: `CARD-FEE-${RUN}-${seq}`, driverLicenseUrl: 'storage://test/license', vehicleInsuranceUrl: 'storage://test/insurance' } });
+    const quote = billing.quoteCardPayNow.bind(billing);
+    const interceptor = vi.spyOn(billing, 'quoteCardPayNow').mockImplementationOnce(async (...args) => {
+      const old = await quote(...args);
+      await new SubscriptionService(app.prisma).startTrialForDriver(driver.id);
+      return old;
+    });
+    try {
+      await expect(start(p, 'PAY_NOW')).rejects.toMatchObject({ code: 'MOVER_FEE_PRICE_CHANGED' });
+      expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(0);
+      const fresh = await start(p, 'PAY_NOW');
+      expect(fresh.amount).toBe(8000);
+      expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).type).toBe('DELIVERY_RIDER');
+    } finally { interceptor.mockRestore(); }
+  });
   it('a SUSPENDED partner pays the owed week by card: the week advances, access returns, one success, one ledger posting — and a second confirm books nothing', async () => {
     const due = new Date(Date.now() - 10 * DAY);
     const p = await partner({ status: 'SUSPENDED', due, failedAttempts: 3 });
@@ -386,11 +409,12 @@ describe('PAY_NOW: server-priced, booked ONCE through applySuccessfulCharge, whi
     expect(after.sub.status).toBe('ACTIVE');
   });
 
-  it('an abandoned page (no button pressed) expires in the sweep and books nothing', async () => {
+  it('an unanswered page remains UNKNOWN after local expiry, paused with nothing booked', async () => {
     const p = await partner();
     const session = await start(p, 'PAY_NOW');
     await card.sweepSessions(new Date(Date.parse(session.expiresAt) + 60_000));
-    expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('EXPIRED');
+    expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('UNKNOWN');
+    expect((await money(p.subId)).sub.billingConfirmationPausedAt).not.toBeNull();
     expect((await money(p.subId)).payments).toHaveLength(0);
   });
 
@@ -491,6 +515,7 @@ function watched(inner: CardRailProvider, hooks: { beforeCharge?: () => Promise<
   const provider: CardRailProvider = {
     binding: inner.binding,
     simulator: inner.simulator,
+    savesCards: inner.savesCards,
     createSession: (i) => inner.createSession(i),
     parseReturn: (params) => inner.parseReturn(params),
     confirm: (i) => inner.confirm(i),
@@ -647,7 +672,7 @@ describe('[AX297 F1] a card that leaves service after billing read it is never c
     const removalHolds = deferred(); const releaseRemoval = deferred();
     let billingPid = 0; let removalPid = 0;
     const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
-      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; },
+      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; billingPid = 0; },
       beforeLateMmgAuthorityLock: async (subscriptionId, tx) => { if (subscriptionId === p.subId && !billingPid) billingPid = await backendPid(tx); },
     }, () => provider);
     const cards = new CardRailService(app.prisma, notifications, racing, () => provider, {
@@ -685,7 +710,7 @@ describe('[AX297 F1] a card that leaves service after billing read it is never c
     const replacementHolds = deferred(); const releaseReplacement = deferred();
     let billingPid = 0; let replacementPid = 0;
     const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
-      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; },
+      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; billingPid = 0; },
       beforeLateMmgAuthorityLock: async (subscriptionId, tx) => { if (subscriptionId === p.subId && !billingPid) billingPid = await backendPid(tx); },
     }, () => provider);
     const cards = new CardRailService(app.prisma, notifications, racing, () => provider, {
@@ -959,5 +984,63 @@ describe('[AX297 F5] CARD_RAIL_V2 off: the worker sweep is a strict no-op; CARD_
     const swept = await sweepCardSessions({ prisma: app.prisma, notifications, billing, cardRail: cardRailWorkerSource({ redis }, drain) }, later);
     expect(swept?.checked).toBeGreaterThanOrEqual(1);
     expect(await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).toMatchObject({ status: 'EXPIRED', failureCode: 'EXPIRED_UNUSED' });
+  });
+});
+
+describe('shared confirmation authority fences card PAY_NOW', () => {
+  async function pendingMmg(p: Awaited<ReturnType<typeof partner>>) {
+    const sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } });
+    return app.prisma.subscriptionPayment.create({ data: {
+      subscriptionId: p.subId, amount: WEEKLY, paymentMethod: 'MOBILE_MONEY', status: 'PENDING',
+      externalRef: `synthetic-held-${nanoid(12)}`, clientKey: `synthetic-mmg-${nanoid(12)}`,
+      periodStart: sub.nextBillingDate, periodEnd: new Date(+sub.nextBillingDate + 7 * DAY),
+      failureRaw: { providerEffect: 'AUTHORIZED' },
+    } });
+  }
+  it('MMG uncertainty committed after quote prevents a second provider page reservation', async () => {
+    const p = await partner();
+    const quote = billing.quoteCardPayNow.bind(billing);
+    const observer = vi.spyOn(billing, 'quoteCardPayNow').mockImplementationOnce(async (...args) => {
+      const priced = await quote(...args); await pendingMmg(p); return priced;
+    });
+    const create = vi.spyOn(sim, 'createSession');
+    try {
+      await expect(start(p, 'PAY_NOW')).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      expect(create).not.toHaveBeenCalled();
+      expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(0);
+      expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE' } })).toBe(1);
+    } finally { observer.mockRestore(); create.mockRestore(); }
+  });
+
+  it('MMG uncertainty during provider creation preserves the session evidence but suppresses the hosted URL and replay', async () => {
+    const p = await partner();
+    const idempotencyKey = `handoff-${nanoid(12)}`;
+    const create = sim.createSession.bind(sim);
+    const observer = vi.spyOn(sim, 'createSession').mockImplementationOnce(async (...args) => {
+      const answer = await create(...args); await pendingMmg(p); return answer;
+    });
+    try {
+      await expect(start(p, 'PAY_NOW', { idempotencyKey })).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      const rows = await app.prisma.cardSession.findMany({ where: { subscriptionId: p.subId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ purpose: 'PAY_NOW', status: 'OPEN', idempotencyKey });
+      expect(rows[0]!.providerSessionRef).toBeTruthy();
+      expect(rows[0]!.hostedUrl).toBeTruthy();
+      await expect(start(p, 'PAY_NOW', { idempotencyKey })).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(1);
+      expect(observer).toHaveBeenCalledOnce();
+      expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE' } })).toBe(2);
+    } finally { observer.mockRestore(); }
+  });
+
+  it('a saved PAY_NOW key cannot bypass a later cross-rail hold', async () => {
+    const p = await partner();
+    const idempotencyKey = `replay-${nanoid(12)}`;
+    const first = await start(p, 'PAY_NOW', { idempotencyKey });
+    await pendingMmg(p);
+    await expect(start(p, 'PAY_NOW', { idempotencyKey })).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+    expect(await app.prisma.cardSession.findUniqueOrThrow({ where: { id: first.sessionId } }))
+      .toMatchObject({ idempotencyKey, status: 'OPEN', providerSessionRef: expect.any(String) });
+    expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(1);
   });
 });

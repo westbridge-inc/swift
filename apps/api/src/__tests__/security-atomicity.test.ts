@@ -9,7 +9,8 @@ import { socketPlugin } from '../plugins/socket';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { requestOtp } from './helpers/otp';
+import { requestPasswordResetOtp } from './helpers/otp';
+import { grantStepUp } from './helpers/step-up';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 
 const ADMIN_PHONE = '+5927009190';
@@ -215,7 +216,7 @@ function passwordLogin(phone: string, password: string) {
 }
 
 async function resetPassword(phone: string, newPassword = NEW_PASSWORD) {
-  const code = await requestOtp(app, phone);
+  const code = await requestPasswordResetOtp(app, phone);
   return app.inject({
     method: 'POST',
     url: '/api/v1/auth/password/reset',
@@ -396,6 +397,9 @@ describe('password-reset security transaction', () => {
   it('does not let a previously authenticated password change overwrite a completed recovery', async () => {
     const user = await createPasswordUser(SET_PASSWORD_RESET_RACE_PHONE);
     const session = await createSession(user.id, 'CUSTOMER');
+    // [L04 · MASTER-003] password/set needs a step-up on this session; grant it
+    // so the race below is still the one under test.
+    await grantStepUp(app, session.token);
     const attackerPassword = 'attacker-chosen-password';
 
     let passwordHashReached!: () => void;
@@ -453,7 +457,7 @@ describe('password-reset security transaction', () => {
 
     // The durable outbox itself fails after the new password and mover state
     // have been written inside the transaction.
-    let code = await requestOtp(app, RESET_PHONE);
+    let code = await requestPasswordResetOtp(app, RESET_PHONE);
     let fault = failNextTransactionDelegate(
       'moverRevocationOutbox',
       'upsert',
@@ -474,7 +478,7 @@ describe('password-reset security transaction', () => {
 
     // A tail write fails after the outbox and session deletion have executed.
     // The inserted outbox row must roll back with every other security write.
-    code = await requestOtp(app, RESET_PHONE);
+    code = await requestPasswordResetOtp(app, RESET_PHONE);
     fault = failNextTransactionDelegate(
       'deviceToken',
       'updateMany',
