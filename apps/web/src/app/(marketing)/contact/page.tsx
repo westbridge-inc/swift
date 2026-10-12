@@ -30,7 +30,7 @@ export default function ContactPage() {
             support inbox on one page without signing in. All three come from
             site.config, which the founder fills with the exact D&B values. */}
         <dl className="mt-9 grid gap-4 sm:grid-cols-2">
-          <div className="rounded-2xl border border-[var(--swift-border)] bg-white p-6">
+          <div className="sw-card p-6">
             <dt className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.1em] text-[var(--swift-muted)]">
               <Mail className="h-4 w-4 text-[var(--swift-red)]" aria-hidden /> Email
             </dt>
@@ -47,7 +47,7 @@ export default function ContactPage() {
             </dd>
           </div>
 
-          <div className="rounded-2xl border border-[var(--swift-border)] bg-white p-6">
+          <div className="sw-card p-6">
             <dt className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.1em] text-[var(--swift-muted)]">
               <Phone className="h-4 w-4 text-[var(--swift-red)]" aria-hidden /> Phone
             </dt>
@@ -61,7 +61,7 @@ export default function ContactPage() {
             </dd>
           </div>
 
-          <div className="rounded-2xl border border-[var(--swift-border)] bg-white p-6 sm:col-span-2">
+          <div className="sw-card p-6 sm:col-span-2">
             <dt className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.1em] text-[var(--swift-muted)]">
               <MapPin className="h-4 w-4 text-[var(--swift-red)]" aria-hidden /> Registered office
             </dt>

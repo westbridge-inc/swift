@@ -1,4 +1,4 @@
-import type { OrderStatus, TaxiStopStatus } from '@prisma/client';
+import type { CustodyRecoveryState, OrderStatus, TaxiStopStatus } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
 // THE terminality of an order status — ONE definition.
@@ -509,3 +509,106 @@ export const TAXI_STOP_TRANSITIONS: Record<TaxiStopStatus, TaxiStopStatus[]> = {
 export function isTaxiStopTransition(from: TaxiStopStatus, to: TaxiStopStatus): boolean {
   return TAXI_STOP_TRANSITIONS[to].includes(from);
 }
+
+// ---------------------------------------------------------------------------
+// A CUSTODY RECOVERY CASE — the ELEVENTH member of this family. [AF-MOB-006]
+//
+// After pickup the goods are in a rider's bag and, on cash, the rider has
+// fronted the store. When the delivery cannot be finished there, the answer
+// used to be "Call support" and nothing else: no owner, no deadline, no
+// outcome. A recovery case is that missing record, and its states are declared
+// here, in the same shape as the order's and the stop's: a Record keyed by the
+// Prisma enum (a new state fails the BUILD until it is classified), every list
+// derived, never hand-written, and no other file may re-declare a case list or
+// a case edge (order-status-single-source.test.ts).
+//
+// The case adds NO OrderStatus. The order keeps its own machine: a return is
+// RETURNING -> RETURNED (the edges above), a delivery is DELIVERED, and a
+// relay changes WHO holds the order (riderId) without changing its status.
+// ---------------------------------------------------------------------------
+
+/** OPEN = the goods still need a decision or an action; RESOLVED = custody is
+ *  settled (delivered, back at the origin, or handed to a verified new
+ *  holder) or the order ended some other way. */
+export type CustodyCaseLaw = 'OPEN' | 'RESOLVED';
+
+/**
+ * Every CustodyRecoveryState, classified. **Adding a value to the enum makes
+ * this object fail to type-check until the new state is classified.** The
+ * database holds the same split (custody_recovery_cases_open_law_check); the
+ * schema suite grades the two against each other.
+ */
+export const CUSTODY_CASE_LAW: Record<CustodyRecoveryState, CustodyCaseLaw> = {
+  // The goods are held where they are while operations decides.
+  SUPPORT_HOLD: 'OPEN',
+  // The order is RETURNING: the goods are going back to where they came from.
+  RETURN_REQUIRED: 'OPEN',
+  // A second mover is needed; none is named yet.
+  RELAY_REQUIRED: 'OPEN',
+  // A relay mover is named and the handoff code is issued; the holder keeps
+  // custody until the code is verified.
+  TRANSFER_IN_PROGRESS: 'OPEN',
+  DELIVERED: 'RESOLVED',
+  RETURNED: 'RESOLVED',
+  // The verified handoff happened: the relay mover is now the one holder and
+  // finishes the delivery through the ordinary door.
+  TRANSFERRED: 'RESOLVED',
+  // The order ended another way (failed, refunded, closed by an operator).
+  CLOSED: 'RESOLVED',
+};
+
+/** THE open case states. Derived from the law, never hand-written. */
+export const CUSTODY_CASE_OPEN_STATES: CustodyRecoveryState[] = (Object.keys(CUSTODY_CASE_LAW) as CustodyRecoveryState[])
+  .filter((s) => CUSTODY_CASE_LAW[s] === 'OPEN');
+
+/** Predicate form: does this case still need someone? */
+export function isCustodyCaseOpen(state: CustodyRecoveryState): boolean {
+  return CUSTODY_CASE_LAW[state] === 'OPEN';
+}
+
+/**
+ * The case machine, in ORDER_TRANSITIONS' convention: key = the target state,
+ * value = the states it may be entered from. A case is born SUPPORT_HOLD (an
+ * incident report) or RETURN_REQUIRED (a return was started), and nothing
+ * leaves a resolved state: a new incident is a new case.
+ */
+export const CUSTODY_CASE_TRANSITIONS: Record<CustodyRecoveryState, CustodyRecoveryState[]> = {
+  // Operations pulls a relay back to "hold where you are".
+  SUPPORT_HOLD: ['RELAY_REQUIRED', 'TRANSFER_IN_PROGRESS'],
+  // Operations directs a return; the order moves to RETURNING in the same commit.
+  // Never from TRANSFER_IN_PROGRESS: a relay mover is on the way, so the
+  // transfer is called off (back to RELAY_REQUIRED or SUPPORT_HOLD) first.
+  RETURN_REQUIRED: ['SUPPORT_HOLD', 'RELAY_REQUIRED'],
+  // Operations decides a second mover is needed, or the named one declined.
+  RELAY_REQUIRED: ['SUPPORT_HOLD', 'TRANSFER_IN_PROGRESS'],
+  // Operations names the relay mover and the handoff code is issued.
+  TRANSFER_IN_PROGRESS: ['RELAY_REQUIRED'],
+  // The holder was able to finish after all (the order reached DELIVERED).
+  DELIVERED: ['SUPPORT_HOLD', 'RELAY_REQUIRED', 'TRANSFER_IN_PROGRESS'],
+  // The goods are back at the origin (the order reached RETURNED).
+  RETURNED: ['RETURN_REQUIRED'],
+  // The relay mover entered the holder's code: custody moved atomically.
+  TRANSFERRED: ['TRANSFER_IN_PROGRESS'],
+  // The order reached any other terminal status.
+  CLOSED: ['SUPPORT_HOLD', 'RETURN_REQUIRED', 'RELAY_REQUIRED', 'TRANSFER_IN_PROGRESS'],
+};
+
+/** What operations may DIRECT an open case into. The other open state,
+ *  TRANSFER_IN_PROGRESS, is entered only by naming a relay rider (which mints
+ *  the handoff code), and resolved states only by what actually happens to
+ *  the goods. */
+export const CUSTODY_CASE_DIRECTABLE = ['SUPPORT_HOLD', 'RELAY_REQUIRED', 'RETURN_REQUIRED'] as const satisfies readonly CustodyRecoveryState[];
+
+/** True when a case may move from `from` to `to`. */
+export function isCustodyCaseTransition(from: CustodyRecoveryState, to: CustodyRecoveryState): boolean {
+  return CUSTODY_CASE_TRANSITIONS[to].includes(from);
+}
+
+/**
+ * The delivery-direction custody statuses: the goods are in the rider's bag on
+ * the way TO the customer. Exactly the states a return may start from (the
+ * RETURNING edge above), so it is read from that edge rather than restated. A
+ * relay transfer and a rider's incident report on a forward leg act on these;
+ * a parcel already RETURNING keeps its own exit (RETURNED).
+ */
+export const RIDER_FORWARD_CUSTODY_STATUSES: readonly OrderStatus[] = ORDER_TRANSITIONS.RETURNING;

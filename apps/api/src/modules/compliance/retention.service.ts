@@ -99,7 +99,7 @@ export interface SweepResult {
   dataClass: string;
   deleted: number;
   cutoff: Date;
-  skipped?: 'disabled' | 'no-enforcer' | 'unsafe-window';
+  skipped?: 'disabled' | 'no-enforcer' | 'unsafe-window' | 'permanent-evidence' | 'policy-unapproved';
 }
 
 /** Run every enabled policy once; one receipt per enforced policy. A policy
@@ -110,8 +110,16 @@ export async function runRetentionSweep(
   now: Date = new Date(),
 ): Promise<SweepResult[]> {
   const policies = await prisma.retentionPolicy.findMany({ orderBy: { dataClass: 'asc' } });
-  const results: SweepResult[] = [];
+  // Owner retention draft: admin audit evidence is permanent. Sensitive-read
+  // expiry and legal-hold release are unapproved. Report both on every run,
+  // including when no registry row exists; a registry clock cannot override it.
+  // cutoff is the sweep reference time for these retained classes, not an expiry.
+  const results: SweepResult[] = [
+    { dataClass: 'audit_logs', deleted: 0, cutoff: now, skipped: 'permanent-evidence' },
+    { dataClass: 'sensitive_read_logs', deleted: 0, cutoff: now, skipped: 'policy-unapproved' },
+  ];
   for (const policy of policies) {
+    if (policy.dataClass === 'audit_logs' || policy.dataClass === 'sensitive_read_logs') continue;
     const cutoff = new Date(now.getTime() - policy.retainDays * 24 * 60 * 60 * 1000);
     if (!policy.enabled) {
       results.push({ dataClass: policy.dataClass, deleted: 0, cutoff, skipped: 'disabled' });

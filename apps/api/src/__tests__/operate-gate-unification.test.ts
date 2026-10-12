@@ -25,10 +25,16 @@ describe('subscriptionOperability — the truth table', () => {
   const at = new Date('2026-08-01T12:00:00Z');
   // An auto-renewing row inside its period — the ordinary shape; the E12 case
   // below overrides autoRenew and the period end.
-  const sub = (status: string, graceOffsetMs?: number, over: { autoRenew?: boolean; periodEndOffsetMs?: number } = {}) =>
+  // [#1393] The grace deadline is the shared clock's projection
+  // (billingEnforcementDueAt: 48 hours of unpaused overdue time); gracePeriodEnd
+  // stays for display and carries the same instant.
+  const sub = (status: string, graceOffsetMs?: number, over: { autoRenew?: boolean; periodEndOffsetMs?: number; confirming?: boolean; autoSuspendEnabled?: boolean } = {}) =>
     ({
       status,
       gracePeriodEnd: graceOffsetMs === undefined ? null : new Date(at.getTime() + graceOffsetMs),
+      billingEnforcementDueAt: graceOffsetMs === undefined ? null : new Date(at.getTime() + graceOffsetMs),
+      billingConfirmationPausedAt: over.confirming ? new Date(at.getTime() - DAY) : null,
+      autoSuspendEnabled: over.autoSuspendEnabled ?? true,
       autoRenew: over.autoRenew ?? true,
       currentPeriodEnd: new Date(at.getTime() + (over.periodEndOffsetMs ?? 7 * 24 * 60 * 60 * 1000)),
     }) as never;
@@ -45,6 +51,14 @@ describe('subscriptionOperability — the truth table', () => {
     expect(subscriptionOperability(sub('PAST_DUE'), { missingRow: 'BLOCK' }, at).operable).toBe(true); // no deadline set → the sweep owns it
     const lapsed = subscriptionOperability(sub('PAST_DUE', -DAY), { missingRow: 'BLOCK' }, at);
     expect(lapsed).toEqual({ operable: false, why: 'GRACE_LAPSED', status: 'PAST_DUE' });
+    // [#1393] The deadline instant itself is lapsed: the full grace has run.
+    expect(subscriptionOperability(sub('PAST_DUE', 1), { missingRow: 'BLOCK' }, at).operable).toBe(true);
+    expect(subscriptionOperability(sub('PAST_DUE', 0), { missingRow: 'BLOCK' }, at))
+      .toEqual({ operable: false, why: 'GRACE_LAPSED', status: 'PAST_DUE' });
+    // [#1393 owner decision] Nobody is blocked while a payment is being confirmed,
+    // and a row that never auto-suspends is not blocked by its grace deadline.
+    expect(subscriptionOperability(sub('PAST_DUE', -DAY, { confirming: true }), { missingRow: 'BLOCK' }, at).operable).toBe(true);
+    expect(subscriptionOperability(sub('PAST_DUE', -DAY, { autoSuspendEnabled: false }), { missingRow: 'BLOCK' }, at).operable).toBe(true);
   });
 
   it('[E12] billing stopped: work continues exactly until the paid period (or trial) ends, then the gate refuses', () => {
@@ -83,9 +97,14 @@ describe('the CI gate — no route may fork the rule again', () => {
     }
     expect(offenders).toEqual([]); // an inline copy of the rule is a build failure
 
-    for (const gate of ['modules/driver/driver.routes.ts', 'modules/rider/rider.routes.ts', 'modules/vendor/vendor.routes.ts']) {
-      expect(readFileSync(join(SRC, gate), 'utf8')).toContain('subscriptionOperability');
+    for (const gate of ['modules/driver/driver.routes.ts', 'modules/rider/rider.routes.ts']) {
+      const source = readFileSync(join(SRC, gate), 'utf8');
+      expect(source).toContain('moverFeeOperability(app.prisma');
+      expect(source).toContain('moverFeeOperability(tx');
+      expect(source).toContain('lockMoverSources(tx');
     }
+    expect(readFileSync(join(SRC, 'modules/subscription/mover-fee-authority.ts'), 'utf8')).toContain('subscriptionOperability(gated, opts, now)');
+    expect(readFileSync(join(SRC, 'modules/vendor/vendor.routes.ts'), 'utf8')).toContain('subscriptionOperability');
   });
 });
 
@@ -147,7 +166,8 @@ describe('the fixed divergence — a grace-lapsed vendor can no longer work orde
       data: {
         vendorId, type: 'RESTAURANT', status: 'PAST_DUE', weeklyRate: 20000, billingMethod: 'CASH',
         currentPeriodStart: new Date(Date.now() - 8 * DAY), currentPeriodEnd: new Date(Date.now() - DAY), nextBillingDate: new Date(Date.now() - DAY),
-        gracePeriodEnd: new Date(Date.now() - 60_000), // grace LAPSED
+        // grace LAPSED: the shared clock's projected deadline (and its display copy) passed
+        gracePeriodEnd: new Date(Date.now() - 60_000), billingEnforcementDueAt: new Date(Date.now() - 60_000),
       },
     });
     subId = sub.id;
@@ -168,7 +188,14 @@ describe('the fixed divergence — a grace-lapsed vendor can no longer work orde
     expect(blocked.statusCode).toBe(403);
     expect(blocked.json().error?.code ?? blocked.json().code).toBe('SUBSCRIPTION_PAST_DUE');
 
-    await app.prisma.subscription.update({ where: { id: subId }, data: { gracePeriodEnd: new Date(Date.now() + DAY) } });
+    // [#1393 owner decision] A payment being confirmed pauses the grace: never blocked meanwhile.
+    await app.prisma.subscription.update({ where: { id: subId }, data: { billingConfirmationPausedAt: new Date() } });
+    const confirming = await app.inject({ method: 'PUT', url: `/api/v1/vendor/orders/${await mkOrder()}/accept`, headers: { authorization: `Bearer ${vendorToken}` } });
+    expect(confirming.statusCode).toBe(200);
+
+    await app.prisma.subscription.update({ where: { id: subId }, data: {
+      billingConfirmationPausedAt: null, gracePeriodEnd: new Date(Date.now() + DAY), billingEnforcementDueAt: new Date(Date.now() + DAY),
+    } });
     const ok = await app.inject({ method: 'PUT', url: `/api/v1/vendor/orders/${await mkOrder()}/accept`, headers: { authorization: `Bearer ${vendorToken}` } });
     expect(ok.statusCode).toBe(200);
   });

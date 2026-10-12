@@ -44,11 +44,16 @@ describe('card rail OFF at the billing boundary', () => {
       {
         prepaidBalance: { findUnique: vi.fn(async () => null) },
         // R13: attemptCharge reads the MMG approval-hold gate first; null = no hold.
+        // [MMG checkout I5] the approval-hold gate also reads checkouts in flight; null = none.
+        mmgCheckoutIntent: { findFirst: vi.fn(async () => null) },
         subscriptionPayment: { findUnique, findFirst: vi.fn(async () => null) },
       } as unknown as PrismaClient,
       {} as NotificationService,
       { chargeToken } as unknown as PaymentProvider,
     );
+    // [#1393] The shared confirmation gate reads the payer, clock and holds;
+    // none of that is this case's subject. No payment is being confirmed here.
+    vi.spyOn(billing as unknown as { subscriptionHasConfirmationHold: () => Promise<boolean> }, 'subscriptionHasConfirmationHold').mockResolvedValue(false);
     // Exercise the real charge decision without opening services or manufacturing
     // the unrelated billing-cycle database graph.
     const attempt = billing as unknown as {
@@ -67,6 +72,8 @@ describe('card rail OFF at the billing boundary', () => {
       {
         prepaidBalance: { findUnique: vi.fn(async () => null) },
         // R13: attemptCharge reads the MMG approval-hold gate first; null = no hold.
+        // [MMG checkout I5] the approval-hold gate also reads checkouts in flight; null = none.
+        mmgCheckoutIntent: { findFirst: vi.fn(async () => null) },
         subscriptionPayment: {
           findUnique: vi.fn(async () => ({ status: 'UNKNOWN', id: 'synthetic-intent' })),
           findFirst: vi.fn(async () => null),
@@ -78,6 +85,8 @@ describe('card rail OFF at the billing boundary', () => {
         chargeToken: vi.fn(async () => ({ status: 'failed', providerRef: '', code: 'CARD_RAIL_DISABLED' })),
       } as unknown as PaymentProvider,
     );
+    // [#1393] As above: no payment is being confirmed for this subscription.
+    vi.spyOn(billing as unknown as { subscriptionHasConfirmationHold: () => Promise<boolean> }, 'subscriptionHasConfirmationHold').mockResolvedValue(false);
     const attempt = billing as unknown as { attemptCharge: (sub: object, amount: number) => Promise<unknown> };
     await expect(attempt.attemptCharge({
       id: 'synthetic', billingMethod: 'CARD', paymentToken: 'synthetic',
@@ -92,6 +101,8 @@ describe('card rail OFF at the billing boundary', () => {
     const billing = new BillingService(
       {
         subscription: { findUnique: vi.fn(async () => ({ id: 'synthetic', paymentToken: 'synthetic', currencyCode: 'GYD' })) },
+        // [MMG checkout I5] the approval-hold gate also reads checkouts in flight; null = none.
+        mmgCheckoutIntent: { findFirst: vi.fn(async () => null) },
         subscriptionPayment: {
           findMany: vi.fn(async () => [{ id: 'synthetic-intent', subscriptionId: 'synthetic', clientKey: 'synthetic', periodStart: now, amount: 1, createdAt: now }]),
           updateMany: vi.fn(async () => ({})),
@@ -119,6 +130,8 @@ describe('card rail OFF at the billing boundary', () => {
     const billing = new BillingService(
       {
         subscription: { findUnique: vi.fn(async () => ({ id: 'synthetic', paymentToken: 'synthetic' })) },
+        // [MMG checkout I5] the approval-hold gate also reads checkouts in flight; null = none.
+        mmgCheckoutIntent: { findFirst: vi.fn(async () => null) },
         subscriptionPayment: {
           findMany: vi.fn(async () => [{ id: 'synthetic-intent', subscriptionId: 'synthetic', clientKey: 'synthetic', periodStart: createdAt, amount: 1, createdAt }]),
           updateMany: vi.fn(async () => ({})),

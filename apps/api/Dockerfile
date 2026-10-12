@@ -57,6 +57,7 @@ COPY --from=build /app/packages ./packages
 
 WORKDIR /app/apps/api
 # Drop to an unprivileged user (node ships in the base image).
+RUN mkdir -p /srv/swift/uploads && chown node:node /srv/swift/uploads
 USER node
 EXPOSE 3000
 # [R048-006] READINESS is the container probe: GET /ready answers 503 for any

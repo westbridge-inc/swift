@@ -18,6 +18,10 @@ export interface TenantStore {
    *  cross-tenant work that names itself), or nothing at all. */
   mode?: 'request' | 'system';
   capability?: string;
+  /** [L04 · R5 auto-bind] Set only by the transaction wrapper in
+   *  plugins/prisma.ts: the tenant a BATCH transaction is bound to. (An
+   *  interactive transaction's tenant is keyed by its own id there.) */
+  batchTenant?: string;
 }
 
 export type TenantMode = 'request' | 'system' | 'unbound';

@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { Heart } from 'lucide-react';
 import { useCustomerSession } from '@/components/customer-session';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { signInPath } from '@/lib/customer-routes';
+import { signInPath, storeHref } from '@/lib/customer-routes';
 import { accountApi } from './account-api';
 import { AccountFrame, useAccountQuery } from './account-frame';
 
@@ -28,7 +28,7 @@ function FavouriteControl({ vendorId, name }: { vendorId: string; name: string }
     mutationFn: async (wasSaved: boolean) => { await accountApi.favourite(vendorId, wasSaved); await favourites.refetch(); },
     onError: (e: Error) => setError(e.message),
   });
-  const className = 'inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full border border-black/10 bg-white px-3 text-[var(--swift-red)] disabled:opacity-50';
+  const className = 'inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full border border-[var(--swift-border)] bg-white px-3 text-[var(--swift-red)] disabled:opacity-50';
   if (session.status === 'guest') return <Link href={signInPath(`/order/vendor/${encodeURIComponent(vendorId)}`)} className={className} aria-label={`Sign in to save ${name}`}><Heart size={20} aria-hidden /></Link>;
   function toggle() {
     if (queryClient.isMutating({ mutationKey }) || !favourites.data || favourites.isError) return;
@@ -51,8 +51,8 @@ export function Favourites() {
     {favourites.isError ? <DataUnavailable what="your favourites" error={favourites.error} onRetry={() => void favourites.refetch()} />
       : !favourites.data ? <p role="status">Loading favourites…</p>
       : favourites.data.length === 0 ? <p>No favourites yet. Save a store with its heart.</p>
-      : <ul className="space-y-3">{favourites.data.map((vendor) => <li key={vendor.id} className="flex items-center justify-between gap-3 rounded-2xl border border-black/5 bg-white p-4">
-        <Link href={`/order/vendor/${encodeURIComponent(vendor.id)}`} className="min-h-11 flex-1 py-3 font-bold">{vendor.name}</Link>
+      : <ul className="space-y-3">{favourites.data.map((vendor) => <li key={vendor.id} className="flex items-center justify-between gap-3 sw-card p-4">
+        <Link href={storeHref(vendor)} className="min-h-11 flex-1 py-3 font-bold">{vendor.name}</Link>
         <FavouriteButton vendorId={vendor.id} name={vendor.name} />
       </li>)}</ul>}
     <Link href="/order/search" className="inline-block py-3 font-semibold text-[var(--swift-red)]">Find a store</Link>

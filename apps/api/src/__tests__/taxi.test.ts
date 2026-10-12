@@ -18,6 +18,8 @@ import { pointInPolygon } from '../utils/geo';
 import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { readDunningClock } from '../modules/billing/dunning-clock';
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
 // [R048-001] this suite quiets the WHOLE driver pool between cases (an unscoped Driver.updateMany) so no leftover driver takes a trip — a stated, reviewable capability.
@@ -62,6 +64,7 @@ async function purgeFixtures() {
   await app.prisma.rating.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await cleanupPayerBillingClocks(app.prisma, ids);
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
 }
 
@@ -308,7 +311,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect([d1.driverId, d2.driverId]).toContain(db.driverId);
   });
 
-  it('commits the server-clamped direct fare with assignment, or rolls both back on abort', async () => {
+  it('commits the formula fare with assignment, or rolls both back on abort', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const ride = await app.prisma.order.create({
@@ -350,13 +353,15 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
       throw new Error('forced direct-fare transaction abort');
     }, options)) as never);
     try {
-      await expect(dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER', { requestedFare: 1200 }))
+      await expect(dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER'))
         .rejects.toThrow('forced direct-fare transaction abort');
     } finally {
       transaction.mockRestore();
     }
 
-    expect(staged).toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 1200, logs: 1 });
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The claim takes no price: the
+    // formula fare (2,000) is staged and committed. (Was: a driver-set 1,200.)
+    expect(staged).toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 2000, logs: 1 });
     const [rolledBackRide, rolledBackDriver, rolledBackLogs] = await Promise.all([
       app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } }),
       app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
@@ -368,12 +373,12 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
       .toEqual({ available: true, pointer: null });
     expect(rolledBackLogs).toBe(0);
 
-    const committed = await dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER', { requestedFare: 1200 });
+    const committed = await dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER');
     expect({ status: committed.status, driverId: committed.driverId, fare: Number(committed.taxiFareTotal) })
-      .toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 1200 });
+      .toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 2000 });
     const durable = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect({ fare: Number(durable.taxiFareTotal), total: Number(durable.totalAmount) })
-      .toEqual({ fare: 1200, total: 1200 });
+      .toEqual({ fare: 2000, total: 2000 });
   });
 
   it('ratings record both ways after completion', async () => {
@@ -580,6 +585,8 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
       orderBy: { createdAt: 'desc' },
     });
     expect(note?.title).toContain('another driver');
+    // [73] The watchdog's ACTUAL payload names the taxi, so a tap opens Taxi, never Delivery.
+    expect(note?.data).toMatchObject({ orderType: 'TAXI', rideId: ride.id, orderId: ride.id, audience: 'customer', status: 'PENDING' });
 
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null } });
   });
@@ -679,6 +686,8 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
       where: { userId: customer.userId, title: 'Your driver lost signal' },
     });
     expect(note).not.toBeNull();
+    // [73] In custody too, the payload names the taxi.
+    expect(note?.data).toMatchObject({ orderType: 'TAXI', rideId: ride.id, orderId: ride.id, audience: 'customer' });
 
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: null, currentRideId: null } });
   });
@@ -996,14 +1005,18 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
   it('blocks go-online when PAST_DUE and the grace window has ended', async () => {
     const d = await offlineDriver();
     await setInsurance(d.userId, 'HIRE', true);
-    await app.prisma.subscription.create({
+    // [#1393] The owner's grace is 48 hours of unpaused overdue time on the
+    // shared clock: due 48 hours and a minute ago, nothing paused, it has ended.
+    const due = new Date(Date.now() - 2 * DAY - 60_000);
+    const sub = await app.prisma.subscription.create({
       data: {
         driverId: d.driverId, type: 'TAXI_DRIVER', status: 'PAST_DUE', weeklyRate: 12000,
-        currentPeriodStart: new Date(Date.now() - 8 * DAY), currentPeriodEnd: new Date(Date.now() - DAY),
-        nextBillingDate: new Date(Date.now() - DAY),
+        currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due,
+        nextBillingDate: due,
         gracePeriodEnd: new Date(Date.now() - 60_000), // grace ended a minute ago
       },
     });
+    await readDunningClock(app.prisma, sub.id);
     const res = await inject('POST', '/api/v1/driver/go-online', {
       latitude: CENTRAL.lat,
       longitude: CENTRAL.lng,
@@ -1017,14 +1030,17 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
   it('allows go-online while PAST_DUE but still within the grace window', async () => {
     const d = await offlineDriver();
     await setInsurance(d.userId, 'HIRE', true);
-    await app.prisma.subscription.create({
+    // [#1393] Due 46 hours ago on the shared clock: 2 hours of the 48-hour grace left.
+    const due = new Date(Date.now() - 46 * 3600 * 1000);
+    const sub = await app.prisma.subscription.create({
       data: {
         driverId: d.driverId, type: 'TAXI_DRIVER', status: 'PAST_DUE', weeklyRate: 12000,
-        currentPeriodStart: new Date(Date.now() - DAY), currentPeriodEnd: new Date(),
-        nextBillingDate: new Date(),
+        currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due,
+        nextBillingDate: due,
         gracePeriodEnd: new Date(Date.now() + 2 * 3600 * 1000), // 2h of grace left
       },
     });
+    await readDunningClock(app.prisma, sub.id);
     const res = await inject('POST', '/api/v1/driver/go-online', {
       latitude: CENTRAL.lat,
       longitude: CENTRAL.lng,

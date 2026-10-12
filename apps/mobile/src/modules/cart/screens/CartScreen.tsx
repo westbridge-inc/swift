@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { Alert, AppState, Platform, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -54,6 +54,7 @@ import type { MmgDirectPaymentAction } from '@swift/types';
 import { CartPaymentOptions } from '../CartPaymentOptions';
 import { checkoutTipAmount } from '../checkout-tip';
 import {
+  cartLineMeta,
   cartStaleCheckoutCode,
   cartPricingChoices,
   checkoutErrorMessage,
@@ -62,6 +63,7 @@ import {
   pickupRetryChoices,
   pickupStoreNames,
   pricedTip,
+  pricesAsSeen,
   quoteStoreIds,
   quotedRiderTip,
   shortStores,
@@ -75,6 +77,7 @@ import {
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '../cartPayment';
+import { touchTarget } from '../../../kit/touch-target';
 
 const GUTTER = space['2xl'];
 const TIP_PRESETS = [0, 200, 500, 1000];
@@ -108,7 +111,7 @@ function CartHeader({ onBack, onMenu }: { onBack?: () => void; onMenu?: () => vo
         {onBack ? (
           // A plain glyph, no filled circle — hitSlop keeps the tap target at
           // 44pt, which is the whole reason the chip existed.
-          <Pressable onPress={onBack} hitSlop={14} accessibilityRole="button" accessibilityLabel="Back">
+          <Pressable onPress={onBack} hitSlop={14} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(24)}>
             {({ pressed }) => (
               <View style={{ opacity: pressed ? 0.6 : 1 }}>
                 <Feather name="chevron-left" size={24} color={color.text.primary} />
@@ -120,7 +123,7 @@ function CartHeader({ onBack, onMenu }: { onBack?: () => void; onMenu?: () => vo
           Cart
         </T>
         {onMenu ? (
-          <Pressable onPress={onMenu} hitSlop={14} accessibilityRole="button" accessibilityLabel="Cart options">
+          <Pressable onPress={onMenu} hitSlop={14} accessibilityRole="button" accessibilityLabel="Cart options" style={touchTarget(22)}>
             {({ pressed }) => (
               <View style={{ opacity: pressed ? 0.6 : 1 }}>
                 <Feather name="more-horizontal" size={22} color={color.text.primary} />
@@ -161,8 +164,10 @@ export function CartScreen() {
   const [pendingTrackId, setPendingTrackId] = useState<string | null>(null);
   useEffect(() => {
     if (placeOrder.isSuccess || !pendingTrackId) return;
+    // iOS navigates from onDismissed below; this fallback is for Android,
+    // where that callback never fires.
+    if (Platform.OS === 'ios') return;
     const id = pendingTrackId;
-    setPendingTrackId(null);
     // WAS: InteractionManager.runAfterInteractions(...).
     //
     // React Native 0.85 turned InteractionManager into a stub whose
@@ -178,7 +183,13 @@ export function CartScreen() {
     // waits two frames instead of pretending.
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => navigation.navigate('Delivery', { orderId: id }));
+      raf2 = requestAnimationFrame(() => {
+        // [ANDROID-QA] Clear the staged id only HERE. Clearing it before the
+        // frames re-ran this effect, and its cleanup cancelled both frames:
+        // "Track order" closed the ceremony and went nowhere on Android.
+        setPendingTrackId(null);
+        navigation.navigate('Delivery', { orderId: id });
+      });
     });
     return () => { cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
   }, [placeOrder.isSuccess, pendingTrackId, navigation]);
@@ -392,6 +403,9 @@ export function CartScreen() {
         ...(pricing.fulfillmentSelections ? { fulfillmentSelections: pricing.fulfillmentSelections } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
+        // [L09 · price lock] The total and line prices the customer saw: the
+        // cart's quote, or for a pickup retry the pickup quote they confirmed.
+        ...pricesAsSeen(pickupRetry ? pickupQuote.data : c),
         ...(extra ?? {}),
         tipAmount: submittedTip,
       },
@@ -469,6 +483,9 @@ export function CartScreen() {
     if (pickupQuote.isFetching || pickupQuote.isPlaceholderData || !pickupQuote.data || pickupConfirmShown.current) return;
     const pickupTotal = Number(pickupQuote.data.totalAmount);
     if (!Number.isFinite(pickupTotal)) return;
+    // Capture the quote the alert displays before a reconnect can replace it.
+    const confirmedPrices = pricesAsSeen(pickupQuote.data);
+    const storeIds = quoteStoreIds(pickupQuote.data.items);
     pickupConfirmShown.current = true;
     Alert.alert(
       'Order for pickup instead?',
@@ -482,9 +499,8 @@ export function CartScreen() {
             // [E01] Every store in the basket collects — not just the one
             // `cart.vendor` happens to track (the rest would still wait for a
             // rider).
-            const storeIds = quoteStoreIds(c?.items);
             if (storeIds.length === 0) return;
-            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });
+            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])), ...confirmedPrices });
           },
         },
       ],
@@ -669,7 +685,7 @@ export function CartScreen() {
             {promoMsg && !promoMsg.ok ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm, paddingLeft: space.lg }}>
                 <Feather name="alert-circle" size={13} color={color.error} />
-                <T variant="caption" tone="error">
+                <T variant="caption" tone="error" style={{ flex: 1 }}>
                   {promoMsg.text}
                 </T>
               </View>
@@ -729,12 +745,7 @@ export function CartScreen() {
               const hasTotal = Number.isFinite(shownTotal);
               // The unit price is not lost: it moves to the muted meta line,
               // where it is labelled and unambiguous.
-              const meta = [
-                it.selectedOptionNames?.length ? it.selectedOptionNames.join(', ') : null,
-                Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null,
-              ]
-                .filter(Boolean)
-                .join(' · ');
+              const meta = cartLineMeta(it, Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null);
               return (
               <View key={it.id}>
                 {idx > 0 ? <View style={RULE} /> : null}
@@ -773,7 +784,8 @@ export function CartScreen() {
                     {!it.isAvailable ? (
                       <>
                         <T variant="caption" tone="error" style={{ marginTop: 2 }}>
-                          No longer available — remove to continue
+                          {/* [F4] The server's reason when a choice sold out. */}
+                          {it.unavailableReason || 'No longer available — remove to continue'}
                         </T>
                         {/* [E07] One tap to recover: the SAME remove-line
                             mutation as the trash glyph, labelled so the path
@@ -814,6 +826,7 @@ export function CartScreen() {
                           hitSlop={14}
                           accessibilityRole="button"
                           accessibilityLabel={`Remove ${it.name}`}
+                          style={touchTarget(18)}
                         >
                           {({ pressed }) => (
                             <View style={{ opacity: pressed ? 0.6 : 1 }}>
@@ -912,7 +925,7 @@ export function CartScreen() {
                     Jumps the dispatch queue · +{money(c.expressSurcharge)} — all of it goes to your rider.
                   </T>
                 </View>
-                <BrandSwitch value={express} onChange={() => setExpress((v) => !v)} />
+                <BrandSwitch label="Express delivery" value={express} onChange={() => setExpress((v) => !v)} />
               </View>
               <View style={RULE} />
             </View>
@@ -959,7 +972,7 @@ export function CartScreen() {
                   appointments[i.itemId] ? (
                     <View key={i.itemId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Feather name="calendar" size={13} color={color.text.muted} />
-                      <T variant="caption" tone="muted">
+                      <T variant="caption" tone="muted" style={{ flex: 1 }}>
                         {i.name} — {formatAppointmentSlot(appointments[i.itemId]!.slotStart)}
                         {appointments[i.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}
                       </T>
@@ -997,7 +1010,7 @@ export function CartScreen() {
           {!c.meetsMinimum && short.length === 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.warning} />
-              <T variant="label" tone="warning">
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
                 This store has a minimum order of {money(c.minimumOrderAmount)}.
               </T>
             </View>
@@ -1005,7 +1018,7 @@ export function CartScreen() {
           {unslotted.length > 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="calendar" size={14} color={color.warning} />
-              <T variant="label" tone="warning">
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
                 Pick a time for {unslotted[0].name} before ordering.
               </T>
             </View>
@@ -1013,7 +1026,7 @@ export function CartScreen() {
           {orderErr ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.error} />
-              <T variant="label" tone="error">
+              <T variant="label" tone="error" style={{ flex: 1 }}>
                 {orderErr}
               </T>
             </View>

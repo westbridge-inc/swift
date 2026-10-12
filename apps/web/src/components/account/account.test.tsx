@@ -362,7 +362,7 @@ describe('account parity through cookie-authenticated API contracts', () => {
     await view.user.click(await screen.findByRole('button', { name: 'Make Work default' }));
     await screen.findByRole('heading', { name: 'Work Default' });
     view.rerender(sessionView(<CartPage />));
-    const place = await screen.findByRole('button', { name: 'Place cash order · GY$150' });
+    const place = await screen.findByRole('button', { name: 'Place cash order · $150' });
     await waitFor(() => expect((place as HTMLButtonElement).disabled).toBe(false));
     expect((screen.getByLabelText('Saved delivery address') as HTMLSelectElement).value).toBe(explicit ? 'home' : 'work');
     await view.user.click(place);

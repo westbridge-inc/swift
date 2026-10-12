@@ -1,5 +1,6 @@
 // Server-side fetchers against the existing Fastify API — the web app is
 // another client on the same backend, never a second source of truth.
+import { cache } from 'react';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 
 // The server-side fetch origin may be overridden (an internal address on the
@@ -59,7 +60,7 @@ export async function fetchPricing(country?: string): Promise<CountryPricing | n
   }
 }
 
-export const LEGAL_URL = (doc: 'terms' | 'privacy') => `${API_URL}/legal/${doc}`;
+export const LEGAL_URL = (doc: 'terms' | 'privacy' | 'vendor-agreement' | 'driver-agreement') => `${API_URL}/legal/${doc}`;
 
 // ── Public storefronts (SEO surface — ACTIVE + verified stores only) ────────
 export interface StorefrontSummary {
@@ -125,12 +126,21 @@ export async function fetchStorefronts(params: { type?: string; city?: string; q
   }
 }
 
-export async function fetchStorefront(slug: string): Promise<StorefrontDetail | null> {
+/**
+ * [W2] ONE read per visit: the page and its metadata share it (React `cache`
+ * remembers it for the length of the request). The server keeps the answer for
+ * 30 seconds — a scanned counter code is a commerce surface, but this copy
+ * only draws the page: the storefront re-reads the live store and menu the
+ * moment it opens and takes no order until that live read has answered
+ * (storefront-experience.tsx `orderable`), and the API re-checks everything
+ * at add and at checkout.
+ */
+export const STOREFRONT_REVALIDATE_SECONDS = 30;
+
+export const fetchStorefront = cache(async (slug: string): Promise<StorefrontDetail | null> => {
   try {
     const res = await fetch(`${API_URL}/api/v1/public/storefronts/${encodeURIComponent(slug)}`, {
-      // A scanned counter code is a commerce surface: open state and menu
-      // availability must be read now, not from a five-minute SEO cache.
-      cache: 'no-store',
+      next: { revalidate: STOREFRONT_REVALIDATE_SECONDS, tags: [`storefront:${slug}`] },
     });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Public storefront request failed (${res.status})`);
@@ -140,4 +150,4 @@ export async function fetchStorefront(slug: string): Promise<StorefrontDetail | 
     // error boundary describe an unavailable service instead of lying with 404.
     throw error instanceof Error ? error : new Error('Public storefront is unavailable.');
   }
-}
+});

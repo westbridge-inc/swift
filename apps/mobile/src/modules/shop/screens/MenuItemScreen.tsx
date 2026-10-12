@@ -18,6 +18,7 @@ import {
   CircleChip,
   ErrorState,
   IconChip,
+  LabeledInput,
   LoadingBlock,
   Money,
   PillButton,
@@ -34,10 +35,14 @@ const GUTTER = space['2xl'];
 
 type Selected = Record<string, string | string[]>;
 
+/** [F4] A choice the store marked sold out is shown, but never chosen. */
+const onSale = (o: any) => o.isAvailable !== false;
+
 function defaultSelections(groups: any[]): Selected {
   const out: Selected = {};
   for (const g of groups ?? []) {
-    const defaults = (g.options ?? []).filter((o: any) => o.isDefault).map((o: any) => o.id);
+    // A sold-out default is never pre-selected: the customer chooses.
+    const defaults = (g.options ?? []).filter((o: any) => o.isDefault && onSale(o)).map((o: any) => o.id);
     if (g.maxSelect === 1) {
       if (defaults[0]) out[g.id] = defaults[0];
     } else if (defaults.length) {
@@ -77,6 +82,10 @@ export function MenuItemScreen() {
   );
   const groups: any[] = useMemo(() => item?.optionGroups ?? [], [item]);
   const [selected, setSelected] = useState<Selected>(() => addDraft?.selectedOptions ?? defaultSelections(groups));
+  // [row 70] A note for the store travels with this line (and through sign-in).
+  // Declared after the existing state so the screen's hook order is unchanged.
+  const [note, setNote] = useState(addDraft?.notes ?? '');
+  const trimmedNote = note.trim();
 
   const isBooking = item?.fulfillment === 'APPOINTMENT';
   const selectedDate = useMemo(() => {
@@ -143,7 +152,7 @@ export function MenuItemScreen() {
   const onAdd = React.useCallback(() => {
     if (!isAuthenticated) {
       requestAuthContinuation({ screen: 'MenuItem', vendorId, itemId,
-        addDraft: { quantity: qty, selectedOptions: selected, dayOffset, slot, visitMode },
+        addDraft: { quantity: qty, selectedOptions: selected, dayOffset, slot, visitMode, ...(trimmedNote ? { notes: trimmedNote } : {}) },
       }, promptLogin);
       // If Auth already owns the root, promptLogin does not change its key.
       if (wantsAuth) navigation.getParent()?.navigate('Auth');
@@ -154,7 +163,10 @@ export function MenuItemScreen() {
     resumedAdd.current = true;
     if (route.params?.addAfterSignIn) navigation.setParams({ addAfterSignIn: undefined, addDraft: undefined });
     addToCart.mutate(
-      { vendorId, itemId, quantity: isBooking ? 1 : qty, selectedOptions: Object.keys(selected).length ? selected : undefined },
+      {
+        vendorId, itemId, quantity: isBooking ? 1 : qty, selectedOptions: Object.keys(selected).length ? selected : undefined,
+        ...(trimmedNote ? { specialInstructions: trimmedNote } : {}),
+      },
       {
         onSuccess: () => {
           if (isBooking && slot) {
@@ -164,7 +176,7 @@ export function MenuItemScreen() {
         },
       },
     );
-  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, promptLogin, navigation, addToCart, isBooking, serviceMode, setAppointment, route.params?.addAfterSignIn]);
+  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, trimmedNote, promptLogin, navigation, addToCart, isBooking, serviceMode, setAppointment, route.params?.addAfterSignIn]);
   React.useEffect(() => {
     if (!route.params?.addAfterSignIn || resumedAdd.current || !isAuthenticated || !item || vendor.isLoading || vendor.isError) return;
     if (outOfStock || item.isAvailable === false || requiredUnmet || addToCart.isPending) return;
@@ -320,6 +332,17 @@ export function MenuItemScreen() {
                   {(g.options ?? []).map((o: any) => {
                     const on = selIds.includes(o.id);
                     const price = Number(o.additionalPrice) || 0;
+                    // [F4] Sold out: shown so the menu stays honest, but it
+                    // cannot be chosen (and the server refuses it anyway).
+                    if (!onSale(o)) {
+                      return (
+                        <Chip
+                          key={o.id}
+                          label={`${o.name} · sold out`}
+                          style={{ height: 42, paddingHorizontal: space.lg, opacity: 0.45 }}
+                        />
+                      );
+                    }
                     return (
                       <Chip
                         key={o.id}
@@ -450,6 +473,19 @@ export function MenuItemScreen() {
                 </T>
               ) : null}
             </>
+          ) : null}
+
+          {!isBooking ? (
+            <LabeledInput
+              label="Note for the store"
+              placeholder="e.g. no onions, extra pepper"
+              value={note}
+              onChangeText={setNote}
+              maxLength={500}
+              accessibilityLabel="Note for the store"
+              testID="menu-item-note"
+              containerStyle={{ marginTop: space.xl }}
+            />
           ) : null}
 
           {addErr ? (

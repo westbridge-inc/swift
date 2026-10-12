@@ -95,6 +95,9 @@ export class EvidenceService {
     if (!kase) return null;
     const existing = await this.prisma.evidenceBundle.findUnique({ where: { caseId } });
     if (existing) return existing;
+    // [M070] A decided case is closed to new evidence: nothing is captured for
+    // it and no SOS bundle is attached to it after it closed.
+    if (kase.status === 'CLOSED') return null;
 
     const items: CapturedItem[] = [{ kind: 'INCIDENT_CASE', label: `Case ${kase.caseNumber} at intake`, content: kase }];
     if (kase.orderId) items.push(...(await this.captureOrderArtifacts(kase.orderId)));
@@ -146,7 +149,11 @@ export class EvidenceService {
   private async captureOrderArtifacts(orderId: string): Promise<CapturedItem[]> {
     const items: CapturedItem[] = [];
     const order = await this.prisma.order.findUnique({ where: { id: orderId } });
-    if (order) items.push({ kind: 'ORDER_SNAPSHOT', label: `Order ${order.orderNumber} at capture`, content: order });
+    // The scoped parent lookup is the authority for every child below.
+    // A missing parent must refuse capture, not assemble a partial bundle
+    // from globally addressed timelines, conversations, or liveness rows.
+    if (!order) throw new NotFoundError('Order');
+    items.push({ kind: 'ORDER_SNAPSHOT', label: `Order ${order.orderNumber} at capture`, content: order });
     const timeline = await this.prisma.orderStatusLog.findMany({ where: { orderId }, orderBy: { createdAt: 'asc' }, take: 200 });
     if (timeline.length) items.push({ kind: 'STATUS_TIMELINE', label: 'Order status timeline', content: timeline });
     const session = await this.prisma.tripSafetySession.findUnique({ where: { orderId } });
@@ -188,12 +195,36 @@ export class EvidenceService {
     return sealed;
   }
 
+  /**
+   * [M070] A bundle is read only through a parent that still holds. Before any
+   * custody log or item read, the bundle's case and/or SOS must still resolve
+   * in the caller's scope, and the two links must agree (the case's SOS is the
+   * bundle's SOS). A bundle whose parent is gone, out of scope or inconsistent
+   * is refused as not found: no content, no log row, no item read.
+   */
+  private async lineageOf(bundleId: string): Promise<{ id: string; caseId: string | null; sosAlertId: string | null }> {
+    const refused = () => new NotFoundError('EvidenceBundle', bundleId);
+    const bundle = await this.prisma.evidenceBundle.findUnique({ where: { id: bundleId }, select: { id: true, caseId: true, sosAlertId: true } });
+    if (!bundle || (!bundle.caseId && !bundle.sosAlertId)) throw refused();
+    if (bundle.caseId) {
+      const kase = await this.prisma.incidentCase.findUnique({ where: { id: bundle.caseId }, select: { sosAlertId: true } });
+      if (!kase) throw refused();
+      if (bundle.sosAlertId && kase.sosAlertId && kase.sosAlertId !== bundle.sosAlertId) throw refused();
+    }
+    if (bundle.sosAlertId) {
+      const alert = await this.prisma.sosAlert.findUnique({ where: { id: bundle.sosAlertId }, select: { id: true } });
+      if (!alert) throw refused();
+    }
+    return bundle;
+  }
+
   /** Sealed content is never viewable without a logged reason (§9.2). The
    *  log write comes FIRST — no log row, no content. */
   async view(bundleId: string, opsUserId: string, reason: string) {
     if (!reason || reason.trim().length < 5) {
       throw new AppError(400, 'REASON_REQUIRED', 'State why you are opening this evidence — the reason is part of the chain of custody.');
     }
+    await this.lineageOf(bundleId);
     const bundle = await this.prisma.evidenceBundle.findUnique({ where: { id: bundleId }, include: { items: true } });
     if (!bundle) throw new NotFoundError('EvidenceBundle', bundleId);
     await this.prisma.safetyAccessLog.create({ data: { bundleId, accessorUserId: opsUserId, action: 'VIEW', reason: reason.trim() } });
@@ -244,9 +275,12 @@ export class EvidenceService {
         await this.observer.beforeAppend?.(alert.id);
       const bundle = await this.prisma.evidenceBundle.findUnique({
         where: { sosAlertId: alert.id },
-        select: { id: true, sealedAt: true },
+        select: { id: true, sealedAt: true, caseId: true },
       });
       if (!bundle || bundle.sealedAt) return;
+      // [M070] A closed case is closed to new evidence, the live trail included:
+      // closing a case does not resolve its SOS, so this tick must check too.
+      if (bundle.caseId && (await this.prisma.incidentCase.findUnique({ where: { id: bundle.caseId }, select: { status: true } }))?.status === 'CLOSED') return;
       const order = await this.prisma.order.findUnique({
         where: { id: alert.orderId! },
         select: {
@@ -290,6 +324,7 @@ export class EvidenceService {
     if (!reason || reason.trim().length < 5) {
       throw new AppError(400, 'REASON_REQUIRED', 'State why you are exporting this evidence — the reason is part of the chain of custody.');
     }
+    await this.lineageOf(bundleId);
     const bundle = await this.prisma.evidenceBundle.findUnique({ where: { id: bundleId }, include: { items: true } });
     if (!bundle) throw new NotFoundError('EvidenceBundle', bundleId);
 

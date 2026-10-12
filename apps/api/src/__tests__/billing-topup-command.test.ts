@@ -18,6 +18,7 @@ import { billingTopupMissingKeyCounter, billingTopupDuplicateFingerprintCounter 
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [M-08 · S0] The prepaid top-up is ONE command.
@@ -126,6 +127,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   delete process.env['BILLING_TOPUP_HOLD'];
+  await cleanupBillingClocks(app.prisma, subIds);
   await app.prisma.topUpCommand.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await purgeAuditLogs(app.prisma, { entity: 'Subscription', entityId: { in: subIds } }, 'test-cleanup:billing-topup-command');
   await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });

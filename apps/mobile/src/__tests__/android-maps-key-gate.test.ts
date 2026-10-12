@@ -132,7 +132,13 @@ describe('the gate does not block a build it cannot affect', () => {
     // CI run sets no platform, and reading that as "not Android" would let a
     // keyless Android artifact through the exact gate this file exists for.
     expect(configCode).toMatch(/EAS_BUILD_PLATFORM'\] !== 'ios'/);
-    expect(configCode).not.toMatch(/EAS_BUILD_PLATFORM'\] === 'android'/);
+    // The GATE's platform test is "not ios" and nothing else, and the gate
+    // throws on exactly that test. (The maps plugin option is the opposite
+    // case on purpose: it is given the key only when EAS says "android", so
+    // an unset platform never embeds the key; android-maps-key-manifest.test.ts.)
+    expect(configCode).toMatch(/const buildsAndroidArtifact = process\.env\['EAS_BUILD_PLATFORM'\] !== 'ios';/);
+    expect(configCode).not.toMatch(/buildsAndroidArtifact\s*=\s*[^;]*=== 'android'/);
+    expect(configCode).toMatch(/if \(!androidMapsApiKey && buildsAndroidArtifact\) \{/);
   });
 
   it('the key still only ever reaches the android config', () => {

@@ -2,42 +2,55 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
 import { useQuery } from '@tanstack/react-query';
-import {
-  Car, ChevronRight, Clock, Compass, MapPin, Package, Receipt, Search, ShoppingCart, Store, UtensilsCrossed, Wrench,
-} from 'lucide-react';
-import { getAddresses, getHome, money, type HomeFeed, type PopularItem, type Vendor } from '@/lib/customer';
+import { CircleCheck, ChevronDown, MapPin, Search, X } from 'lucide-react';
+import { getAddresses, getHome, getPublicHome, type HomeFeed, type PopularItem, type Vendor } from '@/lib/customer';
+import { BROWSE_STALE_MS, fromPage, homeFeedKey, type GuestRead } from '@/lib/browse-keys';
 import { isHomeFeed } from '@/lib/app-rules';
 import { currentCoords } from '@/lib/geolocate';
+import { readShellPerson, shellPersonKey } from '@/lib/shell-data';
+import { signInPath } from '@/lib/customer-routes';
 import { useCustomerSession } from '@/components/customer-session';
-import { PRESS } from '@/components/customer-shell';
+import { Avatar, MoreButton, MoreMenu, PRESS } from '@/components/customer-shell';
+import { Pictogram, type PictogramName } from '@/components/glyphs';
+import { Modal } from '@/components/modal';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
-import { EmptyNote, VendorCard } from '@/components/order-ui';
+import { EmptyNote, ItemCard, SectionHead, VendorCard, VendorHeroCard, VendorSquareCard, VENDOR_GRID } from '@/components/order-ui';
 
 /**
- * [Q7b] HOME — what swiftgy.com opens on. The phone app's Home on the web:
- * where it delivers, search, every service one tap away, the live order, what
- * is popular, the stores you ordered from, and the stores open near you.
+ * [Q7b · WEB-REDESIGN] HOME — what swiftgy.com opens on, in the owner's
+ * design: where it delivers, a greeting, search, the live order, every
+ * service one tap away, what is popular, and the stores — open, nearby, and
+ * closed for now.
  *
  * Every rail reads the one Home feed the phone app reads
- * (GET /customer/home), so the two never disagree about what is open.
+ * (GET /customer/home), so the two never disagree about what is open. No
+ * sample names or numbers: a rail with nothing in it is not drawn.
  * Browsing is public: a guest sees everything and signs in only to order.
  */
 
 // The services grid (the phone app's Home tiles). Every destination is a real
-// page. Taxi is honest: rides are booked in the Swift mobile app, not here.
-const SERVICES = [
-  { href: '/order/browse?type=RESTAURANT', label: 'Food', sub: 'Restaurants & takeaway', Icon: UtensilsCrossed },
-  { href: '/order/browse?type=SUPERMARKET', label: 'Groceries', sub: 'Markets & pharmacies', Icon: ShoppingCart },
-  { href: '/order/browse?type=STORE', label: 'Shops', sub: 'Local stores', Icon: Store },
-  { href: '/order/browse?type=SERVICE', label: 'Services', sub: 'Book a local pro', Icon: Wrench },
-  { href: '/courier', label: 'Send', sub: 'A parcel across town', Icon: Package },
-  { href: '/taxi', label: 'Taxi', sub: 'Book in the Swift mobile app', Icon: Car },
-  { href: '/orders', label: 'Orders', sub: 'Track and reorder', Icon: Receipt },
-  { href: '/explore', label: 'Explore', sub: 'What Swift can do', Icon: Compass },
+// page; Taxi says honestly that rides are booked in the Swift app, and Scan
+// says how a store's Swift code opens on the web.
+const SERVICES: { key: string; label: string; href?: string; sub: string; pictogram: PictogramName }[] = [
+  { key: 'food', label: 'Food', href: '/order/browse?type=RESTAURANT', sub: 'Restaurants & takeaway', pictogram: 'food' },
+  { key: 'groceries', label: 'Groceries', href: '/order/browse?type=SUPERMARKET', sub: 'Markets & pharmacies', pictogram: 'groceries' },
+  { key: 'taxi', label: 'Taxi', href: '/taxi', sub: 'Book in the Swift mobile app', pictogram: 'taxi' },
+  { key: 'send', label: 'Send', href: '/courier', sub: 'A parcel across town', pictogram: 'send' },
+  { key: 'services', label: 'Services', href: '/order/browse?type=SERVICE', sub: 'Book a local pro', pictogram: 'services' },
+  { key: 'orders', label: 'Orders', href: '/orders', sub: 'Track and reorder', pictogram: 'orders' },
+  { key: 'favourites', label: 'Favourites', href: '/account/favourites', sub: 'Stores you saved', pictogram: 'favourites' },
+  { key: 'scan', label: 'Scan', sub: 'Open a store from its Swift code', pictogram: 'scan' },
 ];
+
+const LIVE_TITLE: Record<string, string> = {
+  PENDING: 'Waiting for the store', ACCEPTED: 'Accepted', PREPARING: 'Preparing your order', READY_FOR_PICKUP: 'Ready for pickup',
+  RIDER_ASSIGNED: 'A rider is on the way to the store', RIDER_EN_ROUTE_PICKUP: 'A rider is on the way to the store', RIDER_ARRIVED_PICKUP: 'Your rider is at the store',
+  PICKED_UP: 'On the way', EN_ROUTE_DELIVERY: 'On the way', ARRIVED: 'Your rider is outside',
+  DRIVER_ASSIGNED: 'Your driver is on the way', DRIVER_EN_ROUTE: 'Your driver is on the way', DRIVER_ARRIVED: 'Your driver is here', RIDE_IN_PROGRESS: 'On your ride',
+  RETURNING: 'Returning to the sender',
+};
 
 interface SavedAddress { id: string; label?: string; addressLine1?: string; isDefault?: boolean; latitude?: number; longitude?: number }
 
@@ -50,12 +63,21 @@ function hasPoint(address: SavedAddress | null): address is SavedAddress & { lat
   return Boolean(address && Number.isFinite(address.latitude) && Number.isFinite(address.longitude));
 }
 
-export function CustomerHome({ market }: { market: string }) {
+/** "Good morning" by the clock in Georgetown — the same on the server and in
+ *  the browser, so the first paint and the live page agree. */
+export function greetingAt(date: Date): string {
+  const hour = Number(new Intl.DateTimeFormat('en-GB', { hour: 'numeric', hourCycle: 'h23', timeZone: 'America/Guyana' }).format(date));
+  return hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+}
+
+export function CustomerHome({ market, seed = null }: { market: string; seed?: GuestRead<HomeFeed> | null }) {
   // A guest's "near me" point lives in the shell for this page load, so Home
   // keeps its order when you come back to it; nothing about it is stored.
   const { status, scope, epoch, nearPoint: point, setNearPoint: setPoint } = useCustomerSession();
   const [locating, setLocating] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [more, setMore] = useState(false);
+  const [scanHelp, setScanHelp] = useState(false);
 
   const addresses = useQuery({
     queryKey: ['customer', 'addresses', scope],
@@ -63,23 +85,34 @@ export function CustomerHome({ market }: { market: string }) {
     enabled: status === 'signed-in',
     staleTime: 60_000,
   });
+  const me = useQuery({ queryKey: shellPersonKey(scope, epoch), queryFn: readShellPerson, enabled: status === 'signed-in', staleTime: 5 * 60_000, retry: false });
   const saved = status === 'signed-in' ? deliveryAddress(addresses.data) : null;
   // A signed-in customer sees stores from the address they deliver to; a
   // guest from where the browser is, once they ask.
   const near = hasPoint(saved) ? { lat: saved.latitude, lng: saved.longitude } : status === 'guest' ? point : null;
 
-  // Asked for at once, beside the session probe: the server reads the cookie
-  // itself, so Home never waits on a round trip it does not need. When a
-  // delivery point turns up, the same person's stores re-sort in place (their
-  // previous answer stays on screen meanwhile) — but an answer never outlives
-  // its person: a new epoch starts from nothing.
+  // [W2] Two answers, never mixed. Until the server has said who this is —
+  // and for every guest — Home shows the PUBLIC feed: the one the server
+  // rendered into the page (so the stores are there before any script runs),
+  // read with no session at all. Once someone is signed in, their OWN feed (the
+  // live order, their usuals) is read with their session, under its own key;
+  // the public stores stay on screen while it arrives. When a delivery point
+  // turns up, the same person's stores re-sort in place — but an answer never
+  // outlives its person: a new epoch starts from nothing.
+  const owner = status === 'signed-in' ? 'me' : 'public';
   const feed = useQuery({
-    queryKey: ['customer', 'home', epoch, near?.lat ?? null, near?.lng ?? null],
+    queryKey: homeFeedKey(epoch, owner, near?.lat ?? null, near?.lng ?? null),
     queryFn: async (): Promise<HomeFeed> => {
-      const data = await getHome(near ?? undefined);
+      const data = owner === 'me' ? await getHome(near ?? undefined) : await getPublicHome(near ?? undefined);
       if (!isHomeFeed(data)) throw new Error('Swift sent an incomplete store list.');
       return data;
     },
+    // The guest feed is the same for everyone: fresh for a minute, no re-read
+    // on focus — and on the first page load it is the one the server drew
+    // into the page. A person's own feed is never seeded and keeps the app's
+    // default (it carries their live order).
+    ...(owner === 'public' ? { staleTime: BROWSE_STALE_MS, refetchOnWindowFocus: false } : {}),
+    ...(owner === 'public' && epoch === 0 && !near ? fromPage(seed) : {}),
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[2] === epoch ? previous : undefined),
   });
 
@@ -96,89 +129,148 @@ export function CustomerHome({ market }: { market: string }) {
   }
 
   const data = feed.data;
-  const openStores = data ? withoutRepeats(data.nearby, data.openVendors) : [];
+  const firstName = (me.data?.name ?? '').split(' ')[0] ?? '';
+  const greeting = greetingAt(new Date());
 
   return (
-    <div className="space-y-8">
-      <section aria-labelledby="home-title" className="space-y-4">
+    <div className="flex flex-col">
+      <div className="flex items-center gap-3">
         <DeliveryPoint
           status={status}
           saved={saved}
           savedLoading={status === 'signed-in' && addresses.isPending}
           nearMe={point !== null}
           locating={locating}
-          locationError={locationError}
           onNearMe={() => void showNearMe()}
         />
-        <div>
-          <h1 id="home-title" className="text-2xl font-extrabold tracking-tight md:text-3xl">Order food, groceries and more</h1>
-          <p className="mt-1 text-sm text-[var(--swift-muted)] md:text-base">
-            From businesses in {market} — you pay them directly, cash or MMG. Taxi rides require the Swift mobile app.
-          </p>
-        </div>
+        <div className="flex-1" />
+        <span className="wide:hidden"><MoreButton open={more} onOpen={() => setMore(true)} /></span>
+        {status === 'signed-in' ? (
+          <Link href="/account" aria-label="Profile" className="rounded-full"><Avatar name={me.data?.name} /></Link>
+        ) : status === 'guest' ? (
+          <Link href={signInPath('/')} className="sw-btn sw-btn-sm">Sign in</Link>
+        ) : null}
+      </div>
+      {locationError ? <p role="alert" className="mt-2 text-[13px] leading-[18px] text-[var(--swift-error)]">{locationError}</p> : null}
+
+      <section aria-labelledby="home-title" className="flex flex-col">
+        {/* [W2] The page can be served from the server's cache a little after
+            it was drawn; the browser's clock is the one that greets. */}
+        <h1 id="home-title" className="sw-title mt-3" suppressHydrationWarning>{firstName ? `${greeting}, ${firstName}` : greeting}</h1>
+        <p className="sr-only">Order food, groceries and more from businesses in {market} — you pay them directly, cash or MMG.</p>
         <Link
           href="/order/search"
-          className={`flex items-center gap-3 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 py-3 text-[var(--swift-muted)] shadow-[var(--swift-elevation-card)] md:hidden ${PRESS}`}
+          prefetch={true}
+          className={`mt-3 flex h-12 w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-[13px] font-medium leading-[18px] text-[var(--swift-muted-soft)] hover:border-[var(--swift-border-strong)] wide:max-w-[640px] ${PRESS}`}
         >
-          <Search className="h-5 w-5" aria-hidden />
-          Search stores, dishes and groceries
+          <Search size={17} aria-hidden />
+          Restaurants, groceries, shops…
         </Link>
-        <nav aria-label="Services">
-          <ul className="grid grid-cols-4 gap-2 sm:gap-3 lg:grid-cols-8">
-            {SERVICES.map(({ href, label, sub, Icon }, index) => (
-              <li key={label}>
-                <Link
-                  href={href}
-                  className={`group flex h-full flex-col items-center gap-2 rounded-2xl p-2 text-center hover:bg-[var(--swift-card)] sm:p-3 ${PRESS}`}
-                >
-                  <span className={`grid h-14 w-14 place-items-center rounded-2xl ${index === 0 ? 'bg-[var(--swift-red)] text-[var(--swift-white)]' : 'bg-[var(--swift-card)] text-[var(--swift-ink)] shadow-[var(--swift-elevation-card)]'}`}>
-                    <Icon className="h-6 w-6" aria-hidden />
+
+        {data?.activeOrder ? <LiveOrder order={data.activeOrder} /> : null}
+
+        <nav aria-label="Services" className="mt-1 pb-3">
+          <ul className="grid grid-cols-4 wide:grid-cols-8">
+            {SERVICES.map((service) => {
+              const tile = (
+                <>
+                  <span className={`grid h-14 w-14 place-items-center rounded-2xl ${service.key === 'food' ? 'bg-[var(--swift-red)] text-[var(--swift-white)]' : 'bg-[var(--swift-sunken)] text-[var(--swift-ink)]'}`}>
+                    <Pictogram name={service.pictogram} size={28} />
                   </span>
-                  <span className="text-xs font-semibold leading-tight sm:text-sm">{label}</span>
-                  <span className="sr-only">{sub}</span>
-                </Link>
-              </li>
-            ))}
+                  <span>{service.label}</span>
+                  <span className="sr-only">{service.sub}</span>
+                </>
+              );
+              const cls = `mt-3 flex w-full flex-col items-center gap-1.5 text-[13px] font-medium leading-[18px] text-[var(--swift-ink)] active:scale-[0.94] motion-reduce:active:scale-100 transition-transform duration-150`;
+              return (
+                <li key={service.key}>
+                  {service.href ? (
+                    <Link href={service.href} className={cls}>{tile}</Link>
+                  ) : (
+                    <button type="button" onClick={() => setScanHelp(true)} aria-haspopup="dialog" className={`${cls} cursor-pointer border-0 bg-transparent p-0`}>{tile}</button>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </nav>
       </section>
 
-      {data?.activeOrder ? <LiveOrder order={data.activeOrder} /> : null}
-
       {feed.isError && !data ? (
-        <DataUnavailable what="the stores" error={feed.error} onRetry={() => void feed.refetch()} />
+        <div className="mt-5"><DataUnavailable what="the stores" error={feed.error} onRetry={() => void feed.refetch()} /></div>
       ) : !data ? (
-        <HomeSkeleton />
+        <div className="mt-5"><HomeSkeleton /></div>
       ) : (
-        <>
-          {data.popularItems.length > 0 ? <PopularRail items={data.popularItems} /> : null}
-          {data.orderAgain.length > 0 ? <VendorRail title="Order again" vendors={data.orderAgain} /> : null}
-          <section aria-labelledby="open-stores-title">
-            <h2 id="open-stores-title" className="text-xl font-extrabold">
-              {data.nearby.length > 0 ? 'Stores near you' : 'Open now'}
-            </h2>
-            {openStores.length === 0 ? (
-              <div className="mt-4">
-                <EmptyNote>No stores are taking orders near you right now — check back soon.</EmptyNote>
-              </div>
-            ) : (
-              <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-                {openStores.map((vendor) => <VendorCard key={vendor.id} v={vendor} />)}
-              </div>
-            )}
-          </section>
-          {data.closedVendors.length > 0 ? (
-            <section aria-labelledby="closed-stores-title">
-              <h2 id="closed-stores-title" className="text-lg font-extrabold text-[var(--swift-muted)]">Closed now</h2>
-              <div className="mt-3 grid grid-cols-2 gap-4 opacity-80 sm:grid-cols-3 lg:grid-cols-4">
-                {data.closedVendors.map((vendor) => <VendorCard key={vendor.id} v={vendor} />)}
-              </div>
-            </section>
-          ) : null}
-        </>
+        <HomeRails data={data} />
       )}
+
+      {more ? <MoreMenu guest={status === 'guest'} returnPath={() => '/'} onClose={() => setMore(false)} /> : null}
+      {scanHelp ? <ScanHelp onClose={() => setScanHelp(false)} /> : null}
     </div>
   );
+}
+
+function HomeRails({ data }: { data: HomeFeed }) {
+  const openStores = withoutRepeats(data.nearby, data.openVendors);
+  const foodOpen = data.openVendors.filter((v) => v.vendorType === 'RESTAURANT');
+  const recommended = (data.featured.length > 0 ? data.featured : foodOpen).filter((v) => v.isCurrentlyOpen).slice(0, 3);
+  const shops = data.openVendors.filter((v) => v.vendorType !== 'RESTAURANT' && v.vendorType !== 'SERVICE');
+  return (
+    <>
+      {data.popularItems.length > 0 ? <PopularRail items={data.popularItems} /> : null}
+
+      <div className="sw-bleed sw-band mt-6 flex items-start gap-2 py-6">
+        <CircleCheck size={16} className="mt-0.5 flex-none text-[var(--swift-success)]" aria-hidden />
+        <div className="flex-1">
+          <p className="text-[15px] font-semibold leading-5">0% fees, always.</p>
+          <p className="mt-0.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">Swift never marks up your order — pay cash when it arrives.</p>
+        </div>
+      </div>
+
+      {data.orderAgain.length > 0 ? (
+        <section aria-labelledby="order-again-title" className="mt-6">
+          <SectionHead id="order-again-title" eyebrow="Your usuals" title="Order again" />
+          <Rail>{data.orderAgain.map((vendor) => <li key={vendor.id} className="min-w-0"><VendorSquareCard v={vendor} /></li>)}</Rail>
+        </section>
+      ) : null}
+
+      {recommended.length > 0 ? (
+        <section aria-labelledby="recommended-title" className="mt-6">
+          <SectionHead id="recommended-title" eyebrow="Open now" title={data.featured.length > 0 ? 'Recommended for you' : 'Restaurants open now'} seeAll={{ href: '/order/browse?type=RESTAURANT' }} />
+          <ul className="sw-bleed sw-rail-scroll auto-cols-[72%] pb-4 pt-4 wide:mx-0 wide:grid-flow-row wide:grid-cols-3 wide:px-0">
+            {recommended.map((vendor) => <li key={vendor.id} className="min-w-0"><VendorHeroCard v={vendor} /></li>)}
+          </ul>
+        </section>
+      ) : null}
+
+      <section aria-labelledby="open-stores-title" className="mt-6">
+        <h2 id="open-stores-title" className="sw-title">{data.nearby.length > 0 ? 'Nearby' : 'Open now'}</h2>
+        {openStores.length === 0 ? (
+          <div className="mt-4"><EmptyNote>No stores are taking orders near you right now — check back soon.</EmptyNote></div>
+        ) : (
+          <div className={`mt-4 ${VENDOR_GRID}`}>{openStores.map((vendor) => <VendorCard key={vendor.id} v={vendor} />)}</div>
+        )}
+      </section>
+
+      {shops.length > 0 ? (
+        <section aria-labelledby="shops-title" className="mt-6">
+          <SectionHead id="shops-title" title="Groceries & shops" seeAll={{ href: '/order/browse?type=SUPERMARKET' }} />
+          <Rail>{shops.map((vendor) => <li key={vendor.id} className="min-w-0"><VendorSquareCard v={vendor} /></li>)}</Rail>
+        </section>
+      ) : null}
+
+      {data.closedVendors.length > 0 ? (
+        <section aria-labelledby="closed-stores-title" className="mt-6">
+          <SectionHead id="closed-stores-title" eyebrow="Browse ahead" title="Closed now" />
+          <div className={`mt-4 ${VENDOR_GRID}`}>{data.closedVendors.map((vendor) => <VendorCard key={vendor.id} v={vendor} />)}</div>
+        </section>
+      ) : null}
+    </>
+  );
+}
+
+function Rail({ children }: { children: React.ReactNode }) {
+  return <ul className={RAIL}>{children}</ul>;
 }
 
 /** Nearby first, then every other open store, each once. */
@@ -188,116 +280,86 @@ function withoutRepeats(first: Vendor[], rest: Vendor[]): Vendor[] {
 }
 
 function DeliveryPoint({
-  status, saved, savedLoading, nearMe, locating, locationError, onNearMe,
+  status, saved, savedLoading, nearMe, locating, onNearMe,
 }: {
   status: string;
   saved: SavedAddress | null;
   savedLoading: boolean;
   nearMe: boolean;
   locating: boolean;
-  locationError: string | null;
   onNearMe: () => void;
 }) {
-  const pill = `inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-3.5 py-2 text-sm ${PRESS}`;
+  const pill = `inline-flex min-h-8 max-w-full items-center gap-1 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-1 text-[13px] font-semibold leading-[18px] text-[var(--swift-ink)] hover:border-[var(--swift-border-strong)] ${PRESS}`;
   if (status === 'checking' || savedLoading) {
-    return <span aria-hidden className="inline-block h-11 w-48 animate-pulse rounded-full bg-[var(--swift-subtle)] motion-reduce:animate-none" />;
+    return <span aria-hidden className="sw-skeleton inline-block h-8 w-48 rounded-full" />;
   }
   if (status === 'signed-in') {
     return (
-      <Link href="/order/location" className={pill}>
-        <MapPin className="h-4 w-4 shrink-0 text-[var(--swift-red)]" aria-hidden />
-        {saved ? (
-          <span className="truncate">
-            Deliver to <b className="font-semibold">{saved.label ?? 'your address'}</b>
-            {saved.addressLine1 ? <span className="text-[var(--swift-muted)]"> · {saved.addressLine1}</span> : null}
-          </span>
-        ) : (
-          <span className="font-semibold">Add a delivery address</span>
-        )}
+      <Link href="/order/location" className={`${pill} min-w-0`}>
+        <MapPin size={14} className="flex-none" aria-hidden />
+        <span className="truncate">{saved ? [saved.addressLine1, saved.label].find(Boolean) ?? 'Your address' : 'Add a delivery address'}</span>
+        <ChevronDown size={15} className="flex-none text-[var(--swift-muted-soft)]" aria-hidden />
       </Link>
     );
   }
   return (
-    <div>
-      <button type="button" onClick={onNearMe} disabled={locating} className={`${pill} disabled:opacity-60`}>
-        <MapPin className="h-4 w-4 shrink-0 text-[var(--swift-red)]" aria-hidden />
-        <span className="font-semibold">{locating ? 'Finding you…' : nearMe ? 'Showing stores near you' : 'Show stores near me'}</span>
-      </button>
-      {locationError ? <p role="alert" className="mt-2 text-sm text-[var(--swift-error)]">{locationError}</p> : null}
-    </div>
+    <button type="button" onClick={onNearMe} disabled={locating} className={`${pill} cursor-pointer disabled:opacity-60`}>
+      <MapPin size={14} className="flex-none" aria-hidden />
+      <span>{locating ? 'Finding you…' : nearMe ? 'Showing stores near you' : 'Show stores near me'}</span>
+    </button>
   );
 }
 
 function LiveOrder({ order }: { order: NonNullable<HomeFeed['activeOrder']> }) {
+  const waiting = order.status === 'PENDING';
   return (
-    <Link
-      href={`/orders/${order.id}`}
-      className={`flex items-center gap-3 rounded-2xl bg-[var(--swift-red)] p-4 text-[var(--swift-white)] shadow-[var(--swift-elevation-raised)] ${PRESS}`}
-    >
-      <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-[var(--swift-white)]/15">
-        <Receipt className="h-5 w-5" aria-hidden />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block text-xs font-semibold opacity-85">Your live order · {order.orderNumber}</span>
-        <span className="block truncate font-bold">{order.vendor?.name ?? 'Swift order'}</span>
-      </span>
-      <span className="flex shrink-0 items-center gap-1 text-sm font-semibold">
-        Track <ChevronRight className="h-4 w-4" aria-hidden />
-      </span>
-    </Link>
+    <div className="sw-card mt-4 flex items-center gap-3 p-4">
+      <div className="min-w-0 flex-1">
+        <p className="flex items-center gap-2 text-[15px] font-semibold leading-[22px]">
+          <span aria-hidden className={`h-2 w-2 flex-none rounded-full ${waiting ? 'bg-[var(--swift-warning)]' : 'bg-[var(--swift-success)]'}`} />
+          {LIVE_TITLE[order.status] ?? 'Your live order'}
+        </p>
+        <p className="mt-1 truncate text-[13px] leading-[18px] text-[var(--swift-muted)]">{order.vendor?.name ?? 'Swift order'} · {order.orderNumber}</p>
+      </div>
+      <Link href={`/orders/${order.id}`} className="sw-btn sw-btn-sm sw-btn-ink" aria-label={`Track your live order ${order.orderNumber}`}>Track</Link>
+    </div>
   );
 }
 
 function PopularRail({ items }: { items: PopularItem[] }) {
   return (
-    <section aria-labelledby="popular-title">
-      <div className="flex items-end justify-between">
-        <h2 id="popular-title" className="text-xl font-extrabold">Popular on Swift</h2>
-        <Link href="/order/search" prefetch={true} className="inline-flex items-center text-sm font-semibold text-[var(--swift-red)]">See all</Link>
-      </div>
-      <ul className={RAIL}>
+    <section aria-labelledby="popular-title" className="mt-5">
+      <SectionHead id="popular-title" eyebrow="Most ordered" title="Popular on Swift" seeAll={{ href: '/order/search' }} />
+      <Rail>
         {items.map((item) => (
-          <li key={item.id} className="w-40 shrink-0 snap-start sm:w-44">
-            <Link
+          <li key={item.id} className="min-w-0">
+            <ItemCard
               href={`/order/vendor/${encodeURIComponent(item.vendorId)}?item=${encodeURIComponent(item.id)}`}
-              className={`block overflow-hidden rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] ${PRESS}`}
-            >
-              <span className="relative block h-28 bg-[var(--swift-subtle)]">
-                {item.imageUrl ? <Image src={item.imageUrl} alt="" fill unoptimized sizes="(min-width: 640px) 176px, 160px" loading="lazy" className="object-cover" /> : null}
-              </span>
-              <span className="block p-2.5">
-                <span className="block truncate text-sm font-bold">{item.name}</span>
-                <span className="block text-sm font-semibold text-[var(--swift-red)]">{money(item.price)}</span>
-                <span className="mt-0.5 flex items-center gap-1 truncate text-xs text-[var(--swift-muted)]">
-                  <span className="truncate">{item.vendorName}</span>
-                  {item.etaMin != null ? (
-                    <>
-                      <Clock className="h-3 w-3 shrink-0" aria-hidden />
-                      <span className="shrink-0">{item.etaMin} min</span>
-                    </>
-                  ) : null}
-                </span>
-              </span>
-            </Link>
+              name={item.name}
+              price={item.price}
+              imageUrl={item.imageUrl}
+              vendorType={item.vendorType}
+              meta={item.etaMin != null ? `${item.vendorName} · ${item.etaMin} min` : item.vendorName}
+            />
           </li>
         ))}
-      </ul>
+      </Rail>
     </section>
   );
 }
 
-function VendorRail({ title, vendors }: { title: string; vendors: Vendor[] }) {
-  const id = `rail-${title.toLowerCase().replace(/[^a-z]+/g, '-')}`;
+function ScanHelp({ onClose }: { onClose: () => void }) {
   return (
-    <section aria-labelledby={id}>
-      <h2 id={id} className="text-xl font-extrabold">{title}</h2>
-      <ul className={RAIL}>
-        {vendors.map((vendor) => (
-          <li key={vendor.id} className="w-60 shrink-0 snap-start">
-            <VendorCard v={vendor} />
-          </li>
-        ))}
-      </ul>
-    </section>
+    <Modal labelledBy="scan-help-title" onClose={onClose} className="bg-[var(--swift-card)] px-6 pb-6 pt-5">
+        <div className="flex items-start gap-3">
+          <span className="grid h-12 w-12 flex-none place-items-center rounded-2xl bg-[var(--swift-red-50)] text-[var(--swift-red-600)]"><Pictogram name="scan" size={24} /></span>
+          <div className="flex-1">
+            <h2 id="scan-help-title" className="sw-title">Scan a store’s Swift code</h2>
+            <p className="sw-caption mt-1 text-[15px] leading-[22px]">Point your phone’s camera at the Swift code on a store’s counter or flyer. It opens that store here, ready to order.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close" data-modal-initial-focus className="sw-icon-btn"><X size={20} aria-hidden /></button>
+        </div>
+        <button type="button" onClick={onClose} className="sw-btn sw-btn-block mt-5">Got it</button>
+    </Modal>
   );
 }

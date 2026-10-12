@@ -61,7 +61,7 @@ export default function DriversPage() {
             delivery fee, every fare and every tip is yours — in your hand, the same day.
           </p>
 
-          <div className="mt-9 rounded-2xl border border-[var(--swift-border)] bg-white p-6">
+          <div className="mt-9 sw-card p-6">
             <div className="flex items-start gap-3">
               <Banknote className="mt-0.5 h-5 w-5 shrink-0 text-[var(--swift-red)]" aria-hidden />
               <div>
@@ -107,7 +107,7 @@ export default function DriversPage() {
         </p>
         <ul className="mt-8 grid gap-4 md:grid-cols-2">
           {SAFETY.map(({ icon: Icon, title, body }) => (
-            <li key={title} className="rounded-2xl bg-white p-6 shadow-sm">
+            <li key={title} className="rounded-2xl bg-[var(--swift-card)] p-6 shadow-[var(--swift-elevation-card)]">
               <Icon className="h-6 w-6 text-[var(--swift-red)]" aria-hidden />
               <h3 className="mt-4 font-bold">{title}</h3>
               <p className="mt-2 text-sm leading-relaxed text-[var(--swift-muted)]">{body}</p>
@@ -127,7 +127,7 @@ export default function DriversPage() {
             {DOCUMENTS.map((d) => (
               <li
                 key={d.t}
-                className="flex items-start gap-4 rounded-2xl border border-[var(--swift-border)] bg-white p-5"
+                className="flex items-start gap-4 sw-card p-5"
               >
                 <FileCheck2 className="mt-0.5 h-5 w-5 shrink-0 text-[var(--swift-red)]" aria-hidden />
                 <div>
@@ -144,7 +144,7 @@ export default function DriversPage() {
           <div className="mt-10">
             <Link
               href="/signup"
-              className="inline-block rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
+              className="inline-block rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
             >
               Start a driver account
             </Link>
