@@ -923,8 +923,7 @@ describe('[PROD-PATH] production keeps admin top-ups on hold and never arms the 
   it('accepts the hold with no agent-cash secret (and an empty one), and asks nothing outside production', () => {
     expect(() => assertSafeBootConfig(good)).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: '' })).not.toThrow();
-    const { BILLING_TOPUP_HOLD: _hold, ...withoutHold } = good;
-    expect(() => assertSafeBootConfig({ ...withoutHold, NODE_ENV: 'test', AGENT_CASH_WEBHOOK_SECRET: 'x'.repeat(32) })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, BILLING_TOPUP_HOLD: undefined, NODE_ENV: 'test', AGENT_CASH_WEBHOOK_SECRET: 'x'.repeat(32) })).not.toThrow();
   });
 });
 
