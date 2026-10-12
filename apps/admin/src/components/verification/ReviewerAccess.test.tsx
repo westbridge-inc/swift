@@ -113,6 +113,26 @@ describe('[VERIFY-DOCS V3] the document viewer names the grant when it is missin
   });
 });
 
+describe('[VERIFY-DOCS V3 · DS1003 S4] a grant revoked after the link was minted', () => {
+  it('the render refusal names the grant too, not "try again"', async () => {
+    const message = 'You need the document-reviewer permission to open or decide documents. A super-admin grants it under Document reviewers at the top of the Review Center.';
+    mockApi((r) => {
+      if (r.url.pathname === '/api/v1/admin/verification/doc_2/document-url') {
+        return { body: { success: true, data: { url: '/api/v1/verification/render/doc_2?expires=9999999999&reviewer=rev&sig=synthetic-signature-0000', expiresInSeconds: 300 } } };
+      }
+      if (r.url.pathname === '/api/v1/verification/render/doc_2') {
+        return { status: 403, body: { success: false, error: { code: 'DOCUMENT_REVIEWER_REQUIRED', message } } };
+      }
+      throw new Error(`Unexpected ${r.method} ${r.url.pathname}`);
+    });
+    const { user } = renderWithQuery(<DocumentViewer id="doc_2" label="National ID" onViewed={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'View document' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(message);
+    expect(alert.textContent).not.toMatch(/Try View document again/);
+  });
+});
+
 describe('[VERIFY-DOCS V3] the Review Center carries the panel', () => {
   it('a super-admin sees Document reviewers above the queue', async () => {
     vi.doMock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
