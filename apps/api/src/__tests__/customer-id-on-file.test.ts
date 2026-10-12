@@ -175,7 +175,10 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('ON_FILE');
   });
 
-  it('store build 9 still sends a selfie: its own selfie is accepted (never compared); someone else’s is refused', async () => {
+  // Store builds 9 and 10 (iPhone 9.1, release 14a8cf3b) send exactly { idDocumentUrl, selfieUrl,
+  // consent: true, privacyNoticeVersion: 'v1' } after POST /verification/upload; the build reads only
+  // success. That payload must keep working (the build under review talks to staging).
+  it('store builds 9 and 10 still send a selfie: their own selfie is accepted (never compared); someone else’s is refused', async () => {
     const c = await customer();
     const other = await customer();
     const foreign = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: await upload(other.token, readable()) });
@@ -452,6 +455,25 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     const exported = (dsar.json().data.documents as Array<{ id: string; decisions: Array<{ outcome: string; category: string }> }>).find((d) => d.id === doc.id);
     expect(exported?.decisions).toEqual([expect.objectContaining({ outcome: 'REJECT', category: 'WITHDRAWN' })]);
     expect(dsar.body).not.toContain('Synthetic staff-only reason text');
+  });
+
+  it("a withdrawn ID the customer then erased (PURGED) still shows the neutral line, never the reviewer's reason", async () => {
+    const c = await customer();
+    const doc = (await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) })).json().data;
+    expect((await admin('PUT', `/api/v1/admin/verification/${doc.id}/revoke`, { reason: 'Synthetic staff-only reason after erasure' })).statusCode).toBe(200);
+    expect((await erase(c.token, doc.id)).json().data[0]).toMatchObject({ outcome: 'DESTROYED' });
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).state).toBe('PURGED');
+    const status = await app.inject({ method: 'GET', url: '/api/v1/verification/status', headers: { authorization: `Bearer ${c.token}` } });
+    expect(status.statusCode, status.body).toBe(200);
+    const row = (status.json().data.documents as Array<{ id: string; reviewNote: string | null }>).find((d) => d.id === doc.id);
+    if (row) expect(row.reviewNote).toBe('Withdrawn by our team');
+    expect(status.body).not.toContain('Synthetic staff-only reason after erasure');
+    expect(status.body).not.toContain('REVOKED:');
+    // The data-access export stays truthful: the decision by its neutral category, never the words.
+    const dsar = await app.inject({ method: 'GET', url: '/api/v1/verification/dsar/documents', headers: { authorization: `Bearer ${c.token}` } });
+    const exported = (dsar.json().data.documents as Array<{ id: string; decisions: Array<{ outcome: string; category: string }> }>).find((d) => d.id === doc.id);
+    expect(exported?.decisions).toEqual([expect.objectContaining({ outcome: 'REJECT', category: 'WITHDRAWN' })]);
+    expect(dsar.body).not.toContain('Synthetic staff-only reason after erasure');
   });
 
   it('an account above L1 with no customer ID on record is not said to have one on file', async () => {

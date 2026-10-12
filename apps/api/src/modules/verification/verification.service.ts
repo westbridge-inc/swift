@@ -1453,8 +1453,12 @@ export class VerificationService {
       orderBy: { createdAt: 'desc' },
     })).filter((d) => d.state !== 'SUPERSEDED')
       // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a withdrawn customer ID shows a neutral line; the
-      // reviewer's reason ("REVOKED: …") stays in the staff record.
-      .map((d) => (d.docType === IDENTITY_DOC_TYPE && d.state === 'REVOKED' ? { ...d, reviewNote: 'Withdrawn by our team' } : d));
+      // reviewer's reason ("REVOKED: …") stays in the staff record. Matched on the note as well as
+      // the state: once the customer erases a withdrawn ID (or retention purges it) the row is
+      // PURGED but still carries the reviewer's words, which may name another account.
+      .map((d) => (d.docType === IDENTITY_DOC_TYPE && (d.state === 'REVOKED' || d.reviewNote?.startsWith('REVOKED:'))
+        ? { ...d, reviewNote: 'Withdrawn by our team' }
+        : d));
 
     const approved = new Set(
       documents
