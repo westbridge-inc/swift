@@ -1,12 +1,17 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { CreditCard } from 'lucide-react';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
+import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import { cardFrameEnabled, cardFrameSrc } from '@/lib/card-frame';
 import {
   CARD_CONSENT_VERSION, CARD_IDLE, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
-  cardRemovedWords, cardSessionTone, cardSessionWords, cardSpoken, type CardCheckoutView, type CardFamily, type CardPointer, type LiveCard,
+  cardRemovedWords, cardSessionOf, cardSessionTone, cardSessionWords, cardSpoken, type CardCheckoutView, type CardFamily, type CardPointer, type LiveCard,
 } from '@/lib/card-fee';
+
+// [CARD embed] Loaded only when a card page opens inside the page: no weight on the page otherwise.
+const CardPageFrame = lazy(() => import('./card-page-frame'));
 
 // This tab's last card session: its id and its tap's key, never the page address. The
 // checkout-attempt prefix is the one auth.ts clears on every sign-in, sign-out and account change.
@@ -45,7 +50,9 @@ const TONE = {
 /**
  * "Pay by card" on the one weekly-fee page (CARD-CHECKOUT-API). Shown only when the server says
  * CARD is live, or while a card payment this tab started is still being answered. The card number
- * is typed only on the bank's hosted page, opened in this tab; this page has no card field at all.
+ * is typed only on the bank's hosted page: inside this page (CardPageFrame) when the build turned
+ * that on and the page is on the API origin, otherwise opened in this tab. This page has no card
+ * field at all.
  */
 export function CardPay({ family, storeId, card, otherPaymentPending, refresh, onPaymentPending }: {
   family: CardFamily;
@@ -61,6 +68,11 @@ export function CardPay({ family, storeId, card, otherPaymentPending, refresh, o
   const [removing, setRemoving] = useState<'ask' | 'busy' | null>(null);
   const [removeError, setRemoveError] = useState('');
   const [removeNotice, setRemoveNotice] = useState('');
+  const [frame, setFrame] = useState<{ src: string; watch?: () => Promise<boolean> } | null>(null);
+  // Closes the open card page and lets the session follow the server (once).
+  const frameDone = useRef<(() => void) | null>(null);
+  // The session's latest view, as it is emitted (state lags a render behind).
+  const latest = useRef<CardCheckoutView>(CARD_IDLE);
   const base = `/api/v1/${family}/subscription`;
   // The parent hears "a card payment may be taking money" in the same render as the words, never a frame later.
   const pendingRef = useRef(onPaymentPending); pendingRef.current = onPaymentPending;
@@ -73,16 +85,30 @@ export function CardPay({ family, storeId, card, otherPaymentPending, refresh, o
         headers: { 'Idempotency-Key': key },
       }, { storeId }).then((r) => r.data),
       read: (sessionId) => apiFetch(`${base}/card-sessions/${encodeURIComponent(sessionId)}`, undefined, { storeId }).then((r) => r.data),
-      open: async (url) => { window.location.assign(url); },
+      open: async (url) => {
+        const src = cardFrameEnabled() ? cardFrameSrc(url, BROWSER_API_ORIGIN) : null;
+        if (!src) { window.location.assign(url); return; }
+        const sessionId = latest.current.session?.sessionId;
+        // The open card page asks the server, never the frame, whether it is still open.
+        const watch = sessionId
+          ? () => apiFetch(`${base}/card-sessions/${encodeURIComponent(sessionId)}`, undefined, { storeId }).then((r) => cardSessionOf(r.data)?.status === 'OPEN')
+          : undefined;
+        await new Promise<void>((resolve) => {
+          frameDone.current?.();
+          frameDone.current = () => { frameDone.current = null; setFrame(null); resolve(); };
+          setFrame({ src, ...(watch ? { watch } : {}) });
+        });
+      },
       refresh,
       save: stored.save,
       load: stored.load,
     }, () => crypto.randomUUID(), (v) => {
+      latest.current = v;
       setView(v);
       pendingRef.current(cardPaymentPending(v.session) || v.busy === 'PAY_NOW');
     }, (e) => (e instanceof ApiRequestError ? { status: e.status, code: e.code } : {}));
   }, [base, family, storeId, refresh]);
-  useEffect(() => { session.activate(); session.resume(); return () => session.dispose(); }, [session]);
+  useEffect(() => { session.activate(); session.resume(); return () => { session.dispose(); frameDone.current?.(); }; }, [session]);
   useEffect(() => {
     const focus = () => session.focus();
     window.addEventListener('focus', focus);
@@ -154,5 +180,6 @@ export function CardPay({ family, storeId, card, otherPaymentPending, refresh, o
         <button type="button" onClick={() => setConsent(false)} className="min-h-11 rounded-full border border-black/10 bg-white px-5 text-sm font-semibold">Not now</button>
       </div>
     </div>}
+    {frame && <Suspense fallback={null}><CardPageFrame src={frame.src} {...(frame.watch ? { watch: frame.watch } : {})} onDone={() => frameDone.current?.()} /></Suspense>}
   </section>;
 }
