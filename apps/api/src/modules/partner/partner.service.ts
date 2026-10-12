@@ -4,6 +4,8 @@ import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
+import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
 import { assertHirePlate } from '../verification/hire-plate';
@@ -487,6 +489,20 @@ export class PartnerService {
       }
       if (withdrawn.length > 0) {
         await tx.reviewCase.updateMany({ where: { submissionId: { in: withdrawn }, closedAt: null }, data: { closedAt: now } });
+      }
+
+      // [L06 · #1551] A changed make, model, year, colour or plate is a vehicle the reviewers have not
+      // seen: its papers need a fresh review, the same rule as the profile writers. Re-declaring the SAME
+      // car as another type (a car as a wagon car, same details and plate) keeps its papers, as before.
+      const identityChanged = vehicleIdentityChanged(
+        { vehicleMake: currentProfile.vehicleMake, vehicleModel: currentProfile.vehicleModel, vehicleYear: currentProfile.vehicleYear, vehicleColor: currentProfile.vehicleColor, licensePlate: currentProfile.licensePlate },
+        { vehicleMake: details.make, vehicleModel: details.model, vehicleYear: details.year, vehicleColor: details.color, licensePlate: details.licensePlate },
+      );
+      if (identityChanged) {
+        const nextProfile = target === 'DRIVER' ? await tx.driver.findUniqueOrThrow({ where: { id: targetId } }) : await tx.rider.findUniqueOrThrow({ where: { id: targetId } });
+        const freshReview = await requireFreshVehicleReview(tx, userId, currentProfile.licensePlate, { ...nextProfile, kind: target });
+        superseded.push(...freshReview.superseded);
+        withdrawn.push(...freshReview.withdrawn);
       }
 
       // The change is on the record: what the mover drove before and after, and which

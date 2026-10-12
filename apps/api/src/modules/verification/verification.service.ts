@@ -348,13 +348,26 @@ export class VerificationService {
       // vehicle) and links the account to it — in the same transaction, so a submission
       // without a subject cannot exist (a mover without a plate has no vehicle subject).
       const subject = await resolveSubject(tx, { userId: data.userId, countryCode: alive[0]!.countryCode, docType: data.docType, tenantId: alive[0]!.tenantId, ...(review.authority && { vehicleProfile: review.authority.profile }) });
-      const created = await tx.verificationDocument.create({ data: { ...born, status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
+      const pendingVehicleReview = subject?.kind === 'VEHICLE' && await tx.subjectLink.count({ where: { id: subject.linkId, approvedAt: null, validTo: null } }) > 0;
+      const created = await tx.verificationDocument.create({ data: { ...born, ...(pendingVehicleReview ? { reviewedBy: null, reviewedAt: null } : {}), status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
       // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
       // a submission without its extraction ledger cannot exist.
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      // [L06] An automatic approval stands only when nothing a reviewer would be asked holds it:
+      // a vehicle link still awaiting fresh review (#1551) or a stored-vehicle refusal (#1553)
+      // sends the submission to a person instead.
+      let finalVerdict = verdict === 'APPROVED' && pendingVehicleReview ? 'PENDING' as const : verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING' as const;
+      if (finalVerdict === 'APPROVED') {
+        try { await this.assertStoredVehicleApproval(tx, created); }
+        catch (error) {
+          if (!(error instanceof AppError) || !['VEHICLE_SUBJECT_REQUIRED', 'WRONG_PLATE_CLASS', 'MOVER_PROFILE_REQUIRED', 'INSURANCE_SCOPE_INSUFFICIENT'].includes(error.code)) throw error;
+          finalVerdict = 'PENDING';
+          await tx.verificationDocument.update({ where: { id: created.id }, data: { reviewedBy: null, reviewedAt: null } });
+        }
+      }
+      const doc = await walkSubmission(tx, created.id, finalVerdict, review.extraction);
       // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
       // created on another account's subject — the impostor's link never survives a rejection,
       // and a later resubmission starts a fresh pending assignment.
@@ -511,6 +524,7 @@ export class VerificationService {
         userId,
         docType,
         status: 'APPROVED',
+        state: 'COMMITTED',
         OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }],
       },
     });
@@ -992,18 +1006,39 @@ export class VerificationService {
       vehicleType = vehicle.vehicleKind as VehicleType;
       plate = vehicle.registrationMark;
       taxi = isPassengerVehicle(vehicleType);
+      // [L06 · #1553 review] A mover who changed to a passenger vehicle but kept the plate reuses the
+      // subject recorded under the old class (a motorbike's private plate, say). Every vehicle the account
+      // holds on that plate counts — the Rider AND the Driver profile, whatever mode the applicant is in
+      // right now (Opus 12 Oct: switching to Rider mode before review must not bring back the motorbike's
+      // exemption) — so the H rule and the hire insurance apply when any of them is a passenger vehicle.
+      // Never a refusal by class alone: a car corrected to a wagon car on the same H plate stays approvable,
+      // and holding both profiles is never itself a reason to refuse the reviewer.
+      const mark = normalizeRegistrationMark(plate ?? '');
+      const [riderOnAccount, driverOnAccount] = await Promise.all([
+        tx.rider.findUnique({ where: { userId: doc.userId }, select: { vehicleType: true, licensePlate: true } }),
+        tx.driver.findUnique({ where: { userId: doc.userId }, select: { vehicleType: true, licensePlate: true } }),
+      ]);
+      const passengerOnPlate = [driverOnAccount, riderOnAccount].find((profile) => !!profile && mark !== ''
+        && normalizeRegistrationMark(profile.licensePlate ?? '') === mark
+        && profile.vehicleType in VEHICLE_CLASSES && isPassengerVehicle(profile.vehicleType as VehicleType));
+      if (!taxi && passengerOnPlate) { vehicleType = passengerOnPlate.vehicleType as VehicleType; taxi = true; }
     } else {
       // A legacy unbound row cannot acquire today's chosen role as historical authority.
       const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });
       const driver = await tx.driver.findUnique({ where: { userId: doc.userId } });
       if (rider && driver) throw moverProfileRequired();
-      const profile = driver ?? rider;
-      vehicleType = profile?.vehicleType ?? null;
-      plate = profile?.licensePlate ?? null;
-      taxi = driver !== null;
+      if (driver) {
+        throw new AppError(400, 'VEHICLE_SUBJECT_REQUIRED',
+          'This taxi document has no registered vehicle. Ask the applicant to submit it again so its H-series registration can be reviewed.');
+      }
+      // Non-taxi legacy delivery evidence keeps its exemption. A profile plate
+      // never supplies registration authority for a taxi approval.
+      vehicleType = rider?.vehicleType ?? null;
+      plate = null;
+      taxi = false;
     }
-    if (taxi && plate && plateClassOf(plate) !== 'H') {
-      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi must carry an H registration mark. Reject the document as WRONG_PLATE_CLASS.');
+    if (taxi && plateClassOf(plate ?? '') !== 'H') {
+      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi needs an H-series registration mark on its registered vehicle. A missing or different plate cannot be approved.');
     }
     if (doc.docType === 'vehicle_insurance' && vehicleType && isPassengerVehicle(vehicleType)
       && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
@@ -1101,10 +1136,25 @@ export class VerificationService {
       }
 
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
+      if (requestedStatus === 'APPROVED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
+        const subject = await tx.subject.findUnique({ where: { id: updated.subjectId }, select: { createdById: true } });
+        const vehicle = await tx.vehicleProfile.findUnique({ where: { subjectId: updated.subjectId }, select: { registrationMark: true } });
+        // Any vehicle the registrant holds on that plate (Rider or Driver profile), whatever mode they are
+        // in right now: holding both profiles never blocks the reviewer's approval (Opus 12 Oct, S3-1).
+        const [riderOnAccount, driverOnAccount] = await Promise.all([
+          tx.rider.findUnique({ where: { userId: updated.userId }, select: { licensePlate: true } }),
+          tx.driver.findUnique({ where: { userId: updated.userId }, select: { licensePlate: true } }),
+        ]);
+        const mark = normalizeRegistrationMark(vehicle?.registrationMark ?? '');
+        const onPlate = mark !== '' && [riderOnAccount, driverOnAccount].some((profile) => !!profile && normalizeRegistrationMark(profile.licensePlate ?? '') === mark);
+        if (subject?.createdById === updated.userId && vehicle && onPlate) {
+          await tx.subjectLink.updateMany({ where: { accountId: updated.userId, subjectId: updated.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null }, data: { approvedAt: now } });
+        }
+      }
       // [High #9 · DS109] The PENDING vehicle link lifecycle rides the doc decision: rejecting
       // the submission that created a cross-account assignment closes the link, so it can
-      // never be approved later by anything else. An approved document does NOT approve the
-      // assignment — only the explicit, audited admin action (approveVehicleAssignment) does.
+      // never be approved later by anything else. A human decision can restore the registrant
+      // after an identity edit; cross-account assignments still need the explicit admin action.
       if (requestedStatus === 'REJECTED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
         // Filter on the RAW stored subjectId on purpose: `resolveSubject` keys the link it
         // creates at the same root-of-moment value it stores on the document (one transaction),

@@ -1,0 +1,44 @@
+import type { Prisma } from '@prisma/client';
+import { BUCKET_OF, VEHICLE_REGISTRATION_DOC_TYPE } from './doc-registry';
+import { hopDocState } from './doc-state';
+import { normalizeRegistrationMark, resolveSubject, rootSubjectId } from './subjects';
+import type { VehicleSubmissionProfile } from './submission-authority';
+
+const vehicleTypes = Object.entries(BUCKET_OF).filter(([, bucket]) => bucket === 'VEHICLE').map(([type]) => type);
+const awaiting = ['REVIEW_QUEUED', 'IN_REVIEW', 'INFO_REQUESTED'] as const;
+
+/** Caller holds User and mover profile locks. Every writer uses the same review reset. */
+export async function requireFreshVehicleReview(tx: Prisma.TransactionClient, userId: string, previousPlate: string | null, next: VehicleSubmissionProfile) {
+  const now = new Date();
+  const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true, countryCode: true } });
+  const subjects = new Set<string>();
+  for (const plate of [previousPlate, next.licensePlate]) {
+    const registrationMark = normalizeRegistrationMark(plate ?? '');
+    if (!registrationMark) continue;
+    const vehicle = await tx.vehicleProfile.findUnique({ where: { registrationMark_countryCode: { registrationMark, countryCode: user.countryCode } }, select: { subjectId: true } });
+    if (vehicle) { subjects.add(vehicle.subjectId); subjects.add(await rootSubjectId(tx, vehicle.subjectId)); }
+  }
+  await tx.subjectLink.updateMany({
+    where: { accountId: userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
+    data: { validTo: now },
+  });
+  const papers = await tx.verificationDocument.findMany({
+    where: { userId, role: 'MOVER', docType: { in: vehicleTypes }, state: { in: ['COMMITTED', ...awaiting] },
+      OR: [{ subjectId: null }, { subjectId: { in: [...subjects] } }] },
+    select: { id: true, state: true, legalHoldId: true },
+  });
+  const mutable = papers.filter(paper => !paper.legalHoldId);
+  const awaitingIds = mutable.filter(paper => paper.state !== 'COMMITTED').map(paper => paper.id);
+  if (awaitingIds.length) await tx.$queryRaw`SELECT id FROM review_case WHERE "submissionId" = ANY(${awaitingIds}) ORDER BY id FOR UPDATE`;
+  const superseded: string[] = [], withdrawn: string[] = [];
+  for (const paper of mutable) {
+    if (paper.state === 'COMMITTED') {
+      if (await hopDocState(tx, { id: paper.id, userId }, 'COMMITTED', 'SUPERSEDED', { reviewNote: 'SUPERSEDED: the mover changed vehicle identity' })) superseded.push(paper.id);
+    } else if (await hopDocState(tx, { id: paper.id, userId }, [...awaiting], 'EXPIRED', { status: 'EXPIRED', reviewNote: 'WITHDRAWN: the mover changed vehicle identity' })) withdrawn.push(paper.id);
+  }
+  if (superseded.length) await tx.renewalSchedule.updateMany({ where: { documentId: { in: superseded }, suspendedAt: null }, data: { suspendedAt: now } });
+  if (withdrawn.length) await tx.reviewCase.updateMany({ where: { submissionId: { in: withdrawn }, closedAt: null }, data: { closedAt: now } });
+  const subject = await resolveSubject(tx, { userId, ...user, docType: VEHICLE_REGISTRATION_DOC_TYPE, vehicleProfile: next });
+  if (subject) await tx.subjectLink.updateMany({ where: { id: subject.linkId }, data: { approvedAt: null } });
+  return { superseded, withdrawn };
+}
