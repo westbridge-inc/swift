@@ -771,6 +771,39 @@ describe('weak-network driver acceptance', () => {
     expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
     expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active']);
   });
+  it.each(['ALREADY_TAKEN', 'DRIVER_BUSY'])('reconciles a board retry refused %s because the first accept committed', async (code) => {
+    const urls: string[] = [];
+    let posts = 0;
+    let gets = 0;
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') {
+        posts++;
+        if (posts === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+        throw new AxiosError('conflict', 'ERR_BAD_REQUEST', config, undefined,
+          response(config, 409, { success: false, error: { code } }));
+      }
+      gets++;
+      // Before the retry the first accept has not committed; after it, it has.
+      return response(config, 200, { data: gets === 1 ? null : { id: 'ride-a' } });
+    });
+    expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active', '/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it('still fails a refused board retry when the server holds a different ride', async () => {
+    const urls: string[] = [];
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') {
+        if (urls.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+        throw new AxiosError('conflict', 'ERR_BAD_REQUEST', config, undefined,
+          response(config, 409, { success: false, error: { code: 'DRIVER_BUSY' } }));
+      }
+      return response(config, 200, { data: { id: 'ride-other' } });
+    });
+    await expect(driverApi.accept('ride-a')).rejects.toThrow();
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active', '/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
   it('does not borrow another account for a retry', async () => {
     let calls = 0;
     setAdapter(async (config) => { calls++; auth.current = accountB; throw new AxiosError('offline', 'ERR_NETWORK', config); });

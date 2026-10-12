@@ -1029,9 +1029,12 @@ async function acceptDriver(path: string, body: object, boardId?: string) {
       currentSession();
       return result;
     } catch (retryError) {
-      // The first accept may finish between the active read and the retry.
+      // The first accept may finish between the active read and the retry:
+      // the retry is then refused (UNAVAILABLE before the claim, or
+      // ALREADY_TAKEN / DRIVER_BUSY when it lands during the claim). Only the
+      // server's own current ride, matched by exact id, counts as held.
       if (boardId && axios.isAxiosError(retryError) &&
-          retryError.response?.data?.error?.code === 'UNAVAILABLE') {
+          ['UNAVAILABLE', 'ALREADY_TAKEN', 'DRIVER_BUSY'].includes(retryError.response?.data?.error?.code)) {
         const held = await heldRide();
         if (held) return held;
       }
