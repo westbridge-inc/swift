@@ -1,4 +1,17 @@
 -- Rollback on an isolated database with card processing stopped.
+-- [PT-4] Guarded like the provider-actions rollback: the two columns hold
+-- money evidence (a durable completion claim, the provider's own approved
+-- completion). They are removed only when no row has ever used them, and no
+-- late approval is held; otherwise this refuses.
+BEGIN;
+SET LOCAL lock_timeout = '10s';
+DO $guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM "card_sessions" WHERE "completionClaimedAt" IS NOT NULL OR "completionEvidence" IS NOT NULL
+             OR ("status" = 'HELD' AND "failureCode" = 'LATE_PROVIDER_APPROVAL')) THEN
+    RAISE EXCEPTION 'CARD_COMPLETION_EVIDENCE_IN_USE: card sessions carry completion claims, provider completion evidence or held late approvals; not rolling back';
+  END IF;
+END $guard$;
 CREATE OR REPLACE FUNCTION billing_confirmation_lineage() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE c billing_dunning_clocks%ROWTYPE; source_sub text; source_tenant text; source_user text; payer_user text;
   old_length integer; prefix jsonb; correction jsonb;
@@ -151,3 +164,5 @@ BEGIN
   RETURN NEW;
 END $$ LANGUAGE plpgsql;
 ALTER TABLE card_sessions DROP COLUMN "completionEvidence", DROP COLUMN "completionClaimedAt";
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261012185001_card_completion_evidence';
+COMMIT;

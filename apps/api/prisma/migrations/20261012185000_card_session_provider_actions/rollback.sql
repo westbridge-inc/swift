@@ -28,5 +28,5 @@ ALTER TABLE "card_sessions"
   DROP COLUMN IF EXISTS "resolution",
   DROP COLUMN IF EXISTS "resolvedBy",
   DROP COLUMN IF EXISTS "resolvedAt";
-DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261007151500_card_session_provider_actions';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261012185000_card_session_provider_actions';
 COMMIT;
