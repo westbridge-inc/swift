@@ -83,6 +83,10 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // so the tap opened nothing. ActiveJob is the rider's live job; it takes no
   // params because it resolves the active job itself.
   if (kind === 'prep_ready') return { screen: 'ActiveJob' };
+  // [AF-MOB-006] Custody recovery. The holder's live job carries the handoff
+  // code; the relay rider's task waits on their dashboard until custody is theirs.
+  if (kind === 'custody_handoff_code') return { screen: 'ActiveJob' };
+  if (kind === 'custody_relay_assigned' || kind === 'custody_relay_cancelled') return { screen: 'Main' };
   // A store told "a cancelled order may hold an MMG payment" runs a business:
   // their Main is the vendor dashboard, not a customer tracking screen.
   if (kind === 'mmg_unattested_cancellation') return { screen: 'Main' };
@@ -163,6 +167,17 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // lands on Account, where the Store location card shows it and moves it back.
   if (kind === 'store_pin_moved') return { screen: 'Account' };
 
+  // [L04 · MASTER-003] "Your password was changed" — if it wasn't the owner,
+  // support is the way back, so the notice opens the help screen (mounted in
+  // every navigator) already filed as an account problem.
+  if (kind === 'password_changed') {
+    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'I did not change my password' } };
+  }
+  // [L04 · MASTER-056] Password sign-in paused after many wrong attempts: the
+  // owner can still sign in with a code; help is the door if it wasn't them.
+  if (kind === 'password_sign_in_paused') {
+    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Someone is trying my password' } };
+  }
   if (kind === 'liveness_locked') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };
   }

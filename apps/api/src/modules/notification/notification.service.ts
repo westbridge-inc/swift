@@ -1,3 +1,5 @@
+import { enqueueFeeDemand, isFeeDemand, persistFeeDemandInbox, handOffFeeDemand, feeDemandOutstanding } from '../billing/fee-demand-delivery';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -44,7 +46,10 @@ type NotificationType =
  *  kind deny-list for those. */
 export type NotificationAudience = 'customer' | 'earner' | 'business';
 
-interface NotificationPayload {
+export interface NotificationPayload {
+  /** Durable weekly-fee stage and optional SMS, never used by other notices. */
+  feeStageKey?: string;
+  feeSms?: string;
   userId: string;
   type: NotificationType;
   title: string;
@@ -225,6 +230,45 @@ function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
   return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
 }
 
+/**
+ * [144 · OPS-PAGING] The ONE definition of who an admin notice or an ops page
+ * reaches in-app, shared by notifyAdmins and the OpsAlert outbox
+ * (safety/ops-alert.ts) so the two can never drift:
+ *  - a tenant's notice: that tenant's ACTIVE ADMINs plus every ACTIVE SUPER_ADMIN;
+ *  - `null` (platform): every ACTIVE SUPER_ADMIN, and nobody else;
+ *  - the store-review fiction (a REVIEW tenant): that tenant's own ADMINs and
+ *    NOBODY else — an app-store reviewer's demo never reaches a real operator
+ *    (GUARDRAILS §3).
+ * Platform pages ALSO text the configured OPS_ONCALL_PHONES list (ops-alert.ts,
+ * coordinator ruling 5 Oct 2026), never for the fiction. Whether launch
+ * responders keep SUPER_ADMIN or get a narrower responder role is an open
+ * owner question; until it is answered this stays today's audience.
+ */
+export function adminAudienceWhere(tenantId: string | null, opts: { review?: boolean } = {}): Prisma.UserWhereInput {
+  if (tenantId && opts.review) return { status: 'ACTIVE', tenantId, roles: { has: 'ADMIN' }, NOT: { roles: { has: 'SUPER_ADMIN' } } };
+  return tenantId
+    ? { status: 'ACTIVE', roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, OR: [{ tenantId }, { roles: { has: 'SUPER_ADMIN' } }] }
+    : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } };
+}
+
+/** [REVIEW-PARTNER] Is this the store-review fiction? Tenants are not tenant-scoped rows.
+ *  A lookup that fails answers "no": a real operator page is never lost to a lookup failure. */
+export async function isReviewTenantId(prisma: Pick<PrismaClient, 'tenant'>, tenantId: string): Promise<boolean> {
+  try {
+    const t = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { kind: true } });
+    return t?.kind === 'REVIEW';
+  } catch (err) {
+    log().error({ err }, '[REVIEW-PARTNER] could not read the tenant kind for a page — delivering it');
+    return false;
+  }
+}
+
+/** The audience for a page or notice about `tenantId`, the fiction resolved. */
+export async function adminAudienceFor(prisma: PrismaClient, tenantId: string | null): Promise<{ where: Prisma.UserWhereInput; review: boolean }> {
+  const review = tenantId ? await runWithoutTenant(() => isReviewTenantId(prisma, tenantId)) : false;
+  return { where: adminAudienceWhere(tenantId, { review }), review };
+}
+
 export async function notifyAdmins(
   prisma: PrismaClient,
   notifications: NotificationService,
@@ -287,14 +331,16 @@ export async function notifyAdmins(
   // dedup window kept the outage dark for 15 minutes. Paging operators is a
   // sanctioned cross-tenant read; it must not depend on whose request it
   // happens to run inside.
+  // [REVIEW-PARTNER] The store-review fiction pages NO real operator: an admin page about a
+  // REVIEW tenant is suppressed here, at the one seam every admin page passes. (A durable
+  // caller's requireAll is satisfied: there is nobody to reach.)
+  if (input.tenantId && await isReviewTenantId(prisma, input.tenantId)) {
+    log().info({ kind: input.data?.['kind'] ?? null }, 'review-tenant send suppressed: admin page');
+    return 0;
+  }
+  const { where: audience } = await adminAudienceFor(prisma, input.tenantId);
   const admins = await runWithoutTenant(() => prisma.user.findMany({
-    where: input.tenantId
-      ? {
-        status: 'ACTIVE',
-        roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] },
-        OR: [{ tenantId: input.tenantId }, { roles: { has: 'SUPER_ADMIN' } }],
-      }
-      : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } },
+    where: audience,
     select: { id: true },
   }));
   // [REPORT-035 F-035-06 · S0 evidence] Count DELIVERIES, not candidates.
@@ -344,6 +390,21 @@ export class NotificationService {
   ) {}
 
   async send(payload: NotificationPayload): Promise<string> {
+    if (isFeeDemand(payload)) {
+      // A fee demand that cannot be recorded for THIS recipient is logged and
+      // counted, never thrown into the caller: an admin fan-out must still
+      // reach the next admin. A recorded demand's delivery outcome (an
+      // UNKNOWN handoff included) still reaches the caller unchanged.
+      let notice: Awaited<ReturnType<typeof enqueueFeeDemand>>;
+      try {
+        notice = await enqueueFeeDemand(this.prisma, payload);
+      } catch (err) {
+        log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not recorded for this recipient');
+        notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
+        return '';
+      }
+      return this.deliverFeeDemand(notice.id);
+    }
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 
     // A notification is best-effort: a persistence/fan-out hiccup must NEVER
@@ -392,6 +453,41 @@ export class NotificationService {
     return notification.id;
   }
 
+  async deliverFeeDemand(noticeId: string): Promise<string> {
+    const notice = await this.prisma.billingFeeNotice.findUnique({ where: { id: noticeId } });
+    if (!notice || notice.status === 'OBSOLETE') return '';
+    const inboxId = await persistFeeDemandInbox(this.prisma, noticeId);
+    if (!inboxId) return '';
+    await this.publishPersisted(inboxId);
+    const payload = notice.payload as unknown as NotificationPayload;
+    if (payload.feeSms) {
+      const user = await this.prisma.user.findUnique({ where: { id: notice.userId }, select: { phone: true } });
+      if (!user?.phone) return inboxId;
+      const handoff = <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, noticeId, 'sms', part, effect);
+      if (this.channels.sms.supportsHandoff) await this.channels.sms.sendSms(user.phone, payload.feeSms, { handoff });
+      else await handoff('message', () => this.channels.sms.sendSms(user.phone, payload.feeSms!));
+    }
+    if (!await feeDemandOutstanding(this.prisma, noticeId)) {
+      await this.prisma.billingFeeNotice.updateMany({ where: { id: noticeId, status: 'PENDING' }, data: { status: 'DELIVERED' } });
+    }
+    return inboxId;
+  }
+
+  async drainFeeDemands(): Promise<{ attempted: number; delivered: number }> {
+    const rows = await this.prisma.billingFeeNotice.findMany({ where: { status: 'PENDING' }, orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }], take: 200 });
+    let delivered = 0;
+    for (const row of rows) {
+      try { if (await this.deliverFeeDemand(row.id)) delivered += 1; }
+      catch (err) { log().warn({ err, noticeId: row.id }, 'Fee demand remains pending or needs handoff review'); }
+      finally {
+        // Held or UNKNOWN handoffs retain their evidence without starving
+        // later subscriptions on every capped drain.
+        await this.prisma.billingFeeNotice.updateMany({ where: { id: row.id, status: 'PENDING' }, data: { updatedAt: new Date() } });
+      }
+    }
+    return { attempted: rows.length, delivered };
+  }
+
   /** Fan out an inbox row that another atomic domain transaction already
    * persisted. This is the post-commit half for liability-sensitive workflows:
    * socket/push failures cannot roll back the domain fact, and retrying this
@@ -411,8 +507,9 @@ export class NotificationService {
       : undefined;
 
     try {
-      // Live socket delivery
-      this.io.to(`user:${notification.userId}`).emit('notification', {
+      const feeDemandId = typeof data?.['feeDemandId'] === 'string' ? data['feeDemandId'] : null;
+      // Actual socket submission shares the same payer lock as pause creation.
+      const socketEffect = async () => this.io.to(`user:${notification.userId}`).emit('notification', {
         id: notification.id,
         type: notification.type,
         title: notification.title,
@@ -420,6 +517,8 @@ export class NotificationService {
         data,
         createdAt: notification.createdAt,
       });
+      if (feeDemandId) await handOffFeeDemand(this.prisma, feeDemandId, 'socket', 'notification', socketEffect);
+      else await socketEffect();
 
       // Channel fan-out through the swappable interface, honouring prefs.
       const user = await this.prisma.user.findUnique({
@@ -431,16 +530,19 @@ export class NotificationService {
       if (prefs.push) {
         const tokens = await this.prisma.deviceToken.findMany({
           where: { userId: notification.userId, isActive: true },
-          select: { token: true },
+          select: { token: true }, orderBy: { token: 'asc' },
         });
         if (tokens.length > 0) {
           // Channel failures must never break the request path — but after the
           // provider-level retries (withPushRetry) a final failure is LOGGED,
           // never swallowed silently [SWIFT-UG-NOTIF-01]. [Q10] The payload's
           // kind picks how urgently it travels (alert-class.ts).
-          await this.channels.push
-            .sendPush(tokens.map((t) => t.token), notification.title, notification.body, data, pushOptionsFor(data))
-            .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
+          const options = pushOptionsFor(data);
+          const handoff = feeDemandId ? <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, feeDemandId, 'push', part, effect) : undefined;
+          const effect = () => this.channels.push.sendPush(tokens.map((t) => t.token), notification!.title, notification!.body, data,
+            { ...options, ...(this.channels.push.supportsHandoff ? { handoff } : {}) });
+          await (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
+            .then((r) => deactivateDeadTokens(this.prisma, r?.invalidTokens))
             .catch((err) => {
               log().warn(
                 { err, userId: notification.userId, type: notification.type },
@@ -541,6 +643,20 @@ export class NotificationService {
     });
   }
 
+  /** [73 · owner ruling] The rider's taxi assignment push, from either entrance (an offer-card
+   *  accept or a direct accept, both through dispatch.claimOrder): the driver's first name, the
+   *  car and its plate (checking the plate before getting in is a safety step), tagged as a taxi
+   *  so a tap opens the ride, never a delivery. */
+  async driverFound(customerId: string, orderId: string, driver: { firstName: string; vehicleColor: string; vehicleMake: string; vehicleModel: string; licensePlate: string }): Promise<void> {
+    await this.send({
+      userId: customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Driver Found!',
+      body: `${driver.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
+      data: taxiNotificationData(orderId, { status: 'DRIVER_ASSIGNED' }),
+    });
+  }
+
   async riderAssigned(customerId: string, orderNumber: string, riderName: string, orderId: string): Promise<void> {
     await this.send({
       userId: customerId,
@@ -589,13 +705,13 @@ export class NotificationService {
     });
   }
 
-  async orderDelivered(customerId: string, orderNumber: string, orderId: string): Promise<void> {
+  async orderDelivered(customerId: string, orderNumber: string, orderId: string, orderType?: string): Promise<void> {
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
-      title: 'Delivered!',
-      body: `Your order ${orderNumber} has been delivered. Enjoy your meal!`,
-      data: { orderId, orderNumber, status: 'DELIVERED' },
+      title: orderType === 'TAXI' ? 'Ride completed' : 'Delivered!',
+      body: orderType === 'TAXI' ? 'Your ride is complete. Open Swift to view your trip.' : `Your order ${orderNumber} has been delivered. Enjoy your meal!`,
+      data: orderType === 'TAXI' ? taxiNotificationData(orderId, { status: 'DELIVERED' }) : { orderId, orderNumber, status: 'DELIVERED' },
     });
   }
 
@@ -671,13 +787,13 @@ export class NotificationService {
     });
   }
 
-  async subscriptionReminder(userId: string, dueDate: string, amount: number): Promise<void> {
+  async subscriptionReminder(userId: string, dueDate: string, amount: number, subscriptionId: string): Promise<void> {
     await this.send({
       userId,
       type: 'SUBSCRIPTION_REMINDER',
       title: 'Subscription Due Soon',
       body: `Your weekly subscription of $${amount.toLocaleString()} GYD is due on ${dueDate}.`,
-      data: { dueDate, amount },
+      data: { kind: 'billing_reminder', subscriptionId, dueDate, amount },
     });
   }
 

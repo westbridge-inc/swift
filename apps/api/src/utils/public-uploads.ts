@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { REVIEW_PACK_IMAGE_DIR, reviewPackPicture } from '../modules/review/content-pack';
+import { REVIEW_PARTNER_PORTRAIT_DIR, reviewPartnerPortrait } from '../modules/review/partner-pack';
 
 // Only explicitly public upload trees are ever served statically. KYC /
 // verification documents live under other /uploads folders and stay private —
@@ -37,6 +38,13 @@ export function registerPublicUploads(app: FastifyInstance, uploadBase: string) 
       // the pack declares exists; any other name under this prefix is a 404.
       if (folder === 'items' && rel.startsWith(REVIEW_PACK_IMAGE_DIR)) {
         const png = reviewPackPicture(rel.slice(REVIEW_PACK_IMAGE_DIR.length));
+        if (!png) return reply.code(404).send();
+        return reply.header('Content-Type', 'image/png').header('Cache-Control', 'public, max-age=86400').send(png);
+      }
+      // [REVIEW-PARTNER] The fiction's rider and driver have DRAWN profile
+      // photos (review/partner-pack.ts), never a camera image: same rule.
+      if (folder === 'avatars' && rel.startsWith(REVIEW_PARTNER_PORTRAIT_DIR)) {
+        const png = reviewPartnerPortrait(rel.slice(REVIEW_PARTNER_PORTRAIT_DIR.length));
         if (!png) return reply.code(404).send();
         return reply.header('Content-Type', 'image/png').header('Cache-Control', 'public, max-age=86400').send(png);
       }

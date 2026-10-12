@@ -23,9 +23,9 @@ beforeEach(() => {
 });
 async function signIn() {
   fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001001' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
   fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
 }
 describe('QR-W-R2-1 auth journey cancellation', () => {
   it('preserves deliberate login → signup, then clears on Swift home', async () => {

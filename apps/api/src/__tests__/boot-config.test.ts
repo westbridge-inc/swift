@@ -24,6 +24,7 @@ const good: Record<string, string | undefined> = {
   MASTER_KEK: KEK,
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
+  AWS_S3_BUCKET: 'synthetic-boot-bucket',
   NOTIFICATION_PROVIDER: 'twilio',
   TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
   TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
@@ -43,6 +44,8 @@ const good: Record<string, string | undefined> = {
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
   MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+  SCAN_IP_SALT: 'synthetic-scan-boot-salt',
+  ATTRIB_SALT: 'synthetic-attribution-boot-salt',
 };
 
 const cardOff = {
@@ -68,7 +71,7 @@ const paddedTwilioIdentities = ([
 function runPreflight(candidate: Record<string, string | undefined>) {
   const directory = mkdtempSync(join(tmpdir(), 'swift-twilio-preflight-'));
   try {
-    const candidatePath = join(directory, 'candidate.env');
+    const candidatePath = join(directory, 'candidate.txt');
     writeFileSync(candidatePath, Object.entries(candidate)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
       .map(([name, value]) => `${name}=${value}`).join('\n'));
@@ -84,6 +87,30 @@ function runPreflight(candidate: Record<string, string | undefined>) {
 }
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it.each([
+    ['CONSENT_REQUIRED', '0'],
+    ['ADMIN_CAPABILITY_MODE', 'shadow'],
+    ['PREVIEW_MODE', '1'],
+  ])('launch bypass %s=%s is refused by production', (name, value) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: value })).toThrow(name);
+  });
+
+  it.each(['development', 'test'])('launch bypass fixtures remain available in %s', (mode) => {
+    expect(() => assertSafeBootConfig({
+      NODE_ENV: mode,
+      CONSENT_REQUIRED: '0',
+      ADMIN_CAPABILITY_MODE: 'shadow',
+      PREVIEW_MODE: '1',
+    })).not.toThrow();
+  });
+
+  it('launch bypass defaults keep production admission open', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, CONSENT_REQUIRED: '1', ADMIN_CAPABILITY_MODE: 'enforce', PREVIEW_MODE: '0',
+    })).not.toThrow();
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+  });
+
   it('boots with the card rail explicitly disabled and no card credentials', () => {
     expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
   });
@@ -333,8 +360,9 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local' })).toThrow(/STORAGE_PROVIDER/);
   });
 
-  it('allows local storage in production only with STORAGE_ALLOW_LOCAL=1 (deliberate pilot)', () => {
-    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).not.toThrow();
+  it('allows deliberate local storage only with an explicit root and separate backup obligation', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).toThrow(/UPLOAD_DIR/);
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1', UPLOAD_DIR: '/srv/swift/uploads', STORAGE_LOCAL_BACKUP_ACK: '1' })).not.toThrow();
   });
 
   it('accepts the real object-storage providers', () => {
@@ -683,7 +711,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
   const checkoutOn = (): Record<string, string> => ({
     MMG_CHECKOUT_ENABLED: '1',
     MMG_CHECKOUT_URL: 'https://checkout.example.test/mmg-pg/web/payments',
-    MMG_CHECKOUT_MERCHANT_ID: '0000000001',
+    MMG_CHECKOUT_MERCHANT_ID: '0000001',
     MMG_CHECKOUT_CLIENT_ID: 'client-test',
     MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
     MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',
@@ -707,6 +735,18 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_DRIVER: 'live', MMG_CHECKOUT_ENABLED: '1' }))
       .toThrow(/MMG_CHECKOUT_MERCHANT_ID is required/);
     expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
+  });
+
+  it('[DS632] MMG_CHECKOUT_CREATION_ZONE is exactly GUYANA_WALL_CLOCK or UTC, or unset: anything else refuses to start, in production and outside it, the checkout on or off', () => {
+    for (const zone of ['guyana', 'utc', 'UTC ', 'America/Guyana']) {
+      expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly GUYANA_WALL_CLOCK or UTC/);
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+    }
+    for (const zone of [undefined, '', 'GUYANA_WALL_CLOCK', 'UTC']) {
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+    }
   });
 
   it('production boots with a complete checkout configuration, and never with the UAT page', () => {
@@ -740,6 +780,29 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
   it('OFF — 0 or unset — boots exactly as before', () => {
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '0' })).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: undefined })).not.toThrow();
+  });
+
+  it('[PT-2] refuses the staging-only switch that lets the simulator show the card choice, whatever its value but 0', () => {
+    for (const value of ['1', 'true', 'yes']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: value }), value).toThrow(/CARD_RAIL_SIMULATOR_LIVE/);
+    }
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: undefined })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+  });
+
+  it('[review S2] in EVERY mode, the simulator and its test switch refuse to start on the public API host; the switch needs this test server\'s own address', () => {
+    for (const env of [
+      { NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://API.swiftgy.com/' },
+      { NODE_ENV: 'development', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api.swiftgy.com' },
+    ]) {
+      expect(() => assertSafeBootConfig(env), JSON.stringify(env)).toThrow(/public API host/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1' }))
+      .toThrow(/CARD_RAIL_SIMULATOR_LIVE needs API_PUBLIC_URL/);
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api-test.example.test' }))
+      .not.toThrow();
   });
 
   it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {

@@ -23,7 +23,7 @@ import { VerificationService } from '../modules/verification/verification.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { seedDocRegistry, registryCode } from '../modules/verification/doc-registry';
-import { compileStorefrontDisclosure, disclosureGateEngaged, platformOperator } from '../modules/verification/storefront-disclosure';
+import { compileActivationDisclosure, disclosureGateEngaged, platformOperator } from '../modules/verification/storefront-disclosure';
 import { documentRecordDdl } from '../modules/verification/document-record';
 import { docStateMachineDdl } from '../modules/verification/doc-state';
 import { installDdl } from './helpers/install-ddl';
@@ -94,7 +94,7 @@ afterAll(async () => {
 describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
   it('names what is missing; the verified proprietor "trading as" the store fills the legal name; the address is labelled self-declared; the contact is the verified account; licences appear while VALID and leave when they expire', async () => {
     const { userId, vendorId } = await store(1);
-    const bare = await system(() => compileStorefrontDisclosure(app.prisma, vendorId));
+    const bare = await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }));
     expect(bare.complete).toBe(false);
     expect(bare.missing).toEqual(['legalName']);
     expect(bare.address).toMatchObject({ source: 'SELF_DECLARED', value: '1 Sheriff Street, Georgetown' });
@@ -102,20 +102,24 @@ describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
     expect(bare.operator).toEqual({ legalName: 'Westbridge Inc.', registeredAddress: '1 Main Street, Georgetown, Guyana', supportEmail: 'support@example.gy' });
 
     await approved(userId, 'owner_national_id');
-    const named = await system(() => compileStorefrontDisclosure(app.prisma, vendorId));
+    const named = await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }));
     expect(named.complete).toBe(true);
     expect(named.legalName).toMatchObject({ source: 'PROPRIETOR', docType: 'owner_national_id' });
     expect(named.legalName!.value).toBe(`Priya Persaud1 trading as Priya's Snackette ${RUN}1`);
 
     const licence = await approved(userId, 'food_handler_cert');
-    expect((await system(() => compileStorefrontDisclosure(app.prisma, vendorId))).licences).toEqual([{ value: 'on file', source: 'RECORD', docType: 'food_handler_cert', recordId: expect.any(String) }]);
+    expect((await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }))).licences).toEqual([{ value: 'on file', source: 'RECORD', docType: 'food_handler_cert', recordId: expect.any(String) }]);
     await system(() => app.prisma.verificationDocument.update({ where: { id: licence.id }, data: { expiresAt: new Date(Date.now() - DAY) } }));
     await system(() => service.expireLapsedDocuments());
-    expect((await system(() => compileStorefrontDisclosure(app.prisma, vendorId))).licences).toEqual([]);
+    expect((await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }))).licences).toEqual([]);
   });
 
   it('the storefront read carries the block; without the operator configuration the block says so', async () => {
     const { vendorId } = await store(2);
+    const pending = await app.inject({ method: 'GET', url: `/api/v1/customer/vendors/${vendorId}` });
+    expect(pending.statusCode).toBe(200);
+    expect(pending.json().data.disclosure).toBeNull();
+    await system(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'ACTIVE', isVerified: true } }));
     const res = await app.inject({ method: 'GET', url: `/api/v1/customer/vendors/${vendorId}` });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.disclosure).toMatchObject({ complete: false, missing: ['legalName'] });

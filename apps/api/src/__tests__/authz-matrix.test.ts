@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type HTTPMethods, type InjectOptions } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -83,6 +83,7 @@ async function buildTestApp() {
 }
 
 beforeAll(async () => {
+  vi.stubEnv('ADS_ENABLED', '1');
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
@@ -97,6 +98,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await app.close();
 });
 
@@ -297,7 +299,20 @@ describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
   // and `isAvailable`, so it can only surface goods an anonymous visitor could
   // already see on a store page. Requiring a session here would mean asking
   // someone to sign up before they can see what is for sale.
-  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
+  // /billing/mmg-checkout is MMG's reply path [mmg checkout 3/6]: the web
+  // return page (no session survives MMG's cross-site redirect) and MMG's own
+  // servers post an encrypted reply token there. The token is opened with the
+  // merchant key and only prompts the server's own MMG lookup; the answer is
+  // one of four states with no amount, name or reference. Rate-limited,
+  // body-capped, inert with the flag off — proven in mmg-checkout-routes.test.ts.
+  // /billing/card is the card provider's return path [PT-2] (its MerchantResponseUrl)
+  // and, off production only, the card simulator's test page: the partner's browser
+  // arrives from the provider's page without a Swift session. A return is written
+  // down as evidence and only prompts the server's own question to the provider;
+  // the page answers one of four states with no amount, name, card or id.
+  // Rate-limited per source, body-capped, never logged, inert with the flag off —
+  // proven in card-rail-routes.test.ts.
+  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/billing/mmg-checkout', '/api/v1/billing/card', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
 
   it('flags a server prefix the matrix never mounts (red-first)', () => {
     // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.

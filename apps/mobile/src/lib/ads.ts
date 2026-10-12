@@ -111,7 +111,12 @@ export async function fetchAds(city: string, keys: string[]): Promise<AdsResult>
       };
     }
     return { data: null, trackable: false, trackingScope: null };
-  } catch {
+  } catch (error) {
+    const response = (error as { response?: { status?: number; data?: { error?: { code?: string } } } } | null)?.response;
+    if (response?.status === 403 && response.data?.error?.code === 'ADS_DISABLED') {
+      try { store?.delete(CACHE_KEY); } catch { /* Storage failure must still collapse this response. */ }
+      return { data: null, trackable: false, trackingScope: null };
+    }
     const cached = readCache();
     if (!cached || cached.city !== city || !cacheUsable(cached.at, Date.now())) {
       return { data: null, trackable: false, trackingScope: null };

@@ -1,158 +1,272 @@
 'use client';
 
-import { use } from 'react';
+import { use, useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchVendorDetail, approveVendor, suspendVendor, featureVendor } from '@/lib/api';
-import { Section, Row, StatusPill, BackLink, ActionButton, gyd } from '@/components/detail';
-import { statusClass } from '@/lib/status';
-import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { label, ratingText } from '@/lib/labels';
+import type { Outcome } from '@/lib/outcome';
+import { ActionResult } from '@/components/mc/ActionResult';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { StatusBadge } from '@/components/mc/StatusBadge';
+import { Truncate } from '@/components/mc/Truncate';
+import { DataTable } from '@/components/mc/DataTable';
+
+// ---------------------------------------------------------------------------
+// [MISSION CONTROL · PR-1 pilot] One store, the whole story — and every action
+// answers in words.
+//
+// Approve, suspend and feature go through the in-page panel (reason where the
+// server requires one, a plain confirmation where it does not), and the
+// server's answer — success, a 202 queue, or a refusal such as 409
+// CHECKLIST_INCOMPLETE — is shown in plain words with the next step. The old
+// page dropped every answer but the suspension's: approving a store whose
+// documents were not all approved "silently didn't work".
+// ---------------------------------------------------------------------------
+
+const when = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+
+const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
+
+function Back() {
+  return (
+    <Link href="/vendors" className="mc-back">
+      <ArrowLeft size={16} aria-hidden="true" /> Vendors
+    </Link>
+  );
+}
+
+function Row({ label: name, children }: { label: string; children: React.ReactNode }) {
+  if (children == null || children === '') return null;
+  return (
+    <div className="mc-row">
+      <dt>{name}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+
+interface RecentOrder { id: string; orderNumber: string; status: string; totalAmount: number; paymentMethod: string }
+interface Sibling { id: string; name: string; status: string }
 
 export default function VendorDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['vendor', id], queryFn: () => fetchVendorDetail(id) });
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ['vendor', id] });
-    qc.invalidateQueries({ queryKey: ['vendors'] });
+  const dialog = useActionDialog();
+  const [result, setResult] = useState<Outcome | null>(null);
+  const store = useQuery({ queryKey: ['vendor', id], queryFn: () => fetchVendorDetail(id) });
+
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ['vendor', id] });
+    void qc.invalidateQueries({ queryKey: ['vendors'] });
   };
-  const approve = useMutation({ mutationFn: (reason: string) => approveVendor(id, reason), onSuccess: invalidate });
-  // [ADM-006] a business losing its storefront is owed the real reason
-  const suspend = useMutation({ mutationFn: (reason: string) => suspendVendor(id, reason), onSuccess: invalidate });
-  const feature = useMutation({ mutationFn: (featured: boolean) => featureVendor(id, featured), onSuccess: invalidate });
+  /** Whatever the server said, it stays on the page — and the record is re-read. */
+  const show = (outcome: Outcome | null) => {
+    if (!outcome) return;
+    setResult(outcome);
+    refresh();
+  };
 
-  const v: any = data?.data;
+  const v: any = store.data?.data;
 
-  if (isLoading) return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
-  if (!v) {
+  if (store.isLoading) {
     return (
-      <div>
-        <BackLink href="/vendors" label="Vendors" />
-        <p className="text-[var(--muted)]">Vendor not found.</p>
+      <div className="mc-page">
+        <Back />
+        <div className="mc-card" aria-busy="true">Loading this store…</div>
+      </div>
+    );
+  }
+  if (store.isError || !v) {
+    return (
+      <div className="mc-page">
+        <Back />
+        <QueryFailed
+          error={store.error ?? new Error('The server sent no store record.')}
+          what="this store"
+          onRetry={() => void store.refetch()}
+          retrying={store.isFetching}
+        />
       </div>
     );
   }
 
   const owner = v.owner?.user;
-  const siblings = (v.owner?.vendors ?? []).filter((s: any) => s.id !== v.id);
+  const ownerName = [owner?.firstName, owner?.lastName].filter(Boolean).join(' ');
+  const siblings: Sibling[] = (v.owner?.vendors ?? []).filter((s: Sibling) => s.id !== v.id);
+  const orders: RecentOrder[] = v.recentOrders ?? [];
   const sub = v.subscription;
-  const busy = approve.isPending || suspend.isPending || feature.isPending;
+  const context = { applicantId: owner?.id };
+
+  const approve = async () => show(await dialog.run({
+    title: `Approve ${v.name}?`,
+    body: (
+      <p>
+        The store goes live and can take orders. Swift first checks that every required document is approved; if one is
+        not, nothing changes and you are told what is missing.
+      </p>
+    ),
+    confirmLabel: 'Approve store',
+    reason: { hint: 'Kept on the permanent record; not sent to the owner.' },
+    context,
+    submit: ({ reason }) => approveVendor(id, reason),
+    success: () => `${v.name} is live and can take orders.`,
+  }));
+
+  const suspend = async () => show(await dialog.run({
+    title: `Suspend ${v.name}?`,
+    body: (
+      <p>
+        It stops taking orders immediately and leaves search. The owner is sent your reason. The console cannot undo a
+        suspension yet.
+      </p>
+    ),
+    confirmLabel: 'Suspend store',
+    reason: { hint: 'The owner receives this reason, and it is kept on the permanent record.' },
+    context,
+    submit: ({ reason }) => suspendVendor(id, reason),
+    success: () => `${v.name} is suspended and has stopped taking orders. The owner was sent your reason.`,
+  }));
+
+  const toggleFeatured = async () => {
+    const featuring = !v.isFeatured;
+    show(await dialog.run({
+      title: featuring ? `Feature ${v.name}?` : `Remove ${v.name} from featured stores?`,
+      body: <p>{featuring ? 'Customers see it among the featured stores.' : 'Customers stop seeing it among the featured stores.'}</p>,
+      confirmLabel: featuring ? 'Feature store' : 'Remove from featured',
+      reason: false,
+      context,
+      submit: () => featureVendor(id, featuring),
+      success: () => (featuring ? `${v.name} is now featured.` : `${v.name} is no longer featured.`),
+    }));
+  };
 
   return (
-    <div>
-      <BackLink href="/vendors" label="Vendors" />
+    <div className="mc-page">
+      <Back />
 
-      {suspend.error && (
-        <div className="mb-4">
-          <MutationError error={suspend.error} label="Suspension did not record" />
+      <header className="flex flex-wrap items-start gap-4 mb-5">
+        <div
+          aria-hidden="true"
+          className="mc-numbers grid place-items-center shrink-0 w-12 h-12 rounded-full text-white text-lg font-bold"
+          style={{ background: 'var(--mc-accent)' }}
+        >
+          {String(v.name ?? '?').trim().charAt(0).toUpperCase() || '?'}
         </div>
-      )}
+        <div className="min-w-0 flex-1 basis-56">
+          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+            <Truncate text={v.name} lines={2} focusable />
+          </h1>
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            <StatusBadge group="VendorStatus" value={v.status} />
+            <span className={`mc-badge${v.acceptingOrders ? ' mc-tone-good' : ''}`}>
+              {v.acceptingOrders ? 'Taking orders' : 'Not taking orders'}
+            </span>
+            {v.isFeatured ? <span className="mc-badge mc-tone-info">Featured</span> : null}
+          </div>
+          <p className="mc-muted mt-1.5">
+            {[label('VendorType', v.vendorType), v.city, `Joined ${when(v.createdAt)}`].filter(Boolean).join(' · ')}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2 w-full sm:w-auto sm:ml-auto">
+          <button type="button" className="mc-btn" onClick={toggleFeatured}>
+            {v.isFeatured ? 'Remove from featured…' : 'Feature…'}
+          </button>
+          {v.status === 'ACTIVE' ? (
+            <button type="button" className="mc-btn mc-btn-danger" onClick={suspend}>Suspend…</button>
+          ) : null}
+          {v.status === 'PENDING_APPROVAL' ? (
+            <button type="button" className="mc-btn mc-btn-primary" onClick={approve}>Approve…</button>
+          ) : null}
+        </div>
+      </header>
 
-      <div className="flex flex-wrap items-center gap-3 mb-6">
-        <h1 className="text-2xl font-bold">{v.name}</h1>
-        <StatusPill value={v.status} />
-        <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">{String(v.vendorType).toLowerCase()}</span>
-        {v.isFeatured ? <span className="px-2.5 py-1 rounded-full text-xs bg-amber-500/15 text-amber-400">featured</span> : null}
-        {v.acceptingOrders ? (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">accepting orders</span>
-        ) : (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">not accepting</span>
-        )}
-        <div className="ml-auto flex gap-2">
-          {v.status === 'PENDING_APPROVAL' && (
-            <ActionButton label="Approve" confirm={`Approve ${v.name}? Their 14-day trial starts now.`} onClick={() => { const reason = askReason({ action: 'approve this business', subject: v.name }); if (reason) approve.mutate(reason); }} disabled={busy} />
-          )}
-          <ActionButton
-            label={v.isFeatured ? 'Unfeature' : 'Feature'}
-            confirm={v.isFeatured ? `Remove ${v.name} from featured?` : `Feature ${v.name} on the home surface?`}
-            onClick={() => feature.mutate(!v.isFeatured)}
-            disabled={busy}
-          />
-          {v.status === 'ACTIVE' && (
-            <ActionButton
-              label="Suspend"
-              danger
-              confirm={`Suspend ${v.name}? They stop taking orders immediately. This cannot be reversed from the console.`}
-              onClick={() => { const reason = askReason({ action: 'suspend this business', subject: v.name }); if (reason) suspend.mutate(reason); }}
-              disabled={busy}
-            />
-          )}
-        </div>
-      </div>
+      <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-5" />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 space-y-4">
-          <Section title="Recent orders">
-            {(v.recentOrders ?? []).length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">No orders yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {v.recentOrders.map((o: any) => (
-                  <Link key={o.id} href={`/orders/${o.id}`} className="flex items-center gap-3 p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors text-sm">
-                    <span className="font-mono">{o.orderNumber}</span>
-                    <span className="text-[var(--muted)] text-xs">{o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'cash'}</span>
-                    <span className={`ml-auto px-2 py-0.5 rounded-full text-xs ${statusClass(o.status)}`}>{o.status}</span>
-                    <span className="font-medium">{gyd(o.totalAmount)}</span>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </Section>
+        <div className="lg:col-span-2 space-y-4 min-w-0">
+          <section aria-labelledby="recent-orders" className="space-y-2">
+            <h2 id="recent-orders" className="mc-label">Recent orders</h2>
+            <DataTable<RecentOrder>
+              label="Recent orders"
+              rows={orders}
+              rowKey={(o) => o.id}
+              empty="No orders yet."
+              columns={[
+                {
+                  key: 'order', header: 'Order', width: '34%', primary: true,
+                  cell: (o) => <Link href={`/orders/${o.id}`}><Truncate text={o.orderNumber} /></Link>,
+                },
+                { key: 'payment', header: 'Payment', width: '18%', cell: (o) => label('PaymentMethod', o.paymentMethod) },
+                { key: 'status', header: 'Status', width: '28%', cell: (o) => <StatusBadge group="OrderStatus" value={o.status} /> },
+                { key: 'total', header: 'Total', width: '20%', align: 'right', cell: (o) => <span className="mc-numbers">{gyd(o.totalAmount)}</span> },
+              ]}
+            />
+          </section>
 
-          {siblings.length > 0 && (
-            <Section title="Other stores (same owner)">
-              <div className="space-y-2 text-sm">
-                {siblings.map((s: any) => (
-                  <Link key={s.id} href={`/vendors/${s.id}`} className="flex justify-between p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                    <span>{s.name}</span>
-                    <span className="text-[var(--muted)]">{String(s.status).toLowerCase().replaceAll('_', ' ')} →</span>
-                  </Link>
+          {siblings.length > 0 ? (
+            <section aria-labelledby="other-stores" className="mc-card">
+              <h2 id="other-stores" className="mc-label">Other stores (same owner)</h2>
+              <ul className="grid gap-1">
+                {siblings.map((s) => (
+                  <li key={s.id}>
+                    <Link href={`/vendors/${s.id}`} className="flex items-center justify-between gap-3 min-h-11 rounded-lg px-2 -mx-2 hover:bg-[var(--mc-surface)]">
+                      <Truncate text={s.name} className="font-semibold" />
+                      <StatusBadge group="VendorStatus" value={s.status} />
+                    </Link>
+                  </li>
                 ))}
-              </div>
-            </Section>
-          )}
+              </ul>
+            </section>
+          ) : null}
         </div>
 
-        <div className="space-y-4">
-          <Section title="Owner">
+        <div className="space-y-4 min-w-0">
+          <section aria-labelledby="owner" className="mc-card">
+            <h2 id="owner" className="mc-label">Owner</h2>
             {owner ? (
-              <div className="space-y-1.5">
-                <Row label="Name" value={[owner.firstName, owner.lastName].filter(Boolean).join(' ')} href={`/users/${owner.id}`} />
-                <Row label="Phone" value={owner.phone} />
-                <Row label="Email" value={owner.email} />
-                <Row label="Account" value={owner.status?.toLowerCase()} />
-              </div>
+              <dl className="mc-rows">
+                <Row label="Name">{ownerName ? <Link href={`/users/${owner.id}`}>{ownerName}</Link> : null}</Row>
+                <Row label="Phone">{owner.phone}</Row>
+                <Row label="Email">{owner.email}</Row>
+                <Row label="Account">{owner.status ? <StatusBadge group="UserStatus" value={owner.status} /> : null}</Row>
+              </dl>
             ) : (
-              <p className="text-sm text-[var(--muted)]">—</p>
+              <p className="mc-muted">No owner on this record.</p>
             )}
-          </Section>
+          </section>
 
-          <Section title="Subscription">
+          <section aria-labelledby="subscription" className="mc-card">
+            <h2 id="subscription" className="mc-label">Subscription</h2>
             {sub ? (
-              <div className="space-y-1.5">
-                <Row label="Status" value={<StatusPill value={sub.status} />} />
-                <Row label="Weekly rate" value={gyd(sub.customRate ?? sub.weeklyRate)} />
-                {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends" value={new Date(sub.trialEndDate).toLocaleDateString()} /> : null}
-                {sub.nextBillingDate ? <Row label="Next bill" value={new Date(sub.nextBillingDate).toLocaleDateString()} /> : null}
-              </div>
+              <dl className="mc-rows">
+                <Row label="Status"><StatusBadge group="SubscriptionStatus" value={sub.status} /></Row>
+                <Row label="Weekly fee"><span className="mc-numbers">{gyd(sub.customRate ?? sub.weeklyRate)}</span></Row>
+                {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends">{when(sub.trialEndDate)}</Row> : null}
+                {sub.nextBillingDate ? <Row label="Next bill">{when(sub.nextBillingDate)}</Row> : null}
+              </dl>
             ) : (
-              <p className="text-sm text-[var(--muted)]">No subscription yet (starts on approval).</p>
+              <p className="mc-muted">No subscription yet. It starts when the store goes live.</p>
             )}
-          </Section>
+          </section>
 
-          <Section title="Store">
-            <div className="space-y-1.5">
-              <Row label="City" value={v.city} />
-              <Row label="Address" value={v.addressLine1} />
-              <Row label="Phone" value={v.phone} />
-              <Row label="Rating" value={v.averageRating ? `${Number(v.averageRating).toFixed(1)} (${v.totalRatings ?? 0})` : '—'} />
-              <Row label="Menu items" value={v._count?.items} />
-              <Row label="Lifetime orders" value={v._count?.orders} />
-              <Row label="MMG pay link" value={v.mmgPayUrl ? 'attached' : 'not attached'} />
-              <Row label="Joined" value={new Date(v.createdAt).toLocaleDateString()} />
-            </div>
-          </Section>
+          <section aria-labelledby="store" className="mc-card">
+            <h2 id="store" className="mc-label">Store</h2>
+            <dl className="mc-rows">
+              <Row label="City">{v.city}</Row>
+              <Row label="Address">{v.addressLine1}</Row>
+              <Row label="Phone">{v.phone}</Row>
+              <Row label="Rating"><span className="mc-numbers">{ratingText(v.averageRating, v.totalRatings)}</span></Row>
+              <Row label="Registration">{v.tier ? label('VendorTier', v.tier) : null}</Row>
+              <Row label="Menu items"><span className="mc-numbers">{v._count?.items ?? 0}</span></Row>
+              <Row label="Lifetime orders"><span className="mc-numbers">{v._count?.orders ?? 0}</span></Row>
+              <Row label="MMG pay link">{v.mmgPayUrl ? 'Attached' : 'Not attached'}</Row>
+              <Row label="Joined">{when(v.createdAt)}</Row>
+            </dl>
+          </section>
         </div>
       </div>
     </div>
