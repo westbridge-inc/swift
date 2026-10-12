@@ -1,4 +1,3 @@
-import { registerMoverPush } from './helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
@@ -161,7 +160,6 @@ beforeAll(async () => {
 
   // Verified rider, ready to go online
   const riderUser = await makeUserWithSession(FLOW_RIDER, ['RIDER', 'CUSTOMER'], 'RIDER');
-  await registerMoverPush(app.prisma, riderUser.userId);
   riderToken = riderUser.token;
   await app.prisma.rider.create({
     data: {

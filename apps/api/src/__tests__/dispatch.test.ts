@@ -1,4 +1,3 @@
-import { registerMoverPush } from './helpers/mover-push';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -103,7 +102,6 @@ async function makeRider(opts: {
     },
   });
   createdUserIds.push(user.id);
-  if (opts.online === false) await registerMoverPush(app.prisma, user.id);
   const rider = await app.prisma.rider.create({
     data: {
       userId: user.id,

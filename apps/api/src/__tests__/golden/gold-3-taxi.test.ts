@@ -1,4 +1,3 @@
-import { registerMoverPush } from '../helpers/mover-push';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -144,7 +143,6 @@ async function makeDriver(firstName: string, fix: { lat: number; lng: number }) 
     },
   }));
   drivers.push({ driverId: driver.id, token: u.token });
-  await sys(() => registerMoverPush(app.prisma, u.userId));
   const go = await call('POST', '/api/v1/driver/go-online', u.token, { latitude: fix.lat, longitude: fix.lng });
   expect(go.statusCode, go.body).toBe(200);
   return { ...u, driverId: driver.id, plate: `G3T-${seq}` };

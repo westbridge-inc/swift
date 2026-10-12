@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -8,6 +8,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { currentMoverDocuments } from './helpers/current-mover-documents';
+import { moverPushRequired } from '../modules/notification/mover-push-authority';
 
 // Real GO routes, sessions, documents, fee authority and PostgreSQL. External
 // Redis/socket effects are synthetic; the fixture never writes shared Redis.
@@ -32,7 +33,7 @@ beforeAll(async () => {
   await app.register(driverRoutes, { prefix: '/driver' });
   await app.ready();
 });
-afterEach(() => { vi.restoreAllMocks(); errors.length = 0; });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); errors.length = 0; });
 afterAll(async () => {
   if (!app) return;
   await cleanupPayerBillingClocks(app.prisma, users);
@@ -70,7 +71,37 @@ async function fixture(pool: 'driver' | 'rider', push: 'active' | 'absent' | 'in
   return { user, go, profile };
 }
 
-describe('both GO doors require a reachable push registration', () => {
+// [L07 · build-9 guardrail] The rule is a server switch that is OFF unless it
+// says exactly 'true'. A phone that never asked for notifications (a mover who
+// tapped Not now, a new or reinstalled phone, an ops-created account, the store
+// reviewers' demo logins) has no token, and on iOS no Settings switch to turn
+// on, so while the switch is off GO never refuses for push.
+describe('MOVER_PUSH_REQUIRED off (the default): GO never refuses for push', () => {
+  it.each([[undefined, false], ['', false], ['false', false], ['1', false], ['TRUE', false], ['on', false], ['true', true]] as const)(
+    'MOVER_PUSH_REQUIRED=%j reads as required=%j', (setting, required) => {
+      expect(moverPushRequired(setting === undefined ? {} : { MOVER_PUSH_REQUIRED: setting })).toBe(required);
+    });
+  for (const pool of ['driver', 'rider'] as const) {
+    it.each(['absent', 'inactive', 'muted'] as const)(`${pool} goes online with %s push while the switch is unset`, async (push) => {
+      vi.stubEnv('MOVER_PUSH_REQUIRED', undefined);
+      const f = await fixture(pool, push);
+      const response = await f.go();
+      expect(response.statusCode, [response.body, ...errors].join('\n')).toBe(200);
+      expect(response.json()).toMatchObject({ success: true, data: { isOnline: true, isAvailable: true } });
+      expect((await f.profile()).isOnline).toBe(true);
+    });
+    it.each(['false', '1', 'TRUE'])(`${pool} goes online with no push registration while the switch says %s`, async (setting) => {
+      vi.stubEnv('MOVER_PUSH_REQUIRED', setting);
+      const f = await fixture(pool, 'absent');
+      const response = await f.go();
+      expect(response.statusCode, [response.body, ...errors].join('\n')).toBe(200);
+      expect((await f.profile()).isOnline).toBe(true);
+    });
+  }
+});
+
+describe('MOVER_PUSH_REQUIRED=true: both GO doors require a reachable push registration', () => {
+  beforeEach(() => { vi.stubEnv('MOVER_PUSH_REQUIRED', 'true'); });
   for (const pool of ['driver', 'rider'] as const) {
     it.each(['absent', 'inactive', 'muted'] as const)(`${pool} refuses %s push without activating supply`, async (push) => {
       const f = await fixture(pool, push);
