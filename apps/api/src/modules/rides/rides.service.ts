@@ -235,7 +235,7 @@ export async function assertRideGates(
     }
   }
   if (restriction === 'restricted') {
-    throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
+    throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides need your ID on file. Add your ID in the app — a person will look at it before rides unlock.');
   }
 
   // Universal signup selfie (master plan §3): the driver sees who they are
@@ -252,11 +252,14 @@ export async function assertRideGates(
  * getting into a stranger's car is the highest-trust action on Swift.
  * This supersedes the old fare-threshold gate (every ride now needs L2).
  * (Kept separate because the route has always thrown it AFTER fare/capacity.)
+ * [Owner ruling 8 Oct 2026 — CUSTOMER ID] L2 now comes the moment a customer's ID goes on file
+ * (no admin approval unless an automatic check holds it), so the words say "on file", not
+ * "verified" — nobody may be told Swift verified an ID a person never looked at.
  */
 export function assertL2(user: GatedUser): void {
   if (user.trustLevel === 'L1') {
     throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-      'Rides need a one-time ID verification first — it takes a minute in the app and covers every future ride.',
+      'Rides need your ID on file first — add it once in the app (it takes a minute) and it covers every future ride.',
       { reason: 'first_ride_l2' });
   }
 }
