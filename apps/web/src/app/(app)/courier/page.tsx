@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pictogram } from '@/components/glyphs';
 import { courierEstimate, requestCourier, money } from '@/lib/customer';
@@ -10,6 +10,10 @@ import { submittablePlace, type PickedPlace } from '@/lib/place';
 // now uses the same one — it had the identical defect and its own copy of the
 // search box. A shared field is why there cannot be a third.
 import { LocationField } from '@/components/location-field';
+
+// [WEB-PIN] Pinning either end on the map, as the phone does ("Set location on
+// map"). The map's code loads only when a pin is asked for.
+const PlacePinPanel = lazy(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
 
 // [W-19] The text in the box IS the place, or there is no place. This form used
 // to keep the two apart — pick "42 Lamaha Street", edit the box to "9 Camp
@@ -41,7 +45,10 @@ export default function CourierPage() {
   const [size, setSize] = useState('SMALL');
   const [recipientName, setRecipientName] = useState('');
   const [recipientPhone, setRecipientPhone] = useState('');
-  const [notes, setNotes] = useState('');
+  // The server's field is `packageDescription` (what is inside); it has no
+  // `notes`, so a "notes for the rider" box was silently thrown away.
+  const [contents, setContents] = useState('');
+  const [pinning, setPinning] = useState<'pickup' | 'dropoff' | null>(null);
   const [estimate, setEstimate] = useState<{ totalFee?: number; fare?: number } | null>(null);
   const [estimateFailed, setEstimateFailed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -74,13 +81,20 @@ export default function CourierPage() {
   }, [pickup, dropoff, size]);
 
   const fee = estimate ? (estimate.totalFee ?? estimate.fare ?? null) : null;
-  // Both halves of every address agree, and there is a price for THIS parcel.
-  const readyToSend = pickup !== null && dropoff !== null && fee !== null && !busy;
+  // [WEB-PIN] The server requires who receives it (courier.routes.ts orderSchema:
+  // name 2–120, phone 5–30) — the phone app's same rule — so the button waits for both.
+  const recipientMissing = recipientName.trim().length < 2
+    ? 'Add the recipient’s name'
+    : recipientPhone.trim().length < 5
+      ? 'Add the recipient’s phone'
+      : null;
+  // Both halves of every address agree, there is a price for THIS parcel, and someone to receive it.
+  const readyToSend = pickup !== null && dropoff !== null && fee !== null && recipientMissing === null && !busy;
 
   async function send() {
     const from = submittablePlace(pickup, pickupText);
     const to = submittablePlace(dropoff, dropoffText);
-    if (!from || !to || fee === null) return;
+    if (!from || !to || fee === null || recipientMissing !== null) return;
     setBusy(true); setError(null);
     try {
       const r = await requestCourier({
@@ -90,9 +104,9 @@ export default function CourierPage() {
         pickupAddress: from.label,
         dropoffAddress: to.label,
         packageSize: size,
-        ...(recipientName.trim() && { recipientName: recipientName.trim() }),
-        ...(recipientPhone.trim() && { recipientPhone: recipientPhone.trim() }),
-        ...(notes.trim() && { notes: notes.trim() }),
+        recipientName: recipientName.trim(),
+        recipientPhone: recipientPhone.trim(),
+        ...(contents.trim() && { packageDescription: contents.trim() }),
       });
       const id = r?.orderId ?? r?.order?.id ?? r?.id;
       router.push(id ? `/orders/${id}` : '/orders');
@@ -114,7 +128,20 @@ export default function CourierPage() {
             near={pickup}
           />
           {pickupError && !pickup && (
-            <p role="alert" className="sw-note sw-note-error">{pickupError} You can search for it above instead.</p>
+            <p role="alert" className="sw-note sw-note-error">{pickupError} You can search for it above or pin it on the map instead.</p>
+          )}
+          {pinning === 'pickup' ? (
+            <Suspense fallback={<p role="status" className="sw-caption">Opening the map…</p>}>
+              <PlacePinPanel
+                title="Pin the pickup"
+                mapLabel="Pickup pin map"
+                start={pickup ? { latitude: pickup.lat, longitude: pickup.lng } : null}
+                onUse={(place) => { setPickupText(place.label); setPickup(place); setPickupError(null); setPinning(null); }}
+                onCancel={() => setPinning(null)}
+              />
+            </Suspense>
+          ) : (
+            <button type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" onClick={() => setPinning('pickup')}>Pin pickup on the map</button>
           )}
 
           <LocationField
@@ -124,6 +151,19 @@ export default function CourierPage() {
             onChange={(t, p) => { setDropoffText(t); setDropoff(p); }}
             near={pickup}
           />
+          {pinning === 'dropoff' ? (
+            <Suspense fallback={<p role="status" className="sw-caption">Opening the map…</p>}>
+              <PlacePinPanel
+                title="Pin the drop-off"
+                mapLabel="Drop-off pin map"
+                start={dropoff ? { latitude: dropoff.lat, longitude: dropoff.lng } : null}
+                onUse={(place) => { setDropoffText(place.label); setDropoff(place); setPinning(null); }}
+                onCancel={() => setPinning(null)}
+              />
+            </Suspense>
+          ) : (
+            <button type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" onClick={() => setPinning('dropoff')}>Pin drop-off on the map</button>
+          )}
 
           <h2 className="sw-heading mt-3">What are you sending?</h2>
           <div className="grid grid-cols-2 gap-2 wide:grid-cols-4">
@@ -136,14 +176,14 @@ export default function CourierPage() {
             ))}
           </div>
 
-          {/* [W-20] Who receives it. The API has always accepted these; the form
-              never asked, so a rider arrived with a parcel and no one to ask for. */}
+          {/* [W-20] Who receives it. [WEB-PIN] The server requires both (the
+              phone asks for both too); "optional" here meant a refused request. */}
           <h2 className="sw-heading mt-3">Who’s receiving it?</h2>
           <div className="grid grid-cols-1 gap-2 wide:grid-cols-2">
-            <input value={recipientName} onChange={(e) => setRecipientName(e.target.value)} placeholder="Recipient name (optional)" aria-label="Recipient name (optional)" className="sw-input" />
-            <input value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} placeholder="Recipient phone (optional)" aria-label="Recipient phone (optional)" type="tel" className="sw-input" />
+            <input value={recipientName} onChange={(e) => setRecipientName(e.target.value)} placeholder="Recipient name" aria-label="Recipient name" autoComplete="off" maxLength={120} required className="sw-input" />
+            <input value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} placeholder="Recipient phone" aria-label="Recipient phone" autoComplete="off" maxLength={30} required type="tel" className="sw-input" />
           </div>
-          <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes for the rider (optional)" aria-label="Notes for the rider (optional)" className="sw-input" />
+          <input value={contents} onChange={(e) => setContents(e.target.value)} placeholder="What’s inside? (optional)" aria-label="What’s inside? (optional)" maxLength={500} className="sw-input" />
         </div>
 
         <aside className="flex flex-col gap-3 split:sticky split:top-4">
@@ -168,7 +208,7 @@ export default function CourierPage() {
           {error && <p role="alert" className="sw-note sw-note-error">{error}</p>}
 
           <button type="button" onClick={send} disabled={!readyToSend} className="sw-btn sw-btn-block mt-1">
-            {busy ? 'Requesting…' : !pickup || !dropoff ? 'Set both addresses' : fee === null ? 'Waiting for a price…' : `Request courier · ${money(fee)}`}
+            {busy ? 'Requesting…' : !pickup || !dropoff ? 'Set both addresses' : fee === null ? 'Waiting for a price…' : recipientMissing ?? `Request courier · ${money(fee)}`}
           </button>
         </aside>
       </div>
