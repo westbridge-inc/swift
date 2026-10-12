@@ -84,7 +84,7 @@ export const DARK_FEATURES: DarkFeature[] = [
     source: 'env',
     title: 'Android app links',
     whileOff:
-      'The same link opens Chrome instead of the app. /.well-known/assetlinks.json returns 404. Needs the RELEASE keystore SHA-256, colon-separated.',
+      'The same link opens Chrome instead of the app. /.well-known/assetlinks.json returns 404. Needs the Play app-signing certificate SHA-256 (Play Console, App integrity), then the upload certificate SHA-256, colon-separated and comma-joined, in deploy/.env; the website container receives it from deploy/docker-compose.yml.',
     impact: 'growth',
   },
   {

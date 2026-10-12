@@ -662,6 +662,21 @@ describe('Vendor-no-response auto-cancel [SWIFT-021]', () => {
     expect(statusLog.note).toBe('Auto-cancelled: vendor did not respond');
   });
 
+  it('[Item 63 · certification] a replay after a committed auto-cancel changes nothing and tells nobody twice', async () => {
+    // auto-cancel is certified SAFE_REPLAY because every effect sits behind the
+    // canonical PENDING→CANCELLED compare-and-set: a redelivery of the job
+    // (BullMQ's retry, a stalled job) finds the order no longer PENDING and
+    // returns before any notice or stock movement.
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+    expect(await autoCancelUnresponsiveOrder(ctx(), order.id)).toBe(true);
+    expect(await autoCancelUnresponsiveOrder(ctx(), order.id)).toBe(false);
+    expect(await app.prisma.notification.count({
+      where: { userId: customer.userId, type: 'ORDER_UPDATE', data: { path: ['orderId'], equals: order.id } },
+    })).toBe(1);
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } })).toBe(1);
+  });
+
   it('[E20] a PENDING booking is auto-cancelled with the provider/booking wording', async () => {
     const vendor = await makeVendor();
     const order = await app.prisma.order.create({
