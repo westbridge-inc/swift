@@ -51,6 +51,10 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
         const code = (err as { code?: string })?.code;
         const unavailable = code === 'VERIFICATION_OBJECT_UNAVAILABLE' || code === 'DOCUMENT_PURGED';
         setMissing(unavailable);
+        // [VERIFY-DOCS V3] Without the document-reviewer grant, trying again
+        // never works: say so in the server's words (who grants it, and where).
+        const message = (err as { message?: string })?.message;
+        if (code === 'DOCUMENT_REVIEWER_REQUIRED') { setError(message || 'You need the document-reviewer permission to open documents. Ask a super-admin.'); return; }
         setError(unavailable ? (code === 'DOCUMENT_PURGED' ? 'This document was removed under the retention policy. The applicant must re-submit it before it can be approved.' : 'The file is missing. The applicant must re-submit it before it can be approved.') : 'The document could not be loaded. Try View document again.');
       }
     } finally { if (generation.current === attempt) setLoading(false); }

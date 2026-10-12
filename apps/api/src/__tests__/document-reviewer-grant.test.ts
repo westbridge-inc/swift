@@ -43,7 +43,8 @@ import * as authority from '../modules/admin/admin-authority';
 
 const GRANT = 'documents.review';
 const REQUIRED = 'DOCUMENT_REVIEWER_REQUIRED';
-const MESSAGE = 'You need the document-reviewer permission — ask a super-admin, or grant it to yourself in Staff & roles';
+// The refusal names a door that exists: the Document reviewers panel in the Review Center.
+const MESSAGE = 'You need the document-reviewer permission to open or decide documents. A super-admin grants it under Document reviewers at the top of the Review Center.';
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
