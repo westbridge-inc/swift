@@ -16,6 +16,21 @@ type Db = Prisma.TransactionClient | PrismaClient;
 
 export const AML_RETENTION_DAYS = 7 * 365;
 
+/**
+ * [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] A customer's ID picture is KEPT while the
+ * account is open — so it is there if a safety incident, such as one on a taxi ride, needs it —
+ * and deleted when the account closes (account deletion purges it with every other document;
+ * the customer's own erasure request is honoured too). Nothing purges it early on a schedule:
+ * this supersedes the "delete ID images within 30 days of the decision" rule (6 Oct) FOR
+ * CUSTOMER IDs ONLY. Partner, driver and rider document retention is unchanged. Opening it is
+ * for verification staff only; the document-reviewer grant on the open/decide doors enforces that.
+ * DRAFT defaults like the rest of the table — the lawyer confirms before launch.
+ */
+export const CUSTOMER_ID_DOC_TYPE = 'identity_l2';
+export function keptWhileAccountOpen(doc: { docType: string; role: string }): boolean {
+  return doc.docType === CUSTOMER_ID_DOC_TYPE && doc.role === 'CUSTOMER';
+}
+
 export interface RetentionRuling {
   days: number;
   source: 'REGISTRY' | 'AML' | 'COUNTRY_DEFAULT';

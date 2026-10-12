@@ -10,7 +10,7 @@ import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor, type EvidenceRow } from './evidence';
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
-import { retentionDaysFor } from './retention-policy';
+import { keptWhileAccountOpen, retentionDaysFor } from './retention-policy';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -1179,9 +1179,11 @@ export class VerificationService {
   async purgeImageAfterReview(docId: string, deletedBy: string, now = new Date()): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
     const doc = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
-      select: { id: true, userId: true, fileUrl: true, docType: true, state: true, legalHoldId: true, imagePurgedAt: true, user: { select: { tenantId: true } } },
+      select: { id: true, userId: true, fileUrl: true, docType: true, role: true, state: true, legalHoldId: true, imagePurgedAt: true, user: { select: { tenantId: true } } },
     });
     if (!doc || doc.state !== 'COMMITTED' || doc.legalHoldId || doc.imagePurgedAt || !doc.fileUrl) return 'NOT_PURGED';
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a customer's ID image is kept while the account is open.
+    if (keptWhileAccountOpen(doc)) return 'NOT_PURGED';
     const storage = getStorageProvider();
     const evidence = await shredAndProbe(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
