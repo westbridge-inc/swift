@@ -306,6 +306,13 @@ export function partnerRateFor(tiers: SubscriptionTiers, subject: PartnerSubject
   return { rate, tier, franchised: false };
 }
 
+/** Shared tariff read for services and already-locked money transactions. */
+export async function subscriptionTiersIn(db: Db, code: string): Promise<SubscriptionTiers> {
+  const config = await db.countryConfig.findUnique({ where: { code } });
+  if (!config) throw new NotFoundError('CountryConfig', code);
+  return config.subscriptionTiers as unknown as SubscriptionTiers;
+}
+
 /**
  * Accessor for CountryConfig — currency, ID-gate threshold, subscription
  * tiers, and document checklists all come from here, never from constants.
@@ -331,8 +338,7 @@ export class CountryConfigService {
   }
 
   async getSubscriptionTiers(code: string, db: Db = this.prisma): Promise<SubscriptionTiers> {
-    const config = await this.getByCode(code, db);
-    return config.subscriptionTiers as unknown as SubscriptionTiers;
+    return subscriptionTiersIn(db, code);
   }
 
   /** The ISO-4217 currency a market bills in — the CountryConfig value, never

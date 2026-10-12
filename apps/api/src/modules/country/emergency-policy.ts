@@ -125,3 +125,29 @@ export async function serveEmergencyPolicy(prisma: PrismaClient, country: string
   if (!policy) return { status: 'no-policy', country: code };
   return { status: 'served', signed: signEmergencyPolicy(policy, keyring, now) };
 }
+
+/**
+ * [L10 §2] Write a market's emergency policy — ops tooling (scripts/
+ * set-emergency-policy.ts), never request code. The policy is validated by the
+ * same parser the public route serves through, so a value this writes is a
+ * value the phone can dial; a malformed one is refused before anything is
+ * written. Idempotent: an identical stored policy is left untouched.
+ */
+export async function setEmergencyPolicy(
+  prisma: PrismaClient,
+  country: string,
+  policy: Record<string, unknown>,
+): Promise<{ status: 'updated' | 'unchanged'; previous: unknown }> {
+  const code = country.toUpperCase();
+  const parsed = parseEmergencyPolicy(code, policy);
+  if (!parsed.policy) throw new Error(`Refusing to store the ${code} emergency policy: ${parsed.problem ?? 'it names no service'}`);
+  const row = await prisma.countryConfig.findUnique({ where: { code }, select: { emergency: true } });
+  if (!row) throw new Error(`Refusing to store the ${code} emergency policy: no such market`);
+  const next = { ...parsed.policy.numbers, ...(parsed.policy.notes ? { notes: parsed.policy.notes } : {}) };
+  const sortKeys = (v: unknown): unknown => (v && typeof v === 'object' && !Array.isArray(v)
+    ? Object.fromEntries(Object.keys(v as object).sort().map((k) => [k, sortKeys((v as Record<string, unknown>)[k])]))
+    : v);
+  if (JSON.stringify(sortKeys(row.emergency)) === JSON.stringify(sortKeys(next))) return { status: 'unchanged', previous: row.emergency };
+  await prisma.countryConfig.update({ where: { code }, data: { emergency: next as never } });
+  return { status: 'updated', previous: row.emergency };
+}

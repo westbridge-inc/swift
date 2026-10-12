@@ -21,6 +21,7 @@ import Redis from 'ioredis';
 import { PrismaClient } from '@prisma/client';
 import { Server } from 'socket.io';
 import { pino } from 'pino';
+import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
 import { assertSafeBootConfig } from './utils/boot-config';
 import { initSentry } from './plugins/observability';
@@ -37,7 +38,7 @@ async function main() {
   // loads that plugin, so it inits here.
   initSentry();
 
-  const log = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
+  const log = pino({ level: process.env['LOG_LEVEL'] ?? 'info', redact: loggerRedactConfig, serializers: loggerSerializers });
   const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6379', {
     maxRetriesPerRequest: null,
   });

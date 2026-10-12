@@ -740,12 +740,26 @@ describe('weak-network driver acceptance', () => {
       if (requests.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
       return response(config, 200, { data: { id: 'ride-a' } });
     });
-    const result = await driverApi.acceptOffer('ride-a', 2000, 'attempt-a');
+    const result = await driverApi.acceptOffer('ride-a', 'attempt-a');
     expect(result.data.data.id).toBe('ride-a');
     expect(requests).toHaveLength(2);
     expect(requests.map((request) => request.url)).toEqual(['/driver/offers/accept', '/driver/offers/accept']);
     expect(requests[0]?.data).toBe(requests[1]?.data);
-    expect(JSON.parse(requests[1]!.data)).toEqual({ orderId: 'ride-a', fare: 2000, offerAttemptId: 'attempt-a' });
+    expect(JSON.parse(requests[1]!.data)).toEqual({ orderId: 'ride-a', offerAttemptId: 'attempt-a' });
+  });
+  it('[OWNER RULING 8 Oct] never sends a fare on any accept, first try or retry', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    setAdapter(async (config) => {
+      if (config.method === 'post') {
+        bodies.push(JSON.parse(config.data ?? '{}'));
+        if (bodies.length % 2 === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+      }
+      return response(config, 200, { data: { id: 'other-ride' } });
+    });
+    await driverApi.acceptOffer('ride-a', 'attempt-a');
+    await driverApi.accept('ride-b');
+    expect(bodies).toHaveLength(4);
+    for (const body of bodies) expect(body).not.toHaveProperty('fare');
   });
   it('reconciles a lost board response against the already-held ride', async () => {
     const urls: string[] = [];
@@ -760,7 +774,7 @@ describe('weak-network driver acceptance', () => {
   it('does not borrow another account for a retry', async () => {
     let calls = 0;
     setAdapter(async (config) => { calls++; auth.current = accountB; throw new AxiosError('offline', 'ERR_NETWORK', config); });
-    await expect(driverApi.acceptOffer('ride-a', 2000, 'attempt-a')).rejects.toThrow();
+    await expect(driverApi.acceptOffer('ride-a', 'attempt-a')).rejects.toThrow();
     expect(calls).toBe(1);
   });
   it.each([400, 401, 403, 409, 500])('does not retry an authoritative rejection %i', async (status) => {

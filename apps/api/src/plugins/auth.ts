@@ -2,6 +2,7 @@ import fp from 'fastify-plugin';
 import { reviewGate } from '../modules/review/gate';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import type { TenantKind } from '@prisma/client';
 import { enterTenant } from './prisma';
 import { AuthService } from '../modules/auth/auth.service';
 import {
@@ -21,6 +22,9 @@ declare module 'fastify' {
     authSessionId: string | null;
     /** Transport of the verified credential, never a client-declared app identity. */
     authCredentialSource: 'bearer' | 'cookie' | null;
+    /** [REVIEW-PARTNER] The authenticated caller's tenant KIND, read with the session
+     *  (null for a guest). The store-review fiction's money refusals key on it. */
+    tenantKind: TenantKind | null;
   }
 }
 
@@ -72,6 +76,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
 
   app.decorateRequest('authSessionId', null);
   app.decorateRequest('authCredentialSource', null);
+  app.decorateRequest('tenantKind', null);
   const authService = new AuthService(app);
 
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -134,10 +139,12 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       enterTenant(session.user.tenantId);
       // [R048-003] and on the request itself, so a route can name the caller's tenant without depending on async-context propagation
       request.tenantId = session.user.tenantId;
+      request.tenantKind = session.user.tenant.kind;
       reviewTenant = session.user.tenant.kind === 'REVIEW';
     } catch (err) {
       request.authSessionId = null;
       request.authCredentialSource = null;
+      request.tenantKind = null;
       // [F-250] "I could not REACH the session store" is not "your token is
       // invalid". The bare catch here reported every infrastructure failure —
       // a saturated connection pool, an unreachable database — as UNAUTHORIZED,
@@ -220,6 +227,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         request.authCredentialSource = credentialSource;
         enterTenant(session.user.tenantId);
         request.tenantId = session.user.tenantId;
+        request.tenantKind = session.user.tenant.kind;
         reviewTenant = session.user.tenant.kind === 'REVIEW';
       }
     } catch (err) {

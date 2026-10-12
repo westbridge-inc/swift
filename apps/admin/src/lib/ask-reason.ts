@@ -1,5 +1,7 @@
 'use client';
 
+import { REASON_MIN } from './reason-rules';
+
 /**
  * [ADM-006] THE OPERATOR STATES WHY, IN THEIR OWN WORDS.
  *
@@ -15,7 +17,7 @@
  * the first place. The length rule matches the server's, so the operator hears
  * about it here rather than as a rejected request.
  */
-export const REASON_MIN = 12;
+export { REASON_MIN };
 
 /**
  * The server's floor, for screens that collect a reason into an input they
@@ -38,6 +40,11 @@ export interface ReasonPrompt {
 /**
  * Ask for a reason. Returns the trimmed reason, or null if the operator
  * cancelled — in which case the caller must do NOTHING.
+ *
+ * @deprecated [MISSION CONTROL · PR-1] A browser prompt. Pages move to the
+ * in-page panel (components/mc/ReasonDialog): `useAskReason()` takes this same
+ * argument and returns a Promise of this same `string | null`, and
+ * `useActionDialog().run` also keeps the server's refusal in the panel.
  */
 export function askReason({ action, subject }: ReasonPrompt): string | null {
   const target = subject ? ` for ${subject}` : '';

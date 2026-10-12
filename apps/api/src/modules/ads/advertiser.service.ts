@@ -1,4 +1,5 @@
 import type { PrismaClient, Advertiser, AdvertiserStatus } from '@prisma/client';
+import { refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
@@ -45,6 +46,8 @@ export class AdvertiserService {
    *  application per user is enough for v1; a second registration by the same
    *  user for the same company name is refused. */
   async register(userId: string, input: AdvertiserRegisterInput): Promise<Advertiser> {
+    // [REVIEW-PARTNER] A demo account never becomes an advertiser (an OWNER membership, an admin page).
+    await refuseReviewAccountRoleGrant(this.prisma, userId);
     const existing = await this.prisma.advertiser.findFirst({
       where: { createdByUserId: userId, companyName: input.companyName, status: { in: ['PENDING_REVIEW', 'APPROVED', 'SUSPENDED'] } },
     });

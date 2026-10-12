@@ -1,36 +1,46 @@
+/* [WEB-REDESIGN] Order tracking in the owner's design: the stage in
+   Bricolage under a small eyebrow, the journey as a vertical line of dots
+   (green when done, brand when current), soft white cards for the rider, the
+   address and the handover code, and the receipt with its total in the right
+   column from 760 px. The page's logic and copy are unchanged; this sheet only
+   draws it. Token variables only. */
+
 .page {
   display: grid;
-  gap: var(--swift-space-lg);
-  padding-block-end: var(--swift-space-5xl);
-  color: var(--swift-ink);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
 }
 
-.hero,
-.holdCard,
-.progressCard,
-.card,
-.summaryCard,
-.stateCard {
-  border: thin solid var(--swift-border);
-  border-radius: var(--swift-radius-xl);
-  background: var(--swift-card);
-  box-shadow: var(--swift-elevation-card);
+@media (min-width: 72rem) {
+  .page {
+    grid-template-columns: minmax(0, 1fr) 380px;
+    grid-auto-flow: row dense;
+    column-gap: 24px;
+  }
+  .hero,
+  .moneyNotice,
+  .trackingNotice,
+  .cancelOutcome,
+  .holdCard { grid-column: 1 / -1; }
+  .progressCard { grid-column: 2; }
+  .detailGrid { display: contents; }
+  .mainColumn { grid-column: 1; grid-row: span 2; }
+  .summaryCard { grid-column: 2; }
 }
 
 .hero {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--swift-space-lg);
-  padding: var(--swift-space-xl);
-  border-inline-start: var(--swift-space-xs) solid var(--swift-red);
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
 }
 
 .heroIcon {
-  width: calc(var(--swift-touch) + var(--swift-space-md));
-  height: calc(var(--swift-touch) + var(--swift-space-md));
   display: grid;
   place-items: center;
+  flex: none;
+  width: 56px;
+  height: 56px;
   border-radius: var(--swift-radius-lg);
   background: var(--swift-red-50);
   color: var(--swift-red-600);
@@ -38,582 +48,451 @@
 
 .heroCopy {
   min-width: 0;
+  flex: 1;
 }
 
 .eyebrow {
   margin: 0;
   color: var(--swift-muted);
-  font-family: var(--swift-font-body-medium), system-ui, sans-serif;
-  font-size: var(--swift-type-micro);
-  line-height: var(--swift-leading-micro);
-  letter-spacing: var(--swift-tracking-micro);
+  font: 500 11px/14px var(--swift-face-body), system-ui, sans-serif;
+  letter-spacing: 0.6px;
   text-transform: uppercase;
 }
 
 .title {
-  margin: var(--swift-space-xs) 0 0;
-  font-family: var(--swift-font-display), system-ui, sans-serif;
-  font-size: var(--swift-type-display);
-  line-height: var(--swift-leading-display);
+  margin: 4px 0 0;
+  color: var(--swift-ink);
+  font: 600 22px/28px var(--swift-face-display), system-ui, sans-serif;
+  outline: none;
 }
 
 .updateNote,
 .mutedCopy {
-  margin: var(--swift-space-xs) 0 0;
+  margin: 2px 0 0;
   color: var(--swift-muted);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.statusPill,
-.estimate,
-.rating,
-.plate {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--swift-space-xs);
-  min-height: calc(var(--swift-space-3xl) + var(--swift-space-xs));
-  padding-inline: var(--swift-space-md);
-  border: thin solid var(--swift-red);
+.statusPill {
+  flex: none;
+  padding: 2px 10px;
   border-radius: var(--swift-radius-full);
-  color: var(--swift-red);
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
-  font-size: var(--swift-type-micro);
-  line-height: var(--swift-leading-micro);
+  background: var(--swift-red-50);
+  color: var(--swift-red-600);
+  font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
   text-transform: capitalize;
+  white-space: nowrap;
 }
 
-.statusComplete {
-  border-color: var(--swift-success);
-  color: var(--swift-success);
-}
+.statusComplete { background: var(--swift-soft-success); color: var(--swift-success); }
+.statusRefunded { background: var(--swift-soft-warning); color: var(--swift-warning); }
+.statusCancelled { background: var(--swift-border); color: var(--swift-muted); }
 
-.statusCancelled {
-  border-color: var(--swift-error);
-  color: var(--swift-error);
-}
-
-.statusRefunded {
-  border-color: var(--swift-info);
-  color: var(--swift-info);
-}
-
+.card,
+.progressCard,
+.summaryCard,
 .holdCard {
+  padding: 16px;
+  border-radius: var(--swift-radius-lg);
+  background: var(--swift-card);
+  box-shadow: var(--swift-elevation-card);
+}
+
+.mainColumn {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--swift-space-xl);
-  padding: var(--swift-space-xl);
-  border-color: var(--swift-red);
+  gap: 16px;
 }
 
 .cardTitle {
-  margin: var(--swift-space-xs) 0 0;
-  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
-  font-size: var(--swift-type-title);
-  line-height: var(--swift-leading-title);
-}
-
-.timer {
-  min-width: var(--swift-menu-image);
-  display: grid;
-  justify-items: center;
-  padding: var(--swift-space-md) var(--swift-space-lg);
-  border: thin solid var(--swift-red);
-  border-radius: var(--swift-radius-lg);
-  color: var(--swift-red-600);
-  font-variant-numeric: tabular-nums;
-}
-
-.timer span {
-  font-family: var(--swift-font-display), system-ui, sans-serif;
-  font-size: var(--swift-type-num-l);
-  line-height: var(--swift-leading-num-l);
-}
-
-.timer small {
-  color: var(--swift-muted);
-  font-size: var(--swift-type-micro);
-  line-height: var(--swift-leading-micro);
-  text-transform: uppercase;
-}
-
-.progressCard,
-.card,
-.summaryCard,
-.stateCard {
-  padding: var(--swift-space-xl);
-}
-
-.sectionHeading,
-.iconTitle,
-.riderDetails p,
-.line,
-.totalLine,
-.cashTruth,
-.confirmActions {
-  display: flex;
-  align-items: center;
+  margin: 4px 0 0;
+  color: var(--swift-ink);
+  font: 600 17px/24px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .sectionHeading {
+  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: var(--swift-space-lg);
+  gap: 12px;
 }
 
-.estimate,
-.plate {
-  border-color: var(--swift-border-strong);
-  color: var(--swift-muted);
+.estimate {
+  color: var(--swift-muted-soft);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
+  white-space: nowrap;
 }
 
+/* The journey: one dot per stage, joined by a line. */
 .statusRail {
-  display: grid;
-  grid-template-columns: repeat(var(--swift-stage-count, 4), minmax(0, 1fr));
-  margin: var(--swift-space-xl) 0 0;
+  display: flex;
+  flex-direction: column;
+  margin: 16px 0 0;
   padding: 0;
   list-style: none;
 }
 
 .statusRail li {
   position: relative;
-  display: grid;
-  justify-items: center;
-  gap: var(--swift-space-sm);
-  color: var(--swift-muted);
-  text-align: center;
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 36px;
+  color: var(--swift-muted-soft);
+  font: 500 15px/20px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.statusRail li:not(:first-child)::before {
+.statusRail li:not(:last-child)::after {
   content: '';
   position: absolute;
-  inset-block-start: calc(var(--swift-touch) / 2);
-  inset-inline-end: 50%;
-  width: 100%;
-  border-block-start: var(--swift-space-xs) solid var(--swift-border);
-  z-index: 0;
+  left: 9px;
+  top: 22px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--swift-border);
 }
+
+.statusRail li.stageReached:not(:last-child)::after { background: var(--swift-success); }
+.statusRail li[aria-current='step']:not(:last-child)::after { background: var(--swift-border); }
 
 .stageDot {
-  width: var(--swift-touch);
-  height: var(--swift-touch);
+  position: relative;
+  z-index: 1;
   display: grid;
   place-items: center;
-  z-index: 1;
-  border: thin solid var(--swift-border-strong);
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--swift-border-strong);
   border-radius: var(--swift-radius-full);
   background: var(--swift-card);
-  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  color: transparent;
+  font: 700 11px/1 var(--swift-face-body), system-ui, sans-serif;
 }
 
-.statusRail li.stageReached {
-  color: var(--swift-red);
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
-}
-
+.stageReached { color: var(--swift-ink) !important; }
 .stageReached .stageDot {
+  border-color: var(--swift-success);
+  background: var(--swift-success);
+  color: var(--swift-white);
+}
+
+.statusRail li[aria-current='step'] { font-weight: 600; }
+.statusRail li[aria-current='step'] .stageDot {
   border-color: var(--swift-red);
-  background: var(--swift-red-50);
-}
-
-.statusRail .stageReached:not(:first-child)::before {
-  border-color: var(--swift-red);
-}
-
-.detailGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, var(--swift-rail-width));
-  align-items: start;
-  gap: var(--swift-space-lg);
-}
-
-.mainColumn {
-  display: grid;
-  gap: var(--swift-space-lg);
-}
-
-.summaryCard {
-  position: sticky;
-  inset-block-start: var(--swift-rail-sticky-top);
-}
-
-.rating {
-  border-color: var(--swift-star);
-  color: var(--swift-ink);
-}
-
-.rating svg {
-  color: var(--swift-star);
+  background: var(--swift-card);
+  color: transparent;
 }
 
 .riderDetails {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--swift-space-md);
-  margin-block-start: var(--swift-space-lg);
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .riderDetails p {
-  gap: var(--swift-space-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   color: var(--swift-muted);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.plate {
-  text-transform: uppercase;
-  letter-spacing: var(--swift-tracking-micro);
+.plate { font-weight: 600 !important; color: var(--swift-ink) !important; }
+
+.rating {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--swift-star);
+  font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .iconTitle {
+  display: flex;
   align-items: flex-start;
-  gap: var(--swift-space-md);
-}
-
-.iconTitle > svg {
-  flex: none;
-  margin-block-start: var(--swift-space-xs);
+  gap: 12px;
   color: var(--swift-red);
 }
 
+.iconTitle .cardTitle { font-size: 15px; line-height: 22px; }
+
+/* The code given at the door: big, tabular, on the sunken tint. */
 .pickupCode {
-  margin-block-start: var(--swift-space-lg);
-  display: grid;
-  justify-items: start;
-  gap: var(--swift-space-xs);
-  padding: var(--swift-space-md);
-  border: thin solid var(--swift-border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 16px;
   border-radius: var(--swift-radius-md);
   background: var(--swift-sunken);
 }
 
 .pickupCode span {
   color: var(--swift-muted);
-  font-size: var(--swift-type-caption);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .pickupCode strong {
-  color: var(--swift-red-600);
-  font-family: var(--swift-font-display), system-ui, sans-serif;
-  font-size: var(--swift-type-num-l);
-  line-height: var(--swift-leading-num-l);
-  letter-spacing: calc(var(--swift-tracking-micro) * 3);
+  color: var(--swift-ink);
+  font: 700 34px/38px var(--swift-face-display), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 4px;
 }
 
 .timeline {
   display: grid;
-  gap: var(--swift-space-md);
-  margin: var(--swift-space-lg) 0 0;
+  gap: 0;
+  margin: 12px 0 0;
   padding: 0;
   list-style: none;
 }
 
 .timeline li {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--swift-space-md);
+  display: flex;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--swift-border);
 }
 
+.timeline li:last-child { border-bottom: 0; }
+
 .timelineDot {
-  width: var(--swift-space-md);
-  height: var(--swift-space-md);
-  margin-block-start: var(--swift-space-xs);
-  border: thin solid var(--swift-red);
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
   border-radius: var(--swift-radius-full);
-  background: var(--swift-red-50);
+  background: var(--swift-red);
 }
 
 .timeline strong {
   display: block;
+  color: var(--swift-ink);
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
   text-transform: capitalize;
 }
 
 .timeline time,
 .timeline p {
   display: block;
-  margin: var(--swift-space-xs) 0 0;
+  margin: 0;
   color: var(--swift-muted);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.orderLines {
+.orderLines,
+.breakdown {
   display: grid;
-  gap: var(--swift-space-sm);
-  margin-block-start: var(--swift-space-lg);
+  margin-top: 12px;
 }
+
+.orderLines { border-bottom: 1px solid var(--swift-border); padding-bottom: 8px; }
 
 .line,
 .totalLine {
-  align-items: baseline;
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--swift-space-md);
-}
-
-.line span {
+  gap: 12px;
+  padding: 6px 0;
   color: var(--swift-muted);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.line strong,
-.totalLine strong {
-  flex: none;
-  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+.line strong {
+  color: var(--swift-ink);
+  font: 600 17px/22px var(--swift-face-display), system-ui, sans-serif;
   font-variant-numeric: tabular-nums;
 }
 
-.breakdown {
-  display: grid;
-  gap: var(--swift-space-sm);
-  margin-block-start: var(--swift-space-md);
-  padding-block-start: var(--swift-space-md);
-  border-block-start: thin solid var(--swift-border);
-}
-
 .totalLine {
-  margin-block-start: var(--swift-space-xs);
-  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--swift-border);
+  color: var(--swift-ink);
+  font: 600 15px/22px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .totalLine strong {
-  color: var(--swift-red);
-  font-size: var(--swift-type-num-l);
-  line-height: var(--swift-leading-num-l);
+  font: 700 24px/28px var(--swift-face-display), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 
 .cashTruth {
-  align-items: flex-start;
-  gap: var(--swift-space-md);
-  margin-block-start: var(--swift-space-lg);
-  padding: var(--swift-space-md);
-  border: thin solid var(--swift-red);
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
   border-radius: var(--swift-radius-md);
-  color: var(--swift-red-600);
+  background: var(--swift-sunken);
+  color: var(--swift-success);
+}
+
+.cashTruth strong {
+  display: block;
+  color: var(--swift-ink);
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .cashTruth p {
-  margin: var(--swift-space-xs) 0 0;
+  margin: 4px 0 0;
   color: var(--swift-muted);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
-}
-
-.paymentAction {
-  width: fit-content;
-  margin-block-start: var(--swift-space-md);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .primaryButton,
 .secondaryButton,
 .cancelButton {
-  min-height: calc(var(--swift-touch) + var(--swift-space-xs));
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--swift-space-sm);
-  padding-inline: var(--swift-space-lg);
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 20px;
+  border: 0;
   border-radius: var(--swift-radius-full);
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
+  text-align: center;
   cursor: pointer;
-  text-decoration: none;
-  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
-}
-
-.primaryButton {
-  border: thin solid var(--swift-red);
-  background: var(--swift-red);
-  color: var(--swift-white);
-}
-
-.secondaryButton,
-.cancelButton {
-  border: thin solid var(--swift-border-strong);
-  background: var(--swift-card);
-  color: var(--swift-ink);
-}
-
-.cancelButton {
-  width: 100%;
-  margin-block-start: var(--swift-space-lg);
-  border-color: var(--swift-red);
-  color: var(--swift-red);
 }
 
 .primaryButton:disabled,
 .secondaryButton:disabled,
-.cancelButton:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
+.cancelButton:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.primaryButton {
+  background: var(--swift-red);
+  color: var(--swift-white);
 }
+
+.primaryButton:hover:not(:disabled) { background: var(--swift-red-600); }
+
+.secondaryButton {
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  box-shadow: inset 0 0 0 1px var(--swift-border);
+}
+
+.secondaryButton:hover:not(:disabled) { background: var(--swift-red-50); }
+
+.paymentAction { margin-top: 12px; }
+
+.cancelButton {
+  width: 100%;
+  margin-top: 16px;
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  box-shadow: inset 0 0 0 1px var(--swift-border);
+}
+
+.cancelButton:hover { background: var(--swift-red-50); }
 
 .cancelConfirm {
   display: grid;
-  gap: var(--swift-space-md);
-  margin-block-start: var(--swift-space-lg);
-  padding: var(--swift-space-md);
-  border: thin solid var(--swift-border-strong);
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
   border-radius: var(--swift-radius-md);
+  background: var(--swift-sunken);
+  color: var(--swift-ink);
+  font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.cancelConfirm p {
-  margin: 0;
-  color: var(--swift-muted);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
-}
+.cancelConfirm p { margin: 0; }
 
 .cancelWarning {
-  border-color: var(--swift-warning);
-}
-
-.cancelOutcome {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--swift-space-md);
-  padding: var(--swift-space-md) var(--swift-space-lg);
-  border: thin solid var(--swift-border-strong);
-  border-radius: var(--swift-radius-md);
-  background: var(--swift-card);
-  color: var(--swift-muted);
-}
-
-.moneyNotice {
-  padding: var(--swift-space-md) var(--swift-space-lg);
-  border: thin solid var(--swift-warning);
-  border-radius: var(--swift-radius-md);
-  background: var(--swift-card);
-  color: var(--swift-ink);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
-}
-
-.trackingNotice {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--swift-space-md);
-  padding: var(--swift-space-md) var(--swift-space-lg);
-  border: thin solid var(--swift-error);
-  border-radius: var(--swift-radius-md);
-  background: var(--swift-card);
-  color: var(--swift-error);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
-}
-
-.trackingNotice .secondaryButton {
-  flex: none;
+  background: var(--swift-soft-warning);
+  color: var(--swift-warning);
 }
 
 .confirmActions {
-  gap: var(--swift-space-sm);
-}
-
-.confirmActions > * {
-  flex: 1;
+  display: grid;
+  gap: 8px;
 }
 
 .alert {
-  margin: var(--swift-space-lg) 0 0;
-  padding: var(--swift-space-md);
-  border: thin solid var(--swift-error);
+  margin: 16px 0 0;
+  padding: 12px 16px;
   border-radius: var(--swift-radius-md);
+  background: var(--swift-soft-danger);
   color: var(--swift-error);
-  font-size: var(--swift-type-caption);
-  line-height: var(--swift-leading-caption);
+  font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.trackingNotice,
+.moneyNotice,
+.cancelOutcome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-red-50);
+  color: var(--swift-red-600);
+  font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.moneyNotice { display: grid; justify-content: stretch; }
+.moneyNotice p { margin: 0; }
+
+.cancelOutcome {
+  display: grid;
+  background: var(--swift-soft-success);
+  color: var(--swift-success);
+}
+
+.holdCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: var(--swift-red-50);
+  box-shadow: none;
+}
+
+.timer {
+  display: grid;
+  place-items: center;
+  flex: none;
+  min-width: 96px;
+  padding: 8px 12px;
+  border-radius: var(--swift-radius-md);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+}
+
+.timer span {
+  font: 700 24px/28px var(--swift-face-display), system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.timer small {
+  color: var(--swift-muted);
+  font: 400 11px/14px var(--swift-face-body), system-ui, sans-serif;
 }
 
 .stateCard {
-  max-width: var(--swift-modal-width);
-  margin-inline: auto;
-  display: grid;
-  gap: var(--swift-space-md);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 72px 0;
   text-align: center;
 }
 
-.stateCard h1,
+.stateCard h1 {
+  margin: 0;
+  font: 600 17px/24px var(--swift-face-body), system-ui, sans-serif;
+}
+
 .stateCard p {
   margin: 0;
-}
-
-.stateCard p {
   color: var(--swift-muted);
+  font: 400 15px/22px var(--swift-face-body), system-ui, sans-serif;
 }
 
-.loading {
-  min-height: var(--swift-hero-height);
-  border-radius: var(--swift-radius-xl);
-  background: var(--swift-sunken);
-}
-
-@media (max-width: 52em) {
-  .detailGrid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .summaryCard {
-    position: static;
-  }
-}
-
-@media (max-width: 40em) {
-  .hero {
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: start;
-    padding: var(--swift-space-lg);
-  }
-
-  .statusPill {
-    grid-column: 1 / -1;
-    width: fit-content;
-  }
-
-  .title {
-    font-size: var(--swift-type-title);
-    line-height: var(--swift-leading-title);
-  }
-
-  .holdCard {
-    grid-template-columns: minmax(0, 1fr);
-    padding: var(--swift-space-lg);
-  }
-
-  .timer {
-    width: 100%;
-  }
-
-  .progressCard,
-  .card,
-  .summaryCard {
-    padding: var(--swift-space-lg);
-  }
-
-  .statusRail {
-    grid-template-columns: repeat(
-      var(--swift-stage-count, 4),
-      minmax(calc(var(--swift-touch) + var(--swift-space-xl)), 1fr)
-    );
-    overflow-x: auto;
-    padding-block-end: var(--swift-space-sm);
-  }
-
-  .statusRail li {
-    min-width: calc(var(--swift-touch) + var(--swift-space-xl));
-  }
-
-  .sectionHeading,
-  .riderDetails,
-  .trackingNotice,
-  .confirmActions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .estimate,
-  .rating {
-    width: fit-content;
-  }
-}
+.loading { color: var(--swift-muted); }
