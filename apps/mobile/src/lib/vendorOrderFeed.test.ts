@@ -22,7 +22,7 @@ describe('vendor order feed', () => {
   it('refreshes the order queries on every order event the store room carries, including pick state', () => {
     const socket = fakeSocket();
     const refresh = vi.fn();
-    const off = bindVendorOrderFeed(socket, 'store-a', () => true, { onNew: noop, refresh, refreshBookings: noop });
+    const off = bindVendorOrderFeed(socket, 'store-a', () => true, { onNew: noop, refresh, refreshBookings: noop }, { serverAdmits: true });
     expect(socket.emitted).toEqual([['vendor:subscribe', { vendorId: 'store-a' }]]);
     socket.fire('order:status_changed');
     socket.fire('order:prep_update');
@@ -37,10 +37,20 @@ describe('vendor order feed', () => {
     // A held store shows its orders with the socket still connected but no feed.
     expect(POLL.vendorOrders()).toBe(12000);
     expect(POLL.vendorOrder()).toBe(15000);
-    const off = bindVendorOrderFeed(fakeSocket(), 'store-a', () => true, { onNew: noop, refresh: noop, refreshBookings: noop });
+    const off = bindVendorOrderFeed(fakeSocket(), 'store-a', () => true, { onNew: noop, refresh: noop, refreshBookings: noop }, { serverAdmits: true });
     expect(POLL.vendorOrders()).toBe(30000);
     expect(POLL.vendorOrder()).toBe(30000);
     off();
     expect(POLL.vendorOrders()).toBe(12000);
+  });
+
+  // The server's vendor:subscribe admits only the store owner; a staff or
+  // manager device binds listeners that never receive an event.
+  it('does not stretch for a device the store room will not admit (staff, manager)', () => {
+    fx.connected = true;
+    const off = bindVendorOrderFeed(fakeSocket(), 'store-a', () => true, { onNew: noop, refresh: noop, refreshBookings: noop }, { serverAdmits: false });
+    expect(POLL.vendorOrders()).toBe(12000);
+    expect(POLL.vendorOrder()).toBe(15000);
+    off();
   });
 });

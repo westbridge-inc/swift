@@ -6,8 +6,10 @@ import { vendorOrderFeedLive } from './vendorOrderFeed';
  * Socket-pushed (server emit sites in apps/api): chat:message to chat:<room>;
  * order:new / order:status_changed / order:prep_update / order:pick_state to
  * vendor:<id>. Chat may slow while the socket is connected; the vendor order
- * queries only while a live store feed is bound (bindVendorOrderFeed), since a
- * held store shows orders with the socket connected but no feed.
+ * queries only while a store feed the server admits is bound
+ * (bindVendorOrderFeed): a held store shows orders with no feed, and the
+ * server joins only the store owner to vendor:<id>, so staff and managers
+ * keep the full cadence.
  *
  * Not pushed: the mover active job, stacked legs and demand get no socket
  * event (movers receive only dispatch:offer, the offer withdrawal and

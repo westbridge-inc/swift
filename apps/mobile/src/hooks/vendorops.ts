@@ -290,7 +290,8 @@ export function useVendorOrders(enabled: boolean) {
  *  signal) instead of waiting out the 12s poll — the poll stays as the
  *  reconnect safety net. A new order also buzzes the phone: the board is a
  *  counter appliance, not a screen someone stares at. */
-export function useVendorOrdersLive(vendorId: string | undefined) {
+/** `ownsStore`: the server admits only the store owner to the store room. */
+export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = false) {
   const qc = useQueryClient();
   const previewType = useVendorPreview((s) => s.previewType);
   // NEW-ORDER takeover queue (alerts spec §A1): every order:new lands here;
@@ -320,8 +321,8 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
       onNew,
       refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
       refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
-    });
-  }, [vendorId, qc, previewType]);
+    }, { serverAdmits: ownsStore });
+  }, [vendorId, ownsStore, qc, previewType]);
 
   const dismissTakeover = useCallback(
     (orderId: string) => setTakeover((q) => q.filter((x) => x.orderId !== orderId)),

@@ -19,7 +19,13 @@ export function vendorOrderFeedLive(): boolean { return liveStores.size > 0; }
  * event that room carries (server emit sites: order.service, picking.service,
  * dispatch.service, jobs/queue, booking.service). Rooms are per connection,
  * so it re-joins after reconnects, and only while `mayJoin()` holds. */
-export function bindVendorOrderFeed(socket: FeedSocket, vendorId: string, mayJoin: () => boolean, handlers: VendorOrderFeedHandlers): () => void {
+export function bindVendorOrderFeed(
+  socket: FeedSocket,
+  vendorId: string,
+  mayJoin: () => boolean,
+  handlers: VendorOrderFeedHandlers,
+  { serverAdmits }: { serverAdmits: boolean },
+): () => void {
   const join = () => { if (mayJoin()) socket.emit('vendor:subscribe', { vendorId }); };
   const refresh = () => { handlers.refresh(); };
   const refreshBookings = () => { handlers.refreshBookings(); };
@@ -30,7 +36,9 @@ export function bindVendorOrderFeed(socket: FeedSocket, vendorId: string, mayJoi
   socket.on('order:prep_update', refresh);
   socket.on('order:pick_state', refresh);
   socket.on('bookings:changed', refreshBookings);
-  liveStores.set(vendorId, (liveStores.get(vendorId) ?? 0) + 1);
+  // The server joins only the store OWNER to vendor:<id> (plugins/socket.ts
+  // vendor:subscribe); other roles get no events, so they never count as live.
+  if (serverAdmits) liveStores.set(vendorId, (liveStores.get(vendorId) ?? 0) + 1);
   let bound = true;
   return () => {
     if (!bound) return;
@@ -41,6 +49,7 @@ export function bindVendorOrderFeed(socket: FeedSocket, vendorId: string, mayJoi
     socket.off('order:prep_update', refresh);
     socket.off('order:pick_state', refresh);
     socket.off('bookings:changed', refreshBookings);
+    if (!serverAdmits) return;
     const left = (liveStores.get(vendorId) ?? 1) - 1;
     if (left > 0) liveStores.set(vendorId, left); else liveStores.delete(vendorId);
   };
