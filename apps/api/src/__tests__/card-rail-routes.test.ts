@@ -1349,7 +1349,11 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     expect(session).toMatchObject({ purpose: 'PAY_NOW', status: 'OPEN', testMode: true, testModeLabel: CARD_SANDBOX_TEST_LABEL });
     expect(session.hostedUrl).toMatch(/^https:\/\/api\.example\.test\/api\/v1\/billing\/card\/pay\/ptz_[0-9a-f]{24}$/);
 
-    const pageRes = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) });
+    // [CARD embed] With no web origin to allow, the page is framed by nothing (pinned here: a local env may set one).
+    const webBefore = process.env['APP_PUBLIC_URL'];
+    delete process.env['APP_PUBLIC_URL'];
+    let pageRes: Awaited<ReturnType<typeof ptz.inject>>;
+    try { pageRes = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) }); } finally { if (webBefore !== undefined) process.env['APP_PUBLIC_URL'] = webBefore; }
     expect(pageRes.statusCode).toBe(200);
     expect(pageRes.headers['content-security-policy']).toBe(HOSTED_CARD_PAGE_CSP);
     // [Review S3] Scripts, styles and form posts reach only the card provider's own hosts; the frame is sandboxed.

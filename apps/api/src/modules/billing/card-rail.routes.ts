@@ -602,12 +602,13 @@ export function hostedCardPageCsp(web: string | null = cardWebFrameOrigin()): st
  * frames the bank's form, which comes back here), by the card provider's frames, and by
  * Swift's own web; the simulator by this API and Swift's own web. Never '*'.
  */
-export function cardTextPageCsp(kind: 'return' | 'simulator', web: string | null = cardWebFrameOrigin()): string {
-  const ancestors = ["'self'", ...(kind === 'return' ? [CARD_PROVIDER_ORIGINS] : []), ...(web ? [web] : [])];
+// (Not called kind: the phone's notification census reads every kind literal in the API.)
+export function cardTextPageCsp(page: 'return' | 'simulator', web: string | null = cardWebFrameOrigin()): string {
+  const ancestors = ["'self'", ...(page === 'return' ? [CARD_PROVIDER_ORIGINS] : []), ...(web ? [web] : [])];
   return [
     "default-src 'none'",
     "style-src 'unsafe-inline'",
-    `form-action ${kind === 'simulator' ? "'self'" : "'none'"}`,
+    `form-action ${page === 'simulator' ? "'self'" : "'none'"}`,
     "connect-src 'none'",
     "base-uri 'none'",
     "object-src 'none'",
