@@ -613,11 +613,22 @@ describe('[PROD-PATH · 6 Oct ruling] no live way to pay pauses every partner\'s
 });
 
 describe('[PROD-PATH] the pause is decided by server facts only: nothing a partner sets pauses their fee', () => {
-  it.each(['powertranz', 'typo-provider'])('a provider rejected by the card factory (%s) never unpauses fees', async (provider) => {
+  it.each(['fygaro', 'typo-provider'])('a provider rejected by the card factory (%s) never unpauses fees', async (provider) => {
     const { noLivePayPath } = await import('../modules/billing/fee-pause');
     const env = { ...CARD_LIVE, CARD_RAIL_PROVIDER: provider };
     expect(() => cardFactory.getCardRailProvider({ redis: app.redis }, env)).toThrow('Unknown CARD_RAIL_PROVIDER');
     expect(noLivePayPath(env)).toBe(true);
+  });
+  // #1520 (PT-4) made powertranz a real provider this build's factory builds.
+  // The liveness list follows the factory, unmocked: with card rail v2 on and
+  // not killed it is a live way to pay, so the fee is not paused; killed or
+  // off, it is (owner ruling 6 Oct: the pause is "no live way to pay").
+  it('the real provider the factory builds (powertranz) is a live way to pay while v2 is on and not killed', async () => {
+    const { noLivePayPath } = await import('../modules/billing/fee-pause');
+    expect(cardFactory.cardRailProviderNames()).toEqual(expect.arrayContaining(['powertranz']));
+    expect(noLivePayPath(CARD_LIVE)).toBe(false);
+    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_KILL: '1' })).toBe(true);
+    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_V2: '0' })).toBe(true);
   });
   it('the predicate reads only the server\'s MMG driver and card-rail switches', async () => {
     const { noLivePayPath } = await import('../modules/billing/fee-pause');
