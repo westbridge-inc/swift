@@ -14,6 +14,11 @@
 #       never started, stopped or replaced — refused outright while an API or
 #       worker is running. For a new host before its provider credentials and
 #       its DNS exist: migrate, back up, rehearse a restore, seed.
+#   ./deploy/pilot-up.sh --no-public <sha>   [PROD-PATH] production only: the
+#       first boot before DNS moves. Every check below except DNS, then the
+#       migrations and the API and worker, ready inside the private network.
+#       Caddy, the website and the console are never started (nothing is
+#       public); refused while Caddy is running.
 #
 # [PROD-PATH] PILOT_ENV=production adds production-only refusals, each before
 # anything changes: NODE_ENV must be production; no served name may be a
@@ -26,7 +31,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 DATA_ONLY=0
-if [ "${1:-}" = "--data-only" ]; then DATA_ONLY=1; shift; fi
+NO_PUBLIC=0
+if [ "${1:-}" = "--data-only" ]; then DATA_ONLY=1; shift;
+elif [ "${1:-}" = "--no-public" ]; then NO_PUBLIC=1; shift; fi
 SHA="${1:-}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 ROUTING=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.routing.yml")
@@ -77,6 +84,8 @@ case "$PILOT_ENV" in
   staging | production) ;;
   *) die "PILOT_ENV must be staging or production" ;;
 esac
+[ "$NO_PUBLIC" -eq 0 ] || [ "$PILOT_ENV" = production ] ||
+  die "--no-public is for the production host (the first boot before its DNS moves); a staging host deploys the whole stack"
 API_HOST="$(env_value API_HOST)"
 [[ "$API_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
   die "API_HOST must be a DNS hostname for $PILOT_ENV HTTPS"
@@ -282,7 +291,7 @@ for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || di
 # counts too: an AAAA record left on the old host sends IPv6 clients — and the
 # certificate authority, which prefers IPv6 — elsewhere. The database-only
 # stage serves nothing and needs no name.
-if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ]; then
+if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; then
   for tool in getent hostname; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
   host_addresses=" $(hostname -I 2>/dev/null | tr '[:upper:]' '[:lower:]' || true) "
   read -r -a served_names <<< "$API_HOST $API_ALIAS_HOST $WEB_HOST $WEB_ALIAS_HOSTS $ADMIN_HOST"
@@ -299,10 +308,18 @@ if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ]; then
       *) die "cannot check $served_name IPv6 addresses without address-family filtering; getent --no-addrconfig is required" ;;
     esac
     resolved6="$(printf '%s\n' "$resolved6" | awk '{print tolower($1)}' | grep -v '^::ffff:' | sort -u || true)"
-    for address in $resolved $resolved6; do
+    # The refusal names the record, never the address: deploy logs are kept
+    # as stand-up evidence, which carries no addresses (#1448 review).
+    for address in $resolved; do
       case "$host_addresses" in
         *" $address "*) ;;
-        *) die "$served_name resolves to $address, which is not this host; move its DNS here before the production stack starts (the database-only stage needs none: --data-only)" ;;
+        *) die "$served_name has an IPv4 (A) address that is not this host; move its DNS here before the production stack starts (the database-only stage needs none: --data-only)" ;;
+      esac
+    done
+    for address in $resolved6; do
+      case "$host_addresses" in
+        *" $address "*) ;;
+        *) die "$served_name has an IPv6 (AAAA) address that is not this host; move its DNS here or remove the stale AAAA record before the production stack starts (the database-only stage needs none: --data-only)" ;;
       esac
     done
   done
@@ -422,6 +439,14 @@ if [ "$DATA_ONLY" -eq 1 ]; then
       die "--data-only refuses a stack whose $service is running; use the full deploy, which stops it before migrating"
   done
 fi
+# [PROD-PATH] --no-public never takes a public stack back: Caddy running means
+# the names already serve, and only the full deploy replaces that stack.
+if [ "$NO_PUBLIC" -eq 1 ]; then
+  running="$("${COMPOSE[@]}" ps -q caddy)" ||
+    die "--no-public could not ask Docker whether caddy is running; refusing to deploy without that answer"
+  [ -z "$running" ] ||
+    die "--no-public refuses a stack whose caddy is running (it already serves its public names); use the full deploy"
+fi
 
 # Pull versioned infrastructure images, then build the exact checked-out API.
 "${COMPOSE[@]}" pull postgres redis meilisearch caddy
@@ -429,11 +454,11 @@ fi
 "${COMPOSE[@]}" build api
 # [Q11] The website's image for the same exact commit, built before anything
 # is stopped: a site that does not build leaves the running stack untouched.
-if [ -n "$WEB_HOST" ] && [ "$DATA_ONLY" -eq 0 ]; then
+if [ -n "$WEB_HOST" ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; then
   "${COMPOSE[@]}" build web
 fi
 # [ADMIN-CONSOLE] The same for the admin console: built before anything stops.
-if [ -n "$ADMIN_HOST" ] && [ "$DATA_ONLY" -eq 0 ]; then
+if [ -n "$ADMIN_HOST" ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; then
   "${COMPOSE[@]}" build admin
 fi
 "${COMPOSE[@]}" up -d --wait postgres redis meilisearch
@@ -455,6 +480,27 @@ if [ "${DATA_ONLY:-0}" -eq 1 ]; then
 fi
 
 "${COMPOSE[@]}" up -d --no-deps --force-recreate api worker
+if [ "$NO_PUBLIC" -eq 1 ]; then
+  # Ready inside the private network: the API container is healthy, the
+  # worker runs, and /ready answers from inside the API container. Nothing
+  # listens publicly (only Caddy publishes 80/443, and it is not started).
+  API_READY=0
+  for _ in $(seq 1 90); do
+    API_ID="$("${COMPOSE[@]}" ps -q api)"
+    WORKER_ID="$("${COMPOSE[@]}" ps -q worker)"
+    if [ -n "$API_ID" ] && [ -n "$WORKER_ID" ] &&
+       [ "$(docker inspect -f '{{.State.Health.Status}}' "$API_ID")" = healthy ] &&
+       [ "$(docker inspect -f '{{.State.Status}}' "$WORKER_ID")" = running ] &&
+       "${COMPOSE[@]}" exec -T api node -e "fetch('http://127.0.0.1:3000/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      API_READY=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$API_READY" = 1 ] || die "API/worker readiness did not become healthy (no public address); inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 api worker"
+  echo "API READY at exact SHA $SHA (production, no public address: Caddy, the website and the console were not started)"
+  exit 0
+fi
 "${COMPOSE[@]}" up -d --no-deps --force-recreate caddy
 API_READY=0
 for _ in $(seq 1 90); do

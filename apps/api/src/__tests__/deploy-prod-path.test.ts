@@ -72,6 +72,8 @@ if argv[:1] == ["compose"] and "ps" in argv and "-q" in argv:
     service = argv[-1]
     if service in ("api", "worker") and os.environ.get("API_STOPPED") == "1":
         sys.exit(0)
+    if service == "caddy" and os.environ.get("CADDY_STOPPED") == "1":
+        sys.exit(0)
     print(service + "-id")
 sys.exit(0)
 `;
@@ -259,7 +261,9 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     writeFileSync(log, '');
     const elsewhere = runPilot(PRODUCTION, { env: { DNS_MAP: `${PROD_HOST}=198.51.100.7` } });
     expect(elsewhere.status).not.toBe(0);
-    expect(elsewhere.stderr).toContain(`${PROD_HOST} resolves to 198.51.100.7, which is not this host`);
+    expect(elsewhere.stderr).toContain(`${PROD_HOST} has an IPv4 (A) address that is not this host`);
+    // #1448 review (Opus S4): the refusal names the record, never the address (its log is kept as evidence).
+    expect(elsewhere.stderr + elsewhere.stdout).not.toContain('198.51.100.7');
     expect(elsewhere.calls).toEqual([]);
     writeFileSync(log, '');
     const site = runPilot({ ...PRODUCTION, WEB_HOST: 'example.org' }, { env: { DNS_MAP: `${PROD_HOST}=${HOST_IP}` } });
@@ -319,6 +323,84 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
     expect(staging.stderr).not.toContain('refuses the agent-cash webhook');
+  });
+});
+
+// #1448 review (Opus S2-2, DS917): deploy.sh is the local/staging convenience
+// script. On the production host it would build whatever is checked out, with
+// no pinned SHA and none of pilot-up's refusals (or delete the data volumes).
+// So it refuses there before it runs anything.
+function runDeploySh(action: string, settings: Record<string, string> | string, env: Record<string, string> = {}) {
+  const here = join(tmp, 'deploy-sh');
+  mkdirSync(here, { recursive: true });
+  for (const f of ['deploy.sh', 'wait-for-migration.sh']) copyFileSync(join(DEPLOY, f), join(here, f));
+  const text = typeof settings === 'string' ? settings : Object.entries(settings).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+  writeFileSync(join(here, '.env'), text);
+  writeFileSync(log, '');
+  const res = spawnSync('bash', [join(here, 'deploy.sh'), action], {
+    encoding: 'utf8', timeout: 60_000, input: 'yes\n',
+    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, SWIFT_DEV_NO_STORE: '1', STORE_NAMES: STORE.join(' '), ...env },
+  });
+  return { ...res, calls: calls() };
+}
+const STAGING_ENV_TEXT = Object.entries(STAGING).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+/** The staging settings other than the two posture names, which each case writes itself. */
+const STAGING_REST_TEXT = Object.entries(STAGING).filter(([k]) => k !== 'PILOT_ENV' && k !== 'NODE_ENV').map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+
+describe('[PROD-PATH · #1448 review] deploy.sh never deploys or deletes production', () => {
+  it.each(['up', 'update', 'down', 'nuke'])('deploy.sh %s on the production host refuses before any docker or systemd call, and points to pilot-up', (action) => {
+    for (const settings of [PRODUCTION, { ...STAGING, NODE_ENV: 'production' }, { PILOT_ENV: 'production' }]) {
+      const r = runDeploySh(action, settings);
+      expect(r.status, JSON.stringify(settings)).not.toBe(0);
+      expect(r.stderr).toContain(`deploy.sh ${action} is refused on the production host`);
+      expect(r.stderr).toContain('pilot-up.sh');
+      expect(r.calls).toEqual([]);
+    }
+  });
+
+  // Compose reads the LAST line for a name, honours `export NAME=` and quotes,
+  // and ignores a leading byte-order mark and indentation; a production line
+  // in any of those spellings is the production host. So is a production
+  // posture exported in this shell, which Compose uses before deploy/.env.
+  it.each([
+    ['an export prefix', 'export PILOT_ENV=production\nNODE_ENV=development\n'],
+    ['double quotes', 'PILOT_ENV="production"\nNODE_ENV=development\n'],
+    ['single quotes and a comment', "PILOT_ENV=staging\nNODE_ENV='production' # launch\n"],
+    ['indentation', '  PILOT_ENV=production\nNODE_ENV=development\n'],
+    ['a byte-order mark first in the file', '\uFEFFPILOT_ENV=production\nNODE_ENV=development\n'],
+    ['a later duplicate line (Compose takes the last)', 'PILOT_ENV=staging\nPILOT_ENV=production\nNODE_ENV=development\n'],
+    ['the colon form', 'PILOT_ENV=staging\nNODE_ENV: production\n'],
+    ['upper case', 'PILOT_ENV=staging\nNODE_ENV=Production\n'],
+  ])('refuses a production line written with %s, before any docker call', (_label, text) => {
+    const r = runDeploySh('up', text + STAGING_REST_TEXT);
+    expect(r.status, r.stderr).not.toBe(0);
+    expect(r.stderr).toContain('deploy.sh up is refused on the production host');
+    expect(r.calls).toEqual([]);
+  });
+
+  it.each(['NODE_ENV', 'PILOT_ENV'])('refuses a production posture exported in this shell as %s (Compose would use it over deploy/.env)', (name) => {
+    const r = runDeploySh('update', STAGING, { [name]: 'production' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('deploy.sh update is refused on the production host');
+    expect(r.calls).toEqual([]);
+  });
+
+  it('a comment that mentions production is not a production line (the template has such comments)', () => {
+    const r = runDeploySh('up', '# Set NODE_ENV=production ONLY after every provider is real\n# PILOT_ENV=production on the production host\n' + STAGING_ENV_TEXT);
+    expect(r.stderr).not.toContain('refused on the production host');
+    expect(indexOf(r.calls, 'compose up -d --build')).toBeGreaterThan(-1);
+  });
+
+  it.each(['logs', 'health'])('the read-only %s still answers on the production host', (action) => {
+    const r = runDeploySh(action, PRODUCTION);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain('refused on the production host');
+  });
+
+  it('a staging host still runs it (positive control: the same shims see the build)', () => {
+    const r = runDeploySh('up', STAGING);
+    expect(r.stderr).not.toContain('refused on the production host');
+    expect(indexOf(r.calls, 'compose up -d --build')).toBeGreaterThan(-1);
   });
 });
 
@@ -478,7 +560,8 @@ describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the produc
   it('production refuses a served name whose IPv6 (AAAA) address is not this host\'s, before anything runs; this host\'s own IPv6 passes', () => {
     const elsewhere = runPilot(PRODUCTION, { env: { DNS6_MAP: `${PROD_HOST}=2001:db8::99` } });
     expect(elsewhere.status).not.toBe(0);
-    expect(elsewhere.stderr).toContain(`${PROD_HOST} resolves to 2001:db8::99, which is not this host`);
+    expect(elsewhere.stderr).toContain(`${PROD_HOST} has an IPv6 (AAAA) address that is not this host`);
+    expect(elsewhere.stderr + elsewhere.stdout).not.toContain('2001:db8::99');
     expect(elsewhere.calls).toEqual([]);
     writeFileSync(log, '');
     const here = runPilot(PRODUCTION, { env: { DNS6_MAP: `${PROD_HOST}=2001:DB8::10`, HOST_IPS: `${HOST_IP} 10.10.0.5 2001:db8::10 ` } });
@@ -488,7 +571,8 @@ describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the produc
   it('an IPv4-only host still detects stale AAAA records without address-family filtering', () => {
     const stale = runPilot(PRODUCTION, { env: { IPV4_ONLY: '1', DNS6_MAP: `${PROD_HOST}=2001:db8::99` } });
     expect(stale.status, stale.stdout).not.toBe(0);
-    expect(stale.stderr).toContain(`${PROD_HOST} resolves to 2001:db8::99, which is not this host`);
+    expect(stale.stderr).toContain(`${PROD_HOST} has an IPv6 (AAAA) address that is not this host`);
+    expect(stale.stderr + stale.stdout).not.toContain('2001:db8::99');
     expect(stale.calls).toEqual([]);
     writeFileSync(log, '');
     const noAAAA = runPilot(PRODUCTION, { env: { IPV4_ONLY: '1', DNS6_MAP: '' } });
@@ -500,6 +584,45 @@ describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the produc
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('cannot check');
     expect(r.calls).toEqual([]);
+  });
+});
+
+// #1448 review (Opus S3-5): the first production boot happens before DNS moves,
+// so with no public address. It is a pilot-up mode, so every check runs: all
+// production refusals except DNS, the exact SHA, the store, the private ports.
+describe('[PROD-PATH · #1448 review] pilot-up.sh --no-public: the API and worker, no public address', () => {
+  const NO_PUBLIC = { args: ['--no-public', SHA], env: { DNS_MAP: '', CADDY_STOPPED: '1' } };
+
+  it('migrates and starts only the API and worker on production before DNS, checks readiness inside, and never starts Caddy, the website or the console', () => {
+    const r = runPilot({ ...PRODUCTION, WEB_HOST: 'example.org', ADMIN_HOST: 'admin.example.org', CORS_ORIGIN: 'https://example.org,https://admin.example.org' }, NO_PUBLIC);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`API READY at exact SHA ${SHA} (production, no public address`);
+    expect(indexOf(r.calls, 'up -d --force-recreate migrate')).toBeGreaterThan(-1);
+    expect(indexOf(r.calls, 'up -d --no-deps --force-recreate api worker')).toBeGreaterThan(indexOf(r.calls, 'up -d --force-recreate migrate'));
+    expect(indexOf(r.calls, 'exec -T api')).toBeGreaterThan(indexOf(r.calls, 'up -d --no-deps --force-recreate api worker'));
+    expect(r.calls.filter((l) => /(up|build) .*\b(caddy|web|admin)\b/.test(l))).toEqual([]);
+    expect(r.calls.filter((l) => l.startsWith('curl '))).toEqual([]);
+  });
+
+  it('keeps every production refusal: the top-up hold, before anything changes', () => {
+    const r = runPilot({ ...PRODUCTION, BILLING_TOPUP_HOLD: '0' }, NO_PUBLIC);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('PILOT_ENV=production needs BILLING_TOPUP_HOLD=1');
+    expect(changedNothing(r.calls)).toEqual([]);
+  });
+
+  it('refuses while Caddy is already serving (the stack is public: use the full deploy), before anything is pulled or built', () => {
+    const r = runPilot(PRODUCTION, { args: ['--no-public', SHA], env: { DNS_MAP: '' } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('--no-public refuses a stack whose caddy is running');
+    expect(r.calls.filter((l) => / (pull|build|up) /.test(` ${l} `))).toEqual([]);
+  });
+
+  it('is for the production host only', () => {
+    const r = runPilot(STAGING, NO_PUBLIC);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('--no-public is for the production host');
+    expect(changedNothing(r.calls)).toEqual([]);
   });
 });
 

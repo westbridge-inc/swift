@@ -286,6 +286,20 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: OPS_ONCALL_PHONES has an entry that is not an E.164 number (+ then 7–15 digits, comma-separated) — it would be dropped silently and never paged. Refusing to start.');
   }
 
+  // [PROD-PATH · owner ruling 8 Oct] Production launches with admin top-ups ON
+  // HOLD: admin.routes.ts refuses every manual credit of fee paid ahead exactly
+  // when BILLING_TOPUP_HOLD is '1'. pilot-up.sh refuses a production deploy
+  // without it; this holds it however the API is started.
+  if (env['BILLING_TOPUP_HOLD'] !== '1') {
+    throw new Error('FATAL: BILLING_TOPUP_HOLD must be exactly 1 in production — admin top-ups stay on hold (owner ruling, 8 Oct). Set BILLING_TOPUP_HOLD=1 in deploy/.env. Refusing to start.');
+  }
+  // Partners pay the weekly fee only on the MMG checkout page, never through an
+  // agent or a Swift Number. The agent-cash webhook answers 503 while its
+  // secret is unset; production never sets it. Named, never echoed.
+  if ((env['AGENT_CASH_WEBHOOK_SECRET'] ?? '') !== '') {
+    throw new Error('FATAL: AGENT_CASH_WEBHOOK_SECRET is set in production — partners pay the weekly fee only on the MMG checkout page, never through an agent or a Swift Number. Remove it (and its _FILE line). Refusing to start.');
+  }
+
   // [PROD-PATH] Email: receipts, expiry warnings, data-export links. The dev
   // sender refuses only at the FIRST send in production (channels.ts), so a
   // missing sender stayed invisible until a customer was owed an email. The

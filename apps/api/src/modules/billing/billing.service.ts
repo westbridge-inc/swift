@@ -333,6 +333,16 @@ class PushIdentityRefused extends Error {
   }
 }
 
+/** [PROD-PATH · #1448 review] The card reconciler's per-row answer to a
+ *  paused fee: recordFailureInTx refuses with FEE_PAUSED (the terminal write
+ *  rolls back whole, so the payment stays UNKNOWN). Any other error still ends
+ *  the pass, as before. */
+const FEE_PAUSED_ROW = Symbol('FEE_PAUSED_ROW');
+function unlessFeePaused(error: unknown): typeof FEE_PAUSED_ROW {
+  if (error instanceof AppError && error.code === 'FEE_PAUSED') return FEE_PAUSED_ROW;
+  throw error;
+}
+
 export class BillingService {
   private countryConfig: CountryConfigService;
   private cardRailProvider: CardRailProvider | null | undefined;
@@ -1594,11 +1604,17 @@ export class BillingService {
         continue;
       }
       if (found.status === 'failed') {
+        // [PROD-PATH · #1448 review] A paused fee (no live way to pay, or its
+        // clock held for repair) refuses to record the decline (FEE_PAUSED)
+        // and rolls the terminal write back: the row stays UNKNOWN, retried
+        // once the fee is live. One paused row never ends the pass for the
+        // rows after it, nor the rest of the poll job.
         const outcome = await this.terminalizeFailedPayment(
           sub as SubWithRelations, row,
           { status: 'FAILED', failureCode: mapCardFailure(found.reason), from: ['UNKNOWN'], ...(found.reason ? { failureRaw: found.reason } : {}) },
           found.reason ?? 'Card declined', now, periodKey,
-        );
+        ).catch(unlessFeePaused);
+        if (outcome === FEE_PAUSED_ROW) { out.stillUnknown += 1; continue; }
         if (outcome) { out.declined += 1; cardChargesReconciledCounter.labels('declined').inc(); }
         continue;
       }
@@ -1619,7 +1635,8 @@ export class BillingService {
               },
             },
             'Card instruction never reached the processor before its TTL', now, periodKey,
-          );
+          ).catch(unlessFeePaused);
+          if (outcome === FEE_PAUSED_ROW) { out.stillUnknown += 1; continue; }
           if (outcome) {
             out.expired += 1;
             cardChargesReconciledCounter.labels('expired').inc();

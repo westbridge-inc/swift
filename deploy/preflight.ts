@@ -140,6 +140,8 @@ const STUBS: Record<string, string> = {
   EMAIL_PROVIDER: 'smtp',
   SMTP_HOST: 'stub.invalid', SMTP_PORT: '465', SMTP_USER: 'STUB',
   SMTP_PASS: 'STUB-NOT-A-REAL-SECRET', EMAIL_FROM: 'stub@stub.invalid',
+  BILLING_TOPUP_HOLD: '1',
+  AGENT_CASH_WEBHOOK_SECRET: '',
 };
 
 const fileEnv: Record<string, string | undefined> = readEnvFile(envPath);

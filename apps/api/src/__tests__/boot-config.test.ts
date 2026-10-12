@@ -55,6 +55,8 @@ const good: Record<string, string | undefined> = {
   EMAIL_FROM: 'Swift <noreply@example.test>',
   SCAN_IP_SALT: 'synthetic-scan-boot-salt',
   ATTRIB_SALT: 'synthetic-attribution-boot-salt',
+  // [PROD-PATH] Admin top-ups stay on hold in production (owner ruling, 8 Oct).
+  BILLING_TOPUP_HOLD: '1',
 };
 
 const cardOff = {
@@ -898,6 +900,31 @@ describe('[PROD-PATH] production with MMG fully off', () => {
       fetchSpy.mockRestore();
       vi.unstubAllEnvs();
     }
+  });
+});
+
+// #1448 review (Opus S3-1): the owner's launch money rules held only in
+// pilot-up.sh, so production started any other way (a hand-run compose, an old
+// script) booted with admin top-ups live or the agent-cash webhook armed. The
+// boot guard holds them too, whatever starts the API.
+describe('[PROD-PATH] production keeps admin top-ups on hold and never arms the agent-cash webhook', () => {
+  it.each([undefined, '', '0', 'true', 'yes', ' 1'])('refuses BILLING_TOPUP_HOLD=%j: admin top-ups stay on hold in production', (hold) => {
+    expect(() => assertSafeBootConfig({ ...good, BILLING_TOPUP_HOLD: hold })).toThrow(/BILLING_TOPUP_HOLD=1/);
+  });
+
+  it('refuses an AGENT_CASH_WEBHOOK_SECRET in production, naming the setting, never its value', () => {
+    const secret = 'agent-cash-secret-'.padEnd(40, 'z');
+    let message = '';
+    try { assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: secret }); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/AGENT_CASH_WEBHOOK_SECRET/);
+    expect(message).not.toContain(secret);
+  });
+
+  it('accepts the hold with no agent-cash secret (and an empty one), and asks nothing outside production', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: '' })).not.toThrow();
+    const { BILLING_TOPUP_HOLD: _hold, ...withoutHold } = good;
+    expect(() => assertSafeBootConfig({ ...withoutHold, NODE_ENV: 'test', AGENT_CASH_WEBHOOK_SECRET: 'x'.repeat(32) })).not.toThrow();
   });
 });
 

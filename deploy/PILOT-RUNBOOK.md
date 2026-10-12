@@ -842,8 +842,13 @@ restore rows already deleted.
 
 The same scripts run the production host, a separate server. They never turn a
 staging host into production. deploy/.env on that host says
-`PILOT_ENV=production`, and pilot-up.sh then also refuses, each before
-anything changes:
+`PILOT_ENV=production`. deploy/deploy.sh (the local and staging convenience
+commands) then refuses everything but `logs` and `health`, before any docker
+call: it builds whatever is checked out, with no pinned SHA and none of the
+checks below, and `nuke` deletes the data volumes. It refuses the same when
+deploy/.env sets NODE_ENV=production, in any spelling Compose reads, or when
+the shell exports either as production. pilot-up.sh then also refuses, each
+before anything changes:
 
 - any NODE_ENV but `production`;
 - a served name (API_HOST, API_ALIAS_HOST, WEB_HOST, WEB_ALIAS_HOSTS,
@@ -876,7 +881,9 @@ anything changes:
   host, over IPv4 and IPv6 (`getent ahostsv4` and `getent ahostsv6` against
   `hostname -I`; an AAAA record left on the old host sends IPv6 clients and
   the certificate authority there): Caddy obtains the certificates, and the
-  public names stay on the old host until DNS moves.
+  public names stay on the old host until DNS moves. The refusal names the
+  record (A or AAAA), never the address, so a deploy log kept as evidence
+  carries no address.
 
 The website, when WEB_HOST is set, is built on the production channel
 (SWIFT_WEB_CHANNEL follows PILOT_ENV), so it must call `https://api.<site
@@ -918,6 +925,10 @@ explicitly off. Beyond the earlier guards:
   unacknowledged SOS escalates to them by SMS.
 - **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
   EMAIL_FROM and the SMTP_PASS secret (wired as SMTP_PASS_FILE).
+- **The launch money rules.** `BILLING_TOPUP_HOLD` exactly `1`, and no
+  AGENT_CASH_WEBHOOK_SECRET (nor its `_FILE`): the same two rules pilot-up.sh
+  checks, held by the API itself however it is started (a hand-run compose,
+  an old script). The refusal names the setting, never a value.
 
 ### Database first, before the providers and DNS
 
@@ -981,6 +992,22 @@ must be pinned first (section 6b, step 1).
        sudo rm /etc/credstore.encrypted/swift/SEED_PLAN_SECRET.cred
        sudo systemctl restart swift-secrets.service
        sudo swift-secrets list
+
+### The first boot, before DNS moves
+
+    cd /opt/swift
+    ./deploy/pilot-up.sh --no-public "$APPROVED_SHA"
+
+Production only. It runs every check above except DNS, stops the API and
+worker, migrates, starts the API and worker, and waits until the API
+container is healthy, the worker runs and `/ready` answers from inside the
+API container. It ends with `API READY at exact SHA … (production, no public
+address …)`. Caddy, the website and the console are never built or started,
+and only Caddy publishes ports 80 and 443, so nothing is reachable from
+outside. It refuses outright while Caddy is running (the names already
+serve: use the whole stack), or when Docker cannot say whether it is. Stop
+the two again with `docker compose -f deploy/docker-compose.yml stop api
+worker` before another `--data-only` run, which refuses while they run.
 
 ### The whole stack
 

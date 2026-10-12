@@ -137,6 +137,8 @@ function productionConfig(): Record<string, string | undefined> {
     // (boot-config): a fully configured baseline carries both.
     OPS_ONCALL_PHONES: '+5926000001', EMAIL_PROVIDER: 'smtp', SMTP_HOST: 'smtp.example.test', SMTP_PORT: '465',
     SMTP_USER: 'noreply@example.test', SMTP_PASS: 'synthetic-only', EMAIL_FROM: 'Swift <noreply@example.test>',
+    // ... and admin top-ups on hold (owner ruling, 8 Oct).
+    BILLING_TOPUP_HOLD: '1',
   };
   for (const key of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET']) env[key] = 'synthetic-only';
   return env;
