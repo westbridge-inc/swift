@@ -57,7 +57,11 @@ if argv[:1] == ["inspect"]:
     sys.exit(0)
 if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
     if any(a.endswith("docker-compose.routing.yml") for a in argv):
-        print(json.dumps({"services": {"osrm": {}}}))
+        routing = {"osrm": {}}
+        if "--profile" in argv and "geocoding" in [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--profile"]:
+            routing["photon"] = {"ports": [{"published": "2322", "target": 2322, "protocol": "tcp"}]} if os.environ.get("PHOTON_PORT") == "1" else {}
+            routing["nominatim"] = {}
+        print(json.dumps({"services": routing}))
     else:
         services = {n: {} for n in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
         services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"}, {"published": "443", "target": 443, "protocol": "tcp"}]}
@@ -66,6 +70,8 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
                 services[profile] = {}
         print(json.dumps({"services": services}))
     sys.exit(0)
+if argv[:1] == ["run"] and any("photon:2322" in a for a in argv) and os.environ.get("PHOTON_DOWN") == "1":
+    sys.exit(1)
 if argv[:1] == ["compose"] and "ps" in argv and "-q" in argv:
     if os.environ.get("PS_FAIL") == "1":
         sys.exit(1)
@@ -384,6 +390,31 @@ describe('[PROD-PATH] pilot-up.sh: production routing and address search', () =>
     expect(r.calls.filter((l) => l.includes('nominatim'))).toEqual([]);
     expect(r.calls.some((l) => l.includes('docker-compose.routing.yml') && l.includes('--profile geocoding') && l.includes('config --format json'))).toBe(true);
     expect(indexOf(r.calls, 'up -d --wait osrm photon')).toBeLessThan(indexOf(r.calls, 'up -d --no-deps --force-recreate api worker'));
+  });
+
+  // DS963 (S3): Photon has no healthcheck, so `up --wait` returns while its
+  // first start is still downloading the index. A real search must answer,
+  // from the private network, before the running API is stopped.
+  it('osm: a Georgetown search must answer from the private network before the running API is stopped or anything migrates', () => {
+    const ok = runPilot(PRODUCTION);
+    expect(ok.status, ok.stderr).toBe(0);
+    const probe = indexOf(ok.calls, 'photon:2322/api?q=Georgetown');
+    expect(probe).toBeGreaterThan(indexOf(ok.calls, 'up -d --wait osrm photon'));
+    expect(probe).toBeLessThan(indexOf(ok.calls, 'stop api worker'));
+    writeFileSync(log, '');
+    const down = runPilot(PRODUCTION, { env: { PHOTON_DOWN: '1' } });
+    expect(down.status).not.toBe(0);
+    expect(down.stderr).toContain('address search is not ready: Photon does not answer');
+    expect(down.calls.filter((l) => /stop api worker|up -d --force-recreate migrate|force-recreate api worker/.test(l))).toEqual([]);
+  });
+
+  it('osm: the geocoding profile is held to the private-port rule too (a published Photon port is refused before any pull, build, stop or start)', () => {
+    const r = runPilot(PRODUCTION, { env: { PHOTON_PORT: '1' } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('routing Compose port isolation failed');
+    // The port check runs where it always has, after the store's refresh (not a stack change).
+    expect(changedNothing(r.calls).filter((l) => !l.startsWith('systemctl '))).toEqual([]);
+    expect(r.calls.filter((l) => / pull /.test(` ${l} `))).toEqual([]);
   });
 
   it('google: the key is wired from the store; no Photon is started', () => {

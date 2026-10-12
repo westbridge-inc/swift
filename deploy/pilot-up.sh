@@ -495,6 +495,23 @@ fi
 # Check routing from the same private Docker network that the API uses.
 docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" \
   -e "fetch('http://osrm:5000/nearest/v1/driving/-58.16,6.80').then(async r => { if (!r.ok || (await r.json()).code !== 'Ok') process.exit(1) }).catch(() => process.exit(1))"
+# [PROD-PATH · DS963] Address search, the same way, before the running API is
+# stopped: Photon has no healthcheck, so `up --wait` returns while its first
+# start is still downloading and importing the index. A Georgetown search must
+# answer with a place. Until it does, nothing was stopped or migrated.
+if [ "$PLACES_PHOTON" -eq 1 ]; then
+  PHOTON_READY=0
+  for _ in $(seq 1 90); do
+    if docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" \
+      -e "fetch('http://photon:2322/api?q=Georgetown&limit=1').then(async r => { const d = r.ok ? await r.json() : null; if (!d || !Array.isArray(d.features) || d.features.length === 0) process.exit(1) }).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      PHOTON_READY=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$PHOTON_READY" = 1 ] ||
+    die "address search is not ready: Photon does not answer a Georgetown search yet (its first start downloads and imports a ~6.7 GB index). The running API and the database were not changed; rerun once docker compose -f deploy/docker-compose.routing.yml --profile geocoding logs photon shows it serving"
+fi
 
 [ "${DATA_ONLY:-0}" -eq 1 ] || "${COMPOSE[@]}" stop api worker
 "${COMPOSE[@]}" up -d --force-recreate migrate
