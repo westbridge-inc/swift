@@ -60,11 +60,18 @@ const nearbyQuerySchema = z.object({
   type: z.enum(['RESTAURANT', 'SUPERMARKET']).optional(),
 });
 
-/** Judge the committed pin, never a stale index coordinate. */
+/** Judge the committed pin, never a stale index coordinate. THE one market
+ *  gate for every search rail: /search, suggestions, trending and nearby. */
 function inLaunchMarket(pin: { latitude?: number | null; longitude?: number | null } | null): boolean {
   return pin != null && typeof pin.latitude === 'number' && typeof pin.longitude === 'number'
     && launchMarketAt(pin.latitude, pin.longitude) !== null;
 }
+
+/** The ItemHit select plus the committed pin of the item's store, for the gate. */
+const ITEM_HIT_PIN_SELECT = {
+  ...ITEM_HIT_SELECT,
+  vendor: { select: { ...ITEM_HIT_SELECT.vendor.select, latitude: true, longitude: true } },
+} as const;
 
 export async function searchRoutes(app: FastifyInstance) {
   let searchService: SearchService | null = null;
@@ -229,7 +236,7 @@ export async function searchRoutes(app: FastifyInstance) {
         },
         // The shared select, so the fallback cannot quietly serve fewer fields
         // than the fast path and make the engine visible to the client.
-        select: { ...ITEM_HIT_SELECT, vendor: { select: { ...ITEM_HIT_SELECT.vendor.select, latitude: true, longitude: true } } },
+        select: ITEM_HIT_PIN_SELECT,
         take: parsedLimit,
         orderBy: { totalOrdered: 'desc' },
       }),
@@ -299,7 +306,7 @@ export async function searchRoutes(app: FastifyInstance) {
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
         where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
-        select: { name: true, vendorType: true },
+        select: { name: true, vendorType: true, latitude: true, longitude: true },
         take: 5,
       }),
       app.prisma.item.findMany({
@@ -311,7 +318,7 @@ export async function searchRoutes(app: FastifyInstance) {
           name: { contains: q, mode: 'insensitive' },
           ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
         },
-        select: { id: true, vendorId: true, name: true },
+        select: { id: true, vendorId: true, name: true, vendor: { select: { latitude: true, longitude: true } } },
         // [DS233 F8] A stable window: the most-ordered matches first, never
         // whatever order the heap scan happens to return.
         orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
@@ -319,11 +326,13 @@ export async function searchRoutes(app: FastifyInstance) {
       }),
     ]);
 
+    // [DS982] A store outside the launch market never autocompletes, nor do its dishes.
+    const marketItems = items.filter((i) => inLaunchMarket(i.vendor));
     const listable = request.publicTenantId
-      ? await listableItemsForVendors(app.prisma, tenantId, items)
-      : items;
+      ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
+      : marketItems;
     const suggestions = [
-      ...vendors.map((v) => ({ text: v.name, type: 'vendor' as const })),
+      ...vendors.filter(inLaunchMarket).map((v) => ({ text: v.name, type: 'vendor' as const })),
       ...listable.map((i) => ({ text: i.name, type: 'item' as const })),
     ];
 
@@ -354,14 +363,16 @@ export async function searchRoutes(app: FastifyInstance) {
       // its cards land in the SAME component as the feed's; the fifth hand-built
       // copy of this shape lived here and served an item with no `isNew` and no
       // `categoryName` beside feed items that had both.
-      select: { ...ITEM_HIT_SELECT, totalOrdered: true },
+      select: { ...ITEM_HIT_PIN_SELECT, totalOrdered: true },
       orderBy: { totalOrdered: 'desc' },
       take: 20,
     });
 
+    // [DS982] A dish from a store outside the launch market never trends.
+    const marketItems = items.filter((i) => inLaunchMarket(i.vendor));
     const listable = request.publicTenantId
-      ? await listableItemsForVendors(app.prisma, tenantId, items)
-      : items;
+      ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
+      : marketItems;
     return {
       success: true,
       // ItemHit plus the one field that makes it *trending* — a superset, never
@@ -372,8 +383,13 @@ export async function searchRoutes(app: FastifyInstance) {
 
   // Nearby vendors (location-based)
   app.get('/search/nearby', { preHandler: [browseSearch] }, async (request) => {
-    const { lat: userLat, lng: userLng, radius: radiusKm, type, limit } = nearbyQuerySchema.parse(request.query);
+    // [DS982] The caller's point passes the ONE discovery door: a point in no
+    // launch market reads as no location, and nothing is near no location.
+    const { lat, lng, radius: radiusKm, type, limit } = customerPoint(nearbyQuerySchema.parse(request.query));
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
+    if (lat === undefined || lng === undefined) return { success: true, data: [] };
+    const userLat = lat;
+    const userLng = lng;
 
     // [S2-2] The rating-first cap used to run BEFORE any radius predicate: a
     // five-star vendor outside the radius crowded a four-star vendor at the
@@ -436,7 +452,8 @@ export async function searchRoutes(app: FastifyInstance) {
       );
     }
 
-    const nearby = sortByDistance(vendors, userLat, userLng)
+    // [DS982] A store whose committed pin lies outside the launch market is never nearby.
+    const nearby = sortByDistance(vendors.filter(inLaunchMarket), userLat, userLng)
       .filter((v) => v.distance <= radiusKm)
       .slice(0, limit)
       .map((v) => ({

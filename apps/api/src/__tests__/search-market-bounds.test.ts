@@ -31,3 +31,59 @@ for (const mode of ['guest', 'authenticated fallback', 'authenticated index']) d
     } finally { await app.close(); }
   });
 });
+
+// [DS982] The other search rails wear the same committed-pin predicate as /search.
+for (const mode of ['guest', 'authenticated'] as const) describe(`search rails market bounds — ${mode}`, () => {
+  async function setup(pin: number[]) {
+    const ctx = await guestSearchApp();
+    const vendor = ctx.vendors.find((v) => v['id'] === (mode === 'guest' ? 'public' : 'other'))!;
+    [vendor['latitude'], vendor['longitude']] = pin;
+    const headers = mode === 'guest' ? {} : { authorization: `Bearer ${ctx.token()}` };
+    const read = async (url: string) => {
+      const res = await ctx.app.inject({ url, headers });
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json().data as Array<{ id?: string; text?: string }>;
+    };
+    return { ...ctx, vendor, read };
+  }
+
+  it.each(boundaries)('/search/suggestions uses the live store pin on both sides of $name', async ({ inside, outside }) => {
+    const { app, vendor, read } = await setup(inside);
+    try {
+      const texts = async () => (await read('/api/v1/search/suggestions?q=Pepper')).map((s) => s.text);
+      expect(await texts()).toEqual(expect.arrayContaining([`Pepper ${vendor['id']}`, `Pepper dish ${vendor['id']}`]));
+      [vendor['latitude'], vendor['longitude']] = outside;
+      const refused = await texts();
+      expect(refused).not.toContain(`Pepper ${vendor['id']}`);
+      expect(refused).not.toContain(`Pepper dish ${vendor['id']}`);
+    } finally { await app.close(); }
+  });
+
+  it.each(boundaries)('/search/trending uses the live store pin on both sides of $name', async ({ inside, outside }) => {
+    const { app, vendor, read } = await setup(inside);
+    try {
+      const ids = async () => (await read('/api/v1/search/trending')).map((i) => i.id);
+      expect(await ids()).toContain(`item-${vendor['id']}`);
+      [vendor['latitude'], vendor['longitude']] = outside;
+      expect(await ids()).not.toContain(`item-${vendor['id']}`);
+    } finally { await app.close(); }
+  });
+
+  it.each(boundaries)('/search/nearby uses the live store pin on both sides of $name', async ({ inside, outside }) => {
+    const { app, vendor, read } = await setup(inside);
+    try {
+      const near = async () => (await read(`/api/v1/search/nearby?lat=${inside[0]}&lng=${inside[1]}&radius=5`)).map((v) => v.id);
+      expect(await near()).toContain(vendor['id']);
+      [vendor['latitude'], vendor['longitude']] = outside;
+      expect(await near()).not.toContain(vendor['id']);
+    } finally { await app.close(); }
+  });
+
+  it.each(boundaries)('/search/nearby reads a caller just outside $name as no location: nothing is near it', async ({ inside, outside }) => {
+    const { app, vendor, read } = await setup(inside);
+    try {
+      expect((await read(`/api/v1/search/nearby?lat=${inside[0]}&lng=${inside[1]}&radius=5`)).map((v) => v.id)).toContain(vendor['id']);
+      expect(await read(`/api/v1/search/nearby?lat=${outside[0]}&lng=${outside[1]}&radius=5`)).toEqual([]);
+    } finally { await app.close(); }
+  });
+});

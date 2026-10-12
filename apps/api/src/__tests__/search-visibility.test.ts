@@ -241,3 +241,28 @@ it('HTTP search excludes a live database store and its items just outside the la
     expect(outside.json().data.items.map((i: { id: string }) => i.id)).not.toContain(good.itemId);
   } finally { await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 6.801 } }); }
 });
+
+it('HTTP suggestions, trending and nearby exclude a live database store just outside the launch boundary [DS982]', async () => {
+  const { name: vendorName } = await app.prisma.vendor.findUniqueOrThrow({ where: { id: good.vendorId }, select: { name: true } });
+  const texts = async () => ((await get(`/api/v1/search/suggestions?q=${NEEDLE}`)).json().data as { text: string }[]).map((s) => s.text);
+  const trending = async () => ((await get('/api/v1/search/trending')).json().data as { id: string }[]).map((i) => i.id);
+  const near = async (lat: number) => {
+    const res = await get(`/api/v1/search/nearby?lat=${lat}&lng=-58.156&radius=5`);
+    expect(res.statusCode, res.body).toBe(200);
+    return (res.json().data as { id: string }[]).map((v) => v.id);
+  };
+  try {
+    await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 8.9999 } });
+    expect(await texts()).toEqual(expect.arrayContaining([vendorName, `${NEEDLE} good dish`]));
+    expect(await trending()).toContain(good.itemId);
+    expect(await near(8.999)).toContain(good.vendorId);
+    // A caller just across the line has no location here: nothing is near it.
+    expect(await near(9.0001)).not.toContain(good.vendorId);
+    await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 9.0001 } });
+    const refused = await texts();
+    expect(refused).not.toContain(vendorName);
+    expect(refused).not.toContain(`${NEEDLE} good dish`);
+    expect(await trending()).not.toContain(good.itemId);
+    expect(await near(8.9999)).not.toContain(good.vendorId);
+  } finally { await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 6.801 } }); }
+});
