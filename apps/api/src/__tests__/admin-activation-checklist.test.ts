@@ -48,7 +48,8 @@ const OPERATOR = { PLATFORM_LEGAL_NAME: 'Westbridge Inc.', PLATFORM_REGISTERED_A
 const prevEnv: Record<string, string | undefined> = {};
 
 const SUPERMARKET_DOCS = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
-const MOTORCYCLE_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+// [Owner rulings 6 Oct, landed in #1504] A licence holder's national ID and every mover's police clearance are optional.
+const MOTORCYCLE_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'admin-activation-checklist-test');
 
 async function makeUser(first: string, extra: Record<string, unknown> = {}) {
