@@ -63,7 +63,14 @@ export default function CourierPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const [locating, setLocating] = useState(false);
+
+  /** [review S3-1] The device is asked for its location only when the sender
+   *  taps for it, as in the pin picker — never on page load, where a surprise
+   *  prompt invites a "Block" that would also refuse every later tap. */
+  function locateMe() {
+    if (locating) return;
+    setLocating(true);
     // [F-027-02] This one never fabricated a coordinate — it just failed
     // SILENTLY, leaving "Locating…" on screen forever with no way to know the
     // prompt had been denied. Fail closed AND say so.
@@ -83,8 +90,9 @@ export default function CourierPage() {
         setPickupText('Current location');
         setPickupError(null);
       })
-      .catch((e: Error) => { setPickup(null); setPickupError(e.message); });
-  }, []);
+      .catch((e: Error) => { setPickup(null); setPickupError(e.message); })
+      .finally(() => setLocating(false));
+  }
 
   // [W-20] The estimate belongs to one exact route and size. Any change clears
   // it, so the price on screen can never describe a different parcel.
@@ -146,6 +154,9 @@ export default function CourierPage() {
             onChange={(t, p) => { setPickupText(t); setPickup(p); }}
             near={pickup}
           />
+          <button type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" disabled={locating} onClick={locateMe}>
+            {locating ? 'Finding you…' : 'Use my location as the pickup'}
+          </button>
           {pickupError && !pickup && (
             <p role="alert" className="sw-note sw-note-error">{pickupError} You can search for it above or pin it on the map instead.</p>
           )}

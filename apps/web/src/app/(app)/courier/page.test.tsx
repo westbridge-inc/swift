@@ -71,9 +71,26 @@ async function pinDropoff() {
 }
 
 describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
+  // [review S3-1] Location is asked for only when the sender taps for it, as
+  // in the pin picker: a prompt on page load is a surprise, and an early
+  // "Block" would also refuse every later "Use my location".
+  it('opening the page never asks for the device location; a tap does', async () => {
+    device('ok');
+    const geolocation = navigator.geolocation as unknown as { getCurrentPosition: ReturnType<typeof vi.fn> };
+    render(<CourierPage />);
+    expect(await screen.findByRole('button', { name: 'Use my location as the pickup' })).toBeTruthy();
+    await new Promise((settle) => setTimeout(settle, 30));
+    expect(geolocation.getCurrentPosition).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.click(button('Use my location as the pickup'));
+    expect(await screen.findByDisplayValue('Current location')).toBeTruthy();
+    expect(geolocation.getCurrentPosition).toHaveBeenCalledTimes(1);
+  });
+
   it('pins the drop-off: the estimate and the order carry the pinned point and its name', async () => {
     device('ok');
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     await screen.findByDisplayValue('Current location');
     // Start the drop-off from a saved address, then nudge it by keyboard to the door.
     await pinDropoff();
@@ -121,6 +138,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     device('denied');
     reverseLabel = null;
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     expect(await screen.findByText(/allow location access and try again/)).toBeTruthy();
     fireEvent.click(button('Pin pickup on the map'));
     const map = await screen.findByRole('application', { name: 'Pickup pin map' });
@@ -139,6 +157,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
   it('will not request a courier without the recipient the server requires', async () => {
     device('ok');
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     await screen.findByDisplayValue('Current location');
     const map = await pinDropoff();
     fireEvent.keyDown(map, { key: 'ArrowDown' });
@@ -161,6 +180,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
   it('a rough device fix is not taken as the pickup: the sender pins or searches it', async () => {
     device('rough');
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     expect(await screen.findByText(/only within about 4800 m/)).toBeTruthy();
     expect(screen.queryByDisplayValue('Current location')).toBeNull();
     fireEvent.click(button('Pin pickup on the map'));
@@ -173,6 +193,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
   it('a pin outside Guyana cannot be used', async () => {
     device('ok');
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     await screen.findByDisplayValue('Current location');
     const map = await pinDropoff();
     for (let i = 0; i < 12; i += 1) fireEvent.click(button('Zoom out'));
