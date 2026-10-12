@@ -1873,6 +1873,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.post('/cart/merge', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const body = cartMergeSchema.parse(request.body);
     const key = request.headers['idempotency-key'];
     if (typeof key !== 'string') throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'A basket upload needs an Idempotency-Key.');
