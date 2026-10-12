@@ -2812,7 +2812,7 @@ model RatingTagDef {
 /// Retail returns/disputes (spec §4.5) — retail has returns, food doesn't.
 model ReturnRequest {
   id             String       @id @default(cuid())
-  orderId        String
+  orderId        String       @unique
   customerId     String
   reason         String
   status         ReturnStatus @default(REQUESTED)
@@ -2846,7 +2846,6 @@ model ReturnRequest {
   refundFunder   String?
   createdAt      DateTime     @default(now())
 
-  @@index([orderId])
   @@index([customerId])
   @@index([status])
   @@map("return_requests")
