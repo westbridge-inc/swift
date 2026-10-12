@@ -1,6 +1,7 @@
 import { Prisma, type VehicleType } from '@prisma/client';
 import { CountryConfigService } from '../country/country-config.service';
-import { VEHICLE_CLASSES, isPassengerVehicle } from '../../config/vehicle-classes';
+import { isPassengerVehicle } from '../../config/vehicle-classes';
+import { needsHirePlate } from './hire-plate';
 import { AppError } from '../../utils/errors';
 import { approvedEvidenceFor, anyChecklistEvidenceFor, type EvidenceDb, type EvidenceRow } from './evidence';
 import { BUCKET_OF, VEHICLE_INSURANCE_DOC_TYPE } from './doc-registry';
@@ -57,7 +58,7 @@ export async function evaluateMoverDocuments(
   const hire = opts.kind === 'DRIVER' && isPassengerVehicle(opts.vehicleType);
   // [Owner ruling 11 Oct 2026 · Opus 12 Oct] A taxi (car or wagon car; buses keep their own path) works
   // only on an H-series plate, whatever papers were approved before: the gate says so too, as documents.
-  if (hire && VEHICLE_CLASSES[opts.vehicleType]?.rideClass !== 'GROUP') {
+  if (opts.kind === 'DRIVER' && needsHirePlate(opts.vehicleType)) {
     const profile = await db.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
     if (profile && plateClassOf(profile.licensePlate ?? '') !== 'H') return denied('docs');
   }
