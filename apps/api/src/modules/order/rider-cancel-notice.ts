@@ -4,6 +4,12 @@ import type { NotificationService } from '../notification/notification.service';
 import { checkoutOutboxId } from './checkout-outbox';
 
 export const RIDER_CANCEL_NOTICE_KIND = 'rider-cancel-notice';
+/** [L07 · Opus S3] How long an unconfirmed cancellation push is retried. A
+ *  rider with no active registration, or with push off, never confirms; past
+ *  this window "stop travelling to its pickup" is history, not news, so the
+ *  row closes as unconfirmed (processedAt with lastError) and the inbox notice
+ *  remains. Without it the row retried every 5 minutes forever. */
+export const RIDER_CANCEL_NOTICE_WINDOW_MS = 30 * 60_000;
 
 /** Called with the cancellation's locked order, before its transaction commits. */
 export async function persistRiderCancellationNotice(
@@ -21,7 +27,9 @@ export async function persistRiderCancellationNotice(
       id: notificationId, userId: rider.userId, dedupeKey,
       type: 'ORDER_UPDATE', title: 'Delivery cancelled',
       body: 'The customer cancelled this delivery. Stop travelling to its pickup and check your current jobs.',
-      data: { orderId: order.id, status: 'CANCELLED', audience: 'earner' },
+      // kind: the phone opens the mover dashboard on tap, never the customer
+      // order screen (a cross-app contract: mobile notification-router).
+      data: { kind: 'mover_job_cancelled', orderId: order.id, status: 'CANCELLED', audience: 'earner' },
     },
   });
   await tx.orderOutbox.upsert({
@@ -33,15 +41,17 @@ export async function persistRiderCancellationNotice(
   });
 }
 
-/** One inbox row; retry push submission after outages or a lost response. */
+/** One inbox row; retry push submission after outages or a lost response,
+ *  until push confirms it or RIDER_CANCEL_NOTICE_WINDOW_MS has passed. */
 export async function drainRiderCancellationNotices(
   deps: { prisma: PrismaClient; notifications: Pick<NotificationService, 'publishPersisted'>; now?: () => Date },
   options: { orderId?: string; limit?: number } = {},
-): Promise<{ delivered: number; pending: number }> {
+): Promise<{ delivered: number; pending: number; expired: number }> {
   const system = <T>(fn: () => Promise<T>) => runAsSystem('rider-cancel-notice-drain', fn);
   const clock = () => deps.now?.() ?? new Date();
   let delivered = 0;
   let pending = 0;
+  let expired = 0;
   for (let i = 0; i < Math.min(200, Math.max(1, options.limit ?? 50)); i += 1) {
     const now = clock();
     const due = {
@@ -57,6 +67,15 @@ export async function drainRiderCancellationNotices(
     }));
     if (claim.count !== 1) continue;
     const attempts = row.attempts + 1;
+    if (now.getTime() - row.createdAt.getTime() >= RIDER_CANCEL_NOTICE_WINDOW_MS) {
+      // The end state: closed unconfirmed, recorded, no stale push.
+      await system(() => deps.prisma.orderOutbox.updateMany({
+        where: { id: row.id, processedAt: null, attempts },
+        data: { processedAt: clock(), claimedAt: null, lastError: 'Cancellation push not confirmed within its window; the inbox notice remains' },
+      }));
+      expired += 1;
+      continue;
+    }
     let sent = false;
     try {
       const payload = row.payload as Record<string, unknown>;
@@ -79,5 +98,5 @@ export async function drainRiderCancellationNotices(
     }));
     if (sent) delivered += 1; else pending += 1;
   }
-  return { delivered, pending };
+  return { delivered, pending, expired };
 }

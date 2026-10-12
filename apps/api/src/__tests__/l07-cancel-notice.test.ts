@@ -1,4 +1,4 @@
-import { drainRiderCancellationNotices } from '../modules/order/rider-cancel-notice';
+import { drainRiderCancellationNotices, RIDER_CANCEL_NOTICE_WINDOW_MS } from '../modules/order/rider-cancel-notice';
 import { drainCheckoutOutbox } from '../modules/order/checkout-outbox';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -31,8 +31,13 @@ afterAll(async () => {
   await app.prisma.user.deleteMany({ where: { id: { in: users } } });
   await app.close();
 });
+/** The cancel starts its rider-notice attempt after commit and never waits for
+ *  it; tests that drive the drainer themselves wait for that attempt first. */
+let attempts: { mock: { results: Array<{ value: unknown }> } };
+const settled = () => Promise.all(attempts.mock.results.map((r) => r.value));
 async function fixture(assigned = true) {
   vi.spyOn(NotificationService.prototype, 'send').mockResolvedValue(undefined as never);
+  attempts = vi.spyOn(service, 'drainRiderCancelNoticeNow');
   const customer = await app.prisma.user.create({ data: {
     phone: `+5920788${String(++seq).padStart(4, '0')}`, firstName: 'Synthetic', lastName: 'Customer',
     roles: ['CUSTOMER'], activeRole: 'CUSTOMER', customer: { create: {} },
@@ -59,6 +64,7 @@ describe('assigned riders retain a durable cancellation notice', () => {
   it('commits the captured recipient and retry work with cancellation', async () => {
     const { customer, mover, order } = await fixture();
     const result = await service.cancelOrder(order.id, customer.id, 'Synthetic cancellation');
+    await settled();
     expect(result.message).toContain('cancelled');
     const rows = await noticeRows(order.id);
     expect(rows).toHaveLength(1);
@@ -81,7 +87,7 @@ describe('assigned riders retain a durable cancellation notice', () => {
     await waiting;
     try { await app.prisma.order.update({ where: { id: first.order.id }, data: { riderId: next.mover.rider!.id } }); }
     finally { release(); }
-    await pending;
+    await pending; await settled();
     expect((await noticeRows(first.order.id))[0]!.payload).toMatchObject({ riderUserId: next.mover.id });
   });
   it('a malformed retry recipient cannot publish another order notification', async () => {
@@ -89,12 +95,13 @@ describe('assigned riders retain a durable cancellation notice', () => {
     const second = await fixture();
     await service.cancelOrder(first.order.id, first.customer.id);
     await service.cancelOrder(second.order.id, second.customer.id);
+    await settled();
     const [one] = await noticeRows(first.order.id);
     const [two] = await noticeRows(second.order.id);
     await app.prisma.orderOutbox.update({ where: { id: one!.id }, data: { payload: { ...(two!.payload as Record<string, string>), orderId: first.order.id } } });
     const publishPersisted = vi.fn(async () => true);
     expect(await drainRiderCancellationNotices({ prisma: app.prisma, notifications: { publishPersisted }, now: () => new Date(Date.now() + 600_000) }, { orderId: first.order.id }))
-      .toEqual({ delivered: 0, pending: 1 });
+      .toEqual({ delivered: 0, pending: 1, expired: 0 });
     expect(publishPersisted).not.toHaveBeenCalled();
   });
   it('does not create a rider notice for an unassigned order', async () => {
@@ -114,6 +121,7 @@ describe('assigned riders retain a durable cancellation notice', () => {
   it('keeps a failed push pending, then retries the same durable inbox row', async () => {
     const { customer, order } = await fixture();
     await service.cancelOrder(order.id, customer.id);
+    await settled();
     const [row] = await noticeRows(order.id);
     const noticeId = (row!.payload as { notificationId: string }).notificationId;
     const push = vi.fn().mockRejectedValueOnce(new Error('synthetic provider outage')).mockResolvedValue({ sent: 1 });
@@ -122,16 +130,17 @@ describe('assigned riders retain a durable cancellation notice', () => {
     await app.prisma.deviceToken.create({ data: { userId: notice.userId, token: `ExpoPushToken[synthetic-${nanoid(8)}]`, platform: 'ios' } });
     const now = new Date(Date.now() + 600_000);
     const first = await drainRiderCancellationNotices({ prisma: app.prisma, notifications: publisher, now: () => now }, { orderId: order.id });
-    expect(first).toEqual({ delivered: 0, pending: 1 });
+    expect(first).toEqual({ delivered: 0, pending: 1, expired: 0 });
     expect((await noticeRows(order.id))[0]!.processedAt).toBeNull();
     const second = await drainRiderCancellationNotices({ prisma: app.prisma, notifications: publisher, now: () => new Date(now.getTime() + 600_000) }, { orderId: order.id });
-    expect(second).toEqual({ delivered: 1, pending: 0 });
+    expect(second).toEqual({ delivered: 1, pending: 0, expired: 0 });
     expect(push).toHaveBeenCalledTimes(2);
     expect(await app.prisma.notification.count({ where: { dedupeKey: row!.dedupeKey } })).toBe(1);
   });
   it('the generic queue publisher leaves this notice for its confirmed-push drainer', async () => {
     const { customer, order } = await fixture();
     await service.cancelOrder(order.id, customer.id);
+    await settled();
     // Make it due: the immediate failed push already installed a backoff.
     await app.prisma.orderOutbox.updateMany({ where: { orderId: order.id }, data: { availableAt: new Date(0) } });
     const add = vi.fn(async () => ({}));
@@ -142,11 +151,74 @@ describe('assigned riders retain a durable cancellation notice', () => {
   it('two simultaneous drains claim one notification attempt', async () => {
     const { customer, order } = await fixture();
     await service.cancelOrder(order.id, customer.id);
+    await settled();
     const publishPersisted = vi.fn(async () => true);
     const now = () => new Date(Date.now() + 600_000);
     const results = await Promise.all([0, 1].map(() => drainRiderCancellationNotices({ prisma: app.prisma, notifications: { publishPersisted }, now }, { orderId: order.id })));
     expect(results.reduce((sum, r) => sum + r.delivered, 0)).toBe(1);
     expect(publishPersisted).toHaveBeenCalledTimes(1);
   });
+});
 
+describe('the cancel request never waits for the rider push (Opus S3)', () => {
+  it('a hung push provider cannot hold the cancel: it returns, emits, and the post-commit attempt still starts', async () => {
+    const { customer, order } = await fixture();
+    const hung = vi.spyOn(NotificationService.prototype, 'publishPersisted').mockImplementation(() => new Promise<boolean>(() => {}));
+    const outcome = await Promise.race([
+      service.cancelOrder(order.id, customer.id).then(() => 'returned'),
+      new Promise((resolve) => setTimeout(() => resolve('held by the push'), 2_000)),
+    ]);
+    expect(outcome).toBe('returned');
+    expect(await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({ status: 'CANCELLED' });
+    expect(emit).toHaveBeenCalledWith('order:status_changed', { orderId: order.id, status: 'CANCELLED' });
+    // The immediate attempt is made, after the commit, off the request path.
+    await vi.waitFor(() => expect(hung).toHaveBeenCalledTimes(1));
+    const [row] = await noticeRows(order.id);
+    expect(hung).toHaveBeenCalledWith((row!.payload as { notificationId: string }).notificationId, { requirePush: true });
+  });
+});
+
+describe('a notice push never confirms: it ends, recorded, after its window (Opus S3)', () => {
+  it('past the window the row closes unconfirmed without another push; the inbox notice remains', async () => {
+    const { customer, order } = await fixture();
+    await service.cancelOrder(order.id, customer.id);
+    await settled();
+    const [row] = await noticeRows(order.id);
+    const publishPersisted = vi.fn(async () => false);
+    const late = new Date(row!.createdAt.getTime() + RIDER_CANCEL_NOTICE_WINDOW_MS + 1_000);
+    expect(await drainRiderCancellationNotices({ prisma: app.prisma, notifications: { publishPersisted }, now: () => late }, { orderId: order.id }))
+      .toEqual({ delivered: 0, pending: 0, expired: 1 });
+    expect(publishPersisted).not.toHaveBeenCalled();
+    const closed = (await noticeRows(order.id))[0]!;
+    expect(closed.processedAt).not.toBeNull();
+    expect(closed.lastError).toMatch(/not confirmed/i);
+    expect(await app.prisma.notification.count({ where: { dedupeKey: row!.dedupeKey } })).toBe(1);
+    // Closed is closed: a later sweep finds nothing to do.
+    expect(await drainRiderCancellationNotices({ prisma: app.prisma, notifications: { publishPersisted }, now: () => new Date(late.getTime() + 600_000) }, { orderId: order.id }))
+      .toEqual({ delivered: 0, pending: 0, expired: 0 });
+  });
+
+  it('inside the window an unconfirmed push stays pending and retries', async () => {
+    const { customer, order } = await fixture();
+    await service.cancelOrder(order.id, customer.id);
+    await settled();
+    const [row] = await noticeRows(order.id);
+    const publishPersisted = vi.fn(async () => false);
+    const inside = new Date(row!.createdAt.getTime() + RIDER_CANCEL_NOTICE_WINDOW_MS - 60_000);
+    expect(await drainRiderCancellationNotices({ prisma: app.prisma, notifications: { publishPersisted }, now: () => inside }, { orderId: order.id }))
+      .toEqual({ delivered: 0, pending: 1, expired: 0 });
+    expect(publishPersisted).toHaveBeenCalledTimes(1);
+    expect((await noticeRows(order.id))[0]!.processedAt).toBeNull();
+  });
+});
+
+describe('tapping the notice opens the rider dashboard (DS984)', () => {
+  it('the inbox notice names an earner kind the phone routes, never the customer order screen', async () => {
+    const { customer, order } = await fixture();
+    await service.cancelOrder(order.id, customer.id);
+    await settled();
+    const [row] = await noticeRows(order.id);
+    const notice = await app.prisma.notification.findUniqueOrThrow({ where: { id: (row!.payload as { notificationId: string }).notificationId } });
+    expect(notice.data).toEqual({ kind: 'mover_job_cancelled', orderId: order.id, status: 'CANCELLED', audience: 'earner' });
+  });
 });

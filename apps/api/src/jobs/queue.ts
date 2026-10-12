@@ -1319,6 +1319,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { drainRiderCancellationNotices } = await import('../modules/order/rider-cancel-notice');
           const cancellations = await drainRiderCancellationNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
           if (cancellations.pending > 0) ctx.log.warn(cancellations, 'rider cancellation pushes remain pending');
+          else if (cancellations.expired > 0) ctx.log.warn(cancellations, 'rider cancellation pushes closed unconfirmed; the inbox notices remain');
         });
         if (drainFailure !== undefined) throw drainFailure;
         return;
