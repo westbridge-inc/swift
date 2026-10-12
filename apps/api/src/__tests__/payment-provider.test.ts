@@ -124,128 +124,82 @@ describe('SandboxPaymentProvider', () => {
   });
 });
 
-describe('PowerTranzPaymentProvider', () => {
+describe('PowerTranzPaymentProvider (legacy seam, corrected to PowerTranz\'s guide v2.7)', () => {
   const p = new PowerTranzPaymentProvider('id', 'pass');
+  const REFUND = { providerRef: '0446a902-311d-4868-8247-e9dfbd8ea0a6', amount: 500, currencyCode: 'GYD', idempotencyKey: 'refund:1' };
   afterEach(() => vi.unstubAllGlobals());
 
-  it('charges a stored token — approved becomes succeeded with the txn ref', async () => {
-    const f = mockFetch(200, { Approved: true, TransactionIdentifier: 'txn_1' });
+  it('[PT-4] never sends a saved-card charge: the guide documents none without the cardholder (sec. 7.8) — a local refusal billing never duns on', async () => {
+    const f = vi.fn();
     vi.stubGlobal('fetch', f);
-    expect(await p.chargeToken(CHARGE)).toEqual({ status: 'succeeded', providerRef: 'txn_1' });
+    expect(await p.chargeToken(CHARGE)).toMatchObject({ status: 'failed', providerRef: '', code: 'CARD_RAIL_DISABLED' });
+    expect(await p.chargeToken({ ...CHARGE, currencyCode: 'ZZZ' })).toMatchObject({ status: 'failed', code: 'CARD_RAIL_DISABLED' });
+    expect(f).not.toHaveBeenCalled();
+  });
 
-    const [url, init] = f.mock.calls[0] as unknown as [string, {
-      method: string;
-      headers: Record<string, string>;
-      body: string;
-    }];
-    expect(url).toContain('/api/spi/Sale');
+  it('[PT-4] refunds per sec. 5.2 / 7.5: POST <root>/api/refund with Refund true, the ORIGINAL TransactionIdentifier, the amount and the numeric currency — no card data', async () => {
+    const f = mockFetch(200, { OriginalTrxnIdentifier: REFUND.providerRef, TransactionType: 5, Approved: true, TransactionIdentifier: 'refund_txn_1', IsoResponseCode: '00' });
+    vi.stubGlobal('fetch', f);
+    expect(await p.refund(REFUND)).toEqual({ status: 'succeeded', providerRef: 'refund_txn_1' });
+    const [url, init] = f.mock.calls[0] as unknown as [string, { method: string; headers: Record<string, string>; body: string }];
+    expect(url).toBe('https://staging.ptranz.com/api/refund');
     expect(init.method).toBe('POST');
     expect(init.headers['PowerTranz-PowerTranzId']).toBe('id');
     expect(init.headers['PowerTranz-PowerTranzPassword']).toBe('pass');
-    const body = JSON.parse(init.body) as Record<string, unknown>;
-    expect(body).toMatchObject({
-      TotalAmount: CHARGE.amount,
-      CurrencyCode: '328',
-      ThreeDSecure: false,
-      Source: CHARGE.token,
-      OrderIdentifier: CHARGE.idempotencyKey,
-    });
-    expect(body['TransactionIdentifier']).toEqual(expect.any(String));
-    expect(body).not.toHaveProperty('cardNumber');
-    expect(body).not.toHaveProperty('cvc');
+    expect(JSON.parse(init.body)).toEqual({ Refund: true, TransactionIdentifier: REFUND.providerRef, TotalAmount: 500, CurrencyCode: '328' });
   });
 
   it('does not call an approval successful without a canonical transaction identifier', async () => {
-    vi.stubGlobal('fetch', mockFetch(200, { Approved: true }));
-    expect(await p.chargeToken(CHARGE)).toMatchObject({ status: 'unknown', providerRef: '' });
-
-    vi.stubGlobal('fetch', mockFetch(200, { Approved: true, TransactionIdentifier: '   ' }));
-    expect(await p.chargeToken(CHARGE)).toMatchObject({ status: 'unknown', providerRef: '' });
-
-    vi.stubGlobal('fetch', mockFetch(200, { Approved: true, TransactionIdentifier: 123 }));
-    expect(await p.chargeToken(CHARGE)).toMatchObject({ status: 'unknown', providerRef: '' });
+    for (const TransactionIdentifier of [undefined, '', '   ', 123]) {
+      vi.stubGlobal('fetch', mockFetch(200, { Approved: true, TransactionIdentifier }));
+      await expect(p.refund({ ...REFUND, idempotencyKey: `refund:missing-id:${String(TransactionIdentifier)}` }))
+        .resolves.toMatchObject({ status: 'unknown', providerRef: '' });
+    }
   });
 
   it('requires Approved to be the boolean true, not a truthy lookalike', async () => {
     for (const Approved of ['true', 1, {}, []]) {
       vi.stubGlobal('fetch', mockFetch(200, { Approved, TransactionIdentifier: 'txn_lookalike' }));
-      await expect(p.chargeToken(CHARGE)).resolves.toMatchObject({
-        status: 'unknown',
-        providerRef: 'txn_lookalike',
-      });
+      await expect(p.refund(REFUND)).resolves.toMatchObject({ status: 'unknown', providerRef: 'txn_lookalike' });
     }
   });
 
-  it('requires a non-empty string transaction identifier for an approved refund', async () => {
-    for (const TransactionIdentifier of [undefined, '', '   ', 123]) {
-      vi.stubGlobal('fetch', mockFetch(200, { Approved: true, TransactionIdentifier }));
-      await expect(p.refund({
-        providerRef: 'sale_txn_1',
-        amount: 500,
-        currencyCode: 'GYD',
-        idempotencyKey: `refund:missing-id:${String(TransactionIdentifier)}`,
-      })).resolves.toMatchObject({ status: 'unknown', providerRef: '' });
-    }
-  });
-
-  it('maps a declined sale to failed with the gateway reason', async () => {
-    vi.stubGlobal('fetch', mockFetch(200, { Approved: false, TransactionIdentifier: 'txn_2', ResponseMessage: 'Insufficient funds' }));
-    const r = await p.chargeToken(CHARGE);
+  it('maps a refused refund to failed with the gateway reason', async () => {
+    vi.stubGlobal('fetch', mockFetch(200, { Approved: false, TransactionIdentifier: 'txn_2', ResponseMessage: 'Invalid refund' }));
+    const r = await p.refund(REFUND);
     expect(r.status).toBe('failed');
-    expect(r.reason).toBe('Insufficient funds');
+    expect(r.reason).toBe('Invalid refund');
   });
 
-  it('never throws on a transport error — [M-02] UNKNOWN, not a decline: billing retrieves before it retries', async () => {
+  it('never throws on a transport error — [M-02] UNKNOWN, not a refusal', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNRESET'); }));
-    const r = await p.chargeToken(CHARGE);
+    const r = await p.refund(REFUND);
     expect(r.status).toBe('unknown');
     expect(r.reason).toMatch(/unreachable/i);
   });
 
   it('treats 408, 429, and 5xx as UNKNOWN while preserving a definitive 4xx refusal', async () => {
     vi.stubGlobal('fetch', mockFetch(502, 'bad gateway'));
-    const r = await p.chargeToken(CHARGE);
+    const r = await p.refund(REFUND);
     expect(r.status).toBe('unknown');
     expect(r.reason).toMatch(/HTTP 502/);
-
     vi.stubGlobal('fetch', mockFetch(408, 'request timeout'));
-    expect((await p.chargeToken(CHARGE)).status).toBe('unknown');
-
+    expect((await p.refund(REFUND)).status).toBe('unknown');
     vi.stubGlobal('fetch', mockFetch(429, 'rate limited'));
-    expect((await p.chargeToken(CHARGE)).status).toBe('unknown');
-
+    expect((await p.refund(REFUND)).status).toBe('unknown');
     vi.stubGlobal('fetch', mockFetch(401, 'unauthorized'));
-    expect((await p.chargeToken(CHARGE)).status).toBe('failed');
+    expect((await p.refund(REFUND)).status).toBe('failed');
   });
 
-  it('refunds by original transaction reference without sending card data', async () => {
-    const f = mockFetch(200, { Approved: true, TransactionIdentifier: 'refund_txn_1' });
-    vi.stubGlobal('fetch', f);
-    const r = await p.refund({
-      providerRef: 'sale_txn_1',
-      amount: 500,
-      currencyCode: 'GYD',
-      idempotencyKey: 'refund:1',
-    });
-    expect(r).toEqual({ status: 'succeeded', providerRef: 'refund_txn_1' });
-
-    const [url, init] = f.mock.calls[0] as unknown as [string, { body: string }];
-    expect(url).toContain('/api/spi/Refund');
-    const body = JSON.parse(init.body) as Record<string, unknown>;
-    expect(body).toMatchObject({
-      OriginalTransactionIdentifier: 'sale_txn_1',
-      TotalAmount: 500,
-      OrderIdentifier: 'refund:1',
-    });
-    expect(body).not.toHaveProperty('Source');
-    expect(body).not.toHaveProperty('cardNumber');
-    expect(body).not.toHaveProperty('cvc');
+  it('treats an unreadable answer as UNKNOWN', async () => {
+    vi.stubGlobal('fetch', mockMalformedJsonFetch(200));
+    expect((await p.refund(REFUND)).status).toBe('unknown');
   });
 
   it('fails an unsupported currency without calling the gateway', async () => {
     const f = vi.fn();
     vi.stubGlobal('fetch', f);
-    const r = await p.chargeToken({ ...CHARGE, currencyCode: 'ZZZ' });
+    const r = await p.refund({ ...REFUND, currencyCode: 'ZZZ' });
     expect(r.status).toBe('failed');
     expect(f).not.toHaveBeenCalled();
   });

@@ -1,4 +1,5 @@
 import { readFeePause } from '../billing/mmg-pause';
+import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
@@ -1879,6 +1880,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.post('/cart/merge', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const body = cartMergeSchema.parse(request.body);
     const key = request.headers['idempotency-key'];
     if (typeof key !== 'string') throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'A basket upload needs an Idempotency-Key.');
@@ -1888,6 +1890,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.post('/cart/items', async (request: AuthRequest, reply: FastifyReply) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const body = addCartItemSchema.parse(request.body);
 
@@ -1990,6 +1993,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/items/:id', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { id } = request.params as { id: string };
     const { userId } = request.user;
     const body = updateCartItemSchema.parse(request.body);
@@ -2043,6 +2047,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.delete('/cart/items/:id', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { id } = request.params as { id: string };
     const { userId } = request.user;
 
@@ -2070,6 +2075,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.delete('/cart', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     await app.prisma.cart.deleteMany({ where: { customerId: userId } });
     await app.redis.del(`cart:${userId}`).catch(() => {});
@@ -2077,6 +2083,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/address', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const { addressId } = cartAddressSchema.parse(request.body);
 
@@ -2112,6 +2119,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/tip', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const { amount } = cartTipSchema.parse(request.body);
 
@@ -2134,6 +2142,7 @@ export async function customerRoutes(app: FastifyInstance) {
   // charged full price, with no way back. This clears the stored pointer: the
   // quote re-prices without it and checkout stops receiving the code.
   app.delete('/cart/promo', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
 
     const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
@@ -2156,6 +2165,7 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   app.post('/checkout', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const body = checkoutSchema.parse(request.body ?? {});
 
