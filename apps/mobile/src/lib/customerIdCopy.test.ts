@@ -43,7 +43,11 @@ describe('the words stay truthful', () => {
   it('only a person-reviewed ID is "checked" on the Profile row', () => {
     expect(profileIdRowSub('CHECKED')).toBe('Checked by our team');
     expect(profileIdRowSub('ON_FILE')).toMatch(/^On file/);
-    expect(profileIdRowSub(undefined)).toBe('Needed for bigger orders and taxi rides');
+    // NONE also reaches an account already above L1 with no customer ID on record: say what the ID
+    // is for, never that this account needs one.
+    expect(profileIdRowSub(undefined)).toBe('For bigger orders and taxi rides');
+    expect(profileIdRowSub('NONE')).toBe('For bigger orders and taxi rides');
+    for (const line of rows) expect(line).not.toMatch(/needed|you need/i);
   });
   it('no short line says the ID alone unlocks taxi rides (they also need the profile photo)', () => {
     for (const line of rows) expect(line).not.toMatch(/unlock[^.]*rides|rides[^.]*unlock/i);

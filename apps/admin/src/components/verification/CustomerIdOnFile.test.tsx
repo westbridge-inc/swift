@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { CustomerIdOnFile, customerIdFact, withdrawNotice } from './CustomerIdOnFile';
-import { reviewTimeline, timelineLabel, docLabel } from '@/lib/review-center';
+import { reviewTimeline, timelineLabel, docLabel, isSystemActor } from '@/lib/review-center';
 import { mockApi, renderWithQuery, requestsByMethod } from '@/test/test-utils';
 
 // [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] A reviewer sees which customer IDs went on file
@@ -19,6 +19,9 @@ describe('the customer ID panel tells a reviewer what kind of ID this is', () =>
     expect(customerIdFact({ ...onFile, reviewedBy: 'kyc:auto' })).toMatch(/No person has reviewed this ID/);
     expect(customerIdFact({ ...onFile, reviewedBy: 'reviewer-user-id' })).toBe('On file — approved by a reviewer.');
     expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).toMatch(/Held for a person/);
+    // Approval unlocks the ID gate only: taxi rides also need the customer's profile photo.
+    expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).toMatch(/taxi rides also need the customer.s profile photo/);
+    expect(customerIdFact({ ...onFile, status: 'PENDING', reviewedBy: null })).not.toMatch(/unlocks taxi rides/);
     // An older approved row that names nobody claims nobody.
     expect(customerIdFact({ ...onFile, reviewedBy: null })).toBe('On file.');
   });
@@ -70,6 +73,15 @@ describe('"back to L1" is said only when the server reports it', () => {
     renderWithQuery(<CustomerIdOnFile doc={onFile} onWithdrawn={() => {}} />);
     expect(screen.getByRole('button', { name: 'Withdraw this ID' })).toBeTruthy();
     expect(screen.queryByText(/back to L1/)).toBeNull();
+  });
+});
+
+describe('the history never names an automatic marker as a person', () => {
+  it('auto:id-on-file and kyc:auto are the system, like the validator and the engines; a real id is a person', () => {
+    for (const actor of [null, 'validator', 'engine:x', 'auto:id-on-file', 'kyc:auto']) expect(isSystemActor(actor)).toBe(true);
+    expect(isSystemActor('reviewer-user-id')).toBe(false);
+    const page = readFileSync(join(__dirname, '../../app/verification/page.tsx'), 'utf8');
+    expect(page).toMatch(/const system = isSystemActor\(actor\)/);
   });
 });
 

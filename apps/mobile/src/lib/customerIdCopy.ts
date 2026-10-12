@@ -44,6 +44,8 @@ export function profileIdRowSub(check: unknown): string {
     case 'CHECKED': return 'Checked by our team';
     case 'WAITING': return 'A person is checking it';
     case 'NOT_ACCEPTED': return 'Not accepted — add it again';
-    default: return 'Needed for bigger orders and taxi rides';
+    // NONE also reaches an account already above L1 with no customer ID on record: say what the ID
+    // is for, never that this account needs one.
+    default: return 'For bigger orders and taxi rides';
   }
 }

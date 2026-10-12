@@ -88,6 +88,11 @@ export function timelineLabel(what: string): string {
   }
   return 'Document activity recorded';
 }
+/** Who in the custody timeline is not a person: no actor, the validator, an engine, or the server's
+ *  automatic markers (an ID on file, a processor's own verdict) — never looked up as a reviewer. */
+export function isSystemActor(actor: string | null): boolean {
+  return !actor || actor === 'validator' || actor.startsWith('engine:') || actor.startsWith('auto:') || actor.startsWith('kyc:');
+}
 export interface ReviewTimelineEvent { at: string; actor: string | null; what: string; detail?: { reasonCode?: unknown; reason?: unknown } }
 /** [Owner ruling 8 Oct 2026 — CUSTOMER ID] Why the automatic checks held a customer ID (server customer-id.ts codes). */
 export const CUSTOMER_ID_HOLD_WORDS: Record<string, string> = {
