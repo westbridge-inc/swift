@@ -187,8 +187,12 @@ describe('[WEB-PIN] checkout: pin a delivery address on the map', () => {
     expect(button('Add the city').disabled).toBe(true);
     fireEvent.change(screen.getByRole('textbox', { name: 'City / Town' }), { target: { value: 'Georgetown' } });
     // A street the customer typed is theirs: moving the pin again does not overwrite it.
+    const lookups = calls('GET', '/api/v1/places/reverse').length;
     fireEvent.keyDown(map, { key: 'ArrowLeft' });
     loadMap();
+    // Wait until the NEW pin has been named, so an overwrite would have happened by now.
+    await waitFor(() => expect(calls('GET', '/api/v1/places/reverse').length).toBeGreaterThan(lookups));
+    await waitFor(() => expect(screen.queryByText('Finding the address…')).toBeNull());
     await waitFor(() => expect(button('Save address').disabled).toBe(false));
     expect((screen.getByRole('textbox', { name: 'Street address' }) as HTMLInputElement).value).toBe('Lot 9 Sample Road');
     expect(calls('POST', '/api/v1/customer/addresses')).toHaveLength(0);

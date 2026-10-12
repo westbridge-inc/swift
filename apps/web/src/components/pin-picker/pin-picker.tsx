@@ -8,7 +8,6 @@ import { MAX_ACCURACY_M } from '@/lib/place';
 import {
   STORE_MAP_START, mapPixel, pixelPoint, pinLookup, storePinAddress, storePinInMarket, type StorePoint,
 } from '@/lib/store-pin';
-import styles from './pin-picker.module.css';
 
 // ---------------------------------------------------------------------------
 // [WEB-PIN] ONE PIN PICKER FOR CUSTOMERS — the phone app's rules on the web.
@@ -28,7 +27,13 @@ import styles from './pin-picker.module.css';
 //   - the address Swift's reverse lookup gives for THAT exact point, or null.
 // The pin goes to Swift's API only. The tiles name the map square being
 // viewed, as the store picker's do; no key, no third-party script.
+//
+// Styled with the site's global classes (sw-*) and utilities only: a CSS file
+// of its own would make this lazy chunk carry CSS, and the runtime that loads
+// CSS for a lazy chunk would then be added to every page's first load.
 // ---------------------------------------------------------------------------
+
+const SECONDARY = 'sw-btn sw-btn-outline sw-btn-md';
 
 export type PinPoint = StorePoint;
 export interface ChosenPin extends PinPoint { address: string | null }
@@ -238,55 +243,55 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
   });
 
   return (
-    <div className={styles.picker}>
-      <div className={styles.field}>
-        <label htmlFor={`${id}-search`} className={styles.label}>Search for a street or place</label>
-        <div className={styles.row}>
+    <div className="grid gap-3">
+      <div>
+        <label htmlFor={`${id}-search`} className="sw-field-label">Search for a street or place</label>
+        <div className="flex gap-2">
           <input
             id={`${id}-search`}
-            className={styles.input}
+            className="sw-input"
             value={query}
             autoComplete="off"
             onChange={(event) => { searchTicket.current += 1; setSearching(false); setQuery(event.target.value); setSuggestions([]); }}
             onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void search(); } }}
           />
-          <button type="button" className={styles.button} disabled={searching || query.trim().length < 3} onClick={() => void search()}>
+          <button type="button" className={`${SECONDARY} shrink-0`} disabled={searching || query.trim().length < 3} onClick={() => void search()}>
             <Search size={16} aria-hidden="true" />{searching ? 'Finding…' : 'Find'}
           </button>
         </div>
       </div>
       {suggestions.length > 0 ? (
-        <ul className={styles.results} aria-label="Places found">
+        <ul className="m-0 grid list-none gap-1.5 p-0" aria-label="Places found">
           {suggestions.map((place) => (
             <li key={place.placeId}>
-              <button type="button" className={styles.button} onClick={() => void choose(place)}>
+              <button type="button" className="w-full cursor-pointer rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 py-3 text-left text-[15px] font-semibold leading-5 text-[var(--swift-ink)] hover:bg-[var(--swift-sunken)]" onClick={() => void choose(place)}>
                 {place.primary}{place.secondary ? `, ${place.secondary}` : ''}
               </button>
             </li>
           ))}
         </ul>
       ) : null}
-      <div className={styles.row}>
-        <button type="button" className={styles.button} disabled={locating} onClick={() => void locate()}>
+      <div>
+        <button type="button" className={SECONDARY} disabled={locating} onClick={() => void locate()}>
           <LocateFixed size={16} aria-hidden="true" />{locating ? 'Finding you…' : 'Use my location'}
         </button>
       </div>
       {savedPins.length > 0 ? (
-        <div className={styles.row} role="group" aria-label="Your saved addresses">
+        <div className="sw-chip-row" role="group" aria-label="Your saved addresses">
           {savedPins.map(({ entry, at }) => (
-            <button key={entry.id} type="button" className={styles.button} onClick={() => { jump(at, entry.addressLine1?.trim() || entry.label); map.current?.focus(); }}>
+            <button key={entry.id} type="button" className="sw-chip" onClick={() => { jump(at, entry.addressLine1?.trim() || entry.label); map.current?.focus(); }}>
               {entry.label}{entry.addressLine1 ? ` — ${entry.addressLine1}` : ''}
             </button>
           ))}
         </div>
       ) : null}
-      {notice ? <p role="status" className={styles.copy}>{notice}</p> : null}
-      <p id={`${id}-help`} className={styles.copy}>
+      {notice ? <p role="status" className="sw-caption m-0">{notice}</p> : null}
+      <p id={`${id}-help`} className="sw-caption m-0">
         Drag the map to put the pin on the spot. With the map focused, the arrow keys move it (hold Shift for bigger steps) and + or − zooms.
       </p>
       <div
         ref={map}
-        className={styles.map}
+        className="relative h-[300px] w-full cursor-grab touch-none select-none overflow-hidden rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-sunken)] outline-none focus-visible:ring-[3px] focus-visible:ring-[var(--swift-red)] active:cursor-grabbing"
         tabIndex={0}
         role="application"
         aria-label={mapLabel}
@@ -327,37 +332,44 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
             height={256}
             alt=""
             draggable={false}
-            className={styles.tile}
-            style={{ left: tile.x, top: tile.y }}
+            className="pointer-events-none absolute max-w-none select-none"
+            style={{ left: tile.x, top: tile.y, width: 256, height: 256 }}
             onLoad={() => setLoadedTiles((loaded) => (loaded.has(tile.src) ? loaded : new Set(loaded).add(tile.src)))}
             onError={() => setMapFailed(true)}
           />
         ))}
-        <MapPin className={styles.pin} aria-hidden="true" fill="currentColor" stroke="white" />
+        {/* Lucide's marker tip sits at y=22 of 24: anchor the tip itself on the chosen point. */}
+        <MapPin
+          className="pointer-events-none absolute left-1/2 top-1/2 h-9 w-9 text-[var(--swift-red)]"
+          style={{ transform: 'translate(-50%, calc(-100% + 3px))', filter: 'drop-shadow(0 1px 2px #fff)' }}
+          aria-hidden="true"
+          fill="currentColor"
+          stroke="white"
+        />
       </div>
-      <div className={styles.row}>
-        <button type="button" className={styles.button} disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom - 1)}>
+      <div className="flex gap-2">
+        <button type="button" className={`${SECONDARY} flex-1`} disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom - 1)}>
           <Minus size={16} aria-hidden="true" />Zoom out
         </button>
-        <button type="button" className={styles.button} disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom + 1)}>
+        <button type="button" className={`${SECONDARY} flex-1`} disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom + 1)}>
           <Plus size={16} aria-hidden="true" />Zoom in
         </button>
       </div>
-      <p className={styles.copy}>
-        © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a>
+      <p className="m-0 text-right text-[11px] leading-[14px] text-[var(--swift-muted)]">
+        © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="underline">OpenStreetMap contributors</a>
       </p>
-      <div id={`${id}-readout`} role="group" aria-label="Chosen pin" className={styles.readout}>
+      <div id={`${id}-readout`} role="group" aria-label="Chosen pin" className="grid gap-0.5 rounded-2xl bg-[var(--swift-sunken)] px-3 py-2.5 text-[14px] font-medium leading-5 text-[var(--swift-ink)] [overflow-wrap:anywhere]">
         <span>{settled ? (line ? `Near ${line}` : 'No street name found at this pin.') : 'Finding the address…'}</span>
-        <span className={styles.coords}>Latitude {point.latitude.toFixed(5)}, Longitude {point.longitude.toFixed(5)}</span>
+        <span className="text-[12px] font-normal leading-4 text-[var(--swift-muted)] tabular-nums">Latitude {point.latitude.toFixed(5)}, Longitude {point.longitude.toFixed(5)}</span>
       </div>
-      <p role="status" aria-live="polite" aria-atomic="true" className={styles.srOnly}>{announcement}</p>
-      {!inMarket ? <p role="alert" className={styles.error}>{PIN_OUTSIDE}</p> : null}
-      {inMarket && !placed && anchor?.reason === 'centre' ? <p className={styles.copy}>{PIN_CITY_CENTRE}</p> : null}
-      {!mapReady && !mapFailed ? <p className={styles.copy}>Loading map…</p> : null}
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{announcement}</p>
+      {!inMarket ? <p role="alert" className="sw-note sw-note-error m-0">{PIN_OUTSIDE}</p> : null}
+      {inMarket && !placed && anchor?.reason === 'centre' ? <p className="sw-caption m-0">{PIN_CITY_CENTRE}</p> : null}
+      {!mapReady && !mapFailed ? <p className="sw-caption m-0">Loading map…</p> : null}
       {mapFailed ? (
         <>
-          <p role="alert" className={styles.error}>The map couldn’t load. Retry it to check where the pin is before you use it.</p>
-          <button type="button" className={styles.button} onClick={() => { setMapFailed(false); setLoadedTiles(new Set()); setTileAttempt((attempt) => attempt + 1); }}>Retry map</button>
+          <p role="alert" className="sw-note sw-note-error m-0">The map couldn’t load. Retry it to check where the pin is before you use it.</p>
+          <button type="button" className={SECONDARY} onClick={() => { setMapFailed(false); setLoadedTiles(new Set()); setTileAttempt((attempt) => attempt + 1); }}>Retry map</button>
         </>
       ) : null}
     </div>

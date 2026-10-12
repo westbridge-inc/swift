@@ -2,7 +2,6 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import { PinPicker, type ChosenPin } from './pin-picker';
-import styles from '@/app/(app)/cart/cart.module.css';
 
 /**
  * A new delivery address: the pin the customer placed, and the words that help
@@ -75,21 +74,22 @@ export function AddressPinForm({ busy, onSave, onCancel }: {
   }
 
   return (
-    <section className={styles.formStack} aria-labelledby={`${id}-title`}>
-      <h3 ref={heading} id={`${id}-title`} tabIndex={-1} className={styles.panelTitle}>Pin your delivery address</h3>
-      <p className={styles.stateCopy}>
+    <section className="grid gap-3" aria-labelledby={`${id}-title`}>
+      {/* Global classes only: a lazy chunk with CSS of its own would add CSS loading to every page. */}
+      <h3 ref={heading} id={`${id}-title`} tabIndex={-1} className="sw-heading outline-none">Pin your delivery address</h3>
+      <p className="sw-caption m-0">
         Put the pin on your door. The pin sets the delivery fee and where your rider goes; the words below help them find you.
       </p>
       <PinPicker mapLabel="Delivery pin map" onChange={pinChanged} />
-      <div className={styles.field}>
-        <label htmlFor={`${id}-label`} className={styles.label}>Label</label>
-        <input id={`${id}-label`} className={styles.input} value={label} maxLength={50} placeholder="Home, Work…" onChange={(event) => setLabel(event.target.value)} />
+      <div>
+        <label htmlFor={`${id}-label`} className="sw-field-label">Label</label>
+        <input id={`${id}-label`} className="sw-input" value={label} maxLength={50} placeholder="Home, Work…" onChange={(event) => setLabel(event.target.value)} />
       </div>
-      <div className={styles.field}>
-        <label htmlFor={`${id}-street`} className={styles.label}>Street address</label>
+      <div>
+        <label htmlFor={`${id}-street`} className="sw-field-label">Street address</label>
         <input
           id={`${id}-street`}
-          className={styles.input}
+          className="sw-input"
           value={street}
           maxLength={200}
           autoComplete="street-address"
@@ -97,22 +97,22 @@ export function AddressPinForm({ busy, onSave, onCancel }: {
           onChange={(event) => { streetTyped.current = true; setStreet(event.target.value); }}
         />
       </div>
-      <div className={styles.field}>
-        <label htmlFor={`${id}-landmark`} className={styles.label}>Apt / landmark (optional)</label>
-        <input id={`${id}-landmark`} className={styles.input} value={landmark} maxLength={200} placeholder="Near…" onChange={(event) => setLandmark(event.target.value)} />
+      <div>
+        <label htmlFor={`${id}-landmark`} className="sw-field-label">Apt / landmark (optional)</label>
+        <input id={`${id}-landmark`} className="sw-input" value={landmark} maxLength={200} placeholder="Near…" onChange={(event) => setLandmark(event.target.value)} />
       </div>
-      <div className={styles.field}>
-        <label htmlFor={`${id}-city`} className={styles.label}>City / Town</label>
-        <input id={`${id}-city`} className={styles.input} value={city} maxLength={100} autoComplete="address-level2" onChange={(event) => setCity(event.target.value)} />
+      <div>
+        <label htmlFor={`${id}-city`} className="sw-field-label">City / Town</label>
+        <input id={`${id}-city`} className="sw-input" value={city} maxLength={100} autoComplete="address-level2" onChange={(event) => setCity(event.target.value)} />
       </div>
-      <div className={styles.field}>
-        <label htmlFor={`${id}-instructions`} className={styles.label}>Delivery instructions (optional)</label>
-        <input id={`${id}-instructions`} className={styles.input} value={instructions} maxLength={500} placeholder="Gate code, dog, etc." onChange={(event) => setInstructions(event.target.value)} />
+      <div>
+        <label htmlFor={`${id}-instructions`} className="sw-field-label">Delivery instructions (optional)</label>
+        <input id={`${id}-instructions`} className="sw-input" value={instructions} maxLength={500} placeholder="Gate code, dog, etc." onChange={(event) => setInstructions(event.target.value)} />
       </div>
-      <button type="button" onClick={save} disabled={busy || missing !== null} className={`${styles.button} ${styles.buttonPrimary}`}>
+      <button type="button" onClick={save} disabled={busy || missing !== null} className="sw-btn sw-btn-block">
         {busy ? 'Saving…' : missing ?? 'Save address'}
       </button>
-      <button type="button" onClick={onCancel} disabled={busy} className={`${styles.button} ${styles.buttonSecondary}`}>Cancel</button>
+      <button type="button" onClick={onCancel} disabled={busy} className="sw-btn sw-btn-outline sw-btn-block">Cancel</button>
     </section>
   );
 }
