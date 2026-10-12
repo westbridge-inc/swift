@@ -49,6 +49,8 @@ const RULES: RouteRule[] = [
   { match: exact('/order/browse'), public: true, tab: 'home', parent: HOME_PATH },
   { match: exact('/order/search'), public: true, tab: 'home', parent: HOME_PATH },
   { match: under('/order/vendor'), public: true, tab: 'home', parent: HOME_PATH },
+  // [W6] A store's one page (the old address above sends here, permanently).
+  { match: under('/store'), public: true, tab: 'home', parent: HOME_PATH },
   { match: exact('/explore'), public: true, tab: 'home', parent: HOME_PATH },
   // Taxi on the web is an explanation and an app link — booking stays off.
   { match: exact('/taxi'), public: true, tab: 'home', parent: HOME_PATH },
@@ -99,4 +101,9 @@ export function signInPath(returnPath: string): string {
 /** The sign-up page, with the same return. */
 export function signUpPath(returnPath: string): string {
   return `/signup?next=${encodeURIComponent(returnPath)}`;
+}
+
+/** [W6] A store's one page, by its name; the old id address only for a card the server sent without one. */
+export function storeHref(v: { id: string; slug?: string | null }): string {
+  return v.slug ? `/store/${encodeURIComponent(v.slug)}` : `/order/vendor/${encodeURIComponent(v.id)}`;
 }
