@@ -42,7 +42,9 @@ export function NewAddressForm({ busy, onSave, onCancel }: {
   const [pin, setPin] = useState<ChosenPin | null>(null);
   const [label, setLabel] = useState('Home');
   const [street, setStreet] = useState('');
-  // Until the customer types a street, it follows the pin's looked-up name.
+  // Until the customer types a street, it follows the CURRENT pin's name —
+  // and is empty while that pin is unnamed or has no name (review S2: a moved
+  // pin must never keep the previous spot's words; the phone never fills it).
   const streetTyped = useRef(false);
   const [landmark, setLandmark] = useState('');
   const [city, setCity] = useState('Georgetown');
@@ -52,13 +54,15 @@ export function NewAddressForm({ busy, onSave, onCancel }: {
 
   function pinChanged(next: ChosenPin | null) {
     setPin(next);
-    if (next?.address && !streetTyped.current) setStreet(next.address.slice(0, 200));
+    if (!streetTyped.current) setStreet(next?.named && next.address ? next.address.slice(0, 200) : '');
   }
 
   // The disabled button names the first thing still missing (the phone's grammar).
   const missing = !pin
     ? 'Place the pin on the map'
-    : label.trim().length < 2
+    : !pin.named
+      ? 'Finding the address…'
+      : label.trim().length < 2
       ? 'Give it a label'
       : street.trim().length < 3
         ? 'Add the street address'

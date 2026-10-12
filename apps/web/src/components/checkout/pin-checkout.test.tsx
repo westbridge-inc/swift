@@ -202,6 +202,55 @@ describe('[WEB-PIN] checkout: pin a delivery address on the map', () => {
     expect(calls('POST', '/api/v1/customer/addresses')).toHaveLength(0);
   });
 
+  // [WEB-PIN · review S2] The street Swift fills in belongs to ONE pin. When the
+  // pin moves, the old name must not stay in the box: the next spot may have no
+  // name, or its lookup may time out — and a saved address whose words name a
+  // place ~330 m from its pin is the W-08 defect (lib/place.ts) all over again.
+  it('moving the pin to a spot with no street name clears the old name: Save waits for the customer to type one', async () => {
+    let unnamed = false;
+    api = ({ url }) => (url.pathname === '/api/v1/places/reverse' && unnamed ? ok({ address: null }) : null);
+    renderCart();
+    const map = await openPicker();
+    map.focus();
+    fireEvent.keyDown(map, { key: 'ArrowRight' });
+    loadMap();
+    const street = await screen.findByDisplayValue(REVERSE_LABEL) as HTMLInputElement;
+    unnamed = true;
+    fireEvent.keyDown(map, { key: 'ArrowUp', shiftKey: true });
+    loadMap();
+    await screen.findByText('No street name found at this pin.');
+    expect(street.value).toBe('');
+    expect(button('Add the street address').disabled).toBe(true);
+    fireEvent.change(street, { target: { value: 'Lot 12 Sample Dam' } });
+    await waitFor(() => expect(button('Save address').disabled).toBe(false));
+    fireEvent.click(button('Save address'));
+    await waitFor(() => expect(calls('POST', '/api/v1/customer/addresses')).toHaveLength(1));
+    expect(bodyOf(calls('POST', '/api/v1/customer/addresses')[0]!)).toMatchObject({ addressLine1: 'Lot 12 Sample Dam' });
+  });
+
+  it('until the moved pin is named, the old name is gone and Save waits — even when the lookup times out', async () => {
+    let hang = false;
+    api = ({ url }) => (url.pathname === '/api/v1/places/reverse' && hang ? new Promise<ApiReply>(() => undefined) as unknown as ApiReply : null);
+    renderCart();
+    const map = await openPicker();
+    map.focus();
+    fireEvent.keyDown(map, { key: 'ArrowRight' });
+    loadMap();
+    const street = await screen.findByDisplayValue(REVERSE_LABEL) as HTMLInputElement;
+    hang = true;
+    fireEvent.keyDown(map, { key: 'ArrowDown', shiftKey: true });
+    loadMap();
+    // While Swift is still naming the new spot: no old words, and no Save.
+    expect(within(screen.getByRole('group', { name: 'Chosen pin' })).getByText('Finding the address…')).toBeTruthy();
+    expect(street.value).toBe('');
+    expect(button('Finding the address…').disabled).toBe(true);
+    // The lookup gives up after 4 s: the spot is unnamed, and the customer types the street.
+    await waitFor(() => expect(screen.getByText('No street name found at this pin.')).toBeTruthy(), { timeout: 6000 });
+    expect(street.value).toBe('');
+    expect(button('Add the street address').disabled).toBe(true);
+    expect(calls('POST', '/api/v1/customer/addresses')).toHaveLength(0);
+  }, 10_000);
+
   it('refuses a pin outside Guyana in plain words and never saves it', async () => {
     renderCart();
     const map = await openPicker();
