@@ -1,0 +1,54 @@
+/* [WEB-PIN] The customer pin picker: the store picker's fixed-pin street map
+   (components/store-location-picker.tsx), in the checkout's look. Tokens only. */
+.picker { display: grid; gap: 12px; }
+.copy { margin: 0; color: var(--swift-muted); font: 400 13px/18px var(--swift-face-body), system-ui, sans-serif; }
+.error { margin: 0; color: var(--swift-error); font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+.row > * { flex: 1 1 auto; }
+.field { display: grid; gap: 6px; }
+.label { color: var(--swift-muted); font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif; }
+.input {
+  width: 100%; min-height: 48px; padding: 0 16px;
+  border: 1px solid var(--swift-border); border-radius: var(--swift-radius-lg);
+  background: var(--swift-card); color: var(--swift-ink);
+  font: 400 16px/22px var(--swift-face-body), system-ui, sans-serif;
+}
+.input:focus { border-color: var(--swift-red); outline: none; }
+.button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 44px; padding: 8px 16px; border: 0; border-radius: var(--swift-radius-full);
+  background: var(--swift-card); color: var(--swift-ink); box-shadow: inset 0 0 0 1px var(--swift-border);
+  font: 600 14px/20px var(--swift-face-body), system-ui, sans-serif; text-align: center; cursor: pointer;
+}
+.button:hover:not(:disabled) { background: var(--swift-red-50); }
+.button:disabled { opacity: 0.45; cursor: not-allowed; }
+.button:focus-visible, .map:focus-visible, .input:focus-visible { outline: 3px solid var(--swift-red); outline-offset: 2px; }
+.results { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.results .button { width: 100%; justify-content: flex-start; text-align: start; }
+.map {
+  position: relative; width: 100%; height: 300px; overflow: hidden;
+  border: 1px solid var(--swift-border); border-radius: var(--swift-radius-lg);
+  background: var(--swift-sunken); cursor: grab; touch-action: none; user-select: none;
+}
+.map:active { cursor: grabbing; }
+.tile { position: absolute; width: 256px; height: 256px; max-width: none; pointer-events: none; }
+/* Lucide's marker tip sits at y=22 of 24: anchor the tip on the chosen point. */
+.pin {
+  position: absolute; left: 50%; top: 50%; width: 36px; height: 36px;
+  transform: translate(-50%, calc(-100% + 3px)); color: var(--swift-red);
+  filter: drop-shadow(0 1px 2px var(--swift-white)); pointer-events: none;
+}
+.zoom { position: absolute; right: 8px; top: 8px; display: grid; gap: 6px; }
+.zoom .button { min-width: 44px; padding: 0; background: var(--swift-card); }
+.attribution {
+  position: absolute; right: 0; bottom: 0; padding: 2px 6px; background: var(--swift-card);
+  color: var(--swift-muted); font: 400 11px/14px var(--swift-face-body), system-ui, sans-serif;
+}
+.attribution a { color: inherit; text-decoration: underline; }
+.readout {
+  display: grid; gap: 2px; padding: 10px 12px; border-radius: var(--swift-radius-lg);
+  background: var(--swift-sunken); color: var(--swift-ink);
+  font: 500 14px/20px var(--swift-face-body), system-ui, sans-serif; overflow-wrap: anywhere;
+}
+.coords { color: var(--swift-muted); font: 400 12px/16px var(--swift-face-body), system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

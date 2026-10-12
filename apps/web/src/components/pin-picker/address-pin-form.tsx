@@ -1,0 +1,118 @@
+'use client';
+
+import { useEffect, useId, useRef, useState } from 'react';
+import { PinPicker, type ChosenPin } from './pin-picker';
+import styles from '@/app/(app)/cart/cart.module.css';
+
+/**
+ * A new delivery address: the pin the customer placed, and the words that help
+ * a rider find the door. The fields and their rules are the phone app's
+ * (AddAddressScreen): label, street, apartment/landmark, city, instructions —
+ * no region (the server's is optional and the phone never sends one).
+ */
+export type PinnedAddress = {
+  label: string;
+  addressLine1: string;
+  addressLine2?: string;
+  city: string;
+  latitude: number;
+  longitude: number;
+  instructions?: string;
+};
+
+/**
+ * [WEB-PIN] The checkout's "Add a delivery address": a pin on the map, then the
+ * address fields. It loads on demand (only a customer adding an address pays
+ * for the map's code). Saving belongs to the caller, which holds the
+ * order-attempt guards and asks the server for the quote; this form only hands
+ * over a pinned address.
+ */
+export function AddressPinForm({ busy, onSave, onCancel }: {
+  busy: boolean;
+  onSave: (_address: PinnedAddress) => void;
+  onCancel: () => void;
+}) {
+  const id = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [pin, setPin] = useState<ChosenPin | null>(null);
+  const [label, setLabel] = useState('Home');
+  const [street, setStreet] = useState('');
+  // Until the customer types a street, it follows the pin's reverse-looked-up name.
+  const streetTyped = useRef(false);
+  const [landmark, setLandmark] = useState('');
+  const [city, setCity] = useState('Georgetown');
+  const [instructions, setInstructions] = useState('');
+
+  useEffect(() => { heading.current?.focus(); }, []);
+
+  function pinChanged(next: ChosenPin | null) {
+    setPin(next);
+    if (next?.address && !streetTyped.current) setStreet(next.address.slice(0, 200));
+  }
+
+  // The disabled button names the first thing still missing (the phone's grammar).
+  const missing = !pin
+    ? 'Place the pin on the map'
+    : label.trim().length < 2
+      ? 'Give it a label'
+      : street.trim().length < 3
+        ? 'Add the street address'
+        : city.trim().length < 2
+          ? 'Add the city'
+          : null;
+
+  function save() {
+    if (!pin || missing || busy) return;
+    onSave({
+      label: label.trim(),
+      addressLine1: street.trim(),
+      ...(landmark.trim() ? { addressLine2: landmark.trim() } : {}),
+      city: city.trim(),
+      latitude: pin.latitude,
+      longitude: pin.longitude,
+      ...(instructions.trim() ? { instructions: instructions.trim() } : {}),
+    });
+  }
+
+  return (
+    <section className={styles.formStack} aria-labelledby={`${id}-title`}>
+      <h3 ref={heading} id={`${id}-title`} tabIndex={-1} className={styles.panelTitle}>Pin your delivery address</h3>
+      <p className={styles.stateCopy}>
+        Put the pin on your door. The pin sets the delivery fee and where your rider goes; the words below help them find you.
+      </p>
+      <PinPicker mapLabel="Delivery pin map" onChange={pinChanged} />
+      <div className={styles.field}>
+        <label htmlFor={`${id}-label`} className={styles.label}>Label</label>
+        <input id={`${id}-label`} className={styles.input} value={label} maxLength={50} placeholder="Home, Work…" onChange={(event) => setLabel(event.target.value)} />
+      </div>
+      <div className={styles.field}>
+        <label htmlFor={`${id}-street`} className={styles.label}>Street address</label>
+        <input
+          id={`${id}-street`}
+          className={styles.input}
+          value={street}
+          maxLength={200}
+          autoComplete="street-address"
+          placeholder="Lot and street"
+          onChange={(event) => { streetTyped.current = true; setStreet(event.target.value); }}
+        />
+      </div>
+      <div className={styles.field}>
+        <label htmlFor={`${id}-landmark`} className={styles.label}>Apt / landmark (optional)</label>
+        <input id={`${id}-landmark`} className={styles.input} value={landmark} maxLength={200} placeholder="Near…" onChange={(event) => setLandmark(event.target.value)} />
+      </div>
+      <div className={styles.field}>
+        <label htmlFor={`${id}-city`} className={styles.label}>City / Town</label>
+        <input id={`${id}-city`} className={styles.input} value={city} maxLength={100} autoComplete="address-level2" onChange={(event) => setCity(event.target.value)} />
+      </div>
+      <div className={styles.field}>
+        <label htmlFor={`${id}-instructions`} className={styles.label}>Delivery instructions (optional)</label>
+        <input id={`${id}-instructions`} className={styles.input} value={instructions} maxLength={500} placeholder="Gate code, dog, etc." onChange={(event) => setInstructions(event.target.value)} />
+      </div>
+      <button type="button" onClick={save} disabled={busy || missing !== null} className={`${styles.button} ${styles.buttonPrimary}`}>
+        {busy ? 'Saving…' : missing ?? 'Save address'}
+      </button>
+      <button type="button" onClick={onCancel} disabled={busy} className={`${styles.button} ${styles.buttonSecondary}`}>Cancel</button>
+    </section>
+  );
+}

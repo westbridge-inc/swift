@@ -1,0 +1,20 @@
+declare const styles: {
+  readonly attribution: string;
+  readonly button: string;
+  readonly coords: string;
+  readonly copy: string;
+  readonly error: string;
+  readonly field: string;
+  readonly input: string;
+  readonly label: string;
+  readonly map: string;
+  readonly picker: string;
+  readonly pin: string;
+  readonly readout: string;
+  readonly results: string;
+  readonly row: string;
+  readonly srOnly: string;
+  readonly tile: string;
+  readonly zoom: string;
+};
+export default styles;

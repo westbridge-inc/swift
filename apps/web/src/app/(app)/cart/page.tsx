@@ -2,7 +2,7 @@
 
 import CartSkeleton from './loading';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -24,15 +24,12 @@ import {
   getPublicStorefront,
   getPublicVendor,
   money,
-  placeDetails,
-  placesAutocomplete,
   persistCheckoutAttempt,
   readCheckoutAttempt,
   removeCartLine,
   setCartAddress,
   updateCartLine,
   type Cart,
-  type Place,
 } from '@/lib/customer';
 import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { ApiRequestError } from '@/lib/auth';
@@ -45,9 +42,14 @@ import {
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '@/lib/app-rules';
+import type { PinnedAddress } from '@/components/pin-picker/address-pin-form';
 import styles from './cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
+
+// [WEB-PIN] The pin-on-the-map address form loads only when a customer adds an
+// address, so the map's code never weighs on the cart itself.
+const AddressPinForm = lazy(() => import('@/components/pin-picker/address-pin-form').then((module) => ({ default: module.AddressPinForm })));
 
 export default function CartPage() {
   const router = useRouter();
@@ -72,11 +74,9 @@ export default function CartPage() {
   const [error, setError] = useState<string | null>(null);
   const [noRiders, setNoRiders] = useState(false);
   const [addingAddr, setAddingAddr] = useState(false);
-  const [newAddr, setNewAddr] = useState({ label: '', addressLine1: '', city: '', region: '' });
-  const [addressMatches, setAddressMatches] = useState<Place[]>([]);
-  const [selectedPlace, setSelectedPlace] = useState<{ label: string; lat: number; lng: number } | null>(null);
-  const [addressLookupBusy, setAddressLookupBusy] = useState(false);
-  const addressLabelInput = useRef<HTMLInputElement | null>(null);
+  // The server's word on a just-pinned address it would not price (e.g. past
+  // the store's delivery radius), shown where the address was chosen.
+  const [pinRefusal, setPinRefusal] = useState<string | null>(null);
   const safetyNotice = useRef<HTMLDivElement | null>(null);
   const checkoutRail = useRef<HTMLElement | null>(null);
   const errorMessage = useRef<HTMLParagraphElement | null>(null);
@@ -245,63 +245,27 @@ export default function CartPage() {
     }
   }
 
-  async function saveAddress() {
-    if (checkoutBusy.current || cartMutationLockedByCheckout() || !selectedPlace) return;
+  /** [WEB-PIN] A pinned address is saved, then THIS cart is priced for it: the
+   *  server checks the store's delivery radius on PUT /cart/address and returns
+   *  the quote — the phone app's order (AddressesScreen selectFor 'cart'). */
+  async function saveAddress(fields: PinnedAddress) {
+    if (checkoutBusy.current || cartMutationLockedByCheckout()) return;
     checkoutBusy.current = true;
     resetCheckoutReplay();
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setPinRefusal(null);
     try {
-      const a = await addAddress({
-        label: newAddr.label.trim(),
-        addressLine1: selectedPlace.label,
-        city: newAddr.city.trim(),
-        region: newAddr.region.trim(),
-        latitude: selectedPlace.lat,
-        longitude: selectedPlace.lng,
-        isDefault: addresses.length === 0,
-      });
+      const a = await addAddress({ ...fields, isDefault: addresses.length === 0 });
       setAddingAddr(false);
-      setNewAddr({ label: '', addressLine1: '', city: '', region: '' });
-      setAddressMatches([]);
-      setSelectedPlace(null);
+      let refusal: string | null = null;
+      try {
+        await setCartAddress(a.id);
+      } catch (quoteError) {
+        refusal = quoteError instanceof Error ? quoteError.message : 'Swift could not price delivery to that pin.';
+      }
       await refresh();
-      setAddrId(a.id ?? addrId);
+      if (refusal) setPinRefusal(refusal);
     } catch (e: any) { setError(e.message); }
     finally { checkoutBusy.current = false; setBusy(false); }
-  }
-
-  async function searchAddress() {
-    if (addressLookupBusy || newAddr.addressLine1.trim().length < 3) return;
-    setAddressLookupBusy(true);
-    setError(null);
-    setSelectedPlace(null);
-    try {
-      const matches = await placesAutocomplete(newAddr.addressLine1.trim());
-      setAddressMatches(matches);
-      if (!matches.length) setError('Swift found no map matches for that destination. Add more detail and search again.');
-    } catch (lookupError) {
-      setAddressMatches([]);
-      setError(lookupError instanceof Error ? lookupError.message : 'Swift could not search the destination map.');
-    } finally {
-      setAddressLookupBusy(false);
-    }
-  }
-
-  async function chooseAddressMatch(place: Place) {
-    if (addressLookupBusy) return;
-    setAddressLookupBusy(true);
-    setError(null);
-    try {
-      const details = await placeDetails(place.placeId);
-      setSelectedPlace({ label: details.label, lat: details.lat, lng: details.lng });
-      setNewAddr((current) => ({ ...current, addressLine1: details.label }));
-      setAddressMatches([]);
-    } catch (lookupError) {
-      setSelectedPlace(null);
-      setError(lookupError instanceof Error ? lookupError.message : 'Swift could not confirm that mapped destination.');
-    } finally {
-      setAddressLookupBusy(false);
-    }
   }
 
   async function recheckCartSafety() {
@@ -447,7 +411,7 @@ export default function CartPage() {
     const previous = addrId;
     checkoutBusy.current = true;
     resetCheckoutReplay();
-    setBusy(true); setError(null); setAddrId(nextAddressId);
+    setBusy(true); setError(null); setPinRefusal(null); setAddrId(nextAddressId);
     try {
       await setCartAddress(nextAddressId);
       await refresh();
@@ -542,51 +506,27 @@ export default function CartPage() {
               <p className={styles.errorMessage}>{addressError}</p>
               <button type="button" className={`${styles.button} ${styles.buttonSecondary}`} onClick={() => void refresh().catch((refreshError) => setError(refreshError instanceof Error ? refreshError.message : 'Could not reload your cart.'))}>Try addresses again</button>
             </div>
-          ) : addresses.length > 0 ? (
-            <div className={styles.field}>
-              <label htmlFor="cart-delivery-address" className={styles.label}>Saved delivery address</label>
-              <select id="cart-delivery-address" value={addrId ?? ''} disabled={busy || (cartSafety !== 'safe' && !knownOutOfRange)} onChange={(e) => void changeAddress(e.target.value)} className={styles.input}>
-                {addresses.map((a) => <option key={a.id} value={a.id}>{a.label} — {a.addressLine1}, {a.city}</option>)}
-              </select>
-            </div>
-          ) : addingAddr ? (
-            <div className={styles.formStack}>
-              <div className={styles.field}><label htmlFor="address-label" className={styles.label}>Address label</label><input ref={addressLabelInput} id="address-label" value={newAddr.label} onChange={(e) => setNewAddr({ ...newAddr, label: e.target.value })} className={styles.input} /></div>
-              <div className={styles.field}>
-                <label htmlFor="address-street" className={styles.label}>Search the delivery destination</label>
-                <input
-                  id="address-street"
-                  autoComplete="street-address"
-                  value={newAddr.addressLine1}
-                  aria-describedby="address-map-help"
-                  onChange={(e) => {
-                    setNewAddr({ ...newAddr, addressLine1: e.target.value });
-                    setSelectedPlace(null);
-                    setAddressMatches([]);
-                  }}
-                  className={styles.input}
-                />
-                <p id="address-map-help" className={styles.stateCopy}>Choose a Swift map result below. The selected pin—not this device’s current location—sets the delivery fee and rider destination.</p>
-              </div>
-              <button type="button" onClick={() => void searchAddress()} disabled={addressLookupBusy || newAddr.addressLine1.trim().length < 3} className={`${styles.button} ${styles.buttonSecondary}`}>
-                {addressLookupBusy ? 'Searching map…' : 'Find this destination on the map'}
-              </button>
-              {addressMatches.length > 0 ? (
-                <div className={styles.panelStack} role="group" aria-label="Mapped address matches">
-                  {addressMatches.map((place) => (
-                    <button key={place.placeId} type="button" disabled={addressLookupBusy} onClick={() => void chooseAddressMatch(place)} className={`${styles.button} ${styles.buttonSecondary}`}>
-                      {place.primary}{place.secondary ? ` — ${place.secondary}` : ''}
-                    </button>
-                  ))}
+          ) : (
+            <>
+              {addresses.length > 0 ? (
+                <div className={styles.field}>
+                  <label htmlFor="cart-delivery-address" className={styles.label}>Saved delivery address</label>
+                  <select id="cart-delivery-address" value={addrId ?? ''} disabled={busy || (cartSafety !== 'safe' && !knownOutOfRange)} onChange={(e) => void changeAddress(e.target.value)} className={styles.input}>
+                    {addresses.map((a) => <option key={a.id} value={a.id}>{a.label} — {a.addressLine1}, {a.city}</option>)}
+                  </select>
                 </div>
               ) : null}
-              {selectedPlace ? <p className={styles.stateCopy} role="status">Mapped destination confirmed: {selectedPlace.label}</p> : null}
-              <div className={styles.field}><label htmlFor="address-city" className={styles.label}>City or town</label><input id="address-city" autoComplete="address-level2" value={newAddr.city} onChange={(e) => setNewAddr({ ...newAddr, city: e.target.value })} className={styles.input} /></div>
-              <div className={styles.field}><label htmlFor="address-region" className={styles.label}>Region</label><input id="address-region" autoComplete="address-level1" value={newAddr.region} onChange={(e) => setNewAddr({ ...newAddr, region: e.target.value })} className={styles.input} /></div>
-              <button type="button" onClick={() => void saveAddress()} disabled={busy || !selectedPlace || !newAddr.label.trim() || !newAddr.city.trim() || !newAddr.region.trim()} className={`${styles.button} ${styles.buttonPrimary}`}>{busy ? 'Saving…' : 'Save mapped delivery address'}</button>
-            </div>
-          ) : (
-            <button type="button" onClick={() => { setAddingAddr(true); window.requestAnimationFrame(() => addressLabelInput.current?.focus()); }} className={`${styles.button} ${styles.buttonSecondary}`}>Add a delivery address</button>
+              {pinRefusal ? <p className={styles.errorMessage} role="alert">{pinRefusal}</p> : null}
+              {addingAddr ? (
+                <Suspense fallback={<p className={styles.stateCopy} role="status">Opening the map…</p>}>
+                  <AddressPinForm busy={busy} onSave={(fields) => void saveAddress(fields)} onCancel={() => setAddingAddr(false)} />
+                </Suspense>
+              ) : (
+                <button type="button" disabled={busy} onClick={() => { setPinRefusal(null); setAddingAddr(true); }} className={`${styles.button} ${styles.buttonSecondary}`}>
+                  {addresses.length > 0 ? 'Pin a new address' : 'Add a delivery address'}
+                </button>
+              )}
+            </>
           )}
         </section>
 
