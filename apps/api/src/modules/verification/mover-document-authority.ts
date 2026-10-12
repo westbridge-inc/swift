@@ -59,7 +59,7 @@ export async function evaluateMoverDocuments(
   // only on an H-series plate, whatever papers were approved before: the gate says so too, as documents.
   if (hire && VEHICLE_CLASSES[opts.vehicleType]?.rideClass !== 'GROUP') {
     const profile = await db.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
-    if (plateClassOf(profile?.licensePlate ?? '') !== 'H') return denied('docs');
+    if (profile && plateClassOf(profile.licensePlate ?? '') !== 'H') return denied('docs');
   }
   const types = [...new Set([...required, ...(hire ? [VEHICLE_INSURANCE_DOC_TYPE] : [])])];
   const vehicleTypes = types.filter((type) => BUCKET_OF[type] === 'VEHICLE');
