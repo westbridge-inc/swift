@@ -3,6 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import { API_URL, getDocSignedUrl } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 
+/** The API's own sentence for a missing document-reviewer grant (document-reviewer.ts), for the render path. */
+const DOCUMENT_REVIEWER_SENTENCE = 'You need the document-reviewer permission to open or decide documents. A super-admin grants it under Document reviewers at the top of the Review Center.';
+
 export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: string; label: string; onViewed: (_viewed: boolean) => void; onRejectMissing?: () => void }) {
   const [url, setUrl] = useState('');
   const [pdf, setPdf] = useState(false);
@@ -41,10 +44,10 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
       const proxy = new URL(render.pathname + render.search, window.location.origin).toString();
       const response = await fetch(proxy, { cache: 'no-store', redirect: 'error' });
       if (!response.ok) {
-        // [VERIFY-DOCS V3] The grant can be revoked after the link was minted: the render refuses, and says why.
-        if (response.status === 403) {
-          const body = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null;
-          if (body?.error?.code === 'DOCUMENT_REVIEWER_REQUIRED') throw Object.assign(new Error(body.error.message ?? ''), { code: 'DOCUMENT_REVIEWER_REQUIRED' });
+        // [VERIFY-DOCS V3] The grant can be revoked after the link was minted: the render refuses, and the
+        // same-origin proxy names the code in a header (it relays no body), so the page says why.
+        if (response.status === 403 && response.headers.get('X-Swift-Error-Code') === 'DOCUMENT_REVIEWER_REQUIRED') {
+          throw Object.assign(new Error(DOCUMENT_REVIEWER_SENTENCE), { code: 'DOCUMENT_REVIEWER_REQUIRED' });
         }
         const unavailable = response.status === 404 || response.status === 410;
         throw Object.assign(new Error('The document could not be loaded.'), { code: response.status === 410 ? 'DOCUMENT_PURGED' : unavailable ? 'VERIFICATION_OBJECT_UNAVAILABLE' : 'RENDER_FAILED' });
