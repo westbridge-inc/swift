@@ -1,8 +1,10 @@
 'use client';
 
 import CartSkeleton from './loading';
+import { useOrderingContext } from '@/components/ordering-context';
+import { useGuestBasket } from '@/lib/basket-state';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -36,6 +38,7 @@ import {
 } from '@/lib/customer';
 import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { ApiRequestError } from '@/lib/auth';
+import { photo } from '@/lib/media';
 import {
   cartPaymentOptions,
   checkoutPaymentMethod,
@@ -47,8 +50,18 @@ import {
 import styles from './cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
+const GuestCart = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestCart })));
 
 export default function CartPage() {
+  const { status } = useCustomerSession();
+  const basket = useGuestBasket();
+  if (status === 'checking' || !basket.loaded) return <CartSkeleton />;
+  if (status !== 'signed-in' || basket.lines.length) return <Suspense fallback={<CartSkeleton />}><GuestCart /></Suspense>;
+  return <SignedInCart />;
+}
+
+function SignedInCart() {
+  const { mode: orderingMode } = useOrderingContext();
   const router = useRouter();
   // [WEB-REDESIGN] Every fresh read of the cart also updates the count the
   // rail and the dock show, so the badge never disagrees with this page.
@@ -314,6 +327,7 @@ export default function CartPage() {
   }
 
   async function placeOrder() {
+    if (orderingMode === 'PICKUP') { setError('Pickup checkout is not available yet. Choose delivery to continue.'); return; }
     if (!cart?.items?.length || checkoutBusy.current || cartSafety !== 'safe' || !addrId || !meetsMinimum) return;
     checkoutBusy.current = true;
     setBusy(true); setError(null); setNoRiders(false);
@@ -353,10 +367,19 @@ export default function CartPage() {
         window.requestAnimationFrame(() => errorMessage.current?.focus());
         return;
       }
+      // [L09 · price lock] The total and line prices this page showed: the
+      // server refuses with PRICE_CHANGED (old → new) if the order would
+      // charge anything else, so a price changed since is never charged unseen.
+      const expectedLines = cart.items.flatMap((line) => {
+        const unitPrice = parseAmount(line.customerPrice);
+        return unitPrice === null ? [] : [{ lineId: line.id, unitPrice }];
+      });
       const body = {
         paymentMethod,
         tipAmount: tip,
         ...(liveCart.promoCode?.code ? { promoCode: liveCart.promoCode.code } : {}),
+        ...(total !== null ? { expectedTotal: total } : {}),
+        expectedLines,
       };
       const signature = checkoutAttemptSignature(liveCart, body);
       const storedAttempt = checkoutAttempt.current ?? readCheckoutAttempt();
@@ -481,7 +504,7 @@ export default function CartPage() {
           {cart.items.map((l) => (
             <article key={l.id} className={styles.itemCard}>
               <span className={styles.thumb}>
-                {l.imageUrl ? <Image src={l.imageUrl} alt="" fill unoptimized sizes="64px" loading="lazy" className="object-cover" /> : <Pictogram name="food" size={26} />}
+                {photo(l.imageUrl) ? <Image {...photo(l.imageUrl)!} alt="" fill sizes="64px" loading="lazy" className="object-cover" /> : <Pictogram name="food" size={26} />}
               </span>
               <div className={styles.itemCopy}>
                 <div className={styles.itemTop}>

@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
@@ -40,6 +41,7 @@ import {
 } from './signup-continuation';
 import { publicLaunchCountryFromPhone } from './launch-market';
 import { runWithoutTenant } from '../../plugins/tenant-context';
+import { accountBlockedError, isBlockedAccountStatus } from './account-blocked';
 import {
   clearPasswordFailures,
   isPasswordSignInLocked,
@@ -62,9 +64,9 @@ export type SignupRole = 'CUSTOMER' | 'MOVER' | 'VENDOR';
 
 /** What a one-time code was texted for. A code works only for its own purpose. */
 export type OtpPurpose = 'sign-in' | 'password-reset';
-/** [L04 · AUTH-2] Account states that may not start a session by any credential. */
-const BLOCKED_STATUSES: ReadonlySet<UserStatus> = new Set<UserStatus>(['SUSPENDED', 'BANNED', 'DEACTIVATED']);
-const accountSuspended = () => new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+// [L04 · AUTH-2] Suspended, banned and closed accounts may not start a session by
+// any credential. [NO-DEAD-ENDS] Each refusal names the state and the one door that
+// needs no session (account-blocked.ts); the 403 ACCOUNT_SUSPENDED contract is unchanged.
 /**
  * [L04 · MASTER-054] Compared against when there is no account or no password,
  * so every public password attempt costs one bcrypt comparison at the same
@@ -304,7 +306,7 @@ export class AuthService {
       `;
       const status = rows[0]?.status;
       if (!status) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
-      if (BLOCKED_STATUSES.has(status)) throw accountSuspended();
+      if (isBlockedAccountStatus(status)) throw accountBlockedError(status);
       const issued = await this.createSession(user.id, user.activeRole, deviceInfo, 'OTP', tx);
       await tx.user.update({
         where: { id: user.id },
@@ -523,6 +525,10 @@ export class AuthService {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
 
+      // This service remains authoritative if another caller is added later.
+      const authority = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenant: { select: { kind: true } } } });
+      if (authority.tenant.kind === 'REVIEW') throw new ReviewDemoCredentialRefusedError();
+
       const sessions = await tx.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
         SELECT "id", "expiresAt"
         FROM "sessions"
@@ -533,7 +539,7 @@ export class AuthService {
       if (!session || session.expiresAt <= new Date()) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
-      if (BLOCKED_STATUSES.has(user.status)) throw accountSuspended();
+      if (isBlockedAccountStatus(user.status)) throw accountBlockedError(user.status);
 
       await requireStepUp(this.app, { user: { userId }, authSessionId: sessionId }, { consume: true });
 
@@ -753,7 +759,7 @@ export class AuthService {
         return { kind: 'invalid' as const, countAsFailure: true as const };
       }
 
-      if (BLOCKED_STATUSES.has(locked.status)) throw accountSuspended();
+      if (isBlockedAccountStatus(locked.status)) throw accountBlockedError(locked.status);
 
       const accessToken = this.app.jwt.sign({
         userId: user.id,
@@ -808,9 +814,12 @@ export class AuthService {
 
     const candidate = await this.app.prisma.user.findUnique({
       where: { phone },
-      select: { id: true },
+      select: { id: true, tenant: { select: { kind: true } } },
     });
-    if (!candidate) {
+    // [REVIEW-PARTNER] A store-review demo login is shared: its password is
+    // never reset — answered exactly as for no account (no reset code is ever
+    // texted to a demo identifier; this holds even if one were stored).
+    if (!candidate || candidate.tenant.kind === 'REVIEW') {
       // Do NOT reveal account existence on password reset — return the same
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.
@@ -944,9 +953,7 @@ export class AuthService {
       }
 
       // SEC: a suspended/banned/deactivated account cannot rotate new tokens.
-      if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(user.status)) {
-        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
-      }
+      if (isBlockedAccountStatus(user.status)) throw accountBlockedError(user.status);
       if (
         requiresPrivilegedSessionAssurance(user.activeRole, user.roles)
         && !hasPrivilegedSessionAssurance(session.authMethod)

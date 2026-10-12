@@ -2557,7 +2557,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // audit, booking/search closure, stock, float, and mover release share one
     // transaction. This closes both the crash window and the stale riderId race
     // against a direct board assignment. Socket/push remain post-commit below.
-    await orderService.transitionOrderAtomically({
+    const cancellation = await orderService.transitionOrderAtomically({
       orderId: id,
       target: newStatus,
       allowedFrom,
@@ -2580,11 +2580,15 @@ export async function adminRoutes(app: FastifyInstance) {
       // able to leave a cancelled order with no record of it.
       ...(refund
         ? {
-          withinTransaction: async (tx: Prisma.TransactionClient) => {
+          // [M066] The amount owed is the total on the LOCKED row. The
+          // pre-read above is only for the status gate and the notices; an
+          // adjustment that commits between it and the lock must not leave a
+          // stale (smaller or larger) obligation on record.
+          withinTransaction: async (tx: Prisma.TransactionClient, lockedSource: { totalAmount: Prisma.Decimal }) => {
             await tx.order.update({
               where: { id },
               data: {
-                refundOwedAmount: order.totalAmount,
+                refundOwedAmount: lockedSource.totalAmount,
                 refundOwedAt: new Date(),
                 refundOwedById: request.user.userId,
               },
@@ -2637,7 +2641,8 @@ export async function adminRoutes(app: FastifyInstance) {
       data: {
         orderId: id,
         status: newStatus,
-        refundOwed: refund ? String(order.totalAmount) : null,
+        // [M066] Echo the obligation exactly as it was committed.
+        refundOwed: refund ? String(cancellation.order.refundOwedAmount) : null,
       },
     };
   });
@@ -5550,12 +5555,19 @@ export async function adminRoutes(app: FastifyInstance) {
     // and the record of who made it commit together. `E.returnRequest` is
     // declared, so the subject comes from the params.
     const updated = await tenantPrisma.$transaction(async (tx) => {
-      const row = await mutationOrNotFound('ReturnRequest', id, () => tx.returnRequest.update({
-        where: { id },
+      // The pre-read above is a fast refusal, not the guard: two admins can
+      // both read REQUESTED. Only the writer that still sees REQUESTED decides
+      // and audits; the other gets 409 and writes nothing, so a refusal can
+      // never overwrite an owed refund (or the reverse).
+      const changed = await tx.returnRequest.updateMany({
+        where: { id, status: 'REQUESTED' },
         data: { status: body.status, resolutionNote: body.note, reviewedBy: request.user.userId, reviewedAt: new Date() },
-      }));
+      });
+      if (changed.count !== 1) {
+        throw new AppError(409, 'ALREADY_RESOLVED', 'This return was resolved by someone else a moment ago. Refresh to see the decision.');
+      }
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-      return row;
+      return tx.returnRequest.findUniqueOrThrow({ where: { id } });
     });
     if (body.status === 'REFUND_DUE') returnRefundCounter.labels('owed').inc();
     return { success: true, data: updated };
@@ -6205,7 +6217,14 @@ export async function adminRoutes(app: FastifyInstance) {
     if (refusal) throw new AppError(409, 'REPLAY_NOT_CERTIFIED', refusal, { jobName: job.name, ...recoveryFor(job.name) });
     await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, async () => {
       try {
-        await job.retry();
+        // [Item 63] The operator authorizes ONE fresh execution: reset the
+        // started-run counter the automatic-replay guard reads. A certified
+        // class keeps its attempt history (attemptsMade) visible; an
+        // uncertified one (RECONCILE_FIRST) starts both counters again, so a
+        // worker dying during THIS run is a prior start the guard refuses —
+        // the one replay can never become two.
+        const certified = recoveryFor(job.name).policy === 'SAFE_REPLAY';
+        await job.retry('failed', { resetAttemptsStarted: true, ...(certified ? {} : { resetAttemptsMade: true }) });
       } catch (err) {
         // BullMQ's reprocess refused: the job is no longer in the failed set
         // (a Discard claimed it, or another Retry already moved it).

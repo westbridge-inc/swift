@@ -4,7 +4,7 @@
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
 import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
-import { formatAmount } from './money';
+import { formatAmount, parseAmount } from './money';
 import type { StorefrontDetail } from './api';
 import { retailCategories } from './browse-keys';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
@@ -110,7 +110,7 @@ export interface VendorDetail extends Vendor {
   description?: string;
   categories: Array<{ id: string; name: string; items: MenuItem[] }>;
 }
-export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptionNames?: string[]; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
+export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptions?: Record<string, string | string[]> | null; selectedOptionNames?: string[]; specialInstructions?: string | null; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
 export interface Cart {
   items: CartLine[];
   subtotal?: number;
@@ -315,7 +315,29 @@ export type CheckoutBody = {
   fulfillmentSelections?: Record<string, string>;
   promoCode?: string;
   appointments?: Array<{ itemId: string; slotStart: string; mode?: string }>;
+  /** [L09 · price lock] The total and line prices the customer saw. */
+  expectedTotal?: number;
+  expectedLines?: Array<{ lineId: string; unitPrice: number }>;
 };
+
+/**
+ * [L09 · price lock] What the customer saw, sent with Place order: the quote's
+ * total and each line's unit price, exactly as the server quote on screen
+ * priced them. The server refuses with PRICE_CHANGED (old → new) on any
+ * difference, so a price changed after the customer last looked is never
+ * charged unseen. Nothing is sent when the quote has no total it can stand
+ * behind (the same rule as the phone's).
+ */
+export function pricesAsSeen(cart: Pick<Cart, 'totalAmount' | 'items'> | null | undefined):
+  Pick<CheckoutBody, 'expectedTotal' | 'expectedLines'> {
+  const total = parseAmount(cart?.totalAmount);
+  if (!cart || total === null) return {};
+  const expectedLines = (cart.items ?? []).flatMap((line) => {
+    const unitPrice = parseAmount(line.customerPrice);
+    return typeof line.id === 'string' && unitPrice !== null ? [{ lineId: line.id, unitPrice }] : [];
+  });
+  return { expectedTotal: total, expectedLines };
+}
 
 export type CheckoutAttempt = { signature: string; key: string };
 const CHECKOUT_ATTEMPT_STORAGE_PREFIX = 'swift_web_checkout_attempt';
@@ -429,7 +451,7 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
  * [WEB-REDESIGN] Customer prices read the way the phone app writes them
  * (apps/mobile/src/lib/money.ts): `$2,500`. Every price on Swift is in Guyana
  * dollars, which the footer states on every page ("Prices in GYD"); the
- * partner consoles keep their `GY$` (lib/money.ts formatMoney). Unparseable
+ * partner consoles print the same `$` (lib/money.ts formatMoney). Unparseable
  * money is still the em-dash, never a zero.
  */
 export const money = (n: unknown) => formatAmount(n, '$');

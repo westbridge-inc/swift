@@ -23,7 +23,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { resolveConfirmationInTx, ACTIVE_CONFIRMATION_STATES, hasConfirmationInTx, readDunningClock } from '../modules/billing/dunning-clock';
 import { readFeePaymentDecision } from '../modules/billing/fee-payment-authority';
 import { confirmationReviewQueue, resolveFinanceConfirmation } from '../modules/billing/confirmation-finance';
-import { CARD_ON_FILE_CONSENT_VERSION, CARD_SANDBOX_TEST_LABEL, CardRailService } from '../modules/billing/card-rail.service';
+import { CARD_ON_FILE_CONSENT_VERSION, CARD_SANDBOX_TEST_LABEL, CardRailService, type CardConfirmResult } from '../modules/billing/card-rail.service';
 import { CARD_CHECKOUT_PLATFORMS_KEY, resetCardCheckoutSwitchCache } from '../modules/billing/card-pay-action';
 import {
   CARD_APP_RETURN_LINK,
@@ -946,8 +946,16 @@ describe('[review S3 · S4] the return page: two ways back, and a time limit on 
     await slowApp.register(socketPlugin);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    // Every late answer the return started, held so the test waits for ALL of it. Booking the week and
+    // marking the session SUCCEEDED are two separate writes, so a booked week alone is not the end of the
+    // answer: reading the session as soon as the booking showed raced the second write (CI read OPEN).
+    const late: Array<Promise<CardConfirmResult>> = [];
     const slowService = Object.create(runtime.service) as CardRailService;
-    slowService.confirm = async (id, opts) => { await gate; return runtime.service.confirm(id, opts); };
+    slowService.confirm = (id, opts) => {
+      const answer = (async () => { await gate; return runtime.service.confirm(id, opts); })();
+      late.push(answer);
+      return answer;
+    };
     slowApp.decorate(CARD_RAIL_RUNTIME_DECORATION, { ...runtime, service: slowService });
     await slowApp.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card', confirmWaitMs: 50 });
     await slowApp.ready();
@@ -960,14 +968,17 @@ describe('[review S3 · S4] the return page: two ways back, and a time limit on 
       expect(Date.now() - started).toBeLessThan(5_000);
       expect(pageState(res.body)).toBe('PENDING');
       expect((await money(p.subId)).successes).toBe(0);
+      expect(late).toHaveLength(1);
       release();
-      const sessionStatus = async () => (await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status;
-      // The week is booked, then the session row is marked: wait (bounded) for both.
-      for (let i = 0; i < 50 && ((await money(p.subId)).successes === 0 || (await sessionStatus()) !== 'SUCCEEDED'); i += 1) await new Promise((r) => setTimeout(r, 100));
+      expect((await late[0]!).status).toBe('SUCCEEDED');
       expect((await money(p.subId)).successes).toBe(1);
       expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('SUCCEEDED');
     } finally {
       release();
+      // Never close while a late answer is still writing: closing this app disconnects the one Prisma
+      // client of this process, which the rest of this file shares. A query cut off that way left the
+      // client unusable ("Engine is not yet connected") for every later test, hook and cleanup here.
+      await Promise.allSettled(late);
       await slowApp.close();
     }
   });
