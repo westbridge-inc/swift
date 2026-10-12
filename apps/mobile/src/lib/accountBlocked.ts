@@ -10,7 +10,10 @@
  *
  * Kept free of React Native imports so it is unit-testable.
  */
-export const SWIFT_SUPPORT_EMAIL = 'support@swiftgy.com';
+import { SUPPORT_CONTACT } from './supportContact';
+
+/** The inbox Contact Us shows: read from the one support-contact source, never written here. */
+export const SWIFT_SUPPORT_EMAIL = SUPPORT_CONTACT.email;
 
 export type BlockedAccountStatus = 'SUSPENDED' | 'BANNED' | 'DEACTIVATED';
 
