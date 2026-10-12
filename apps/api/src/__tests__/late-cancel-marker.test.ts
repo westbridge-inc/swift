@@ -364,3 +364,31 @@ describe('freeCancellationExpiresAt — the countdown never expires before the w
     expect(freeCancellationExpiresAt({ ...base, scheduledFor: inMinutes(60 * 34), status: 'PREPARING' })).toBeNull();
   });
 });
+
+describe('[Item 64] a mover search that found nobody is part of the ONE predicate', () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
+  // A prepared food order well past the window: chargeable on every other branch.
+  const prepared = {
+    status: 'READY_FOR_PICKUP', orderType: 'FOOD_DELIVERY', placedAt: minutesAgo(30),
+    holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
+    scheduledFor: null as Date | null,
+  };
+
+  it('free while nobody holds the job; the fact is read by the caller, never assumed', () => {
+    expect(isFreeCancellation({ ...prepared })).toBe(false);
+    expect(isFreeCancellation({ ...prepared, noMoverFound: false })).toBe(false);
+    expect(isFreeCancellation({ ...prepared, noMoverFound: true })).toBe(true);
+  });
+
+  it('a mover holding the job ends it, whatever the search said', () => {
+    expect(isFreeCancellation({ ...prepared, noMoverFound: true, riderId: 'r1' })).toBe(false);
+    expect(isFreeCancellation({ ...prepared, noMoverFound: true, driverId: 'd1' })).toBe(false);
+  });
+
+  it('open-ended: free until a mover takes it, so no countdown is promised', () => {
+    expect(freeCancellationExpiresAt({ ...prepared, noMoverFound: true })).toBeNull();
+    // Even inside the ordinary window, the no-mover reason has no end to count down to.
+    expect(freeCancellationExpiresAt({ ...prepared, status: 'PENDING', placedAt: minutesAgo(1), noMoverFound: true })).toBeNull();
+  });
+});
+
