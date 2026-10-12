@@ -238,7 +238,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
                 value={mmgRef}
                 onChangeText={setMmgRef}
                 autoCapitalize="characters"
-                placeholder="From the message in your wallet"
+                placeholder="From MMG’s payment message"
                 style={{ marginTop: space.sm }}
               />
               <PillButton

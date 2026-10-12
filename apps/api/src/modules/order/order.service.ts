@@ -373,7 +373,7 @@ export function assertMmgFulfilmentAllowed(
     throw new AppError(
       409,
       'MMG_PAYMENT_PENDING',
-      'This MMG order can move only after the store confirms the payment landed in its MMG wallet.',
+      'This MMG order can move only after the store confirms the payment landed in its MMG account.',
     );
   }
 }
