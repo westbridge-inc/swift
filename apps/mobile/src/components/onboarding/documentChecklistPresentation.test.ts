@@ -55,7 +55,8 @@ describe('a document waiting for review', () => {
     expect(card).toMatch(/<Pressable disabled=\{approved \|\| upload\.isPending\} onPress=\{pending \? confirmReplace : pick\}>/);
     expect(card).toMatch(/Replace this document\?/);
     const list = readFileSync(join(process.cwd(), 'src/components/onboarding/DocumentChecklist.tsx'), 'utf8');
-    expect(list).toMatch(/replaced=\{doc\?\.replaced === true\}/);
+    // Required AND optional documents both say "Replaced — waiting for review" (a police clearance can be replaced too).
+    expect(list.match(/replaced=\{doc\?\.replaced === true\}/g)).toHaveLength(2);
   });
 });
 

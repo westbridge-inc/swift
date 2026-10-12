@@ -161,6 +161,7 @@ export function DocumentChecklist({
                 expiresAt={doc?.status === 'APPROVED' ? doc?.expiresAt : null}
                 submittedAt={doc?.createdAt ?? null}
                 reviewNote={doc?.reviewNote ?? null}
+                replaced={doc?.replaced === true}
                 faceMatched={faceMatched.has(docType)}
                 optionalHint={optionalDocHint(docType)}
               />
