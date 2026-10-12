@@ -952,8 +952,18 @@ Before the API ever starts, the weekly-fee confirmation cutover must report
 READY: apps/api/BILLING-CONFIRMATION-CUTOVER.md, step 3 (the versioned
 backfill) and step 4 (the check). Until then billing stays BLOCKED: no
 collection, no fee demand, no suspension. The backfill runs with tsx, which
-the runtime image does not carry; run it in the build-stage container the
-seed uses (section 6), never on a host install.
+the runtime image does not carry, so it runs in the seed's build-stage
+container (section 6), never on a host install, through its own script:
+
+    ./deploy/billing-cutover.sh "$APPROVED_SHA" 20260930180000-v1
+
+It makes the seed's refusals (the exact clean SHA on origin/main, one plain
+deploy/.env, nothing exported, this host's Docker, NODE_ENV=production on
+production), refuses while the API or worker runs, reads the database name
+and deployment from the database itself (its deployment_identity row must say
+this host's PILOT_ENV), runs step 3, and reads step 4 back: it ends with
+`BILLING CUTOVER READY …`, or fails naming the state and the missing count.
+It is restartable: an interrupted run leaves BLOCKED and is run again.
 
 Back up and rehearse the restore (sections 4 and 5, with `--compare-source`:
 in schemas public and swift_qr it compares every table's row count and

@@ -800,6 +800,146 @@ describe('[PROD-PATH] seed-production.sh: the host and the database must agree',
   });
 });
 
+// ── billing-cutover.sh ──────────────────────────────────────────────────────
+// #1448 review (Opus S3-3): the weekly-fee confirmation cutover backfill
+// (apps/api/BILLING-CONFIRMATION-CUTOVER.md steps 3 and 4) ran as an inline
+// override of the seed container's command, skipping every check the seed
+// makes. It is a reviewed script now: the seed's refusals, the API and worker
+// stopped, the database and deployment read from the database itself (never
+// typed), the exact SHA, then the backfill in the seed's build-stage image and
+// the READY check read back.
+const CUTOVER_VERSION = '20260930180000-v1';
+function runCutover(settings: Record<string, string>, env: Record<string, string> = {}, args: string[] = [SHA, CUTOVER_VERSION]) {
+  const here = join(tmp, 'repo', 'deploy');
+  mkdirSync(here, { recursive: true });
+  for (const f of ['billing-cutover.sh', 'docker-compose.seed.yml', 'docker-compose.yml']) copyFileSync(join(DEPLOY, f), join(here, f));
+  writeFileSync(join(here, '.env'), Object.entries(settings).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
+  shim('docker', [
+    'line="$*"',
+    'echo "docker $line" >> "$CALL_LOG"',
+    'case "$line" in "context show") echo "${DOCKER_CURRENT_CONTEXT:-default}"; exit 0;; esac',
+    'case "$line" in *" ps -q api"|*" ps -q worker") [ "${PS_FAIL:-0}" = 1 ] && exit 1; [ "${API_STOPPED:-1}" = 1 ] || echo "${line##* }-id"; exit 0;; esac',
+    'case "$line" in *"exec -T postgres"*) sql="$(cat)"; echo "sql: $sql" >> "$CALL_LOG"',
+    '  case "$sql" in *deployment_identity*) echo "$IDENTITY_ROW";; *billing_confirmation_missing_coverage*) echo "$CHECK_ROW";; esac; exit 0;; esac',
+    'case "$line" in *"run --rm --no-TTY seed"*) exit "${RUN_STATUS:-0}";; esac',
+    'exit 0',
+  ].join('\n'));
+  const res = spawnSync('bash', [join(here, 'billing-cutover.sh'), ...args], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: {
+      PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`,
+      CALL_LOG: log, GIT_HEAD: SHA,
+      IDENTITY_ROW: '1:production:swift-production:swift', CHECK_ROW: 'READY:0',
+      ...env,
+    },
+  });
+  return { ...res, calls: calls() };
+}
+const PROD_CUTOVER = { PILOT_ENV: 'production', NODE_ENV: 'production', OPS_ONCALL_PHONES: '+5926000001' };
+const ranBackfill = (lines: string[]) => lines.filter((l) => l.includes('run --rm --no-TTY seed'));
+
+describe('[PROD-PATH · #1448 review] billing-cutover.sh: the backfill through a reviewed script', () => {
+  it('production: checks first, builds the seed image of the exact SHA, runs the versioned backfill against the database and deployment the database names, and reads READY back', () => {
+    const r = runCutover(PROD_CUTOVER);
+    expect(r.status, r.stderr).toBe(0);
+    const runs = ranBackfill(r.calls);
+    expect(runs).toHaveLength(1);
+    // The target is what the database said, never typed; the version is the operator's.
+    expect(runs[0]).toContain('src/scripts/backfill-billing-confirmation.ts');
+    expect(runs[0]!.endsWith(` swift swift-production ${CUTOVER_VERSION}`)).toBe(true);
+    const at = (fragment: string) => indexOf(r.calls, fragment);
+    expect(at('ps -q api')).toBeGreaterThan(-1);
+    expect(at('ps -q worker')).toBeGreaterThan(-1);
+    expect(at('sql: SELECT count(*)')).toBeGreaterThan(Math.max(at('ps -q api'), at('ps -q worker')));
+    expect(at('git fetch origin main')).toBeGreaterThan(at('sql: SELECT count(*)'));
+    expect(at('build seed')).toBeGreaterThan(at('git fetch origin main'));
+    expect(at('run --rm --no-TTY seed')).toBeGreaterThan(at('build seed'));
+    expect(at('billing_confirmation_missing_coverage')).toBeGreaterThan(at('run --rm --no-TTY seed'));
+    expect(r.stdout).toContain(`BILLING CUTOVER READY at exact SHA ${SHA}`);
+    // Settings are read by name; deploy/.env is never printed.
+    expect(r.stdout + r.stderr).not.toContain('+5926000001');
+  });
+
+  it.each([
+    ['the API', { API_STOPPED: '0' }, 'refuses while the api or worker is running'],
+    ['no answer from Docker', { PS_FAIL: '1' }, 'could not ask Docker whether'],
+  ])('refuses with %s before the database is read or anything is built', (_label, env, message) => {
+    const r = runCutover(PROD_CUTOVER, env);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(message);
+    expect(r.calls.filter((l) => /sql:|build seed|run --rm/.test(l))).toEqual([]);
+  });
+
+  it.each([
+    ['0: : : ', 'deployment_identity'],
+    ['1:staging:swift-staging:swift', 'is not production'],
+    ['1:production: :swift', 'deployment id'],
+    ['1:production:swift production:swift', 'deployment id'],
+    ['1:production:swift-production:sw;ift', 'database name'],
+  ])('refuses the database row %j before the checkout or a build', (row, message) => {
+    const r = runCutover(PROD_CUTOVER, { IDENTITY_ROW: row });
+    expect(r.status, row).not.toBe(0);
+    expect(r.stderr).toContain(message);
+    expect(r.calls.filter((l) => /git fetch|build seed|run --rm/.test(l))).toEqual([]);
+  });
+
+  it('a staging host runs it only against a database that says staging', () => {
+    const r = runCutover({ PILOT_ENV: 'staging', NODE_ENV: 'development' }, { IDENTITY_ROW: '1:staging:swift-staging:swift' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(ranBackfill(r.calls)[0]!.endsWith(` swift swift-staging ${CUTOVER_VERSION}`)).toBe(true);
+  });
+
+  it.each([
+    [[SHA], 'cutover version'],
+    [[SHA, 'v1'], 'cutover version'],
+    [['abc', CUTOVER_VERSION], '40-character'],
+  ])('refuses the arguments %j before anything runs', (args, message) => {
+    const r = runCutover(PROD_CUTOVER, {}, args);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(message);
+    expect(r.calls).toEqual([]);
+  });
+
+  it.each([
+    [{ ...PROD_CUTOVER, NODE_ENV: 'development' }, {}, 'NODE_ENV=production'],
+    [PROD_CUTOVER, { NODE_ENV: 'production' }, 'NODE_ENV is set in this shell'],
+    [PROD_CUTOVER, { DOCKER_HOST: 'tcp://elsewhere' }, 'DOCKER_HOST is set in this shell'],
+    [{ ...PROD_CUTOVER, PILOT_ENV: 'Production' }, {}, 'PILOT_ENV must be staging or production'],
+  ])('keeps the seed\'s host refusals (%#), before Docker is asked anything', (settings, env, message) => {
+    const r = runCutover(settings, env);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(message);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('refuses a persisted remote Docker context on production', () => {
+    const r = runCutover(PROD_CUTOVER, { DOCKER_CURRENT_CONTEXT: 'remote-box' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("docker's current context is not this host's own daemon");
+    expect(r.calls).toEqual(['docker context show']);
+  });
+
+  it.each([
+    ['BLOCKED:3', 'BLOCKED with 3'],
+    ['READY:2', 'READY with 2'],
+    ['MISSING:0', 'MISSING with 0'],
+    ['', 'could not read'],
+  ])('fails unless the check reads READY with no missing coverage (%j)', (row, message) => {
+    const r = runCutover(PROD_CUTOVER, { CHECK_ROW: row });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(message);
+    expect(r.stdout).not.toContain('BILLING CUTOVER READY');
+  });
+
+  it('a backfill that fails is a failure, and READY is not claimed', () => {
+    const r = runCutover(PROD_CUTOVER, { RUN_STATUS: '1' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('the backfill did not complete');
+    expect(r.stdout).not.toContain('BILLING CUTOVER READY');
+  });
+});
+
 // ── restore.sh --compare-source, against REAL databases ────────────────────
 // The compare SQL runs for real on the test cluster: a source database with
 // RLS, a policy, a trigger, a function, a grant, a sequence and the swift_qr
