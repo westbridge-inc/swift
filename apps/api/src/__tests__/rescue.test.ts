@@ -30,7 +30,7 @@ import { recordDecision } from '../modules/algo/decisions';
 import { ConflictError } from '../utils/errors';
 import {
   foodAge, foodAgeLimitMinutes, retireTooOldOrder, settleTooOldOrder, sweepFoodAge, releaseFoodAgeHold, grantRescueIncentive, rescueIncentiveGyd, incentiveKey, isCapturedMmg, SWEEP_PAGE,
-  FOOD_TOO_OLD_REASON, FOOD_TOO_OLD_PAID_HELD_OUTCOME,
+  FOOD_TOO_OLD_REASON, FOOD_TOO_OLD_PAID_HELD_OUTCOME, RESCUE_SWEEPS, RESCUE_NOTICE_KIND,
 } from '../modules/dispatch/rescue';
 import { ALGO_DEFAULTS, invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { explainEarning } from '../utils/explain-earning';
@@ -83,7 +83,8 @@ async function purge() {
   for (const o of oids) await app.redis.del(...dispatchKeys(o), `ops_page:food_too_old:${o}`, `ops_page:food_too_old_paid:${o}`);
   await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-06', subjectId: { in: [...oids, ...riders.map((r) => r.id)] } } });
   await app.prisma.earning.deleteMany({ where: { orderId: { in: oids } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: oids } } });
+  await app.prisma.notification.deleteMany({ where: { OR: [{ userId: { in: ids } }, { dedupeKey: { in: oids.map((o) => `food-too-old:ops:${o}`) } }] } });
   await app.prisma.order.deleteMany({ where: { id: { in: oids } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
   const vos = await app.prisma.vendorOwner.findMany({ where: { userId: { in: ids } }, select: { id: true } });
@@ -269,7 +270,11 @@ describe('[ALG-06 ②] the cutoff inside dispatch', () => {
 
     // The cascade's keys are gone; no offer was ever made.
     for (const k of dispatchKeys(order.id)) expect(await app.redis.exists(k)).toBe(0);
-    expect(await app.redis.get(`ops_page:food_too_old:${order.id}`)).toBe('1');
+    // Ops: paged once — this suite's operator holds the page on its own key,
+    // and the cutoff's durable obligation is closed, nothing left owed.
+    const admin = await app.prisma.user.findFirstOrThrow({ where: { phone: `${PHONE_PREFIX}92` }, select: { id: true } });
+    expect(await app.prisma.notification.count({ where: { userId: admin.id, dedupeKey: `food-too-old:ops:${order.id}` } })).toBe(1);
+    expect(await app.prisma.orderOutbox.count({ where: { orderId: order.id, kind: RESCUE_NOTICE_KIND, processedAt: null } })).toBe(0);
   });
 
   it('an MMG order tells the customer the store refunds — Swift never holds their money', async () => {
@@ -401,6 +406,7 @@ describe('[TA-S0-001] paid MMG money is never cancelled by the system', () => {
     // Ops: paged once on the paid-hold key, never on the cancel key.
     expect(await app.redis.get(`ops_page:food_too_old_paid:${order.id}`)).toBe('1');
     expect(await app.redis.exists(`ops_page:food_too_old:${order.id}`)).toBe(0);
+    expect(await app.prisma.notification.count({ where: { dedupeKey: `food-too-old:ops:${order.id}` } })).toBe(0);
   });
 
   it('the sweep holds it too, and holding is idempotent: a second tick writes no second row, page or notice', async () => {
@@ -599,16 +605,18 @@ describe('[TA-S0-001 hold v3 — the review of #991] a two-way door with a durab
     try {
       // Other cases in this file leave holds behind too, so the walk is driven
       // until the cursor wraps: every hold in the set has been visited once.
-      await app.redis.del('rescue:cursor:holds');
+      // (The cursor is the durable sweep_cursors row; null = the pass is done.)
+      const passInFlight = async () => (await app.prisma.sweepCursor.findUnique({ where: { workType: RESCUE_SWEEPS.holds } }))?.cursorId != null;
+      await app.prisma.sweepCursor.deleteMany({ where: { workType: RESCUE_SWEEPS.holds } });
       let ticks = 0;
       do {
         await sweepFoodAge(deps());
         ticks += 1;
-      } while ((await app.redis.exists('rescue:cursor:holds')) === 1 && ticks < 60);
+      } while ((await passInFlight()) && ticks < 60);
       expect(ticks).toBeGreaterThan(2); // the page really was smaller than the set
     } finally {
       SWEEP_PAGE.holds = saved;
-      await app.redis.del('rescue:cursor:holds');
+      await app.prisma.sweepCursor.deleteMany({ where: { workType: RESCUE_SWEEPS.holds } });
     }
     for (const id of ids) {
       expect(await app.prisma.notification.count({ where: { userId: customerId, dedupeKey: `food-too-old-paid:customer:${id}` } })).toBe(1);

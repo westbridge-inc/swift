@@ -93,7 +93,8 @@ describe('[Q7b] / is the ordering home', () => {
     expect(bowl.textContent).toMatch(/\$1,800/);
     expect(bowl.textContent).not.toMatch(/GY\$/);
     const open = screen.getByRole('region', { name: 'Open now' });
-    expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/order/vendor/v1');
+    // [W6] A store card opens the store's one page, by its name.
+    expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/store/shanta-kitchen');
     expect(within(screen.getByRole('region', { name: 'Closed now' })).getByText('Late Night Roti')).toBeTruthy();
     expect(homeRequests()).toHaveLength(1);
   });
