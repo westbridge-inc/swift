@@ -44,6 +44,8 @@ async function customerHost(rows: Row[]) {
     user: { findUnique: async () => ({ countryCode: 'GY' }) },
     countryConfig: { findUnique: async () => null },
     rating: { findMany: async () => [] },
+    // [Item 64] The dispatch journal holds no exhausted search for these fixtures.
+    dispatchSearch: { findFirst: async () => null },
   });
   const redis = recordingRedis();
   const host = await hostRoutes(customerRoutes, { prisma, redis, io: recordingIo() });
