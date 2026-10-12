@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -161,4 +161,21 @@ describe('guest basket upload', () => {
     expect(await quantity(c.id)).toBe(0);
   });
 
+  // [L08 scheduled orders off] Every cart ingress refuses a schedule while the
+  // switch is off, before its schema could strip the field and apply the rest.
+  describe('a basket upload that asks for a later time', () => {
+    afterEach(() => vi.unstubAllEnvs());
+    it.each([undefined, 'false', '1'])('switch %s: refused before any cart change or replay receipt; the key stays usable', async (setting) => {
+      vi.stubEnv('SCHEDULED_ORDERS_ENABLED', setting);
+      const c = await customer(); const key = nanoid(24);
+      const res = await merge(c.token, [line()], key, { scheduledFor: new Date(Date.now() + 2 * 86_400_000).toISOString() });
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('SCHEDULED_ORDERS_UNAVAILABLE');
+      expect(await quantity(c.id)).toBe(0);
+      expect(await app.prisma.cartMergeReceipt.count({ where: { userId: c.id } })).toBe(0);
+      const plain = await merge(c.token, [line()], key);
+      expect(plain.statusCode, plain.body).toBe(200);
+      expect(await quantity(c.id)).toBe(2);
+    });
+  });
 });

@@ -1,4 +1,5 @@
 import { assertMoverPushReady } from '../notification/mover-push-authority';
+import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
@@ -1054,7 +1055,7 @@ export async function riderRoutes(app: FastifyInstance) {
       orderTypes.push('COURIER');
     }
 
-    const orders = await app.prisma.order.findMany({
+    const candidates = await app.prisma.order.findMany({
       where: {
         customerId: { not: request.user.userId },
         status: { in: ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'] },
@@ -1093,6 +1094,8 @@ export async function riderRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
+
+    const orders = await safeBoardOrders(app.prisma, candidates, request.user.userId, 'RIDER');
 
     // §4d trust badge: WHO the rider would front cash for — trust level,
     // completed orders, strikes. One batch (3 queries), never per-row.

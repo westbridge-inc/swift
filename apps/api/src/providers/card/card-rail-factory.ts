@@ -2,6 +2,7 @@ import type Redis from 'ioredis';
 import { isProduction } from '../../utils/runtime-mode';
 import type { CardRailProvider } from './card-provider';
 import { SIMULATOR_PROVIDER, SimulatorCardRailProvider } from './simulator-provider';
+import { POWERTRANZ_PROVIDER, PowerTranzCardRailProvider, powerTranzConfigFromEnv } from './powertranz-provider';
 
 /** A provider account label: Swift's own short name for a merchant account.
  *  Never the merchant number, never a credential (the same shape the
@@ -14,12 +15,16 @@ export const CARD_RAIL_ACCOUNT_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
  * (a session, an instrument charge, a v2 reconciliation) ever asks for it, so
  * a process with the flag off never needs it configured.
  *
- *   CARD_RAIL_PROVIDER     simulator (the only v2 provider in this build)
- *   CARD_RAIL_ENVIRONMENT  sandbox | live   (the simulator is sandbox only)
+ *   CARD_RAIL_PROVIDER     simulator (Swift's test page; never production) |
+ *                          powertranz (real cards, PT-4: powertranz-provider.ts)
+ *   CARD_RAIL_ENVIRONMENT  sandbox | live   (the simulator is sandbox only;
+ *                          production takes live only)
  *   CARD_RAIL_ACCOUNT      the merchant-account label tokens are bound to
  *   API_PUBLIC_URL         the public origin the hosted pages are served from
+ *   POWERTRANZ_*           the real provider's settings and secrets
+ *                          (powerTranzConfigFromEnv names each one)
  *
- * The simulator keeps its state in Redis so the API and the worker share it;
+ * Both keep their per-page state in Redis so the API and the worker share it;
  * the caller passes its own connection (app.redis, or the worker's).
  */
 export function getCardRailProvider(
@@ -47,5 +52,8 @@ export function getCardRailProvider(
     }
     return new SimulatorCardRailProvider(deps.redis, { account, publicBaseUrl: env['API_PUBLIC_URL'] ?? '' }, env);
   }
-  throw new Error(`Unknown CARD_RAIL_PROVIDER: ${provider}. This build has one card rail v2 provider, the simulator; a real processor is added from its own documentation.`);
+  if (provider === POWERTRANZ_PROVIDER) {
+    return new PowerTranzCardRailProvider(deps.redis, powerTranzConfigFromEnv(env));
+  }
+  throw new Error(`Unknown CARD_RAIL_PROVIDER: ${provider}. The card rail v2 providers are simulator and powertranz.`);
 }
