@@ -457,28 +457,35 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     });
   }
 
-  it('a board grab with a lower fare refuses on captured MMG — assignment and price untouched', async () => {
+  // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the price.
+  // An older app's slider may still send a fare: the server ignores it and
+  // never errors the mover out — the order is taken at its checkout price.
+  // (Was: a lower fare on a captured MMG order was refused MMG_PRICE_LOCKED.)
+  it('a board grab carrying an older app\u2019s lower fare on captured MMG assigns at the checkout price — the fare is ignored, never an error', async () => {
     await riderOnline();
     const order = await makeMmgOrder('READY_FOR_PICKUP', { paymentStatus: 'CAPTURED', withRider: false });
     const res = await inject('POST', `/api/v1/rider/orders/${order.id}/accept`, rider.token, { fare: 100 });
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error?.code ?? res.json().code).toBe('MMG_PRICE_LOCKED');
+    expect(res.statusCode).toBe(200);
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(fresh.riderId).toBeNull();
+    expect(fresh.riderId).toBe(riderId);
     expect(Number(fresh.deliveryFee)).toBe(300);
     expect(Number(fresh.totalAmount)).toBe(1500);
+    await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
   });
 
-  it('the persistence seam itself refuses a repricing attempt on MMG (defense in depth)', async () => {
+  it('the persistence seam takes no price at all: a stray fee from any caller never reprices (defense in depth)', async () => {
+    await riderOnline();
     const order = await makeMmgOrder('ACCEPTED', { paymentStatus: 'CAPTURED', withRider: false });
-    await expect(
-      app.prisma.$transaction((tx) => orders.stageDirectRiderAssignment(tx, {
-        orderId: order.id, riderId, changedBy: rider.userId, moverUserId: rider.userId, requestedFee: 100,
-      })),
-    ).rejects.toMatchObject({ code: 'MMG_PRICE_LOCKED' });
+    await app.prisma.$transaction((tx) => orders.stageDirectRiderAssignment(tx, {
+      orderId: order.id, riderId, changedBy: rider.userId, moverUserId: rider.userId, requestedFee: 100,
+    } as unknown as Parameters<OrderService['stageDirectRiderAssignment']>[1]));
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(fresh.riderId).toBeNull();
+    expect(fresh.riderId).toBe(riderId);
     expect(Number(fresh.deliveryFee)).toBe(300);
+    expect(Number(fresh.totalAmount)).toBe(1500);
+    await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
   });
 
   it('a market-fee board grab (no undercut) still assigns a captured MMG order', async () => {

@@ -140,3 +140,51 @@ export function billingBlocked(store: {
   if (source === 'BILLING') return true;
   return subscriptionBlocked;
 }
+
+/**
+ * [NO-DEAD-ENDS · owner, 6 Oct] Which hold, if any, keeps this store from
+ * working orders, so the screen names the real reason and the real door.
+ *
+ * The server writes three suspension sources (BILLING, ADMIN, WIND_DOWN) and
+ * a CLOSED status. The root used to test for a 'MODERATION' source the server
+ * never writes, so a store Swift suspended, or one whose owner's account was
+ * closed, fell through to the onboarding checklist ("selling unlocks the
+ * moment you're approved") with every document approved: no reason, no door.
+ *
+ *  - FEE_UNPAID: billing's hold (or a blocked subscription). Paying lifts it;
+ *    accepted orders are still finished (owner ruling, 1 Oct).
+ *  - Every other hold: payment does NOT lift it; only Swift support can.
+ */
+export type StoreHold = 'FEE_UNPAID' | 'SUSPENDED_BY_SWIFT' | 'OWNER_ACCOUNT_CLOSED' | 'SUSPENDED' | 'CLOSED';
+
+export function storeHoldOf(store: {
+  status?: unknown;
+  suspensionSource?: unknown;
+  subscription?: { status?: unknown } | null;
+} | null | undefined): StoreHold | null {
+  if (!store) return null;
+  const status = String(store.status ?? '').toUpperCase();
+  const source = store.suspensionSource == null ? null : String(store.suspensionSource).toUpperCase();
+  if (status === 'CLOSED') return 'CLOSED';
+  if (status === 'SUSPENDED') {
+    if (source === 'BILLING') return 'FEE_UNPAID';
+    if (source === 'ADMIN') return 'SUSPENDED_BY_SWIFT';
+    if (source === 'WIND_DOWN') return 'OWNER_ACCOUNT_CLOSED';
+    return 'SUSPENDED';
+  }
+  // A blocked subscription not (yet) mirrored onto an otherwise working store.
+  return billingBlocked(store) ? 'FEE_UNPAID' : null;
+}
+
+/** The order states a store can still finish under a fee hold: accepted and
+ *  not yet done (the server's IN_FLIGHT work). New orders wait to be declined. */
+const TERMINAL_ORDER = new Set(['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED']);
+const NEW_ORDER = new Set(['PENDING', 'PLACED']);
+export function heldStoreOrders(orders: unknown): { accepted: any[]; waiting: any[] } {
+  const list = Array.isArray(orders) ? orders : [];
+  const open = list.filter((o: any) => o && typeof o.id === 'string' && !TERMINAL_ORDER.has(String(o.status ?? '').toUpperCase()));
+  return {
+    accepted: open.filter((o: any) => !NEW_ORDER.has(String(o.status ?? '').toUpperCase())),
+    waiting: open.filter((o: any) => NEW_ORDER.has(String(o.status ?? '').toUpperCase())),
+  };
+}

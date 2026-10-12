@@ -28,6 +28,8 @@ async function customerHost(rows: Row[]) {
     rating: { findMany: async () => [] },
     // [AF-MOB-006] The order screen reads the order's custody recovery case.
     custodyRecoveryCase: { findFirst: async () => null },
+    // [Item 64] The cancel preview reads whether the mover search came back empty.
+    dispatchSearch: { findFirst: async () => null },
   });
   return hostRoutes(customerRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
 }
