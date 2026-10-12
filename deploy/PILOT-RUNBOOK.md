@@ -852,7 +852,8 @@ call: it builds whatever is checked out, with no pinned SHA and none of the
 checks below, and `nuke` deletes the data volumes. It refuses the same when
 deploy/.env sets NODE_ENV=production, in any spelling Compose reads, or when
 the shell exports either as production. pilot-up.sh then also refuses, each
-before anything changes:
+before the stack changes (the backup keys are read from the store after the
+checkout moves to the requested SHA; everything else before that):
 
 - any NODE_ENV but `production`;
 - a served name (API_HOST, API_ALIAS_HOST, WEB_HOST, WEB_ALIAS_HOSTS,

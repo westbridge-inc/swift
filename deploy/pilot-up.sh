@@ -21,7 +21,9 @@
 #       public); refused while Caddy is running.
 #
 # [PROD-PATH] PILOT_ENV=production adds production-only refusals, each before
-# anything changes: NODE_ENV must be production; no served name may be a
+# the stack changes (all but the backup-key check also before the checkout
+# moves; that one reads the store after the switch to the requested SHA, before
+# any store restart or Docker change): NODE_ENV must be production; no served name may be a
 # staging name; documents in object storage, never on this disk; the backup
 # keys in the store; no unfilled site details; and, for the whole stack, every
 # served name must already resolve to THIS host (Caddy obtains certificates

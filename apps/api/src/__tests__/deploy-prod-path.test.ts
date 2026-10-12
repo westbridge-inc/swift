@@ -300,6 +300,7 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
       const dataOnly = runPilot({ ...PRODUCTION, BILLING_TOPUP_HOLD: '0' }, { args, env: { DNS_MAP: '' } });
       expect(dataOnly.status).not.toBe(0);
       expect(dataOnly.stderr).toContain('PILOT_ENV=production needs BILLING_TOPUP_HOLD=1');
+      expect(changedNothing(dataOnly.calls)).toEqual([]);
     }
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, BILLING_TOPUP_HOLD: undefined });
@@ -312,13 +313,16 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
   it('production refuses the agent-cash (Swift Number) webhook secret, wired or written in, without echoing it; staging is not asked', () => {
     const secretValue = 'agentcash-'.padEnd(40, 'q');
     const withStore = [...STORE, 'AGENT_CASH_WEBHOOK_SECRET'].join(' ');
-    for (const wiring of [{ AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { AGENT_CASH_WEBHOOK_SECRET: secretValue }]) {
-      writeFileSync(log, '');
-      const r = runPilot({ ...PRODUCTION, ...wiring }, { env: { STORE_NAMES: withStore } });
-      expect(r.status).not.toBe(0);
-      expect(r.stderr).toContain('PILOT_ENV=production refuses the agent-cash webhook');
-      expect(r.stderr + r.stdout).not.toContain(secretValue);
-      expect(changedNothing(r.calls)).toEqual([]);
+    // #1448 review (Opus S4): every mode, the whole stack, --data-only and --no-public.
+    for (const args of [[SHA], ['--data-only', SHA], ['--no-public', SHA]]) {
+      for (const wiring of [{ AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { AGENT_CASH_WEBHOOK_SECRET: secretValue }]) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, ...wiring }, { args, env: { STORE_NAMES: withStore, ...(args.length > 1 ? { DNS_MAP: '' } : {}) } });
+        expect(r.status, args.join(' ')).not.toBe(0);
+        expect(r.stderr).toContain('PILOT_ENV=production refuses the agent-cash webhook');
+        expect(r.stderr + r.stdout).not.toContain(secretValue);
+        expect(changedNothing(r.calls)).toEqual([]);
+      }
     }
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
@@ -382,6 +386,21 @@ describe('[PROD-PATH · #1448 review] deploy.sh never deploys or deletes product
     const r = runDeploySh('update', STAGING, { [name]: 'production' });
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('deploy.sh update is refused on the production host');
+    expect(r.calls).toEqual([]);
+  });
+
+  // DS960 (S4): padded values in the shell, and another env file named to Compose.
+  it.each([['PILOT_ENV', ' production'], ['NODE_ENV', 'production '], ['NODE_ENV', '\tProduction']])('refuses %s=%j exported in this shell (padding is trimmed)', (name, value) => {
+    const r = runDeploySh('up', STAGING, { [name]: value });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('deploy.sh up is refused on the production host');
+    expect(r.calls).toEqual([]);
+  });
+
+  it.each(['up', 'nuke'])('deploy.sh %s refuses COMPOSE_ENV_FILES in this shell: Compose would read settings no check saw', (action) => {
+    const r = runDeploySh(action, STAGING, { COMPOSE_ENV_FILES: '/elsewhere/prod.env' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('COMPOSE_ENV_FILES is set in this shell');
     expect(r.calls).toEqual([]);
   });
 

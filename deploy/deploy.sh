@@ -28,7 +28,7 @@ cd "$(dirname "$0")"
 production_posture() {
   local name
   for name in PILOT_ENV NODE_ENV; do
-    [ "$(printf '%s' "${!name:-}" | tr '[:upper:]' '[:lower:]')" != production ] || return 0
+    [ "$(printf '%s' "${!name:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" != production ] || return 0
   done
   [[ -f .env ]] || return 1
   tr -d '\357\273\277\r' < .env |
@@ -37,6 +37,12 @@ production_posture() {
 case "${1:-up}" in
   logs | health) ;;
   *)
+    # Compose would also read settings from the files this names, which the
+    # check below never sees (DS960): refused, as pilot-up.sh refuses it.
+    if [[ -n "${COMPOSE_ENV_FILES+set}" ]]; then
+      echo "error: COMPOSE_ENV_FILES is set in this shell, and Compose would read settings from it that deploy.sh never checks; unset it (deploy.sh reads deploy/.env only)." >&2
+      exit 1
+    fi
     if production_posture; then
       echo "error: deploy.sh ${1:-up} is refused on the production host (deploy/.env or this shell names a production posture). Deploy with ./deploy/pilot-up.sh <approved full SHA> (or --data-only / --no-public <SHA>); see deploy/PILOT-RUNBOOK.md section 12." >&2
       exit 1
