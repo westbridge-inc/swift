@@ -25,8 +25,8 @@ import type { FastifyInstance } from 'fastify';
 // stays in every ledger that holds it, and these words get their own stamp.
 // [LEGAL-FEE · owner 2026-09-29] Partner weekly fees are paid through MMG's
 // checkout in the Swift app, or by card where offered. New words, new version.
-export const LEGAL_VERSION = '2026-10-12';
-const LAST_UPDATED = '12 October 2026'; // human form of LEGAL_VERSION
+export const LEGAL_VERSION = '2026-10-11';
+const LAST_UPDATED = '11 October 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>

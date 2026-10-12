@@ -119,15 +119,15 @@ const PUBLISHED: Record<
     vendor_agreement: '8bbbb883fe61443878d3183f615bca68c78d787265954e7ddfb5bd823567d702',
   },
   // Owner rulings 8 + 11 Oct 2026 (customer ID), DRAFT wording for the lawyer (never served: on
-  // HOLD for the V1b bump; re-date when unheld): a customer's ID goes on file at once unless
-  // automatic checks hold it for a person; kept while the account is open, deleted at closure, a
-  // banned account's ID kept for the retention period; profile photo for taxi only, never
-  // compared with the ID.
-  '2026-10-12': {
-    terms: 'b15ef2b3b82f7432d8eb5db849820863eebdd5c6312306da8df5ed7b6a350b8e',
-    privacy: '9984d63ebc7cba8bf6ac5e6b61d51318e9080ca7cd5311fbefeffee9428ec76b',
-    driver_agreement: 'a72a2fb88f9af8ad21ebf971bb6e2d3c68ff5425246c8b5c637fd3ba6c3186b2',
-    vendor_agreement: '50b5097b857431f35c65d2de2496ea859960c3c905d614ea51681ebcbbc7140b',
+  // HOLD for the V1b bump; re-date when unheld, later than #1605 and #1609): a customer's ID goes
+  // on file at once unless automatic checks hold it for a person; kept while the account is open,
+  // deleted at closure, a banned account's ID kept for the retention period; profile photo for
+  // taxi only, never compared with the ID.
+  '2026-10-11': {
+    terms: '3efb436392b15166121d69d3fb6327e3c1021e403cc0f0ba6f692fe9d58e6877',
+    privacy: 'd5dc3363ab4953df593a2f503d221daa738612700a041c8b889f86f61a361f0a',
+    driver_agreement: 'c5c776fd4b4b2d3bdccf6139154be6c2f40bd2f6a16c70f3e36b88adc79c29ba',
+    vendor_agreement: '50c3b5717806a15389a8c0416c2cf4c6d210e713f608edc24f17c1304e4fdae8',
   },
 };
 
