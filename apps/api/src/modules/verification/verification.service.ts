@@ -1763,6 +1763,32 @@ export class VerificationService {
   /** Schedule a leaving participant's documents for deletion after the
    *  country's retention window. Non-AML clocks are only added or shortened;
    *  AML scheduling retains its existing policy behavior. Skips purged rows. */
+  /**
+   * [Owner rulings 8 Oct and 11 Oct 2026 — CUSTOMER ID] A ban keeps the customer's ID for the
+   * retention period (scheduleDocumentRetention); when the ban is lifted the account is open again,
+   * and the ID is kept while it is open — so the ban's clock is cleared on the customer ID only.
+   * Under the user lock the account cutoff and final purge take, and only while the account is
+   * ACTIVE (a closure that won the race keeps its clock). Partner, driver and rider documents keep
+   * theirs. A legal hold is separate (legalHoldId) and untouched.
+   */
+  async keepCustomerIdWhileOpen(userId: string): Promise<number> {
+    return this.projectionTransaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ status: string }>>`
+        SELECT "status" FROM "users" WHERE "id" = ${userId}
+        FOR UPDATE /* customer-id-kept-while-open-authority */
+      `;
+      if (locked[0]?.status !== 'ACTIVE') return 0;
+      const docs = await tx.verificationDocument.findMany({
+        where: { userId, docType: IDENTITY_DOC_TYPE, purgedAt: null, retentionExpiresAt: { not: null } },
+        select: { id: true, docType: true, role: true },
+      });
+      const kept = docs.filter((d) => keptWhileAccountOpen(d)).map((d) => d.id);
+      if (kept.length === 0) return 0;
+      const res = await tx.verificationDocument.updateMany({ where: { id: { in: kept }, userId, purgedAt: null }, data: { retentionExpiresAt: null } });
+      return res.count;
+    });
+  }
+
   async scheduleDocumentRetention(userId: string): Promise<number> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
