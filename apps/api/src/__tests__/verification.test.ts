@@ -20,6 +20,7 @@ import { registrationProofFor } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 
 // [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
 process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
@@ -64,6 +65,7 @@ async function cleanup() {
   const users = await app.prisma.user.findMany({ where: { phone: { in: ALL_PHONES } }, select: { id: true } });
   const ids = users.map((u) => u.id);
   if (ids.length) {
+    await cleanupPayerBillingClocks(app.prisma, ids);
     await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   }

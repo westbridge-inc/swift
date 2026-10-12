@@ -8,6 +8,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { sandboxResetMmg } from '../providers/mmg/mmg-provider';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [DB-028] A CRASH MID-ATTEMPT STOPPED BILLING A SUBSCRIBER FOREVER.
@@ -114,6 +115,7 @@ beforeAll(async () => {
 });
 afterEach(() => sandboxResetMmg());
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, createdSubIds);
   if (createdSubIds.length) {
     await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: createdSubIds } } });
     await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: createdSubIds } } });

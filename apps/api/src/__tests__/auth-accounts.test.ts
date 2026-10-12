@@ -9,7 +9,8 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { requestOtp, loginWithOtp, registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
+import { requestPasswordResetOtp, loginWithOtp, registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
+import { grantStepUp } from './helpers/step-up';
 import { nanoid } from 'nanoid';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
@@ -240,9 +241,14 @@ describe('Email + password login with lockout', () => {
     moverToken = login.json().data.tokens.accessToken;
   });
 
-  it('sets a password (authenticated)', async () => {
+  it('sets a password (authenticated, with a fresh step-up on this session)', async () => {
+    // [L04 · MASTER-003] A password change needs a step-up on THIS session
+    // (refusal without one is graded in auth-credentials.test.ts) and replaces
+    // this session's tokens; the suite carries on with the new access token.
+    await grantStepUp(app, moverToken);
     const res = await inject('POST', '/api/v1/auth/password/set', { password: PASSWORD }, moverToken);
     expect(res.statusCode).toBe(200);
+    moverToken = res.json().data.tokens.accessToken;
   });
 
   it('logs in with phone + password', async () => {
@@ -268,20 +274,30 @@ describe('Email + password login with lockout', () => {
     expect(wrong.json().error.code).toBe(unknown.json().error.code);
   });
 
-  it('locks the account after 5 failures — even the right password is refused', async () => {
+  it('five failures from one address lock password sign-in from that address — even the right password is refused', async () => {
     for (let i = 0; i < 5; i++) {
       const attempt = await inject('POST', '/api/v1/auth/password/login', {
         phone: MOVER_PHONE,
         password: `wrong-password-${i}`,
       });
-      expect([401, 423]).toContain(attempt.statusCode);
+      expect(attempt.statusCode).toBe(401);
     }
     const locked = await inject('POST', '/api/v1/auth/password/login', {
       phone: MOVER_PHONE,
       password: PASSWORD,
     });
-    expect(locked.statusCode).toBe(423);
-    expect(locked.json().error.code).toBe('ACCOUNT_LOCKED');
+    // [L04 · MASTER-054] The lock is enforced, never announced: the right
+    // password on a locked account gets exactly the unknown-account answer
+    // (it used to be a distinct 423 ACCOUNT_LOCKED, which told a guesser the
+    // account exists). No session is issued.
+    const unknown = await inject('POST', '/api/v1/auth/password/login', {
+      phone: '+5929990000',
+      password: PASSWORD,
+    });
+    expect(locked.statusCode).toBe(401);
+    expect(locked.json().error.code).toBe('INVALID_CREDENTIALS');
+    expect(locked.body).toBe(unknown.body);
+    expect(locked.json().data?.tokens).toBeUndefined();
   });
 
   it('password reset via OTP unlocks the account and kills every session', async () => {
@@ -301,7 +317,7 @@ describe('Email + password login with lockout', () => {
       }),
     ]);
 
-    const code = await requestOtp(app, MOVER_PHONE);
+    const code = await requestPasswordResetOtp(app, MOVER_PHONE);
     const reset = await inject('POST', '/api/v1/auth/password/reset', {
       phone: MOVER_PHONE,
       code,

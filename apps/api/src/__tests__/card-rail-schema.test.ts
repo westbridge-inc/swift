@@ -123,6 +123,8 @@ describe('[PT-1] the three tables are walled like every tenant table', () => {
     expect(triggers.map((t) => `${t.rel}.${t.tgname}`)).toEqual([
       'card_observations.card_observations_no_mutation',
       'card_observations.card_observations_tenant_matches_owner',
+      // [#1393] A Pay-now session held for payment confirmation keeps its source identity.
+      'card_sessions.billing_confirmation_source_immutable',
       'card_sessions.card_sessions_frozen',
       'card_sessions.card_sessions_tenant_matches_user',
       'payment_instruments.payment_instruments_frozen',

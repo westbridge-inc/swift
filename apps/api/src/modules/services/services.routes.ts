@@ -18,6 +18,7 @@ import {
   tradeRiskTier,
 } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { deactivateRoom } from '../chat/chat-authority';
@@ -116,14 +117,16 @@ export async function servicesRoutes(app: FastifyInstance) {
       // so concurrent first saves cannot race the unique upsert, and persist the
       // trade BEFORE evaluating its legal checklist (electricians must never get
       // a base-doc-only verification window on first save or trade change).
-      const users = await tx.$queryRaw<Array<{ id: string; status: string }>>`
-        SELECT "id", "status"::text FROM "users"
-        WHERE "id" = ${userId}
-        FOR UPDATE /* service-provider-profile-authority */
+      const users = await tx.$queryRaw<Array<{ id: string; status: string; tenantKind: string }>>`
+        SELECT u."id", u."status"::text, t."kind"::text AS "tenantKind" FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId"
+        WHERE u."id" = ${userId}
+        FOR UPDATE OF u /* service-provider-profile-authority */
       `;
       if (!users[0] || users[0].status !== 'ACTIVE') {
         throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'This account cannot publish a provider profile right now.');
       }
+      // [REVIEW-PARTNER] A demo account never becomes a service provider.
+      if (users[0].tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
       await tx.serviceProvider.upsert({
         where: { userId },
         create: {

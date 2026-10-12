@@ -40,14 +40,17 @@ export const SECRET_FILE_NAMES = [
   // Notifications.
   'TWILIO_API_KEY_SECRET',
   'SMTP_PASS',
+  // [L04] Non-production SMS recipient allowlist: phone numbers are personal
+  // data, so they arrive by file from the store, never in a compose file.
+  'SMS_RECIPIENT_ALLOWLIST',
   // MMG mobile money.
   'MMG_API_KEY',
   'MMG_PASSWORD',
   'MMG_MKEY',
   'MMG_MSECRET',
-  // MMG hosted checkout: the private key that opens MMG replies (a
-  // multi-line PEM — a file is its natural carrier) and the secret key sealed
-  // inside every request token.
+  // MMG hosted checkout: the owner provisions both PEM halves and the
+  // shared secret through the store, including the public half used by requests.
+  'MMG_CHECKOUT_PUBLIC_KEY',
   'MMG_CHECKOUT_PRIVATE_KEY',
   'MMG_CHECKOUT_SECRET_KEY',
   // Card rails.

@@ -71,31 +71,31 @@ export function LocationField({
   }
 
   return (
-    <div className="relative rounded-2xl border border-black/5 bg-white p-3">
-      <p className="text-xs font-semibold text-[var(--swift-muted)]">{label}</p>
+    <div className="relative rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 py-3 focus-within:border-[var(--swift-red)]">
+      <p className="text-[13px] font-medium leading-[18px] text-[var(--swift-muted)]">{label}</p>
       <div className="flex items-center gap-2">
-        <Search className="h-4 w-4 text-[var(--swift-muted)]" />
+        <Search className="h-4 w-4 text-[var(--swift-muted-soft)]" />
         {/* the box shows the text and NOTHING else — the old
             `q || value?.label` put a cleared address back on screen */}
         <input
           value={text}
           onChange={(e) => edit(e.target.value)}
           placeholder="Search address…"
-          className="w-full py-1 outline-none"
+          className="w-full bg-transparent py-1 text-base font-semibold leading-[22px] text-[var(--swift-ink)] outline-none placeholder:font-normal placeholder:text-[var(--swift-muted-soft)]"
         />
       </div>
       {text.trim().length >= 3 && !place && !searchFailed && sugg.length === 0 && (
-        <p className="mt-1 text-xs text-[var(--swift-muted)]">Choose an address from the list — we send to the pin, not the words.</p>
+        <p className="mt-1 text-[13px] leading-[18px] text-[var(--swift-muted)]">Choose an address from the list — we send to the pin, not the words.</p>
       )}
       {searchFailed && (
-        <p role="alert" className="mt-1 text-xs font-semibold text-[var(--swift-red)]">Address search is unavailable right now, so we can&apos;t place this on the map.</p>
+        <p role="alert" className="mt-1 text-[13px] font-semibold leading-[18px] text-[var(--swift-error)]">Address search is unavailable right now, so we can&apos;t place this on the map.</p>
       )}
       {sugg.length > 0 && (
-        <ul className="absolute inset-x-0 top-full z-10 mt-1 overflow-hidden rounded-xl border border-black/10 bg-white shadow-lg">
+        <ul className="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] shadow-[var(--swift-elevation-raised)]">
           {sugg.map((s) => (
             <li key={s.placeId}>
-              <button onClick={() => pick(s)} className="w-full px-3 py-2.5 text-left hover:bg-[var(--swift-subtle)]">
-                {s.primary}{s.secondary && <span className="block text-xs text-[var(--swift-muted)]">{s.secondary}</span>}
+              <button onClick={() => pick(s)} className="w-full border-b border-[var(--swift-border)] px-4 py-3 text-left text-[15px] font-semibold leading-5 last:border-b-0 hover:bg-[var(--swift-sunken)]">
+                {s.primary}{s.secondary && <span className="block text-[13px] font-normal leading-[18px] text-[var(--swift-muted)]">{s.secondary}</span>}
               </button>
             </li>
           ))}
