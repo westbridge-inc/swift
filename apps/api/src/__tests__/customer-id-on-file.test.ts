@@ -427,11 +427,16 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
   });
 
-  it('a second approved ID replaces the first (one stands per person); withdrawing the standing one says L1', async () => {
+  it('a second ID replaces the first (one stands per person); withdrawing the standing one says L1', async () => {
     const c = await customer();
     const first = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) })).json().data;
     const second = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(420, 300)) })).json().data;
-    for (const d of [first, second]) expect((await admin('PUT', `/api/v1/admin/verification/${d.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
+    // [#1620] The second copy, sent while the first still waited, replaced it before review: the first can no
+    // longer be decided (DOCUMENT_REPLACED), and the newer one is the one approved. One stands per person.
+    const stale = await admin('PUT', `/api/v1/admin/verification/${first.id}/approve`, { documentNumber: typedNumber() });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error.code).toBe('DOCUMENT_REPLACED');
+    expect((await admin('PUT', `/api/v1/admin/verification/${second.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: first.id } })).state).toBe('SUPERSEDED');
     expect((await admin('PUT', `/api/v1/admin/verification/${first.id}/revoke`, { reason: 'Synthetic: replaced ID' })).statusCode).toBe(409);
     const last = await admin('PUT', `/api/v1/admin/verification/${second.id}/revoke`, { reason: 'Synthetic: withdrawn after review' });
