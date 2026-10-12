@@ -67,7 +67,7 @@ export function assertMmgAttestable(order: AttestableOrder): void {
       throw new AppError(
         409,
         'PAYMENT_FAILED',
-        'MMG reports this payment as failed. If money did reach your wallet, contact support with the transaction reference — do not mark it received here.',
+        'MMG reports this payment as failed. If money did reach your MMG account, contact support with the transaction reference — do not mark it received here.',
       );
     case 'EXPIRED':
       throw new AppError(
@@ -95,14 +95,14 @@ export function normaliseMmgReference(raw: unknown): string {
     throw new AppError(
       400,
       'REFERENCE_REQUIRED',
-      'Enter the MMG transaction reference from the message in your wallet — it is what proves this payment later.',
+      'Enter the MMG transaction reference from MMG’s payment message — it is what proves this payment later.',
     );
   }
   if (!REFERENCE_SHAPE.test(value)) {
     throw new AppError(
       400,
       'REFERENCE_INVALID',
-      'That does not look like an MMG transaction reference. Copy it from the payment message in your wallet.',
+      'That does not look like an MMG transaction reference. Copy it from MMG’s payment message.',
     );
   }
   return value;
