@@ -51,7 +51,8 @@ import styles from '@/app/(app)/cart/cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
 const GuestCart = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestCart })));
-// Only a customer with no saved address opens this form, so it loads on demand.
+// [WEB-PIN] Only a customer adding an address opens this form (a pin on the
+// map), so it loads on demand and the map's code never weighs on the checkout.
 const NewAddressForm = lazy(() => import('@/components/checkout/new-address-form').then(module => ({ default: module.NewAddressForm })));
 
 /** The checkout page for whoever is here: a guest sees their browser basket
@@ -93,6 +94,9 @@ export function CheckoutPanel() {
   const [error, setError] = useState<string | null>(null);
   const [noRiders, setNoRiders] = useState(false);
   const [addingAddr, setAddingAddr] = useState(false);
+  // [WEB-PIN] The server's own words when it will not price a just-pinned
+  // address (e.g. past the store's delivery radius), shown where it was chosen.
+  const [pinRefusal, setPinRefusal] = useState<string | null>(null);
   // [W5] The live store a pickup is collected from, read with the safety check.
   const [pickupStore, setPickupStore] = useState<{ address: string; hours: string | null } | null>(null);
   // [W5] The stores the last quote priced: a pickup quote names every one.
@@ -323,16 +327,25 @@ export function CheckoutPanel() {
     }
   }
 
+  /** [WEB-PIN] A pinned address is saved, then THIS cart is priced for it: the
+   *  server checks the store's delivery radius on PUT /cart/address and returns
+   *  the quote — the phone app's order (AddressesScreen, selectFor 'cart'). */
   async function saveAddress(fields: NewAddress) {
     if (checkoutBusy.current || cartMutationLockedByCheckout()) return;
     checkoutBusy.current = true;
     resetCheckoutReplay();
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setPinRefusal(null);
     try {
       const a = await addAddress({ ...fields, isDefault: addresses.length === 0 });
       setAddingAddr(false);
+      let refusal: string | null = null;
+      try {
+        await setCartAddress(a.id);
+      } catch (quoteError) {
+        refusal = quoteError instanceof Error ? quoteError.message : 'Swift could not price delivery to that pin.';
+      }
       await refresh();
-      setAddrId(a.id ?? addrId);
+      if (refusal) setPinRefusal(refusal);
     } catch (e: any) { setError(e.message); }
     finally { checkoutBusy.current = false; setBusy(false); }
   }
@@ -480,7 +493,7 @@ export function CheckoutPanel() {
     const previous = addrId;
     checkoutBusy.current = true;
     resetCheckoutReplay();
-    setBusy(true); setError(null); setAddrId(nextAddressId);
+    setBusy(true); setError(null); setPinRefusal(null); setAddrId(nextAddressId);
     try {
       await setCartAddress(nextAddressId);
       await refresh();
@@ -589,19 +602,29 @@ export function CheckoutPanel() {
               <p className={styles.errorMessage}>{addressError}</p>
               <button type="button" className={`${styles.button} ${styles.buttonSecondary}`} onClick={() => void refresh().catch((refreshError) => setError(refreshError instanceof Error ? refreshError.message : 'Could not reload your cart.'))}>Try addresses again</button>
             </div>
-          ) : addresses.length > 0 ? (
-            <div className={styles.field}>
-              <label htmlFor="cart-delivery-address" className={styles.label}>Saved delivery address</label>
-              <select id="cart-delivery-address" value={addrId ?? ''} disabled={busy || (cartSafety !== 'safe' && !knownOutOfRange)} onChange={(e) => void changeAddress(e.target.value)} className={styles.input}>
-                {addresses.map((a) => <option key={a.id} value={a.id}>{a.label} — {a.addressLine1}, {a.city}</option>)}
-              </select>
-            </div>
-          ) : addingAddr ? (
-            <Suspense fallback={<p className={styles.stateCopy} role="status">Opening the address form…</p>}>
-              <NewAddressForm busy={busy} onError={setError} onSave={(fields) => void saveAddress(fields)} />
-            </Suspense>
           ) : (
-            <button type="button" onClick={() => setAddingAddr(true)} className={`${styles.button} ${styles.buttonSecondary}`}>Add a delivery address</button>
+            <>
+              {addresses.length > 0 ? (
+                <div className={styles.field}>
+                  <label htmlFor="cart-delivery-address" className={styles.label}>Saved delivery address</label>
+                  <select id="cart-delivery-address" value={addrId ?? ''} disabled={busy || (cartSafety !== 'safe' && !knownOutOfRange)} onChange={(e) => void changeAddress(e.target.value)} className={styles.input}>
+                    {addresses.map((a) => <option key={a.id} value={a.id}>{a.label} — {a.addressLine1}, {a.city}</option>)}
+                  </select>
+                </div>
+              ) : null}
+              {pinRefusal ? <p className={styles.errorMessage} role="alert">{pinRefusal}</p> : null}
+              {/* [WEB-PIN] A new address is always on offer — a customer whose
+                  saved addresses are all wrong for this order can pin another. */}
+              {addingAddr ? (
+                <Suspense fallback={<p className={styles.stateCopy} role="status">Opening the map…</p>}>
+                  <NewAddressForm busy={busy} onSave={(fields) => void saveAddress(fields)} onCancel={() => setAddingAddr(false)} />
+                </Suspense>
+              ) : (
+                <button type="button" disabled={busy} onClick={() => { setPinRefusal(null); setAddingAddr(true); }} className={`${styles.button} ${styles.buttonSecondary}`}>
+                  {addresses.length > 0 ? 'Pin a new address on the map' : 'Add a delivery address'}
+                </button>
+              )}
+            </>
           )}
         </section>}
 

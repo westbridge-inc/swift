@@ -1,109 +1,123 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { placeDetails, placesAutocomplete, type Place } from '@/lib/customer';
-import styles from '@/app/(app)/cart/cart.module.css';
-
-/** A new delivery address: a pin chosen on Swift's map, never this device's location. */
-export type NewAddress = { label: string; addressLine1: string; city: string; region: string; latitude: number; longitude: number };
+import { useEffect, useId, useRef, useState } from 'react';
+import { PinPicker, type ChosenPin } from '@/components/pin-picker/pin-picker';
 
 /**
- * [W4 · W5] The checkout's "Add a delivery address" form. Only a customer with
- * no saved address opens it, so it loads on demand and keeps the checkout
- * light. Saving belongs to the checkout (it holds the order-attempt guards);
- * this form only finds the mapped destination and hands the fields over.
+ * A new delivery address: the pin the customer placed on Swift's map, and the
+ * words that help a rider find the door. The fields and their rules are the
+ * phone app's (AddAddressScreen): label, street, apartment/landmark, city,
+ * instructions — no region (optional on the server; the phone never sends one).
  */
-export function NewAddressForm({ busy, onError, onSave }: {
-  busy: boolean; onError: (_message: string | null) => void; onSave: (_address: NewAddress) => void;
+export type NewAddress = {
+  label: string;
+  addressLine1: string;
+  addressLine2?: string;
+  city: string;
+  latitude: number;
+  longitude: number;
+  instructions?: string;
+};
+
+/**
+ * [W4 · W5 · WEB-PIN] The checkout's "Add a delivery address": a pin on the
+ * map, then the address fields. It loads on demand, so the map's code never
+ * weighs on the checkout itself; it uses the site's global classes only, so
+ * this lazy chunk carries no CSS (a lazy chunk with CSS adds a CSS loader to
+ * every page's first load). Saving belongs to the checkout (it holds the
+ * order-attempt guards and asks the server for the quote); this form only
+ * hands over a pinned address.
+ *
+ * Owner, 11 Oct: the old form searched the places provider only — on the test
+ * server that knows delivery zones and saved addresses — so a customer could
+ * not get any street onto the map, never got a quote, and could not order.
+ */
+export function NewAddressForm({ busy, onSave, onCancel }: {
+  busy: boolean;
+  onSave: (_address: NewAddress) => void;
+  onCancel: () => void;
 }) {
-  const [newAddr, setNewAddr] = useState({ label: '', addressLine1: '', city: '', region: '' });
-  const [addressMatches, setAddressMatches] = useState<Place[]>([]);
-  const [selectedPlace, setSelectedPlace] = useState<{ label: string; lat: number; lng: number } | null>(null);
-  const [addressLookupBusy, setAddressLookupBusy] = useState(false);
-  const addressLabelInput = useRef<HTMLInputElement | null>(null);
-  useEffect(() => { addressLabelInput.current?.focus(); }, []);
+  const id = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [pin, setPin] = useState<ChosenPin | null>(null);
+  const [label, setLabel] = useState('Home');
+  const [street, setStreet] = useState('');
+  // Until the customer types a street, it follows the pin's looked-up name.
+  const streetTyped = useRef(false);
+  const [landmark, setLandmark] = useState('');
+  const [city, setCity] = useState('Georgetown');
+  const [instructions, setInstructions] = useState('');
 
-  async function searchAddress() {
-    if (addressLookupBusy || newAddr.addressLine1.trim().length < 3) return;
-    setAddressLookupBusy(true);
-    onError(null);
-    setSelectedPlace(null);
-    try {
-      const matches = await placesAutocomplete(newAddr.addressLine1.trim());
-      setAddressMatches(matches);
-      if (!matches.length) onError('Swift found no map matches for that destination. Add more detail and search again.');
-    } catch (lookupError) {
-      setAddressMatches([]);
-      onError(lookupError instanceof Error ? lookupError.message : 'Swift could not search the destination map.');
-    } finally {
-      setAddressLookupBusy(false);
-    }
+  useEffect(() => { heading.current?.focus(); }, []);
+
+  function pinChanged(next: ChosenPin | null) {
+    setPin(next);
+    if (next?.address && !streetTyped.current) setStreet(next.address.slice(0, 200));
   }
 
-  async function chooseAddressMatch(place: Place) {
-    if (addressLookupBusy) return;
-    setAddressLookupBusy(true);
-    onError(null);
-    try {
-      const details = await placeDetails(place.placeId);
-      setSelectedPlace({ label: details.label, lat: details.lat, lng: details.lng });
-      setNewAddr((current) => ({ ...current, addressLine1: details.label }));
-      setAddressMatches([]);
-    } catch (lookupError) {
-      setSelectedPlace(null);
-      onError(lookupError instanceof Error ? lookupError.message : 'Swift could not confirm that mapped destination.');
-    } finally {
-      setAddressLookupBusy(false);
-    }
-  }
+  // The disabled button names the first thing still missing (the phone's grammar).
+  const missing = !pin
+    ? 'Place the pin on the map'
+    : label.trim().length < 2
+      ? 'Give it a label'
+      : street.trim().length < 3
+        ? 'Add the street address'
+        : city.trim().length < 2
+          ? 'Add the city'
+          : null;
 
   function save() {
-    if (!selectedPlace) return;
+    if (!pin || missing || busy) return;
     onSave({
-      label: newAddr.label.trim(),
-      addressLine1: selectedPlace.label,
-      city: newAddr.city.trim(),
-      region: newAddr.region.trim(),
-      latitude: selectedPlace.lat,
-      longitude: selectedPlace.lng,
+      label: label.trim(),
+      addressLine1: street.trim(),
+      ...(landmark.trim() ? { addressLine2: landmark.trim() } : {}),
+      city: city.trim(),
+      latitude: pin.latitude,
+      longitude: pin.longitude,
+      ...(instructions.trim() ? { instructions: instructions.trim() } : {}),
     });
   }
 
   return (
-    <div className={styles.formStack}>
-      <div className={styles.field}><label htmlFor="address-label" className={styles.label}>Address label</label><input ref={addressLabelInput} id="address-label" value={newAddr.label} onChange={(e) => setNewAddr({ ...newAddr, label: e.target.value })} className={styles.input} /></div>
-      <div className={styles.field}>
-        <label htmlFor="address-street" className={styles.label}>Search the delivery destination</label>
-        <input
-          id="address-street"
-          autoComplete="street-address"
-          value={newAddr.addressLine1}
-          aria-describedby="address-map-help"
-          onChange={(e) => {
-            setNewAddr({ ...newAddr, addressLine1: e.target.value });
-            setSelectedPlace(null);
-            setAddressMatches([]);
-          }}
-          className={styles.input}
-        />
-        <p id="address-map-help" className={styles.stateCopy}>Choose a Swift map result below. The selected pin—not this device’s current location—sets the delivery fee and rider destination.</p>
+    <section className="grid gap-3" aria-labelledby={`${id}-title`}>
+      <h3 ref={heading} id={`${id}-title`} tabIndex={-1} className="sw-heading outline-none">Pin your delivery address</h3>
+      <p className="sw-caption m-0">
+        Put the pin on your door. The pin sets the delivery fee and where your rider goes; the words below help them find you.
+      </p>
+      <PinPicker mapLabel="Delivery pin map" onChange={pinChanged} />
+      <div>
+        <label htmlFor={`${id}-label`} className="sw-field-label">Label</label>
+        <input id={`${id}-label`} className="sw-input" value={label} maxLength={50} placeholder="Home, Work…" onChange={(event) => setLabel(event.target.value)} />
       </div>
-      <button type="button" onClick={() => void searchAddress()} disabled={addressLookupBusy || newAddr.addressLine1.trim().length < 3} className={`${styles.button} ${styles.buttonSecondary}`}>
-        {addressLookupBusy ? 'Searching map…' : 'Find this destination on the map'}
+      <div>
+        <label htmlFor={`${id}-street`} className="sw-field-label">Street address</label>
+        <input
+          id={`${id}-street`}
+          className="sw-input"
+          value={street}
+          maxLength={200}
+          autoComplete="street-address"
+          placeholder="Lot and street"
+          onChange={(event) => { streetTyped.current = true; setStreet(event.target.value); }}
+        />
+      </div>
+      <div>
+        <label htmlFor={`${id}-landmark`} className="sw-field-label">Apt / landmark (optional)</label>
+        <input id={`${id}-landmark`} className="sw-input" value={landmark} maxLength={200} placeholder="Near…" onChange={(event) => setLandmark(event.target.value)} />
+      </div>
+      <div>
+        <label htmlFor={`${id}-city`} className="sw-field-label">City / Town</label>
+        <input id={`${id}-city`} className="sw-input" value={city} maxLength={100} autoComplete="address-level2" onChange={(event) => setCity(event.target.value)} />
+      </div>
+      <div>
+        <label htmlFor={`${id}-instructions`} className="sw-field-label">Delivery instructions (optional)</label>
+        <input id={`${id}-instructions`} className="sw-input" value={instructions} maxLength={500} placeholder="Gate code, dog, etc." onChange={(event) => setInstructions(event.target.value)} />
+      </div>
+      <button type="button" onClick={save} disabled={busy || missing !== null} className="sw-btn sw-btn-block">
+        {busy ? 'Saving…' : missing ?? 'Save address'}
       </button>
-      {addressMatches.length > 0 ? (
-        <div className={styles.panelStack} role="group" aria-label="Mapped address matches">
-          {addressMatches.map((place) => (
-            <button key={place.placeId} type="button" disabled={addressLookupBusy} onClick={() => void chooseAddressMatch(place)} className={`${styles.button} ${styles.buttonSecondary}`}>
-              {place.primary}{place.secondary ? ` — ${place.secondary}` : ''}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      {selectedPlace ? <p className={styles.stateCopy} role="status">Mapped destination confirmed: {selectedPlace.label}</p> : null}
-      <div className={styles.field}><label htmlFor="address-city" className={styles.label}>City or town</label><input id="address-city" autoComplete="address-level2" value={newAddr.city} onChange={(e) => setNewAddr({ ...newAddr, city: e.target.value })} className={styles.input} /></div>
-      <div className={styles.field}><label htmlFor="address-region" className={styles.label}>Region</label><input id="address-region" autoComplete="address-level1" value={newAddr.region} onChange={(e) => setNewAddr({ ...newAddr, region: e.target.value })} className={styles.input} /></div>
-      <button type="button" onClick={save} disabled={busy || !selectedPlace || !newAddr.label.trim() || !newAddr.city.trim() || !newAddr.region.trim()} className={`${styles.button} ${styles.buttonPrimary}`}>{busy ? 'Saving…' : 'Save mapped delivery address'}</button>
-    </div>
+      <button type="button" onClick={onCancel} disabled={busy} className="sw-btn sw-btn-outline sw-btn-block">Cancel</button>
+    </section>
   );
 }
