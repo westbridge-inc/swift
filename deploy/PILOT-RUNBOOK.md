@@ -605,17 +605,21 @@ from issue at most) bounds that window.
 
    They send the operator only the public line
    (`~/.ssh/swift_seed_approver.pub`). The operator writes one line per
-   approver, `<name> ssh-ed25519 AAAA…`, into a file and pins it in the store
-   (public keys, but root-only there, so nobody can swap one):
+   approver, `<name> ssh-ed25519 AAAA…`, into a file outside the checkout
+   and pins it in the store (public keys, but root-only there, so nobody can
+   swap one):
 
-       sudo swift-secrets set SEED_APPROVER_KEYS < approver-keys.txt
+       sudo swift-secrets set SEED_APPROVER_KEYS < ~/approver-keys.txt
 
 2. The operator runs the change without approvals. It prints the request
    between two `-----` lines (stdout carries only the request) and exits 2
    (spine) or 3 (promotion):
 
        cd /opt/swift
-       SEED_ADMIN_PHONE=+5920400001 ./deploy/seed-production.sh "$SHA" > request.txt
+       SEED_ADMIN_PHONE=+5920400001 ./deploy/seed-production.sh "$SHA" > ~/seed-request.txt
+
+   The request goes OUTSIDE the checkout: the script refuses a checkout with
+   any untracked file, and the shell creates the file before the script runs.
 
 3. Each approver checks the request and signs it on their own computer. The
    script shows the database, the configuration and FX rate, the first
@@ -624,7 +628,7 @@ from issue at most) bounds that window.
    request that does not say these things in words, or that hides anything
    (control characters, lines after its `end`):
 
-       ./deploy/seed-approve.sh <their-name> ~/.ssh/swift_seed_approver < request.txt
+       ./deploy/seed-approve.sh <their-name> ~/.ssh/swift_seed_approver < seed-request.txt
 
    Never sign for someone else: the control is two people with two keys.
    SEED_APPROVE_YES is for the test suites only (they have no terminal): it
@@ -981,7 +985,9 @@ must be pinned first (section 6b, step 1).
 
 1. The first run prints the plan, then the request to sign, and exits 2:
 
-       SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' ./deploy/seed-production.sh "$SHA" > request.txt
+       SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' ./deploy/seed-production.sh "$SHA" > ~/seed-request.txt
+
+   (Outside the checkout, as in section 6b: an untracked file in it is refused.)
 
 2. Each approver signs it on their own computer (section 6b, step 3).
 
