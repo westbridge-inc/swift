@@ -4,7 +4,7 @@
  * goods vehicles G). Approval already refuses a taxi whose registered plate is not H-series
  * (V_PLATE_CLASS, and the stored-vehicle check). This is the same rule said EARLIER, where the plate is
  * typed — sign-up and the vehicle screens — so nobody saves a taxi plate that could never be approved
- * and waits for an approval that cannot come (a "PLL592" taxi used to sit unapprovable, unexplained).
+ * and waits for an approval that cannot come (a taxi typed with a private plate used to sit unapprovable, unexplained).
  *
  * Buses (B-series plates; road-service licence, s.64) are hidden at launch and are not judged here.
  */
@@ -14,7 +14,7 @@ import { AppError } from '../../utils/errors';
 import { normalizeRegistrationMark, plateClassOf } from './subjects';
 
 export const TAXI_PLATE_NOT_HIRE = 'TAXI_PLATE_NOT_HIRE';
-/** Plain words for the person typing the plate. The apps show the server's message as it is. */
+/** Plain words for the person typing the plate. The app and website hints repeat these exact words. */
 export const TAXI_PLATE_COPY = 'Taxi plates in Guyana start with H — e.g. HC 1234. Enter the plate shown on your Certificate of Registration. A private (P) plate cannot be approved for taxi work.';
 
 /** The hire-car classes: passenger vehicles other than buses (Group). */

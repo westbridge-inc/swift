@@ -15,13 +15,13 @@ describe('taxi plate rule in the app', () => {
   it('reads the plate like the server: spacing and hyphens ignored, first letter H', () => {
     expect(isHirePlate('HC 1234')).toBe(true);
     expect(isHirePlate('hd-4321')).toBe(true);
-    expect(isHirePlate('PLL592')).toBe(false);
+    expect(isHirePlate('PLX4821')).toBe(false);
     expect(isHirePlate(' PAB 1234')).toBe(false);
   });
 
   it('shows the hint first, then the error once a non-H plate is typed', () => {
     expect(taxiPlateMessage('CAR', '')).toEqual({ text: TAXI_PLATE_HINT, error: false });
-    expect(taxiPlateMessage('CAR', 'PLL592')).toEqual({ text: TAXI_PLATE_ERROR, error: true });
+    expect(taxiPlateMessage('CAR', 'PLX4821')).toEqual({ text: TAXI_PLATE_ERROR, error: true });
     expect(taxiPlateMessage('WAGON_CAR', 'HC 1234')).toEqual({ text: TAXI_PLATE_HINT, error: false });
     expect(taxiPlateMessage('MOTORCYCLE', 'PAB 1234')).toBeNull();
   });

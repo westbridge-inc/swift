@@ -7,7 +7,7 @@ import type { VehicleKind } from '../services/api';
  * person presses save. Buses (B-series) are hidden at launch and are not judged here.
  */
 export const TAXI_PLATE_HINT = 'Taxi plates in Guyana start with H — e.g. HC 1234.';
-export const TAXI_PLATE_ERROR = 'Taxi plates in Guyana start with H — e.g. HC 1234. Enter the plate on your Certificate of Registration; a private (P) plate cannot be approved for taxi work.';
+export const TAXI_PLATE_ERROR = 'Taxi plates in Guyana start with H — e.g. HC 1234. Enter the plate shown on your Certificate of Registration. A private (P) plate cannot be approved for taxi work.';
 
 const HIRE_CAR_KINDS: readonly VehicleKind[] = ['CAR', 'WAGON_CAR'];
 

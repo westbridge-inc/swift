@@ -17,7 +17,7 @@ import { grantStepUp } from './helpers/step-up';
 // and match its registration. Approval already refuses anything else, so the
 // rule is said where the plate is TYPED: sign-up (/partner/become), the vehicle
 // screen (/partner/vehicle) and a plate edit on the driver profile. A taxi
-// driver can no longer save a plate that could never be approved ("PLL592"),
+// driver can no longer save a plate that could never be approved (a P plate),
 // and is told why in plain words. Delivery vehicles are not judged; buses are
 // hidden at launch and keep their own path. Names here are plain strings so on
 // the old code each case fails on its own assertion.
@@ -86,7 +86,7 @@ afterAll(async () => {
 });
 
 describe('[H-PLATE · owner 11 Oct] sign-up refuses a taxi plate that could never be approved', () => {
-  it.each([['CAR', 'PLL592'], ['CAR', `PAB ${NUM}`], ['WAGON_CAR', `GAA ${NUM}`], ['CAR', `B${NUM}`]])('%s with plate %s: refused in plain words, nothing saved', async (vehicleType, plate) => {
+  it.each([['CAR', `PLX${NUM}`], ['CAR', `PAB ${NUM}`], ['WAGON_CAR', `GAA ${NUM}`], ['CAR', `B${NUM}`]])('%s with plate %s: refused in plain words, nothing saved', async (vehicleType, plate) => {
     const u = await makeUser();
     expectPlainRefusal(await become(u.token, vehicleType, plate));
     expect(await system(() => app.prisma.driver.findUnique({ where: { userId: u.userId } }))).toBeNull();
@@ -119,7 +119,7 @@ describe('[H-PLATE · owner 11 Oct] the vehicle screens say it too', () => {
   it('a taxi driver retyping the plate to a private one is refused before step-up; the saved plate stays', async () => {
     const u = await makeUser();
     expect((await become(u.token, 'CAR', `HB ${NUM}`)).statusCode).toBe(201);
-    const refused = await send('PUT', '/api/v1/driver/profile', u.token, { licensePlate: 'PLL592' });
+    const refused = await send('PUT', '/api/v1/driver/profile', u.token, { licensePlate: `PLX${NUM}` });
     expectPlainRefusal(refused);
     expect((await system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId: u.userId } }))).licensePlate).toBe(`HB ${NUM}`);
     await grantStepUp(app, u.token);
@@ -127,14 +127,27 @@ describe('[H-PLATE · owner 11 Oct] the vehicle screens say it too', () => {
     expect(ok.statusCode, ok.body).toBe(200);
   });
 
+  it('a VERIFIED taxi driver typing a private plate on the vehicle screen hears the rule first, not a step-up', async () => {
+    const u = await makeUser();
+    expect((await become(u.token, 'CAR', `HE ${NUM}`)).statusCode).toBe(201);
+    await system(() => app.prisma.driver.update({ where: { userId: u.userId }, data: { documentsVerified: true } }));
+    // No step-up granted: a plate that can never be approved is refused before anything asks "confirm it's you".
+    expectPlainRefusal(await send('PUT', '/api/v1/partner/vehicle', u.token, { vehicleType: 'CAR', vehicle: car(`PVV ${NUM}`) }));
+    expect((await system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId: u.userId } }))).licensePlate).toBe(`HE ${NUM}`);
+    // An H plate still asks the verified driver to confirm it's them first (the change is their livelihood).
+    const asked = await send('PUT', '/api/v1/partner/vehicle', u.token, { vehicleType: 'CAR', vehicle: car(`HF ${NUM}`) });
+    expect(asked.statusCode, asked.body).toBe(403);
+    expect(asked.json().error.code).toBe('STEP_UP_REQUIRED');
+  });
+
   it('a driver saved before the rule with a private plate can still save other details (the plate is unchanged)', async () => {
     const u = await makeUser();
     await system(() => app.prisma.driver.create({ data: {
-      userId: u.userId, vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2018, vehicleColor: 'Silver', licensePlate: 'PLL592',
+      userId: u.userId, vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2018, vehicleColor: 'Silver', licensePlate: `PLX${NUM}`,
       driverLicenseUrl: '/uploads/synthetic-licence', vehicleInsuranceUrl: '/uploads/synthetic-insurance',
     } }));
     await system(() => app.prisma.user.update({ where: { id: u.userId }, data: { roles: ['CUSTOMER', 'MOVER', 'DRIVER'], activeRole: 'DRIVER', lastMoverRole: 'DRIVER' } }));
-    const res = await send('PUT', '/api/v1/driver/profile', u.token, { licensePlate: 'pll-592', profilePhotoUrl: '/uploads/avatars/tp-legacy.jpg' });
+    const res = await send('PUT', '/api/v1/driver/profile', u.token, { licensePlate: `plx-${NUM}`, profilePhotoUrl: '/uploads/avatars/tp-legacy.jpg' });
     expect(res.statusCode, res.body).toBe(200);
   });
 });

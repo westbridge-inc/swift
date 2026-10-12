@@ -96,7 +96,7 @@ describe('[W9] four ways to join', () => {
     await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
     const create = () => screen.getByRole('button', { name: 'Create driver account' }) as HTMLButtonElement;
     expect(screen.getByText(/Taxi plates in Guyana start with H — e\.g\. HC 1234\./)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'PLL592' } });
+    fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'PLX4821' } });
     expect(create().disabled).toBe(true);
     expect(screen.getByRole('alert').textContent).toMatch(/private \(P\) plate cannot be approved/);
     fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'hc-1234' } });
