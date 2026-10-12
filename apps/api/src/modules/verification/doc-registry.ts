@@ -79,7 +79,7 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   vehicle_insurance: 365,  // annual policy
   hire_car_permit: 365,    // annual occupational permit
   road_service_licence: 365, // annual commercial road-service licence
-  food_handler_cert: 365,  // annual health cert
+  food_handler_cert: 365,  // annual Food Handler's Permit (Food Safety Act 2019 s.54) — a permit, never a medical certificate
   gra_restaurant_licence: 365,
   // [DOC-1 §18.1] the addendum's annual Guyana licences (submittable through a category gate)
   liquor_licence: 365,
@@ -314,7 +314,8 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
   for (const c of countries) {
     // Code defaults under the stored JSON (P3-2): a list added in code is seeded everywhere; an edited stored list wins.
     const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((c.documentChecklists ?? {}) as Record<string, string[]>) };
-    const legacyCodes = [...new Set(Object.values(lists).flat())];
+    // [VERIFY-DOCS] A never-accepted type (a medical document) is never minted, whatever a stored list says.
+    const legacyCodes = [...new Set(Object.values(lists).flat())].filter((code) => !isNeverAcceptedDocType(code));
     for (const legacyCode of legacyCodes) {
       const bucket = BUCKET_OF[legacyCode] ?? 'PERSONAL';
       const validity = AUTO_APPROVE_EXPIRY_DAYS[legacyCode];
@@ -332,24 +333,44 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
       });
       docTypes += 1;
     }
+    // [VERIFY-DOCS] One requirement set per (role, tier): its required list's items are BLOCKING in
+    // their published order; its `<KEY>_OPTIONAL` list's items join the same set as NON-blocking
+    // (a type both lists name stays blocking). The set is RECONCILED to the lists — an item they no
+    // longer name is removed — so the registry never keeps a requirement the owner has lifted.
+    const declared = new Map<string, { actorRole: string; tier: string; items: Map<string, { isBlocking: boolean; sortOrder: number }> }>();
     for (const [listKey, codes] of Object.entries(lists)) {
       // [DOC-1 §3.6 · P3-2] A <ROLE>_UNREGISTERED list is the same role's requirement set at the
       // UNREGISTERED tier — the registry's own tier column, not a second role.
-      const { actorRole, tier } = splitChecklistKey(listKey);
+      const { actorRole, tier, optional } = splitChecklistKey(listKey);
+      const key = `${actorRole}|${tier}`;
+      const entry = declared.get(key) ?? { actorRole, tier, items: new Map() };
+      declared.set(key, entry);
+      for (const [i, legacyCode] of codes.entries()) {
+        // [VERIFY-DOCS · ruling 5] A never-accepted type (a medical document), named in a required OR an
+        // `_OPTIONAL` list, was never minted above: requiring it would be a foreign-key error at boot.
+        if (isNeverAcceptedDocType(legacyCode)) continue;
+        const code = registryCode(c.code, legacyCode);
+        const had = entry.items.get(code);
+        if (optional) { if (!had) entry.items.set(code, { isBlocking: false, sortOrder: 1000 + i }); }
+        else entry.items.set(code, { isBlocking: true, sortOrder: i });
+      }
+    }
+    for (const { actorRole, tier, items } of declared.values()) {
       const set = await prisma.requirementSet.upsert({
         where: { countryCode_actorRole_tier_effectiveFrom: { countryCode: c.code, actorRole, tier, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
         create: { countryCode: c.code, actorRole, tier, effectiveFrom: REGISTRY_EFFECTIVE_FROM },
         update: {},
       });
       requirementSets += 1;
-      for (const [i, legacyCode] of codes.entries()) {
+      for (const [docTypeCode, { isBlocking, sortOrder }] of items) {
         await prisma.requirementItem.upsert({
-          where: { requirementSetId_docTypeCode: { requirementSetId: set.id, docTypeCode: registryCode(c.code, legacyCode) } },
-          create: { requirementSetId: set.id, docTypeCode: registryCode(c.code, legacyCode), isBlocking: true, minCount: 1, sortOrder: i },
-          update: { sortOrder: i },
+          where: { requirementSetId_docTypeCode: { requirementSetId: set.id, docTypeCode } },
+          create: { requirementSetId: set.id, docTypeCode, isBlocking, minCount: 1, sortOrder },
+          update: { isBlocking, sortOrder },
         });
         requirementItems += 1;
       }
+      await prisma.requirementItem.deleteMany({ where: { requirementSetId: set.id, docTypeCode: { notIn: [...items.keys()] } } });
     }
   }
   const extraDocTypes = await seedExtraDocTypes(prisma);
@@ -377,13 +398,13 @@ const DATES = (issue = 'issue_date', expiry = 'expiry_date'): FieldRow[] => [
   { fieldCode: issue, dataType: 'date', validatorRef: 'V_DATE_ORDER' },
   { fieldCode: expiry, dataType: 'date', validatorRef: 'V_EXPIRY_PLAUSIBLE' },
 ];
+// [VERIFY-DOCS · owner ruling 5, 6 Oct 2026] An ID proves who someone is and that they are an adult:
+// number, name, date of birth, dates. Sex and nationality are not needed and are not declared (RETIRED_FIELDS).
 const IDENTITY: FieldRow[] = [
   { fieldCode: 'doc_number', dataType: 'text', isPii: true, blind: true, identifier: true, validatorRef: 'V_MRZ_CHECKSUM' },
   { fieldCode: 'full_name', dataType: 'text', isPii: true },
   { fieldCode: 'dob', dataType: 'date', isPii: true, validatorRef: 'V_DOB_ADULT' },
-  { fieldCode: 'sex', dataType: 'enum', isPii: true, enumValues: ['M', 'F', 'X'] },
   ...DATES(),
-  { fieldCode: 'nationality', dataType: 'text', isPii: true },
 ];
 export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   national_id: IDENTITY,
@@ -445,7 +466,7 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
     { fieldCode: 'model', dataType: 'text' },
     { fieldCode: 'year', dataType: 'number' },
     { fieldCode: 'colour', dataType: 'text' }, // recorded, never judged (owner ruling 2026-10-01: any colour)
-    { fieldCode: 'owner_name', dataType: 'text', isPii: true },
+    // [VERIFY-DOCS · ruling 5] no owner_name: the registered owner can be a third party (RETIRED_FIELDS)
   ],
   road_service_licence: [
     { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
@@ -502,6 +523,37 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   ],
 };
 
+/**
+ * [VERIFY-DOCS · owner ruling 5, 6 Oct 2026] Fields an older registry declared and Swift no longer
+ * collects: a person's sex and nationality on identity documents, and the registered owner's name on a
+ * vehicle registration (it can be a third party's). The seed RETIRES their declarations (seedDocFields),
+ * so no extraction creates them again, and the subject's export and the custody trail never show an
+ * empty placeholder an older extraction left for them. A value under one (none is ever written: the
+ * processor contract carries only the document number) would still be exported to its subject.
+ */
+export const RETIRED_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  national_id: ['sex', 'nationality'],
+  owner_national_id: ['sex', 'nationality'],
+  passport: ['sex', 'nationality'],
+  digital_id: ['sex', 'nationality'],
+  vehicle_registration: ['owner_name'],
+};
+/** An empty placeholder for a retired field: nothing to show anyone. */
+export function isRetiredPlaceholder(legacyCode: string, fieldCode: string, valueCt: unknown): boolean {
+  return valueCt === null && (RETIRED_FIELDS[legacyCode]?.includes(fieldCode) ?? false);
+}
+
+/**
+ * [VERIFY-DOCS · owner ruling 5] Swift never accepts a medical certificate or any health record — health
+ * data is sensitive personal data (Data Protection Act 2023 s.2), and nothing Swift does needs it (the food
+ * handler's permit is a permit). No list may name one, the registry never mints one, and an upload of one
+ * is refused before any document is recorded, whatever a stored list says.
+ */
+export const NEVER_ACCEPTED_DOC_TYPES: ReadonlySet<string> = new Set(['medical_certificate', 'health_certificate', 'medical_report', 'doctors_note', 'fitness_to_work_certificate']);
+export function isNeverAcceptedDocType(code: string): boolean {
+  return NEVER_ACCEPTED_DOC_TYPES.has(code) || /medic|health|doctor|physician|clinic|hospital/i.test(code);
+}
+
 /** The field a processor's generic `documentNumber` lands in for a type: a declared `doc_number` first (the legacy convention), else the type's identifier. */
 export function identifierFieldOf(legacyCode: string, declared: ReadonlyArray<{ fieldCode: string }>): string | null {
   if (declared.some((f) => f.fieldCode === 'doc_number')) return 'doc_number';
@@ -509,8 +561,12 @@ export function identifierFieldOf(legacyCode: string, declared: ReadonlyArray<{ 
   return id && declared.some((f) => f.fieldCode === id) ? id : null;
 }
 
-/** Seed the declared fields of every seeded document type. Expand-only: rows are upserted, never removed (a type's own test may add fields for a run). */
+/** Seed the declared fields of every seeded document type. Expand-only: rows are upserted, never removed (a type's own test may add fields for a run)
+ *  — except a RETIRED field, whose declaration is removed so no extraction creates it again [VERIFY-DOCS]. */
 export async function seedDocFields(prisma: PrismaClient): Promise<number> {
+  for (const [legacyCode, fieldCodes] of Object.entries(RETIRED_FIELDS)) {
+    await prisma.docField.deleteMany({ where: { docType: { legacyCode }, fieldCode: { in: [...fieldCodes] } } });
+  }
   const types = await prisma.docType.findMany({ select: { code: true, legacyCode: true } });
   const validators = new Set((await prisma.validator.findMany({ select: { code: true } })).map((v) => v.code));
   let n = 0;
@@ -538,11 +594,16 @@ export async function seedDocFields(prisma: PrismaClient): Promise<number> {
  */
 export const UNREGISTERED_TIER = 'UNREGISTERED';
 export const UNREGISTERED_LIST_SUFFIX = '_UNREGISTERED';
-/** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; anything else is the STANDARD tier. */
-export function splitChecklistKey(listKey: string): { actorRole: string; tier: string } {
-  return listKey.endsWith(UNREGISTERED_LIST_SUFFIX)
-    ? { actorRole: listKey.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER }
-    : { actorRole: listKey, tier: REGISTRY_TIER };
+/** [VERIFY-DOCS] `<KEY>_OPTIONAL` names documents the same role MAY add: never a gate. */
+export const OPTIONAL_LIST_SUFFIX = '_OPTIONAL';
+/** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; MOVER_OPTIONAL → { actorRole: 'MOVER', optional };
+ *  anything else is the STANDARD tier's required list. */
+export function splitChecklistKey(listKey: string): { actorRole: string; tier: string; optional: boolean } {
+  const optional = listKey.endsWith(OPTIONAL_LIST_SUFFIX);
+  const key = optional ? listKey.slice(0, -OPTIONAL_LIST_SUFFIX.length) : listKey;
+  return key.endsWith(UNREGISTERED_LIST_SUFFIX)
+    ? { actorRole: key.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER, optional }
+    : { actorRole: key, tier: REGISTRY_TIER, optional };
 }
 
 export async function registryChecklist(prisma: PrismaClient, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
@@ -555,9 +616,11 @@ export async function registryChecklist(prisma: PrismaClient, countryCode: strin
     orderBy: { effectiveFrom: 'desc' },
     include: { items: { include: { docType: { select: { legacyCode: true, isActive: true } } }, orderBy: { sortOrder: 'asc' } } },
   });
-  if (!set || set.items.length === 0) return null;
+  // [VERIFY-DOCS] The checklist is the BLOCKING items; an optional item never becomes a requirement.
+  const blocking = set?.items.filter((i) => i.isBlocking) ?? [];
+  if (!set || blocking.length === 0) return null;
   if (!set.items.every((i) => i.docType.isActive)) return null;
-  return set.items.map((i) => i.docType.legacyCode);
+  return blocking.map((i) => i.docType.legacyCode);
 }
 
 /** [DOC-1 Part XIX · P19] The identity types whose VALID record lets a proprietor's verified name stand in for a business name ("trading as"). Registry text (DOC-INV-2). */
@@ -568,5 +631,8 @@ export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
 /** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
 export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
+/** [VERIFY-DOCS · owner rulings 1–3, 6 Oct 2026] The character document: optional for movers (an approved, current one is
+ *  the "Police-cleared" flag), still required where a list names it. Registry text (DOC-INV-2). */
+export const POLICE_CLEARANCE_DOC_TYPE = 'police_clearance';
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];

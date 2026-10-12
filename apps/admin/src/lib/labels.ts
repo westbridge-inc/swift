@@ -51,7 +51,7 @@ export const ENUM_LABELS = {
     DELIVERY: 'Delivery', APPOINTMENT: 'Appointment', PICKUP: 'Customer pickup',
   },
   PaymentMethod: {
-    CASH: 'Cash', MOBILE_MONEY: 'MMG', BANK_TRANSFER: 'Bank transfer', CARD: 'Card', WALLET: 'Wallet',
+    CASH: 'Cash', MOBILE_MONEY: 'MMG', BANK_TRANSFER: 'Bank transfer', CARD: 'Card', WALLET: 'Not in use',
   },
   PaymentStatus: {
     PENDING: 'Not paid yet', AUTHORIZED: 'Authorised', CAPTURED: 'Paid',
@@ -79,7 +79,7 @@ export const ENUM_LABELS = {
   },
   BillingEventType: {
     CHARGE_ATTEMPT: 'Weekly fee charge started', CHARGE_ATTEMPT_RECLAIMED: 'Stalled charge restarted',
-    CHARGE_SUCCESS: 'Weekly fee paid', CHARGE_FAILED: 'Weekly fee not paid', PREPAID_TOPUP: 'Prepaid top-up',
+    CHARGE_SUCCESS: 'Weekly fee paid', CHARGE_FAILED: 'Weekly fee not paid', PREPAID_TOPUP: 'Fee paid ahead',
     SUSPENDED: 'Suspended for an unpaid fee', REINSTATED: 'Reinstated', REMINDER: 'Reminder sent',
     TIER_CHANGE: 'Plan changed', CHURNED: 'Left Swift',
   },

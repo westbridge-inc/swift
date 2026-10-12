@@ -1,3 +1,4 @@
+import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -700,7 +701,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // [SWIFT-064]. The demand heatmap uses the same window (one source of
     // truth); actually CANCELLING abandoned requests is SWIFT-021.
     const freshSince = new Date(Date.now() - TAXI_DEMAND_WINDOW_MIN * 60_000);
-    const orders = await app.prisma.order.findMany({
+    const candidates = await app.prisma.order.findMany({
       where: {
         customerId: { not: request.user.userId },
         orderType: 'TAXI',
@@ -730,6 +731,8 @@ export async function driverRoutes(app: FastifyInstance) {
       orderBy: { placedAt: 'asc' },
       take: 20,
     });
+
+    const orders = await safeBoardOrders(app.prisma, candidates, request.user.userId, 'DRIVER');
 
     // R8.4: the incoming request shows "{Passenger} · {rating}★" (or New) —
     // one batched read from the ONE mapper.
