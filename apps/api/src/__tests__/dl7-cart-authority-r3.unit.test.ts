@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { OrderService } from '../modules/order/order.service';
 import { runWithTenant } from '../plugins/tenant-context';
@@ -20,10 +20,24 @@ async function fixture() {
   const address: Row = { id: 'address-fixture', userId: 'user-fixture', latitude: 60, longitude: 60 };
   const update = vi.fn(async () => ({ ...cart }));
   const readVendor = vi.fn(async (q: Query) => queryRow(cart['vendor'] as Row, q));
+  // [L04 promo wall] A store code's store, by id (the promo tenant check's read).
+  const promoVendor = async (q: Query) => {
+    const id = (q as { where?: { id?: string } }).where?.id;
+    const row = [vendor, other].find((v) => v['id'] === id);
+    return row ? queryRow(row, q) : null;
+  };
+  // [L04 promo wall] The deployment's one active PRODUCTION operator (a platform
+  // code is its offer): the fixture's tenant while that is a production tenant;
+  // when the fixture's tenant is the store-review fiction, Swift's own operator.
+  const productionOperator = () => {
+    const t = vendor['tenant'] as Row;
+    return t['kind'] === 'PRODUCTION' && t['isActive'] ? 'tenant-fixture' : 'tenant-swift';
+  };
   const readUser = vi.fn(async () => { throw new Error('VISIBLE_CART_PASSED_AUTHORITY'); });
   const prisma = prismaDouble(orderStore([]), {
     cart: { findUnique: async (q: Query) => queryRow(cart, q), update },
-    vendor: { findUnique: readVendor, findFirst: readVendor },
+    vendor: { findUnique: promoVendor, findFirst: readVendor },
+    tenant: { findMany: async () => [{ id: productionOperator() }] },
     promoCode: { findUnique: async () => promo }, address: { findFirst: async (q: Query) => queryRow(address, q) },
     user: { findUniqueOrThrow: readUser },
     // Main's identity authority gate on promo: an unclustered account.
@@ -38,6 +52,9 @@ async function fixture() {
 }
 
 describe('DL7 R3 promo caller nested cart wall', () => {
+  // The public operator is the ONE active production tenant (no explicit setting).
+  beforeEach(() => { vi.stubEnv('PUBLIC_TENANT_ID', ''); });
+  afterEach(() => { vi.unstubAllEnvs(); });
   it('a visible tracked cart counts only its visible lines', async () => {
     const h = await fixture();
     expect(await h.promoRead()).toMatchObject({ data: { estimatedDiscount: 10, applied: true } });
@@ -59,7 +76,15 @@ describe('DL7 R3 promo caller nested cart wall', () => {
     const h = await fixture();
     h.other['tenantId'] = 'tenant-fixture';
     (h.vendor['tenant'] as Row)['kind'] = 'REVIEW';
-    expect(await h.promoRead()).toMatchObject({ data: { estimatedDiscount: 910, applied: true } });
+    // [L04 promo wall] A platform code is the production operator's offer: the
+    // store-review customer is answered exactly as for an unknown code.
+    await expect(h.promoRead()).rejects.toMatchObject({ statusCode: 404, code: 'INVALID_PROMO' });
+    expect(h.update).not.toHaveBeenCalled();
+    // Its own tenant's codes see the COMPLETE same-tenant cart: each store's line counts.
+    Object.assign(h.promo, { vendorId: h.vendor['id'] });
+    expect(await h.promoRead()).toMatchObject({ data: { estimatedDiscount: 10, applied: true } });
+    Object.assign(h.promo, { vendorId: h.other['id'] });
+    expect(await h.promoRead()).toMatchObject({ data: { estimatedDiscount: 900, applied: true } });
   });
 });
 
