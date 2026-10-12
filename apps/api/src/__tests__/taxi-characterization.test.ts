@@ -395,6 +395,47 @@ describe('the current taxi contract (characterization — must stay green all en
     expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount));
   });
 
+  // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] "we go by the thing we set up
+  // base fee plus km": a driver never sets the price. An older app's slider may
+  // still send a lower fare; the server ignores it, never errors, and books the
+  // formula fare — on the board accept and on the offer card alike.
+  it('[owner ruling 8 Oct] a driver-sent lower fare is ignored on the board accept: the formula fare stands', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const ride = await requestRide(customer.token);
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id }, select: { taxiFareTotal: true, totalAmount: true } });
+    const lower = Math.ceil(Number(before.taxiFareTotal) * 0.6);
+    const accept = await app.inject({
+      method: 'POST', url: `/api/v1/driver/rides/${ride.id}/accept`,
+      headers: { authorization: `Bearer ${driver.token}`, 'content-type': 'application/json' },
+      payload: { fare: lower },
+    });
+    expect(accept.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(fresh.status).toBe('DRIVER_ASSIGNED');
+    expect(Number(fresh.taxiFareTotal)).toBe(Number(before.taxiFareTotal));
+    expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount));
+  });
+
+  it('[owner ruling 8 Oct] a driver-sent lower fare is ignored on the offer card: the formula fare stands', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const ride = await requestRide(customer.token);
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id }, select: { taxiFareTotal: true, totalAmount: true } });
+    await app.redis.set(`dispatch:offer:${ride.id}`, driver.driverId, 'EX', 40);
+    const accept = await app.inject({
+      method: 'POST', url: '/api/v1/driver/offers/accept',
+      headers: { authorization: `Bearer ${driver.token}`, 'content-type': 'application/json' },
+      payload: { orderId: ride.id, fare: Math.ceil(Number(before.taxiFareTotal) * 0.6) },
+    });
+    expect(accept.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(fresh.driverId).toBe(driver.driverId);
+    expect(Number(fresh.taxiFareTotal)).toBe(Number(before.taxiFareTotal));
+    expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount));
+    await app.redis.del(`dispatch:offer:${ride.id}`, `dispatch:mover-offer:${driver.driverId}`);
+  });
+
   it('driver cancel = controlled release: PENDING + reason driver_cancelled + honest push (T18 bones)', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
