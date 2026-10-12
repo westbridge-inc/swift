@@ -65,15 +65,9 @@ export function coarsen(point: Point, decimals = COARSE_DECIMALS): Point {
 }
 
 /**
- * The map URLs, built from a COARSENED point. The embed keeps a wide-enough
- * box to stay useful at that precision.
+ * The outbound map link, built from a COARSENED point. (The in-page map is
+ * drawn from tiles: components/tile-map.tsx.)
  */
-export function mapEmbedUrl(point: Point): string {
-  const { lat, lng } = coarsen(point);
-  const box = 0.008;
-  return `https://www.openstreetmap.org/export/embed.html?bbox=${lng - box}%2C${lat - box}%2C${lng + box}%2C${lat + box}&layer=mapnik&marker=${lat}%2C${lng}`;
-}
-
 export function mapLinkUrl(point: Point): string {
   const { lat, lng } = coarsen(point);
   return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=14/${lat}/${lng}`;

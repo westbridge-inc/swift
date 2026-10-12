@@ -16,6 +16,7 @@ import { readOfferItinerary, type TaxiStopPreview } from '../rides/taxi-stops-re
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
 import { algoConfig } from '../algo/algo-config';
+import { journalAuthorityWhere, poolForOrder, type DispatchPool } from './dispatch-generation-keys';
 import { foodAgeLimitMinutes, foodAge, retireTooOldOrder, rescueIncentiveGyd, grantRescueIncentive, incentiveKey, isCapturedMmg } from './rescue';
 import { recordDecision } from '../algo/decisions';
 import { TERMINAL_ORDER_STATUSES, DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
@@ -28,7 +29,6 @@ import { freshRidePinReset } from '../rides/ride-pin';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
-import { clampDriverFare } from '../../utils/markup';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
 import { mmgDispatchBlocked } from '../order/mmg-claim.service';
 import { FloatService, riderFloatForOrder } from './float.service';
@@ -146,13 +146,9 @@ export function nearestCandidateCap(): number {
   return Number.isInteger(n) && n > 0 ? n : 50;
 }
 
-/** Taxi rides draw from the driver pool; everything else from riders.
- *  Same scoring, same cascade, same atomic claim — shared code, not a copy. */
-export type DispatchPool = 'RIDER' | 'DRIVER';
-
-function poolForOrder(order: { orderType: string }): DispatchPool {
-  return order.orderType === 'TAXI' ? 'DRIVER' : 'RIDER';
-}
+// The pool and the journal's generation rule live in dispatch-generation-keys.ts,
+// shared with the cancel policy's "no mover found" read.
+export type { DispatchPool } from './dispatch-generation-keys';
 
 /** Journal vertical (availability spec §3): TAXI | COURIER | DELIVERY. */
 function verticalForOrder(order: { orderType: string }): string {
@@ -296,26 +292,6 @@ const exhaustKey = dispatchExhaustKey;
 const reconciledKey = (orderId: string) => `dispatch:reconciled:${orderId}`;
 /** [F-014-06] Short single-flight lock around exhaust() side effects. */
 const exhaustLockKey = dispatchExhaustLockKey;
-
-/** Generation zero is also the rollout compatibility generation: searches
- * created before the migration carry NULL, while existing Order rows are
- * backfilled/defaulted to version 0. Both identities describe the same
- * pre-switch custody. Later generations are exact and never match NULL. */
-function journalAuthorityWhere(
-  pool: DispatchPool,
-  deliveryAuthorityVersion: number,
-): Prisma.DispatchSearchWhereInput {
-  if (pool !== 'RIDER') return { deliveryAuthorityVersion: null };
-  if (deliveryAuthorityVersion === 0) {
-    return {
-      OR: [
-        { deliveryAuthorityVersion: 0 },
-        { deliveryAuthorityVersion: null },
-      ],
-    };
-  }
-  return { deliveryAuthorityVersion };
-}
 
 /** A committed claim must never be surfaced as failed, even if the logger's
  * destination is itself unhealthy while reporting a best-effort side effect. */
@@ -2301,7 +2277,10 @@ export class DispatchService {
    * guarded update) is the real lock — Redis only routes the offer. Even if
    * every rider in town calls this at once, exactly one wins.
    */
-  async acceptOffer(orderId: string, moverUserId: string, requestedFare?: number, offerAttemptId?: string) {
+  /** [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The third argument is a
+   *  retired slot: a mover never sets the price (base fee plus km, as booked),
+   *  so whatever an older app sent there is never read. */
+  async acceptOffer(orderId: string, moverUserId: string, _retiredMoverFare?: number, offerAttemptId?: string) {
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
 
@@ -2323,17 +2302,9 @@ export class DispatchService {
     // take the live card, but it acknowledges no generated attempt.
     const countsForMover = !!offerAttemptId || !resolvedAttemptId;
 
-    // [REPORT-012 F-012-02] Prove the rail BEFORE consuming the exclusive
-    // offer. A positive fare on a non-CASH order used to ride into claimOrder,
-    // which rejected it MMG_PRICE_LOCKED — but only AFTER removeOfferIfOwned
-    // had destroyed the mover's offer, and the catch below then marked that
-    // mover declined and advanced the cascade: a stale/forged client burned
-    // its own valid offer. The price on a non-CASH rail is locked and the
-    // current card sends no fare there, so a submitted fare is NEUTRALIZED —
-    // the accept proceeds at the locked market price, the offer is never
-    // consumed-then-rejected. The in-claim MMG_PRICE_LOCKED gate stays as the
-    // locked-row belt (board/direct entrances, and any future caller).
-    let fare = requestedFare;
+    // [REPORT-012 F-012-02 · OWNER RULING 8 Oct] No mover-sent price reaches
+    // the claim at all, so a stale card can never burn its own offer on a
+    // price refusal: the accept always proceeds at the booked price.
     const rail = await this.prisma.order.findUnique({
       where: { id: orderId },
       select: { paymentMethod: true, fulfillmentMode: true, fulfillmentModeVersion: true },
@@ -2354,7 +2325,6 @@ export class DispatchService {
       await this.dispatchOrder(orderId).catch(() => {});
       throw new AppError(409, 'OFFER_EXPIRED', 'Delivery ownership changed; refresh for the current offer');
     }
-    if (fare !== undefined && rail && rail.paymentMethod !== 'CASH') fare = undefined;
 
     // Consume the offer atomically before claiming. A late accept can no longer
     // pass GET and then claim after timeout/offline has offered the job to the
@@ -2371,7 +2341,6 @@ export class DispatchService {
       // rejection here therefore means no durable winner exists and only then
       // is it safe to advance the cascade.
       const claimed = await this.claimOrder(orderId, mover.id, pool, {
-        requestedFare: fare,
         ...(pool === 'RIDER'
           ? { expectedDeliveryAuthorityVersion: offeredVersion }
           : {}),
@@ -2558,7 +2527,6 @@ export class DispatchService {
     moverId: string,
     pool: DispatchPool = 'RIDER',
     options: {
-      requestedFare?: number;
       expectedDeliveryAuthorityVersion?: number;
       /** Internal accept-card handoff: acceptOffer consumes this generation's
        * incentive immediately after the durable claim returns. */
@@ -2686,29 +2654,9 @@ export class DispatchService {
       if (pool === 'RIDER' && withheldAwaitingReadiness(lockedOrder)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(lockedOrder)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
 
-      const chosenTaxiFare = pool === 'DRIVER' && options.requestedFare !== undefined
-        ? clampDriverFare(options.requestedFare, Number(lockedOrder.taxiFareTotal))
-        : undefined;
-
-      // [REPORT-005 F-005-01] Rider fee choice for the offer card is applied
-      // HERE, inside the locked claim — never as a post-assignment second
-      // commit. CASH only: an MMG total was already paid/instructed to the
-      // store; a differing fare on MMG refuses before any assignment write.
-      let riderRepricing: { deliveryFee: number; totalAmount: { decrement: number } } | undefined;
-      if (pool === 'RIDER' && options.requestedFare !== undefined) {
-        const marketFee = Number(lockedOrder.deliveryFee);
-        const chosenFee = clampDriverFare(options.requestedFare, marketFee);
-        if (chosenFee !== marketFee) {
-          if (lockedOrder.paymentMethod !== 'CASH') {
-            throw new AppError(
-              409,
-              'MMG_PRICE_LOCKED',
-              'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
-            );
-          }
-          riderRepricing = { deliveryFee: chosenFee, totalAmount: { decrement: marketFee - chosenFee } };
-        }
-      }
+      // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The claim never writes a
+      // price: the delivery fee and the taxi fare stay exactly as booked (the
+      // set formula, base fee plus km).
 
       const claimed = pool === 'DRIVER'
         ? await tx.order.updateMany({
@@ -2723,9 +2671,6 @@ export class DispatchService {
               driverId: moverId,
               status: 'DRIVER_ASSIGNED',
               acceptedAt: new Date(),
-              ...(chosenTaxiFare !== undefined
-                ? { taxiFareTotal: chosenTaxiFare, totalAmount: chosenTaxiFare }
-                : {}),
             },
           }).catch((error: unknown) => {
             // [DISPATCH 1/3] orders_one_live_taxi_per_driver_key: the database
@@ -2754,7 +2699,7 @@ export class DispatchService {
               // against a future caller or a changed query path.
               AND: [notSelfDeliveredFilter(), dispatchHoldExpiredFilter()],
             },
-            data: { riderId: moverId, status: 'RIDER_ASSIGNED', ...(riderRepricing ?? {}) },
+            data: { riderId: moverId, status: 'RIDER_ASSIGNED' },
           });
       if (claimed.count === 0) {
         throw new AppError(409, 'ALREADY_TAKEN', 'Another mover already took this job');

@@ -1,5 +1,6 @@
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -15,12 +16,12 @@ import type {
 } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
-import { clampDriverFare, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
+import { generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import { isFreeCancellation, freeBecauseNoMoverFound, readNoMoverFound, LATE_CANCEL_FEE } from './cancel-policy';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -374,7 +375,7 @@ export function assertMmgFulfilmentAllowed(
     throw new AppError(
       409,
       'MMG_PAYMENT_PENDING',
-      'This MMG order can move only after the store confirms the payment landed in its MMG wallet.',
+      'This MMG order can move only after the store confirms the payment landed in its MMG account.',
     );
   }
 }
@@ -672,10 +673,6 @@ export class OrderService {
       riderId: string;
       changedBy: string;
       note?: string;
-      /** Rider-chosen delivery fee (CASH rail only) — the seam derives the
-       *  clamp and the total delta from the LOCKED row, never from a route
-       *  preview [REPORT-005 F-005-01]. */
-      requestedFee?: number;
       moverUserId: string;
     },
   ): Promise<RiderAssignmentSnapshot & { dispatchAssignmentSequence: number }> {
@@ -704,26 +701,8 @@ export class OrderService {
       }
     }
 
-    // [REPORT-005 F-005-01] Rider price choice is a CASH feature: the customer
-    // pays the (lower) total at the door. An MMG total was already paid — or
-    // externally instructed — at checkout; repricing after capture rewrites
-    // money the store received. Fee applied as an atomic delta off the locked
-    // row so a stale preview can never smuggle in an absolute total.
-    let repricing: Prisma.OrderUncheckedUpdateManyInput = {};
-    if (input.requestedFee != null && paymentGate) {
-      const marketFee = Number(paymentGate.deliveryFee);
-      const chosenFee = clampDriverFare(input.requestedFee, marketFee);
-      if (chosenFee !== marketFee) {
-        if (paymentGate.paymentMethod !== 'CASH') {
-          throw new AppError(
-            409,
-            'MMG_PRICE_LOCKED',
-            'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
-          );
-        }
-        repricing = { deliveryFee: chosenFee, totalAmount: { decrement: marketFee - chosenFee } };
-      }
-    }
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The seam takes no price:
+    // the delivery fee and the total stay exactly as booked at checkout.
 
     const claimed = await tx.order.updateMany({
       where: {
@@ -745,7 +724,6 @@ export class OrderService {
       data: {
         riderId: input.riderId,
         status: 'RIDER_ASSIGNED',
-        ...repricing,
       },
     });
     if (claimed.count === 0) {
@@ -2429,6 +2407,7 @@ export class OrderService {
       order: CancellationOrder;
       heldNow: boolean;
       freeCancellation: boolean;
+      noMoverFree: boolean;
       cancellationFee: number;
       cancelledSearches: number;
     } | undefined;
@@ -2490,7 +2469,12 @@ export class OrderService {
           // the job, and the order is held or still in its uncommitted status
           // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
           // inside the window.
-          const freeCancellation = isFreeCancellation(order, now);
+          // [Item 64] ...or the mover search came back empty — read here, under
+          // the order lock and before the searches are closed below, so a mover
+          // assigned after the customer's preview still ends the exemption.
+          const policyOrder = { ...order, noMoverFound: await readNoMoverFound(tx, order) };
+          const freeCancellation = isFreeCancellation(policyOrder, now);
+          const noMoverFree = freeCancellation && freeBecauseNoMoverFound(policyOrder);
           const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 
           // The row lock makes this update and every dependent release below one
@@ -2549,6 +2533,7 @@ export class OrderService {
             order,
             heldNow,
             freeCancellation,
+            noMoverFree,
             cancellationFee,
             cancelledSearches: searches.count,
           };
@@ -2564,7 +2549,7 @@ export class OrderService {
     }
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
-    const { order, heldNow, freeCancellation, cancellationFee, cancelledSearches } = committed;
+    const { order, heldNow, freeCancellation, noMoverFree, cancellationFee, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
@@ -2614,15 +2599,18 @@ export class OrderService {
     // booking and its money is with the PROVIDER — the noun and the party
     // follow the committed row's fulfillment; the fee and the MMG uncertainty
     // above are the server's and are unchanged. Food keeps its exact words.
-    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : 'Order';
+    // A ride is a "Ride" in the customer's words [Item 64 · review S4].
+    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
     const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+    // [Item 64] The plain reason, when the platform found nobody to do the job.
+    const cancelled = noMoverFree ? `${noun} cancelled — no mover was found, so there is no fee.` : null;
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
-        message: `${noun} cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`,
+        message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
         cancellationFee,
       };
     }
-    return { message: freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`, cancellationFee };
+    return { message: cancelled ?? (freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`), cancellationFee };
   }
 
   async updateStatus(
@@ -3123,7 +3111,12 @@ export class OrderService {
     plans: Array<{ vendorId: string; subtotal: number }>,
   ) {
     const promo = await this.prisma.promoCode.findUnique({ where: { code: code.toUpperCase() } });
-    if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    // [L04] Another tenant's code — a platform code for a caller outside
+    // production above all — is the unknown-code answer, and so is never
+    // redeemed: its redemption count cannot move.
+    if (!(await promoBelongsToCallerTenant(this.prisma, promo, userId)) || !promo) {
+      throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
 
     const now = new Date();
