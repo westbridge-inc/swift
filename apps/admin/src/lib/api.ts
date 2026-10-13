@@ -616,6 +616,11 @@ export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: I
 // reason header [ADM-006].
 export const rejectDoc = (id: string, reason: string, reasonCode: RejectionReasonCode) =>
   apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason, reasonCode }), reason });
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] Withdraw a committed document (admin.routes revokeDocSchema).
+// For a customer ID the server takes the account back to L1 when no other customer ID stands, in
+// the same transaction, and answers the resulting accountTrustLevel (#1610).
+export const revokeDoc = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/revoke`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been

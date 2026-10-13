@@ -118,7 +118,7 @@ async function choose(name: string) {
 }
 
 describe('[Q7b] store → cart', () => {
-  it('a guest fills the basket, then signs in at Place order and comes back to that store', async () => {
+  it('a guest fills the basket, then signs in at Place order and lands on the one checkout', async () => {
     signedIn = false;
     at('/store/shanta-kitchen', {}, await storePage());
     await choose('Pepperpot bowl');
@@ -133,7 +133,7 @@ describe('[Q7b] store → cart', () => {
     const placeOrder = screen.getByRole('button', { name: 'Place order' });
     await waitFor(() => expect((placeOrder as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(placeOrder);
-    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fshanta-kitchen'));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fcheckout'));
     expect(calls('POST', '/api/v1/auth/refresh')).toHaveLength(1);
   });
 
@@ -148,10 +148,10 @@ describe('[Q7b] store → cart', () => {
     await screen.findByText('Pepperpot bowl added to your order.');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
-    // The order is on this page: its panel, reached from the floating button
-    // (#1590: shown once the panel has scrolled off a phone's screen).
+    // [W4] The order is placed on the one checkout page, one tap from the floating button
+    // (#1590: shown once the order panel has scrolled off a phone's screen).
     report(screen.getByRole('complementary', { name: 'Your order and checkout' }), false);
-    expect(screen.getByRole('link', { name: /View your order/ }).getAttribute('href')).toBe('#checkout');
+    expect(screen.getByRole('link', { name: /^Checkout · 1 item/ }).getAttribute('href')).toBe('/checkout');
   });
 });
 
@@ -203,9 +203,13 @@ describe('[Q7b] cart → checkout → tracking', () => {
   it('places a cash order against the server quote, once, and opens its tracking', async () => {
     at('/cart', {}, <CartPage />);
     const place = await screen.findByRole('button', { name: 'Place cash order · $2,150' });
-    // No MMG on this cart, so no choice is offered — cash, stated plainly.
-    expect(screen.queryByRole('radiogroup')).toBeNull();
+    // No MMG on this cart, so no payment choice is offered — cash, stated
+    // plainly. ([W5] The page's other choice is Delivery · Pickup.)
+    expect(screen.queryByRole('radiogroup', { name: 'Payment' })).toBeNull();
+    expect(screen.getAllByRole('radiogroup').map((group) => group.getAttribute('aria-label'))).toEqual(['How would you like your order?']);
     expect(screen.getByText('Cash at the door')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /schedule|pick a time|order later/i })).toBeNull();
+    expect(document.querySelector('input[type=date], input[type=time], input[type=datetime-local]')).toBeNull();
     fireEvent.click(place);
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/o9'));
     const [[, addressInit]] = calls('PUT', '/api/v1/customer/cart/address') as [[unknown, RequestInit]];

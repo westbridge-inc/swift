@@ -1,7 +1,9 @@
+import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
+import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
@@ -36,6 +38,7 @@ import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
+import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -431,9 +434,13 @@ async function buildCartResponse(
       where: { userId: cart.customerId, isDefault: true },
     });
   }
-  const promoCodeRecord = cart.promoCodeId
+  const storedPromoCode = cart.promoCodeId
     ? await app.prisma.promoCode.findUnique({ where: { id: cart.promoCodeId } })
     : null;
+  // Old carts can predate the attachment wall. Their saved pointer grants
+  // neither access to another tenant's terms nor a discount on this quote.
+  const promoCodeRecord = storedPromoCode && await promoBelongsToCallerTenant(app.prisma, storedPromoCode, userId)
+    ? storedPromoCode : null;
   // The fee is about where the order is GOING: the chosen delivery address
   // wins over device coords (those are only a fallback before an address is
   // set). Same routing source as checkout, so the quote equals the final fee.
@@ -844,6 +851,11 @@ export async function customerRoutes(app: FastifyInstance) {
         // time — a private object's key is unrenderable by any client.
         avatar: await resolveAvatarUrl(user.avatar),
         selfieCapturedAt: user.selfieCapturedAt,
+        // [Owner ruling 8 Oct 2026 — CUSTOMER ID] What the app may say about the customer's ID,
+        // truthfully (additive): NONE · ON_FILE (unlocked, no person reviewed it) · CHECKED (a person
+        // approved it) · WAITING (held for a person) · NOT_ACCEPTED.
+        // Never fails the profile: an unreadable answer is left out, and the app then claims nothing.
+        idCheck: await customerIdCheck(app.prisma, userId, user.trustLevel).catch(() => undefined),
         role: user.activeRole,
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
@@ -1867,6 +1879,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.post('/cart/merge', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const body = cartMergeSchema.parse(request.body);
     const key = request.headers['idempotency-key'];
     if (typeof key !== 'string') throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'A basket upload needs an Idempotency-Key.');
@@ -1876,6 +1889,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.post('/cart/items', async (request: AuthRequest, reply: FastifyReply) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const body = addCartItemSchema.parse(request.body);
 
@@ -1978,6 +1992,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/items/:id', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { id } = request.params as { id: string };
     const { userId } = request.user;
     const body = updateCartItemSchema.parse(request.body);
@@ -2031,6 +2046,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.delete('/cart/items/:id', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { id } = request.params as { id: string };
     const { userId } = request.user;
 
@@ -2058,6 +2074,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.delete('/cart', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     await app.prisma.cart.deleteMany({ where: { customerId: userId } });
     await app.redis.del(`cart:${userId}`).catch(() => {});
@@ -2065,6 +2082,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/address', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const { addressId } = cartAddressSchema.parse(request.body);
 
@@ -2100,6 +2118,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/tip', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const { amount } = cartTipSchema.parse(request.body);
 
@@ -2122,6 +2141,7 @@ export async function customerRoutes(app: FastifyInstance) {
   // charged full price, with no way back. This clears the stored pointer: the
   // quote re-prices without it and checkout stops receiving the code.
   app.delete('/cart/promo', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
 
     const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
@@ -2144,6 +2164,7 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   app.post('/checkout', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const body = checkoutSchema.parse(request.body ?? {});
 
@@ -3418,7 +3439,12 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { code: code.toUpperCase().trim() },
     });
 
-    if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    // [L04] A code of another tenant (a platform code for anyone outside
+    // production, or another tenant's store code) is answered exactly as an
+    // unknown code — and is never attached to this cart.
+    if (!(await promoBelongsToCallerTenant(app.prisma, promo, userId)) || !promo) {
+      throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
 
     const now = new Date();
