@@ -4,7 +4,7 @@ import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
-import { alignStoredVehicleKind, requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { alignStoredVehicleKind, papersUnderSecondReview, requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
@@ -491,9 +491,12 @@ export class PartnerService {
       if (awaitingIds.length > 0) {
         await tx.$queryRaw`SELECT "id" FROM "review_case" WHERE "submissionId" = ANY(${awaitingIds}) FOR UPDATE`;
       }
+      // [DOC-1 §24.2] A paper under a second review is frozen too: its confirmation opens the fraud case.
+      const underSecondReview = await papersUnderSecondReview(tx, awaitingIds);
       const superseded: string[] = [];
       const withdrawn: string[] = [];
       for (const paper of toRetire) {
+        if (underSecondReview.has(paper.id)) continue;
         if (paper.committed) {
           if (await hopDocState(tx, { id: paper.id, userId }, 'COMMITTED', 'SUPERSEDED', { reviewNote: 'SUPERSEDED: the mover changed vehicle' })) superseded.push(paper.id);
         } else if (await hopDocState(tx, { id: paper.id, userId }, [...AWAITING_REVIEW], 'EXPIRED', { status: 'EXPIRED', reviewNote: 'WITHDRAWN: the mover changed vehicle' })) {
