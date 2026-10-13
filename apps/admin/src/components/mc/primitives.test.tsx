@@ -183,7 +183,7 @@ describe('[MC-PR1] <ReasonDialog> validation', () => {
     const dialog = await screen.findByRole('dialog');
     const amount = within(dialog).getByRole('textbox', { name: 'Amount handed back (GYD)' });
     const reference = within(dialog).getByRole('textbox', { name: 'Receipt reference' });
-    expect(document.activeElement).toBe(amount);
+    await waitFor(() => expect(document.activeElement).toBe(amount));
     await user.type(amount, 'four thousand');
     await user.type(reference, 'r1');
     await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
