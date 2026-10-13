@@ -9,24 +9,69 @@ vi.mock('@/components/swift-logo', () => ({ SwiftLogo: () => <span>Swift</span> 
 vi.mock('@/components/order-ui', () => ({
   VendorGridSkeleton: () => <div aria-label="Loading stores" />,
   VendorCard: ({ v }: any) => <p>{v.name}</p>, EmptyNote: ({ children }: any) => <p>{children}</p>, VENDOR_GRID: 'grid',
+  ItemCard: ({ name, meta, href }: any) => <a href={href}>{`${name} · ${meta}`}</a>,
 }));
 
+const SEARCH_URL = 'http://vendor-api.test/api/v1/search?q=Pepper&limit=30';
+
+function engine(vendors: unknown[], items: unknown[] = []) {
+  return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const url = String(input);
+    const data = url.includes('/api/v1/search?') ? { vendors, items } : url.includes('/market/depth') ? { visible: false, items: 0, vendors: 0 } : null;
+    return new Response(JSON.stringify({ success: data !== null, data }), { status: data === null ? 401 : 200 });
+  });
+}
+
 describe('web guest catalogue search', () => {
-  it('mounts the public page and uses the existing guest browse client', async () => {
-    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ success: true, data: [{ id: 'public', name: 'Public pepper shop' }] }), { status: 200 }));
+  it('mounts the public page and asks the one search engine, once, as a guest', async () => {
+    const fetcher = engine([{ id: 'public', name: 'Public pepper shop', vendorType: 'RESTAURANT' }]);
     vi.stubGlobal('fetch', fetcher);
     render(<AppLayout><SearchPage /></AppLayout>);
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search stores' }), { target: { value: 'Pepper' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search stores and dishes' }), { target: { value: 'Pepper' } });
     await waitFor(() => expect(screen.queryByText('Public pepper shop')).not.toBeNull());
     // [Q7b] The shell asks once who is browsing and once whether Market is
-    // open; the search itself is still the one guest browse call. Nothing
-    // else — in particular, no refresh is spent on a guest.
+    // open; the search itself is ONE call to the search engine (stores and
+    // dishes together). Nothing else — in particular, no refresh is spent on a guest.
     expect(fetcher.mock.calls.map(([url]) => String(url)).sort()).toEqual([
       'http://vendor-api.test/api/v1/auth/me',
-      'http://vendor-api.test/api/v1/customer/vendors?search=Pepper',
       'http://vendor-api.test/api/v1/market/depth',
+      SEARCH_URL,
     ]);
-    expect(fetcher).toHaveBeenCalledWith('http://vendor-api.test/api/v1/customer/vendors?search=Pepper', expect.objectContaining({ credentials: 'include' }));
+    expect(fetcher).toHaveBeenCalledWith(SEARCH_URL, expect.objectContaining({ credentials: 'include' }));
     expect(navigation.replace).not.toHaveBeenCalled();
+  });
+
+  it('[SEARCH 13 Oct] shows the dishes and products that match, each opening its own store at the item', async () => {
+    vi.stubGlobal('fetch', engine(
+      [{ id: 'v1', name: 'Pepper Kitchen', vendorType: 'RESTAURANT' }],
+      [{ id: 'i1', name: 'Pepperpot', vendorId: 'v2', vendorName: 'Granny Fakeplace', basePrice: 1500, imageUrl: null, categoryName: null, isNew: false }],
+    ));
+    render(<AppLayout><SearchPage /></AppLayout>);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search stores and dishes' }), { target: { value: 'Pepper' } });
+    const dish = await screen.findByText('Pepperpot · Granny Fakeplace');
+    expect(dish.getAttribute('href')).toBe('/order/vendor/v2?item=i1');
+    expect(screen.getByText('Pepper Kitchen')).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Dishes and products' })).toBeTruthy();
+  });
+
+  it('a kind chip narrows the stores; dishes, which carry no kind, show under All only', async () => {
+    vi.stubGlobal('fetch', engine(
+      [{ id: 'v1', name: 'Pepper Kitchen', vendorType: 'RESTAURANT' }, { id: 'v3', name: 'Pepper Hardware', vendorType: 'STORE' }],
+      [{ id: 'i1', name: 'Pepperpot', vendorId: 'v2', vendorName: 'Granny Fakeplace', basePrice: 1500, imageUrl: null, categoryName: null, isNew: false }],
+    ));
+    render(<AppLayout><SearchPage /></AppLayout>);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search stores and dishes' }), { target: { value: 'Pepper' } });
+    await screen.findByText('Pepperpot · Granny Fakeplace');
+    fireEvent.click(screen.getByRole('button', { name: 'Shops' }));
+    expect(screen.getByText('Pepper Hardware')).toBeTruthy();
+    expect(screen.queryByText('Pepper Kitchen')).toBeNull();
+    expect(screen.queryByText('Pepperpot · Granny Fakeplace')).toBeNull();
+  });
+
+  it('an empty answer says so, and offers dishes as something to try', async () => {
+    vi.stubGlobal('fetch', engine([], []));
+    render(<AppLayout><SearchPage /></AppLayout>);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search stores and dishes' }), { target: { value: 'Pepper' } });
+    expect(await screen.findByText('Nothing matches “Pepper” — try a store’s name, a dish or a cuisine.')).toBeTruthy();
   });
 });
