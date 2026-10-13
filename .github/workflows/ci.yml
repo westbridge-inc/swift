@@ -591,7 +591,7 @@ jobs:
         run: bash scripts/fetch-gitleaks.sh && ./gitleaks detect --no-git --source apps/mobile/dist --redact --exit-code 1
       # Reference ARM64 builds measure native overhead without signing credentials,
       # stores or EAS. These are CI measurements, never distributed binaries.
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
