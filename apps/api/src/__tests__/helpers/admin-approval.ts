@@ -18,6 +18,13 @@ import { TEST_ADMIN_REASON } from './admin-reason';
  */
 
 const seconds = new WeakMap<FastifyInstance, Map<string, Promise<string>>>();
+const createdUsers = new WeakMap<FastifyInstance, Set<string>>();
+
+function duplicatePhone(error: unknown): boolean {
+  const e = error as { code?: string; meta?: { target?: unknown } } | null;
+  const target = e?.meta?.target;
+  return e?.code === 'P2002' && (Array.isArray(target) ? target.includes('phone') : typeof target === 'string' && /(?:^|_)phone(?:_|$)/.test(target));
+}
 
 /**
  * A second capable admin for this app instance, IN THE APPROVAL'S OWN TENANT,
@@ -32,18 +39,35 @@ function secondAdminToken(app: FastifyInstance, tenantId: string): Promise<strin
   let existing = byTenant.get(tenantId);
   if (!existing) {
     existing = (async () => {
-      const phone = `+59273${String(Math.floor(Math.random() * 90000) + 10000)}`;
-      const user = await runWithoutTenant(() => app.prisma.user.create({
-        data: {
-          phone, firstName: 'Second', lastName: `Approver${nanoid(4)}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
-          activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, tenantId,
-          admin: { create: { permissions: ['*'] } },
-        },
-      }), 'test-second-approver');
-      const token = app.jwt.sign({ userId: user.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
+      let user: { id: string } | undefined;
+      const tried = new Set<string>();
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        // Avoid repeating a candidate even if the random source repeats itself.
+        let digits = Math.floor(Math.random() * 90000) + 10000;
+        while (tried.has(String(digits))) digits = digits === 99999 ? 10000 : digits + 1;
+        tried.add(String(digits));
+        try {
+          user = await runWithoutTenant(() => app.prisma.user.create({
+            data: {
+              phone: `+59273${digits}`, firstName: 'Second', lastName: `Approver${nanoid(4)}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
+              activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, tenantId,
+              admin: { create: { permissions: ['*'] } },
+            },
+          }), 'test-second-approver');
+          break;
+        } catch (error) {
+          if (!duplicatePhone(error) || attempt === 7) throw error;
+        }
+      }
+      if (!user) throw new Error('Second approver creation did not complete');
+      let ids = createdUsers.get(app);
+      if (!ids) { ids = new Set(); createdUsers.set(app, ids); }
+      const secondUserId = user.id;
+      ids.add(secondUserId);
+      const token = app.jwt.sign({ userId: secondUserId, role: 'SUPER_ADMIN', jti: nanoid(8) });
       await runWithoutTenant(() => app.prisma.session.create({
         data: {
-          userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP',
+          userId: secondUserId, token, refreshToken: nanoid(48), authMethod: 'OTP',
           deviceId: 'test-second-approver', deviceType: 'test',
           expiresAt: new Date(Date.now() + 86_400_000),
         },
@@ -102,11 +126,12 @@ export async function injectWithApproval(app: FastifyInstance, options: InjectOp
 export async function cleanupSecondApprovers(app: FastifyInstance): Promise<void> {
   const byTenant = seconds.get(app);
   if (!byTenant) return;
-  const tokens = await Promise.all([...byTenant.values()]);
+  const outcomes = await Promise.allSettled([...byTenant.values()]);
+  const tokens = outcomes.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
   seconds.delete(app);
   await runWithoutTenant(async () => {
     const sessions = await app.prisma.session.findMany({ where: { token: { in: tokens } }, select: { userId: true } });
-    const ids = sessions.map((row) => row.userId);
+    const ids = [...new Set([...(createdUsers.get(app) ?? []), ...sessions.map((row) => row.userId)])];
     if (!ids.length) return;
     await app.prisma.privilegedApproval.deleteMany({ where: { approvedBy: { in: ids } } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
@@ -114,4 +139,5 @@ export async function cleanupSecondApprovers(app: FastifyInstance): Promise<void
     await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } }).catch(() => {});
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   }, 'test-second-approver-cleanup');
+  createdUsers.delete(app);
 }
