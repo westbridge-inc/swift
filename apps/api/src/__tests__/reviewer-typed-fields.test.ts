@@ -16,7 +16,7 @@
  *     reviewer was asked for an expiry the document does not print.
  *
  * Now the approval asks for exactly what the document type needs:
- *   - national ID / owner's ID / passport / L2 identity: the number → a HARD
+ *   - national ID / owner's ID / passport: the number → a HARD
  *     ID_DOC_NUMBER identity key (an HMAC blind index; the number itself is
  *     stored nowhere);
  *   - driver's licence: the licence number → the same key type, in its own
@@ -24,6 +24,11 @@
  *   - police clearance: the issue date → kept on the document's record, and
  *     the re-check falls due one year after it.
  * The queue tells the console which of these each document needs.
+ *
+ * A CUSTOMER's ID (identity_l2) is asked for nothing: rule of 11 Oct 2026
+ * (coordinator, under the owner's delegation), "no ID-number duplicate check
+ * at launch (collects less data; revisit after launch)". A number sent anyway
+ * is dropped unread.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -51,16 +56,18 @@ const users: string[] = [];
 let seq = 0;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'reviewer-typed-fields-test');
 
-async function subject(role: 'MOVER' | 'VENDOR_OWNER' = 'MOVER') {
+type Role = 'MOVER' | 'VENDOR_OWNER' | 'CUSTOMER';
+async function subject(role: Role = 'MOVER') {
   seq += 1;
   const u = await system(() => app.prisma.user.create({ data: {
     phone: `+59278${NUM}${String(seq).padStart(2, '0')}`, firstName: `Tf${RUN}`, lastName: `S${seq}`,
     roles: [role] as never[], activeRole: role as never, status: 'ACTIVE', isPhoneVerified: true, countryCode: 'GY',
+    ...(role === 'CUSTOMER' ? { trustLevel: 'L1' as const } : {}),
   } }));
   users.push(u.id);
   return u.id;
 }
-async function pending(userId: string, docType: string, role: 'MOVER' | 'VENDOR_OWNER' = 'MOVER') {
+async function pending(userId: string, docType: string, role: Role = 'MOVER') {
   return system(() => app.prisma.verificationDocument.create({ data: {
     userId, role, docType, fileUrl: '', status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1',
   } }));
@@ -229,5 +236,67 @@ describe('[typed fields] nothing changes for a document that needs nothing typed
     expect(rows.find((r) => r.id === id.id)?.reviewerTypes).toEqual(['documentNumber']);
     expect(rows.find((r) => r.id === pc.id)?.reviewerTypes).toEqual(['issuedOn']);
     expect(rows.find((r) => r.id === lic.id)?.reviewerTypes).toEqual(['documentNumber']);
+  });
+});
+
+describe('[typed fields] a customer’s ID is never asked for its number (rule 11 Oct 2026: no ID-number duplicate check at launch)', () => {
+  const user = (id: string) => system(() => app.prisma.user.findUniqueOrThrow({ where: { id }, select: { trustLevel: true } }));
+
+  it('a held customer ID is approved with nothing typed, and the customer reaches L2', async () => {
+    const who = await subject('CUSTOMER');
+    const doc = await pending(who, 'identity_l2', 'CUSTOMER');
+    const res = await approve(doc.id, {});
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await statusOf(doc.id)).toBe('APPROVED');
+    expect(await user(who)).toEqual({ trustLevel: 'L2' });
+    expect((await keysOf(who)).filter((k) => k.type === 'ID_DOC_NUMBER')).toEqual([]);
+  });
+
+  it('a number sent anyway is dropped: no identity key, no link to an account that holds the same number, stored nowhere', async () => {
+    const number = `C${NUM}${RUN.slice(0, 3)}9`;
+    const normalized = number.toUpperCase();
+    // A partner whose national ID carries the same number (that one IS a signal).
+    const partner = await subject();
+    expect((await approve((await pending(partner, 'national_id')).id, { documentNumber: number })).statusCode).toBe(200);
+    expect(await keysOf(partner)).toContainEqual({ type: 'ID_DOC_NUMBER', valueHash: blind(normalized), source: 'REVIEWER_TYPED' });
+
+    const who = await subject('CUSTOMER');
+    const doc = await pending(who, 'identity_l2', 'CUSTOMER');
+    const res = await approve(doc.id, { documentNumber: number });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await user(who)).toEqual({ trustLevel: 'L2' });
+    expect((await keysOf(who)).filter((k) => k.type === 'ID_DOC_NUMBER')).toEqual([]);
+    expect(await system(() => clusterMemberIds(app.prisma, who))).not.toContain(partner);
+    expect(await system(() => clusterMemberIds(app.prisma, partner))).not.toContain(who);
+    expect(res.body).not.toContain(normalized);
+    const stored = JSON.stringify(await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })));
+    expect(stored).not.toContain(normalized);
+    const audits = JSON.stringify(await system(() => app.prisma.auditLog.findMany({ where: { entityId: doc.id } })));
+    expect(audits).not.toContain(normalized);
+  });
+
+  it('the queue asks nothing typed for a customer ID — and still asks for a partner’s ID and licence numbers', async () => {
+    const customer = await pending(await subject('CUSTOMER'), 'identity_l2', 'CUSTOMER');
+    const who = await subject();
+    const id = await pending(who, 'national_id');
+    const lic = await pending(who, 'drivers_licence');
+    // The customer lane is asked for on purpose; the operator lane is the default view.
+    const lane = async (role: 'customer' | 'operator', wanted: string[]) => {
+      const rows: Array<{ id: string; reviewerTypes: string[] }> = [];
+      for (let page = 1; page <= 200; page += 1) {
+        const res = await app.inject({ method: 'GET', url: `/api/v1/admin/verification/queue?status=PENDING&role=${role}&limit=50&page=${page}`,
+          headers: { authorization: `Bearer ${adminToken}` } });
+        expect(res.statusCode).toBe(200);
+        const batch = res.json().data as Array<{ id: string; reviewerTypes: string[] }>;
+        rows.push(...batch);
+        if (batch.length < 50 || wanted.every((want) => rows.some((r) => r.id === want))) break;
+      }
+      return rows;
+    };
+    const customers = await lane('customer', [customer.id]);
+    const operators = await lane('operator', [id.id, lic.id]);
+    expect(customers.find((r) => r.id === customer.id)?.reviewerTypes).toEqual([]);
+    expect(operators.find((r) => r.id === id.id)?.reviewerTypes).toEqual(['documentNumber']);
+    expect(operators.find((r) => r.id === lic.id)?.reviewerTypes).toEqual(['documentNumber']);
   });
 });

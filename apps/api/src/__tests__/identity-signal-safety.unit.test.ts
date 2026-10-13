@@ -64,7 +64,6 @@ describe('[VERIFY-DOCS] numbers a reviewer types at approval', () => {
     ['national_id', ' 154-829-063 ', '154829063'],
     ['owner_national_id', 'ab 12-34', 'AB1234'],
     ['passport', ' pa-0091 ', 'PA0091'],
-    ['identity_l2', ' l2-1234 ', 'L21234'],
   ])('an identity number keeps the same value as an extracted one (%s)', (docType, raw, expected) => {
     expect(reviewerTypedDocumentSignal(docType, raw)).toBe(expected);
   });
@@ -82,6 +81,11 @@ describe('[VERIFY-DOCS] numbers a reviewer types at approval', () => {
   it('a number too short to identify anyone is no signal', () => {
     expect(reviewerTypedDocumentSignal('national_id', '1-2')).toBeNull();
     expect(reviewerTypedDocumentSignal('drivers_licence', '---')).toBeNull();
+  });
+
+  it('a customer’s ID number is never a signal, and the console asks nothing for it (rule 11 Oct 2026: no ID-number duplicate check at launch)', () => {
+    expect(reviewerTypedDocumentSignal('identity_l2', ' l2-1234 ')).toBeNull();
+    expect(reviewerTypedFields('identity_l2')).toEqual([]);
   });
 
   it('the console is told what to ask for, per type', () => {
