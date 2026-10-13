@@ -1,0 +1,216 @@
+// ---------------------------------------------------------------------------
+// FORGIVING TEXT MATCH — the database half of customer search (owner, 13 Oct:
+// "can't find stuff when searching similar words or words that are part of
+// the item").
+//
+// Every database search door used to match ONE substring of the whole typed
+// text (`name ILIKE '%<q>%'`): a misspelling ("chiken"), a plural ("burgers"
+// for "Beef Burger"), a missing or extra letter ("brocoli", "broccolli") or
+// the words in another order ("curry chicken") found nothing. These helpers
+// split the text into words and give each word the forms it may take in the
+// catalogue, so the plain Postgres the platform already runs (no extension,
+// no migration) can match the way the index does:
+//
+//   - every word on its own, in any order, anywhere in the text (also inside
+//     a longer word: "doori" finds "Tandoori");
+//   - a plural finds its singular ("burgers" -> "burger", "patties" -> "patty");
+//   - from MIN_TYPO_LENGTH letters, ONE slip in a NAME: a letter missing,
+//     extra, wrong or two letters swapped, at the start of a word — the same
+//     floor and the same word-start rule Meilisearch uses for one typo, so the
+//     two engines forgive the same slips.
+//
+// Exact matches always rank first: callers ask for the strict tiers before
+// the forgiving ones (`searchTiers`), so a typo match never displaces a word
+// that was typed correctly.
+//
+// SAFETY: a word keeps only letters and digits, so nothing a customer types
+// can reach the LIKE pattern as a wildcard (`%`, `_`, `\`). The ONE wildcard
+// in a pattern is the `_` placed here for a slip. These helpers only build the
+// TEXT half of a query; every caller still ANDs its own visibility predicate.
+// ---------------------------------------------------------------------------
+
+/** Words shorter than this are dropped ("a", "&"); a query of only such words matches nothing. */
+const MIN_TERM_LENGTH = 2;
+/** The fewest letters a word needs before one slip is forgiven. Meilisearch's default floor for one typo. */
+export const MIN_TYPO_LENGTH = 5;
+/** Words past this many are ignored, which bounds the size of the query a long paste can build. */
+export const MAX_TERMS = 5;
+/** A stem is never shorter than this ("bus" must not become "bu"). */
+const MIN_STEM_LENGTH = 3;
+
+/** The words of a query: lower-cased, letters and digits only, de-duplicated, at most MAX_TERMS. */
+export function searchTerms(q: string): string[] {
+  const words = q.normalize('NFC').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= MIN_TERM_LENGTH);
+  return [...new Set(words)].slice(0, MAX_TERMS);
+}
+
+/** A word and its singular forms. Matching is by substring, so a singular
+ *  also finds the plural ("burger" is inside "burgers"): only the plural the
+ *  customer typed needs undoing. */
+export function literalForms(term: string): string[] {
+  const forms = new Set([term]);
+  const stem = (s: string) => { if (s.length >= MIN_STEM_LENGTH) forms.add(s); };
+  if (term.length > MIN_STEM_LENGTH) {
+    if (term.endsWith('ies')) { stem(`${term.slice(0, -3)}y`); stem(term.slice(0, -1)); }
+    else if (term.endsWith('es')) { stem(term.slice(0, -2)); stem(term.slice(0, -1)); }
+    else if (term.endsWith('s') && !term.endsWith('ss')) stem(term.slice(0, -1));
+  }
+  return [...forms];
+}
+
+/** Every LIKE pattern one slip away from the word, `_` standing for exactly
+ *  one letter: a letter wrong, a letter missing from what was typed, an extra
+ *  letter typed, two neighbours swapped. Empty below MIN_TYPO_LENGTH. */
+export function typoForms(term: string): string[] {
+  const chars = [...term];
+  const n = chars.length;
+  if (n < MIN_TYPO_LENGTH) return [];
+  const out = new Set<string>();
+  const join = (parts: string[]) => parts.join('');
+  for (let i = 0; i < n; i += 1) {
+    out.add(join([...chars.slice(0, i), '_', ...chars.slice(i + 1)])); // wrong letter
+    out.add(join([...chars.slice(0, i), ...chars.slice(i + 1)])); // an extra letter was typed
+    if (i > 0) out.add(join([...chars.slice(0, i), '_', ...chars.slice(i)])); // a letter was left out
+    if (i < n - 1 && chars[i] !== chars[i + 1]) {
+      out.add(join([...chars.slice(0, i), chars[i + 1]!, chars[i]!, ...chars.slice(i + 2)])); // two letters swapped
+    }
+  }
+  out.delete(term);
+  return [...out];
+}
+
+type Where = Record<string, unknown>;
+
+/** Which catalogue columns a search reads. `text`: free text, matched as a
+ *  case-insensitive substring of any literal form. `typoText` (default: none):
+ *  the columns where a SLIP is also forgiven — names, never long descriptions,
+ *  where one-letter-off substrings would match almost anything. A slip match
+ *  is anchored at the START of a word (the text start, or after a space), the
+ *  way the index matches word prefixes: "bread" with a slip may find "Ready
+ *  meal", never "thread". `lists`: String[] tag columns, an element equal to a
+ *  literal form in the casings a tag is written in (the old `hasSome: [q]`). */
+export type SearchColumns = { text: readonly string[]; typoText?: readonly string[]; lists?: readonly string[] };
+
+function casings(forms: string[]): string[] {
+  const out = new Set<string>();
+  for (const f of forms) {
+    out.add(f);
+    out.add(f.charAt(0).toUpperCase() + f.slice(1));
+    out.add(f.toUpperCase());
+  }
+  return [...out];
+}
+
+/** One word, in any of its forms, in any of the columns. */
+function termWhere(columns: SearchColumns, term: string, typos: boolean): Where {
+  const literal = literalForms(term);
+  const or: Where[] = [];
+  for (const column of columns.text) {
+    for (const form of literal) or.push({ [column]: { contains: form, mode: 'insensitive' } });
+  }
+  if (typos) {
+    for (const column of columns.typoText ?? []) {
+      for (const form of typoForms(term)) {
+        or.push({ [column]: { startsWith: form, mode: 'insensitive' } });
+        or.push({ [column]: { contains: ` ${form}`, mode: 'insensitive' } });
+      }
+    }
+  }
+  for (const column of columns.lists ?? []) or.push({ [column]: { hasSome: casings(literal) } });
+  return { OR: or };
+}
+
+/** A strictness level: must EVERY word match, and is one slip forgiven? */
+export type Tier = { every: boolean; typos: boolean };
+
+/**
+ * The search tiers, strictest first. A caller runs them in order and stops
+ * when its page is full, so a correctly typed word is never pushed down by a
+ * slip match:
+ *   1. every word, as typed (or its singular);
+ *   2. every word, one slip forgiven;
+ *   3. any word, as typed;       (only for a query of two or more words)
+ *   4. any word, one slip forgiven.
+ * A slip tier is skipped when no word is long enough for a slip or the
+ * columns forgive none. Empty when the query has no searchable word.
+ */
+export function searchTiers(q: string, columns: SearchColumns): Array<{ tier: Tier; where: Where }> {
+  const terms = searchTerms(q);
+  if (terms.length === 0) return [];
+  const canSlip = (columns.typoText ?? []).length > 0 && terms.some((t) => typoForms(t).length > 0);
+  const tiers: Tier[] = [
+    { every: true, typos: false },
+    ...(canSlip ? [{ every: true, typos: true }] : []),
+    ...(terms.length > 1 ? [{ every: false, typos: false }] : []),
+    ...(terms.length > 1 && canSlip ? [{ every: false, typos: true }] : []),
+  ];
+  return tiers.map((tier) => {
+    const perTerm = terms.map((t) => termWhere(columns, t, tier.typos));
+    return { tier, where: tier.every ? { AND: perTerm } : { OR: perTerm } };
+  });
+}
+
+/** Every word must match, a slip forgiven or not — one predicate, for a
+ *  paginated list that cannot run tiers (the store browse). Null when the
+ *  query has no searchable word. */
+export function everyWordWhere(q: string, columns: SearchColumns, typos: boolean): Where | null {
+  const terms = searchTerms(q);
+  if (terms.length === 0) return null;
+  return { AND: terms.map((t) => termWhere(columns, t, typos)) };
+}
+
+/** The in-memory twin of the column predicates for ONE text column: does
+ *  `text` hold a literal form of any word anywhere, or (with `typos`) a slip
+ *  form at the start of a word? `_` is exactly one character, as in SQL.
+ *  Used to rank NAME matches above matches found only in a description. */
+export function nameMatcher(q: string, typos: boolean): (text: string | null | undefined) => boolean {
+  const terms = searchTerms(q);
+  if (terms.length === 0) return () => false;
+  // forms hold letters, digits and `_` only, so nothing else needs escaping
+  const literal = terms.flatMap(literalForms);
+  const slips = typos ? terms.flatMap(typoForms).map((f) => f.replace(/_/g, '.')) : [];
+  const re = new RegExp([...literal, ...slips.map((f) => `(?:^|\\s)${f}`)].join('|'), 'iu');
+  return (text) => typeof text === 'string' && re.test(text);
+}
+
+/**
+ * Fill a page from the tiers, strictest first, with the caller's LIVE gates
+ * (launch market, listing rules) applied BEFORE counting toward the page —
+ * never `take` a window and filter it afterwards, which left pages short or
+ * empty while live matches sat just past the window.
+ *
+ * `fetch(where, take)` must AND `where` with the caller's own visibility
+ * predicate. Rows already seen (returned by an earlier tier, rejected by a
+ * gate, or passed in `exclude`) are never fetched again.
+ */
+export async function fillFromTiers<Row extends { id: string }>(opts: {
+  tiers: Array<{ tier: Tier; where: Where }>;
+  fetch: (where: Where, take: number) => Promise<Row[]>;
+  keep: (rows: Row[]) => Promise<Row[]> | Row[];
+  limit: number;
+  exclude?: Iterable<string>;
+  /** Stable re-order inside one fetched window (e.g. name matches first). */
+  rank?: (rows: Row[], tier: Tier) => Row[];
+  window?: number;
+  maxFetchesPerTier?: number;
+}): Promise<Row[]> {
+  const out: Row[] = [];
+  const seen = new Set(opts.exclude ?? []);
+  const window = opts.window ?? Math.min(Math.max(opts.limit * 3, 30), 150);
+  const maxFetches = opts.maxFetchesPerTier ?? 3;
+  for (const { tier, where } of opts.tiers) {
+    for (let fetchNo = 0; fetchNo < maxFetches && out.length < opts.limit; fetchNo += 1) {
+      const scoped = seen.size > 0 ? { AND: [where, { id: { notIn: [...seen] } }] } : where;
+      const rows = await opts.fetch(scoped, window);
+      for (const r of rows) seen.add(r.id);
+      const ranked = opts.rank ? opts.rank(rows, tier) : rows;
+      for (const r of await opts.keep(ranked)) {
+        if (out.length >= opts.limit) break;
+        out.push(r);
+      }
+      if (rows.length < window) break; // this tier has nothing more
+    }
+    if (out.length >= opts.limit) break;
+  }
+  return out;
+}

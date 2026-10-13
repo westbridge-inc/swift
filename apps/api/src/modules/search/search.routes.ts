@@ -5,11 +5,13 @@ import { SearchService } from './search.service';
 import { AppError, ForbiddenError } from '../../utils/errors';
 import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';
 import { bindBrowseTenant, requireRequestTenant } from './search-scope';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { customerPoint } from '../discovery/customer-point';
 import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
+import { fillFromTiers, nameMatcher, searchTiers, type Tier } from './forgiving-text';
 
 // [B2] ONE wire contract whichever engine answered. The route used to hand
 // clients raw Meilisearch hits on the fast path and raw Prisma rows on the
@@ -73,52 +75,218 @@ const ITEM_HIT_PIN_SELECT = {
   vendor: { select: { ...ITEM_HIT_SELECT.vendor.select, latitude: true, longitude: true } },
 } as const;
 
+/**
+ * How many index hits /search asks for per hit it will return. The live gates
+ * (open now, still visible, inside the launch market) run AFTER the index
+ * answers, so asking for exactly `limit` left the page short — or empty —
+ * whenever closed or out-of-market hits filled the window ahead of a live one.
+ */
+export const ENGINE_OVERFETCH = 3;
+/** The most index hits one /search reads, whatever the limit. */
+export const ENGINE_MAX_HITS = 150;
+/** How long after a failed index start-up the next search may try again. */
+export const SEARCH_WARM_RETRY_MS = 60_000;
+/** The audited system capability the index warm-up runs under. */
+export const SEARCH_WARM_CAPABILITY = 'search-index-warm';
+
+/** The catalogue columns each database search reads (forgiving-text.ts).
+ *  A slip is forgiven in names only; descriptions match as typed. */
+const VENDOR_COLUMNS = { text: ['name', 'description'], typoText: ['name'], lists: ['cuisineTypes', 'tags'] } as const;
+const ITEM_COLUMNS = { text: ['name', 'description'], typoText: ['name'] } as const;
+const NAME_COLUMNS = { text: ['name'], typoText: ['name'] } as const;
+
+/** Name matches first inside one fetched window; the window's own order
+ *  (rating, popularity) breaks ties. Array.sort is stable. */
+function nameFirst(q: string) {
+  return <T extends { name: string }>(rows: T[], tier: Tier): T[] => {
+    const inName = nameMatcher(q, tier.typos);
+    return [...rows].sort((a, b) => Number(inName(b.name)) - Number(inName(a.name)));
+  };
+}
+
 export async function searchRoutes(app: FastifyInstance) {
   let searchService: SearchService | null = null;
+  let warming = false;
+  let lastWarmAttempt = 0;
 
   // Warm Meilisearch in the BACKGROUND — server startup must never block on it. avvio's
   // ~10s plugin timeout plus a full re-sync can otherwise take the whole API down on
   // restart. Until the index is ready, the routes below fall back to DB search.
-  void (async () => {
-    try {
-      const svc = new SearchService(app.prisma);
-      await svc.initialize();
-      await svc.syncAllVendors();
-      await svc.syncAllItems();
-      searchService = svc;
-      app.log.info('Meilisearch initialized and synced');
-    } catch (err) {
-      app.log.warn({ err }, 'Meilisearch unavailable — falling back to DB search');
-    }
-  })();
+  // An index that was unreachable at start-up is tried again (at most once per
+  // SEARCH_WARM_RETRY_MS, from a search request, never blocking it): before,
+  // one failed start left every search on the database until the next restart.
+  //
+  // The warm-up is platform-wide work — it reads every operator's catalogue
+  // and reconciles the shared index — so it runs as NAMED system work, never
+  // in whatever context happens to be current: at boot that was an unbound
+  // composition root, which TENANT_UNSCOPED_ACCESS=deny refuses (the index
+  // would never fill and every search would stay on the database), and a retry
+  // started from a search request must not inherit that caller's tenant (a
+  // one-tenant sync, then served as if it were the whole index). The job
+  // workers' syncs already run this way (jobs/queue.ts, runAsSystem).
+  const warm = (): void => {
+    if (searchService || warming) return;
+    if (lastWarmAttempt !== 0 && Date.now() - lastWarmAttempt < SEARCH_WARM_RETRY_MS) return;
+    warming = true;
+    lastWarmAttempt = Date.now();
+    void runAsSystem(SEARCH_WARM_CAPABILITY, async () => {
+      try {
+        const svc = new SearchService(app.prisma);
+        await svc.initialize();
+        await svc.syncAllVendors();
+        await svc.syncAllItems();
+        searchService = svc;
+        app.log.info('Meilisearch initialized and synced');
+      } catch (err) {
+        app.log.warn({ err }, 'Meilisearch unavailable — falling back to DB search');
+      } finally {
+        warming = false;
+      }
+    });
+  };
+  warm();
 
   // Credential-bearing requests keep the strict session path (cookie sessions
   // and invalid/expired credential refusals included); guests bind the public
   // catalogue's tenant — the one browse binding, shared with the Home rail.
   const browseSearch = bindBrowseTenant(app);
 
+  /** The database search of stores: the tiers of forgiving-text.ts, strictest
+   *  first, every live gate applied before a row counts toward the page. */
+  async function dbVendors(ctx: {
+    q: string; tenantId: string; publicMode: boolean; openOnly: boolean;
+    type?: 'RESTAURANT' | 'SUPERMARKET'; cuisine?: string; limit: number; exclude?: Iterable<string>;
+    near?: { lat: number; lng: number };
+  }): Promise<VendorHit[]> {
+    const base = {
+      // [B2] The ONE visibility predicate — this fallback previously
+      // dropped tenant.isActive, so a shut-off operator's store surfaced
+      // whenever Meilisearch was down.
+      ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode),
+      ...(ctx.publicMode && { items: { some: { isAvailable: true } } }),
+      ...(ctx.openOnly && { isCurrentlyOpen: true }),
+      ...(ctx.type && { vendorType: ctx.type }),
+      ...(ctx.cuisine && { cuisineTypes: { has: ctx.cuisine } }),
+    };
+    const byName = nameFirst(ctx.q);
+    const rows = await fillFromTiers({
+      tiers: searchTiers(ctx.q, VENDOR_COLUMNS),
+      fetch: (where, take) => app.prisma.vendor.findMany({
+        where: { AND: [base, where] },
+        select: {
+          id: true, name: true, slug: true, vendorType: true, logoUrl: true, coverImageUrl: true,
+          cuisineTypes: true, isCurrentlyOpen: true, estimatedPrepTime: true, latitude: true, longitude: true, city: true,
+        },
+        take,
+        orderBy: [{ averageRating: 'desc' }, { id: 'asc' }],
+      }),
+      // [DS982] A store whose committed pin lies outside the launch market is never found.
+      keep: (found) => found.filter(inLaunchMarket),
+      // With the customer's point, the nearest first inside each tier's window
+      // (a hit with no committed coordinates sorts after the ones that can
+      // claim a distance, never with an invented position); without it, the
+      // stores whose NAME matches first.
+      rank: (found, tier) => {
+        if (!ctx.near) return byName(found, tier);
+        const locatable = found.filter((v): v is typeof v & { latitude: number; longitude: number } => v.latitude != null && v.longitude != null);
+        const unlocatable = found.filter((v) => v.latitude == null || v.longitude == null);
+        const order = sortByDistance(locatable, ctx.near.lat, ctx.near.lng).map((v) => v.id);
+        const byId = new Map(locatable.map((v) => [v.id, v]));
+        return [...order.map((id) => byId.get(id)!), ...unlocatable];
+      },
+      limit: ctx.limit,
+      exclude: ctx.exclude,
+    });
+    // R8: the star surface rides the ONE mapper on this path too, so both
+    // engines speak the same displayRating/topRated contract.
+    const surfaces = await ratingSurfaces(app.prisma, 'VENDOR', rows.map((v) => v.id));
+    return rows.map((v) => ({
+      id: v.id,
+      name: v.name,
+      slug: v.slug,
+      vendorType: v.vendorType,
+      logoUrl: v.logoUrl,
+      coverImageUrl: v.coverImageUrl,
+      cuisineTypes: v.cuisineTypes,
+      city: v.city,
+      latitude: v.latitude,
+      longitude: v.longitude,
+      estimatedPrepTime: v.estimatedPrepTime,
+      isCurrentlyOpen: v.isCurrentlyOpen,
+      displayRating: surfaces.get(v.id)?.displayRating ?? null,
+      ratingCount: surfaces.get(v.id)?.ratingCount ?? 0,
+      topRated: surfaces.get(v.id)?.topRated ?? false,
+    }));
+  }
+
+  /** The database search of dishes and products, same tiers and gates. */
+  async function dbItems(ctx: {
+    q: string; tenantId: string; publicMode: boolean; hiddenOnly: string[];
+    limit: number; exclude?: Iterable<string>;
+  }): Promise<ItemHit[]> {
+    const base = {
+      isAvailable: true,
+      // [B2] Same predicate through the relation — `status: 'ACTIVE'` alone
+      // let an unverified or shut-off operator's dishes answer searches. The
+      // relation filter is not reached by the tenant-scoping extension: the
+      // tenant is named here.
+      vendor: { ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode), ...(ctx.publicMode && { isCurrentlyOpen: true }) },
+      // [S2-1] Guest surfaces exclude hidden-only items IN the query, before
+      // the window is capped; the listing gate below stays a defensive pass.
+      ...(ctx.hiddenOnly.length > 0 ? { id: { notIn: ctx.hiddenOnly } } : {}),
+    };
+    const rows = await fillFromTiers({
+      tiers: searchTiers(ctx.q, ITEM_COLUMNS),
+      fetch: (where, take) => app.prisma.item.findMany({
+        where: { AND: [base, where] },
+        // The shared select, so this path cannot quietly serve fewer fields
+        // than the index path and make the engine visible to the client.
+        select: ITEM_HIT_PIN_SELECT,
+        take,
+        orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
+      }),
+      keep: async (found) => {
+        const marketItems = found.filter((item) => inLaunchMarket(item.vendor));
+        return ctx.publicMode ? listableItemsForVendors(app.prisma, ctx.tenantId, marketItems) : marketItems;
+      },
+      rank: nameFirst(ctx.q),
+      limit: ctx.limit,
+      exclude: ctx.exclude,
+    });
+    return rows.map(toItemHit);
+  }
+
   // Universal search — searches vendors AND items
   app.get('/search', { preHandler: [browseSearch] }, async (request) => {
     const { q, type, cuisine, lat, lng, limit: parsedLimit } = customerPoint(searchQuerySchema.parse(request.query));
     // [R048-003] ONE tenant per request — the caller's, as auth bound it. Carried into the
-    // index filter (server-built) and into every DB fallback query below.
+    // index filter (server-built) and into every DB query below.
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
+    const publicMode = Boolean(request.publicTenantId);
 
     if (!q || q.length < 2) {
       return { success: true, data: { vendors: [], items: [] } };
     }
 
+    // [S2-1] Hidden-only items never occupy a guest's window: excluded in the query.
+    const hiddenOnly = publicMode ? await hiddenOnlyItemIds(app.prisma, tenantId) : [];
+
     // Public discovery reads live browse eligibility. An index hit alone is
     // not authority to publish a listing whose visibility may have changed.
     // Authenticated search retains index ranking, with live visibility checked below.
-    if (searchService && !request.publicTenantId) {
+    if (!searchService) warm();
+    if (searchService && !publicMode) {
       try {
+        const want = Math.min(parsedLimit * ENGINE_OVERFETCH, ENGINE_MAX_HITS);
         const [vendorResults, itemResults] = await Promise.all([
-          searchService.searchVendors(tenantId, q, { type, cuisine, openOnly: true, limit: parsedLimit }),
-          searchService.searchItems(tenantId, q, { limit: parsedLimit }),
+          // No `openOnly` here: the index's open flag is the copy from its last
+          // sync, so a store that opened since was invisible. The live gate
+          // below reads open-now from the database.
+          searchService.searchVendors(tenantId, q, { type, cuisine, limit: want }),
+          searchService.searchItems(tenantId, q, { limit: want }),
         ]);
 
-        const vendors: VendorHit[] = (vendorResults.hits as Record<string, unknown>[]).map((h) => ({
+        const vendorHits: VendorHit[] = (vendorResults.hits as Record<string, unknown>[]).map((h) => ({
           // the entity id, never the tenant-prefixed document id
           id: String(h['entityId'] ?? h['id']),
           name: String(h['name']),
@@ -138,34 +306,51 @@ export async function searchRoutes(app: FastifyInstance) {
           ratingCount: (h['rating_count'] as number | null) ?? 0,
           topRated: Boolean(h['top_rated']),
         }));
-        const items: ItemHit[] = (itemResults.hits as Record<string, unknown>[]).map(
+        const itemHits: ItemHit[] = (itemResults.hits as Record<string, unknown>[]).map(
           itemHitFromSearchDoc,
         );
 
         // Index ranking is not authority to publish a vendor after its
-        // subscription stops operating. Reuse the same bounded live gate.
+        // subscription stops operating. Every hit passes the live gate — read
+        // for ALL the hits fetched, never a `take` of them before the gate.
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
-            where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), id: { in: vendors.map((v) => v.id) }, isCurrentlyOpen: true },
-            select: { id: true, latitude: true, longitude: true }, take: parsedLimit,
+            where: { ...catalogueVendorInTenant(tenantId, false), id: { in: vendorHits.map((v) => v.id) }, isCurrentlyOpen: true },
+            select: { id: true, latitude: true, longitude: true },
           }),
           app.prisma.item.findMany({
-            where: { id: { in: items.map((i) => i.id) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)) },
-            select: { id: true, vendorId: true, vendor: { select: { latitude: true, longitude: true } } }, take: parsedLimit,
+            where: { id: { in: itemHits.map((i) => i.id) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, false) },
+            select: { id: true, vendorId: true, vendor: { select: { latitude: true, longitude: true } } },
           }),
         ]);
         const vendorIds = new Set(liveVendors.filter(inLaunchMarket).map((v) => v.id));
         const itemIds = new Set(liveItems.filter((i) => inLaunchMarket(i.vendor)).map((i) => i.id));
-        const visibleVendors = vendors.filter((v) => vendorIds.has(v.id));
-        const visibleItems = items.filter((i) => itemIds.has(i.id));
+        // open NOW, as the database says — the hit's copy may predate the opening
+        const visibleVendors = vendorHits.filter((v) => vendorIds.has(v.id)).slice(0, parsedLimit).map((v) => ({ ...v, isCurrentlyOpen: true }));
+        const visibleItems = itemHits.filter((i) => itemIds.has(i.id)).slice(0, parsedLimit);
+
+        // A short index answer is topped up from the database, below the
+        // index's own ranking: the index matches whole words and word starts,
+        // the database also finds a part inside a word ("doori" -> "Tandoori"),
+        // and a listing the index has not caught up with yet.
+        const [moreVendors, moreItems] = await Promise.all([
+          visibleVendors.length < parsedLimit
+            ? dbVendors({ q, tenantId, publicMode: false, openOnly: true, type, cuisine, limit: parsedLimit - visibleVendors.length, exclude: vendorHits.map((v) => v.id) })
+            : Promise.resolve([]),
+          visibleItems.length < parsedLimit
+            ? dbItems({ q, tenantId, publicMode: false, hiddenOnly, limit: parsedLimit - visibleItems.length, exclude: itemHits.map((i) => i.id) })
+            : Promise.resolve([]),
+        ]);
+        const vendors = [...visibleVendors, ...moreVendors];
+        const items = [...visibleItems, ...moreItems];
         return {
           success: true,
           data: {
-            vendors: visibleVendors,
-            items: visibleItems,
+            vendors,
+            items,
             meta: {
-              vendorCount: visibleVendors.length,
-              itemCount: visibleItems.length,
+              vendorCount: vendors.length,
+              itemCount: items.length,
               processingTimeMs: vendorResults.processingTimeMs + itemResults.processingTimeMs,
             },
           },
@@ -177,163 +362,79 @@ export async function searchRoutes(app: FastifyInstance) {
       }
     }
 
-    // DB fallback (boot-time Meili absence OR a runtime Meili failure)
-    const userLat = lat ?? null;
-    const userLng = lng ?? null;
-
-    // [S2-1] Guest surfaces exclude hidden-only items IN the query, before
-    // the window is capped; the in-memory gate below stays a defensive pass.
-    const hiddenOnly = request.publicTenantId
-      ? await hiddenOnlyItemIds(app.prisma, tenantId)
-      : [];
-
+    // DB path (every guest; a signed-in caller while the index is absent or failing)
     const [vendors, items] = await Promise.all([
-      app.prisma.vendor.findMany({
-        // [B2] The ONE visibility predicate — this fallback previously
-        // dropped tenant.isActive, so a shut-off operator's store surfaced
-        // whenever Meilisearch was down.
-        where: {
-          ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
-          ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }),
-          OR: [
-            { name: { contains: q, mode: 'insensitive' } },
-            { description: { contains: q, mode: 'insensitive' } },
-            { cuisineTypes: { hasSome: [q] } },
-            { tags: { hasSome: [q] } },
-          ],
-          ...(type && { vendorType: type }),
-          ...(cuisine && { cuisineTypes: { has: cuisine } }),
-        },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          vendorType: true,
-          logoUrl: true,
-          coverImageUrl: true,
-          cuisineTypes: true,
-          isCurrentlyOpen: true,
-          estimatedPrepTime: true,
-          latitude: true,
-          longitude: true,
-          city: true,
-        },
-        take: parsedLimit,
-        orderBy: { averageRating: 'desc' },
+      dbVendors({
+        q, tenantId, publicMode, openOnly: publicMode, type, cuisine, limit: parsedLimit,
+        near: lat != null && lng != null ? { lat, lng } : undefined,
       }),
-      app.prisma.item.findMany({
-        // [B2] Same predicate through the relation — `status: 'ACTIVE'` alone
-        // let an unverified or shut-off operator's dishes answer searches.
-        where: {
-          isAvailable: true,
-          // the relation filter is not reached by the tenant-scoping extension: the tenant is named here
-          vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true }) },
-          OR: [
-            { name: { contains: q, mode: 'insensitive' } },
-            { description: { contains: q, mode: 'insensitive' } },
-          ],
-          ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
-        },
-        // The shared select, so the fallback cannot quietly serve fewer fields
-        // than the fast path and make the engine visible to the client.
-        select: ITEM_HIT_PIN_SELECT,
-        take: parsedLimit,
-        orderBy: { totalOrdered: 'desc' },
-      }),
+      dbItems({ q, tenantId, publicMode, hiddenOnly, limit: parsedLimit }),
     ]);
-
-    // R8: the star surface rides the ONE mapper on the fallback path too, so
-    // both engines speak the same displayRating/topRated contract.
-    const surfaces = await ratingSurfaces(app.prisma, 'VENDOR', vendors.map((v) => v.id));
-
-    const shapedVendors: VendorHit[] = vendors.filter(inLaunchMarket).map((v) => ({
-      id: v.id,
-      name: v.name,
-      slug: v.slug,
-      vendorType: v.vendorType,
-      logoUrl: v.logoUrl,
-      coverImageUrl: v.coverImageUrl,
-      cuisineTypes: v.cuisineTypes,
-      city: v.city,
-      latitude: v.latitude,
-      longitude: v.longitude,
-      estimatedPrepTime: v.estimatedPrepTime,
-      isCurrentlyOpen: v.isCurrentlyOpen,
-      displayRating: surfaces.get(v.id)?.displayRating ?? null,
-      ratingCount: surfaces.get(v.id)?.ratingCount ?? 0,
-      topRated: surfaces.get(v.id)?.topRated ?? false,
-    }));
-
-    // Sort vendors by distance if lat/lng provided. A hit with no committed
-    // coordinates can't claim a distance — it sorts after the ones that can,
-    // never with an invented position.
-    let sortedVendors: VendorHit[] = shapedVendors;
-    if (userLat && userLng) {
-      const locatable = shapedVendors.filter(
-        (v): v is VendorHit & { latitude: number; longitude: number } => v.latitude != null && v.longitude != null,
-      );
-      const unlocatable = shapedVendors.filter((v) => v.latitude == null || v.longitude == null);
-      sortedVendors = [...sortByDistance(locatable, userLat, userLng), ...unlocatable];
-    }
-
-    const marketItems = items.filter((item) => inLaunchMarket(item.vendor));
-    const listable = request.publicTenantId
-      ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
-      : marketItems;
-    const shapedItems: ItemHit[] = listable.map(toItemHit);
 
     return {
       success: true,
       data: {
-        vendors: sortedVendors,
-        items: shapedItems,
-        meta: { vendorCount: sortedVendors.length, itemCount: shapedItems.length },
+        vendors,
+        items,
+        meta: { vendorCount: vendors.length, itemCount: items.length },
       },
     };
   });
 
-  // Suggestions / autocomplete
+  // Suggestions / autocomplete — the same forgiving tiers over NAMES, the same
+  // gates, five of each, filled from live matches before the cut.
   app.get('/search/suggestions', { preHandler: [browseSearch] }, async (request) => {
     const { q } = suggestionsQuerySchema.parse(request.query);
     if (!q || q.length < 2) return { success: true, data: [] };
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
+    const publicMode = Boolean(request.publicTenantId);
     // [S2-1] Hidden-only items never occupy the fixed five-item window: they
     // are excluded here, before the take, not after it.
-    const hiddenOnly = request.publicTenantId
-      ? await hiddenOnlyItemIds(app.prisma, tenantId)
-      : [];
+    const hiddenOnly = publicMode ? await hiddenOnlyItemIds(app.prisma, tenantId) : [];
+    const tiers = searchTiers(q, NAME_COLUMNS);
+    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode), ...(publicMode && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }) };
+    const itemBase = {
+      isAvailable: true,
+      // [B2] This query had NO vendor predicate at all — a banned store's
+      // dish names kept autocompleting for every customer who typed.
+      vendor: { ...catalogueVendorInTenant(tenantId, publicMode), ...(publicMode && { isCurrentlyOpen: true }) },
+      ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
+    };
 
     const [vendors, items] = await Promise.all([
-      app.prisma.vendor.findMany({
-        where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
-        select: { name: true, vendorType: true, latitude: true, longitude: true },
-        take: 5,
+      fillFromTiers({
+        tiers,
+        fetch: (where, take) => app.prisma.vendor.findMany({
+          where: { AND: [vendorBase, where] },
+          select: { id: true, name: true, vendorType: true, latitude: true, longitude: true },
+          orderBy: [{ averageRating: 'desc' }, { id: 'asc' }],
+          take,
+        }),
+        // [DS982] A store outside the launch market never autocompletes, nor do its dishes.
+        keep: (found) => found.filter(inLaunchMarket),
+        limit: 5,
       }),
-      app.prisma.item.findMany({
-        // [B2] This query had NO vendor predicate at all — a banned store's
-        // dish names kept autocompleting for every customer who typed.
-        where: {
-          isAvailable: true,
-          vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true }) },
-          name: { contains: q, mode: 'insensitive' },
-          ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
+      fillFromTiers({
+        tiers,
+        fetch: (where, take) => app.prisma.item.findMany({
+          where: { AND: [itemBase, where] },
+          select: { id: true, vendorId: true, name: true, vendor: { select: { latitude: true, longitude: true } } },
+          // [DS233 F8] A stable window: the most-ordered matches first, never
+          // whatever order the heap scan happens to return.
+          orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
+          take,
+        }),
+        keep: async (found) => {
+          const marketItems = found.filter((i) => inLaunchMarket(i.vendor));
+          return publicMode ? listableItemsForVendors(app.prisma, tenantId, marketItems) : marketItems;
         },
-        select: { id: true, vendorId: true, name: true, vendor: { select: { latitude: true, longitude: true } } },
-        // [DS233 F8] A stable window: the most-ordered matches first, never
-        // whatever order the heap scan happens to return.
-        orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
-        take: 5,
+        limit: 5,
       }),
     ]);
 
-    // [DS982] A store outside the launch market never autocompletes, nor do its dishes.
-    const marketItems = items.filter((i) => inLaunchMarket(i.vendor));
-    const listable = request.publicTenantId
-      ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
-      : marketItems;
     const suggestions = [
-      ...vendors.filter(inLaunchMarket).map((v) => ({ text: v.name, type: 'vendor' as const })),
-      ...listable.map((i) => ({ text: i.name, type: 'item' as const })),
+      ...vendors.map((v) => ({ text: v.name, type: 'vendor' as const })),
+      ...items.map((i) => ({ text: i.name, type: 'item' as const })),
     ];
 
     return { success: true, data: suggestions };

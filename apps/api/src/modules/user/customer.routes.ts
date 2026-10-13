@@ -47,6 +47,7 @@ import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, pric
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
+import { searchTiers } from '../search/forgiving-text';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
@@ -96,6 +97,11 @@ const latLngQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),
 });
+
+/** The store columns the browse search reads: name and description as text, a
+ *  slip forgiven in the name only, and the cuisine list (an element equal to a
+ *  word, as `has: search` matched before). */
+const BROWSE_SEARCH_COLUMNS = { text: ['name', 'description'], typoText: ['name'], lists: ['cuisineTypes'] } as const;
 
 const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
   type: z.nativeEnum(VendorType).optional(),
@@ -1399,11 +1405,20 @@ export async function customerRoutes(app: FastifyInstance) {
     if (open === 'true') where['isCurrentlyOpen'] = true;
     if (minRating != null) where['averageRating'] = { gte: minRating };
     if (search) {
-      where['OR'] = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { cuisineTypes: { has: search } },
-      ];
+      // Owner, 13 Oct — search must forgive. This used to match ONE substring
+      // of the whole text, so a misspelt name, a plural, or the words in
+      // another order found no store (the website's search page and the app's
+      // Shops / Services chips read this list). The forgiving tiers
+      // (search/forgiving-text.ts), strictest first: the page uses the first
+      // tier that finds anything, so a correctly typed name never shares its
+      // page with slip matches, and the total and pages stay one tier's.
+      const tiers = searchTiers(search, BROWSE_SEARCH_COLUMNS);
+      let chosen: Record<string, unknown> = { id: { in: [] } }; // no searchable word: nothing matches
+      for (const { where: tierWhere } of tiers) {
+        chosen = tierWhere;
+        if (await app.prisma.vendor.count({ where: { AND: [where, tierWhere] } }) > 0) break;
+      }
+      where['AND'] = [chosen];
     }
 
     const orderBy: Record<string, string>[] = [];
