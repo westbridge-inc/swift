@@ -12,7 +12,7 @@ import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useStepUp } from '../../../hooks/useStepUp';
 import { isStepUpDismissed } from '../../../lib/stepUp';
 import {
-  CARD_IDLE, CARD_RETURN, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
+  CARD_IDLE, CARD_RETURN, adoptableCardSession, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
   cardRemovedWords, cardSessionTone, cardSessionWords, cardSpoken, type CardCheckoutView, type CardFamily, type CardPointer, type LiveCard,
 } from '../../../lib/cardFee';
 
@@ -31,9 +31,11 @@ export const hasCardSession = (context: string) => lastSession.has(context);
  * in-app browser sheet; this screen has no card field of any kind. Every state it shows
  * is the server's read of the session, never the browser's result.
  */
-export function CardPaySection({ family, card, contextPending, otherPaymentPending, refresh, onPaymentPending }: {
+export function CardPaySection({ family, card, latest, contextPending, otherPaymentPending, refresh, onPaymentPending }: {
   family: CardFamily;
   card?: LiveCard;
+  /** The subscription's latestCardSession: followed when this app holds no card session of its own. */
+  latest?: unknown;
   contextPending: boolean;
   /** An MMG payment is being confirmed: no second payment is offered. */
   otherPaymentPending: boolean;
@@ -72,6 +74,8 @@ export function CardPaySection({ family, card, contextPending, otherPaymentPendi
     return { status: failure.response?.status, code: failure.response?.data?.error?.code };
   }), [client, context]);
   useEffect(() => { session.activate(); if (!contextPending) session.resume(); return () => session.dispose(); }, [session, contextPending]);
+  const latestShown = adoptableCardSession(latest);
+  useEffect(() => { if (!contextPending) session.adopt(latest); }, [session, contextPending, latestShown?.sessionId, latestShown?.status]); // eslint-disable-line react-hooks/exhaustive-deps
   useFocusEffect(useCallback(() => { if (!contextPending) session.focus(); }, [session, contextPending]));
   useEffect(() => {
     const listener = AppState.addEventListener('change', (state) => { if (state === 'active' && !contextPending) session.focus(); });
