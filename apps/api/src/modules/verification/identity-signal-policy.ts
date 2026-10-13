@@ -50,9 +50,16 @@ export function approvedIdentityDocumentNumber(
  * photo ID (owner ruling 4), so the same licence on two accounts is one
  * person. It lives in its own namespace (`DL:`): a licence number never
  * matches an identity-card number made of the same characters.
+ *
+ * A CUSTOMER's ID (`identity_l2`) is NOT here, by rule of 11 Oct 2026
+ * (coordinator, under the owner's delegation): "no ID-number duplicate check
+ * at launch (collects less data; revisit after launch)". The 6 Oct ruling was
+ * written for partner and mover documents. So the console asks nothing for a
+ * customer's ID, and a number sent anyway is dropped unread: it never becomes
+ * an identity key and never links two customers.
  */
 export const REVIEWER_TYPED_NUMBER_DOC_TYPES: ReadonlySet<string> = new Set([
-  ...IDENTITY_NUMBER_DOC_TYPES,
+  ...IDENTITY_DOC_TYPES,
   ...LICENCE_NUMBER_DOC_TYPES,
 ]);
 /** Fewer characters than this identify nobody (and would union strangers). */

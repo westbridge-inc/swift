@@ -98,7 +98,7 @@ export const TENANT_TABLES = [
   'ads_settings', 'advertisers', 'attribution_claims', 'batch_evaluations',
   'batching_settings', 'booking_exceptions',
   // [M-11] The checkout command's durable result and tail.
-  'checkout_receipts',
+  'checkout_receipts', 'cart_merge_receipts',
   'delivery_runs',
   // [M-22] Immutable bank deposit confirmations and their adjustments.
   'deposit_confirmations',

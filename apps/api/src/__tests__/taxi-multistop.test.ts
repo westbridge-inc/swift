@@ -272,9 +272,11 @@ describe('every point of a route with stops lies where Swift works (400 STOP_OUT
     expect(res.json().error).toMatchObject({ code: 'STOP_OUT_OF_MARKET', details: { place: 'DESTINATION' } });
   });
 
-  it('KNOWN GAP, a follow-up: without stops the same destination is still quoted as today (the zero-stop path is untouched)', async () => {
+  it('without stops the same outside destination is also refused before quoting', async () => {
     vi.stubEnv('TAXI_MAX_STOPS', '3');
-    expect((await estimate(app, token, { pickup: PICKUP, dropoff: PORT_OF_SPAIN })).statusCode).toBe(200);
+    const res = await estimate(app, token, { pickup: PICKUP, dropoff: PORT_OF_SPAIN });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatchObject({ code: 'ROUTE_OUT_OF_MARKET', details: { place: 'DESTINATION' } });
   });
 });
 

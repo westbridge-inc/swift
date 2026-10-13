@@ -4,7 +4,7 @@ import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor, type EvidenceRow } from './evidence';
@@ -30,6 +30,8 @@ import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { assertExternalProcessingPermitted } from '../legal/processor-register';
 import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { decryptBuffer, getKeyProvider } from '../../providers/storage/envelope';
+import { customerIdHoldReasons, readCustomerIdFacts, ON_FILE_REVIEWER, type CustomerIdHoldReason } from './customer-id';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
@@ -62,6 +64,16 @@ export const IDENTITY_FACE_MATCH_DOCS: ReadonlySet<string> = new Set(['national_
  */
 export function identityFaceMatchLeg(docType: string, env: Record<string, string | undefined> = process.env): boolean {
   return IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled(env);
+}
+
+/**
+ * [VERIFY-DOCS] The "Police-cleared" flag: this account holds an approved, current police
+ * clearance under THE evidence rule (document records, not images — so the flag survives the
+ * image being deleted after review, and lapses with the certificate). Optional for movers; it
+ * never decides whether anyone may work.
+ */
+export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClient, userId: string, now = new Date()): Promise<boolean> {
+  return (await approvedEvidenceFor(db, userId, [POLICE_CLEARANCE_DOC_TYPE], now)).length > 0;
 }
 
 /** The KYC engines whose identity check compares the document's face with the
@@ -352,11 +364,14 @@ export class VerificationService {
    *  paused (KYC latency), cannot land new PII after the purge committed. */
   private async createDocumentLively(
     data: Prisma.VerificationDocumentUncheckedCreateInput,
-    review: { queue: ReviewQueue; extraction?: ExtractionPlan; authority?: SubmissionAuthority } = { queue: 'STANDARD' },
+    review: { queue: ReviewQueue; extraction?: ExtractionPlan; authority?: SubmissionAuthority; customerIdHolds?: CustomerIdHoldReason[] } = { queue: 'STANDARD' },
   ) {
     const doc = await this.projectionTransaction(async (tx) => {
+      // A customer-ID intake takes the user row FOR UPDATE, like revoke and purge, so two uploads
+      // (or an upload and a withdrawal) are decided one after the other, never side by side.
+      const exclusive = review.authority || review.customerIdHolds;
       const alive = await tx.$queryRaw<{ status: string; tenantId: string; countryCode: string }[]>(
-        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} ${review.authority ? Prisma.sql`FOR UPDATE` : Prisma.sql`FOR SHARE`}`,
+        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} ${exclusive ? Prisma.sql`FOR UPDATE` : Prisma.sql`FOR SHARE`}`,
       );
       const status = alive[0]?.status;
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
@@ -368,6 +383,30 @@ export class VerificationService {
         catch (err) {
           if (!(err instanceof IdentityReviewRequiredError)) throw err;
           data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
+          review.customerIdHolds?.push('IDENTITY_REVIEW');
+        }
+      }
+      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] One ID goes on file at a time: if another customer ID
+      // of this account is waiting or on file now (a parallel upload committed first), this one waits
+      // for a person. Read under the lock above, so it cannot race.
+      if (review.customerIdHolds && data.status === 'APPROVED') {
+        const live = await tx.verificationDocument.count({
+          where: { userId: data.userId, docType: IDENTITY_DOC_TYPE, status: { in: ['APPROVED', 'PENDING'] }, state: { notIn: ['PURGED', 'SUPERSEDED'] } },
+        });
+        if (live > 0) {
+          data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
+          review.customerIdHolds.push('OPEN_SUBMISSION');
+        } else {
+          // A person's rejection or withdrawal that committed after the automatic checks read the
+          // facts (outside this lock) still holds the upload: decisions are re-read here too.
+          const earlier = await tx.verificationDocument.findMany({ where: { userId: data.userId, docType: IDENTITY_DOC_TYPE }, select: { id: true } });
+          const decided = earlier.length > 0 && (await tx.reviewDecision.count({
+            where: { outcome: 'REJECT', case: { submissionId: { in: earlier.map((d) => d.id) } } },
+          })) > 0;
+          if (decided) {
+            data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
+            review.customerIdHolds.push('EARLIER_DECISION');
+          }
         }
       }
       await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
@@ -509,6 +548,11 @@ export class VerificationService {
     if (['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(user.status)) {
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
     }
+    // [VERIFY-DOCS · owner ruling 5] Never a medical document, whatever a stored list names: refused
+    // before anything is recorded or sent anywhere.
+    if (isNeverAcceptedDocType(docType)) {
+      throw new AppError(400, 'DOC_TYPE_NOT_ACCEPTED', 'Swift does not accept medical documents. Remove it and upload the document your checklist asks for.');
+    }
     const authority = roleKey === 'MOVER' && BUCKET_OF[docType] === 'VEHICLE'
       ? await captureSubmissionAuthority(this.prisma, userId, authenticatedRole) : undefined;
     if (authority && authority.userUpdatedAt.getTime() !== user.updatedAt.getTime()) throw moverAuthorityChanged();
@@ -519,9 +563,15 @@ export class VerificationService {
     // checklist. [STRAND-3] The old hard-coded CAR list made country-required
     // COMMERCIAL types (road_service_licence for BUS/cargo classes)
     // UNSUBMITTABLE through this API — the mover's persisted profiles decide.
-    const checklist = roleKey === 'MOVER'
-      ? await this.moverSubmittableChecklist(user.countryCode, userId)
-      : await this.checklistFor(userId, user.countryCode, roleKey);
+    // [VERIFY-DOCS] A document the role MAY add (police clearance for a mover) is submittable
+    // too; it never gates. A type no list names — required or optional — is refused below.
+    let checklist: string[];
+    if (roleKey === 'MOVER') {
+      checklist = await this.moverSubmittableChecklist(user.countryCode, userId);
+    } else {
+      const required = await this.checklistFor(userId, user.countryCode, roleKey);
+      checklist = [...required, ...await this.optionalFor(userId, user.countryCode, roleKey, required)];
+    }
     if (!checklist.includes(docType)) {
       // [DOC-1 §18.3] A document type a category gate names in this country is
       // submittable by a vendor even when no checklist lists it — a shop that wants
@@ -673,42 +723,70 @@ export class VerificationService {
     return doc;
   }
 
-  /** L2 customer verification: ID + selfie. Approval is permanent. */
+  /**
+   * L2 customer ID. [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] (customer-id.ts): the ID
+   * goes ON FILE at once — L2 now, no admin approval — unless an automatic check flags it; then
+   * it waits for a person, who approves or rejects it. An admin can withdraw it at any time
+   * (revokeDocument → back to L1). No face match: the selfie is optional (old apps still send
+   * one; it must be the caller's own upload) and is never compared or sent anywhere — a profile
+   * photo is a taxi-only requirement, enforced at ride booking. A document processor that reads
+   * documents can still reject (an auto-reject stands) or refer the document to a person.
+   */
   async submitIdentity(
     userId: string,
     idDocumentUrl: string,
-    selfieUrl: string,
+    selfieUrl: string | undefined,
     privacyNoticeVersion: string,
   ) {
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, trustLevel: true, countryCode: true } });
     if (!user) throw new NotFoundError('User', userId);
     if (user.trustLevel !== 'L1') {
-      throw new AppError(409, 'ALREADY_VERIFIED', 'Identity is already verified');
+      throw new AppError(409, 'ALREADY_VERIFIED', 'Your ID is already on file.');
     }
-    await resolveVerificationObject(this.prisma, { fileKey: idDocumentUrl, userId });
-    await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId });
+    const object = await resolveVerificationObject(this.prisma, { fileKey: idDocumentUrl, userId });
+    if (selfieUrl !== undefined) await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId });
 
-    // [DOC-1 §0.5 · FD-D5] Biometric off → the L2 identity document is verified
-    // document-only; the selfie is not sent anywhere.
-    // [DGP-1 · DOC-1 §2] the identity check sends the national ID (and selfie) — same gate as any document.
+    // [DGP-1 · DOC-1 §2] the ID check sends the national ID — same gate as any document.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, 'national_id'), this.kyc.engine);
     const startedAt = new Date();
     // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
-    let result: DegradedResult = await extractWithLadder(() => (biometricFaceMatchEnabled()
-      ? this.kyc.verifyIdentity({ userId, idDocumentUrl, selfieUrl })
-      : this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl })));
+    let result: DegradedResult = await extractWithLadder(() => this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl }));
     const finishedAt = new Date();
     result = await this.holdOnCrossSubjectCollision(userId, 'MOVER', idDocumentUrl, result);
-    // Rung 2/3: held accounts are never auto-approved (see submitDocument).
-    if (result.status === 'approved') {
-      const { hasActiveHold } = await import('../integrity/enforcement');
-      if ((await hasActiveHold(this.prisma, userId)).held) {
-        result = { ...result, status: 'pending_manual' as const };
+
+    // The automatic checks decide between "on file now" and "a person looks first". The on-shore
+    // manual engine reads nothing and decides nothing, so its "pending" is not a referral; any
+    // other engine's "pending" is. A processor's approval means it read the document, which
+    // stands in for the size check. A processor that did not answer (the P21 ladder's outage) is
+    // a hold. The checks fail closed: the ID goes on file only when every check RAN and none
+    // flagged it; if they cannot run, a person looks.
+    let holdReasons: CustomerIdHoldReason[] | null = null;
+    if (result.status !== 'rejected') {
+      const nobodyReads = this.kyc.engine?.name === 'manual-review';
+      const processorUnavailable = Boolean(result.degraded);
+      try {
+        holdReasons = customerIdHoldReasons(await readCustomerIdFacts(this.prisma, {
+          userId,
+          object,
+          duplicateImage: (result as { collided?: boolean }).collided === true,
+          sizeCheckApplies: result.status !== 'approved',
+          processorReferred: !nobodyReads && !processorUnavailable && result.status !== 'approved',
+          processorUnavailable,
+          readPlaintext: () => this.readVerificationPlaintext(idDocumentUrl, object),
+        }));
+      } catch (err) {
+        log().warn({ errName: err instanceof Error ? err.name : typeof err, userId }, 'customer ID checks could not run; held for a person');
+        holdReasons = ['CHECKS_UNAVAILABLE'];
       }
+      result = holdReasons !== null && holdReasons.length === 0
+        ? { ...result, status: 'approved' as const }
+        : { ...result, status: 'pending_manual' as const, reason: `Held for a person by the automatic checks: ${(holdReasons ?? ['CHECKS_UNAVAILABLE']).join(', ')}` };
     }
-    // [DOC-1 P4-4 · P6-4] Ledger rows for the identity check; §0.5 / §6.9 decide whether the approval stands.
+    // [DOC-1 P4-4 · P6-4] Ledger rows for the ID check; §0.5 / §6.9 decide whether the decision stands.
     const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, IDENTITY_DOC_TYPE, result, { startedAt, finishedAt });
     result = gateAutoApproval(result, extraction, registryType);
+    const processorRead = this.kyc.engine?.name !== 'manual-review';
+    const lateHolds: CustomerIdHoldReason[] = [];
 
     const doc = await this.createDocumentLively({
         userId,
@@ -722,11 +800,20 @@ export class VerificationService {
           result.status === 'approved' ? 'APPROVED'
           : result.status === 'rejected' ? 'REJECTED'
           : 'PENDING',
-        ...(result.status !== 'pending_manual' && { reviewedBy: 'kyc:auto', reviewedAt: new Date() }),
-        ...(result.status === 'rejected' && { reviewNote: result.reason }),
-    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction });
+        // Never a person's id: an ID on file was not reviewed by anyone (customer-id.ts).
+        ...(result.status === 'approved' && { reviewedBy: processorRead ? 'kyc:auto' : ON_FILE_REVIEWER, reviewedAt: new Date() }),
+        ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
+    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction, customerIdHolds: lateHolds });
+    // A hold decided inside the creation transaction (identity graph, a parallel upload) is named too.
+    if (doc.status === 'PENDING' && lateHolds.length > 0) {
+      holdReasons = [...(holdReasons ?? []), ...lateHolds];
+      result = { ...result, reason: `Held for a person by the automatic checks: ${holdReasons.join(', ')}` };
+    }
 
-    await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason);
+    // The hold reasons are for the reviewers (audit trail and the admin notice) — never on the
+    // customer's own document row: "the same picture is on another account" must not leak.
+    await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason,
+      doc.status === 'APPROVED' ? 'CUSTOMER_ID_ON_FILE' : doc.status === 'PENDING' ? 'CUSTOMER_ID_HELD' : undefined);
 
     // Only the approved L2 verdict may turn OCR into HARD identity evidence.
     const identityDocumentNumber = approvedIdentityDocumentNumber(
@@ -742,19 +829,33 @@ export class VerificationService {
       });
     }
 
-    if (doc.status === 'APPROVED') await this.promoteToL2(userId);
+    if (doc.status === 'APPROVED') await this.promoteToL2(userId, 'ON_FILE');
     if (doc.status === 'REJECTED') await this.notifyRejection(userId, 'identity', result.reason);
     if (doc.status === 'PENDING') {
       await notifyAdmins(this.prisma, this.notifications, {
         // Follows the submitter [NOC-A F45].
         tenantId: await tenantOfUser(this.prisma, userId),
-        title: 'Verification review needed',
-        body: 'An identity check (L2) is waiting in the review queue.',
-        data: { kind: 'verification_pending', docId: doc.id },
+        title: 'Customer ID needs a person',
+        body: holdReasons && holdReasons.length > 0
+          ? `The automatic checks held a customer ID (${holdReasons.join(', ')}). It is waiting in the Customers lane of the review queue.`
+          : 'A customer ID is waiting in the Customers lane of the review queue.',
+        data: { kind: 'verification_pending', docId: doc.id, holdReasons: holdReasons ?? [] },
       });
     }
 
     return doc;
+  }
+
+  /** The decrypted bytes of a proven verification upload (the same path the reviewer's render takes). */
+  private async readVerificationPlaintext(
+    fileKey: string,
+    object: { wrappedDek: Uint8Array | null; iv: Uint8Array; authTag: Uint8Array },
+  ): Promise<Buffer> {
+    const keys = getKeyProvider();
+    if (!keys || !object.wrappedDek?.length) throw new Error('verification envelope unavailable');
+    const ciphertext = await getStorageProvider().getObject(fileKey);
+    const dek = await keys.unwrapDek(Buffer.from(object.wrappedDek));
+    return decryptBuffer(ciphertext, dek, Buffer.from(object.iv), Buffer.from(object.authTag));
   }
 
   /** [STRAND-2 belt] Reconcile vendor activation projections against document
@@ -795,7 +896,10 @@ export class VerificationService {
     if (rider?.vehicleType) classes.add(rider.vehicleType);
     if (driver?.vehicleType) classes.add(driver.vehicleType);
     const lists = await Promise.all(
-      [...classes].map((vehicleType) => this.countryConfig.getMoverChecklist(countryCode, vehicleType)),
+      [...classes].flatMap((vehicleType) => [
+        this.countryConfig.getMoverChecklist(countryCode, vehicleType),
+        this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType),
+      ]),
     );
     return [...new Set(lists.flat())];
   }
@@ -1230,12 +1334,29 @@ export class VerificationService {
   async revokeDocument(docId: string, adminId: string, reason: string): Promise<VerificationDocument> {
     const doc = await this.prisma.verificationDocument.findUnique({ where: { id: docId }, select: { id: true, userId: true, docType: true } });
     if (!doc) throw new NotFoundError('VerificationDocument', docId);
+    let noneStands = false;
     const revoked = await this.projectionTransaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${doc.userId} FOR UPDATE /* verification-document-decision-authority */`;
       const won = await hopDocState(tx, { id: docId, userId: doc.userId }, 'COMMITTED', 'REVOKED', {
         status: 'REJECTED', reviewedBy: adminId, reviewedAt: new Date(), reviewNote: `REVOKED: ${reason}`,
       });
       if (!won) throw new AppError(409, 'NOT_COMMITTED', 'Only a committed (approved) document can be revoked');
+      if (doc.docType === IDENTITY_DOC_TYPE) {
+        // [Owner ruling 8 Oct 2026 — CUSTOMER ID] A withdrawal is a person's decision and must outlive
+        // the row: the customer can erase a withdrawn ID (it becomes PURGED), and the next upload must
+        // still wait for a person (customer-id.ts EARLIER_DECISION reads REJECT decisions). Review
+        // cases and decisions are never purged with the document.
+        const tenantId = (await tx.user.findUniqueOrThrow({ where: { id: doc.userId }, select: { tenantId: true } })).tenantId;
+        const now = new Date();
+        const closed = await tx.reviewCase.create({ data: { submissionId: docId, tenantId, queue: 'STANDARD', slaDueAt: now, closedAt: now } });
+        await tx.reviewDecision.create({ data: {
+          caseId: closed.id, tenantId, reviewerId: adminId, outcome: 'REJECT', reasonCode: 'REVOKED',
+          // The customer-facing category is neutral (their data-access export shows it); the
+          // reviewer's reason stays the internal note.
+          actorFacingCategory: 'WITHDRAWN', internalNote: reason, timeOnCaseMs: 0,
+        } });
+        noneStands = await this.demoteIfNoCustomerIdStands(tx, doc.userId);
+      }
       await projectProviderVerificationLocked(tx, doc.userId);
       await this.projectVendorActivation(tx, doc.userId);
       return tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
@@ -1244,7 +1365,21 @@ export class VerificationService {
     await this.suspendListingsIfUnverified(doc.userId);
     // [DOC-1 §3.11 · P3-4] A revoked vehicle document reaches every driver assigned to the vehicle.
     await this.propagateVehicleLapse({ id: doc.id, userId: doc.userId, docType: doc.docType, subjectId: revoked.subjectId }, 'was revoked');
-    await this.notifyRejection(doc.userId, doc.docType, 'the approval was withdrawn');
+    if (doc.docType === IDENTITY_DOC_TYPE) {
+      // Only say the account has no ID on file when none stands (the database keeps one committed
+      // customer ID per person, so this is the normal case; the other line is defence in depth).
+      await this.notifications.send({
+        userId: doc.userId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        ...(noneStands
+          ? { title: 'Your ID is no longer on file', body: 'Our team withdrew the ID on your account. Taxi rides and orders over the ID limit need a new ID — add it in the app and a person will look at it.' }
+          : { title: 'An ID on your account was withdrawn', body: 'Our team withdrew one of the IDs on your account. Another ID is still on file.' }),
+        audience: 'customer',
+        data: { kind: 'verification_rejected' },
+      });
+    } else {
+      await this.notifyRejection(doc.userId, doc.docType, 'the approval was withdrawn');
+    }
     return revoked;
   }
 
@@ -1362,10 +1497,19 @@ export class VerificationService {
    * gate apply a stricter MOTORCYCLE default for the null case.
    */
   private async getMoverVehicleType(userId: string): Promise<VehicleType | null> {
-    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } });
-    if (driver) return driver.vehicleType;
-    const rider = await this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } });
-    return rider?.vehicleType ?? null;
+    const [user, rider, driver] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
+      this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    ]);
+    if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
+    if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
+    if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+      if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
+      if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
+    }
+    // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+    return rider?.vehicleType ?? driver?.vehicleType ?? null;
   }
 
   /**
@@ -1398,6 +1542,26 @@ export class VerificationService {
     return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId));
   }
 
+  /**
+   * [VERIFY-DOCS] The documents this person MAY add for the role — never required, never a gate:
+   * shown under the checklist and accepted for upload. Same vehicle rule as checklistFor.
+   */
+  private async optionalFor(
+    userId: string,
+    countryCode: string,
+    roleKey: ChecklistRole,
+    required: readonly string[],
+    vehicleHint?: VehicleType,
+  ): Promise<string[]> {
+    if (roleKey === 'MOVER') {
+      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
+      return this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType);
+    }
+    // A service category that is not open has no checklist at all — and nothing to add either.
+    if (roleKey === 'SERVICE_PROVIDER' && required.length === 0) return [];
+    return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
+  }
+
   /** UNREGISTERED when any store the owner holds is on that tier; otherwise undefined (standard). */
   private async vendorTierOf(userId: string): Promise<string | undefined> {
     const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { tier: 'UNREGISTERED' }, select: { id: true }, take: 1 } } });
@@ -1412,14 +1576,23 @@ export class VerificationService {
     if (!user) throw new NotFoundError('User', userId);
 
     const checklist = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
+    // [VERIFY-DOCS] What the person MAY add. Older apps read only `checklist` and ignore this.
+    const optional = await this.optionalFor(userId, user.countryCode, roleKey, checklist, vehicleHint);
     // A SUPERSEDED submission is no longer evidence (its record followed it): a renewal
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
     // out here, or the checklist would show an approval GO no longer counts.
     const documents = (await this.prisma.verificationDocument.findMany({
-      where: { userId, docType: { in: [...checklist, IDENTITY_DOC_TYPE] } },
+      where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
-    })).filter((d) => d.state !== 'SUPERSEDED');
+    })).filter((d) => d.state !== 'SUPERSEDED')
+      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a withdrawn customer ID shows a neutral line; the
+      // reviewer's reason ("REVOKED: …") stays in the staff record. Matched on the note as well as
+      // the state: once the customer erases a withdrawn ID (or retention purges it) the row is
+      // PURGED but still carries the reviewer's words, which may name another account.
+      .map((d) => (d.docType === IDENTITY_DOC_TYPE && (d.state === 'REVOKED' || d.reviewNote?.startsWith('REVOKED:'))
+        ? { ...d, reviewNote: 'Withdrawn by our team' }
+        : d));
 
     const approved = new Set(
       documents
@@ -1449,12 +1622,14 @@ export class VerificationService {
     // default) or the engine compares none (the on-shore manual review), so the
     // apps never claim a check that does not run. Read-only.
     const facesCompared = FACE_COMPARING_ENGINES.has(this.kyc.engine?.name ?? '');
-    const faceMatchDocTypes: string[] = facesCompared ? checklist.filter((docType) => identityFaceMatchLeg(docType)) : [];
+    const faceMatchDocTypes: string[] = facesCompared ? [...checklist, ...optional].filter((docType) => identityFaceMatchLeg(docType)) : [];
 
     return {
       roleKey,
       trustLevel: user.trustLevel,
       checklist,
+      // [VERIFY-DOCS] Documents this person MAY add (never in `missing`, never a gate).
+      optional,
       documents,
       missing,
       vehicleType,
@@ -1462,6 +1637,10 @@ export class VerificationService {
       categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && checklist.length === 0,
       trial,
       faceMatchDocTypes,
+      // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
+      // the one evidence rule, so the flag survives the image being deleted after review.
+      // Only asked where this person's lists name the document at all.
+      policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
     };
   }
 
@@ -1794,17 +1973,39 @@ export class VerificationService {
       }
       // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
       await this.propagateVehicleLapse(doc, 'expired');
+      // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
+      // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
+      const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
       await this.notifications.send({
         userId: doc.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Document expired',
-        body: `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+        body: optional
+          ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
+          : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expired', docId: doc.id },
       });
     }
 
     return expired;
+  }
+
+  /** [VERIFY-DOCS] A mover's document that no gate of theirs requires today (police clearance;
+   *  a licence holder's national ID). Vendor and service documents are never judged optional here. */
+  private async isOptionalMoverDocument(userId: string, role: UserRole, docType: string): Promise<boolean> {
+    if (role !== 'MOVER' && role !== 'RIDER' && role !== 'DRIVER') return false;
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    if (!user) return false;
+    const [rider, driver] = await Promise.all([
+      this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    ]);
+    const vehicles = [rider?.vehicleType, driver?.vehicleType].filter((type): type is VehicleType => !!type);
+    if (vehicles.length === 0) return false;
+    // Expiry can stop either retained profile, even while the other surface is active.
+    const required = await Promise.all(vehicles.map((type) => this.countryConfig.getMoverChecklist(user.countryCode, type)));
+    return required.every((list) => !list.includes(docType));
   }
 
   /** One reminder per document, 30 days before expiry. */
@@ -1819,11 +2020,15 @@ export class VerificationService {
     for (const n of due) {
       const doc = await this.prisma.verificationDocument.findUnique({ where: { id: n.documentId }, select: { docType: true, role: true } });
       if (!doc) continue;
+      // [VERIFY-DOCS] Never threaten a suspension over a document nobody requires.
+      const optional = await this.isOptionalMoverDocument(n.subjectId, doc.role, doc.docType);
       await this.notifications.send({
         userId: n.subjectId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: n.daysLeft <= 1 ? 'Document expires tomorrow' : 'Document expiring soon',
-        body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${n.expiresOn.toISOString().slice(0, 10)} — ${n.daysLeft} day${n.daysLeft === 1 ? '' : 's'} left. Renew it to avoid suspension.`,
+        body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${n.expiresOn.toISOString().slice(0, 10)} — ${n.daysLeft} day${n.daysLeft === 1 ? '' : 's'} left. ${optional
+          ? (doc.docType === POLICE_CLEARANCE_DOC_TYPE ? 'Renew it to stay recorded as police-cleared. It is optional and does not affect your work.' : 'It is optional and does not affect your work.')
+          : 'Renew it to avoid suspension.'}`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expiry_reminder', docId: n.documentId, daysLeft: n.daysLeft },
       });
@@ -1982,6 +2187,9 @@ export class VerificationService {
       if (won.count !== 1) return false;
       // The receipt commits with the purge or not at all.
       await writeDeletionReceipt(tx, receipt);
+      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] L2 stands on an ID on file: purging the last one
+      // (the customer's own erasure, retention, account closure) takes the account back to L1.
+      if (doc.docType === IDENTITY_DOC_TYPE) await this.demoteIfNoCustomerIdStands(tx, doc.userId);
       // Account deletion commits this exact marker with its due clocks under
       // the same user lock. Consume it even if the caller snapshot predates
       // deletion or a later admin ban replaced DEACTIVATED. A different
@@ -2005,15 +2213,44 @@ export class VerificationService {
   // Side effects
   // -------------------------------------------------------------------------
 
-  private async promoteToL2(userId: string) {
-    await this.prisma.user.update({ where: { id: userId }, data: { trustLevel: 'L2' } });
-    // D.3 — a higher trust level means a higher float limit (no-op for non-riders).
-    await new FloatService(this.prisma).recomputeForUser(userId);
+  /**
+   * [Owner ruling 8 Oct 2026 — CUSTOMER ID] L2 stands on a committed customer ID. When the last one
+   * is withdrawn (revoke) or destroyed (purge), the account goes back to L1 — an earned L3 too, it
+   * stood on the ID — inside the caller's transaction; the rider float follows the level.
+   */
+  /** Returns true when no customer ID stands any more (the account is L1 after this). */
+  private async demoteIfNoCustomerIdStands(tx: Prisma.TransactionClient, userId: string): Promise<boolean> {
+    const standing = await tx.verificationDocument.count({ where: { userId, docType: IDENTITY_DOC_TYPE, state: 'COMMITTED' } });
+    if (standing > 0) return false;
+    await tx.user.updateMany({ where: { id: userId, trustLevel: { not: 'L1' } }, data: { trustLevel: 'L1' } });
+    await new FloatService(tx).recomputeForUser(userId);
+    return true;
+  }
+
+  /** L1 → L2. `basis` keeps the notice truthful (owner ruling 8 Oct 2026, customer-id.ts): an ID
+   *  that is only ON FILE is never called verified; only a person's approval is. An account
+   *  already above L1 (an earned L3) is never lowered by a second approval. */
+  private async promoteToL2(userId: string, basis: 'ON_FILE' | 'PERSON' = 'PERSON') {
+    // Under the same user lock revoke and purge take, and only while a committed customer ID still
+    // stands: a withdrawal or an erasure that landed after the document committed is never undone.
+    const promoted = await this.projectionTransaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* customer-id-promotion-authority */`;
+      const standing = await tx.verificationDocument.count({ where: { userId, docType: IDENTITY_DOC_TYPE, state: 'COMMITTED' } });
+      if (standing === 0) return false;
+      const raised = await tx.user.updateMany({ where: { id: userId, trustLevel: 'L1' }, data: { trustLevel: 'L2' } });
+      // D.3 — a higher trust level means a higher float limit (no-op for non-riders; an ID that is
+      // only on file never lifts a rider's float — FloatService.recomputeForUser / floatTrustLevel).
+      await new FloatService(tx).recomputeForUser(userId);
+      return raised.count === 1;
+    });
+    if (!promoted) return;
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Identity verified',
-      body: 'You are now ID-verified and can place orders of any size.',
+      ...(basis === 'ON_FILE'
+        // Truthful: the ID unlocks bigger orders; a taxi ride also needs the profile photo (SELFIE_REQUIRED).
+        ? { title: 'Your ID is on file', body: 'Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' }
+        : { title: 'Identity verified', body: 'A person on our team checked your ID. Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' }),
       audience: 'customer',
       data: { kind: 'verification_l2' },
     });
@@ -2192,18 +2429,20 @@ export class VerificationService {
     });
   }
 
-  /** Append an immutable audit entry for an automated KYC decision (§3.6). */
+  /** Append an immutable audit entry for an automated KYC decision (§3.6). `action` names a
+   *  customer-ID intake outcome (customer-id.ts) where the generic KYC verb would mislead. */
   private async recordDecision(
     userId: string,
     docId: string,
     docType: string,
     status: VerificationDocument['status'],
     reason?: string,
+    actionOverride?: 'CUSTOMER_ID_ON_FILE' | 'CUSTOMER_ID_HELD',
   ) {
-    const action =
-      status === 'APPROVED' ? 'KYC_AUTO_APPROVE'
+    const action = actionOverride ??
+      (status === 'APPROVED' ? 'KYC_AUTO_APPROVE'
       : status === 'REJECTED' ? 'KYC_AUTO_REJECT'
-      : 'VERIFICATION_SUBMIT';
+      : 'VERIFICATION_SUBMIT');
     await this.prisma.auditLog.create({
       data: {
         userId,
