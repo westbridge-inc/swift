@@ -480,7 +480,8 @@ describe('GOLD-2 · VEND-04 — the weekly fee and agent cash', () => {
         { account: 'WALLET_LIABILITY', debit: RATE_CARD_SMALL_VENDOR, credit: 0 },
       ],
     });
-    expect((await noticesTo(p.owner.userId)).slice(3)).toEqual(['Top-up received', 'Subscription payment received']);
+    // [OWNER RULING 8 Oct, NO "WALLET"] the notice says "fee paid ahead", never "top-up" or "balance".
+    expect((await noticesTo(p.owner.userId)).slice(3)).toEqual(['Weekly fee paid ahead', 'Subscription payment received']);
 
     // The agent's system resends the same notice: nothing moves again.
     const replay = await agentPays(p.san, RATE_CARD_SMALL_VENDOR, txn);

@@ -4,7 +4,7 @@ import {
   isBehind,
   isBlocked,
   shortDate,
-  walletLine,
+  feePaidAheadLine,
   weeklyFeeGyd,
   weeksCovered,
   payScreenState,
@@ -125,19 +125,23 @@ describe('weeksCovered', () => {
   });
 });
 
-describe('walletLine', () => {
-  it('is null when nothing is banked', () => {
-    expect(walletLine(0, 12000)).toBeNull();
-    expect(walletLine(null, 12000)).toBeNull();
+// [OWNER RULING 8 Oct, NO "WALLET"] weekly fees paid before they are due are
+// "Fee paid ahead — covers N weeks": never a wallet, a balance or "banked".
+describe('feePaidAheadLine', () => {
+  it('is null when nothing is paid ahead', () => {
+    expect(feePaidAheadLine(0, 12000)).toBeNull();
+    expect(feePaidAheadLine(null, 12000)).toBeNull();
   });
 
-  it('adds a coverage clause when the fee is known', () => {
-    expect(walletLine(24000, 12000)).toBe('$24,000 banked · covers 2 weeks');
-    expect(walletLine(12000, 12000)).toBe('$12,000 banked · covers 1 week');
+  it('says the weeks it covers when the fee is known — whole weeks, never over-promised', () => {
+    expect(feePaidAheadLine(24000, 12000)).toBe('Fee paid ahead — covers 2 weeks');
+    expect(feePaidAheadLine(12000, 12000)).toBe('Fee paid ahead — covers 1 week');
+    expect(feePaidAheadLine(30000, 12000)).toBe('Fee paid ahead — covers 2 weeks');
   });
 
-  it('drops the coverage clause when the fee is unknown', () => {
-    expect(walletLine(5000, 0)).toBe('$5,000 banked');
+  it('names the amount when it covers less than a week, or the fee is unknown', () => {
+    expect(feePaidAheadLine(5000, 12000)).toBe('Fee paid ahead — $5,000 toward your next weekly fee');
+    expect(feePaidAheadLine(5000, 0)).toBe('Fee paid ahead — $5,000');
   });
 });
 

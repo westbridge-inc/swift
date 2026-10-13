@@ -35,9 +35,11 @@ const submitDocumentSchema = z.object({
   ...consentFields,
 });
 
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match: the selfie is optional. Store build 9
+// still sends one (it must be the caller's own upload); a newer app sends the ID alone.
 const submitIdentitySchema = z.object({
   idDocumentUrl: z.string().min(5).max(2048),
-  selfieUrl: z.string().min(5).max(2048),
+  selfieUrl: z.string().min(5).max(2048).optional(),
   ...consentFields,
 });
 
@@ -231,7 +233,10 @@ export async function verificationRoutes(app: FastifyInstance) {
     return reply.send(plaintext);
   });
 
-  /** POST /identity — L2 flow: government ID + selfie. Permanent once approved. */
+  /** POST /identity — the customer's ID (L2). [Owner ruling 8 Oct 2026] On file at once unless an
+   *  automatic check holds it for a person. `idCheck` (additive) says which, in words an app can
+   *  repeat truthfully: ON_FILE (unlocked now, no person reviewed it), WAITING (a person looks
+   *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
     const doc = await verification.submitIdentity(
@@ -241,6 +246,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       body.privacyNoticeVersion,
     );
     reply.code(201);
-    return { success: true, data: doc };
+    const idCheck = doc.status === 'APPROVED' ? 'ON_FILE' : doc.status === 'REJECTED' ? 'NOT_ACCEPTED' : 'WAITING';
+    return { success: true, data: { ...doc, idCheck } };
   });
 }
