@@ -446,6 +446,21 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     expect((await notices(c.id)).map((n) => n.title)).toContain('Your ID is no longer on file');
   });
 
+  // [Opus 12 Oct · #1620 × DOC-1 §24.2] A held customer ID a reviewer escalated is never wiped by a new upload.
+  it('a held ID under a second review is kept: a new upload is refused, and the second reviewer can still confirm', async () => {
+    const c = await customer();
+    const first = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) })).json().data;
+    const escalated = await admin('PUT', `/api/v1/admin/verification/${first.id}/reject`, { reason: 'Synthetic: the photo looks edited', reasonCode: 'SUSPECTED_TAMPERING' });
+    expect(escalated.statusCode, escalated.body).toBe(200);
+    expect((await app.prisma.reviewCase.findFirstOrThrow({ where: { submissionId: first.id, closedAt: null } })).queue).toBe('SECOND_REVIEW');
+    const again = await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(420, 300)) });
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error.code).toBe('DOCUMENT_UNDER_SECOND_CHECK');
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: first.id } })).state).toBe('REVIEW_QUEUED');
+    expect(await app.prisma.verificationDocument.count({ where: { userId: c.id, docType: 'identity_l2' } })).toBe(1);
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+  });
+
   it("the customer's own status shows a neutral line for a withdrawn ID, never the reviewer's reason", async () => {
     const c = await customer();
     const doc = (await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) })).json().data;

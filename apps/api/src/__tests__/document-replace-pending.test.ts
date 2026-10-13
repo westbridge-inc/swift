@@ -24,6 +24,7 @@ import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verific
 let app: FastifyInstance;
 let service: VerificationService;
 let reviewerId: string;
+let secondReviewerId: string;
 const users: string[] = [];
 const phoneBase = 592_078_000_000 + Math.floor(Math.random() * 900_000);
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'document-replace-pending-test');
@@ -45,6 +46,7 @@ async function mover() {
 const upload = async (userId: string) => system(async () => service.submitDocument(userId, 'MOVER', 'national_id', await ownedVerificationFixture(app.prisma, userId), 'test-v1'));
 const read = (id: string) => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id } });
 const openCases = (id: string) => app.prisma.reviewCase.findMany({ where: { submissionId: id, closedAt: null } });
+const openCasesFull = (id: string) => app.prisma.reviewCase.findMany({ where: { submissionId: id, closedAt: null }, select: { queue: true, priority: true } });
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -58,6 +60,11 @@ beforeAll(async () => {
     admin: { create: { permissions: ['*'] } },
   } }));
   users.push(reviewer.id); reviewerId = reviewer.id;
+  const second = await system(() => app.prisma.user.create({ data: {
+    phone: `+${phoneBase + 899_998}`, firstName: 'Synthetic', lastName: 'Second', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true,
+    admin: { create: { permissions: ['*'] } },
+  } }));
+  users.push(second.id); secondReviewerId = second.id;
 });
 
 afterAll(async () => {
@@ -71,6 +78,48 @@ afterAll(async () => {
     await app.prisma.user.deleteMany({ where: { id: { in: users } } }).catch(() => {});
   });
   await app.close();
+});
+
+async function partner() {
+  return system(async () => {
+    const user = await app.prisma.user.create({ data: {
+      phone: `+${phoneBase + users.length}`, firstName: 'Synthetic', lastName: 'Owner', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER',
+      countryCode: 'GY', isPhoneVerified: true,
+    } });
+    users.push(user.id);
+    const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
+    await app.prisma.vendor.create({ data: {
+      ownerId: owner.id, name: 'Synthetic Store', slug: `syn-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT',
+      phone: `+${phoneBase + 700_000 + users.length}`, addressLine1: '1 Synthetic Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: 6.8, longitude: -58.15,
+    } });
+    return { userId: user.id };
+  });
+}
+
+// [Opus 12 Oct · DOC-1 §24.2] A copy a reviewer escalated to a second review (or that intake routed there
+// because its file matched another account) is suspicion awaiting a DIFFERENT reviewer. A new upload must not
+// wipe it: the replacement is refused, the escalated copy keeps its SECOND_REVIEW case, and the second
+// reviewer's confirmation still opens the fraud case.
+describe('a copy under a second review is never replaced', () => {
+  it.each([
+    ['a mover', 'MOVER', 'national_id'],
+    ['a business owner', 'RESTAURANT', 'owner_national_id'],
+  ] as const)('%s: the escalated copy stays, the new upload is refused, and the second reviewer can still confirm', async (_who, role, docType) => {
+    const applicant = role === 'MOVER' ? await mover() : await partner();
+    const upload1 = async () => system(async () => service.submitDocument(applicant.userId, role, docType, await ownedVerificationFixture(app.prisma, applicant.userId), 'test-v1'));
+    const first = await upload1();
+    // Reviewer A raises the suspicion: the case moves to SECOND_REVIEW and the document stays pending.
+    await system(() => service.rejectDocument(first.id, reviewerId, 'The photo looks edited', 'SUSPECTED_TAMPERING'));
+    expect((await openCasesFull(first.id)).map((c) => c.queue)).toEqual(['SECOND_REVIEW']);
+    // The applicant sends another copy: refused, and nothing about the escalated copy changes.
+    await expect(upload1()).rejects.toMatchObject({ code: 'DOCUMENT_UNDER_SECOND_CHECK' });
+    expect(await read(first.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
+    expect((await openCasesFull(first.id)).map((c) => c.queue)).toEqual(['SECOND_REVIEW']);
+    expect(await app.prisma.verificationDocument.count({ where: { userId: applicant.userId, docType } })).toBe(1);
+    // Reviewer B confirms: the rejection (and the fraud case) happens.
+    expect(await system(() => service.rejectDocument(first.id, secondReviewerId, 'Confirmed edited photo', 'SUSPECTED_TAMPERING'))).toMatchObject({ status: 'REJECTED' });
+  });
 });
 
 describe('replace a document while it waits for review', () => {

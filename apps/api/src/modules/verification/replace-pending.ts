@@ -15,6 +15,7 @@
  */
 import type { Prisma } from '@prisma/client';
 import { hopDocState } from './doc-state';
+import { AppError } from '../../utils/errors';
 
 type Tx = Prisma.TransactionClient;
 
@@ -22,6 +23,9 @@ type Tx = Prisma.TransactionClient;
 export const AWAITING_REVIEW_STATES = ['REVIEW_QUEUED', 'IN_REVIEW', 'INFO_REQUESTED'] as const;
 export const REPLACED_NOTE = 'REPLACED: the applicant uploaded a newer copy before review';
 export const DOCUMENT_REPLACED = 'DOCUMENT_REPLACED';
+export const DOCUMENT_UNDER_SECOND_CHECK = 'DOCUMENT_UNDER_SECOND_CHECK';
+/** Review queues that mean suspicion awaiting a different reviewer (DOC-1 §24.2). */
+const SECOND_CHECK_QUEUES = ['SECOND_REVIEW', 'ESCALATED'] as const;
 
 /** The note a replaced copy carries, naming the copy that replaced it — so "replaced" belongs to that copy only. */
 export function replacedNoteFor(replacementId: string): string {
@@ -51,6 +55,20 @@ export interface ReplaceOutcome {
 export async function supersedeAwaitingCopies(tx: Tx, doc: Copy): Promise<ReplaceOutcome> {
   // Two uploads of the same document at once: the second waits for the first, then decides.
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`document-replace:${doc.userId}:${doc.role}:${doc.docType}`}))::text AS locked`;
+  // [Opus 12 Oct · DOC-1 §24.2] A copy under a second check — a reviewer escalated it, or intake routed it there
+  // because its file matched another account — is suspicion awaiting a DIFFERENT reviewer. A new upload must
+  // never wipe it (its confirmation opens the fraud case and the legal hold), so the upload is refused and the
+  // escalated copy stays exactly as it is. The words do not say why, as the applicant is never told of suspicion.
+  const underSecondCheck = await tx.reviewCase.count({ where: {
+    closedAt: null, queue: { in: [...SECOND_CHECK_QUEUES] },
+    submissionId: { in: (await tx.verificationDocument.findMany({
+      where: { userId: doc.userId, role: doc.role as never, docType: doc.docType, id: { not: doc.id }, state: { in: [...AWAITING_REVIEW_STATES] } },
+      select: { id: true },
+    })).map((row) => row.id) },
+  } });
+  if (underSecondCheck > 0) {
+    throw new AppError(409, DOCUMENT_UNDER_SECOND_CHECK, 'We are still checking the copy you sent. You can send a new one once that check is finished.');
+  }
   const others = await tx.verificationDocument.findMany({
     where: { userId: doc.userId, role: doc.role as never, docType: doc.docType, id: { not: doc.id }, state: { in: [...AWAITING_REVIEW_STATES] }, legalHoldId: null },
     select: { id: true, createdAt: true },
