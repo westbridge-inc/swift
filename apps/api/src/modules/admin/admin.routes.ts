@@ -1,4 +1,4 @@
-import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
+import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
@@ -51,6 +51,7 @@ import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
@@ -280,7 +281,7 @@ const broadcastSchema = z.object({
 // no evidence of which payment it was, and the same payment could be credited
 // again tomorrow under a fresh idempotency key.
 const topUpSchema = z.object({
-  amount: zMoneyWhole.refine((n) => n > 0, 'A top-up must be more than zero'),
+  amount: zMoneyWhole.refine((n) => n > 0, 'A recorded fee payment must be more than zero'),
   reference: z.string(),
 });
 
@@ -2557,7 +2558,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // audit, booking/search closure, stock, float, and mover release share one
     // transaction. This closes both the crash window and the stale riderId race
     // against a direct board assignment. Socket/push remain post-commit below.
-    await orderService.transitionOrderAtomically({
+    const cancellation = await orderService.transitionOrderAtomically({
       orderId: id,
       target: newStatus,
       allowedFrom,
@@ -2580,11 +2581,15 @@ export async function adminRoutes(app: FastifyInstance) {
       // able to leave a cancelled order with no record of it.
       ...(refund
         ? {
-          withinTransaction: async (tx: Prisma.TransactionClient) => {
+          // [M066] The amount owed is the total on the LOCKED row. The
+          // pre-read above is only for the status gate and the notices; an
+          // adjustment that commits between it and the lock must not leave a
+          // stale (smaller or larger) obligation on record.
+          withinTransaction: async (tx: Prisma.TransactionClient, lockedSource: { totalAmount: Prisma.Decimal }) => {
             await tx.order.update({
               where: { id },
               data: {
-                refundOwedAmount: order.totalAmount,
+                refundOwedAmount: lockedSource.totalAmount,
                 refundOwedAt: new Date(),
                 refundOwedById: request.user.userId,
               },
@@ -2637,7 +2642,8 @@ export async function adminRoutes(app: FastifyInstance) {
       data: {
         orderId: id,
         status: newStatus,
-        refundOwed: refund ? String(order.totalAmount) : null,
+        // [M066] Echo the obligation exactly as it was committed.
+        refundOwed: refund ? String(cancellation.order.refundOwedAmount) : null,
       },
     };
   });
@@ -3536,7 +3542,8 @@ export async function adminRoutes(app: FastifyInstance) {
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
       return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority };
     }));
-    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }) };
+    // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
+    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {
@@ -3620,13 +3627,15 @@ export async function adminRoutes(app: FastifyInstance) {
     // ledger posting, the audit row and the durable notice / re-bill tail are
     // written together. Rollback is hold-only (BILLING_TOPUP_HOLD=1 refuses
     // every top-up); there is no way back to an unkeyed mutation.
-    if (process.env['BILLING_TOPUP_HOLD'] === '1') {
-      throw new AppError(503, 'TOPUP_ON_HOLD', 'Top-ups are on hold by operations — nothing was recorded. Try again once the hold is lifted.');
+    // [OWNER 8 Oct 22:20 + 23:58 (4)] Production holds it (fails closed when
+    // unset there); only BILLING_TOPUP_HOLD=0 opens it on a test server.
+    if (manualFeeCreditHeld()) {
+      throw new AppError(503, 'TOPUP_ON_HOLD', MANUAL_FEE_CREDIT_HELD_MESSAGE);
     }
     const clientKey = request.headers['idempotency-key'];
     if (!isUsableTopUpKey(clientKey)) {
       billingTopupMissingKeyCounter.inc();
-      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A recorded fee payment needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
     // [A-12] Normalised the same way every other manual-rail reference is, so
     // the same transfer typed two ways cannot occupy two rows and defeat the
@@ -4712,20 +4721,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/billing/agent-payments/:id/refund-flag', { preHandler: [adminGuard] }, async (request) => {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ note: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const row = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
-    if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
-    if (row.status !== 'UNMATCHED') throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
+    // [REVIEW S3-2] One refund per MMG payment: the service closes the
+    // provider transaction and reconciles its other held observations.
     // [ADM-002] Flagging a payment for refund is a money decision. Its
     // subject is in the params, so the row needs no id override.
-    const updated = await tenantPrisma.$transaction(async (tx) => {
-      const row = await tx.mmgAgentPayment.update({
-        where: { id },
-        data: { status: 'REFUND_FLAGGED', note: body.note, resolvedBy: request.user.userId, resolvedAt: new Date() },
-      });
-      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-      return row;
-    });
-    return { success: true, data: updated };
+    const { AgentCashService } = await import('../billing/agent-cash.service');
+    const svc = new AgentCashService(tenantPrisma, billing);
+    const result = await svc.flagRefund(id, request.user.userId, body.note,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+    const updated = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
+    return { success: true, data: { ...updated, refund: result } };
   });
 
   /** Leave with note (stays in the queue). */
@@ -5417,8 +5422,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const doc = await verification.revokeDocument(id, request.user.userId, body.reason);
     await audit(request.user.userId, 'REVOKE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
-
-    return { success: true, data: doc };
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] Additive: the account level after the withdrawal, so
+    // the console says "back to L1" only when it is (another customer ID may still stand).
+    const after = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { trustLevel: true } });
+    return { success: true, data: { ...doc, accountTrustLevel: after?.trustLevel ?? null } };
   });
 
   // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────
@@ -5559,12 +5566,19 @@ export async function adminRoutes(app: FastifyInstance) {
     // and the record of who made it commit together. `E.returnRequest` is
     // declared, so the subject comes from the params.
     const updated = await tenantPrisma.$transaction(async (tx) => {
-      const row = await mutationOrNotFound('ReturnRequest', id, () => tx.returnRequest.update({
-        where: { id },
+      // The pre-read above is a fast refusal, not the guard: two admins can
+      // both read REQUESTED. Only the writer that still sees REQUESTED decides
+      // and audits; the other gets 409 and writes nothing, so a refusal can
+      // never overwrite an owed refund (or the reverse).
+      const changed = await tx.returnRequest.updateMany({
+        where: { id, status: 'REQUESTED' },
         data: { status: body.status, resolutionNote: body.note, reviewedBy: request.user.userId, reviewedAt: new Date() },
-      }));
+      });
+      if (changed.count !== 1) {
+        throw new AppError(409, 'ALREADY_RESOLVED', 'This return was resolved by someone else a moment ago. Refresh to see the decision.');
+      }
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-      return row;
+      return tx.returnRequest.findUniqueOrThrow({ where: { id } });
     });
     if (body.status === 'REFUND_DUE') returnRefundCounter.labels('owed').inc();
     return { success: true, data: updated };
@@ -6214,7 +6228,14 @@ export async function adminRoutes(app: FastifyInstance) {
     if (refusal) throw new AppError(409, 'REPLAY_NOT_CERTIFIED', refusal, { jobName: job.name, ...recoveryFor(job.name) });
     await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, async () => {
       try {
-        await job.retry();
+        // [Item 63] The operator authorizes ONE fresh execution: reset the
+        // started-run counter the automatic-replay guard reads. A certified
+        // class keeps its attempt history (attemptsMade) visible; an
+        // uncertified one (RECONCILE_FIRST) starts both counters again, so a
+        // worker dying during THIS run is a prior start the guard refuses —
+        // the one replay can never become two.
+        const certified = recoveryFor(job.name).policy === 'SAFE_REPLAY';
+        await job.retry('failed', { resetAttemptsStarted: true, ...(certified ? {} : { resetAttemptsMade: true }) });
       } catch (err) {
         // BullMQ's reprocess refused: the job is no longer in the failed set
         // (a Discard claimed it, or another Retry already moved it).
@@ -6527,5 +6548,12 @@ export async function adminRoutes(app: FastifyInstance) {
   }));
   app.get<{ Params: { subscriptionId: string } }>('/billing/subscriptions/:subscriptionId/cards', { preHandler: [adminGuard] }, async (request) => ({
     success: true, data: await adminSubscriptionCards(app.prisma, request.params.subscriptionId),
+  }));
+  // [PT-4 · review S2-2] Finance resolves a HELD card payment (C4: two people).
+  // [ADM-002] Its audit row commits with the decision's claim or closure.
+  app.post<{ Params: { id: string } }>('/billing/card-sessions/:id/resolve', { preHandler: [adminGuard] }, async (request) => ({
+    success: true,
+    data: await adminResolveCardSession(app, request.params.id, request.body, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts })),
   }));
 }

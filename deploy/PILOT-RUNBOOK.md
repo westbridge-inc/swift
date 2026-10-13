@@ -605,17 +605,21 @@ from issue at most) bounds that window.
 
    They send the operator only the public line
    (`~/.ssh/swift_seed_approver.pub`). The operator writes one line per
-   approver, `<name> ssh-ed25519 AAAA…`, into a file and pins it in the store
-   (public keys, but root-only there, so nobody can swap one):
+   approver, `<name> ssh-ed25519 AAAA…`, into a file outside the checkout
+   and pins it in the store (public keys, but root-only there, so nobody can
+   swap one):
 
-       sudo swift-secrets set SEED_APPROVER_KEYS < approver-keys.txt
+       sudo swift-secrets set SEED_APPROVER_KEYS < ~/approver-keys.txt
 
 2. The operator runs the change without approvals. It prints the request
    between two `-----` lines (stdout carries only the request) and exits 2
    (spine) or 3 (promotion):
 
        cd /opt/swift
-       SEED_ADMIN_PHONE=+5920400001 ./deploy/seed-production.sh "$SHA" > request.txt
+       SEED_ADMIN_PHONE=+5920400001 ./deploy/seed-production.sh "$SHA" > ~/seed-request.txt
+
+   The request goes OUTSIDE the checkout: the script refuses a checkout with
+   any untracked file, and the shell creates the file before the script runs.
 
 3. Each approver checks the request and signs it on their own computer. The
    script shows the database, the configuration and FX rate, the first
@@ -624,7 +628,7 @@ from issue at most) bounds that window.
    request that does not say these things in words, or that hides anything
    (control characters, lines after its `end`):
 
-       ./deploy/seed-approve.sh <their-name> ~/.ssh/swift_seed_approver < request.txt
+       ./deploy/seed-approve.sh <their-name> ~/.ssh/swift_seed_approver < seed-request.txt
 
    Never sign for someone else: the control is two people with two keys.
    SEED_APPROVE_YES is for the test suites only (they have no terminal): it
@@ -842,8 +846,14 @@ restore rows already deleted.
 
 The same scripts run the production host, a separate server. They never turn a
 staging host into production. deploy/.env on that host says
-`PILOT_ENV=production`, and pilot-up.sh then also refuses, each before
-anything changes:
+`PILOT_ENV=production`. deploy/deploy.sh (the local and staging convenience
+commands) then refuses everything but `logs` and `health`, before any docker
+call: it builds whatever is checked out, with no pinned SHA and none of the
+checks below, and `nuke` deletes the data volumes. It refuses the same when
+deploy/.env sets NODE_ENV=production, in any spelling Compose reads, or when
+the shell exports either as production. pilot-up.sh then also refuses, each
+before the stack changes (the backup keys are read from the store after the
+checkout moves to the requested SHA; everything else before that):
 
 - any NODE_ENV but `production`;
 - a served name (API_HOST, API_ALIAS_HOST, WEB_HOST, WEB_ALIAS_HOSTS,
@@ -858,6 +868,15 @@ anything changes:
 - AGENT_CASH_WEBHOOK_SECRET or AGENT_CASH_WEBHOOK_SECRET_FILE set: partners
   pay the weekly fee only on the MMG checkout page, never through an agent or
   a Swift Number (the agent-cash webhook answers 503 without its secret);
+- for the whole stack and `--no-public` (not `--data-only`), no address-search
+  provider: `PLACES_PROVIDER=osm` with `PHOTON_URL=http://photon:2322` (the
+  script then also starts the private Photon service from the routing file's
+  geocoding profile, never Nominatim; its South America index is about 6.7 GB
+  on first start), or `PLACES_PROVIDER=google` with
+  `GOOGLE_MAPS_API_KEY_BACKEND_FILE=/run/secrets/GOOGLE_MAPS_API_KEY_BACKEND`
+  (the owner's key in the store). The choice is the owner's. Every host also
+  needs `MAPS_PROVIDER=osrm` and `OSRM_URL=http://osrm:5000` (road fares and
+  ETAs; without them taxi and courier quotes are refused);
 - any setting Compose fills from `${…}` that is also set in the operator's
   shell (Compose prefers the shell to deploy/.env, which is what every check
   reads), and the COMPOSE_* switches. Run it from a clean shell;
@@ -876,7 +895,9 @@ anything changes:
   host, over IPv4 and IPv6 (`getent ahostsv4` and `getent ahostsv6` against
   `hostname -I`; an AAAA record left on the old host sends IPv6 clients and
   the certificate authority there): Caddy obtains the certificates, and the
-  public names stay on the old host until DNS moves.
+  public names stay on the old host until DNS moves. The refusal names the
+  record (A or AAAA), never the address, so a deploy log kept as evidence
+  carries no address.
 
 The website, when WEB_HOST is set, is built on the production channel
 (SWIFT_WEB_CHANNEL follows PILOT_ENV), so it must call `https://api.<site
@@ -918,6 +939,10 @@ explicitly off. Beyond the earlier guards:
   unacknowledged SOS escalates to them by SMS.
 - **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
   EMAIL_FROM and the SMTP_PASS secret (wired as SMTP_PASS_FILE).
+- **The launch money rules.** `BILLING_TOPUP_HOLD` exactly `1`, and no
+  AGENT_CASH_WEBHOOK_SECRET (nor its `_FILE`): the same two rules pilot-up.sh
+  checks, held by the API itself however it is started (a hand-run compose,
+  an old script). The refusal names the setting, never a value.
 
 ### Database first, before the providers and DNS
 
@@ -941,8 +966,18 @@ Before the API ever starts, the weekly-fee confirmation cutover must report
 READY: apps/api/BILLING-CONFIRMATION-CUTOVER.md, step 3 (the versioned
 backfill) and step 4 (the check). Until then billing stays BLOCKED: no
 collection, no fee demand, no suspension. The backfill runs with tsx, which
-the runtime image does not carry; run it in the build-stage container the
-seed uses (section 6), never on a host install.
+the runtime image does not carry, so it runs in the seed's build-stage
+container (section 6), never on a host install, through its own script:
+
+    ./deploy/billing-cutover.sh "$APPROVED_SHA" 20260930180000-v1
+
+It makes the seed's refusals (the exact clean SHA on origin/main, one plain
+deploy/.env, nothing exported, this host's Docker, NODE_ENV=production on
+production), refuses while the API or worker runs, reads the database name
+and deployment from the database itself (its deployment_identity row must say
+this host's PILOT_ENV), runs step 3, and reads step 4 back: it ends with
+`BILLING CUTOVER READY …`, or fails naming the state and the missing count.
+It is restartable: an interrupted run leaves BLOCKED and is run again.
 
 Back up and rehearse the restore (sections 4 and 5, with `--compare-source`:
 in schemas public and swift_qr it compares every table's row count and
@@ -960,7 +995,9 @@ must be pinned first (section 6b, step 1).
 
 1. The first run prints the plan, then the request to sign, and exits 2:
 
-       SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' ./deploy/seed-production.sh "$SHA" > request.txt
+       SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' ./deploy/seed-production.sh "$SHA" > ~/seed-request.txt
+
+   (Outside the checkout, as in section 6b: an untracked file in it is refused.)
 
 2. Each approver signs it on their own computer (section 6b, step 3).
 
@@ -981,6 +1018,22 @@ must be pinned first (section 6b, step 1).
        sudo rm /etc/credstore.encrypted/swift/SEED_PLAN_SECRET.cred
        sudo systemctl restart swift-secrets.service
        sudo swift-secrets list
+
+### The first boot, before DNS moves
+
+    cd /opt/swift
+    ./deploy/pilot-up.sh --no-public "$APPROVED_SHA"
+
+Production only. It runs every check above except DNS, stops the API and
+worker, migrates, starts the API and worker, and waits until the API
+container is healthy, the worker runs and `/ready` answers from inside the
+API container. It ends with `API READY at exact SHA … (production, no public
+address …)`. Caddy, the website and the console are never built or started,
+and only Caddy publishes ports 80 and 443, so nothing is reachable from
+outside. It refuses outright while Caddy is running (the names already
+serve: use the whole stack), or when Docker cannot say whether it is. Stop
+the two again with `docker compose -f deploy/docker-compose.yml stop api
+worker` before another `--data-only` run, which refuses while they run.
 
 ### The whole stack
 

@@ -96,7 +96,9 @@ afterAll(async () => {
 
 describe('[R048-005] the plan applies once; a replay changes nothing', () => {
   it('records the emergency confirmation under a new platform config version', () => {
-    expect(desiredPlatformConfig().version).toBe('2026-10-07.1');
+    // 2026-10-07.1 carried the confirmation without main's 2026-10-06.1
+    // document rulings; the merged values are a version of their own.
+    expect(desiredPlatformConfig().version).toBe('2026-10-13.1');
   });
 
   it.each(['create', 'policy'] as const)('seeds owner-confirmed emergency numbers for the Guyana %s path', (path) => {

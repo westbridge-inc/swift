@@ -17,6 +17,8 @@ const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
 const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
+  PLACES_PROVIDER: 'osm',
+  PHOTON_URL: 'http://photon.test',
   // [ledger E08] The settled production posture ships the hold ON in both env
   // examples, so the valid production base carries it explicitly.
   LIFECYCLE_V2: '1',
@@ -55,6 +57,8 @@ const good: Record<string, string | undefined> = {
   EMAIL_FROM: 'Swift <noreply@example.test>',
   SCAN_IP_SALT: 'synthetic-scan-boot-salt',
   ATTRIB_SALT: 'synthetic-attribution-boot-salt',
+  // [PROD-PATH] Admin top-ups stay on hold in production (owner ruling, 8 Oct).
+  BILLING_TOPUP_HOLD: '1',
 };
 
 const cardOff = {
@@ -768,7 +772,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
 // [PT-1 · C10] Card rail v2 in production. The card simulator is a test page
 // with no real money, and this build has no production-capable v2 provider:
 // production refuses both, loudly, at boot — never at a partner's first tap.
-describe('[PT-1] card rail v2 cannot be switched on in production yet, and the simulator never', () => {
+describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set up for live cards, and the simulator never', () => {
   it('refuses the card simulator in production, whatever the flag says', () => {
     for (const flag of [undefined, '0', '1']) {
       expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_V2: flag }), String(flag))
@@ -776,8 +780,41 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
     }
   });
 
-  it('refuses CARD_RAIL_V2=1 in production: no production v2 provider exists in this build', () => {
+  it('refuses CARD_RAIL_V2=1 in production without the real card provider', () => {
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '1' })).toThrow(/FATAL: CARD_RAIL_V2=1/);
+  });
+
+  // [PT-4] Production runs v2 only on the real provider, fully set up for LIVE cards.
+  const liveCards = {
+    CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', CARD_RAIL_ACCOUNT: 'swift-gy',
+    POWERTRANZ_API_URL: 'https://gateway.ptranz.com', POWERTRANZ_ID: 'LIVEID01', POWERTRANZ_PASSWORD: 'not-a-real-password',
+    POWERTRANZ_PAGE_SET: 'PTZ/Swift', POWERTRANZ_PAGE_NAME: 'Weekly', API_PUBLIC_URL: 'https://api.example.com',
+  };
+  it('[PT-4] boots with the real provider fully set up for live cards (and drains on the same terms)', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards, CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1' })).not.toThrow();
+  });
+  it('[PT-4] refuses anything less: sandbox, a test URL, a missing credential or page, http — never echoing a value', () => {
+    const cases: Array<[Record<string, string | undefined>, RegExp]> = [
+      // A sandbox setup that is complete in itself (test root, test credentials) is still not for production.
+      [{ CARD_RAIL_ENVIRONMENT: 'sandbox', POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /real cards only: CARD_RAIL_ENVIRONMENT must be live/],
+      [{ POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /test system/],
+      [{ POWERTRANZ_API_URL: undefined }, /POWERTRANZ_API_URL/],
+      // [Review S4] The provider's API lives under ptranz.com (guide sec. 2.3): never another host.
+      [{ POWERTRANZ_API_URL: 'https://gateway.example.com' }, /ptranz\.com/],
+      [{ POWERTRANZ_ID: undefined }, /POWERTRANZ_ID/],
+      [{ POWERTRANZ_PASSWORD: undefined }, /POWERTRANZ_PASSWORD/],
+      [{ POWERTRANZ_PAGE_NAME: undefined }, /POWERTRANZ_PAGE_SET and POWERTRANZ_PAGE_NAME/],
+      [{ API_PUBLIC_URL: 'http://api.example.com' }, /API_PUBLIC_URL/],
+      [{ CARD_RAIL_PROVIDER: 'stripe' }, /CARD_RAIL_PROVIDER=powertranz/],
+    ];
+    for (const [patch, message] of cases) {
+      let thrown: Error | undefined;
+      try { assertSafeBootConfig({ ...good, ...liveCards, ...patch }); } catch (err) { thrown = err as Error; }
+      expect(thrown?.message, JSON.stringify(patch)).toMatch(/^FATAL: CARD_RAIL_V2=1/);
+      expect(thrown?.message).toMatch(message);
+      expect(thrown?.message).not.toContain('not-a-real-password');
+    }
   });
 
   it('the flag is 1 or 0 (or unset), never a guess', () => {
@@ -814,12 +851,35 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
       .not.toThrow();
   });
 
+  it('[review S2-1] in EVERY mode, the provider\'s TEST system (its sandbox) refuses to start on the public API host — a trailing dot is the same host', () => {
+    const sandbox = { CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox' };
+    for (const env of [
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_V2: '0', API_PUBLIC_URL: 'https://API.swiftgy.com/' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_ENVIRONMENT: undefined, API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com./' },
+      { NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://api.swiftgy.com.' },
+    ]) {
+      expect(() => assertSafeBootConfig(env), JSON.stringify(env)).toThrow(/public API host/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+  });
+
+  it('[review S3] in EVERY mode but production, live (real) cards refuse to start: a test server never charges real cards', () => {
+    for (const mode of ['development', 'test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', API_PUBLIC_URL: 'https://api-test.example.test' }), mode)
+        .toThrow(/live \(real cards\) outside production/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox', API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).not.toThrow();
+  });
+
   it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
   });
 
   // [AX297 F5] Draining v2 after a switch-off is its own switch, held to the same rules.
-  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and never 1 in production: there is nothing there to drain', () => {
+  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and 1 in production only on the real provider', () => {
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '1' })).toThrow(/FATAL: CARD_RAIL_V2_DRAIN=1/);
     for (const value of ['true', 'yes', '2', ' 1']) {
       expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: value }), value).toThrow(/CARD_RAIL_V2_DRAIN must be 1 or 0/);
@@ -901,6 +961,30 @@ describe('[PROD-PATH] production with MMG fully off', () => {
   });
 });
 
+// #1448 review (Opus S3-1): the owner's launch money rules held only in
+// pilot-up.sh, so production started any other way (a hand-run compose, an old
+// script) booted with admin top-ups live or the agent-cash webhook armed. The
+// boot guard holds them too, whatever starts the API.
+describe('[PROD-PATH] production keeps admin top-ups on hold and never arms the agent-cash webhook', () => {
+  it.each([undefined, '', '0', 'true', 'yes', ' 1'])('refuses BILLING_TOPUP_HOLD=%j: admin top-ups stay on hold in production', (hold) => {
+    expect(() => assertSafeBootConfig({ ...good, BILLING_TOPUP_HOLD: hold })).toThrow(/BILLING_TOPUP_HOLD=1/);
+  });
+
+  it('refuses an AGENT_CASH_WEBHOOK_SECRET in production, naming the setting, never its value', () => {
+    const secret = 'agent-cash-secret-'.padEnd(40, 'z');
+    let message = '';
+    try { assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: secret }); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/AGENT_CASH_WEBHOOK_SECRET/);
+    expect(message).not.toContain(secret);
+  });
+
+  it('accepts the hold with no agent-cash secret (and an empty one), and asks nothing outside production', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: '' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, BILLING_TOPUP_HOLD: undefined, NODE_ENV: 'test', AGENT_CASH_WEBHOOK_SECRET: 'x'.repeat(32) })).not.toThrow();
+  });
+});
+
 describe('[PROD-PATH] production needs an on-call phone and an email sender', () => {
   it.each([undefined, '', ' , '])('refuses OPS_ONCALL_PHONES=%j: an unacknowledged SOS would page nobody', (phones) => {
     expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: phones })).toThrow(/OPS_ONCALL_PHONES/);
@@ -956,5 +1040,17 @@ describe('[PROD-PATH] production needs an on-call phone and an email sender', ()
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stdout).toContain('OPS_ONCALL_PHONES');
     expect(result.stdout).toContain('EMAIL_PROVIDER');
+  });
+});
+
+describe('production address lookup is an explicit deployment choice', () => {
+  it.each([undefined, 'local', '', 'unknown'])('refuses PLACES_PROVIDER=%s instead of silently limiting addresses', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: provider })).toThrow(/PLACES_PROVIDER/);
+  });
+  it('accepts an explicit configured Photon service, without making a network request', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon.test' })).not.toThrow();
+  });
+  it('refuses explicit OSM without its Photon endpoint in preflight too', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: undefined })).toThrow(/PHOTON_URL/);
   });
 });

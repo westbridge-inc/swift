@@ -125,6 +125,7 @@ describe('AX8: candidate consumption and receipt insertion commit together', () 
 function productionConfig(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {
     NODE_ENV: 'production', LIFECYCLE_V2: '0', JWT_SECRET: 'synthetic'.repeat(8),
+    PLACES_PROVIDER: 'osm', PHOTON_URL: 'https://places.example.invalid',
     KYC_PROVIDER: 'manual', PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1',
     MMG_DRIVER: 'live', MMG_API_URL: 'https://example.invalid/api', MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
     NOTIFICATION_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
@@ -137,6 +138,8 @@ function productionConfig(): Record<string, string | undefined> {
     // (boot-config): a fully configured baseline carries both.
     OPS_ONCALL_PHONES: '+5926000001', EMAIL_PROVIDER: 'smtp', SMTP_HOST: 'smtp.example.test', SMTP_PORT: '465',
     SMTP_USER: 'noreply@example.test', SMTP_PASS: 'synthetic-only', EMAIL_FROM: 'Swift <noreply@example.test>',
+    // ... and admin top-ups on hold (owner ruling, 8 Oct).
+    BILLING_TOPUP_HOLD: '1',
   };
   for (const key of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET']) env[key] = 'synthetic-only';
   return env;

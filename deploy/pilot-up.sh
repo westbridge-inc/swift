@@ -14,9 +14,16 @@
 #       never started, stopped or replaced — refused outright while an API or
 #       worker is running. For a new host before its provider credentials and
 #       its DNS exist: migrate, back up, rehearse a restore, seed.
+#   ./deploy/pilot-up.sh --no-public <sha>   [PROD-PATH] production only: the
+#       first boot before DNS moves. Every check below except DNS, then the
+#       migrations and the API and worker, ready inside the private network.
+#       Caddy, the website and the console are never started (nothing is
+#       public); refused while Caddy is running.
 #
 # [PROD-PATH] PILOT_ENV=production adds production-only refusals, each before
-# anything changes: NODE_ENV must be production; no served name may be a
+# the stack changes (all but the backup-key check also before the checkout
+# moves; that one reads the store after the switch to the requested SHA, before
+# any store restart or Docker change): NODE_ENV must be production; no served name may be a
 # staging name; documents in object storage, never on this disk; the backup
 # keys in the store; no unfilled site details; and, for the whole stack, every
 # served name must already resolve to THIS host (Caddy obtains certificates
@@ -26,7 +33,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 DATA_ONLY=0
-if [ "${1:-}" = "--data-only" ]; then DATA_ONLY=1; shift; fi
+NO_PUBLIC=0
+PLACES_PHOTON=0
+if [ "${1:-}" = "--data-only" ]; then DATA_ONLY=1; shift;
+elif [ "${1:-}" = "--no-public" ]; then NO_PUBLIC=1; shift; fi
 SHA="${1:-}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 ROUTING=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.routing.yml")
@@ -77,6 +87,8 @@ case "$PILOT_ENV" in
   staging | production) ;;
   *) die "PILOT_ENV must be staging or production" ;;
 esac
+[ "$NO_PUBLIC" -eq 0 ] || [ "$PILOT_ENV" = production ] ||
+  die "--no-public is for the production host (the first boot before its DNS moves); a staging host deploys the whole stack"
 API_HOST="$(env_value API_HOST)"
 [[ "$API_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
   die "API_HOST must be a DNS hostname for $PILOT_ENV HTTPS"
@@ -273,6 +285,24 @@ if [ "$PILOT_ENV" = production ]; then
     [ -z "$(env_setting "$agent_cash_name")" ] ||
       die "PILOT_ENV=production refuses the agent-cash webhook ($agent_cash_name is set): partners pay the weekly fee only on the MMG checkout page"
   done
+  # Address search (the API refuses to boot in production without a provider,
+  # #1563): osm, the private Photon service this script then starts, or
+  # google, the owner's key in the encrypted store. Which one is the owner's
+  # decision. Only a stage that starts the API asks; --data-only does not.
+  if [ "$DATA_ONLY" -eq 0 ]; then
+    case "$(env_setting PLACES_PROVIDER)" in
+      osm)
+        [ "$(env_setting PHOTON_URL)" = http://photon:2322 ] ||
+          die "PLACES_PROVIDER=osm needs PHOTON_URL=http://photon:2322: the private Photon service (geocoding profile) this script starts"
+        ROUTING+=(--profile geocoding)
+        PLACES_PHOTON=1 ;;
+      google)
+        [ "$(env_setting GOOGLE_MAPS_API_KEY_BACKEND_FILE)" = /run/secrets/GOOGLE_MAPS_API_KEY_BACKEND ] ||
+          die "PLACES_PROVIDER=google needs GOOGLE_MAPS_API_KEY_BACKEND_FILE=/run/secrets/GOOGLE_MAPS_API_KEY_BACKEND: the owner's key, in the encrypted store" ;;
+      *)
+        die "PILOT_ENV=production needs PLACES_PROVIDER=osm or google (the owner's choice): production has no local-only address search" ;;
+    esac
+  fi
 fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 # [PROD-PATH] The production stack obtains certificates for every name it
@@ -282,7 +312,7 @@ for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || di
 # counts too: an AAAA record left on the old host sends IPv6 clients — and the
 # certificate authority, which prefers IPv6 — elsewhere. The database-only
 # stage serves nothing and needs no name.
-if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ]; then
+if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; then
   for tool in getent hostname; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
   host_addresses=" $(hostname -I 2>/dev/null | tr '[:upper:]' '[:lower:]' || true) "
   read -r -a served_names <<< "$API_HOST $API_ALIAS_HOST $WEB_HOST $WEB_ALIAS_HOSTS $ADMIN_HOST"
@@ -299,10 +329,18 @@ if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ]; then
       *) die "cannot check $served_name IPv6 addresses without address-family filtering; getent --no-addrconfig is required" ;;
     esac
     resolved6="$(printf '%s\n' "$resolved6" | awk '{print tolower($1)}' | grep -v '^::ffff:' | sort -u || true)"
-    for address in $resolved $resolved6; do
+    # The refusal names the record, never the address: deploy logs are kept
+    # as stand-up evidence, which carries no addresses (#1448 review).
+    for address in $resolved; do
       case "$host_addresses" in
         *" $address "*) ;;
-        *) die "$served_name resolves to $address, which is not this host; move its DNS here before the production stack starts (the database-only stage needs none: --data-only)" ;;
+        *) die "$served_name has an IPv4 (A) address that is not this host; move its DNS here before the production stack starts (the database-only stage needs none: --data-only)" ;;
+      esac
+    done
+    for address in $resolved6; do
+      case "$host_addresses" in
+        *" $address "*) ;;
+        *) die "$served_name has an IPv6 (AAAA) address that is not this host; move its DNS here or remove the stale AAAA record before the production stack starts (the database-only stage needs none: --data-only)" ;;
       esac
     done
   done
@@ -422,26 +460,59 @@ if [ "$DATA_ONLY" -eq 1 ]; then
       die "--data-only refuses a stack whose $service is running; use the full deploy, which stops it before migrating"
   done
 fi
+# [PROD-PATH] --no-public never takes a public stack back: Caddy running means
+# the names already serve, and only the full deploy replaces that stack.
+if [ "$NO_PUBLIC" -eq 1 ]; then
+  running="$("${COMPOSE[@]}" ps -q caddy)" ||
+    die "--no-public could not ask Docker whether caddy is running; refusing to deploy without that answer"
+  [ -z "$running" ] ||
+    die "--no-public refuses a stack whose caddy is running (it already serves its public names); use the full deploy"
+fi
 
 # Pull versioned infrastructure images, then build the exact checked-out API.
 "${COMPOSE[@]}" pull postgres redis meilisearch caddy
 "${ROUTING[@]}" pull osrm
+[ "$PLACES_PHOTON" -eq 0 ] || "${ROUTING[@]}" pull photon
 "${COMPOSE[@]}" build api
 # [Q11] The website's image for the same exact commit, built before anything
 # is stopped: a site that does not build leaves the running stack untouched.
-if [ -n "$WEB_HOST" ] && [ "$DATA_ONLY" -eq 0 ]; then
+if [ -n "$WEB_HOST" ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; then
   "${COMPOSE[@]}" build web
 fi
 # [ADMIN-CONSOLE] The same for the admin console: built before anything stops.
-if [ -n "$ADMIN_HOST" ] && [ "$DATA_ONLY" -eq 0 ]; then
+if [ -n "$ADMIN_HOST" ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; then
   "${COMPOSE[@]}" build admin
 fi
 "${COMPOSE[@]}" up -d --wait postgres redis meilisearch
-"${ROUTING[@]}" up -d --wait osrm
+# [PROD-PATH] Photon only with PLACES_PROVIDER=osm on production; never
+# Nominatim (the geocoding profile's other, heavy member).
+if [ "$PLACES_PHOTON" -eq 1 ]; then
+  "${ROUTING[@]}" up -d --wait osrm photon
+else
+  "${ROUTING[@]}" up -d --wait osrm
+fi
 
 # Check routing from the same private Docker network that the API uses.
 docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" \
   -e "fetch('http://osrm:5000/nearest/v1/driving/-58.16,6.80').then(async r => { if (!r.ok || (await r.json()).code !== 'Ok') process.exit(1) }).catch(() => process.exit(1))"
+# [PROD-PATH · DS963] Address search, the same way, before the running API is
+# stopped: Photon has no healthcheck, so `up --wait` returns while its first
+# start is still downloading and importing the index. A Georgetown search must
+# answer, within 5 seconds, with a named place that has coordinates (what the
+# API's provider keeps). Until it does, nothing was stopped or migrated.
+if [ "$PLACES_PHOTON" -eq 1 ]; then
+  PHOTON_READY=0
+  for _ in $(seq 1 90); do
+    if docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" \
+      -e "fetch('http://photon:2322/api?q=Georgetown&limit=1', { signal: AbortSignal.timeout(5000) }).then(async r => { const d = r.ok ? await r.json() : null; const usable = d && Array.isArray(d.features) && d.features.some(f => f && f.geometry && Array.isArray(f.geometry.coordinates) && f.geometry.coordinates.length === 2 && f.properties && f.properties.name); if (!usable) process.exit(1) }).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      PHOTON_READY=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$PHOTON_READY" = 1 ] ||
+    die "address search is not ready: Photon does not answer a Georgetown search yet (its first start downloads and imports a ~6.7 GB index). The running API and the database were not changed; rerun once docker compose -f deploy/docker-compose.routing.yml --profile geocoding logs photon shows it serving"
+fi
 
 [ "${DATA_ONLY:-0}" -eq 1 ] || "${COMPOSE[@]}" stop api worker
 "${COMPOSE[@]}" up -d --force-recreate migrate
@@ -455,6 +526,27 @@ if [ "${DATA_ONLY:-0}" -eq 1 ]; then
 fi
 
 "${COMPOSE[@]}" up -d --no-deps --force-recreate api worker
+if [ "$NO_PUBLIC" -eq 1 ]; then
+  # Ready inside the private network: the API container is healthy, the
+  # worker runs, and /ready answers from inside the API container. Nothing
+  # listens publicly (only Caddy publishes 80/443, and it is not started).
+  API_READY=0
+  for _ in $(seq 1 90); do
+    API_ID="$("${COMPOSE[@]}" ps -q api)"
+    WORKER_ID="$("${COMPOSE[@]}" ps -q worker)"
+    if [ -n "$API_ID" ] && [ -n "$WORKER_ID" ] &&
+       [ "$(docker inspect -f '{{.State.Health.Status}}' "$API_ID")" = healthy ] &&
+       [ "$(docker inspect -f '{{.State.Status}}' "$WORKER_ID")" = running ] &&
+       "${COMPOSE[@]}" exec -T api node -e "fetch('http://127.0.0.1:3000/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      API_READY=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$API_READY" = 1 ] || die "API/worker readiness did not become healthy (no public address); inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 api worker"
+  echo "API READY at exact SHA $SHA (production, no public address: Caddy, the website and the console were not started)"
+  exit 0
+fi
 "${COMPOSE[@]}" up -d --no-deps --force-recreate caddy
 API_READY=0
 for _ in $(seq 1 90); do

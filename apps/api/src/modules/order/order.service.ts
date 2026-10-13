@@ -1,5 +1,8 @@
 import { readFeePause } from '../billing/mmg-pause';
+import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
+import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -15,12 +18,12 @@ import type {
 } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
-import { clampDriverFare, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
+import { generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import { isFreeCancellation, freeBecauseNoMoverFound, readNoMoverFound, LATE_CANCEL_FEE } from './cancel-policy';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -374,7 +377,7 @@ export function assertMmgFulfilmentAllowed(
     throw new AppError(
       409,
       'MMG_PAYMENT_PENDING',
-      'This MMG order can move only after the store confirms the payment landed in its MMG wallet.',
+      'This MMG order can move only after the store confirms the payment landed in its MMG account.',
     );
   }
 }
@@ -672,10 +675,6 @@ export class OrderService {
       riderId: string;
       changedBy: string;
       note?: string;
-      /** Rider-chosen delivery fee (CASH rail only) — the seam derives the
-       *  clamp and the total delta from the LOCKED row, never from a route
-       *  preview [REPORT-005 F-005-01]. */
-      requestedFee?: number;
       moverUserId: string;
     },
   ): Promise<RiderAssignmentSnapshot & { dispatchAssignmentSequence: number }> {
@@ -692,9 +691,10 @@ export class OrderService {
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const paymentGate = await tx.order.findUnique({
       where: { id: input.orderId },
-      select: { paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
+      select: { customerId: true, paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
     });
     if (paymentGate) {
+      await assertDispatchPairEligible(tx, paymentGate.customerId, input.moverUserId, 'RIDER');
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
       if (withheldAwaitingReadiness(paymentGate)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(paymentGate)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
@@ -703,26 +703,8 @@ export class OrderService {
       }
     }
 
-    // [REPORT-005 F-005-01] Rider price choice is a CASH feature: the customer
-    // pays the (lower) total at the door. An MMG total was already paid — or
-    // externally instructed — at checkout; repricing after capture rewrites
-    // money the store received. Fee applied as an atomic delta off the locked
-    // row so a stale preview can never smuggle in an absolute total.
-    let repricing: Prisma.OrderUncheckedUpdateManyInput = {};
-    if (input.requestedFee != null && paymentGate) {
-      const marketFee = Number(paymentGate.deliveryFee);
-      const chosenFee = clampDriverFare(input.requestedFee, marketFee);
-      if (chosenFee !== marketFee) {
-        if (paymentGate.paymentMethod !== 'CASH') {
-          throw new AppError(
-            409,
-            'MMG_PRICE_LOCKED',
-            'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
-          );
-        }
-        repricing = { deliveryFee: chosenFee, totalAmount: { decrement: marketFee - chosenFee } };
-      }
-    }
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The seam takes no price:
+    // the delivery fee and the total stay exactly as booked at checkout.
 
     const claimed = await tx.order.updateMany({
       where: {
@@ -744,7 +726,6 @@ export class OrderService {
       data: {
         riderId: input.riderId,
         status: 'RIDER_ASSIGNED',
-        ...repricing,
       },
     });
     if (claimed.count === 0) {
@@ -874,7 +855,7 @@ export class OrderService {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Ordering is disabled on this account after repeated failed deliveries. Contact support.');
     }
     if (restriction === 'restricted') {
-      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
+      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering needs your ID on file. Add your ID in the app — a person will look at it before ordering unlocks.');
     }
 
     // [E27] No profile selfie to place an ordinary order (food, grocery,
@@ -1208,7 +1189,7 @@ export class OrderService {
     const orderCurrency = (await this.countryConfig.getByCode(user.countryCode).catch(() => null))?.currencyCode ?? 'GYD';
     if (user.trustLevel === 'L1' && grandTotal >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need ID verification. Verify once in the app and this limit is gone.`,
+        `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need your ID on file. Add it once in the app to lift this limit.`,
         { threshold: gateLocal, total: grandTotal });
     }
 
@@ -1222,7 +1203,7 @@ export class OrderService {
     // one trust boundary, tunable per country, no new magic number.
     if (user.trustLevel === 'L1' && discount >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `This promo needs ID verification to use. Verify once in the app and it's yours to keep.`,
+        `This promo needs your ID on file. Add it once in the app and it's yours to keep.`,
         { threshold: gateLocal, discount });
     }
 
@@ -2428,6 +2409,7 @@ export class OrderService {
       order: CancellationOrder;
       heldNow: boolean;
       freeCancellation: boolean;
+      noMoverFree: boolean;
       cancellationFee: number;
       cancelledSearches: number;
     } | undefined;
@@ -2489,7 +2471,12 @@ export class OrderService {
           // the job, and the order is held or still in its uncommitted status
           // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
           // inside the window.
-          const freeCancellation = isFreeCancellation(order, now);
+          // [Item 64] ...or the mover search came back empty — read here, under
+          // the order lock and before the searches are closed below, so a mover
+          // assigned after the customer's preview still ends the exemption.
+          const policyOrder = { ...order, noMoverFound: await readNoMoverFound(tx, order) };
+          const freeCancellation = isFreeCancellation(policyOrder, now);
+          const noMoverFree = freeCancellation && freeBecauseNoMoverFound(policyOrder);
           const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 
           // The row lock makes this update and every dependent release below one
@@ -2535,6 +2522,8 @@ export class OrderService {
             },
           });
 
+          await persistRiderCancellationNotice(tx, order);
+
           if (order.riderId) {
             await new FloatService(tx).release(tx, order.riderId, riderFloatForOrder(order));
             await this.stageRiderRelease(tx, order.riderId, orderId, false, true);
@@ -2548,6 +2537,7 @@ export class OrderService {
             order,
             heldNow,
             freeCancellation,
+            noMoverFree,
             cancellationFee,
             cancelledSearches: searches.count,
           };
@@ -2563,7 +2553,7 @@ export class OrderService {
     }
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
-    const { order, heldNow, freeCancellation, cancellationFee, cancelledSearches } = committed;
+    const { order, heldNow, freeCancellation, noMoverFree, cancellationFee, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
@@ -2589,6 +2579,9 @@ export class OrderService {
     if (order.vendorId && !heldNow) {
       this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
     }
+    // [L07] The rider's notice committed with the cancel; this is only its
+    // first delivery attempt, started after the emits and never awaited.
+    void this.drainRiderCancelNoticeNow(orderId);
     // [REPORT-007-v4 F-02 / REPORT-008 F-02] The store must LEARN a
     // possibly-paid MMG order was cancelled — it holds the only rail that can
     // make the customer whole. HELD orders are NOT exempt: the pay link went
@@ -2613,15 +2606,30 @@ export class OrderService {
     // booking and its money is with the PROVIDER — the noun and the party
     // follow the committed row's fulfillment; the fee and the MMG uncertainty
     // above are the server's and are unchanged. Food keeps its exact words.
-    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : 'Order';
+    // A ride is a "Ride" in the customer's words [Item 64 · review S4].
+    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
     const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+    // [Item 64] The plain reason, when the platform found nobody to do the job.
+    const cancelled = noMoverFree ? `${noun} cancelled — no mover was found, so there is no fee.` : null;
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
-        message: `${noun} cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`,
+        message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
         cancellationFee,
       };
     }
-    return { message: freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`, cancellationFee };
+    return { message: cancelled ?? (freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`), cancellationFee };
+  }
+
+  /** [L07 · Opus S3] The first delivery attempt of a committed rider
+   *  cancellation notice. The cancel request never awaits it: a hung push
+   *  provider (an 8 s timeout, three tries and backoff, about 34 s) would hold
+   *  the customer's cancel past the phone's 10 s timeout, and they would read
+   *  a failed cancel that went through. The checkout-outbox sweep (every 10 s)
+   *  is the durability guarantee. Never rejects. */
+  drainRiderCancelNoticeNow(orderId: string): Promise<void> {
+    return drainRiderCancellationNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId })
+      .then(() => undefined)
+      .catch((err) => log().warn({ err, orderId }, 'rider cancellation notice awaits retry'));
   }
 
   async updateStatus(
@@ -3122,7 +3130,12 @@ export class OrderService {
     plans: Array<{ vendorId: string; subtotal: number }>,
   ) {
     const promo = await this.prisma.promoCode.findUnique({ where: { code: code.toUpperCase() } });
-    if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    // [L04] Another tenant's code — a platform code for a caller outside
+    // production above all — is the unknown-code answer, and so is never
+    // redeemed: its redemption count cannot move.
+    if (!(await promoBelongsToCallerTenant(this.prisma, promo, userId)) || !promo) {
+      throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
 
     const now = new Date();
