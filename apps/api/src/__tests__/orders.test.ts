@@ -617,6 +617,9 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     }, customer.token);
     expect(blocked.statusCode).toBe(403);
     expect(blocked.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] the ID goes on file, it is not "verified" by anyone.
+    expect(blocked.json().error.message).toMatch(/need your ID on file/);
+    expect(blocked.json().error.message).not.toMatch(/verif/i);
 
     // L2 flows through the same cart
     await app.prisma.user.update({ where: { id: customer.userId }, data: { trustLevel: 'L2' } });

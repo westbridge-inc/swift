@@ -583,6 +583,8 @@ describe('Strike consequences — the prankster customer gets restricted', () =>
     }, prankster.token);
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe('STRIKE_RESTRICTED');
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a restricted account's ID waits for a person (STRIKES hold).
+    expect(res.json().error.message).toMatch(/ID on file[\s\S]*a person will look at it/);
   });
 
   it('a banned customer cannot check out at all', async () => {

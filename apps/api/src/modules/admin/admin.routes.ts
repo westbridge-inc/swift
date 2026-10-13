@@ -1,4 +1,4 @@
-import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
+import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
@@ -5413,8 +5413,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const doc = await verification.revokeDocument(id, request.user.userId, body.reason);
     await audit(request.user.userId, 'REVOKE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
-
-    return { success: true, data: doc };
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] Additive: the account level after the withdrawal, so
+    // the console says "back to L1" only when it is (another customer ID may still stand).
+    const after = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { trustLevel: true } });
+    return { success: true, data: { ...doc, accountTrustLevel: after?.trustLevel ?? null } };
   });
 
   // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────
@@ -6537,5 +6539,12 @@ export async function adminRoutes(app: FastifyInstance) {
   }));
   app.get<{ Params: { subscriptionId: string } }>('/billing/subscriptions/:subscriptionId/cards', { preHandler: [adminGuard] }, async (request) => ({
     success: true, data: await adminSubscriptionCards(app.prisma, request.params.subscriptionId),
+  }));
+  // [PT-4 · review S2-2] Finance resolves a HELD card payment (C4: two people).
+  // [ADM-002] Its audit row commits with the decision's claim or closure.
+  app.post<{ Params: { id: string } }>('/billing/card-sessions/:id/resolve', { preHandler: [adminGuard] }, async (request) => ({
+    success: true,
+    data: await adminResolveCardSession(app, request.params.id, request.body, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts })),
   }));
 }
