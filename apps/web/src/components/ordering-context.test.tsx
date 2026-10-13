@@ -45,6 +45,8 @@ describe('the order context bar', () => {
     render(<OrderingContextBar inline deliverTo="12 Main St" addressHref="/order/location" />);
     const trigger = screen.getByRole('button', { name: /^Delivery to 12 Main St, as soon as possible\. Change delivery or pickup/ });
     expect(trigger.textContent).toContain('12 Main St'); expect(trigger.textContent).not.toContain('address at checkout');
+    // On a phone the row is narrow: the pill shows the address itself, "Delivery" and "ASAP" from the wide layout up.
+    for (const word of ['Delivery', '· ASAP']) expect(within(trigger).getByText(word).className.split(/\s+/)).toEqual(expect.arrayContaining(['hidden', 'wide:inline']));
     fireEvent.click(trigger);
     const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
     expect(within(sheet).getByRole('link', { name: 'Change delivery address' }).getAttribute('href')).toBe('/order/location');
