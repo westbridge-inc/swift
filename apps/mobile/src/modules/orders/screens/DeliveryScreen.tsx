@@ -1,3 +1,5 @@
+import { isOfflineSnapshot } from '../../../lib/offlineQueryCache';
+import { SavedOrderSummary } from '../../../components/SavedOrderSummary';
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useRef, useState } from 'react';
@@ -688,6 +690,10 @@ export function DeliveryScreen() {
     prevStatusRef.current = status;
   }, [isFocused, o?.status, o?.fulfillment]);
 
+  if (isOfflineSnapshot(o)) return <View style={{ flex: 1, paddingTop: insets.top, backgroundColor: color.surface.subtle }}>
+    <CircleChip icon="chevron-left" label="Go back" onPress={() => navigation.goBack()} />
+    <SavedOrderSummary order={o} />
+  </View>;
   if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
   if (order.isError || !o) {
     return (

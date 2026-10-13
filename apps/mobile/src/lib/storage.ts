@@ -61,3 +61,10 @@ export const zustandStorage: StateStorage = {
   setItem: (name, value) => requireStorage().set(name, value),
   removeItem: (name) => requireStorage().delete(name),
 };
+
+/** Same encrypted instance, with a synchronous adapter for query persistence. */
+export const encryptedQueryStorage = {
+  getItem: (name: string): string | null => requireStorage().getString(name) ?? null,
+  setItem: (name: string, value: string): void => requireStorage().set(name, value),
+  removeItem: (name: string): void => requireStorage().delete(name),
+};
