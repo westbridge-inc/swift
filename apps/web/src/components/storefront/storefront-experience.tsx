@@ -39,6 +39,9 @@ import {
   validateSelectedOptions,
 } from '@/lib/menu-options';
 import { useOptionalCustomerSession } from '@/components/customer-session';
+import { useOrderingContext } from '@/components/ordering-context';
+import { MODE_LOCKED } from '@/lib/ordering-mode-lock';
+import { FulfilmentChoice } from '@/components/checkout/fulfilment-choice';
 import { guestCart } from '@/lib/basket-projection';
 import { useGuestBasket } from '@/lib/basket-state';
 import { Photo } from '@/components/order-ui';
@@ -214,6 +217,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // here. Rendered on its own (tests), both are simply absent.
   const shellSession = useOptionalCustomerSession();
   const shellStatus = shellSession?.status;
+  // [W5] Delivery or pickup — the one ordering context the checkout reads.
+  const { mode: orderingMode, setMode: setOrderingMode } = useOrderingContext();
   const guestBasket = useGuestBasket();
   const shellQueries = useContext(QueryClientContext);
   const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
@@ -899,6 +904,10 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             </div>
 
             <div className={styles.railBody}>
+              <FulfilmentChoice name="store-fulfilment" value={orderingMode} onChange={(mode) => setError(setOrderingMode(mode) ? null : MODE_LOCKED)} />
+              {orderingMode === 'PICKUP' ? (
+                <p className={styles.railNote}>Pickup from {storeLabel || catalog.name} · No delivery fee</p>
+              ) : null}
               {cartItems.length === 0 ? (
                 <p className={styles.emptyRail}>
                   Add a menu item to start your order. No account needed to fill your basket.

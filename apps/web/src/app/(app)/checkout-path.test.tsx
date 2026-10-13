@@ -203,8 +203,10 @@ describe('[Q7b] cart → checkout → tracking', () => {
   it('places a cash order against the server quote, once, and opens its tracking', async () => {
     at('/cart', {}, <CartPage />);
     const place = await screen.findByRole('button', { name: 'Place cash order · $2,150' });
-    // No MMG on this cart, so no choice is offered — cash, stated plainly.
-    expect(screen.queryByRole('radiogroup')).toBeNull();
+    // No MMG on this cart, so no payment choice is offered — cash, stated
+    // plainly. ([W5] The page's other choice is Delivery · Pickup.)
+    expect(screen.queryByRole('radiogroup', { name: 'Payment' })).toBeNull();
+    expect(screen.getAllByRole('radiogroup').map((group) => group.getAttribute('aria-label'))).toEqual(['How would you like your order?']);
     expect(screen.getByText('Cash at the door')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /schedule|pick a time|order later/i })).toBeNull();
     expect(document.querySelector('input[type=date], input[type=time], input[type=datetime-local]')).toBeNull();
