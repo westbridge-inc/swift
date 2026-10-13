@@ -137,7 +137,8 @@ describe('[MC-PR1] <ReasonDialog> validation', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Approve Target Store?' });
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     const box = within(dialog).getByRole('textbox', { name: 'Reason' });
-    expect(document.activeElement).toBe(box);
+    // Modal moves focus in an effect, which can run just after the dialog is in the DOM.
+    await waitFor(() => expect(document.activeElement).toBe(box));
     expect(box.getAttribute('aria-describedby')).toBeTruthy();
   });
 
