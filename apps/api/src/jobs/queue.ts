@@ -704,7 +704,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
                 title: '📄 Settlement imports need a person',
-                body: `${imports.unbalanced.length} published import(s) do not balance, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
+                body: `${imports.unbalanced.length} published import(s) do not add up, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
               }),
             ).catch(() => {});
@@ -1311,6 +1311,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (rescueNotices.owed + rescueNotices.failed > 0) ctx.log.warn(rescueNotices, '[RESCUE S1] food-age cutoff notices still owed — retrying with backoff');
           else if (rescueNotices.delivered > 0) ctx.log.info(rescueNotices, '[RESCUE S1] food-age cutoff notices delivered');
         });
+        await drain('rider-cancel-notice', async () => {
+          // [L07] A customer's cancellation of a delivery a rider holds commits
+          // the rider's notice as an obligation; whatever the request's own
+          // post-commit attempt could not confirm is delivered here, in
+          // process, until push confirms it or its window closes.
+          const { drainRiderCancellationNotices } = await import('../modules/order/rider-cancel-notice');
+          const cancellations = await drainRiderCancellationNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
+          if (cancellations.pending > 0) ctx.log.warn(cancellations, 'rider cancellation pushes remain pending');
+          else if (cancellations.expired > 0) ctx.log.warn(cancellations, 'rider cancellation pushes closed unconfirmed; the inbox notices remain');
+        });
         if (drainFailure !== undefined) throw drainFailure;
         return;
       }
@@ -1744,7 +1754,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
+              body: `${report.walletMismatches.length} fee-paid-ahead mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger vs fee-paid-ahead drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );
