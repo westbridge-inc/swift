@@ -66,11 +66,12 @@ describe('[CERT-ISSUER] Caddy may only obtain certificates the apps\' pins accep
   // the config Caddy actually runs is checked too. CI has no Caddy image and
   // relies on the two checks above.
   it.skipIf(!caddyImage)('the config Caddy runs carries only Let\'s Encrypt, with the optional names empty or set', () => {
-    for (const env of [
+    const hostSets: Array<Record<string, string>> = [
       { API_HOST: 'api-staging.example.com' },
       { API_HOST: 'api-staging.example.com', API_ALIAS_HOST: '', WEB_HOST: '', WEB_ALIAS_HOSTS: '', ADMIN_HOST: '' },
       { API_HOST: 'api-staging.example.com', API_ALIAS_HOST: 'api.example.com', WEB_HOST: 'staging.example.com', WEB_ALIAS_HOSTS: 'example.com www.example.com', ADMIN_HOST: 'admin-staging.example.com' },
-    ]) {
+    ];
+    for (const env of hostSets) {
       const config = adapt(env) as { apps?: { tls?: { automation?: { policies?: Array<{ issuers?: unknown }> } } } };
       const policies = config.apps?.tls?.automation?.policies ?? [];
       expect(policies.length, `no issuer named for ${JSON.stringify(env)}: Caddy would use its built-in issuers`).toBeGreaterThan(0);
