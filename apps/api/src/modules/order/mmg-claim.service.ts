@@ -233,7 +233,7 @@ export function decideStoreMmgClaim(f: MmgClaimFacts, reference: string, now: Da
     throw new AppError(
       409,
       'MMG_ATTEMPT_REJECTED',
-      'Swift support already decided this MMG payment did not reach your wallet. It cannot be marked received again — contact support if the customer has paid since.',
+      'Swift support already decided this MMG payment did not reach your MMG account. It cannot be marked received again — contact support if the customer has paid since.',
     );
   }
   const revision = f.mmgClaimRevision + 1;

@@ -175,7 +175,9 @@ function harness() {
     $queryRaw: vi.fn(async (query: unknown, ...values: unknown[]) => rawSecurityCensus(people, orphans, query, values)
       ?? [{ id: String(values[0] ?? A), status: 'ACTIVE', tenantId: 'tenant-a', countryCode: 'GY' }]),
   };
-  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart']) {
+  // Account erasure also drops the browser-basket upload receipts that ride
+  // with the cart (POST /customer/cart/merge replay records).
+  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) {
     db[name] = { deleteMany: vi.fn() };
   }
   // The synthetic route session is not a fresh code sign-in, so deletion
@@ -388,11 +390,15 @@ describe('verification object containment at real service boundaries', () => {
     expect(h.db.verificationDocument.create).toHaveBeenCalledOnce();
   });
 
-  it('owned identity and owned selfie uploads reach the identity provider', async () => {
+  // [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] "no face match": a customer's ID reaches the
+  // document check alone, even with the biometric switch on. An owned selfie (store build 9 still
+  // sends one) is still proven to be the caller's own upload, and then never compared or sent.
+  it('owned identity (with an owned selfie) reaches the document check — never a face match', async () => {
     const h = harness(); vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
     const selfie = key(A, 's'); h.objects.set(selfie, { ...h.objects.get(key(A))!, fileKey: selfie });
     await expect(h.service.submitIdentity(A, key(A), selfie, '1')).resolves.toMatchObject({ userId: A, fileUrl: key(A) });
-    expect(h.provider.verifyIdentity).toHaveBeenCalledWith({ userId: A, idDocumentUrl: key(A), selfieUrl: selfie });
+    expect(h.provider.verifyDocument).toHaveBeenCalledWith({ userId: A, docType: 'national_id', fileUrl: key(A) });
+    expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
   });
 
   it('server-persisted signup selfie keeps the checklist face-match path working', async () => {
@@ -1180,7 +1186,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     // The due obligation must commit WITH the account cutoff, before it can
     // lose authentication. Verify actual transaction ordering, not a bypass.
     expect(h.db.verificationDocument.updateMany.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
-    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
+    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
     expect(storage.delete).toHaveBeenCalledExactlyOnceWith(avatar(A));
     expect(storage.getObject).toHaveBeenCalledWith(avatar(A));
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();

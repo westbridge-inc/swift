@@ -10,13 +10,13 @@ import { customerRoute, signInPath, signUpPath } from './customer-routes';
 
 describe('[Q7b] the customer route map', () => {
   it('lets a guest browse: Home, the store lists, search, a store, Market and the taxi explainer', () => {
-    for (const path of ['/', '/order', '/order/browse', '/order/search', '/order/vendor/v1', '/store/shanta-kitchen', '/explore', '/taxi', '/market']) {
+    for (const path of ['/', '/order', '/order/browse', '/order/search', '/order/vendor/v1', '/store/shanta-kitchen', '/explore', '/taxi', '/market', '/cart']) {
       expect(customerRoute(path).public, path).toBe(true);
     }
   });
 
   it('keeps everything that belongs to an account private', () => {
-    for (const path of ['/cart', '/account', '/orders', '/orders/o1', '/order/location', '/courier']) {
+    for (const path of ['/account', '/orders', '/orders/o1', '/order/location', '/courier']) {
       expect(customerRoute(path).public, path).toBe(false);
     }
   });

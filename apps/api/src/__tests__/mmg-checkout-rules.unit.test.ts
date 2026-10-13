@@ -522,7 +522,8 @@ describe('what a fee notice may say', () => {
     expect(mmgPayLine(1500)).toBe('Pay GY$1,500 with MMG in the Swift app.');
     expect(feeDueLine(2100, 'GYD', null)).toBe('The weekly fee of GY$2,100 is due now.');
     expect(feeDueLine(2100.5, 'GYD', new Date('2026-09-29T15:00:00Z'), { first: true })).toBe('Your first weekly fee of GY$2,100.50 is due on Tue 29 Sep.');
-    expect(feeCoveredLine(2100, 'GYD', { first: true })).toBe('Your balance already covers your first weekly fee of GY$2,100.');
+    // [OWNER RULING 8 Oct, NO "WALLET"] fee paid ahead, never a "balance".
+    expect(feeCoveredLine(2100, 'GYD', { first: true })).toBe('Your fee paid ahead already covers your first weekly fee of GY$2,100.');
   });
 
   it('dates in Guyana time (UTC−4, no daylight saving)', () => {

@@ -11,7 +11,7 @@ import {
   isBillingStopped,
   isBlocked,
   shortDate,
-  walletLine,
+  feePaidAheadLine,
   weeklyFeeGyd,
   billingStoppedLine,
 } from '../../lib/billing';
@@ -156,16 +156,17 @@ export function BillingStatusBlock({
   // amber CTA instead of a link buried under two lines of copy.
   if (isBehind(sub)) return <FeeReminderBanner sub={sub} onPay={onPay} style={style} />;
 
-  // Healthy — surface a parked wallet balance as reassurance (covers N weeks).
-  const wallet = walletLine(Number(sub.walletBalanceGyd ?? 0), weeklyFeeGyd(sub));
-  if (wallet) {
+  // Healthy — weekly fees paid ahead, as reassurance (owner ruling 8 Oct:
+  // "Fee paid ahead — covers N weeks"; the action is "Pay weekly fee").
+  const paidAhead = feePaidAheadLine(Number(sub.walletBalanceGyd ?? 0), weeklyFeeGyd(sub));
+  if (paidAhead) {
     return (
       <View style={[{ marginTop: space.md, flexDirection: 'row', alignItems: 'center', gap: space.sm }, style]}>
         <Feather name="check-circle" size={14} color={color.success} />
         <T variant="caption" weight="semibold" tone="success" style={{ flex: 1 }}>
-          {wallet}
+          {paidAhead}
         </T>
-        {onPay && !compact ? <LinkText label="Top up" onPress={onPay} /> : null}
+        {onPay && !compact ? <LinkText label="Pay weekly fee" onPress={onPay} /> : null}
       </View>
     );
   }
