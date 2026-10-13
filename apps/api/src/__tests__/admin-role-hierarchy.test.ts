@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -26,18 +26,27 @@ import { purgeAuditLogs } from '../lib/audit-immutability';
 //
 // Every refusal here is proven on durable state: status, sessions, audit rows
 // and notifications of the target are read before and after, and must be
-// identical. Fixture range: +59241nnnnn (this file only).
+// identical. Each process gets an E.164-safe fixture block derived from a
+// collision-resistant base-36 run id; the two trailing digits are local
+// sequence numbers. Random five-digit numbers collided in parallel CI runs.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(6).toLowerCase();
+const RUN = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 6)();
+const PHONE_RUN_BLOCK = String(Number.parseInt(RUN, 36)).padStart(10, '0');
+let phoneSequence = 0;
 const userIds: string[] = [];
 const REASON = 'Repeated platform-control abuse after three documented warnings';
 
 type Actor = { token: string; userId: string };
 
+function nextPhone(): string {
+  if (phoneSequence >= 100) throw new Error('admin-role-hierarchy exhausted its per-run phone block');
+  return `+592${PHONE_RUN_BLOCK}${String(phoneSequence++).padStart(2, '0')}`;
+}
+
 async function makeAccount(role: 'ADMIN' | 'SUPER_ADMIN' | 'CUSTOMER'): Promise<Actor> {
-  const phone = `+59241${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = nextPhone();
   const privileged = role !== 'CUSTOMER';
   const user = await app.prisma.user.create({
     data: {
