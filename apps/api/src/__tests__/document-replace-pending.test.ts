@@ -70,6 +70,10 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!app) return;
   await system(async () => {
+    await app.prisma.fraudCase.deleteMany({ where: { subjectUserId: { in: users } } });
+    await app.prisma.enforcementAction.deleteMany({ where: { accountId: { in: users } } });
+    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
+    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
     const ids = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } })).map((d) => d.id);
     await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: ids } } } });
     await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: ids } } });
@@ -113,16 +117,35 @@ describe('a copy under a second review is never replaced', () => {
     await system(() => service.rejectDocument(first.id, reviewerId, 'The photo looks edited', 'SUSPECTED_TAMPERING'));
     expect((await openCasesFull(first.id)).map((c) => c.queue)).toEqual(['SECOND_REVIEW']);
     // The applicant sends another copy: refused, and nothing about the escalated copy changes.
-    await expect(upload1()).rejects.toMatchObject({ code: 'DOCUMENT_UNDER_SECOND_CHECK' });
+    await expect(upload1()).rejects.toMatchObject({ code: 'DOCUMENT_STILL_IN_REVIEW', message: 'This document is still being checked. You can send a new copy once that check finishes.' });
     expect(await read(first.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
     expect((await openCasesFull(first.id)).map((c) => c.queue)).toEqual(['SECOND_REVIEW']);
     expect(await app.prisma.verificationDocument.count({ where: { userId: applicant.userId, docType } })).toBe(1);
-    // Reviewer B confirms: the rejection (and the fraud case) happens.
+    // Reviewer B confirms: the rejection, the fraud case and the legal hold land.
     expect(await system(() => service.rejectDocument(first.id, secondReviewerId, 'Confirmed edited photo', 'SUSPECTED_TAMPERING'))).toMatchObject({ status: 'REJECTED' });
+    const confirmed = await read(first.id);
+    expect(confirmed.legalHoldId).not.toBeNull();
+    expect(await system(() => app.prisma.fraudCase.findFirst({ where: { subjectUserId: applicant.userId, submissionId: first.id } })))
+      .toMatchObject({ confirmedBy: secondReviewerId, legalHoldId: confirmed.legalHoldId });
   });
 });
 
 describe('replace a document while it waits for review', () => {
+  // [Opus 13 Oct · #1620 S3-1] ESCALATED is the review-SLA watchdog marking a copy overdue (more than 24 hours
+  // waiting), not suspicion. A copy that waited too long is still replaceable.
+  it('an overdue copy (its case moved to ESCALATED by the review-SLA watchdog) is still replaced', async () => {
+    const m = await mover();
+    const first = await upload(m.userId);
+    await system(() => app.prisma.reviewCase.updateMany({ where: { submissionId: first.id, closedAt: null }, data: { slaDueAt: new Date(Date.now() - 3_600_000) } }));
+    await system(() => service.alertReviewSlaBreaches());
+    expect((await openCasesFull(first.id)).map((c) => c.queue)).toEqual(['ESCALATED']);
+    const second = await upload(m.userId);
+    expect(second).toMatchObject({ status: 'PENDING', state: 'REVIEW_QUEUED' });
+    expect(await read(first.id)).toMatchObject({ state: 'SUPERSEDED', status: 'EXPIRED' });
+    expect(await openCases(first.id)).toHaveLength(0);
+    expect(await openCases(second.id)).toHaveLength(1);
+  });
+
   it('the newer copy replaces the waiting one: kept as SUPERSEDED, its case closed, one fresh case for the newest', async () => {
     const m = await mover();
     const first = await upload(m.userId);

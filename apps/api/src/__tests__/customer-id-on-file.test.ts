@@ -455,7 +455,7 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     expect((await app.prisma.reviewCase.findFirstOrThrow({ where: { submissionId: first.id, closedAt: null } })).queue).toBe('SECOND_REVIEW');
     const again = await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(420, 300)) });
     expect(again.statusCode, again.body).toBe(409);
-    expect(again.json().error.code).toBe('DOCUMENT_UNDER_SECOND_CHECK');
+    expect(again.json().error.code).toBe('DOCUMENT_STILL_IN_REVIEW');
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: first.id } })).state).toBe('REVIEW_QUEUED');
     expect(await app.prisma.verificationDocument.count({ where: { userId: c.id, docType: 'identity_l2' } })).toBe(1);
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
