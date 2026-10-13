@@ -52,6 +52,7 @@ import { hasStepUp, reviewStepUpKey } from '../modules/auth/step-up';
 import { hashReviewCode } from '../modules/review/credentials';
 import { PACK_IMAGE_WIDTH, PACK_IMAGE_HEIGHT } from '../modules/review/pack-image';
 import { commitReviewFixtureDocument } from '../modules/verification/verification.service';
+import { HIRE_SPLIT_STARTED_KEY } from '../modules/verification/hire-permit-grace';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adsRoutes } from '../modules/ads/ads.routes';
@@ -343,6 +344,45 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
       const police = await app.prisma.verificationDocument.findMany({ where: { userId: review.riderUserId, docType: 'drivers_licence' }, include: { record: true } });
       expect(police.map((d) => d.record?.status).sort()).toEqual(['EXPIRED', 'VALID']);
     });
+  });
+
+  // [Opus 13 Oct · #1546 S3-1] STAGING is what Apple reviews. A pack seeded before the hire-car permit split
+  // holds the old permit; during the 60-day window that permit counts as both new licences, so a re-seed must
+  // still commit the two real licences, or the review taxi goes offline the day the window closes.
+  it('a pack holding only the old hire-car permit gets both real licences on re-seed while the 60-day window is open, and stays ready after it closes', async () => {
+    const DAY = 86_400_000;
+    const prior = await system(() => app.prisma.platformConfig.findUnique({ where: { key: HIRE_SPLIT_STARTED_KEY } }));
+    const splitStarted = (daysAgo: number) => system(() => app.prisma.platformConfig.upsert({
+      where: { key: HIRE_SPLIT_STARTED_KEY },
+      create: { key: HIRE_SPLIT_STARTED_KEY, value: { startedAt: new Date(Date.now() - daysAgo * DAY).toISOString() } },
+      update: { value: { startedAt: new Date(Date.now() - daysAgo * DAY).toISOString() } },
+    }));
+    const licences = ['hire_car_driver_licence', 'hire_car_vehicle_licence'];
+    try {
+      await splitStarted(1);
+      await system(async () => {
+        // The state of a pack seeded before the split: the two licences absent, the old permit approved and current.
+        await app.prisma.verificationDocument.updateMany({ where: { userId: review.driverUserId, docType: { in: licences }, state: 'COMMITTED' }, data: { state: 'EXPIRED' } });
+        await commitReviewFixtureDocument(app.prisma, { userId: review.driverUserId, docType: 'hire_car_permit', expiresAt: new Date(Date.now() + 300 * DAY),
+          reviewedBy: REVIEW_PACK_REVIEWER, reviewedAt: new Date(), reviewNote: 'Review fixture: the permit a pack held before the split' });
+      });
+      const reseeded = await system(() => seedReviewContentPack(app.prisma, { slug: REVIEW }));
+      expect(reseeded.partnerDocumentsCommitted).toBe(2);
+      await system(async () => {
+        const held = await app.prisma.verificationDocument.findMany({ where: { userId: review.driverUserId, docType: { in: licences }, state: 'COMMITTED' }, include: { record: true } });
+        expect(held.map((d) => [d.docType, d.record?.status]).sort()).toEqual([['hire_car_driver_licence', 'VALID'], ['hire_car_vehicle_licence', 'VALID']]);
+      });
+      // Day 61: the window has closed, the review taxi still holds every document it needs.
+      await splitStarted(61);
+      const after = await system(() => reviewContentPackFacts(app.prisma, REVIEW));
+      expect(after.state).toBe('PRESENT');
+      expect(after.partners).toMatchObject({ DRIVER: { ready: 1 } });
+    } finally {
+      await system(async () => {
+        if (prior === null) await app.prisma.platformConfig.deleteMany({ where: { key: HIRE_SPLIT_STARTED_KEY } });
+        else await app.prisma.platformConfig.update({ where: { key: HIRE_SPLIT_STARTED_KEY }, data: { value: prior.value as never } });
+      });
+    }
   });
 
   it('the profile photo is DRAWN from the pack — a real PNG on the public avatars route; any other name is a 404', async () => {
