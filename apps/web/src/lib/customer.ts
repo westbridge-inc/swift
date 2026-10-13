@@ -133,6 +133,8 @@ export interface Cart {
   };
   meetsMinimum?: boolean;
   minimumOrderAmount?: number;
+  /** [E01] One row per future order: each store's fulfilment, fee and total, as checkout writes it. */
+  vendors?: Array<{ vendorId: string; name: string; fulfillment: string; subtotal?: number; deliveryFee: number; totalAmount?: number; meetsMinimum?: boolean }>;
   paymentCapabilities?: {
     /** Changes when the vendor set or the validated MMG destination changes. */
     scope?: string;
