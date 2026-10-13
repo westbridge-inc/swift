@@ -767,6 +767,10 @@ const resolveBody = z.object({
  * admin-authority.ts: two people. The session must be in the admin's tenant.
  */
 export async function adminResolveCardSession(app: FastifyInstance, id: string, body: unknown, adminUserId: string, onAudit?: OnAudit) {
+  // [Opus S4-f] Gated like every other card route: with the card rail off and
+  // not draining, nothing acts on a card session. Draining (CARD_RAIL_V2_DRAIN)
+  // is how what was in flight, held payments included, gets finished.
+  if (!cardRailV2Enabled() && !cardRailV2DrainEnabled()) throw new AppError(404, 'CARD_RAIL_UNAVAILABLE', 'Card payments are not available.');
   if (!ID_SHAPE.test(id)) throw notFound('CARD_SESSION_NOT_FOUND', 'There is no such card session.');
   const parsed = resolveBody.safeParse(body ?? {});
   if (!parsed.success) throw new AppError(400, 'INVALID_RESOLUTION', `Send { action: ${CARD_RESOLVE_ACTIONS.join(' | ')}, providerReference, amount }.`);

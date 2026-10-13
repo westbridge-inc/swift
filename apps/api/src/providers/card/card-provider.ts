@@ -86,7 +86,9 @@ export type CardCompletionEvidence = {
   OrderIdentifier: string;
   TotalAmount: number;
   CurrencyCode: string;
-  RiskManagement: { ThreeDSecure: { AuthenticationStatus: string; Eci?: string } };
+  /** The brand the answer named, if any (the ECI is judged per brand, sec. 8.4). */
+  CardBrand?: string;
+  RiskManagement: { ThreeDSecure: { AuthenticationStatus: string; Eci: string } };
 };
 
 /** The five outcomes. A caller switches over all of them; `assertNever` makes
