@@ -272,7 +272,7 @@ export async function adjustReserve(
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'rlp_reserve:' + input.countryCode}))`;
   const balance = await reserveBalance(tx, input.countryCode);
   if (balance + input.amount < 0) {
-    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (balance ${balance.toLocaleString()}).`);
+    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (it holds ${balance.toLocaleString()}).`);
   }
   const row = await tx.rlpReserveEntry.create({ data: { countryCode: input.countryCode, kind: 'ADJUSTMENT', amount: input.amount, createdById: input.byId, note: input.note } });
   return { id: row.id, balanceAfter: balance + input.amount };

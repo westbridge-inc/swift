@@ -208,6 +208,8 @@ describe('[Q7b] cart → checkout → tracking', () => {
     expect(screen.queryByRole('radiogroup', { name: 'Payment' })).toBeNull();
     expect(screen.getAllByRole('radiogroup').map((group) => group.getAttribute('aria-label'))).toEqual(['How would you like your order?']);
     expect(screen.getByText('Cash at the door')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /schedule|pick a time|order later/i })).toBeNull();
+    expect(document.querySelector('input[type=date], input[type=time], input[type=datetime-local]')).toBeNull();
     fireEvent.click(place);
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/o9'));
     const [[, addressInit]] = calls('PUT', '/api/v1/customer/cart/address') as [[unknown, RequestInit]];

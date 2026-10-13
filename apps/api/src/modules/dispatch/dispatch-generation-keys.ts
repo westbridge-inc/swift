@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
 
 /**
  * Redis search memory is scoped to a delivery-custody generation after the
@@ -76,3 +77,40 @@ export const dispatchExhaustLockKey = (orderId: string, version?: number | null)
 
 export const dispatchGenerationInitKey = (orderId: string, version: number): string =>
   `dispatch:generation-init:${orderId}:fv${version}`;
+
+// ---------------------------------------------------------------------------
+// The dispatch journal's two identity rules, in ONE place. Dispatch writes the
+// journal by them and the cancel policy reads it by them ([Item 64]: the
+// "no mover found" fact), so a change to either can never leave the free
+// cancel deciding by an older rule than the search that wrote the rows.
+// ---------------------------------------------------------------------------
+
+/** Taxi rides draw from the driver pool; everything else from riders.
+ *  Same scoring, same cascade, same atomic claim — shared code, not a copy. */
+export type DispatchPool = 'RIDER' | 'DRIVER';
+
+export function poolForOrder(order: { orderType: string }): DispatchPool {
+  return order.orderType === 'TAXI' ? 'DRIVER' : 'RIDER';
+}
+
+/** The journal rows that belong to an order's current delivery generation.
+ * Generation zero is also the rollout compatibility generation: searches
+ * created before the migration carry NULL, while existing Order rows are
+ * backfilled/defaulted to version 0. Both identities describe the same
+ * pre-switch custody. Later generations are exact and never match NULL.
+ * The driver pool carries no generation. */
+export function journalAuthorityWhere(
+  pool: DispatchPool,
+  deliveryAuthorityVersion: number,
+): Prisma.DispatchSearchWhereInput {
+  if (pool !== 'RIDER') return { deliveryAuthorityVersion: null };
+  if (deliveryAuthorityVersion === 0) {
+    return {
+      OR: [
+        { deliveryAuthorityVersion: 0 },
+        { deliveryAuthorityVersion: null },
+      ],
+    };
+  }
+  return { deliveryAuthorityVersion };
+}

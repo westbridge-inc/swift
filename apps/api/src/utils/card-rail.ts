@@ -37,13 +37,14 @@ export function cardSimulatorLiveEnabled(env: Record<string, string | undefined>
   return env['CARD_RAIL_SIMULATOR_LIVE'] === '1';
 }
 
-/** [PT-2 · review S2] The simulator moves no money, yet a simulator "Approve"
- * books a paid week. So it opens pages ONLY for the TEST subscriptions listed
- * by id in CARD_RAIL_SIMULATOR_SUBSCRIPTIONS (comma-separated): a real
- * partner on a test server never sees or settles a simulator payment. Empty
- * or unset: no subscription may use it. */
-export function cardSimulatorSubscriptions(env: Record<string, string | undefined> = process.env): ReadonlySet<string> {
-  return new Set((env['CARD_RAIL_SIMULATOR_SUBSCRIPTIONS'] ?? '').split(',').map((s) => s.trim()).filter((s) => /^[A-Za-z0-9_-]{1,64}$/.test(s)));
+/** [PT-2 · PT-4 · reviews S2 / S2-1] A TEST card system — the simulator, or
+ * a provider's sandbox — moves no real money, yet a test "approval" books a
+ * paid week. So a test system opens pages, and books, ONLY for the TEST
+ * subscriptions listed by id in CARD_RAIL_TEST_SUBSCRIPTIONS
+ * (comma-separated): a real partner on a test server never sees or settles
+ * a test payment. Empty or unset: no subscription may use one. */
+export function cardTestSubscriptions(env: Record<string, string | undefined> = process.env): ReadonlySet<string> {
+  return new Set((env['CARD_RAIL_TEST_SUBSCRIPTIONS'] ?? '').split(',').map((s) => s.trim()).filter((s) => /^[A-Za-z0-9_-]{1,64}$/.test(s)));
 }
 
 /** [PT-2 · review S2] The host the public talks to (and, until the DNS
