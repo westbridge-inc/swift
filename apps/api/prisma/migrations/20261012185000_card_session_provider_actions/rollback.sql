@@ -5,6 +5,12 @@ BEGIN;
 SET LOCAL lock_timeout = '10s';
 DO $$
 BEGIN
+  -- [Opus S4-a] Rolled back in order: the completion-evidence migration's
+  -- functions read these columns, so its rollback runs first.
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+             AND table_name = 'card_sessions' AND column_name IN ('completionClaimedAt', 'completionEvidence')) THEN
+    RAISE EXCEPTION 'CARD_COMPLETION_EVIDENCE_STILL_APPLIED: roll back 20261012185001_card_completion_evidence first';
+  END IF;
   IF EXISTS (SELECT 1 FROM "card_sessions" WHERE "providerTransactionRef" IS NOT NULL OR "providerVoidState" IS NOT NULL
              OR "providerRefundState" IS NOT NULL OR "bookClaimedAt" IS NOT NULL OR "resolution" IS NOT NULL) THEN
     RAISE EXCEPTION 'CARD_PROVIDER_ACTIONS_IN_USE: card sessions carry provider references, void/refund/booking claims or finance decisions; not rolling back';
