@@ -91,13 +91,14 @@ beforeAll(async () => {
       ['pepperpot', 'Pepperpot'], ['patty', 'Cheese Patty'], ['tandooriChicken', 'Tandoori Chicken'],
       // never searchable: switched off by the store
       ['soup', 'Chicken Soup', false],
-      // one slip from "chicken" and by far the most ordered: an exact match must still come first
-      ['thicken', 'Thicken Gravy Bowl', true, 9_000_000],
+      // a store's own misspelling, one slip from "chicken", and by far the most
+      // ordered: a correctly spelled match must still come first
+      ['chikenTypo', 'Chiken Gravy Bowl', true, 9_000_000],
     ],
   });
   // one slip from "tandoori" ("tandoor"): a correctly typed store name must not share its page with it
   await store({ key: 'tandoor', name: 'Tandoor Express', items: [['naan', 'Garlic Naan']] });
-  await store({ key: 'hardware', name: 'Sunny Hardware Depot', type: 'STORE', items: [['brush', 'Paint Brush'], ['spread', 'Spread Toast']] });
+  await store({ key: 'hardware', name: 'Sunny Hardware Depot', type: 'STORE', items: [['brush', 'Paint Brush'], ['spread', 'Spread Toast'], ['fantastic', 'Fantastic Fries']] });
   // never searchable: the whole store is suspended
   await store({ key: 'suspended', name: 'Suspended Chicken Shack', status: 'SUSPENDED', items: [['wings', 'Chicken Wings']] });
 
@@ -173,16 +174,22 @@ describe.each<Who>(['signed-in', 'guest'])('/search on the database path (%s)', 
     expect(r.vendors).not.toContain(ids['suspended']);
   });
 
-  it('a slip is forgiven at the start of a word only: "bread" never finds the "read" inside "Spread"', async () => {
-    expect((await search(who, 'bread')).items).not.toContain(ids['spread']);
+  it('a slip is forgiven at the start of a word only: "toast" never finds the "tast" inside "Fantastic"', async () => {
+    const r = await search(who, 'toast');
+    expect(r.items).toContain(ids['spread']);
+    expect(r.items).not.toContain(ids['fantastic']);
     expect((await search(who, 'spred')).items).toContain(ids['spread']);
+  });
+
+  it('a slip never changes the first letter: "zhicken" finds no chicken', async () => {
+    expect((await search(who, 'zhicken')).items).toEqual([]);
   });
 
   it('an exact match ranks before a typo match, however popular the typo match', async () => {
     const r = await search(who, 'chicken');
-    // both "chicken" dishes are exact; the far more ordered one-slip "Thicken" comes after them
+    // both "chicken" dishes are exact; the far more ordered one-slip "Chiken" comes after them
     expect(r.items.slice(0, 2).sort()).toEqual([ids['curry'], ids['tandooriChicken']].sort());
-    expect(r.items).toContain(ids['thicken']);
+    expect(r.items).toContain(ids['chikenTypo']);
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 import {
-  MAX_TERMS, MIN_TYPO_LENGTH, everyWordWhere, literalForms, nameMatcher, searchTerms, searchTiers, typoForms,
+  MAX_SLIP_FORMS, MAX_SLIP_WORD_LENGTH, MAX_TERMS, MIN_TYPO_LENGTH, literalForms, nameMatcher, searchTerms, searchTiers, typoForms,
 } from '../modules/search/forgiving-text';
 import { SearchService, TYPO_TOLERANCE, type SearchClientLike, type SearchIndexLike } from '../modules/search/search.service';
 import { ITEM_INDEX, VENDOR_INDEX } from '../modules/search/search-scope';
@@ -26,7 +26,6 @@ describe('what a customer types never becomes a wildcard', () => {
     expect(searchTerms('%%')).toEqual([]);
     expect(searchTerms('__')).toEqual([]);
     expect(searchTiers('%_\\', { text: ['name'], typoText: ['name'] })).toEqual([]);
-    expect(everyWordWhere('%%', { text: ['name'] }, true)).toBeNull();
   });
 
   it('metacharacters inside a query split it into plain words', () => {
@@ -68,14 +67,39 @@ describe('words and forms', () => {
     expect(forms).not.toContain('chiken');
   });
 
+  it('never forgives a slip in the FIRST letter (as the index does): every form starts as the word does', () => {
+    for (const f of typoForms('chicken')) expect(f.startsWith('c')).toBe(true);
+    expect(typoForms('bread')).not.toContain('read');
+    expect(typoForms('chicken')).not.toContain('_hicken');
+    expect(typoForms('chicken')).not.toContain('hcicken');
+  });
+
+  it('[DS1080 S2] the size of a query is bounded, however it is typed', () => {
+    // one pasted run of letters: matched as typed, no slip forms at all
+    expect(typoForms('a'.repeat(MAX_SLIP_WORD_LENGTH + 1))).toEqual([]);
+    expect(typoForms('x'.repeat(200))).toEqual([]);
+    expect(typoForms('abcdefghijklmnopqrst').length).toBeGreaterThan(0);
+    // five long words: the slip budget, not the word count, bounds the slip clauses
+    const cols = { text: ['name', 'description'], typoText: ['name'] } as const;
+    const q = 'abcdefghijklmnopqrst bcdefghijklmnopqrstu cdefghijklmnopqrstuv defghijklmnopqrstuvw efghijklmnopqrstuvwx';
+    for (const { where } of searchTiers(q, cols)) {
+      const slipClauses = likeValues(where).filter((v) => v.includes('_') || v.startsWith(' ')).length;
+      expect(slipClauses).toBeLessThanOrEqual(2 * MAX_SLIP_FORMS);
+    }
+    const all = searchTiers(q, cols).flatMap((t) => likeValues(t.where));
+    expect(all.length).toBeLessThan(600);
+  });
+
   it('the in-memory twin agrees: literal anywhere, a slip only at a word start', () => {
     expect(nameMatcher('doori', false)('Tandoori Chicken')).toBe(true);
     expect(nameMatcher('chiken', false)('Chicken Curry')).toBe(false);
     expect(nameMatcher('chiken', true)('Chicken Curry')).toBe(true);
     expect(nameMatcher('chiken', true)('Curry Chicken')).toBe(true);
-    // "bread" with a slip ("read") may find a word that STARTS so, never one that hides it
-    expect(nameMatcher('bread', true)('Ready Meal')).toBe(true);
-    expect(nameMatcher('bread', true)('Thread Count')).toBe(false);
+    // a slip form must start a word: "toast" one letter short is "tast", inside "Fantastic"
+    expect(nameMatcher('toast', true)('Fantastic Fries')).toBe(false);
+    expect(nameMatcher('toast', true)('Tast Bun')).toBe(true);
+    // and never changes the first letter
+    expect(nameMatcher('chicken', true)('Thicken Gravy')).toBe(false);
   });
 
   it('tiers run strictest first and skip what cannot add anything', () => {

@@ -15,9 +15,10 @@
 //     a longer word: "doori" finds "Tandoori");
 //   - a plural finds its singular ("burgers" -> "burger", "patties" -> "patty");
 //   - from MIN_TYPO_LENGTH letters, ONE slip in a NAME: a letter missing,
-//     extra, wrong or two letters swapped, at the start of a word — the same
-//     floor and the same word-start rule Meilisearch uses for one typo, so the
-//     two engines forgive the same slips.
+//     extra, wrong or two letters swapped — never the first letter, and at the
+//     start of a word — the same floor and the same word-start rule
+//     Meilisearch uses for one typo, so the two engines forgive the same
+//     slips. Slip forms are bounded per word and per query (MAX_SLIP_*).
 //
 // Exact matches always rank first: callers ask for the strict tiers before
 // the forgiving ones (`searchTiers`), so a typo match never displaces a word
@@ -37,6 +38,15 @@ export const MIN_TYPO_LENGTH = 5;
 export const MAX_TERMS = 5;
 /** A stem is never shorter than this ("bus" must not become "bu"). */
 const MIN_STEM_LENGTH = 3;
+/** A word longer than this is matched as typed only. Its slip forms grow
+ *  with its length (about four per letter, each two LIKE clauses), and no
+ *  catalogue word is this long — a pasted run of letters must not turn into a
+ *  thousand-clause query on a public door (DS1080 S2). */
+export const MAX_SLIP_WORD_LENGTH = 20;
+/** The most slip forms one query carries across all its words. Words past the
+ *  budget are matched as typed only, so a query's size is bounded however it
+ *  is made up (five seven-letter words fit). */
+export const MAX_SLIP_FORMS = 120;
 
 /** The words of a query: lower-cased, letters and digits only, de-duplicated, at most MAX_TERMS. */
 export function searchTerms(q: string): string[] {
@@ -60,23 +70,40 @@ export function literalForms(term: string): string[] {
 
 /** Every LIKE pattern one slip away from the word, `_` standing for exactly
  *  one letter: a letter wrong, a letter missing from what was typed, an extra
- *  letter typed, two neighbours swapped. Empty below MIN_TYPO_LENGTH. */
+ *  letter typed, two neighbours swapped. The FIRST letter is never part of a
+ *  slip — as in Meilisearch, a word is found by how it starts — which also
+ *  keeps "bread" from turning into "read". Empty below MIN_TYPO_LENGTH and
+ *  above MAX_SLIP_WORD_LENGTH. */
 export function typoForms(term: string): string[] {
   const chars = [...term];
   const n = chars.length;
-  if (n < MIN_TYPO_LENGTH) return [];
+  if (n < MIN_TYPO_LENGTH || n > MAX_SLIP_WORD_LENGTH) return [];
   const out = new Set<string>();
   const join = (parts: string[]) => parts.join('');
-  for (let i = 0; i < n; i += 1) {
+  for (let i = 1; i < n; i += 1) {
     out.add(join([...chars.slice(0, i), '_', ...chars.slice(i + 1)])); // wrong letter
     out.add(join([...chars.slice(0, i), ...chars.slice(i + 1)])); // an extra letter was typed
-    if (i > 0) out.add(join([...chars.slice(0, i), '_', ...chars.slice(i)])); // a letter was left out
+    out.add(join([...chars.slice(0, i), '_', ...chars.slice(i)])); // a letter was left out
     if (i < n - 1 && chars[i] !== chars[i + 1]) {
       out.add(join([...chars.slice(0, i), chars[i + 1]!, chars[i]!, ...chars.slice(i + 2)])); // two letters swapped
     }
   }
   out.delete(term);
   return [...out];
+}
+
+/** Which words of a query get slip forms, within MAX_SLIP_FORMS, in the order typed. */
+function slipPlan(terms: string[]): Map<string, string[]> {
+  const plan = new Map<string, string[]>();
+  let budget = MAX_SLIP_FORMS;
+  for (const t of terms) {
+    const forms = typoForms(t);
+    if (forms.length > 0 && forms.length <= budget) {
+      plan.set(t, forms);
+      budget -= forms.length;
+    }
+  }
+  return plan;
 }
 
 type Where = Record<string, unknown>;
@@ -101,16 +128,17 @@ function casings(forms: string[]): string[] {
   return [...out];
 }
 
-/** One word, in any of its forms, in any of the columns. */
-function termWhere(columns: SearchColumns, term: string, typos: boolean): Where {
+/** One word, in any of its forms, in any of the columns. `slips`: the word's
+ *  slip forms when this tier forgives one (from `slipPlan`), else empty. */
+function termWhere(columns: SearchColumns, term: string, slips: readonly string[]): Where {
   const literal = literalForms(term);
   const or: Where[] = [];
   for (const column of columns.text) {
     for (const form of literal) or.push({ [column]: { contains: form, mode: 'insensitive' } });
   }
-  if (typos) {
+  if (slips.length > 0) {
     for (const column of columns.typoText ?? []) {
-      for (const form of typoForms(term)) {
+      for (const form of slips) {
         or.push({ [column]: { startsWith: form, mode: 'insensitive' } });
         or.push({ [column]: { contains: ` ${form}`, mode: 'insensitive' } });
       }
@@ -137,7 +165,8 @@ export type Tier = { every: boolean; typos: boolean };
 export function searchTiers(q: string, columns: SearchColumns): Array<{ tier: Tier; where: Where }> {
   const terms = searchTerms(q);
   if (terms.length === 0) return [];
-  const canSlip = (columns.typoText ?? []).length > 0 && terms.some((t) => typoForms(t).length > 0);
+  const plan = slipPlan(terms);
+  const canSlip = (columns.typoText ?? []).length > 0 && plan.size > 0;
   const tiers: Tier[] = [
     { every: true, typos: false },
     ...(canSlip ? [{ every: true, typos: true }] : []),
@@ -145,18 +174,9 @@ export function searchTiers(q: string, columns: SearchColumns): Array<{ tier: Ti
     ...(terms.length > 1 && canSlip ? [{ every: false, typos: true }] : []),
   ];
   return tiers.map((tier) => {
-    const perTerm = terms.map((t) => termWhere(columns, t, tier.typos));
+    const perTerm = terms.map((t) => termWhere(columns, t, tier.typos ? plan.get(t) ?? [] : []));
     return { tier, where: tier.every ? { AND: perTerm } : { OR: perTerm } };
   });
-}
-
-/** Every word must match, a slip forgiven or not — one predicate, for a
- *  paginated list that cannot run tiers (the store browse). Null when the
- *  query has no searchable word. */
-export function everyWordWhere(q: string, columns: SearchColumns, typos: boolean): Where | null {
-  const terms = searchTerms(q);
-  if (terms.length === 0) return null;
-  return { AND: terms.map((t) => termWhere(columns, t, typos)) };
 }
 
 /** The in-memory twin of the column predicates for ONE text column: does
@@ -168,7 +188,7 @@ export function nameMatcher(q: string, typos: boolean): (text: string | null | u
   if (terms.length === 0) return () => false;
   // forms hold letters, digits and `_` only, so nothing else needs escaping
   const literal = terms.flatMap(literalForms);
-  const slips = typos ? terms.flatMap(typoForms).map((f) => f.replace(/_/g, '.')) : [];
+  const slips = typos ? [...slipPlan(terms).values()].flat().map((f) => f.replace(/_/g, '.')) : [];
   const re = new RegExp([...literal, ...slips.map((f) => `(?:^|\\s)${f}`)].join('|'), 'iu');
   return (text) => typeof text === 'string' && re.test(text);
 }
