@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { doorCounters, doorFor, doorGuidanceFor, parseHandoverAuthority, recordDoorBlocked, recordDoorMismatch, resetDoorCountersForTests, DOOR_REFUSAL_CODES, HANDOVER_AUTHORITY_REQUIRED, HANDOVER_POLICY, type HandoverAuthority } from './handoverAuthority';
+import { doorCounters, doorFor, doorGuidanceFor, parseHandoverAuthority, recordDoorBlocked, recordDoorMismatch, resetDoorCountersForTests, DOOR_REFUSAL_CODES, HANDOVER_AUTHORITY_REQUIRED, HANDOVER_POLICY, MIN_HANDOVER_POLICY_VERSION, type HandoverAuthority } from './handoverAuthority';
 
 // ---------------------------------------------------------------------------
 // [MOB-023] The door renders the SERVER's authority, never the payment
@@ -9,7 +9,7 @@ import { doorCounters, doorFor, doorGuidanceFor, parseHandoverAuthority, recordD
 // ---------------------------------------------------------------------------
 
 const authority = (over: Partial<HandoverAuthority> = {}): HandoverAuthority => ({
-  policy: HANDOVER_POLICY, rail: 'MOBILE_MONEY', paymentState: 'CAPTURED', custodyState: 'ARRIVED', amount: 1250, currency: 'GYD', version: 'v-1', permitted: 'DELIVER_NO_CASH', blockReason: null, ...over,
+  policy: HANDOVER_POLICY, policyVersion: MIN_HANDOVER_POLICY_VERSION, rail: 'MOBILE_MONEY', paymentState: 'CAPTURED', custodyState: 'ARRIVED', amount: 1250, currency: 'GYD', version: 'v-1', permitted: 'DELIVER_NO_CASH', blockReason: null, ...over,
 });
 
 beforeEach(() => resetDoorCountersForTests());
@@ -133,10 +133,21 @@ describe('[F-106-01] a mobile-money door is never derived without the server', (
       .toEqual({ kind: 'no-cash', version: 'v-1', source: 'server' });
   });
 
-  it('an authority whose policy this client does not know is not an authority at all', () => {
-    expect(parseHandoverAuthority({ ...authority(), policy: 'something-else' })).toBeNull();
-    expect(parseHandoverAuthority({ ...authority(), policy: undefined })).toBeNull();
-    expect(parseHandoverAuthority(authority())).not.toBeNull();
+  it('an authority this client cannot vouch for is not an authority at all', () => {
+    // Changed deliberately. This asserted that an unrecognised policy STRING is
+    // always refused. That is now true only of a server with no version — with
+    // a version at or above this build's minimum, the ORDER is the authority
+    // and the name is free to change. The old shape is what made bumping the
+    // API a fleet-wide outage; see the [review] block at the end of this file.
+    const noVersion = (over: Record<string, unknown>) => {
+      const a = { ...authority(), ...over } as Record<string, unknown>;
+      delete a['policyVersion'];
+      return parseHandoverAuthority(a);
+    };
+    expect(noVersion({ policy: 'something-else' }), 'unknown name, no version').toBeNull();
+    expect(noVersion({ policy: undefined }), 'no name, no version').toBeNull();
+    expect(noVersion({}), 'the legacy name still vouches for a pre-version server').not.toBeNull();
+    expect(parseHandoverAuthority(authority()), 'name and version both known').not.toBeNull();
   });
 
   it('other rails keep the old conservative derivation — this is an MMG rule', () => {
@@ -165,5 +176,53 @@ describe('[F-106-03] the rider is told what is true, and given a way out that wo
     const g = doorGuidanceFor('MOBILE_MONEY_PENDING');
     expect(g.action).toBe('refresh');
     expect(g.headline).toContain('Ask the store to confirm the payment');
+  });
+});
+
+
+describe('[review] the policy is ORDERED, and only the dangerous direction is refused', () => {
+  // The mechanism this replaces was an exact-match list carried on the DEVICE,
+  // with the API warning that bumping its constant alone would black out every
+  // mobile-money handover in the fleet. There is no expo-updates in this app,
+  // so the device is the side that updates LAST — it could not hold a grace
+  // window. The risk is one-directional, so the rule is now a minimum.
+
+  const served = (over: Record<string, unknown>) => parseHandoverAuthority({
+    ...authority(), ...over,
+  });
+
+  it('a server AHEAD of this build is accepted — this is what makes an API bump safe', () => {
+    const ahead = served({ policyVersion: MIN_HANDOVER_POLICY_VERSION + 5, policy: 'some-future-name' });
+    expect(ahead, 'a newer server has strictly more rules and already decided `permitted`').not.toBeNull();
+    expect(ahead!.policyVersion).toBe(MIN_HANDOVER_POLICY_VERSION + 5);
+  });
+
+  it('a server BEHIND this build is refused — that is the authority that can open a disputed door', () => {
+    expect(served({ policyVersion: MIN_HANDOVER_POLICY_VERSION - 1 })).toBeNull();
+    expect(served({ policyVersion: 0 })).toBeNull();
+  });
+
+  it('a server with NO version falls back to the legacy string, so an old server still works', () => {
+    const legacy = { ...authority(), policy: HANDOVER_POLICY } as Record<string, unknown>;
+    delete legacy['policyVersion'];
+    expect(parseHandoverAuthority(legacy), 'the check that protected us before').not.toBeNull();
+  });
+
+  it('...and an UNKNOWN string with no version is still refused', () => {
+    const legacy = { ...authority(), policy: 'mismatch-0-prehistoric' } as Record<string, unknown>;
+    delete legacy['policyVersion'];
+    expect(parseHandoverAuthority(legacy)).toBeNull();
+  });
+
+  it('a non-integer version is not a version — it falls through to the string check', () => {
+    expect(served({ policyVersion: 1.5, policy: 'unknown-name' })).toBeNull();
+    expect(served({ policyVersion: 'two', policy: 'unknown-name' })).toBeNull();
+    expect(served({ policyVersion: Number.NaN, policy: 'unknown-name' })).toBeNull();
+  });
+
+  it('an unknown permission still fails closed, whatever the version says', () => {
+    // Why accepting a newer server is safe: this build renders the server's
+    // decision, and a decision shape it does not know is refused outright.
+    expect(served({ policyVersion: 99, permitted: 'HAND_OVER_AND_HOPE' })).toBeNull();
   });
 });
