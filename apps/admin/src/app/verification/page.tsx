@@ -7,10 +7,11 @@ import { MutationError } from '@/components/MutationError';
 import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
+import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_STATUSES, applicantId, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_STATUSES, applicantId, isSystemActor, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -27,7 +28,7 @@ const LANES = [{ value: 'operator', label: 'Operators' }, { value: 'customer', l
 function Chip({ status }: { status: string }) { return <span className={`rc-chip rc-chip-${status.toLowerCase()}`}>{status}</span>; }
 
 function TimelineActor({ actor, applicant }: { actor: string | null; applicant: Applicant }) {
-  const system = !actor || actor === 'validator' || actor.startsWith('engine:');
+  const system = isSystemActor(actor);
   const isApplicant = actor === applicant.id;
   const person = useQuery({ queryKey: ['review-actor', actor], queryFn: () => fetchUserDetail(actor!), enabled: !system && !isApplicant });
   const name = [person.data?.data?.firstName, person.data?.data?.lastName].filter(Boolean).join(' ');
@@ -250,6 +251,16 @@ export default function VerificationPage() {
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
+            <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc, accountTrustLevel) => {
+              setNotice(withdrawNotice(applicant.name, accountTrustLevel));
+              await Promise.all([
+                client.invalidateQueries({ queryKey: ['verification'] }),
+                client.invalidateQueries({ queryKey: ['verification-history'] }),
+                client.invalidateQueries({ queryKey: ['verification-counts'] }),
+                client.invalidateQueries({ queryKey: ['document-custody', doc.id] }),
+              ]);
+              openApplicant(null);
+            }} />
             {selected.status === 'PENDING' && (needsExpiry || isInsurance) && <div className="rc-fields">
               {needsExpiry && <label>Expiry printed on the document (required)<input type="date" aria-label="Expiry printed on the document" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} disabled={busy} />{!expiryOk && <small>{expiresAt ? 'That date has already passed; an expired document cannot be approved.' : 'This document type expires — key the date from the document.'}</small>}</label>}
               {isInsurance && <fieldset disabled={busy}><legend>Insurance 5-point check</legend>
