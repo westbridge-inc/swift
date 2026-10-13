@@ -154,7 +154,7 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
         {status === 'signed-in' ? (
           <Link href="/account" aria-label="Profile" className="rounded-full"><Avatar name={me.data?.name} /></Link>
         ) : status === 'guest' ? (
-          <Link href={signInPath('/')} className="sw-btn sw-btn-sm">Sign in</Link>
+          <Link href={signInPath('/')} className="sw-btn sw-btn-sm flex-none whitespace-nowrap">Sign in</Link>
         ) : null}
       </div>
       {locationError ? <p role="alert" className="mt-2 text-[13px] leading-[18px] text-[var(--swift-error)]">{locationError}</p> : null}

@@ -86,14 +86,14 @@ export function GuestCart() {
         <div className="flex items-center gap-3"><button aria-label={`Decrease ${l.name}`} className="sw-icon-btn" onClick={() => change(l.id, l.quantity - 1)}>−</button><span>{l.quantity}</span><button aria-label={`Increase ${l.name}`} className="sw-icon-btn" onClick={() => change(l.id, l.quantity + 1)}>+</button></div>
       </li>)}</ul>
       <p className="my-4">Items estimate: {money(subtotal)}. We confirm the delivery fee and the final total after you sign in.</p>
-      <button className="sw-btn sw-btn-md" onClick={() => void ensureSignedIn().then(async ok => {
+      <div className="flex flex-wrap gap-3"><button className="sw-btn sw-btn-md" onClick={() => void ensureSignedIn().then(async ok => {
         // Back to this same page (the cart or the checkout) after the code.
         if (!ok) { router.push(`/login?next=${encodeURIComponent(window.location.pathname === '/checkout' ? '/checkout' : '/cart')}`); return; }
         try { const result = await uploadGuestBasket(getSessionPrincipal() ?? scope); if (result && !result.applied) { setError('Your basket changed. Check the items and retry the upload.'); return; }
           await queries.invalidateQueries({ queryKey: ['customer', 'cart'] }); router.refresh();
         } catch (e) { setError((e as Error).message); }
       })}>Place order</button>
-      <button className="sw-btn sw-btn-md sw-btn-outline ml-3" onClick={() => { if (discardBasket()) setError(null); }}>Discard this browser basket</button>
+      <button className="sw-btn sw-btn-md sw-btn-outline" onClick={() => { if (discardBasket()) setError(null); }}>Discard this browser basket</button></div>
     </>}{error ? <p role="alert">{error}</p> : null}
   </section>;
 }

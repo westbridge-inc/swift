@@ -113,7 +113,12 @@ it('[owner, staging] its buttons are Swift’s buttons and it speaks plainly abo
   const place = await screen.findByRole('button', { name: 'Place order' });
   expect(place.className.split(/\s+/)).toContain('sw-btn');
   expect(place.className.split(/\s+/)).not.toContain('sw-btn-outline');
-  expect(screen.getByRole('button', { name: 'Discard this browser basket' }).className.split(/\s+/)).toEqual(expect.arrayContaining(['sw-btn', 'sw-btn-outline']));
+  const discard = screen.getByRole('button', { name: 'Discard this browser basket' });
+  expect(discard.className.split(/\s+/)).toEqual(expect.arrayContaining(['sw-btn', 'sw-btn-outline']));
+  // [staging screenshot, 390 px] The two buttons wrap as one row with a gap, never an indented second line.
+  expect(discard.className.split(/\s+/)).not.toContain('ml-3');
+  expect(discard.parentElement).toBe(place.parentElement);
+  expect(place.parentElement!.className.split(/\s+/)).toEqual(expect.arrayContaining(['flex', 'flex-wrap', 'gap-3']));
   expect(screen.getByText(/We confirm the delivery fee and the final total after you sign in\./)).toBeTruthy();
   expect(screen.queryByText(/server/i)).toBeNull();
 });

@@ -60,7 +60,12 @@ describe('the order context bar', () => {
   it('on Home a guest finds the stores near them from the same sheet', async () => {
     const find = vi.fn();
     render(<OrderingContextBar inline nearMe={{ busy: false, on: false, find }} />);
-    fireEvent.click(screen.getByRole('button', { name: /^Delivery, address at checkout/ }));
+    const trigger = screen.getByRole('button', { name: /^Delivery, address at checkout/ });
+    // [staging screenshot, 390 px] Beside the menu and Sign in, the phone pill says just "Delivery";
+    // "address at checkout" and "ASAP" are in its spoken name and show from the wide layout up.
+    expect(within(trigger).getByText('Delivery').className.split(/\s+/)).not.toContain('hidden');
+    for (const words of ['address at checkout', '· ASAP']) expect(within(trigger).getByText(words).className.split(/\s+/)).toEqual(expect.arrayContaining(['hidden', 'wide:inline']));
+    fireEvent.click(trigger);
     const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Show stores near me' }));
     expect(find).toHaveBeenCalledOnce();

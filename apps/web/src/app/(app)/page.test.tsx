@@ -108,6 +108,9 @@ describe('[Q7b] / is the ordering home', () => {
     renderHome();
     await screen.findByRole('region', { name: 'Open now' });
     expect(screen.queryByRole('region', { name: /Sign in/ })).toBeNull();
+    // [staging screenshot, 390 px] Sign in keeps its size beside the place pill: one line, never squeezed.
+    const homeSignIn = screen.getAllByRole('link', { name: 'Sign in' }).find((link) => link.className.split(/\s+/).includes('sw-btn-sm'));
+    expect(homeSignIn?.className.split(/\s+/)).toEqual(expect.arrayContaining(['flex-none', 'whitespace-nowrap']));
     // [owner, staging] One place control on Home: the stores near me are found from its sheet.
     fireEvent.click(await screen.findByRole('button', { name: /^Delivery, address at checkout/ }));
     fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delivery or pickup' })).getByRole('button', { name: 'Show stores near me' }));

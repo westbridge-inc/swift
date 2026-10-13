@@ -26,12 +26,13 @@ export function OrderingContextBar({ inline = false, deliverTo, addressHref, nea
   const where = pickup ? 'from the store' : deliverTo || 'address at checkout';
   const close = () => { setOpen(false); setLocked(false); };
   // Inline (Home's top row, which on a phone also holds the menu and the
-  // profile) the phone pill shows the address itself, like the phone app's
-  // location pill; "Delivery" and "ASAP" stay in its spoken name and show on
-  // wider screens.
+  // profile or Sign in) the phone pill shows the address itself, like the
+  // phone app's location pill, or just "Delivery" before there is one;
+  // "Delivery", "address at checkout" and "ASAP" stay in its spoken name and
+  // show on wider screens.
   const trigger = (
     <button type="button" onClick={() => setOpen(true)} className={`flex min-h-11 max-w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-sm${inline ? ' min-w-0' : ''}`} aria-label={`${pickup ? 'Pickup from the store' : deliverTo ? `Delivery to ${deliverTo}` : 'Delivery, address at checkout'}, as soon as possible. Change delivery or pickup`}>
-      <MapPin size={18} aria-hidden className="flex-none text-[var(--swift-red)]" /><span className={`font-semibold${inline && !pickup && deliverTo ? ' hidden wide:inline' : ''}`}>{pickup ? 'Pickup' : 'Delivery'}</span><span className="truncate">{where}</span><span className={`flex-none text-[var(--swift-muted)]${inline ? ' hidden wide:inline' : ''}`}>· ASAP</span><ChevronDown size={16} aria-hidden className="flex-none" />
+      <MapPin size={18} aria-hidden className="flex-none text-[var(--swift-red)]" /><span className={`font-semibold${inline && !pickup && deliverTo ? ' hidden wide:inline' : ''}`}>{pickup ? 'Pickup' : 'Delivery'}</span><span className={`truncate${inline && !pickup && !deliverTo ? ' hidden wide:inline' : ''}`}>{where}</span><span className={`flex-none text-[var(--swift-muted)]${inline ? ' hidden wide:inline' : ''}`}>· ASAP</span><ChevronDown size={16} aria-hidden className="flex-none" />
     </button>
   );
   return <>
