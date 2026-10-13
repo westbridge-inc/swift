@@ -9,6 +9,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { vehicleCanCarry } from '../dispatch/dispatch.service';
+import { assertDispatchPairEligible, safetyExcludedMovers } from '../dispatch/pair-safety';
 import { handoverAttemptState } from '../handover/handover-security';
 import { assertActiveMoverAccount, assertMoverRoleAuthority, lockUserRoleAuthority } from '../mover-authority';
 import type { OrderService } from '../order/order.service';
@@ -408,6 +409,11 @@ export async function transferCustody(deps: CustodyDeps, input: TransferInput) {
     if (order.customerId === input.relayUserId) {
       throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot take over a delivery placed by your own account.');
     }
+    // [L07] The same pair policy as every claim door, by any path: a block,
+    // an incident pair or a shadow restriction that formed after the relay
+    // was named stops the handoff here, under the relay rider's User lock and
+    // the order lock, before custody, the leg or the float moves.
+    await assertDispatchPairEligible(tx, order.customerId, input.relayUserId, 'RIDER');
     const holderRiderId = kase.holderRiderId;
 
     // 1. The order's one holder becomes the relay rider.
@@ -670,6 +676,12 @@ export async function assignRelay(
     if (!relay) throw new NotFoundError('Rider', input.riderId);
     if (relay.id === kase.holderRiderId) throw new AppError(400, 'RELAY_IS_HOLDER', 'The relay rider must be someone other than the rider holding the order.');
     if (relay.userId === order.customerId) throw new AppError(400, 'SELF_OWN_ORDER', 'That rider placed this order.');
+    // [L07] Ops cannot see a customer's blocks or incident pairings, so the
+    // server applies the claim doors' pair policy here and says only that
+    // this rider cannot serve this customer, never why.
+    if ((await safetyExcludedMovers(tx, order.customerId, [relay.userId], 'RIDER')).has(relay.userId)) {
+      throw new AppError(400, 'RELAY_PAIR_EXCLUDED', 'That rider cannot serve this customer. Choose another rider.');
+    }
     if (relay.user.status !== 'ACTIVE') throw new AppError(400, 'RELAY_NOT_ACTIVE', 'That rider account is not active.');
     if (!relay.isOnline) throw new AppError(400, 'RELAY_OFFLINE', 'That rider is offline.');
     const needsCourier = order.orderType === 'COURIER';

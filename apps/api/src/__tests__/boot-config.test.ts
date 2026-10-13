@@ -17,6 +17,8 @@ const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
 const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
+  PLACES_PROVIDER: 'osm',
+  PHOTON_URL: 'http://photon.test',
   // [ledger E08] The settled production posture ships the hold ON in both env
   // examples, so the valid production base carries it explicitly.
   LIFECYCLE_V2: '1',
@@ -1038,5 +1040,17 @@ describe('[PROD-PATH] production needs an on-call phone and an email sender', ()
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stdout).toContain('OPS_ONCALL_PHONES');
     expect(result.stdout).toContain('EMAIL_PROVIDER');
+  });
+});
+
+describe('production address lookup is an explicit deployment choice', () => {
+  it.each([undefined, 'local', '', 'unknown'])('refuses PLACES_PROVIDER=%s instead of silently limiting addresses', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: provider })).toThrow(/PLACES_PROVIDER/);
+  });
+  it('accepts an explicit configured Photon service, without making a network request', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon.test' })).not.toThrow();
+  });
+  it('refuses explicit OSM without its Photon endpoint in preflight too', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: undefined })).toThrow(/PHOTON_URL/);
   });
 });
