@@ -58,6 +58,12 @@ describe('in-store search forgives the way the Search tab does', () => {
     expect(searchWords('chi%cken_curry')).toEqual(['chi', 'cken', 'curry']);
   });
 
+  it('[DS1081 S3] a pasted megabyte never throws (the regex engine refuses a pattern that large)', () => {
+    const huge = 'x'.repeat(1_000_000);
+    expect(() => find(huge)).not.toThrow();
+    expect(find(huge)).toEqual([]);
+  });
+
   it('nothing typed can act as a regex', () => {
     expect(() => find('(.*')).not.toThrow();
     expect(find('(.*')).toEqual([]);

@@ -34,6 +34,8 @@ export default function SearchPage() {
   const [kind, setKind] = useState('all');
   const [results, setResults] = useState<CatalogueResults | null>(null);
   const [busy, setBusy] = useState(false);
+  // A search that could not be asked is not "nothing matches" (DS1081 S4).
+  const [failed, setFailed] = useState(false);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sequence = useRef(0);
   const input = useRef<HTMLInputElement | null>(null);
@@ -43,10 +45,13 @@ export default function SearchPage() {
     setQ(v);
     if (debounce.current) clearTimeout(debounce.current);
     const request = ++sequence.current;
-    if (v.trim().length < 2) { setResults(null); setBusy(false); return; }
+    if (v.trim().length < 2) { setResults(null); setFailed(false); setBusy(false); return; }
     setBusy(true);
     debounce.current = setTimeout(() => {
-      searchCatalogue(v.trim()).then((r) => { if (sequence.current === request) setResults(r); }).catch(() => { if (sequence.current === request) setResults(NONE); }).finally(() => { if (sequence.current === request) setBusy(false); });
+      searchCatalogue(v.trim())
+        .then((r) => { if (sequence.current === request) { setResults(r); setFailed(false); } })
+        .catch(() => { if (sequence.current === request) { setResults(NONE); setFailed(true); } })
+        .finally(() => { if (sequence.current === request) setBusy(false); });
     }, 300);
   }
 
@@ -79,7 +84,9 @@ export default function SearchPage() {
       {!busy && results !== null ? (
         <>
           <h2 className="sw-title mt-2">{`Results for “${q.trim()}”`}</h2>
-          {stores.length === 0 && dishes.length === 0 ? (
+          {failed ? (
+            <EmptyNote>Search isn’t answering right now. Please try again in a moment.</EmptyNote>
+          ) : stores.length === 0 && dishes.length === 0 ? (
             <EmptyNote>{nothingAtAll
               ? `Nothing matches “${q.trim()}” — try a store’s name, a dish or a cuisine.`
               : `No ${current?.label.toLowerCase()} stores match “${q.trim()}”.`}</EmptyNote>

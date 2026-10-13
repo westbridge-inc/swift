@@ -68,6 +68,18 @@ describe('web guest catalogue search', () => {
     expect(screen.queryByText('Pepperpot · Granny Fakeplace')).toBeNull();
   });
 
+  it('[DS1081 S4] a search that could not be asked says so — never "nothing matches"', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/v1/search?')) return new Response(JSON.stringify({ success: false, error: { message: 'down' } }), { status: 503 });
+      return new Response(JSON.stringify({ success: false, data: null }), { status: 401 });
+    }));
+    render(<AppLayout><SearchPage /></AppLayout>);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search stores and dishes' }), { target: { value: 'Pepper' } });
+    expect(await screen.findByText('Search isn’t answering right now. Please try again in a moment.')).toBeTruthy();
+    expect(screen.queryByText(/Nothing matches/)).toBeNull();
+  });
+
   it('an empty answer says so, and offers dishes as something to try', async () => {
     vi.stubGlobal('fetch', engine([], []));
     render(<AppLayout><SearchPage /></AppLayout>);

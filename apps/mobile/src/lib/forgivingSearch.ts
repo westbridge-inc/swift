@@ -31,9 +31,14 @@ const MAX_SLIP_WORD_LENGTH = 20;
 /** The most slip forms one query carries across its words — the server's budget. */
 const MAX_SLIP_FORMS = 120;
 
+/** The longest query read, the server's own bound (GET /search refuses more).
+ *  A pasted megabyte must never become a regex the engine refuses to build —
+ *  that throw would take the store screen down with it (DS1081 S3). */
+export const MAX_QUERY_LENGTH = 200;
+
 /** The words of a query: lower-cased, letters and digits only, de-duplicated. */
 export function searchWords(q: string): string[] {
-  const words = q.normalize('NFC').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= MIN_WORD_LENGTH);
+  const words = q.slice(0, MAX_QUERY_LENGTH).normalize('NFC').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= MIN_WORD_LENGTH);
   return [...new Set(words)].slice(0, MAX_WORDS);
 }
 
