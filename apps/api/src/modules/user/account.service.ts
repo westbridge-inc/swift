@@ -492,6 +492,7 @@ export class AccountService {
     await prisma.rideQueueEntry.deleteMany({ where: { customerId: userId } });
     await prisma.supplyWatch.deleteMany({ where: { customerId: userId } });
     await prisma.cart.deleteMany({ where: { customerId: userId } });
+    await prisma.cartMergeReceipt.deleteMany({ where: { userId } });
 
     // 4. De-identify the account row. It stays (orders/ratings reference it for
     //    the legal retention window) but the person is stripped from it. The

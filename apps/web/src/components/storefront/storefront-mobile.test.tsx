@@ -1,5 +1,4 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { renderToString } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -34,7 +33,8 @@ const disconnect = vi.fn();
 const scrollIntoView = vi.fn();
 const page = () => <StorefrontExperience store={store} returnPath="/store/test-kitchen" />;
 const panel = () => screen.getByRole('complementary', { name: 'Your order and checkout' });
-const dock = () => screen.queryByRole('link', { name: /View your order/ });
+// [W4] The floating button is one tap to the one checkout page.
+const dock = () => screen.queryByRole('link', { name: /^Checkout · \d+ item/ });
 const reportIntersection = (isIntersecting: boolean) => act(() => {
   if (!intersect) throw new Error('Checkout observer was not installed');
   intersect([{ target: panel(), isIntersecting }]);
@@ -100,14 +100,16 @@ async function renderCart() {
   return view;
 }
 
-// [W6] This page's other link to the order panel (besides the floating dock):
-// the "View order" link of the notice an Add shows.
-async function viewOrderLink() {
+// [W4] This page's other way to checkout (besides the floating button): the
+// "Checkout" link of the notice an Add shows.
+async function checkoutNoticeLink() {
   const add = await screen.findByRole('button', { name: 'Add Soup' });
   await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(add);
-  return screen.findByRole('link', { name: 'View order' });
+  return screen.findByRole('link', { name: 'Checkout' });
 }
+// [W4] The order panel's own way on: its Checkout button.
+const panelCheckout = () => within(panel()).getByRole('button', { name: /^Checkout · / });
 
 describe('storefront mobile checkout access', () => {
   it('hides the dock until visibility is known, shows it off screen, hides it for any visible panel, and disconnects', async () => {
@@ -118,48 +120,23 @@ describe('storefront mobile checkout access', () => {
     expect(dock()).not.toBeNull();
     reportIntersection(true);
     expect(dock()).toBeNull();
-    expect(within(panel()).getByRole('button', { name: 'Place cash order' })).toBeTruthy();
+    expect(panelCheckout()).toBeTruthy();
     reportIntersection(false);
     expect(dock()).not.toBeNull();
     view.unmount();
     expect(disconnect).toHaveBeenCalledOnce();
   });
 
-  it.each([false, true])('both links scroll and focus the order heading on every tap (reduced motion: %s)', async reducedMotion => {
-    vi.mocked(window.matchMedia).mockReturnValue({ matches: reducedMotion } as MediaQueryList);
+  // [W4] The order is placed on the one checkout page, so the store page's
+  // links go there instead of scrolling to the order panel (#1590's scroll
+  // and focus on tap, and its reduced-motion scroll checks, have nothing to
+  // act on here).
+  it('both links go to the one checkout page', async () => {
     await renderCart();
-    if (intersect) reportIntersection(false);
-    const heading = within(panel()).getByRole('heading', { level: 2 });
-    const focus = vi.spyOn(heading, 'focus');
-    const basket = await viewOrderLink();
-    for (const link of [dock()!, basket, basket]) {
-      link.focus();
-      fireEvent.click(link);
-      // Reduced motion asks for 'auto': the page's own reduced-motion rule makes it a jump, and every
-      // engine accepts 'auto' (an engine that rejects 'instant' would throw before the focus moves).
-      expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
-      expect(scrollIntoView.mock.contexts.at(-1)).toBe(panel());
-      expect(document.activeElement).toBe(heading);
-      expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
-    }
-    expect(scrollIntoView).toHaveBeenCalledTimes(3);
-    expect(window.matchMedia).toHaveBeenCalledWith('(prefers-reduced-motion: reduce)');
-    if (intersect) reportIntersection(true);
-    basket.focus();
-    fireEvent.click(basket);
-    expect(scrollIntoView).toHaveBeenCalledTimes(4);
-    expect(document.activeElement).toBe(heading);
-  });
-
-  it('supports Enter from the basket link with the heading outside the tab order', async () => {
-    await renderCart();
-    const basket = await viewOrderLink();
-    basket.focus();
-    await userEvent.keyboard('{Enter}');
-    const heading = within(panel()).getByRole('heading', { level: 2 });
-    expect(document.activeElement).toBe(heading);
-    expect(heading.tabIndex).toBe(-1);
-    expect(scrollIntoView).toHaveBeenCalledOnce();
+    reportIntersection(false);
+    expect(dock()!.getAttribute('href')).toBe('/checkout');
+    expect((await checkoutNoticeLink()).getAttribute('href')).toBe('/checkout');
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 
   it('server-renders without browser observers and keeps checkout usable if the observer is unavailable', async () => {
@@ -167,8 +144,8 @@ describe('storefront mobile checkout access', () => {
     expect(renderToString(page())).toContain('id="checkout"');
     await renderCart();
     expect(dock()).toBeNull();
-    fireEvent.click(await viewOrderLink());
-    expect(document.activeElement).toBe(within(panel()).getByRole('heading', { level: 2 }));
+    expect((panelCheckout() as HTMLButtonElement).disabled).toBe(false);
+    expect((await checkoutNoticeLink()).getAttribute('href')).toBe('/checkout');
   });
 
   it('retains measured clearance when the dock hides and updates it when text wraps', async () => {
@@ -223,28 +200,12 @@ describe('storefront mobile checkout access', () => {
     // Panel scrolled away and back before the callback ran: it is on screen now.
     reportCrossings(false, true);
     expect(dock()).toBeNull();
-    expect(within(panel()).getByRole('button', { name: 'Place cash order' })).toBeTruthy();
+    expect(panelCheckout()).toBeTruthy();
     // Scrolled in and out again: it is off screen now, so the dock returns.
     reportCrossings(true, false);
     expect(dock()).not.toBeNull();
     reportCrossings(false, true, false, true);
     expect(dock()).toBeNull();
-  });
-
-  it('still scrolls and focuses the order heading under reduced motion where the browser rejects the instant scroll value', async () => {
-    vi.mocked(window.matchMedia).mockReturnValue({ matches: true } as MediaQueryList);
-    // An engine without the 'instant' value throws a TypeError for it, as WebIDL requires.
-    scrollIntoView.mockImplementationOnce((options?: ScrollIntoViewOptions) => {
-      if (options?.behavior === 'instant') throw new TypeError("'instant' is not a valid ScrollBehavior value");
-    });
-    await renderCart();
-    const heading = within(panel()).getByRole('heading', { level: 2 });
-    fireEvent.click(await viewOrderLink());
-    // The tap must never "do nothing": focus lands on the order heading.
-    expect(document.activeElement).toBe(heading);
-    expect(scrollIntoView).toHaveBeenCalledOnce();
-    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'auto', block: 'start' });
-    expect(scrollIntoView.mock.contexts.at(-1)).toBe(panel());
   });
 
   it('lands the order panel below the phone header and the stuck category bar', () => {
@@ -265,11 +226,10 @@ describe('storefront mobile checkout access', () => {
     expect(tokenPx('--swift-section-scroll')).toBeGreaterThanOrEqual(tokenPx('--swift-touch') + tokenPx('--swift-space-2xl'));
   });
 
-  it('announces the focused heading as the order panel to screen readers, with the visible title unchanged', async () => {
+  it('announces the order panel’s heading to screen readers as the order, with the visible title unchanged', async () => {
     await renderCart();
-    fireEvent.click(await viewOrderLink());
     const heading = within(panel()).getByRole('heading', { level: 2, name: 'Your order, Test Kitchen' });
-    expect(document.activeElement).toBe(heading);
+    expect(heading.tabIndex).toBe(-1);
     const prefix = heading.querySelector('.sr-only');
     expect(prefix?.textContent).toBe('Your order, ');
     expect(heading.textContent?.slice(prefix?.textContent?.length ?? 0)).toBe('Test Kitchen');

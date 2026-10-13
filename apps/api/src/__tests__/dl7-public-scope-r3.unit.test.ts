@@ -16,7 +16,7 @@ afterEach(() => vi.restoreAllMocks());
 function store(id: string, tenant: Row): Row {
   return { id, tenantId: tenant['id'], tenant, status: 'ACTIVE', isVerified: true, subscription: null,
     name: `SENTINEL_${id}`, description: 'SENTINEL_DESCRIPTION', slug: id, vendorType: 'STORE', items: [{ isAvailable: true }],
-    isCurrentlyOpen: true, acceptingOrders: true, cuisineTypes: [], tags: [], latitude: 0, longitude: 0,
+    isCurrentlyOpen: true, acceptingOrders: true, cuisineTypes: [], tags: [], latitude: 6.8013, longitude: -58.1551,
     addressLine1: 'Fixture business address', logoUrl: null, coverImageUrl: null, city: 'Fixture city',
     estimatedPrepTime: 10, averageRating: 4, totalRatings: 1, minOrderAmount: 0, totalOrders: 1,
     deliveryRadius: 4, distanceKm: null };
@@ -42,7 +42,7 @@ async function fixture() {
   const search = await hostRoutes(searchRoutes, parts); const market = await hostRoutes(marketRoutes, parts);
   const customer = await hostRoutes(customerRoutes, parts);
   const callSearch = (path: string, publicMode: boolean) => runWithTenant(String(tenant['id']), () => search.call(`get ${path}`, {
-    ...(publicMode ? { publicTenantId: tenant['id'] } : { tenantId: tenant['id'] }), query: { q: 'SENTINEL', lat: '0', lng: '0' },
+    ...(publicMode ? { publicTenantId: tenant['id'] } : { tenantId: tenant['id'] }), query: { q: 'SENTINEL', lat: '6.8013', lng: '-58.1551' },
   }));
   const callMarket = (path: string) => runWithTenant(String(tenant['id']), () => market.call(`get ${path}`, { publicTenantId: tenant['id'] }));
   const ranked = (page = 1) => runAsSystem(PUBLIC_BROWSE_CAPABILITY, () => customer.call('get /vendors', { query: { sort: 'top_rated', page: String(page), limit: '2' } }));
