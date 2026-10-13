@@ -7,6 +7,24 @@ import type { VehicleSubmissionProfile } from './submission-authority';
 const vehicleTypes = Object.entries(BUCKET_OF).filter(([, bucket]) => bucket === 'VEHICLE').map(([type]) => type);
 const awaiting = ['REVIEW_QUEUED', 'IN_REVIEW', 'INFO_REQUESTED'] as const;
 
+/**
+ * [DOC-1 §24.2 · Opus 13 Oct, #1551 S2-1] Of these awaiting papers, the ones whose open case sits in
+ * SECOND_REVIEW: a suspicion awaiting a DIFFERENT reviewer (a reviewer escalated it, or intake routed a
+ * collision there). Its confirmation opens the fraud case and the legal hold, so a vehicle edit keeps such a
+ * paper and its case exactly as they are, like a legal hold, and still succeeds (the applicant is never told
+ * of suspicion). Only SECOND_REVIEW: ESCALATED is the review-SLA watchdog's "overdue", not suspicion.
+ * The caller locks these papers' cases FOR UPDATE first, so an escalation that committed before the edit is
+ * seen here.
+ */
+export async function papersUnderSecondReview(tx: Prisma.TransactionClient, awaitingIds: string[]): Promise<Set<string>> {
+  if (awaitingIds.length === 0) return new Set();
+  const cases = await tx.reviewCase.findMany({
+    where: { submissionId: { in: awaitingIds }, closedAt: null, queue: 'SECOND_REVIEW' },
+    select: { submissionId: true },
+  });
+  return new Set(cases.map((kase) => kase.submissionId));
+}
+
 /** Caller holds User and mover profile locks. Every writer uses the same review reset. */
 export async function requireFreshVehicleReview(tx: Prisma.TransactionClient, userId: string, previousPlate: string | null, next: VehicleSubmissionProfile) {
   const now = new Date();
@@ -30,8 +48,10 @@ export async function requireFreshVehicleReview(tx: Prisma.TransactionClient, us
   const mutable = papers.filter(paper => !paper.legalHoldId);
   const awaitingIds = mutable.filter(paper => paper.state !== 'COMMITTED').map(paper => paper.id);
   if (awaitingIds.length) await tx.$queryRaw`SELECT id FROM review_case WHERE "submissionId" = ANY(${awaitingIds}) ORDER BY id FOR UPDATE`;
+  const underSecondReview = await papersUnderSecondReview(tx, awaitingIds);
   const superseded: string[] = [], withdrawn: string[] = [];
   for (const paper of mutable) {
+    if (underSecondReview.has(paper.id)) continue;
     if (paper.state === 'COMMITTED') {
       if (await hopDocState(tx, { id: paper.id, userId }, 'COMMITTED', 'SUPERSEDED', { reviewNote: 'SUPERSEDED: the mover changed vehicle identity' })) superseded.push(paper.id);
     } else if (await hopDocState(tx, { id: paper.id, userId }, [...awaiting], 'EXPIRED', { status: 'EXPIRED', reviewNote: 'WITHDRAWN: the mover changed vehicle identity' })) withdrawn.push(paper.id);

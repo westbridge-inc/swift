@@ -41,6 +41,13 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!app) return;
   await system(async () => {
+    // The second-review cases below confirm fraud: their case, hold and founder hold go first.
+    await app.prisma.fraudCase.deleteMany({ where: { subjectUserId: { in: users } } });
+    await app.prisma.enforcementAction.deleteMany({ where: { accountId: { in: users } } });
+    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
+    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
+    await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.admin.deleteMany({ where: { userId: { in: users } } });
     const ids = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } })).map(d => d.id);
     await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: ids } } } });
     await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: ids } } });
@@ -187,4 +194,60 @@ describe('vehicle edit evidence lifecycle', () => {
   expect(result.statusCode).toBe(409); expect(result.json().error.code).toBe('ACTIVE_WORK');
   expect(await read(kind, mover.userId)).toMatchObject({ vehicleColor: 'Silver', isOnline: true });
  });
+});
+
+/**
+ * [DOC-1 §24.2 · Opus 13 Oct, #1551 S2-1] A vehicle paper whose case sits in SECOND_REVIEW is a suspicion
+ * awaiting a DIFFERENT reviewer. A vehicle edit (colour, make, model, year or plate, through any of the three
+ * writers) must never withdraw it: its confirmation is what opens the fraud case and the legal hold. The edit
+ * itself still succeeds (nothing tells the applicant why a paper stayed), and an ordinary waiting paper is
+ * still withdrawn as before.
+ */
+describe('a vehicle paper under a second review survives a vehicle edit', () => {
+  const reviewer = async () => {
+    const r = await system(() => app.prisma.user.create({ data: { phone: `+${phoneBase + users.length}`, firstName: 'Synthetic', lastName: 'Reviewer',
+      roles: ['ADMIN'], activeRole: 'ADMIN', admin: { create: { permissions: ['*'] } } } }));
+    users.push(r.id);
+    return r.id;
+  };
+  const upload = async (userId: string, docType: string) => {
+    const fileKey = await system(() => ownedVerificationFixture(app.prisma, userId));
+    const doc = await system(() => verification().submitDocument(userId, 'MOVER', docType, fileKey, 'test-v1'));
+    expect(doc).toMatchObject({ status: 'PENDING', state: 'REVIEW_QUEUED' });
+    return doc.id;
+  };
+  const openCase = (submissionId: string) => app.prisma.reviewCase.findFirst({ where: { submissionId, closedAt: null } });
+  const edits = {
+    'driver profile colour': (m: { token: string }) => save('driver', m.token, { vehicleColor: 'Blue' }),
+    'rider profile colour': (m: { token: string }) => save('rider', m.token, { vehicleColor: 'Blue' }),
+    'vehicle screen, new plate': (m: { token: string }) => app.inject({ method: 'PUT', url: '/api/v1/partner/vehicle', headers: { authorization: `Bearer ${m.token}` },
+      payload: { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: `HD${nanoid(8).replace(/[^a-z0-9]/gi, '0').toUpperCase()}` } } }),
+  } as const;
+
+  it.each(Object.keys(edits) as Array<keyof typeof edits>)('%s: the escalated paper and its case stay; a different reviewer can still confirm the fraud', async (door) => {
+    const mover = await fixture(door.startsWith('rider') ? 'rider' : 'driver');
+    const escalated = await upload(mover.userId, 'vehicle_registration');
+    const plain = await upload(mover.userId, 'vehicle_insurance');
+    const a = await reviewer(); const b = await reviewer();
+    await system(() => verification().rejectDocument(escalated, a, 'The registration looks altered', 'SUSPECTED_TAMPERING'));
+    expect(await openCase(escalated)).toMatchObject({ queue: 'SECOND_REVIEW' });
+
+    await grantStepUp(app, mover.token);
+    const edited = await edits[door](mover);
+    expect(edited.statusCode, edited.body).toBe(200);
+
+    // The suspicion is untouched: still waiting, its SECOND_REVIEW case still open.
+    expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: escalated } })).toMatchObject({ status: 'PENDING', state: 'REVIEW_QUEUED' });
+    expect(await openCase(escalated)).toMatchObject({ queue: 'SECOND_REVIEW' });
+    // An ordinary waiting paper is withdrawn exactly as before.
+    expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: plain } })).toMatchObject({ status: 'EXPIRED', state: 'EXPIRED' });
+    expect(await openCase(plain)).toBeNull();
+
+    // Reviewer B confirms: the rejection, the fraud case and the legal hold land.
+    await system(() => verification().rejectDocument(escalated, b, 'Confirmed: the registration was altered', 'SUSPECTED_TAMPERING'));
+    const row = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: escalated } });
+    expect(row.status).toBe('REJECTED');
+    expect(row.legalHoldId).not.toBeNull();
+    expect(await system(() => app.prisma.fraudCase.findFirst({ where: { subjectUserId: mover.userId, submissionId: escalated } }))).toMatchObject({ confirmedBy: b, legalHoldId: row.legalHoldId });
+  });
 });
