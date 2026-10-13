@@ -89,7 +89,8 @@ describe('the actual /store/[slug] QR arrival', () => {
 
   it('preserves the menu/cart flow slot and computed layout styles on dismissal', async () => {
     // A signed-in customer with a line in the order, so the floating
-    // "View your order" link exists and the cart-link checks below bite.
+    // order link exists and the cart-link checks below bite. ([W4] It reads
+    // "Checkout · N items" and opens the one checkout.)
     vi.mocked(auth.sessionProbe).mockResolvedValue({ ok: true });
     vi.mocked(customer.getCart).mockResolvedValue({
       items: [{ id: 'line', itemId: 'roti', name: 'Pumpkin roti', quantity: 1, customerPrice: 800, isAvailable: true, fulfillment: 'DELIVERY' }],
@@ -98,10 +99,11 @@ describe('the actual /store/[slug] QR arrival', () => {
     vi.spyOn(customer, 'getAddresses').mockResolvedValue([]);
     const report = stubIntersectionObserver();
     render(await page({ src: 'qr' }));
-    await screen.findByText('1× Pumpkin roti');
-    // #1590: the floating link shows once the order panel has scrolled off a phone's screen.
-    report(screen.getByRole('complementary', { name: 'Your order and checkout' }), false);
-    await screen.findByRole('link', { name: /View your order/ });
+    // #1590: the floating button shows once the order panel has scrolled off a phone's screen.
+    const orderPanel = screen.getByRole('complementary', { name: 'Your order and checkout' });
+    await waitFor(() => expect(orderPanel.textContent).toContain('Pumpkin roti'));
+    report(orderPanel, false);
+    await screen.findByRole('link', { name: /^Checkout · 1 item/ });
     const dismiss = screen.getByRole('button', { name: 'Dismiss dining-in message' });
     const slot = dismiss.parentElement!;
     const menu = screen.getByRole('region', { name: 'Menu' });
@@ -110,7 +112,7 @@ describe('the actual /store/[slug] QR arrival', () => {
     // order" link joins it once something is in the order. (The old
     // store-branded top bar and its cart link are gone: the app's frame holds
     // the page now.)
-    const cartLinks = screen.queryAllByRole('link', { name: /your order/i });
+    const cartLinks = screen.queryAllByRole('link', { name: /your order|^Checkout ·/i });
     expect(cartLinks.length).toBeGreaterThan(0);
     const layoutStyles = (element: Element) => {
       const computed = getComputedStyle(element);
@@ -200,10 +202,13 @@ describe('the actual /store/[slug] QR arrival', () => {
     await waitFor(() => expect(readGuestBasket().lines[0]).toMatchObject({ itemId: 'roti', quantity: 1, unitPrice: 800 }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`/login?next=${encodeURIComponent('/store/garden-kitchen?src=qr&c=BCDFGHJKMN&t=card')}`));
+    // [W4] The code brings the customer to the one checkout; the scanned
+    // store address, template code included, stays with the basket.
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith('/login?next=%2Fcheckout'));
+    expect(readGuestBasket().lines[0]?.returnPath).toBe('/store/garden-kitchen?src=qr&c=BCDFGHJKMN&t=card');
   });
 
-  it('places an order from the scanned menu after sign-in, without the banner blocking checkout', async () => {
+  it('takes a signed-in customer from the scanned menu to the one checkout, without the banner blocking it', async () => {
     vi.mocked(auth.sessionProbe).mockResolvedValue({ ok: true });
     const cart: customer.Cart = {
       items: [{ id: 'line', itemId: 'roti', name: 'Pumpkin roti', quantity: 1, customerPrice: 800, isAvailable: true, fulfillment: 'DELIVERY' }],
@@ -213,18 +218,18 @@ describe('the actual /store/[slug] QR arrival', () => {
     vi.mocked(customer.getCart).mockResolvedValueOnce({ items: [] }).mockResolvedValue(cart);
     vi.mocked(customer.addToCart).mockResolvedValue(cart);
     vi.spyOn(customer, 'getAddresses').mockResolvedValue([{ id: 'address', label: 'Home', addressLine1: 'Example Street', city: 'Georgetown', isDefault: true }]);
-    vi.spyOn(customer, 'setCartAddress').mockResolvedValue(cart);
-    vi.spyOn(customer, 'checkout').mockResolvedValue({ order: { id: 'qr-order' } });
+    const order = vi.spyOn(customer, 'checkout');
     render(await page({ src: 'qr' }));
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(add);
     expect(customer.addToCart).toHaveBeenCalledWith({ vendorId: store.id, itemId: 'roti', quantity: 1 });
-    const place = await screen.findByRole('button', { name: 'Place cash order' });
-    await waitFor(() => expect((place as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(place);
-    await waitFor(() => expect(customer.checkout).toHaveBeenCalledWith({ paymentMethod: 'CASH', tipAmount: 0, expectedTotal: 1000, expectedLines: [{ lineId: 'line', unitPrice: 800 }] }, expect.any(String)));
-    expect(nav.push).toHaveBeenCalledWith('/orders/qr-order');
+    // [W4] The store page shows the basket; the one checkout prices and places it.
+    const next = await screen.findByRole('button', { name: 'Checkout · $800' });
+    await waitFor(() => expect((next as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(next);
+    expect(nav.push).toHaveBeenCalledWith('/checkout');
+    expect(order).not.toHaveBeenCalled();
     expect(screen.getByText(copy)).toBeTruthy();
   });
 });
@@ -242,7 +247,8 @@ describe('QR-01-W: guest basket → sign-in → one bulk upload', () => {
     const login = render(<LoginPage />);
     fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001001' } }); await waitFor(() => expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } }); fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
-    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith('/store/garden-kitchen?src=qr&c=BCDFGHJKMN')); login.unmount();
+    // [W4] Place order signs in for the one checkout; a direct sign-in returns to the scanned store.
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(startingState === 'Place order' ? '/checkout' : '/store/garden-kitchen?src=qr&c=BCDFGHJKMN')); login.unmount();
     expect(readGuestBasket().lines).toHaveLength(1);
     const upload = vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: { applied: true, verdicts: [{ clientLineId: line.clientLineId, status: 'ADDED' }], cart: { items: [] } } } as never);
     const order = vi.spyOn(customer, 'checkout');
