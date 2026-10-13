@@ -2,8 +2,139 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { stripImageMetadata } from '../utils/images';
+import { deflateSync, inflateSync } from 'node:zlib';
+import { stripImageMetadata, stripImageMetadataStrict } from '../utils/images';
 import { LocalStorageProvider } from '../providers/storage/storage-provider';
+import { PROGRESSIVE_JPEG, PROGRESSIVE_SCAN_OFFSETS, SYNTHETIC_CAMERA_TAG, progressiveWithMetadata } from './fixtures/progressive-jpeg';
+import { ICC_PROFILE, ICC_JPEG, ICC_PNG, ICC_NOTE } from './fixtures/icc-images';
+
+export function embeddedProfile(bytes: Buffer): Buffer {
+  if (bytes[0] === 0xff) {
+    const parts: Buffer[] = [];
+    for (let i = 2; i + 4 < bytes.length;) {
+      const marker = bytes[i + 1];
+      if (marker === 0xda || marker === 0xd9) break;
+      const end = i + 2 + bytes.readUInt16BE(i + 2);
+      if (marker === 0xe2 && bytes.toString('latin1', i + 4, i + 16) === 'ICC_PROFILE\0') parts.push(bytes.subarray(i + 18, end));
+      i = end;
+    }
+    return Buffer.concat(parts);
+  }
+  for (let i = 8; i + 12 <= bytes.length;) {
+    const end = i + 12 + bytes.readUInt32BE(i);
+    if (bytes.toString('ascii', i + 4, i + 8) === 'iCCP') {
+      const data = bytes.subarray(i + 8, end - 4);
+      return inflateSync(data.subarray(data.indexOf(0) + 2));
+    }
+    i = end;
+  }
+  return Buffer.alloc(0);
+}
+
+function profileTags(profile: Buffer): Map<string, Buffer> {
+  const tags = new Map<string, Buffer>();
+  for (let n = 0; n < profile.readUInt32BE(128); n++) {
+    const i = 132 + n * 12;
+    const start = profile.readUInt32BE(i + 4);
+    tags.set(profile.toString('ascii', i, i + 4), profile.subarray(start, start + profile.readUInt32BE(i + 8)));
+  }
+  return tags;
+}
+
+function jpegProfile(profile: Buffer, split = false): Buffer {
+  const parts = split ? [profile.subarray(0, 200), profile.subarray(200)] : [profile];
+  const segments = parts.map((part, n) => {
+    const body = Buffer.concat([Buffer.from('ICC_PROFILE\0', 'latin1'), Buffer.from([n + 1, parts.length]), part]);
+    const length = Buffer.alloc(2); length.writeUInt16BE(body.length + 2);
+    return Buffer.concat([Buffer.from([0xff, 0xe2]), length, body]);
+  });
+  return Buffer.concat([PROGRESSIVE_JPEG.subarray(0, 2), ...segments, PROGRESSIVE_JPEG.subarray(2)]);
+}
+
+describe('ICC descriptions are metadata, while verified colour transforms survive', () => {
+  it.each([['JPEG', ICC_JPEG, 'image/jpeg'], ['PNG', ICC_PNG, 'image/png']] as const)('%s removes descriptive ICC text and preserves every colour tag', (_label, dirty, type) => {
+    const original = embeddedProfile(dirty);
+    expect(original.includes(Buffer.from(ICC_NOTE, 'utf16le').swap16())).toBe(true);
+    const clean = stripImageMetadataStrict(dirty, type);
+    expect(clean).not.toBeNull();
+    const profile = embeddedProfile(clean!);
+    expect(profile.includes(Buffer.from(ICC_NOTE, 'utf16le').swap16())).toBe(false);
+    for (const tag of ['wtpt', 'chad', 'rXYZ', 'gXYZ', 'bXYZ', 'rTRC', 'gTRC', 'bTRC', 'chrm']) {
+      expect(profileTags(profile).get(tag), tag).toEqual(profileTags(original).get(tag));
+    }
+    expect(stripImageMetadata(dirty, type)).toEqual(clean);
+    expect(stripImageMetadataStrict(clean!, type)).toEqual(clean);
+  });
+
+  it('reassembles a split JPEG profile before removing descriptions', () => {
+    const clean = stripImageMetadataStrict(jpegProfile(ICC_PROFILE, true), 'image/jpeg');
+    expect(clean).not.toBeNull();
+    expect(embeddedProfile(clean!).includes(Buffer.from(ICC_NOTE, 'utf16le').swap16())).toBe(false);
+    expect(profileTags(embeddedProfile(clean!)).get('rTRC')).toEqual(profileTags(ICC_PROFILE).get('rTRC'));
+  });
+
+  it('removes profile identity, reserved bytes, and unreferenced payload', () => {
+    const profile = Buffer.concat([ICC_PROFILE, Buffer.from('synthetic-unreferenced-location')]);
+    profile.writeUInt32BE(profile.length, 0);
+    for (const [start, end] of [[4, 8], [40, 44], [48, 56], [80, 128]] as const) profile.fill(0x41, start, end);
+    const clean = stripImageMetadataStrict(jpegProfile(profile), 'image/jpeg');
+    expect(clean).not.toBeNull();
+    const sanitized = embeddedProfile(clean!);
+    for (const [start, end] of [[4, 8], [40, 44], [48, 56], [80, 128]] as const) expect(sanitized.subarray(start, end)).toEqual(Buffer.alloc(end - start));
+    expect(sanitized.includes('synthetic-unreferenced-location')).toBe(false);
+  });
+
+  it.each(['unknown rendering type', 'tag past the profile', 'duplicate tag', 'unsupported transform', 'unsupported optional transform'])('refuses %s rather than publish an unverified profile', (kind) => {
+    const profile = Buffer.from(ICC_PROFILE);
+    const rxyz = [...Array(profile.readUInt32BE(128)).keys()].map(n => 132 + n * 12).find(i => profile.toString('ascii', i, i + 4) === 'rXYZ')!;
+    if (kind === 'unknown rendering type') profile.write('mluc', profile.readUInt32BE(rxyz + 4));
+    if (kind === 'tag past the profile') profile.writeUInt32BE(profile.length, rxyz + 4);
+    if (kind === 'duplicate tag') profile.write('desc', rxyz);
+    if (kind === 'unsupported transform') profile.write('A2B0', rxyz);
+    if (kind === 'unsupported optional transform') {
+      const chad = [...Array(profile.readUInt32BE(128)).keys()].map(n => 132 + n * 12).find(i => profile.toString('ascii', i, i + 4) === 'chad')!;
+      profile.write('A2B0', chad);
+    }
+    expect(stripImageMetadataStrict(jpegProfile(profile), 'image/jpeg')).toBeNull();
+    expect(stripImageMetadata(jpegProfile(profile), 'image/jpeg')).toEqual(jpegProfile(profile));
+  });
+
+  it('refuses missing or duplicate JPEG ICC chunks', () => {
+    const partial = jpegProfile(ICC_PROFILE); partial[19] = 2;
+    expect(stripImageMetadataStrict(partial, 'image/jpeg')).toBeNull();
+    const twice = Buffer.concat([partial.subarray(0, 2), partial.subarray(2, 20 + ICC_PROFILE.length), partial.subarray(2)]);
+    expect(stripImageMetadataStrict(twice, 'image/jpeg')).toBeNull();
+  });
+
+  it('replaces the PNG profile name and refuses an excessive compressed profile', () => {
+    const data = Buffer.concat([Buffer.from('synthetic-location\0\0'), deflateSync(ICC_PROFILE)]);
+    const dirty = Buffer.concat([BASE_PNG.subarray(0, 33), pngChunk('iCCP', data), BASE_PNG.subarray(33)]);
+    const clean = stripImageMetadataStrict(dirty, 'image/png');
+    expect(clean).not.toBeNull();
+    expect(clean!.includes('synthetic-location')).toBe(false);
+    const huge = Buffer.concat([BASE_PNG.subarray(0, 33), pngChunk('iCCP', Buffer.concat([Buffer.from('ICC\0\0'), deflateSync(Buffer.alloc(2 * 1024 * 1024))])), BASE_PNG.subarray(33)]);
+    expect(stripImageMetadataStrict(huge, 'image/png')).toBeNull();
+  });
+
+  it('refuses repeated PNG profiles', () => {
+    const chunk = pngChunk('iCCP', Buffer.concat([Buffer.from('ICC\0\0'), deflateSync(ICC_PROFILE)]));
+    const dirty = Buffer.concat([BASE_PNG.subarray(0, 33), chunk, chunk, BASE_PNG.subarray(33)]);
+    expect(stripImageMetadataStrict(dirty, 'image/png')).toBeNull();
+  });
+
+  it('sanitizes the same profile in WebP and keeps its colour-profile flag', () => {
+    const base = webpWithExif();
+    const dirty = Buffer.concat([base, riffChunk('ICCP', ICC_PROFILE)]);
+    dirty.writeUInt32LE(dirty.length - 8, 4); dirty[20] = dirty[20]! | 0x20;
+    const clean = stripImageMetadataStrict(dirty, 'image/webp');
+    expect(clean).not.toBeNull();
+    expect(clean!.includes(Buffer.from(ICC_NOTE, 'utf16le').swap16())).toBe(false);
+    expect(clean![20]! & 0x20).toBe(0x20);
+    expect(stripImageMetadataStrict(clean!, 'image/webp')).toEqual(clean);
+    const missing = Buffer.from(base); missing[20] = missing[20]! | 0x20;
+    expect(stripImageMetadataStrict(missing, 'image/webp')).toBeNull();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // [S8/C4] Uploads arrive straight off a phone camera and carry EXIF: GPS to
@@ -150,6 +281,57 @@ describe('stripImageMetadata — the camera metadata never reaches storage', () 
     expect(() => stripImageMetadata(junk, 'image/jpeg')).not.toThrow();
     expect(stripImageMetadata(junk, 'image/jpeg').equals(junk)).toBe(true);
     const truncated = BASE_PNG.subarray(0, 20);
+    expect(stripImageMetadata(truncated, 'image/png').equals(truncated)).toBe(true);
+  });
+});
+
+describe('JPEG metadata after a scan begins', () => {
+  it.each(PROGRESSIVE_SCAN_OFFSETS)('removes EXIF before the scan at offset %i without changing any image byte', (offset) => {
+    expect(PROGRESSIVE_JPEG.subarray(offset, offset + 2)).toEqual(Buffer.from([0xff, 0xda]));
+    const dirty = progressiveWithMetadata(offset);
+    expect(dirty.includes(SYNTHETIC_CAMERA_TAG)).toBe(true);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')?.equals(PROGRESSIVE_JPEG)).toBe(true);
+    expect(stripImageMetadata(dirty, 'image/png').equals(PROGRESSIVE_JPEG)).toBe(true);
+  });
+
+  it.each([0xed, 0xfe])('removes the non-rendering marker %i between scans', (marker) => {
+    const dirty = progressiveWithMetadata(PROGRESSIVE_SCAN_OFFSETS[1], marker);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')?.equals(PROGRESSIVE_JPEG)).toBe(true);
+  });
+
+  it('discards metadata and arbitrary payload after EOI', () => {
+    const dirty = Buffer.concat([progressiveWithMetadata(PROGRESSIVE_JPEG.length), Buffer.from('synthetic-trailing-payload')]);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')?.equals(PROGRESSIVE_JPEG)).toBe(true);
+    expect(stripImageMetadata(dirty, 'image/jpeg').equals(PROGRESSIVE_JPEG)).toBe(true);
+  });
+
+  it('refuses a metadata segment with a length past the file between scans', () => {
+    const offset = PROGRESSIVE_SCAN_OFFSETS[1];
+    const dirty = Buffer.concat([PROGRESSIVE_JPEG.subarray(0, offset), Buffer.from([0xff, 0xe1, 0xff, 0xff]), PROGRESSIVE_JPEG.subarray(offset)]);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')).toBeNull();
+    expect(stripImageMetadata(dirty, 'image/jpeg').equals(dirty)).toBe(true);
+  });
+
+  it('refuses an unfinished scan and an invalid scan header', () => {
+    expect(stripImageMetadataStrict(PROGRESSIVE_JPEG.subarray(0, -2), 'image/jpeg')).toBeNull();
+    const dirty = Buffer.from(PROGRESSIVE_JPEG);
+    dirty.writeUInt16BE(1, PROGRESSIVE_SCAN_OFFSETS[1] + 2);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')).toBeNull();
+  });
+
+  it('keeps stuffed entropy bytes, restart markers and marker fill bytes', () => {
+    const scan = Buffer.from([0xff, 0xd8, 0xff, 0xda, 0x00, 0x08, 1, 1, 0, 0, 0x3f, 0]);
+    const entropy = Buffer.from([0x12, 0xff, 0x00, 0xe1, 0xff, 0xd0, 0x34, 0xff, 0xff, 0xd7, 0x56]);
+    const clean = Buffer.concat([scan, entropy, Buffer.from([0xff, 0xff, 0xd9])]);
+    expect(stripImageMetadataStrict(clean, 'image/jpeg')?.equals(clean)).toBe(true);
+  });
+});
+
+describe('a published PNG must have a complete container', () => {
+  it.each([8, BASE_PNG.length - 12, BASE_PNG.length - 4])('refuses a PNG truncated at byte %i', (end) => {
+    const truncated = BASE_PNG.subarray(0, end);
+    expect(stripImageMetadataStrict(truncated, 'image/png')).toBeNull();
+    // Private document uploads retain their established fail-open behavior.
     expect(stripImageMetadata(truncated, 'image/png').equals(truncated)).toBe(true);
   });
 });
