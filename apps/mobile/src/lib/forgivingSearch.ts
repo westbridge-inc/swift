@@ -13,7 +13,7 @@
 //     (also inside a longer word);
 //   - a typed plural finds its singular ("tomatoes" -> "tomato");
 //   - from SLIP_MIN_LENGTH letters, ONE slip (a letter missing, extra, wrong
-//     or two swapped) at the start of a word in the NAME.
+//     or two swapped, never the first letter) at the start of a word in the NAME.
 //
 // Results come strictest first — every word as typed, then every word with a
 // slip, then any word as typed, then any word with a slip — so a product the
@@ -25,6 +25,11 @@ const MIN_WORD_LENGTH = 2;
 export const SLIP_MIN_LENGTH = 5;
 const MAX_WORDS = 5;
 const MIN_STEM_LENGTH = 3;
+/** Longer words match as typed only — the server's bound (a pasted run of
+ *  letters must not become a regex of hundreds of alternatives). */
+const MAX_SLIP_WORD_LENGTH = 20;
+/** The most slip forms one query carries across its words — the server's budget. */
+const MAX_SLIP_FORMS = 120;
 
 /** The words of a query: lower-cased, letters and digits only, de-duplicated. */
 export function searchWords(q: string): string[] {
@@ -44,20 +49,32 @@ function literalForms(word: string): string[] {
   return [...forms];
 }
 
-/** Regex sources one slip from the word; `.` is the one letter that may differ or be missing. */
+/** Regex sources one slip from the word; `.` is the one letter that may
+ *  differ or be missing. The first letter is never part of a slip. */
 function slipForms(word: string): string[] {
   const chars = [...word];
   const n = chars.length;
-  if (n < SLIP_MIN_LENGTH) return [];
+  if (n < SLIP_MIN_LENGTH || n > MAX_SLIP_WORD_LENGTH) return [];
   const out = new Set<string>();
-  for (let i = 0; i < n; i += 1) {
+  for (let i = 1; i < n; i += 1) {
     out.add([...chars.slice(0, i), '.', ...chars.slice(i + 1)].join('')); // wrong letter
     out.add([...chars.slice(0, i), ...chars.slice(i + 1)].join('')); // an extra letter typed
-    if (i > 0) out.add([...chars.slice(0, i), '.', ...chars.slice(i)].join('')); // a letter left out
+    out.add([...chars.slice(0, i), '.', ...chars.slice(i)].join('')); // a letter left out
     if (i < n - 1 && chars[i] !== chars[i + 1]) out.add([...chars.slice(0, i), chars[i + 1]!, chars[i]!, ...chars.slice(i + 2)].join(''));
   }
   out.delete(word);
   return [...out];
+}
+
+/** Which words get slip forms, within MAX_SLIP_FORMS, in the order typed. */
+function slipPlan(words: string[]): Map<string, string[]> {
+  const plan = new Map<string, string[]>();
+  let budget = MAX_SLIP_FORMS;
+  for (const w of words) {
+    const forms = slipForms(w);
+    if (forms.length > 0 && forms.length <= budget) { plan.set(w, forms); budget -= forms.length; }
+  }
+  return plan;
 }
 
 type Matcher = (name: string, description: string) => boolean;
@@ -65,10 +82,10 @@ type Matcher = (name: string, description: string) => boolean;
 /** Does one word match, as typed (anywhere in name or description) or — with
  *  slips — one letter off at the start of a word in the name? Words hold only
  *  letters and digits, so they are safe regex sources as they stand. */
-function wordMatcher(word: string, slips: boolean): Matcher {
+function wordMatcher(word: string, slips: readonly string[]): Matcher {
   const literal = new RegExp(literalForms(word).join('|'), 'iu');
-  const slip = slips && slipForms(word).length > 0
-    ? new RegExp(slipForms(word).map((f) => `(?:^|\\s)${f}`).join('|'), 'iu')
+  const slip = slips.length > 0
+    ? new RegExp(slips.map((f) => `(?:^|\\s)${f}`).join('|'), 'iu')
     : null;
   return (name, description) => literal.test(name) || literal.test(description) || (slip !== null && slip.test(name));
 }
@@ -80,7 +97,8 @@ function wordMatcher(word: string, slips: boolean): Matcher {
 export function forgivingFilter<T>(rows: readonly T[], q: string, text: (row: T) => { name?: unknown; description?: unknown }): T[] {
   const words = searchWords(q);
   if (words.length === 0) return q.trim() ? [] : [...rows];
-  const canSlip = words.some((w) => w.length >= SLIP_MIN_LENGTH);
+  const plan = slipPlan(words);
+  const canSlip = plan.size > 0;
   const tiers: Array<{ every: boolean; slips: boolean }> = [
     { every: true, slips: false },
     ...(canSlip ? [{ every: true, slips: true }] : []),
@@ -90,7 +108,7 @@ export function forgivingFilter<T>(rows: readonly T[], q: string, text: (row: T)
   const out: T[] = [];
   const taken = new Set<number>();
   for (const tier of tiers) {
-    const matchers = words.map((w) => wordMatcher(w, tier.slips));
+    const matchers = words.map((w) => wordMatcher(w, tier.slips ? plan.get(w) ?? [] : []));
     rows.forEach((row, i) => {
       if (taken.has(i)) return;
       const t = text(row);
