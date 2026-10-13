@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StorefrontExperience, loadItemSheet } from './storefront-experience';
@@ -6,6 +7,8 @@ import { CustomerSessionProvider, type CustomerSession } from '@/components/cust
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 import type { StorefrontDetail } from '@/lib/api';
+import { GuestCart } from '@/components/guest-basket';
+import { addGuestLine, readGuestBasket } from '@/lib/basket';
 
 // ---------------------------------------------------------------------------
 // [W6] The one store page's menu: one tap for an item that needs no choice,
@@ -15,7 +18,7 @@ import type { StorefrontDetail } from '@/lib/api';
 // Synthetic store and items only.
 // ---------------------------------------------------------------------------
 
-const nav = vi.hoisted(() => ({ push: vi.fn() }));
+const nav = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => nav }));
 
 const option = (id: string, name: string, additionalPrice: string, extra: Partial<customer.OptionGroup['options'][number]> = {}) =>
@@ -67,7 +70,9 @@ beforeAll(() => loadItemSheet());
 
 beforeEach(() => {
   sessionStorage.clear();
+  localStorage.clear();
   nav.push.mockReset();
+  nav.refresh.mockReset();
   signedIn = true;
   vi.restoreAllMocks();
   vi.spyOn(auth, 'sessionProbe').mockImplementation(async () => ({ ok: signedIn }) as Awaited<ReturnType<typeof auth.sessionProbe>>);
@@ -95,20 +100,30 @@ describe('reviewer regression proofs', () => {
     await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: 'menu-store', itemId: 'soup', quantity: 1 }));
     expect(customer.updateCartLine).not.toHaveBeenCalled();
   });
-  it('keeps quantity 2 after a guest session is renewed', async () => {
+  it('keeps quantity 2 when a guest signs in at Place order', async () => {
     signedIn = false;
-    const ensureSignedIn = vi.fn(async () => { signedIn = true; return true; });
-    await start({ wrap: node => <CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}</CustomerSessionProvider> });
+    const principal = vi.spyOn(auth, 'getSessionPrincipal').mockReturnValue(null);
+    const ensureSignedIn = vi.fn(async () => { signedIn = true; principal.mockReturnValue('fixture-customer'); return true; });
+    const merge = vi.spyOn(auth, 'apiFetch').mockImplementation(async () => ({ success: true, data: {
+      applied: true, verdicts: readGuestBasket().lines.map(line => ({ clientLineId: line.clientLineId, status: 'ADDED' })),
+    } }));
+    await start({ wrap: node => <QueryClientProvider client={new QueryClient()}><CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}<div data-testid="guest-cart"><GuestCart /></div></CustomerSessionProvider></QueryClientProvider> });
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
-    const sheet = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /Large/ }));
     fireEvent.click(within(sheet).getByRole('radio', { name: /Paratha/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: 'Increase quantity' }));
     expect(within(sheet).getByLabelText('Quantity 2')).toBeTruthy();
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
-    await waitFor(() => expect(customer.getCart).toHaveBeenCalled());
-    await waitFor(() => expect(sessionStorage.getItem('swift_storefront_add')).toBeNull());
-    expect(within(screen.getByRole('dialog')).queryByLabelText('Quantity 2')).not.toBeNull();
+    await waitFor(() => expect(readGuestBasket().lines[0]?.quantity).toBe(2));
+    expect(ensureSignedIn).not.toHaveBeenCalled();
+    expect(merge).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByTestId('guest-cart')).getByRole('button', { name: 'Place order' }));
+    await waitFor(() => expect(merge).toHaveBeenCalledTimes(1));
+    expect(ensureSignedIn).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(merge.mock.calls[0]?.[1]?.body)).lines[0]).toMatchObject({ quantity: 2, expectedUnitPrice: 1900, selectedOptions: { size: 'large', roti: 'paratha' } });
+    await waitFor(() => expect(readGuestBasket().lines).toHaveLength(0));
+    await waitFor(() => expect(nav.refresh).toHaveBeenCalledTimes(1));
   });
   it('a deep-linked item remains open when Add is attempted before cart hydration completes', async () => {
     let resolveCart!: (_cart: customer.Cart) => void;
@@ -190,5 +205,53 @@ describe('the row’s − only ever takes away what + adds', () => {
     await waitFor(() => expect((last as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(last);
     await waitFor(() => expect(customer.removeCartLine).toHaveBeenCalledExactlyOnceWith('plain-line'));
+  });
+});
+
+// [W3 × W6 · review 11 Oct] A guest's browser basket follows the same rule as a
+// saved cart: the row's "−" only takes from the plain line that "+" adds.
+describe('a guest’s browser basket: the row’s − only ever takes away what + adds', () => {
+  const seed = (...lines: Array<{ quantity: number; unitPrice?: number; selectedOptions?: Record<string, string[]>; selectedOptionNames?: string[] }>) => {
+    for (const l of lines) {
+      addGuestLine({ vendorId: 'menu-store', storeSlug: 'sample-kitchen', vendorName: 'Sample Kitchen', itemId: 'soup', name: 'Pumpkin soup',
+        quantity: l.quantity, unitPrice: l.unitPrice ?? 800, selectedOptions: l.selectedOptions ?? {}, selectedOptionNames: l.selectedOptionNames ?? [] });
+    }
+  };
+  const guestRow = async (name: string) => {
+    const add = await screen.findByRole('button', { name });
+    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+    return add.closest('article')!;
+  };
+  const plainQuantity = () => readGuestBasket().lines.filter((l) => Object.values(l.selectedOptions).every((v) => (Array.isArray(v) ? v.length === 0 : !v))).reduce((sum, l) => sum + l.quantity, 0);
+
+  it('a plain line and a customised one: no − on the row, + adds the plain one, and × removes the customised line by name', async () => {
+    signedIn = false;
+    live([{ ...soup, optionGroups: [EXTRAS] }, curry]);
+    seed({ quantity: 2 }, { quantity: 1, unitPrice: 1100, selectedOptions: { extras: ['cheese', 'egg'] }, selectedOptionNames: ['Egg', 'Cheese'] });
+    render(<StorefrontExperience store={store()} returnPath="/store/sample-kitchen" />);
+    const row = await guestRow('Add another Pumpkin soup');
+    expect(within(row).getByText('3 in your order')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Remove one Pumpkin soup' })).toBeNull();
+    fireEvent.click(within(row).getByRole('button', { name: 'Add another Pumpkin soup' }));
+    await waitFor(() => expect(plainQuantity()).toBe(3));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove Pumpkin soup with Egg, Cheese from your order' }));
+    await waitFor(() => expect(readGuestBasket().lines.map((l) => l.selectedOptionNames ?? [])).toEqual([[]]));
+    expect(plainQuantity()).toBe(3);
+    expect(customer.addToCart).not.toHaveBeenCalled();
+    expect(customer.updateCartLine).not.toHaveBeenCalled();
+  });
+
+  it('only the plain configuration: − takes one from that line, and removes it at one', async () => {
+    signedIn = false;
+    live([{ ...soup, optionGroups: [EXTRAS] }, curry]);
+    seed({ quantity: 2 });
+    render(<StorefrontExperience store={store()} returnPath="/store/sample-kitchen" />);
+    const minus = await screen.findByRole('button', { name: 'Remove one Pumpkin soup' });
+    await waitFor(() => expect((minus as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(minus);
+    await waitFor(() => expect(plainQuantity()).toBe(1));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove one Pumpkin soup' }));
+    await waitFor(() => expect(readGuestBasket().lines).toEqual([]));
+    expect(customer.updateCartLine).not.toHaveBeenCalled();
   });
 });

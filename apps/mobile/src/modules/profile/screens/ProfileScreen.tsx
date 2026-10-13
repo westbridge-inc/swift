@@ -17,6 +17,7 @@ import { openPayLink } from '../../../lib/payLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { BrandSwitch } from '../../../kit/controls';
 import { retryRead } from '../../../lib/appQueryPolicy';
+import { profileIdRowSub } from '../../../lib/customerIdCopy';
 
 const GUTTER = space['2xl'];
 
@@ -356,13 +357,12 @@ export function ProfileScreen() {
             />
             <SettingsRow
               icon="shield"
-              label="Identity verification"
-              // No status chip here on purpose: /customer/profile carries no
-              // review state for a customer's ID submission, and a chip that
-              // guessed "Pending" from a local flag would be the UI lying.
-              // Registered as a FINDING — when the server returns the
-              // submission status, it lands here and nowhere else.
-              sub="Unlocks bigger orders and rides"
+              label="Your ID"
+              // [Owner ruling 8 Oct 2026 — CUSTOMER ID] The line is the server's own
+              // answer (/customer/profile `idCheck`), never a guess from a local
+              // flag: "on file" for an ID no person reviewed, "checked" only when
+              // one did. An older server sends nothing and the line claims nothing.
+              sub={profileIdRowSub(p?.idCheck)}
               onPress={() => navigation.navigate('IdentityVerification')}
             />
             <SettingsRow
