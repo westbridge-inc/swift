@@ -45,8 +45,10 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  (the Act is not yet in force).
  *  2026-10-13.1: all of 2026-10-06.1 plus 2026-10-07.1 (this lane's earlier
  *  version: Guyana's police, fire and ambulance numbers verified by the
- *  owner on 5 October, preserved on every seed run), as merged. Neither
- *  earlier version describes these values together, so neither is reused. */
+ *  owner on 5 October, preserved on every seed run), as merged, and the
+ *  Market tab always shown at launch (owner, 13 Oct: MARKET_MIN_ITEMS and
+ *  MARKET_MIN_VENDORS at 0). No earlier version describes these values
+ *  together, so none is reused. */
 export const PLATFORM_CONFIG_VERSION = '2026-10-13.1';
 
 /**
@@ -309,6 +311,11 @@ export function desiredPlatformConfig(): DesiredConfig {
     platformConfig: [
       { key: 'order_auto_reject_minutes', value: 5 },
       { key: 'delivery_base_fee', value: 500 },
+      // Owner ruling, 13 Oct: the Market tab ALWAYS shows at launch. The tab's
+      // depth gate (market/launch-depth.ts) reads these two; 0 is the explicit
+      // operator choice it honours ("open it, it is thin").
+      { key: 'MARKET_MIN_ITEMS', value: 0 },
+      { key: 'MARKET_MIN_VENDORS', value: 0 },
     ],
     countries: [
       {

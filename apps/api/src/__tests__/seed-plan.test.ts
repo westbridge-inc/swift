@@ -13,6 +13,7 @@ import {
 import { approvalRequest, parseApproverKeys, parseRequest, promotionSubject, type SignedApproval } from '../modules/ops/approver-signatures';
 import { desiredPlatformConfig, seedPlatformSpine } from '../modules/ops/platform-config';
 import { parseEmergencyPolicy, serveEmergencyPolicy } from '../modules/country/emergency-policy';
+import { marketGate, thresholdsFrom } from '../modules/market/launch-depth';
 import { assertSafeToSeedDemo } from '../utils/seed-guard';
 import { seedPlanCounter } from '../plugins/observability';
 
@@ -152,6 +153,20 @@ describe('[R048-005] the plan applies once; a replay changes nothing', () => {
       const src = readFileSync(join(__dirname, file), 'utf8');
       expect(src, file).not.toMatch(/CREATE (UNIQUE )?INDEX|CREATE EXTENSION|ALTER TABLE|DROP /);
     }
+  });
+
+  // Owner ruling, 13 Oct: the Market tab ALWAYS shows at launch. Its depth
+  // gate reads MARKET_MIN_ITEMS / MARKET_MIN_VENDORS from platform config
+  // (market.routes.ts /depth); the spine seeds both at 0, the explicit
+  // operator choice the gate honours, so even a thin catalogue shows the tab.
+  it('the spine opens the Market tab at launch: both depth thresholds seeded at 0, and the gate then shows even an empty market', async () => {
+    const desired = Object.fromEntries(desiredPlatformConfig().platformConfig.map((c) => [c.key, c.value]));
+    expect(desired).toMatchObject({ MARKET_MIN_ITEMS: 0, MARKET_MIN_VENDORS: 0 });
+    await seedPlatformSpine(prisma, { databaseUrl: URL_, actor: 'test' });
+    const rows = await prisma.platformConfig.findMany({ where: { key: { in: ['MARKET_MIN_ITEMS', 'MARKET_MIN_VENDORS'] } }, select: { key: true, value: true } });
+    const thresholds = thresholdsFrom(Object.fromEntries(rows.map((r) => [r.key, r.value])));
+    expect(thresholds).toEqual({ minItems: 0, minVendors: 0 });
+    expect(marketGate({ items: 0, vendors: 0 }, thresholds).visible).toBe(true);
   });
 });
 
