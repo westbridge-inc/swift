@@ -53,7 +53,7 @@ const RESULT_WORDS: Record<string, string> = {
 const WINDOW_WORDS: Record<NonNullable<MmgCheckoutTimelineEntry['windowCheck']>, string> = {
   INSIDE: 'Inside the checkout window',
   OUTSIDE: 'Outside the checkout window',
-  AFTER_REPLY: "After MMG's first reply: MMG's time may not match the zone setting",
+  UNCONFIRMED: "MMG's time could not be confirmed against Swift's records",
   UNREADABLE: "MMG's date could not be read",
 };
 const SOURCE_WORDS: Record<MmgCheckoutTimelineEntry['source'], string> = { RETURN: 'Reply (return page)', NOTIFY: 'Reply (MMG server)', LOOKUP: 'MMG lookup' };

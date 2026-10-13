@@ -89,19 +89,19 @@ describe('the window support sees is the window judge() decides with', () => {
   const replied = at(opened.getTime() + 60_000);
   const lastCountingReply = at(intent.expiresAt.getTime() + 2 * 60_000);
   /** [name, MMG's creationDate, the first reply naming the transaction, the window support shows, judge()'s verdict or hold reason] */
-  const cases: Array<[string, unknown, Date | null, 'INSIDE' | 'OUTSIDE' | 'AFTER_REPLY' | 'UNREADABLE', string]> = [
-    ['three minutes before it opened', gyStamp(at(opened.getTime() - 3 * 60_000)), replied, 'OUTSIDE', 'OUTSIDE_CHECKOUT_WINDOW'],
+  const cases: Array<[string, unknown, Date | null, 'INSIDE' | 'UNCONFIRMED' | 'UNREADABLE', string]> = [
+    ['three minutes before it opened', gyStamp(at(opened.getTime() - 3 * 60_000)), replied, 'UNCONFIRMED', 'CREATION_UNCONFIRMED'],
     ['one minute before it opened (inside the tolerance)', gyStamp(at(opened.getTime() - 60_000)), replied, 'INSIDE', 'CONFIRM'],
     ['a minute after it opened, as the reply came', gyStamp(replied), replied, 'INSIDE', 'CONFIRM'],
     // [Sol, DS663] The after-reply bound decides first, exactly as judge() does: two minutes, no more.
     ['exactly two minutes after the first reply', gyStamp(at(replied.getTime() + 2 * 60_000)), replied, 'INSIDE', 'CONFIRM'],
-    ['two minutes and one millisecond after the first reply, inside the window', gyStamp(at(replied.getTime() + 2 * 60_000 + 1)), replied, 'AFTER_REPLY', 'CREATION_AFTER_REPLY'],
-    ['inside the window, half an hour after the first reply', gyStamp(at(intent.expiresAt.getTime() - 60_000)), replied, 'AFTER_REPLY', 'CREATION_AFTER_REPLY'],
+    ['two minutes and one millisecond after the first reply, inside the window', gyStamp(at(replied.getTime() + 2 * 60_000 + 1)), replied, 'UNCONFIRMED', 'CREATION_UNCONFIRMED'],
+    ['inside the window, half an hour after the first reply', gyStamp(at(intent.expiresAt.getTime() - 60_000)), replied, 'UNCONFIRMED', 'CREATION_UNCONFIRMED'],
     ['one minute after it closed, the reply as late as one still counts', gyStamp(at(intent.expiresAt.getTime() + 60_000)), lastCountingReply, 'INSIDE', 'CONFIRM'],
-    ['three minutes after it closed, the reply as late as one still counts', gyStamp(at(intent.expiresAt.getTime() + 3 * 60_000)), lastCountingReply, 'OUTSIDE', 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['three minutes after it closed, the reply as late as one still counts', gyStamp(at(intent.expiresAt.getTime() + 3 * 60_000)), lastCountingReply, 'UNCONFIRMED', 'CREATION_UNCONFIRMED'],
     // Hours out: MMG's stamps do not match the zone.
-    ['a UTC stamp read as Guyana time, four hours late', replied.toISOString(), replied, 'AFTER_REPLY', 'CREATION_AFTER_REPLY'],
-    ['no reply ever named the transaction', gyStamp(replied), null, 'AFTER_REPLY', 'CREATION_AFTER_REPLY'],
+    ['a UTC stamp read as Guyana time, four hours late', replied.toISOString(), replied, 'UNCONFIRMED', 'CREATION_UNCONFIRMED'],
+    ['no reply ever named the transaction', gyStamp(replied), null, 'UNCONFIRMED', 'CREATION_UNCONFIRMED'],
     ['an unreadable stamp', '1 Oct 2026', replied, 'UNREADABLE', 'CREATION_DATE_UNREADABLE'],
     ['no stamp', undefined, replied, 'UNREADABLE', 'CREATION_DATE_UNREADABLE'],
   ];
@@ -114,10 +114,32 @@ describe('the window support sees is the window judge() decides with', () => {
     expect(window === 'INSIDE').toBe(decided === 'CONFIRM');
   });
 
+  it('[option b · staging/UAT setting on] MMG’s stamp as the lookup’s own clock: support says INSIDE exactly when judge() confirms, within five minutes of when Swift asked', () => {
+    const asked = at(replied.getTime() + 10 * 60_000);
+    for (const [delta, window, decided] of [[0, 'INSIDE', 'CONFIRM'], [5 * 60_000, 'INSIDE', 'CONFIRM'], [5 * 60_000 + 1, 'UNCONFIRMED', 'CREATION_UNCONFIRMED']] as const) {
+      const detail = answerAt(gyStamp(at(asked.getTime() + delta)));
+      const creation = { zone: GY, firstReplyAt: replied, lookedUpAt: asked, lookupClock: true };
+      const verdict = judge(intent, '20402048536279', detail, ['0000000'], [], success, creation);
+      expect(verdict.verdict === 'CONFIRM' ? 'CONFIRM' : verdict.verdict === 'HOLD' ? verdict.reason : verdict.verdict).toBe(decided);
+      expect(windowCheckOf(intent, detail.createdAt, creation)).toBe(window);
+    }
+  });
+
+  it('[#1500 review S2-1] with the setting off (the default), the same stamps are UNCONFIRMED in support exactly as judge() holds them', () => {
+    const asked = at(replied.getTime() + 10 * 60_000);
+    for (const delta of [0, 5 * 60_000]) {
+      const detail = answerAt(gyStamp(at(asked.getTime() + delta)));
+      const creation = { zone: GY, firstReplyAt: replied, lookedUpAt: asked };
+      const verdict = judge(intent, '20402048536279', detail, ['0000000'], [], success, creation);
+      expect(verdict).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_UNCONFIRMED' });
+      expect(windowCheckOf(intent, detail.createdAt, creation)).toBe('UNCONFIRMED');
+    }
+  });
+
   it('read in the zone the server is configured with; with none, support cannot read it either', () => {
     const inTime = at(opened.getTime() + 60_000);
     expect(windowCheckOf(intent, inTime.toISOString(), { zone: 'UTC', firstReplyAt: inTime })).toBe('INSIDE');
-    expect(windowCheckOf(intent, gyStamp(inTime), { zone: 'UTC', firstReplyAt: inTime })).toBe('OUTSIDE');
+    expect(windowCheckOf(intent, gyStamp(inTime), { zone: 'UTC', firstReplyAt: inTime })).toBe('UNCONFIRMED');
     expect(windowCheckOf(intent, '2026-10-01T15:39:19.000-04:00', { zone: 'UTC', firstReplyAt: inTime })).toBe('INSIDE');
     // Even a stamp with an explicit offset: judge() verifies nothing without a configured zone, so support claims nothing.
     for (const stamp of [gyStamp(inTime), inTime.toISOString(), '2026-10-01T15:39:19.000-04:00']) {
@@ -153,12 +175,12 @@ describe('a timeline entry says only what the allowlist names', () => {
     expect(JSON.stringify(entry)).not.toContain('6000002');
   });
 
-  it('[Sol, DS663] a lookup whose MMG time is more than two minutes after the first reply naming it shows AFTER_REPLY, as judge() holds it', () => {
+  it('[Sol, DS663] a lookup whose MMG time is more than two minutes after the first reply naming it shows UNCONFIRMED, as judge() holds it', () => {
     const entry = timelineEntryOf(intent, {
       source: 'LOOKUP', detail: '20402048536279', failure: null, createdAt: at,
       body: { transactionStatus: 'successful', amount: '500', currency: 'GYD', creationDate: gyStamp(new Date(at.getTime() + 2 * 60_000 + 1)), transactionReference: '20402048601581' },
     }, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: at });
-    expect(entry.windowCheck).toBe('AFTER_REPLY');
+    expect(entry.windowCheck).toBe('UNCONFIRMED');
   });
 
   it('a lookup MMG could not answer carries its failure and nothing invented', () => {

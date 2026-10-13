@@ -12,7 +12,7 @@ import { bindTenantTransaction } from '../../plugins/prisma';
 import { normalizePhone } from '../../utils/phone';
 import { maskPhone } from '../auth/step-up';
 import { CHECKOUT_CLOCK_TOLERANCE_MS, MMG_TXN_ID, creationCheckOf, creationZoneInUse, firstReplyNaming, type CreationCheck } from './mmg-checkout.service';
-import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
+import { getMmgCheckoutProvider, mmgCreationLookupClock, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 
 // ---------------------------------------------------------------------------
 // [MMG support lookup] Support finds an MMG weekly-fee payment by any id MMG or
@@ -99,15 +99,18 @@ export function decodeSupportCursor(cursor: string): { createdAt: Date; id: stri
 /**
  * Condition 5 of the owner's automatic confirmation, as support reads it: the
  * SAME creation-time check judge() credits by (creationCheckOf) [Sol, DS663]:
- * the stamp read in the configured zone (MMG_CHECKOUT_CREATION_ZONE), bounded
- * by the first reply naming the transaction and by the checkout's window.
+ * the stamp read in the configured zone (MMG_CHECKOUT_CREATION_ZONE), as a
+ * payment time (inside the checkout's window, no later than the first reply
+ * naming the transaction) or, where MMG_CHECKOUT_CREATION_LOOKUP_CLOCK is on
+ * (staging/UAT), as the lookup's own clock (within five minutes of when Swift
+ * asked, never before the first reply) [option b]; anything else is UNCONFIRMED.
  * Support shows INSIDE exactly when that check would let the payment be
  * credited. No configured zone, or an absent or unreadable stamp, is
  * UNREADABLE (judge holds CREATION_ZONE_UNVERIFIED / CREATION_DATE_UNREADABLE).
  */
 export function windowCheckOf(
   intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, creation: CreationCheck,
-): 'INSIDE' | 'OUTSIDE' | 'AFTER_REPLY' | 'UNREADABLE' {
+): 'INSIDE' | 'UNCONFIRMED' | 'UNREADABLE' {
   const result = creationCheckOf(intent, stamp, creation);
   return result === 'ZONE_UNVERIFIED' ? 'UNREADABLE' : result;
 }
@@ -399,8 +402,13 @@ export async function mmgCheckoutSupportDetail(
   // verify() reads it: a switched-off or unbuildable provider has none, and
   // then judge() holds every payment, so support claims no window either.
   const zone = creationZoneInUse(deps.checkout ?? (() => getMmgCheckoutProvider()));
+  // [#1500 review S2-1] The same staging/UAT setting judge() reads.
+  const lookupClock = mmgCreationLookupClock();
   const creationFor = (o: ObservationForTimeline): CreationCheck => ({
     zone, firstReplyAt: o.source === 'LOOKUP' && o.detail ? firstReplyNaming(answers, o.detail) : null,
+    // [option b] A lookup is written down the moment its answer arrives: that is when Swift asked.
+    lookedUpAt: o.source === 'LOOKUP' ? o.createdAt : null,
+    lookupClock,
   });
   return {
     ...rows[0]!,
