@@ -972,7 +972,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
               {!signedIn ? (
                 <>
                   <button type="button" disabled={!itemCount} onClick={goToCheckout} className={styles.primaryButton}>Place order</button>
-                  <p className={styles.guestCopy}>Sign in with your phone at Place order. Swift’s server then prices your basket, delivery or pickup, and the total.</p>
+                  <p className={styles.guestCopy}>Sign in with your phone at Place order. We then price your basket, delivery or pickup, and the total.</p>
                   <p className={styles.guestCopy}>
                     New to Swift?{' '}
                     <Link href={`/signup?next=${encodeURIComponent('/checkout')}`}>Create your web account</Link>.
@@ -989,7 +989,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                 </button>
               )}
               <p className={styles.railNote}>
-                Delivery or pickup, the fee and the total are confirmed by Swift’s server at checkout.
+                We confirm delivery or pickup, the fee and the total at checkout.
               </p>
             </div>
           </aside>
