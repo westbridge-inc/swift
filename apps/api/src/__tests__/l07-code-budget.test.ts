@@ -19,6 +19,7 @@ const orders: string[] = [];
 let seq = 0;
 const io = { to: () => ({ emit: vi.fn() }), emit: vi.fn() };
 const cache = new Map<string, string>();
+let evalFails = false;
 beforeAll(async () => {
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -27,6 +28,7 @@ beforeAll(async () => {
   app.decorate('redis', {
     lrange: async () => [],
     eval: async (_script: string, _keys: number, key: string) => {
+      if (evalFails) throw new Error('redis unavailable');
       const count = Number(cache.get(key) ?? '0') + 1;
       cache.set(key, String(count)); return count;
     },
@@ -220,6 +222,14 @@ describe('handover attempt budget is one locked order decision', () => {
       expect(await f.request('246801', nanoid(16))).toMatchObject({ status: 429, code: 'HANDOVER_RATE_LIMITED' });
       const other = await fixture(door);
       expect(await other.request('135790')).toMatchObject({ status: 200 });
+    });
+    it(`${door} a Redis outage never blocks the handover: the request ceiling fails open to the durable budget [coordinator 11 Oct]`, async () => {
+      const f = await fixture(door);
+      evalFails = true;
+      try {
+        expect(await f.request('135790')).toMatchObject({ status: 200 });
+      } finally { evalFails = false; }
+      expect((await app.prisma.order.findUniqueOrThrow({ where: { id: f.order.id } })).status).toBe(door === 'pickup' ? 'COMPLETED' : 'DELIVERED');
     });
     it(`${door} accepts a correct proof while the budget remains`, async () => {
       const f = await fixture(door);

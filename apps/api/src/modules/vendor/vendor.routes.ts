@@ -1,4 +1,5 @@
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
+import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -2252,9 +2253,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot complete pickup from ${order.status} status`);
     }
     const { code } = completePickupSchema.parse(request.body ?? {});
+    await assertHandoverRequestBudget(app.redis, order.id);
     const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer', {
       allowedFrom: ['READY_FOR_PICKUP'], expectedFulfillment: 'PICKUP',
-      handover: { kind: 'pickup', code, vendorUserId: request.user.userId, expectedVendorId: order.vendorId! },
+      handover: { purpose: 'pickup', code, vendorUserId: request.user.userId, expectedVendorId: order.vendorId! },
     });
     return { success: true, data: updated };
   });

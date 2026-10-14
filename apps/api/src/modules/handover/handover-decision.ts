@@ -6,7 +6,7 @@ import { handoverAttemptState } from './handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 
 export interface HandoverDecision {
-  kind: 'pickup' | 'delivery' | 'cash-delivery';
+  purpose: 'pickup' | 'delivery' | 'cash-delivery';
   code?: string;
   vendorUserId?: string;
   expectedVendorId?: string;
@@ -19,7 +19,7 @@ export interface HandoverFailure {
 /** Run with the canonical Order lock held. Membership locks retain the
  * vendor grant until the terminal write commits; route previews cannot grant it. */
 export async function authorizeHandover(tx: Prisma.TransactionClient, source: Order, proof: HandoverDecision): Promise<void> {
-  if (proof.kind !== 'pickup') return;
+  if (proof.purpose !== 'pickup') return;
   if (!source.vendorId || source.vendorId !== proof.expectedVendorId || !proof.vendorUserId) {
     throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'This order no longer belongs to the expected store.');
   }
@@ -40,12 +40,12 @@ export async function authorizeHandover(tx: Prisma.TransactionClient, source: Or
 /** A wrong guess returns a value, so its attempt commits before the caller
  * reports the error. Success and the terminal facts share this same lock. */
 export async function verifyHandoverDecision(tx: Prisma.TransactionClient, source: Order, proof: HandoverDecision): Promise<HandoverFailure | null> {
-  const pickup = proof.kind === 'pickup';
+  const pickup = proof.purpose === 'pickup';
   if (!pickup) {
-    if (proof.kind === 'cash-delivery' && source.paymentMethod !== 'CASH') {
+    if (proof.purpose === 'cash-delivery' && source.paymentMethod !== 'CASH') {
       throw new AppError(409, 'CASH_HANDOVER_ONLY', 'Customer cash handover is available only for cash orders.');
     }
-    if (proof.kind === 'delivery') {
+    if (proof.purpose === 'delivery') {
       if (!handoverVersionMatches(source, proof.handoverVersion)) {
         handoverBlockCounter.labels('STALE_VERSION').inc();
         throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');

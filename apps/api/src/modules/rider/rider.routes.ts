@@ -1,6 +1,7 @@
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
+import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
@@ -312,6 +313,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // Idempotent on Idempotency-Key: a network-retried handover returns the
     // original result instead of failing the (now-terminal) transition.
     const { data, replayed } = await withIdempotency(app, request, 'handover', id, async () => {
+      if (body.outcome === 'paid') await assertHandoverRequestBudget(app.redis, id);
       const result = await cashRules.handover(id, request.user.userId, { ...body, sessionId: request.authSessionId ?? undefined });
       return {
         orderId: id,
@@ -1584,12 +1586,13 @@ export async function riderRoutes(app: FastifyInstance) {
     // replay short-circuits to the stored result.
     const { data, replayed } = await withIdempotency(app, request, 'delivered', id, async () => {
       const order = await getOwnedOrder(app, id, rider.id);
+      await assertHandoverRequestBudget(app.redis, id);
 
       // Fresh custody, payment, code and budget are one canonical Order-lock
       // decision. A wrong attempt commits before its route error is returned.
       await orderService.updateStatus(id, 'DELIVERED', request.user.userId, 'Delivery completed', {
         allowedFrom: ['ARRIVED', 'EN_ROUTE_DELIVERY'], expectedRiderId: rider.id,
-        handover: { kind: 'delivery', code: ridePin, handoverVersion },
+        handover: { purpose: 'delivery', code: ridePin, handoverVersion },
       });
 
       // 3. Read the freed rider back for the response payload.

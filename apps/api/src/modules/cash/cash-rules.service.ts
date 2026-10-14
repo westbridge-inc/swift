@@ -358,7 +358,7 @@ export class CashRulesService {
               withinTransaction,
               invalidStatus: (current) => new AppError(409, 'NOT_IN_TRANSIT', `Cannot close a courier job from status ${current}`),
             })).order
-          : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction, allowedFrom: ['ARRIVED'], expectedRiderId: mover.riderId, expectedDriverId: mover.driverId, handover: { kind: 'cash-delivery', code: input.ridePin } });
+          : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction, allowedFrom: ['ARRIVED'], expectedRiderId: mover.riderId, expectedDriverId: mover.driverId, handover: { purpose: 'cash-delivery', code: input.ridePin } });
       for (const notice of earningNotices) {
         await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type).catch(() => {});
       }
