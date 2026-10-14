@@ -40,8 +40,10 @@ export interface CountryPricing {
   movers?: MoverPriceQuote[];
   /** Services are flat; catalogue businesses step up by active items. */
   vendors?: { service: number; catalogue: CataloguePriceBand[] };
-  /** @deprecated Always null: every store pays its own tier (owner, 13 Oct
-   *  2026). Never read. */
+  /** @deprecated Null from a server with the 13 Oct 2026 ruling (every store
+   *  pays its own tier); an older server still sends its old multi-store rule
+   *  here. The page never shows a discount, and claims "every store pays its
+   *  own rate" only when this is null. */
   franchise?: unknown;
   /** @deprecated Conflated numbers kept for older clients — never render them:
    *  one figure here can stand for several kinds of partner at once. */

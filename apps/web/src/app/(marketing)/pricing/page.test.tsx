@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@/lib/api';
 import PricingPage from './page';
@@ -89,7 +89,8 @@ describe('public pricing page — every partner reads their own weekly fee', () 
   });
 
   it('a mover card lists only the vehicles a mover can register today', async () => {
-    // Buses hidden at launch (#1545): the server marks them not offered.
+    // A vehicle the server marks not offered drops out of its card (buses,
+    // once #1545 adds them to the server's launch-hidden set).
     pricing = { ...GY, movers: GY.movers.map((q) => (q.vehicleType.startsWith('BUS') ? { ...q, offered: false } : q)) };
     await renderPage();
     const taxi = cardOf('Taxi drivers').textContent!;
@@ -124,6 +125,19 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(screen.queryByRole('heading', { name: 'Franchises' })).toBeNull();
     const page = document.body.textContent!;
     expect(page).not.toMatch(/franchise|% off|7,500/i);
+    // That server still bills the old discount, so the page must not claim
+    // every store pays its own rate.
+    expect(page).not.toContain('however many stores');
+  });
+
+  it('says every store pays its own rate only when the server confirms there is no multi-store pricing', async () => {
+    await renderPage();
+    expect(document.body.textContent).toContain('Every store is its own account and pays the rate for its own catalogue, however many stores its owner runs.');
+    cleanup();
+    // A server from before multi-store pricing existed sends no key at all.
+    pricing = { ...GY, franchise: undefined };
+    await renderPage();
+    expect(document.body.textContent).toContain('however many stores its owner runs');
   });
 
   it('prints the server boundaries, not copy frozen into the page', async () => {

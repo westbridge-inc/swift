@@ -128,9 +128,16 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
             </div>
             <p className="mt-6 text-sm text-[var(--swift-muted)]">
               A taxi driver pays the taxi rate whatever the vehicle; a delivery rider&apos;s rate follows the
-              vehicle they register. Every store is its own account and pays the rate for its own catalogue,
-              however many stores its owner runs. A business moves between catalogue tiers automatically as its
-              active items change — nothing to apply for. A rate agreed with Swift stays as agreed.
+              vehicle they register.{' '}
+              {/* Said only when the server confirms it bills no multi-store
+                  discount (franchise: null, owner ruling of 13 Oct 2026). A
+                  server that still sends the old rule bills it, so the page
+                  must not claim otherwise; it shows no discount either way. */}
+              {list.pricing.franchise == null && (
+                <>Every store is its own account and pays the rate for its own catalogue, however many stores its owner runs. </>
+              )}
+              A business moves between catalogue tiers automatically as its active items change — nothing to apply
+              for. A rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (
