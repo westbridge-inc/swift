@@ -306,10 +306,13 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
   });
 
   it('an admin top-up bills instantly and reinstates — vendor returns to browse', async () => {
+    // [OWNER #62 · 14 Oct] At most one week ahead (was four, 8 Oct): with
+    // GY$10,000 already held and the owed week of GY$20,000, the most an
+    // operator can record is GY$30,000 (the owed week and the coming one).
     const res = await injectWithApproval(app, {
       method: 'POST',
       url: `/api/v1/admin/subscriptions/${subId}/topup`,
-      payload: { amount: 100000, reference: `BANK-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
+      payload: { amount: 30000, reference: `BANK-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
       headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(res.statusCode).toBe(200);
@@ -319,7 +322,7 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     expect(sub.failedAttempts).toBe(0);
 
     const balance = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } });
-    expect(Number(balance.balance)).toBe(10000 + 100000 - 20000);
+    expect(Number(balance.balance)).toBe(10000 + 30000 - 20000); // the coming week held: one week ahead, the cap
 
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
     expect(vendor.status).toBe('ACTIVE');
@@ -672,6 +675,7 @@ describe('F-012-05 — suspension is ONE authority generation [REPORT-012]', () 
 });
 
 describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]', () => {
+  // [owner #62 · 14 Oct] A fee payment here is the owed week (GY$20,000): one week at a time, never several.
   it('payment lifts ONLY a billing suspension: admin authority survives, and dead documents keep commerce closed', async () => {
     const adminToken = (await makeUserWithSession(['ADMIN'], 'ADMIN')).token;
 
@@ -687,7 +691,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     });
     const resA = await injectWithApproval(app, {
       method: 'POST', url: `/api/v1/admin/subscriptions/${a.subId}/topup`,
-      payload: { amount: 100000, reference: `ADMINSURVIVES-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
+      payload: { amount: 20000, reference: `ADMINSURVIVES-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
       headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(resA.statusCode).toBe(200);
@@ -709,7 +713,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     });
     const resB = await injectWithApproval(app, {
       method: 'POST', url: `/api/v1/admin/subscriptions/${b.subId}/topup`,
-      payload: { amount: 100000, reference: `DOCSDEAD-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
+      payload: { amount: 20000, reference: `DOCSDEAD-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
       headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` }, // [M-08] the key is required
     });
     expect(resB.statusCode).toBe(200);
@@ -741,7 +745,7 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     // The owner pays the fee: billing gives back only what billing took.
     const res = await injectWithApproval(app, {
       method: 'POST', url: `/api/v1/admin/subscriptions/${fx.subId}/topup`,
-      payload: { amount: 100000, reference: `KEEPSOURCE-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
+      payload: { amount: 20000, reference: `KEEPSOURCE-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
       headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` },
     });
     expect(res.statusCode, res.payload).toBe(200);

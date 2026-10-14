@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import AppLayout from './layout';
+import { loadInstallCard } from '@/components/install-prompt';
 import CartPage from './cart/page';
 import * as api from '@/lib/customer';
 
@@ -29,6 +30,10 @@ function installEvent() {
 }
 
 const card = () => screen.queryByRole('complementary', { name: 'Install Swift' });
+
+// [PWA-1] As once an offer is possible on Home: the card's code has arrived
+// (install-prompt-loading.test.tsx covers an offer that comes before it).
+beforeAll(() => loadInstallCard());
 
 beforeEach(() => {
   state.pathname = '/';
@@ -120,14 +125,15 @@ describe('[PWA-1] the customer shell, installed', () => {
     vi.spyOn(api, 'getAddresses').mockResolvedValue([]);
     render(<AppLayout><CartPage /></AppLayout>);
     fireEvent.click(await screen.findByRole('button', { name: 'Add a delivery address' }));
-    const address = screen.getByRole('textbox', { name: 'Search the delivery destination' }) as HTMLInputElement;
+    // The address form (a pin on the map, then its fields) loads on demand.
+    const address = await screen.findByRole('textbox', { name: 'Street address' }) as HTMLInputElement;
     fireEvent.change(address, { target: { value: 'Test destination, Georgetown' } });
     act(() => { window.dispatchEvent(new Event('offline')); });
     expect(screen.getByText('You’re offline.')).toBeTruthy();
     act(() => { window.dispatchEvent(new Event('online')); });
     expect(reload).not.toHaveBeenCalled();
     expect(screen.queryByText('You’re offline.')).toBeNull();
-    expect(screen.getByRole('textbox', { name: 'Search the delivery destination' })).toBe(address);
+    expect(screen.getByRole('textbox', { name: 'Street address' })).toBe(address);
     expect(address.value).toBe('Test destination, Georgetown');
   });
 });

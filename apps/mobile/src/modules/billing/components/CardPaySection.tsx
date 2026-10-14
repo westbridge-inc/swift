@@ -6,15 +6,18 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
 import { color, radius, space } from '@swift/ui';
 import { Card, ConfirmDialog, IconChip, PillButton, StatePill, T } from '../../../kit';
-import { cardFeeApi } from '../../../services/api';
+import { API_URL, cardFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useStepUp } from '../../../hooks/useStepUp';
 import { isStepUpDismissed } from '../../../lib/stepUp';
 import {
   CARD_IDLE, CARD_RETURN, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
-  cardRemovedWords, cardSessionTone, cardSessionWords, cardSpoken, type CardCheckoutView, type CardFamily, type CardPointer, type LiveCard,
+  cardRemovedWords, cardSessionOf, cardSessionTone, cardSessionWords, cardSpoken, type CardCheckoutView, type CardFamily, type CardPointer, type LiveCard,
 } from '../../../lib/cardFee';
+import { cardSheetFor } from '../../../lib/cardPage';
+import { cardWebView, type CardWebView } from '../../../lib/cardWebView';
+import { CardPageSheet } from './CardPageSheet';
 
 /** The last card session each partner context started, for this app run only. Never a page address. */
 const lastSession = new Map<string, CardPointer>();
@@ -27,9 +30,10 @@ export const hasCardSession = (context: string) => lastSession.has(context);
 
 /**
  * "Pay by card" on the one weekly-fee page (CARD-CHECKOUT-API). Shown only when the server
- * says CARD is live. The card number is typed on the bank's hosted page, opened in the
- * in-app browser sheet; this screen has no card field of any kind. Every state it shows
- * is the server's read of the session, never the browser's result.
+ * says CARD is live. The card number is typed on the bank's hosted page, shown inside Swift
+ * in the card sheet (CardPageSheet) or, on a build without it, in the in-app browser sheet;
+ * this screen has no card field of any kind. Every state it shows is the server's read of
+ * the session, never the browser's result.
  */
 export function CardPaySection({ family, card, contextPending, otherPaymentPending, refresh, onPaymentPending }: {
   family: CardFamily;
@@ -49,6 +53,11 @@ export function CardPaySection({ family, card, contextPending, otherPaymentPendi
   const [removeError, setRemoveError] = useState('');
   const [removeNotice, setRemoveNotice] = useState('');
   const stepUp = useStepUp();
+  const [sheet, setSheet] = useState<{ url: string; apiOrigin: string; WebView: CardWebView; watch?: () => Promise<boolean> } | null>(null);
+  // Closes the open card sheet and lets the session follow the server (once).
+  const sheetDone = React.useRef<(() => void) | null>(null);
+  // The session's latest view, as it is emitted (state lags a render behind).
+  const latest = React.useRef<CardCheckoutView>(CARD_IDLE);
   const refreshRef = React.useRef(refresh); refreshRef.current = refresh;
   // The parent hears "a card payment may be taking money" in the same render as the words, never a frame later.
   const pendingRef = React.useRef(onPaymentPending); pendingRef.current = onPaymentPending;
@@ -60,18 +69,30 @@ export function CardPaySection({ family, card, contextPending, otherPaymentPendi
   const session = useMemo(() => new CardCheckoutSession({
     start: client.start,
     read: client.read,
-    open: (url) => WebBrowser.openAuthSessionAsync(url, CARD_RETURN),
+    open: (url) => {
+      const embed = cardSheetFor(url, cardWebView, () => API_URL);
+      if (!embed) return WebBrowser.openAuthSessionAsync(url, CARD_RETURN);
+      const sessionId = latest.current.session?.sessionId;
+      // The open sheet asks the server, never the page, whether the card page is still open.
+      const watch = sessionId ? () => client.read(sessionId).then((v) => cardSessionOf(v)?.status === 'OPEN') : undefined;
+      return new Promise<void>((resolve) => {
+        sheetDone.current?.();
+        sheetDone.current = () => { sheetDone.current = null; setSheet(null); resolve(); };
+        setSheet({ url, ...embed, ...(watch ? { watch } : {}) });
+      });
+    },
     refresh: () => { void refreshRef.current(); },
     save: (pointer) => { if (pointer) lastSession.set(context, pointer); else lastSession.delete(context); },
     load: () => lastSession.get(context) ?? null,
   }, () => Crypto.randomUUID(), (v) => {
+    latest.current = v;
     setView(v);
     pendingRef.current(cardPaymentPending(v.session) || v.busy === 'PAY_NOW');
   }, (e) => {
     const failure = e as { response?: { status?: number; data?: { error?: { code?: string } } } };
     return { status: failure.response?.status, code: failure.response?.data?.error?.code };
   }), [client, context]);
-  useEffect(() => { session.activate(); if (!contextPending) session.resume(); return () => session.dispose(); }, [session, contextPending]);
+  useEffect(() => { session.activate(); if (!contextPending) session.resume(); return () => { session.dispose(); sheetDone.current?.(); }; }, [session, contextPending]);
   useFocusEffect(useCallback(() => { if (!contextPending) session.focus(); }, [session, contextPending]));
   useEffect(() => {
     const listener = AppState.addEventListener('change', (state) => { if (state === 'active' && !contextPending) session.focus(); });
@@ -142,5 +163,6 @@ export function CardPaySection({ family, card, contextPending, otherPaymentPendi
       onClose={() => setRemoving(null)}
     />
     {stepUp.sheet}
+    {sheet ? <CardPageSheet url={sheet.url} apiOrigin={sheet.apiOrigin} WebView={sheet.WebView} {...(sheet.watch ? { watch: sheet.watch } : {})} onDone={() => sheetDone.current?.()} /> : null}
   </Card>;
 }

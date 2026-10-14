@@ -1,4 +1,6 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
+import { orderSocketFixture, rowLockAtPublish } from './helpers/order-socket-fixture';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -132,6 +134,7 @@ async function makeDriver(opts: { lat?: number; lng?: number; currentInsurance?:
     fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
     coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
   } });
+  await currentTaxiSplitDocuments(app.prisma, u.userId);
   return { ...u, driverId: driver.id };
 }
 
@@ -311,7 +314,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect([d1.driverId, d2.driverId]).toContain(db.driverId);
   });
 
-  it('commits the server-clamped direct fare with assignment, or rolls both back on abort', async () => {
+  it('commits the formula fare with assignment, or rolls both back on abort', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const ride = await app.prisma.order.create({
@@ -353,13 +356,15 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
       throw new Error('forced direct-fare transaction abort');
     }, options)) as never);
     try {
-      await expect(dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER', { requestedFare: 1200 }))
+      await expect(dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER'))
         .rejects.toThrow('forced direct-fare transaction abort');
     } finally {
       transaction.mockRestore();
     }
 
-    expect(staged).toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 1200, logs: 1 });
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The claim takes no price: the
+    // formula fare (2,000) is staged and committed. (Was: a driver-set 1,200.)
+    expect(staged).toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 2000, logs: 1 });
     const [rolledBackRide, rolledBackDriver, rolledBackLogs] = await Promise.all([
       app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } }),
       app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } }),
@@ -371,12 +376,12 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
       .toEqual({ available: true, pointer: null });
     expect(rolledBackLogs).toBe(0);
 
-    const committed = await dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER', { requestedFare: 1200 });
+    const committed = await dispatch.claimOrder(ride.id, driver.driverId, 'DRIVER');
     expect({ status: committed.status, driverId: committed.driverId, fare: Number(committed.taxiFareTotal) })
-      .toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 1200 });
+      .toEqual({ status: 'DRIVER_ASSIGNED', driverId: driver.driverId, fare: 2000 });
     const durable = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect({ fare: Number(durable.taxiFareTotal), total: Number(durable.totalAmount) })
-      .toEqual({ fare: 1200, total: 1200 });
+      .toEqual({ fare: 2000, total: 2000 });
   });
 
   it('ratings record both ways after completion', async () => {
@@ -1156,7 +1161,7 @@ describe('Driver location authority', () => {
       longitude: -58.153,
     }, secondDevice.token);
     expect(ownerSample.statusCode).toBe(200);
-    expect(ownerSample.json()).toEqual({ success: true });
+    expect(ownerSample.json()).toEqual({ success: true, data: { accepted: true } });
     const afterOwnerSample = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
     expect({ lat: afterOwnerSample.currentLat, lng: afterOwnerSample.currentLng })
       .toEqual({ lat: 6.803, lng: -58.153 });
@@ -1250,6 +1255,52 @@ describe('Driver location authority', () => {
     expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.842, lng: -58.182 });
   });
 
+  // [L05] The audience gate reads the room's sockets across nodes and takes
+  // its own DB connection: that must never happen under the FOR SHARE
+  // authority checkpoint (pool starvation; logout/GO writers queue behind it).
+  async function rideForLocation(driverId: string) {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const ride = await app.prisma.order.create({
+      data: {
+        orderNumber: `LOC-L05-${nanoid(8)}`, orderType: 'TAXI', customerId: customer.userId, driverId,
+        status: 'DRIVER_EN_ROUTE', pickupLat: CENTRAL.lat, pickupLng: CENTRAL.lng, pickupAddress: 'L05 pickup',
+        deliveryLat: SOUTH.lat, deliveryLng: SOUTH.lng, deliveryAddress: 'L05 dropoff',
+        subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+      },
+    });
+    await app.prisma.driver.update({ where: { id: driverId }, data: { currentRideId: ride.id, isAvailable: false } });
+    const heard: string[] = [];
+    const detach = orderSocketFixture(app.io, ride, (event) => heard.push(event));
+    return { ride, heard, detach };
+  }
+
+  it('[L05] publishes the GPS sample after the authority transaction commits: no row lock held while the gate reads sockets', async () => {
+    const d = await makeDriver();
+    const { ride, heard, detach } = await rideForLocation(d.driverId);
+    const probe = rowLockAtPublish(app.io, app.prisma, `order:${ride.id}`, 'drivers', d.driverId);
+    try {
+      const res = await inject('PUT', '/api/v1/driver/location', { latitude: CENTRAL.lat, longitude: CENTRAL.lng }, d.token);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data).toEqual({ accepted: true });
+    } finally { probe.restore(); detach(); }
+    expect(probe.locked, 'the gate ran once, with the driver row free').toEqual([false]);
+    expect(heard).toEqual(['driver:location']);
+  });
+
+  it('[L05] a ride reassigned after the checkpoint commits gets no sample from the former driver', async () => {
+    const d = await makeDriver();
+    const other = await makeDriver();
+    const { ride, heard, detach } = await rideForLocation(d.driverId);
+    const probe = rowLockAtPublish(app.io, app.prisma, `order:${ride.id}`, 'drivers', d.driverId,
+      () => app.prisma.order.update({ where: { id: ride.id }, data: { driverId: other.driverId } }));
+    try {
+      const res = await inject('PUT', '/api/v1/driver/location', { latitude: CENTRAL.lat, longitude: CENTRAL.lng }, d.token);
+      expect(res.statusCode).toBe(200);
+    } finally { probe.restore(); detach(); }
+    expect(probe.locked).toHaveLength(1);
+    expect(heard, 'the passenger gets no sample from a driver who left').toEqual([]);
+  });
+
 
   it('treats a queued offline sample as a no-op', async () => {
     const d = await makeDriver({ lat: 6.8, lng: -58.15 });
@@ -1317,6 +1368,8 @@ describe('Driver location authority', () => {
       longitude: -58.17,
     }, active.token);
     expect(activeRes.statusCode).toBe(200);
+    // An active-ride fix is an explicit acceptance too: the app keeps tracking only on one.
+    expect(activeRes.json()).toEqual({ success: true, data: { accepted: true } });
     const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: active.driverId } });
     expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.83, lng: -58.17 });
   });

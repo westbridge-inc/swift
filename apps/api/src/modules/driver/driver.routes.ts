@@ -1,3 +1,6 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { assertMoverPushReady } from '../notification/mover-push-authority';
+import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -16,8 +19,10 @@ import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
+import { coarsePoint } from '../dispatch/board-privacy';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { loadTaxiStops, offerItinerary, readRideItinerary } from '../rides/taxi-stops-read';
+import { decorateRideWaiting, readFareBreakdown, type TaxiFareBreakdown } from '../rides/taxi-waiting';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
@@ -36,6 +41,7 @@ import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { moverLocationAccepted } from '../../contracts/mover-location';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
@@ -58,8 +64,10 @@ import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
-import { normalizeRegistrationMark } from '../verification/subjects';
+import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
+import { assertHirePlateChange } from '../verification/hire-plate';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 
 const updateDriverProfileSchema = z.object({
@@ -177,19 +185,20 @@ export async function driverRoutes(app: FastifyInstance) {
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const me = await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    // [Owner ruling 11 Oct 2026 — H-PLATE] A new taxi plate is H-series, said before step-up or any write.
+    assertHirePlateChange(me.vehicleType, body.licensePlate, me.licensePlate);
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: its taxi
     // driver has no MMG pay link to set or clear. Refused before any step-up,
     // money-surface command or owner notice (whose SMS would reach a fictional number).
     if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') {
       throw new ReviewDemoMoneyRefusedError();
     }
-    // [High #9 · DS109] Changing the plate re-identifies the vehicle the driver operates.
+    // [High #9 · DS109] Changing the plate, make, model, year or colour re-identifies the vehicle the driver operates.
     // Step-up first (the same proof as a money surface), and the old vehicle links close so
     // GO re-checks the EXACT new vehicle — a retyped plate never carries another subject's
     // approved documents, and the old vehicle's evidence stops counting.
-    const plateChanged = body.licensePlate !== undefined
-      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(me.licensePlate ?? '');
-    if (plateChanged) {
+    const identityChanged = vehicleIdentityChanged(me, body);
+    if (identityChanged) {
       await requireStepUp(app, request);
     }
     const mmgPayUrl = body.mmgPayUrl === undefined
@@ -208,6 +217,7 @@ export async function driverRoutes(app: FastifyInstance) {
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
+      if (identityChanged && me.currentRideId) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active ride before changing your vehicle.');
       const driver = await tx.driver.update({
         where: { userId: request.user.userId },
         data: {
@@ -226,10 +236,10 @@ export async function driverRoutes(app: FastifyInstance) {
           ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
           ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
           ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
-          // [High #9 · DS109] A real plate change re-identifies the vehicle: retire live supply
+          // [High #9 · DS109] A real vehicle identity change re-identifies the vehicle: retire live supply
           // NOW (same atomic shape as the admin reject path) and clear the legacy verification
           // flag, so the new vehicle must be verified before this driver is dispatchable again.
-          ...(plateChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
+          ...(identityChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
         },
         include: {
           user: {
@@ -246,14 +256,8 @@ export async function driverRoutes(app: FastifyInstance) {
           },
         },
       });
-      if (plateChanged) {
-        // A plate change never inherits another subject's approved documents: every open
-        // vehicle link closes. New submissions for the new plate create a PENDING assignment
-        // that an admin must approve before its evidence propagates.
-        await tx.subjectLink.updateMany({
-          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-          data: { validTo: new Date() },
-        });
+      if (identityChanged) {
+        await requireFreshVehicleReview(tx, request.user.userId, me.licensePlate, { ...driver, kind: 'DRIVER' });
       }
 
       return driver;
@@ -401,6 +405,7 @@ export async function driverRoutes(app: FastifyInstance) {
       if (!sessions[0]) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
+      await assertMoverPushReady(tx, request.user.userId);
       const retiredRiderId = await lockAndRetireRiderSupply(tx, request.user.userId);
 
       // Lock and re-read the profile after the User lock. This makes the active
@@ -621,9 +626,13 @@ export async function driverRoutes(app: FastifyInstance) {
         : await cachedLegEta(app, authorized.currentRideId);
 
       // ETA work yields long enough for a second device to rotate GO. Take a
-      // short shared row lock only around the final authority check +
-      // synchronous socket publication. Concurrent pings do not block one
-      // another, but no old-generation sample can emit after a GO commits.
+      // short shared row lock only around the final authority check.
+      // Concurrent pings do not block one another; a GO that commits first
+      // refuses this sample. The publish runs after commit, never under the
+      // lock: the audience gate reads the room's sockets across nodes and takes
+      // its own DB connection. A sample authorized here goes out only while
+      // this driver is still the ride's driver, and the device's next ping is
+      // refused.
       const publication = await app.prisma.$transaction(async (tx) => {
         const users = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT "id"
@@ -663,25 +672,27 @@ export async function driverRoutes(app: FastifyInstance) {
           };
         }
 
-        if (current.currentRideId === authorized.currentRideId) {
-          app.io.to(`order:${authorized.currentRideId}`).emit('driver:location', {
-            driverId: driver.id,
-            orderId: authorized.currentRideId,
-            latitude,
-            longitude,
-            heading: heading || null,
-            etaMinutes,
-            timestamp: new Date().toISOString(),
-          });
-        }
-        return { accepted: true as const };
+        return { accepted: true as const, stillOnRide: current.currentRideId === authorized.currentRideId };
       });
       if (!publication.accepted) {
         return { success: true, data: publication };
       }
+      // Published after the commit, never under the lock (see above).
+      if (publication.stillOnRide) {
+        await emitToOrderRoom(app.prisma, app.io, authorized.currentRideId, 'driver:location', {
+          driverId: driver.id,
+          orderId: authorized.currentRideId,
+          latitude,
+          longitude,
+          heading: heading || null,
+          etaMinutes,
+          timestamp: new Date().toISOString(),
+        }, { fromMover: { driverId: driver.id } });
+      }
     }
 
-    return { success: true };
+    // The app checkpoints only an explicit acceptance (contracts/mover-location.ts).
+    return moverLocationAccepted();
   });
 
   // ─── Available Rides ───────────────────────────────────────────────────
@@ -700,7 +711,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // [SWIFT-064]. The demand heatmap uses the same window (one source of
     // truth); actually CANCELLING abandoned requests is SWIFT-021.
     const freshSince = new Date(Date.now() - TAXI_DEMAND_WINDOW_MIN * 60_000);
-    const orders = await app.prisma.order.findMany({
+    const candidates = await app.prisma.order.findMany({
       where: {
         customerId: { not: request.user.userId },
         orderType: 'TAXI',
@@ -725,11 +736,13 @@ export async function driverRoutes(app: FastifyInstance) {
         }],
       },
       include: {
-        customer: { select: { id: true, firstName: true, avatar: true } },
+        customer: { select: { id: true } },
       },
       orderBy: { placedAt: 'asc' },
       take: 20,
     });
+
+    const orders = await safeBoardOrders(app.prisma, candidates, request.user.userId, 'DRIVER');
 
     // R8.4: the incoming request shows "{Passenger} · {rating}★" (or New) —
     // one batched read from the ONE mapper.
@@ -741,21 +754,22 @@ export async function driverRoutes(app: FastifyInstance) {
 
     // Enrich with distance from driver to pickup
     const enriched = orders.map((order) => {
+      const pickup = coarsePoint(order.pickupLat, order.pickupLng);
+      const dropoff = coarsePoint(order.deliveryLat, order.deliveryLng);
       const distanceToPickup =
-        driver.currentLat && driver.currentLng && order.pickupLat && order.pickupLng
-          ? haversineDistance(driver.currentLat, driver.currentLng, order.pickupLat, order.pickupLng)
+        driver.currentLat !== null && driver.currentLng !== null && pickup
+          ? haversineDistance(driver.currentLat, driver.currentLng, pickup.lat, pickup.lng)
           : null;
       const etaMinutes = distanceToPickup !== null ? estimateDeliveryMinutes(distanceToPickup) : null;
+      const itinerary = offerItinerary(order, itineraries);
 
       return {
         id: order.id,
         orderNumber: order.orderNumber,
-        pickupAddress: order.taxiPickupAddress || order.pickupAddress,
-        dropoffAddress: order.taxiDropoffAddress || order.deliveryAddress,
-        pickupLat: order.pickupLat,
-        pickupLng: order.pickupLng,
-        dropoffLat: order.deliveryLat,
-        dropoffLng: order.deliveryLng,
+        pickupLat: pickup?.lat ?? null,
+        pickupLng: pickup?.lng ?? null,
+        dropoffLat: dropoff?.lat ?? null,
+        dropoffLng: dropoff?.lng ?? null,
         passengerCount: order.taxiPassengerCount || 1,
         estimatedDistance: order.taxiDistance,
         estimatedDuration: order.taxiDuration,
@@ -767,13 +781,14 @@ export async function driverRoutes(app: FastifyInstance) {
         distanceToPickup: distanceToPickup !== null ? Math.round(distanceToPickup * 10) / 10 : null,
         etaToPickup: etaMinutes,
         customer: order.customer
-          ? { ...order.customer, displayRating: passengerSurfaces.get(order.customer.id)?.displayRating ?? null }
+          ? { displayRating: passengerSurfaces.get(order.customer.id)?.displayRating ?? null }
           : order.customer,
         createdAt: order.createdAt,
         // [TAXI multi-stop] A ride with stops: how many and where, in order. The
         // dropoff above stays the FINAL destination; distance, duration and
         // fare are the whole route's. A ride without stops gains no key.
-        ...offerItinerary(order, itineraries),
+        // Coarse stops only, like the offer cards (offerItinerary).
+        ...itinerary,
       };
     });
 
@@ -810,7 +825,10 @@ export async function driverRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] A ride with stops: each with its progress, in order, and
     // the one the ride is heading for. A ride without them gains no key.
     const itinerary = order ? await readRideItinerary(app.prisma, order) : null;
-    return { success: true, data: order && itinerary ? { ...order, ...itinerary } : order };
+    // [TAXI waiting charge] From the arrival on, the live wait: what the driver
+    // collects on top of the route fare, the same number the freeze will take.
+    const waiting = order ? await decorateRideWaiting(app.prisma, order, itinerary?.stops ?? null) : {};
+    return { success: true, data: order && (itinerary || waiting.waiting) ? { ...order, ...itinerary, ...waiting } : order };
   });
 
   // ─── Ride Lifecycle ────────────────────────────────────────────────────
@@ -818,10 +836,10 @@ export async function driverRoutes(app: FastifyInstance) {
   // 1. Accept ride
   app.post('/rides/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    // [REPORT-011 F-04] fare 0 = "no choice", never the 60% floor (a
-    // forged/legacy client must not clamp the driver's own fare down).
-    const { fare: rawFare } = z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
-    const fare = rawFare && rawFare > 0 ? rawFare : undefined;
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A driver never sets the
+    // price: base fee plus km, as booked. An older app's `fare` is read (never
+    // refused) and ignored.
+    z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
     const driver = await getDriver(request.user.userId);
 
     if (!driver.isOnline || !driver.locationSessionId) {
@@ -857,16 +875,15 @@ export async function driverRoutes(app: FastifyInstance) {
     // Shared claim: the DB compare-and-set means two drivers tapping
     // accept at the same instant resolve to exactly one winner — the old
     // check-then-update here could double-assign.
-    // Assignment, mover reservation, immutable evidence, and the driver's
-    // server-clamped fare share one commit. A crash cannot leave a durable
-    // winner carrying the old fare (or a fare write on an unassigned ride).
-    const responseOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER', { requestedFare: fare });
+    // Assignment, mover reservation and immutable evidence share one commit;
+    // the booked formula fare is never rewritten by the claim.
+    const responseOrder = await dispatch.claimOrder(id, driver.id, 'DRIVER');
 
     // Customer-facing publication is after the canonical claim and therefore
     // best-effort. A socket/push outage cannot tell the driver a durable winner
     // failed (a retry would only meet their already-owned ride).
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id,
         status: 'DRIVER_ASSIGNED',
         driver: {
@@ -916,15 +933,14 @@ export async function driverRoutes(app: FastifyInstance) {
    *  quietly decayed by the un-acked offer's timeout.) */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getDriver(request.user.userId); // authz before validation
-    const { orderId, fare, offerAttemptId } = z.object({
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] `fare` from an older app
+    // is read (never refused) and ignored: the booked formula fare stands.
+    const { orderId, offerAttemptId } = z.object({
       orderId: z.string().min(1).max(64),
       fare: zMoneyWhole.optional(),
       offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
     }).parse(request.body);
-    // [REPORT-010 F-07] fare 0 is never a legitimate choice — a recovered
-    // card missing its board row must not silently clamp pay to the 60%
-    // floor. Zero means "no choice"; the market fare applies.
-    const order = await dispatch.acceptOffer(orderId, request.user.userId, fare && fare > 0 ? fare : undefined, offerAttemptId);
+    const order = await dispatch.acceptOffer(orderId, request.user.userId, undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
 
@@ -1051,7 +1067,7 @@ export async function driverRoutes(app: FastifyInstance) {
     await app.redis.expire(cancelledDeclinedKey, 3600).catch(() => {});
 
     // Tell the rider honestly, then re-dispatch so their ride survives.
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',
@@ -1102,7 +1118,7 @@ export async function driverRoutes(app: FastifyInstance) {
       etaMinutes = estimateDeliveryMinutes(dist);
     }
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'DRIVER_EN_ROUTE',
       eta: etaMinutes,
@@ -1179,7 +1195,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'DRIVER_ARRIVED',
     });
@@ -1256,7 +1272,7 @@ export async function driverRoutes(app: FastifyInstance) {
     }
     const updatedOrder = verification.order;
 
-    app.io.to(`order:${id}`).emit('ride:pin_verified', { orderId: id });
+    await emitToOrderRoom(app.prisma, app.io, id, 'ride:pin_verified', { orderId: id });
 
     return { success: true, data: updatedOrder, message: 'PIN verified successfully. You may now start the ride.' };
   });
@@ -1292,7 +1308,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     const updatedOrder = order;
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'RIDE_IN_PROGRESS',
       estimatedDuration: previous.taxiDuration,
@@ -1323,6 +1339,39 @@ export async function driverRoutes(app: FastifyInstance) {
     gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
     photoUrl: z.string().max(2048).optional(),
   });
+  /** [TAXI waiting charge] What a finished ride tells the passenger: the
+   *  DELIVERED event's fare object (with its breakdown once a waiting charge is
+   *  frozen, CONTRACT §8.4) and the completion notice. A ride with no frozen
+   *  charge gets today's object and today's sentence, exactly. */
+  const finishedFare = async (
+    order: Parameters<typeof readFareBreakdown>[1] & { taxiFareBase: unknown; taxiFarePerKm: unknown; taxiFarePerMin: unknown; taxiFareSurge: unknown },
+    status: string,
+    log: { warn: (obj: unknown, msg: string) => void },
+  ) => {
+    let breakdown: TaxiFareBreakdown | null = null;
+    if (status === 'DELIVERED') {
+      breakdown = await readFareBreakdown(app.prisma, order).catch((err: unknown) => {
+        log.warn({ err, orderId: order.id }, 'taxi fare breakdown could not be read after commit');
+        return null;
+      });
+    }
+    const fare = {
+      base: order.taxiFareBase,
+      perKm: order.taxiFarePerKm,
+      perMin: order.taxiFarePerMin,
+      surge: order.taxiFareSurge,
+      // [DS1201 S3] The amount collected: with a frozen waiting charge, the
+      // route fare + the charge — an older app reads only this figure. A ride
+      // with no charge keeps today's value exactly.
+      total: breakdown && breakdown.waitingCharge > 0 ? breakdown.total : order.taxiFareTotal,
+      ...(breakdown ? { fareBreakdown: breakdown } : {}),
+    };
+    const body = breakdown && breakdown.waitingCharge > 0
+      ? `You have arrived at your destination. Total fare: $${breakdown.total.toLocaleString()} GYD (trip $${breakdown.routeFare.toLocaleString()} + waiting $${breakdown.waitingCharge.toLocaleString()}).`
+      : `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`;
+    return { fare, body };
+  };
+
   app.post('/rides/:id/handover-photo', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
@@ -1355,17 +1404,12 @@ export async function driverRoutes(app: FastifyInstance) {
       };
     });
     if (!replayed) {
+      const finished = await finishedFare(order, data.status, request.log);
       try {
-        app.io.to(`order:${id}`).emit('order:status_changed', {
+        await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
           orderId: id,
           status: data.status,
-          fare: {
-            base: order.taxiFareBase,
-            perKm: order.taxiFarePerKm,
-            perMin: order.taxiFarePerMin,
-            surge: order.taxiFareSurge,
-            total: order.taxiFareTotal,
-          },
+          fare: finished.fare,
           actualDuration: data.actualDuration,
         });
       } catch (error) {
@@ -1376,7 +1420,7 @@ export async function driverRoutes(app: FastifyInstance) {
           userId: order.customerId,
           type: 'ORDER_UPDATE',
           title: 'Ride Complete',
-          body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
+          body: finished.body,
           data: taxiNotificationData(id, { status: 'DELIVERED' }),
         }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
       }
@@ -1421,17 +1465,12 @@ export async function driverRoutes(app: FastifyInstance) {
       invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${current}`),
     });
 
+    const finished = await finishedFare(order, 'DELIVERED', request.log);
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id,
         status: 'DELIVERED',
-        fare: {
-          base: order.taxiFareBase,
-          perKm: order.taxiFarePerKm,
-          perMin: order.taxiFarePerMin,
-          surge: order.taxiFareSurge,
-          total: order.taxiFareTotal,
-        },
+        fare: finished.fare,
         actualDuration,
       });
     } catch (error) {
@@ -1442,7 +1481,7 @@ export async function driverRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Ride Complete',
-      body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
+      body: finished.body,
       data: taxiNotificationData(id, { status: 'DELIVERED' }),
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
 

@@ -36,6 +36,7 @@ vi.mock('../../../mobile/src/modules/advertiser/screens/CampaignDetailScreen', (
 vi.mock('../../../mobile/src/modules/advertiser/screens/AdvertiserBillingScreen', () => ({ AdvertiserBillingScreen: () => null }));
 vi.mock('../../../mobile/src/modules/advertiser/screens/AdvertiserTeamScreen', () => ({ AdvertiserTeamScreen: () => null }));
 vi.mock('../../../mobile/src/modules/profile/screens/GetHelpScreen', () => ({ GetHelpScreen: () => null }));
+vi.mock('../../../mobile/src/modules/profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: () => null }));
 vi.mock('../../../mobile/node_modules/@react-navigation/native-stack', () => ({ createNativeStackNavigator: () => ({
   Navigator: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   Screen: ({ component: Component }: { component: React.ComponentType }) => <Component />,

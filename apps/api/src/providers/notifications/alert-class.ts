@@ -57,6 +57,10 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // [AF-MOB-006] A custody relay handoff: the holder and the relay rider. Standard
     // (prompt, audible); promoting them to job_update is a product decision.
     'custody_handoff_code', 'custody_relay_assigned', 'custody_relay_cancelled',
+    // [L07] The customer cancelled the delivery a rider holds. It travelled as
+    // standard (by fallback) before it had a kind; it stays standard, and
+    // promoting it to job_update is a product decision, like the relay kinds.
+    'mover_job_cancelled',
     'mmg_payment_confirmed', 'mmg_claim_disputed', 'mmg_claim_resolved', 'mmg_claim_mismatch',
     'mmg_unattested_cancellation', 'supply_returned',
     // Rides
@@ -84,7 +88,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
     'low_stock', 'staff_added', 'review_response', 'rating_removed', 'category_request_resolved',
-    'category_backfill_review', 'vendor_tier_promoted', 'support_update', 'store_pin_moved',
+    'category_backfill_review', 'vendor_tier_promoted', 'vendor_needs_public_phone', 'support_update', 'store_pin_moved',
     'ad_campaign_paused', 'ad_campaign_cancelled', 'ad_campaign_killed', 'ad_campaign_auto_cancelled',
     'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture',
     // Operations pages (admins)

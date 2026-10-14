@@ -1,6 +1,10 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { assertMoverPushReady } from '../notification/mover-push-authority';
+import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
+import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
@@ -35,7 +39,8 @@ import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { requireStepUp } from '../auth/step-up';
-import { normalizeRegistrationMark } from '../verification/subjects';
+import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 import { handoverBlockCounter } from '../../plugins/observability';
@@ -51,8 +56,8 @@ import { goOnlineRefusal } from '../subscription/go-online-refusals';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
-import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { moverLocationAccepted } from '../../contracts/mover-location';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
 import { dailyEarnings } from '../order/daily-earnings';
@@ -343,18 +348,12 @@ export async function riderRoutes(app: FastifyInstance) {
    *  acceptance — unlike the board-grab entrance, which is for the open list. */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
-    const { orderId, fare, offerAttemptId } = offerActionSchema.extend({ fare: zMoneyWhole.optional() }).parse(request.body);
-    // Rider-set delivery fee (CASH only) rides INSIDE the locked claim
-    // transaction [REPORT-005 F-005-01]: assignment, price, float, and audit
-    // commit or roll back together — never a post-assignment second commit
-    // that can fail after a durable assignment or apply a stale total.
-    // [REPORT-010 F-07] fare 0 is NEVER a legitimate choice (the floor is 60%
-    // of market): a recovered offer card whose board row hadn't loaded used
-    // to submit 0 and silently clamp the mover's pay to the floor — and on
-    // MMG it consumed the offer with MMG_PRICE_LOCKED. Zero means "no
-    // choice"; the market rate applies.
-    const chosenFare = fare && fare > 0 ? fare : undefined;
-    const order = await dispatch.acceptOffer(orderId, request.user.userId, chosenFare, offerAttemptId);
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the
+    // price: every delivery is the formula fee set at checkout. An older app's
+    // slider may still send `fare`; it is read (so that app is never refused)
+    // and ignored.
+    const { orderId, offerAttemptId } = offerActionSchema.extend({ fare: zMoneyWhole.optional() }).parse(request.body);
+    const order = await dispatch.acceptOffer(orderId, request.user.userId, undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
 
@@ -502,14 +501,13 @@ export async function riderRoutes(app: FastifyInstance) {
     if (body.vehicleType !== undefined && body.vehicleType !== rider.vehicleType) {
       throw new AppError(409, 'USE_VEHICLE_CHANGE', 'Change your vehicle from the vehicle screen — a new vehicle needs its own documents.');
     }
-    // [High #9 · DS109] Changing the plate re-identifies the vehicle the rider operates.
+    // [High #9 · DS109] Changing the plate, make, model, year or colour re-identifies the vehicle the rider operates.
     // Step-up first (the same proof as a money surface), the old vehicle links close so
     // GO re-checks the EXACT new vehicle, and live supply retires now — a retyped plate
     // never carries another subject's approved documents, and the old vehicle's evidence
     // stops counting.
-    const plateChanged = body.licensePlate !== undefined
-      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(rider.licensePlate ?? '');
-    if (plateChanged) {
+    const identityChanged = vehicleIdentityChanged(rider, body);
+    if (identityChanged) {
       await requireStepUp(app, request);
     }
 
@@ -531,13 +529,15 @@ export async function riderRoutes(app: FastifyInstance) {
     if (docFields.some((f) => updateData[f] !== undefined)) {
       updateData['documentsVerified'] = false;
     }
-    // [High #9 · DS109] A real plate change retires live supply atomically (same shape as
+    // [High #9 · DS109] A real vehicle identity change retires live supply atomically (same shape as
     // the driver route and the admin reject path) and clears the legacy verification flag,
     // so the new vehicle must be verified before this rider is dispatchable again.
-    if (plateChanged) {
+    if (identityChanged) {
       updateData['isOnline'] = false;
       updateData['locationSessionId'] = null;
       updateData['documentsVerified'] = false;
+      updateData['documentsVerifiedAt'] = null;
+      updateData['documentsVerifiedBy'] = null;
     }
 
     if (Object.keys(updateData).length === 0) {
@@ -549,6 +549,7 @@ export async function riderRoutes(app: FastifyInstance) {
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM riders WHERE id = ${rider.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== rider.updatedAt.getTime()) throw staleMoverAuthorityError();
+      if (identityChanged && (rider.currentOrderId || (await riderLiveLegCount(tx, rider.id)) > 0)) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active delivery before changing your vehicle.');
       const updated = await tx.rider.update({
         where: { id: rider.id },
         data: updateData,
@@ -568,14 +569,8 @@ export async function riderRoutes(app: FastifyInstance) {
         },
       });
 
-      if (plateChanged) {
-        // A plate change never inherits another subject's approved documents: every open
-        // vehicle link closes. New submissions for the new plate create a PENDING assignment
-        // that an admin must approve before its evidence propagates.
-        await tx.subjectLink.updateMany({
-          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-          data: { validTo: new Date() },
-        });
+      if (identityChanged) {
+        await requireFreshVehicleReview(tx, request.user.userId, rider.licensePlate, { ...updated, kind: 'RIDER' });
       }
 
       return updated;
@@ -681,6 +676,7 @@ export async function riderRoutes(app: FastifyInstance) {
       if (!sessions[0]) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
+      await assertMoverPushReady(tx, request.user.userId);
 
       const snapshots = await tx.$queryRaw<Array<{ currentOrderId: string | null; documentsVerified: boolean; updatedAt: Date }>>`
         SELECT "currentOrderId", "documentsVerified", "updatedAt"
@@ -931,11 +927,14 @@ export async function riderRoutes(app: FastifyInstance) {
 
       // Authorization above and the live emit cannot be one unguarded read /
       // publish pair: another device may win GO while ETA is being computed.
-      // Take a shared lock only for this final synchronous publication
-      // checkpoint (never for maps/cache work). Concurrent pings can still
-      // publish together, while GO/offline updates wait. GO therefore
-      // linearizes either before this check and suppresses the stale sample,
-      // or after the emit has already completed.
+      // Take a shared lock only for this final authority checkpoint (never for
+      // maps/cache work, and never for the publish: the audience gate reads
+      // the room's sockets across nodes and takes its own DB connection, which
+      // must not happen while these rows are locked). Concurrent pings still
+      // run together, while GO/offline updates wait. GO therefore linearizes
+      // either before this check and suppresses the stale sample, or after it;
+      // a sample authorized here goes out right after commit, only while this
+      // rider is still the leg's mover, and the device's next ping is refused.
       const publication = await app.prisma.$transaction(async (tx) => {
         // User -> Session -> profile matches the authority writers' outer lock
         // order. The shared mode keeps concurrent authorized pings concurrent
@@ -988,36 +987,39 @@ export async function riderRoutes(app: FastifyInstance) {
             select: { id: true },
           })).map((o) => o.id),
         );
-        for (const leg of legEtas) {
-          if (!stillLive.has(leg.orderId)) continue;
-          app.io.to(`order:${leg.orderId}`).emit('rider:location', {
-            // [MOB-024] The event NAMES its order. It is emitted into that
-            // order's room, so the server already knows — and without it the
-            // customer's screen had nothing to check a fix against, so a
-            // coordinate from another room (a retained subscription, a
-            // reconnect that rejoined an old room) moved the courier marker
-            // and the ETA on the wrong customer's delivery.
-            orderId: leg.orderId,
-            riderId: rider.id,
-            lat: latitude,
-            lng: longitude,
-            heading: heading ?? null,
-            speed: speed ?? null,
-            etaMinutes: leg.etaMinutes,
-            // 'direct' for the leg the rider is on; 'after_current' for a leg
-            // behind another delivery. The screen labels it honestly.
-            etaBasis: leg.basis,
-            ts: now.toISOString(),
-          });
-        }
-        return { accepted: true as const };
+        return { accepted: true as const, stillLive };
       });
       if (!publication.accepted) {
         return { success: true, data: publication };
       }
+      const { stillLive } = publication;
+      // Published after the commit, never under the lock (see above).
+      for (const leg of legEtas) {
+        if (!stillLive.has(leg.orderId)) continue;
+        await emitToOrderRoom(app.prisma, app.io, leg.orderId, 'rider:location', {
+          // [MOB-024] The event NAMES its order. It is emitted into that
+          // order's room, so the server already knows — and without it the
+          // customer's screen had nothing to check a fix against, so a
+          // coordinate from another room (a retained subscription, a
+          // reconnect that rejoined an old room) moved the courier marker
+          // and the ETA on the wrong customer's delivery.
+          orderId: leg.orderId,
+          riderId: rider.id,
+          lat: latitude,
+          lng: longitude,
+          heading: heading ?? null,
+          speed: speed ?? null,
+          etaMinutes: leg.etaMinutes,
+          // 'direct' for the leg the rider is on; 'after_current' for a leg
+          // behind another delivery. The screen labels it honestly.
+          etaBasis: leg.basis,
+          ts: now.toISOString(),
+        }, { fromMover: { riderId: rider.id } });
+      }
     }
 
-    return { success: true };
+    // The app checkpoints only an explicit acceptance (contracts/mover-location.ts).
+    return moverLocationAccepted();
   });
 
   // =========================================================================
@@ -1059,7 +1061,7 @@ export async function riderRoutes(app: FastifyInstance) {
       orderTypes.push('COURIER');
     }
 
-    const orders = await app.prisma.order.findMany({
+    const candidates = await app.prisma.order.findMany({
       where: {
         customerId: { not: request.user.userId },
         status: { in: ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'] },
@@ -1093,11 +1095,13 @@ export async function riderRoutes(app: FastifyInstance) {
             addressLine1: true, city: true,
           },
         },
-        items: { select: { name: true, quantity: true } },
+        items: { select: { quantity: true } },
       },
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
+
+    const orders = await safeBoardOrders(app.prisma, candidates, request.user.userId, 'RIDER');
 
     // §4d trust badge: WHO the rider would front cash for — trust level,
     // completed orders, strikes. One batch (3 queries), never per-row.
@@ -1123,14 +1127,18 @@ export async function riderRoutes(app: FastifyInstance) {
         // empty, and nothing about the system says why.
         const pickupLat = order.pickupLat != null ? Number(order.pickupLat) : Number(order.vendor?.latitude ?? NaN);
         const pickupLng = order.pickupLng != null ? Number(order.pickupLng) : Number(order.vendor?.longitude ?? NaN);
-        const hasPickup = Number.isFinite(pickupLat) && Number.isFinite(pickupLng);
+        const privatePickup = order.orderType === 'COURIER' ? coarsePoint(pickupLat, pickupLng) : null;
+        const boardPickupLat = order.orderType === 'COURIER' ? privatePickup?.lat ?? NaN : pickupLat;
+        const boardPickupLng = order.orderType === 'COURIER' ? privatePickup?.lng ?? NaN : pickupLng;
+        const destination = coarsePoint(order.deliveryLat, order.deliveryLng);
+        const hasPickup = Number.isFinite(boardPickupLat) && Number.isFinite(boardPickupLng);
 
         // No usable pickup point is NOT a job 6,494 km away — it is a job whose
         // distance we do not know. Infinity keeps it off the radius-filtered
         // board without pretending we measured something.
-        const pickupDistance = hasPickup ? haversineDistance(riderLat, riderLng, pickupLat, pickupLng) : Infinity;
-        const deliveryDistance = hasPickup
-          ? haversineDistance(pickupLat, pickupLng, Number(order.deliveryLat), Number(order.deliveryLng))
+        const pickupDistance = hasPickup ? haversineDistance(riderLat, riderLng, boardPickupLat, boardPickupLng) : Infinity;
+        const deliveryDistance = hasPickup && destination
+          ? haversineDistance(boardPickupLat, boardPickupLng, destination.lat, destination.lng)
           : Infinity;
         return {
           id: order.id,
@@ -1138,10 +1146,6 @@ export async function riderRoutes(app: FastifyInstance) {
           orderType: order.orderType,
           status: order.status,
           vendor: order.vendor,
-          pickupAddress: order.pickupAddress,
-          deliveryAddress: order.deliveryAddress,
-          deliveryInstructions: order.deliveryInstructions,
-          items: order.items,
           itemCount: order.items.reduce((s, i) => s + i.quantity, 0),
           estLoad: estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0)),
           deliveryFee: Number(order.deliveryFee),
@@ -1267,12 +1271,10 @@ export async function riderRoutes(app: FastifyInstance) {
   /** POST /orders/:id/accept — Claim an available order. */
   app.post('/orders/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    // [REPORT-011 F-04] fare 0 is never a legitimate undercut choice (the floor
-    // is 60% of market). A forged/legacy client posting 0 must NOT clamp the
-    // rider's own pay to the floor — normalize zero to "no choice" so the
-    // market fee applies, at THIS entrance too, not just the offer card.
-    const { fare: rawFare } = z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
-    const fare = rawFare && rawFare > 0 ? rawFare : undefined;
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the
+    // price. An older app's `fare` is read (never refused) and ignored: the
+    // formula fee set at checkout stands, on CASH and MMG alike.
+    z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
 
     // Must be online.
@@ -1379,20 +1381,6 @@ export async function riderRoutes(app: FastifyInstance) {
         `This ${needsCourier ? 'courier parcel' : 'delivery'} needs a ${needsCourier ? 'courier' : 'delivery'} rider — your account isn't set up for it.`);
     }
 
-    // Rider-set delivery fee, capped at the market rate (deliveryFee) — CASH
-    // only [REPORT-005 F-005-01]: on CASH the customer simply pays less at the
-    // door; on MMG the checkout total was already paid/instructed to the store,
-    // so repricing would rewrite captured money. Early honest 409 here; the
-    // persistence seam re-derives the clamp from the LOCKED row either way.
-    if (fare != null && order.paymentMethod !== 'CASH'
-      && clampDriverFare(fare, Number(order.deliveryFee)) !== Number(order.deliveryFee)) {
-      throw new AppError(
-        409,
-        'MMG_PRICE_LOCKED',
-        'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
-      );
-    }
-
     // D.3 cash-exposure parity with dispatch.claimOrder [debug-ledger P2]: a
     // board-grab accept must respect the same float gate the offer cascade
     // enforces — the rider fronts the vendor the CASH subtotal at pickup — and
@@ -1434,9 +1422,6 @@ export async function riderRoutes(app: FastifyInstance) {
         changedBy: request.user.userId,
         moverUserId: request.user.userId,
         note: 'Rider accepted the order',
-        // The seam clamps against the LOCKED row and applies the total as an
-        // atomic delta — no stale absolute totals from this preview [F-005-01].
-        ...(fare != null ? { requestedFee: fare } : {}),
       });
 
       // Float, order, and mover reservation share this transaction. Any failed
@@ -2041,7 +2026,7 @@ export async function riderRoutes(app: FastifyInstance) {
     const handbackDeclinedKey = dispatchDeclinedKey(id, outcome.order.fulfillmentModeVersion);
     await app.redis.sadd(handbackDeclinedKey, rider.id).catch(() => {});
     await app.redis.expire(handbackDeclinedKey, 3600).catch(() => {});
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
     await new NotificationService(app.prisma, app.io).send({
       userId: outcome.customerId,
       type: 'ORDER_UPDATE',

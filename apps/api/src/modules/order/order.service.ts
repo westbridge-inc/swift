@@ -1,4 +1,9 @@
+import { emitToOrderRoom } from './order-room-emission.service';
+import { readFeePause } from '../billing/mmg-pause';
+import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
+import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -14,12 +19,13 @@ import type {
 } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
-import { clampDriverFare, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
+import { generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
+import { readTooLateToDeliver } from '../dispatch/rescue';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -39,7 +45,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
 import { canonicalSlotStart } from '../booking/availability';
 import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, COURIER_CASH_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
-import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
+import { resolveSelectedOptions, optionsUnitPrice, OptionSelectionError, normalizeItemNote, rebuildSelectionFromSnapshot, selectionKey, validateSelectedOptions, type OptionSelection, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
@@ -55,6 +61,7 @@ import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { newRidePin } from '../rides/ride-pin';
+import { freezeTaxiWaiting, frozenWaitingCharge } from '../rides/taxi-waiting';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   hasTaxiPassengerCustody,
@@ -66,6 +73,7 @@ import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
+import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
 
 interface CheckoutInput {
   userId: string;
@@ -88,6 +96,12 @@ interface CheckoutInput {
    *  mode picks where a BOTH-mode service happens (validated against what
    *  the business actually offers). */
   appointments?: Array<{ itemId: string; slotStart: Date; mode?: 'AT_BUSINESS' | 'MOBILE' }>;
+  /** [L09 · price lock] What the customer saw when they placed the order: the
+   *  quote's total and each cart line's unit price. Compared under the store
+   *  lock with what the order would charge; any difference refuses with
+   *  PRICE_CHANGED (seen → now) so the customer confirms the new price. An
+   *  older app sends neither and is not compared (today's behaviour). */
+  expectedPrices?: { total?: number; lines?: Array<{ lineId: string; unitPrice: number }> };
   /** Injectable clock so the risk heuristic is testable */
   now?: Date;
   /** Test seam [REPORT-013 F-013-01/06]: runs after pre-transaction pricing
@@ -128,6 +142,66 @@ interface CheckoutStaged {
   orders: CheckoutCreatedOrder[];
   answer: CheckoutAnswer;
   receiptId: string | null;
+}
+
+/** [L09 · M023 · F4] How checkout refuses a line its options no longer allow.
+ *  A sold-out or removed choice answers like a sold-out item (409
+ *  ITEM_UNAVAILABLE): every app already re-reads the cart on that code, and
+ *  the cart quote marks the line so the customer removes it and chooses
+ *  again. Any other gap (a choice the store now requires, too many choices)
+ *  asks for the choices again. */
+function checkoutOptionRefusal(item: { id: string; name: string }, error: OptionSelectionError): AppError {
+  const details = { itemId: [item.id], reason: [error.reason] };
+  if (error.reason === 'OPTION_UNAVAILABLE' || error.reason === 'OPTION_UNKNOWN') {
+    const what = error.reason === 'OPTION_UNAVAILABLE' && error.optionName
+      ? `${error.optionName} for ${item.name} is sold out`
+      : `A choice for ${item.name} is no longer on the menu`;
+    return new AppError(409, 'ITEM_UNAVAILABLE', `${what} — remove it from your cart and add it again with another choice.`, details);
+  }
+  return new AppError(409, 'CART_OPTIONS_CHANGED', `Choose your options for ${item.name} again — remove it from your cart and add it from the menu.`, details);
+}
+
+/** GYD as the customer reads it: "GYD 1,450" (cents only when there are any). */
+function gyd(amount: number): string {
+  return `GYD ${amount.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+/** Money compared to the cent, so a decimal read never reads as a change. */
+const sameMoney = (a: number, b: number) => Math.round(a * 100) === Math.round(b * 100);
+
+/**
+ * [L09 · price lock] Refuse when the order would charge anything other than
+ * what the customer saw: a line's unit price or the total. Only what the
+ * client sent is compared (an older app sends nothing and is not refused).
+ * A line the customer saw that is no longer in the cart is a cart change.
+ * The refusal is bounded however large the cart: the message names five
+ * lines and the details carry fifty, with the full count beside them.
+ */
+export function assertPricesAsSeen(
+  expected: NonNullable<CheckoutInput['expectedPrices']>,
+  lines: ReadonlyArray<{ id: string; item: { name: string }; unitPrice: number }>,
+  total: number,
+): void {
+  const byId = new Map(lines.map((line) => [line.id, line]));
+  const changed: Array<{ lineId: string; name: string; seen: number; now: number }> = [];
+  for (const seen of expected.lines ?? []) {
+    const line = byId.get(seen.lineId);
+    if (!line) throw new AppError(409, 'CART_CHANGED', 'Your cart just changed — review it and place the order again.');
+    if (!sameMoney(line.unitPrice, seen.unitPrice)) {
+      changed.push({ lineId: line.id, name: line.item.name, seen: seen.unitPrice, now: line.unitPrice });
+    }
+  }
+  const totalChanged = expected.total != null && !sameMoney(total, expected.total);
+  if (changed.length === 0 && !totalChanged) return;
+  const parts = changed.slice(0, 5).map((c) => `${c.name} ${gyd(c.seen)} → ${gyd(c.now)}`);
+  if (changed.length > 5) parts.push(`and ${changed.length - 5} other line${changed.length - 5 === 1 ? '' : 's'}`);
+  if (totalChanged) parts.push(`total ${gyd(expected.total!)} → ${gyd(total)}`);
+  throw new AppError(
+    409,
+    'PRICE_CHANGED',
+    `Prices changed since you last looked: ${parts.join('; ')}. Review your cart and place the order again.`,
+    { lines: changed.slice(0, 50), changedLineCount: changed.length, total: totalChanged ? { seen: expected.total, now: total } : null },
+  );
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -301,13 +375,13 @@ export function assertMmgFulfilmentAllowed(
   // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
   if (order.mmgClaimMismatchAt) {
     // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
-    throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim, so this order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don\'t hand anything over until then.');
+    throw new AppError(409, 'MMG_CLAIM_MISMATCH', "The store's and the customer's MMG payment reports don't match. This order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don't hand anything over until then.");
   }
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
       409,
       'MMG_PAYMENT_PENDING',
-      'This MMG order can move only after the store confirms the payment landed in its MMG wallet.',
+      'This MMG order can move only after the store confirms the payment landed in its MMG account.',
     );
   }
 }
@@ -507,7 +581,6 @@ export interface CanonicalOrderTransitionInput {
     /** Null keeps system cancellations out of customer-risk attribution. */
     by: string | null;
     reason: string;
-    lateFeeDue?: number;
   };
   /** Route-specific terminal facts that must commit with the state machine.
    * Deliberately whitelisted so callers cannot overwrite ownership, money, or
@@ -553,6 +626,10 @@ export interface CanonicalOrderTransitionInput {
     userAgent?: string;
   };
   invalidStatus?: (current: OrderStatus) => AppError;
+  /** [owner #50] A CUSTOMER's own cancel through this seam (the courier sender
+   *  cancel): the one cancellation predicate [cancel-policy.ts] decides on the
+   *  LOCKED row, exactly as `cancelOrder` does — free or refused, never a fee. */
+  customerCancel?: boolean;
 }
 
 export interface CanonicalOrderTransitionResult {
@@ -605,10 +682,6 @@ export class OrderService {
       riderId: string;
       changedBy: string;
       note?: string;
-      /** Rider-chosen delivery fee (CASH rail only) — the seam derives the
-       *  clamp and the total delta from the LOCKED row, never from a route
-       *  preview [REPORT-005 F-005-01]. */
-      requestedFee?: number;
       moverUserId: string;
     },
   ): Promise<RiderAssignmentSnapshot & { dispatchAssignmentSequence: number }> {
@@ -625,10 +698,13 @@ export class OrderService {
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const paymentGate = await tx.order.findUnique({
       where: { id: input.orderId },
-      select: { paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
+      select: { customerId: true, paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
     });
     if (paymentGate) {
+      await assertDispatchPairEligible(tx, paymentGate.customerId, input.moverUserId, 'RIDER');
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
+      // [GUARDRAILS §8] Nor is a rider handed an order holding a line Swift no longer allows.
+      await assertOrderMayProceed(tx, input.orderId, 'mover');
       if (withheldAwaitingReadiness(paymentGate)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(paymentGate)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
       if (paymentGate.fulfillment !== 'DELIVERY') {
@@ -636,26 +712,8 @@ export class OrderService {
       }
     }
 
-    // [REPORT-005 F-005-01] Rider price choice is a CASH feature: the customer
-    // pays the (lower) total at the door. An MMG total was already paid — or
-    // externally instructed — at checkout; repricing after capture rewrites
-    // money the store received. Fee applied as an atomic delta off the locked
-    // row so a stale preview can never smuggle in an absolute total.
-    let repricing: Prisma.OrderUncheckedUpdateManyInput = {};
-    if (input.requestedFee != null && paymentGate) {
-      const marketFee = Number(paymentGate.deliveryFee);
-      const chosenFee = clampDriverFare(input.requestedFee, marketFee);
-      if (chosenFee !== marketFee) {
-        if (paymentGate.paymentMethod !== 'CASH') {
-          throw new AppError(
-            409,
-            'MMG_PRICE_LOCKED',
-            'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
-          );
-        }
-        repricing = { deliveryFee: chosenFee, totalAmount: { decrement: marketFee - chosenFee } };
-      }
-    }
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The seam takes no price:
+    // the delivery fee and the total stay exactly as booked at checkout.
 
     const claimed = await tx.order.updateMany({
       where: {
@@ -677,7 +735,6 @@ export class OrderService {
       data: {
         riderId: input.riderId,
         status: 'RIDER_ASSIGNED',
-        ...repricing,
       },
     });
     if (claimed.count === 0) {
@@ -745,7 +802,7 @@ export class OrderService {
       timestamp: new Date().toISOString(),
     };
     try {
-      this.io.to(`order:${order.id}`).emit('order:status_changed', statusEvent);
+      await emitToOrderRoom(this.prisma, this.io, order.id, 'order:status_changed', statusEvent);
       if (order.vendorId) {
         this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
       }
@@ -760,6 +817,10 @@ export class OrderService {
   }
 
   async checkout(input: CheckoutInput) {
+    const assertions = input.expectedPrices?.lines;
+    if (assertions && new Set(assertions.map((line) => line.lineId)).size !== assertions.length) {
+      throw new AppError(400, 'INVALID_EXPECTED_PRICES', 'Expected-price line IDs must be unique.');
+    }
     const now = input.now ?? new Date();
 
     const cart = await this.prisma.cart.findUnique({
@@ -772,6 +833,17 @@ export class OrderService {
     });
     if (!cart || cart.items.length === 0) {
       throw new AppError(400, 'EMPTY_CART', 'Your cart is empty');
+    }
+    // [L09 · M023] The same validator the cart used: a choice that became
+    // unavailable (or a selection the cart never should have held) refuses
+    // the checkout instead of being silently dropped from, or charged on, the order.
+    for (const line of cart.items) {
+      try {
+        validateSelectedOptions(line.item, line.selectedOptions);
+      } catch (error) {
+        if (!(error instanceof OptionSelectionError)) throw error;
+        throw checkoutOptionRefusal(line.item, error);
+      }
     }
 
     const user = await this.prisma.user.findUniqueOrThrow({
@@ -792,7 +864,7 @@ export class OrderService {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Ordering is disabled on this account after repeated failed deliveries. Contact support.');
     }
     if (restriction === 'restricted') {
-      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
+      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering needs your ID on file. Add your ID in the app — a person will look at it before ordering unlocks.');
     }
 
     // [E27] No profile selfie to place an ordinary order (food, grocery,
@@ -837,6 +909,7 @@ export class OrderService {
       vendor: (typeof cart.items)[number]['item']['vendor'];
       fulfillment: FulfillmentType;
       appointmentSlot?: Date;
+      homeVisit?: { inShopAvailable: boolean };
       distanceKm: number;
       /** [ALG-18] Which engine priced `distanceKm`; frozen on the order with it. */
       distanceSource: RouteSource | null;
@@ -865,9 +938,9 @@ export class OrderService {
       const vendorSub = await this.prisma.subscription.findFirst({
         where: { vendorId: vendor.id },
         orderBy: { createdAt: 'desc' },
-        select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
+        select: { id: true, status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
       });
-      const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
+      const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' }, await readFeePause(this.prisma, process.env, vendorSub?.id));
       if (!vendorOperability.operable) {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
       }
@@ -893,6 +966,9 @@ export class OrderService {
         requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
+      // [GUARDRAILS §8] No order carries a prohibited line (banned, or held for a check) —
+      // refused in the sold-out shape, before any write. Re-checked under the locks.
+      await assertOrderableNow(this.prisma, items.map((ci) => ({ id: ci.item.id, name: ci.item.name })));
       // [DOC-1 §18.3 · DOC-INV-26] A line in a BLOCK_ORDER category whose licence
       // is not valid fails the order — the lapse-after-publish case.
       {
@@ -942,6 +1018,7 @@ export class OrderService {
       const fulfillment: FulfillmentType = planFulfillment(items, input.fulfillmentSelections?.[vendorId]);
       const appointmentItems = items.filter((ci) => ci.item.fulfillment === 'APPOINTMENT');
       let appointmentSlot: Date | undefined;
+      let homeVisit: { inShopAvailable: boolean } | undefined;
 
       if (fulfillment === 'APPOINTMENT') {
         if (appointmentItems.length !== items.length || items.length !== 1) {
@@ -1026,6 +1103,17 @@ export class OrderService {
         }
         const mobileVisit = requestedMode ? requestedMode === 'MOBILE' : offered === 'MOBILE' || offered === 'BOTH';
         if (mobileVisit) {
+          homeVisit = { inShopAvailable: offered === 'BOTH' };
+          // [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] A home visit is booked only while
+          // the owner holds an approved, current police clearance. Refused before anything else
+          // about the visit (an address would not change the answer); the owner is told once a
+          // day what unlocks it. In-shop bookings never reach this branch.
+          const owner = await this.prisma.vendorOwner.findUnique({ where: { id: vendor.ownerId }, select: { userId: true } });
+          const { homeVisitRefusal, homeVisitsCleared, tellOwnerHomeVisitsPaused } = await import('../verification/home-visits');
+          if (!owner || !(await homeVisitsCleared(this.prisma, owner.userId))) {
+            if (owner) await tellOwnerHomeVisitsPaused(this.prisma, this.notifications, owner.userId, vendor.name).catch(() => false);
+            throw homeVisitRefusal(vendor.name, offered === 'BOTH');
+          }
           if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
           const travel = await this.maps.routeKm(
             { lat: vendor.latitude, lng: vendor.longitude },
@@ -1065,7 +1153,7 @@ export class OrderService {
         throw new AppError(400, 'MIN_ORDER', `Minimum order at ${vendor.name} is $${Number(vendor.minOrderAmount).toLocaleString()} GYD`);
       }
 
-      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
+      plans.push({ vendor, fulfillment, appointmentSlot, homeVisit, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
     }
 
     // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
@@ -1126,7 +1214,7 @@ export class OrderService {
     const orderCurrency = (await this.countryConfig.getByCode(user.countryCode).catch(() => null))?.currencyCode ?? 'GYD';
     if (user.trustLevel === 'L1' && grandTotal >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need ID verification. Verify once in the app and this limit is gone.`,
+        `Orders of $${Math.round(gateLocal).toLocaleString()} GYD or more need your ID on file. Add it once in the app to lift this limit.`,
         { threshold: gateLocal, total: grandTotal });
     }
 
@@ -1140,7 +1228,7 @@ export class OrderService {
     // one trust boundary, tunable per country, no new magic number.
     if (user.trustLevel === 'L1' && discount >= gateLocal) {
       throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `This promo needs ID verification to use. Verify once in the app and it's yours to keep.`,
+        `This promo needs your ID on file. Add it once in the app and it's yours to keep.`,
         { threshold: gateLocal, discount });
     }
 
@@ -1209,20 +1297,52 @@ export class OrderService {
       // removed item could still be ordered. The authoritative generation is
       // the item set (id + quantity) plus the tip; re-read it under the lock
       // and refuse on any drift.
+      // [L09 · M022] Each line's options and note, and the chosen destination,
+      // are part of the reviewed cart too: a change to any of them between
+      // pricing and commit refuses the checkout like a quantity change does.
       const cartSignature = (
-        items: Array<{ id: string; quantity: number }>,
+        items: Array<{ id: string; quantity: number; selectedOptions: unknown; specialInstructions: string | null }>,
         tipAmount: Prisma.Decimal | number,
       ) =>
         JSON.stringify({
-          items: items.map((i) => [i.id, i.quantity]).sort((a, b) => (a[0]! < b[0]! ? -1 : 1)),
+          items: items
+            .map((i) => [i.id, i.quantity, selectionKey(i.selectedOptions), i.specialInstructions ?? null] as const)
+            .sort((a, b) => (a[0] < b[0] ? -1 : 1)),
           tip: Number(tipAmount),
         });
       const lockedCart = await tx.cart.findUnique({
         where: { id: cart.id },
-        select: { tipAmount: true, items: { select: { id: true, quantity: true } } },
+        select: {
+          tipAmount: true,
+          deliveryAddressId: true,
+          items: { select: { id: true, quantity: true, selectedOptions: true, specialInstructions: true } },
+        },
       });
-      if (!lockedCart || cartSignature(lockedCart.items, lockedCart.tipAmount) !== cartSignature(cart.items, cart.tipAmount)) {
+      if (
+        !lockedCart
+        || cartSignature(lockedCart.items, lockedCart.tipAmount) !== cartSignature(cart.items, cart.tipAmount)
+      ) {
         throw new AppError(409, 'CART_CHANGED', 'Your cart just changed — review it and place the order again.');
+      }
+      // The priced address is resolved again, the same way (the cart's choice,
+      // else the default), and must be the same address at the same place.
+      // The order is stamped with this address's text too, so the text is
+      // part of the comparison: a new door number is a different destination.
+      const addressSelect = { id: true, latitude: true, longitude: true, addressLine1: true, city: true } as const;
+      const lockedAddress = (lockedCart.deliveryAddressId
+        ? await tx.address.findUnique({ where: { id: lockedCart.deliveryAddressId }, select: addressSelect })
+        : null)
+        ?? await tx.address.findFirst({ where: { userId: input.userId, isDefault: true }, select: addressSelect });
+      if (
+        (lockedAddress?.id ?? null) !== (address?.id ?? null)
+        || (address && lockedAddress && (
+          lockedAddress.latitude !== address.latitude
+          || lockedAddress.longitude !== address.longitude
+          || lockedAddress.addressLine1 !== address.addressLine1
+          || lockedAddress.city !== address.city
+        ))
+      ) {
+        throw new AppError(409, 'CART_CHANGED', 'Your delivery address just changed — review it and place the order again.');
       }
 
       // [REPORT-013 F-013-06] Authority is proven WHERE IT COMMITS: every
@@ -1236,7 +1356,7 @@ export class OrderService {
       for (const planVendorId of planVendorIds) {
         const lockedVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: planVendorId },
-          select: { name: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
+          select: { name: true, ownerId: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
         });
         if (
           lockedVendor.status !== 'ACTIVE'
@@ -1246,17 +1366,32 @@ export class OrderService {
         ) {
           throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
         }
+        const visit = plans.find((plan) => plan.vendor.id === planVendorId)?.homeVisit;
+        if (visit) {
+          const owner = await tx.vendorOwner.findUnique({ where: { id: lockedVendor.ownerId }, select: { userId: true } });
+          const { homeVisitRefusal, homeVisitsCleared } = await import('../verification/home-visits');
+          if (!owner || !(await homeVisitsCleared(tx, owner.userId))) throw homeVisitRefusal(lockedVendor.name, visit.inShopAvailable);
+        }
         const lockedSub = await tx.subscription.findFirst({
           where: { vendorId: planVendorId },
           orderBy: { createdAt: 'desc' },
-          select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
+          select: { id: true, status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
         });
-        const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
+        const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' }, await readFeePause(tx, process.env, lockedSub?.id));
         if (!lockedOperability.operable) {
           throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
         }
       }
       const basketItemIds = plans.flatMap((p) => p.orderItems.map((oi) => oi.itemId));
+      // Freeze the menu snapshot through commit. Item/group locks also block
+      // inserting a new child choice through its foreign key. All rows use a
+      // stable lock order, shared with stock writers.
+      const menuItemIds = [...new Set(basketItemIds)].sort();
+      if (menuItemIds.length > 0) {
+        await tx.$queryRaw`SELECT id FROM "items" WHERE id IN (${Prisma.join(menuItemIds)}) ORDER BY id FOR UPDATE`;
+        await tx.$queryRaw`SELECT id FROM "option_groups" WHERE "itemId" IN (${Prisma.join(menuItemIds)}) ORDER BY id FOR UPDATE`;
+        await tx.$queryRaw`SELECT o.id FROM "options" o JOIN "option_groups" g ON g.id = o."optionGroupId" WHERE g."itemId" IN (${Prisma.join(menuItemIds)}) ORDER BY o.id FOR UPDATE OF o`;
+      }
       const darkItem = await tx.item.findFirst({
         where: { id: { in: basketItemIds }, isAvailable: false },
         select: { name: true },
@@ -1267,6 +1402,48 @@ export class OrderService {
         // Same code+status as the pre-lock ITEM_UNAVAILABLE path, so a race
         // loser reads identically wherever the race is caught.
         throw new AppError(409, 'ITEM_UNAVAILABLE', `${darkItem.name} just became unavailable — remove it and try again.`);
+      }
+      // [GUARDRAILS §8] The same refusal against the locked menu rows.
+      await assertOrderableNow(tx, cart.items.map((line) => ({ id: line.item.id, name: line.item.name })));
+      // [L09 · M023 · F4] The choices are re-read here as well, beside the
+      // item check above: a choice that sold out (or was removed), or a price
+      // that changed, after the pre-check is refused instead of ordered at the
+      // old price. Each line is validated by the one validator and priced by
+      // the one line pricer against this read, and must price exactly as the
+      // plan did.
+      const lockedMenu = new Map((await tx.item.findMany({
+        where: { id: { in: [...new Set(cart.items.map((line) => line.itemId))] } },
+        select: { id: true, name: true, vendorId: true, fulfillment: true, basePrice: true, optionGroups: { include: { options: true } } },
+      })).map((row) => [row.id, row]));
+      for (const line of cart.items) {
+        const current = lockedMenu.get(line.itemId);
+        if (!current) {
+          throw new AppError(409, 'ITEM_UNAVAILABLE', `${line.item.name} just became unavailable — remove it and try again.`);
+        }
+        try {
+          validateSelectedOptions(current, line.selectedOptions);
+        } catch (error) {
+          if (!(error instanceof OptionSelectionError)) throw error;
+          throw checkoutOptionRefusal(current, error);
+        }
+        const planned = priceCartLine(line);
+        const repriced = priceCartLine({ quantity: line.quantity, selectedOptions: line.selectedOptions, item: current });
+        if (
+          repriced.unitPrice !== planned.unitPrice
+          || JSON.stringify(repriced.options) !== JSON.stringify(planned.options)
+        ) {
+          throw new AppError(409, 'CART_CHANGED', `The price of ${current.name} just changed — review your cart and place the order again.`);
+        }
+      }
+      // [L09 · price lock] The prices just proven current are what the order
+      // charges; they must also be what the customer saw when they tapped
+      // Place order (the quote's line prices and total, sent with the order).
+      if (input.expectedPrices) {
+        assertPricesAsSeen(
+          input.expectedPrices,
+          cart.items.map((line) => ({ id: line.id, item: line.item, unitPrice: priceCartLine(line).unitPrice })),
+          priced.perPlan.reduce((sum, plan) => sum + plan.total, 0),
+        );
       }
 
       let committedMmgPayUrl: string | null = null;
@@ -1756,10 +1933,7 @@ export class OrderService {
         note: 'Order cancelled before pickup',
       });
       if (restock.applied) {
-        await db.item.updateMany({
-          where: { id: restockItemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-          data: { isAvailable: true, autoHiddenAt: null },
-        });
+        await unhideRestocked(db, restockItemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
       }
     }
   }
@@ -1932,6 +2106,26 @@ export class OrderService {
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
     // MMG payment-first gate lives here, on the freshly locked row.
     assertMmgFulfilmentAllowed(source, input.target);
+    // [GUARDRAILS §8] An order holding a line Swift no longer allows does not
+    // move toward the customer from this seam either (accept, prepare, ready,
+    // rider legs before pickup, the store's own handover). Cancelling is never refused.
+    if (heldAtSeam(source, input.target)) {
+      await assertOrderMayProceed(tx, source.id, refusalAudience(input.target), { storeMayReject: storeMayReject(source, MMG_MONEY_MOVED) });
+    }
+    // [owner #50] A customer's own cancel is the cancellation policy's to
+    // decide, on this locked row and before anything is written — the same
+    // verdict `cancelOrder` reads (the no-mover fact from the journal under
+    // this lock), so no cancel door forks the rule.
+    if (input.customerCancel === true && input.target === 'CANCELLED') {
+      const lockedNow = new Date();
+      const verdict = cancellationVerdict({
+        ...source,
+        noMoverFound: await readNoMoverFound(tx, source),
+        tooLateToDeliver: await readTooLateToDeliver(this.prisma, source, lockedNow),
+        assignedAt: await readAssignedAt(tx, source),
+      }, lockedNow);
+      if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+    }
     // [TAXI multi-stop 3/8] A ride is over only when every stop the passenger
     // asked for is done: arrived at and left, or skipped with a reason the
     // passenger is told. Every way to DELIVERED passes this seam (the fare
@@ -2013,15 +2207,25 @@ export class OrderService {
       data.cancelledAt = now;
       data.cancelledBy = input.cancellation.by;
       data.cancellationReason = input.cancellation.reason;
-      if (input.cancellation.lateFeeDue !== undefined) {
-        data.lateCancelFeeDue = input.cancellation.lateFeeDue;
-      }
     }
     if (input.terminalMetadata?.actualDeliveryTime !== undefined) {
       data.actualDeliveryTime = input.terminalMetadata.actualDeliveryTime;
     }
     if (input.terminalMetadata?.courierProofPhotoUrl !== undefined) {
       data.courierProofPhotoUrl = input.terminalMetadata.courierProofPhotoUrl;
+    }
+    // [TAXI waiting charge] A ride's waiting is frozen HERE, once: on the way to
+    // DELIVERED (and nowhere else, so a no-show, a refusal or a cancellation is
+    // never charged), on the locked row, after the stop guard above proved every
+    // wait closed. Its charge joins the order's total in this same write, so the
+    // fare earning below, the receipt and the total all read one frozen number;
+    // a rolled-back completion leaves nothing frozen and nothing added, and the
+    // freeze answers nothing a second time.
+    if (input.target === 'DELIVERED' && source.orderType === 'TAXI') {
+      const waiting = await freezeTaxiWaiting(tx, source, now);
+      if (waiting && waiting.waitingCharge > 0) {
+        data.totalAmount = new Prisma.Decimal(source.totalAmount).plus(waiting.waitingCharge);
+      }
     }
     await tx.order.update({ where: { id: input.orderId }, data });
 
@@ -2264,8 +2468,8 @@ export class OrderService {
     let committed: {
       order: CancellationOrder;
       heldNow: boolean;
-      freeCancellation: boolean;
-      cancellationFee: number;
+      noMoverFree: boolean;
+      tooLateFree: boolean;
       cancelledSearches: number;
     } | undefined;
 
@@ -2305,16 +2509,14 @@ export class OrderService {
           // capture serializes on this same orders lock, so cancel-after-
           // capture refuses here and capture-after-cancel refuses in the
           // capture CAS — CANCELLED+CAPTURED can no longer be minted in
-          // either commit order. PENDING MMG stays cancellable (the only
-          // exit from an unpaid MMG order); if external money landed
-          // unattested, the capture path's closed-order refusal directs the
-          // store to refund directly.
+          // either commit order. PENDING MMG stays cancellable while the
+          // policy below allows it (for a store order: until the store
+          // accepts, then the store declines it — owner #46); if external
+          // money landed unattested, the capture path's closed-order refusal
+          // directs the store to refund directly.
           if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
-            throw new AppError(
-              409,
-              'MMG_CANCEL_UNAVAILABLE',
-              'This order is already paid by MMG to the store. The store cancels and refunds you directly — Swift never holds the money.',
-            );
+            // [owner #46 · Opus S3-1] The same words the order screen shows beside the store's number.
+            throw new AppError(409, 'MMG_CANCEL_UNAVAILABLE', MMG_PAID_STORE_CANCELS_MESSAGE);
           }
 
           const now = new Date();
@@ -2322,12 +2524,29 @@ export class OrderService {
           // so the vendor-board socket below stays silent about it.
           const heldNow = isHeld(order, now) && !order.riderId && !order.driverId;
           // THE one policy predicate, shared with the customer preview
-          // [cancel-policy.ts]: free ⟺ nothing was committed — no mover holds
-          // the job, and the order is held or still in its uncommitted status
-          // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
-          // inside the window.
-          const freeCancellation = isFreeCancellation(order, now);
-          const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
+          // [cancel-policy.ts], read from this LOCKED row: free or refused,
+          // never a fee (owner #46/#50).
+          // [Item 64] The mover search came back empty — read here, under the
+          // order lock and before the searches are closed below, so a mover
+          // assigned after the customer's preview still ends the exemption.
+          // [owner #46] For a store order, too late to deliver (the rescue
+          // cutoff, read from this LOCKED row; the tenant's cutoff is
+          // configuration, read on the app client).
+          const policyOrder = {
+            ...order,
+            noMoverFound: await readNoMoverFound(tx, order),
+            tooLateToDeliver: await readTooLateToDeliver(this.prisma, order, now),
+            // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
+            assignedAt: await readAssignedAt(tx, order),
+          };
+          const verdict = cancellationVerdict(policyOrder, now);
+          // [owner #46/#50] Not the customer's to cancel any more (the store
+          // accepted, or the five-minute window of a ride, parcel or booking
+          // has passed): refused before anything is written, in the words the
+          // apps show as-is.
+          if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+          const noMoverFree = verdict.reason === 'NO_MOVER';
+          const tooLateFree = verdict.reason === 'TOO_LATE';
 
           // The row lock makes this update and every dependent release below one
           // canonical state transition. No stale riderId/driverId can escape.
@@ -2338,8 +2557,8 @@ export class OrderService {
               cancelledAt: now,
               cancelledBy: userId,
               cancellationReason: reason,
-              // Founder decision #5: recorded cash-only marker, never collected.
-              lateCancelFeeDue: cancellationFee,
+              // [owner #46/#50] No late-cancel marker is ever written: there
+              // is no fee (`lateCancelFeeDue` keeps its default 0).
             },
           });
 
@@ -2372,6 +2591,8 @@ export class OrderService {
             },
           });
 
+          await persistRiderCancellationNotice(tx, order);
+
           if (order.riderId) {
             await new FloatService(tx).release(tx, order.riderId, riderFloatForOrder(order));
             await this.stageRiderRelease(tx, order.riderId, orderId, false, true);
@@ -2384,8 +2605,8 @@ export class OrderService {
           return {
             order,
             heldNow,
-            freeCancellation,
-            cancellationFee,
+            noMoverFree,
+            tooLateFree,
             cancelledSearches: searches.count,
           };
         });
@@ -2400,7 +2621,7 @@ export class OrderService {
     }
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
-    const { order, heldNow, freeCancellation, cancellationFee, cancelledSearches } = committed;
+    const { order, heldNow, noMoverFree, tooLateFree, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
@@ -2420,12 +2641,15 @@ export class OrderService {
       });
     }
 
-    this.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', { orderId, status: 'CANCELLED' });
     // A held order was never shown to the vendor — telling them about a
     // cancellation of something they never saw would only confuse the board.
     if (order.vendorId && !heldNow) {
       this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
     }
+    // [L07] The rider's notice committed with the cancel; this is only its
+    // first delivery attempt, started after the emits and never awaited.
+    void this.drainRiderCancelNoticeNow(orderId);
     // [REPORT-007-v4 F-02 / REPORT-008 F-02] The store must LEARN a
     // possibly-paid MMG order was cancelled — it holds the only rail that can
     // make the customer whole. HELD orders are NOT exempt: the pay link went
@@ -2448,17 +2672,38 @@ export class OrderService {
     // The result is the banner the customer reads first (the tracking screen
     // shows the server's message before its own fallback). A booking is a
     // booking and its money is with the PROVIDER — the noun and the party
-    // follow the committed row's fulfillment; the fee and the MMG uncertainty
-    // above are the server's and are unchanged. Food keeps its exact words.
-    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : 'Order';
+    // follow the committed row's fulfillment; the MMG uncertainty above is the
+    // server's and is unchanged. Food keeps its exact words.
+    // A ride is a "Ride" in the customer's words [Item 64 · review S4].
+    // [owner #46/#50] Every customer cancel is free — there is no fee any more.
+    // `cancellationFee: 0` stays in the answer only because builds 9 and 10
+    // read it (a number) after a cancel; it is never anything but zero.
+    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
     const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+    // [Item 64] The plain reason, when the platform found nobody to do the job.
+    // [owner #46/#52] ...and when it was running very late.
+    const cancelled = noMoverFree
+      ? `${noun} cancelled — no mover was found.`
+      : tooLateFree ? `${noun} cancelled because it was running very late.` : null;
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
-        message: `${noun} cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`,
-        cancellationFee,
+        message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
+        cancellationFee: 0,
       };
     }
-    return { message: freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`, cancellationFee };
+    return { message: cancelled ?? `${noun} cancelled — no charge`, cancellationFee: 0 };
+  }
+
+  /** [L07 · Opus S3] The first delivery attempt of a committed rider
+   *  cancellation notice. The cancel request never awaits it: a hung push
+   *  provider (an 8 s timeout, three tries and backoff, about 34 s) would hold
+   *  the customer's cancel past the phone's 10 s timeout, and they would read
+   *  a failed cancel that went through. The checkout-outbox sweep (every 10 s)
+   *  is the durability guarantee. Never rejects. */
+  drainRiderCancelNoticeNow(orderId: string): Promise<void> {
+    return drainRiderCancellationNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId })
+      .then(() => undefined)
+      .catch((err) => log().warn({ err, orderId }, 'rider cancellation notice awaits retry'));
   }
 
   async updateStatus(
@@ -2505,7 +2750,7 @@ export class OrderService {
 
     log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
     const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
-    this.io.to(`order:${orderId}`).emit('order:status_changed', statusEvent);
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition
     // live without subscribing to each order individually.
     if (order.vendorId) {
@@ -2773,7 +3018,11 @@ export class OrderService {
         // Zero-commission model: the driver keeps the whole fare. A taxi
         // order's money lives in taxiFareTotal — deliveryFee is 0 for rides,
         // which silently paid drivers $0 before this read the right field.
-        amount: Number(order.taxiFareTotal ?? order.deliveryFee),
+        // [TAXI waiting charge] Plus the waiting charge frozen at completion
+        // (0 for every ride without one): the driver collected it in cash with
+        // the fare, and keeps it all.
+        amount: Number(order.taxiFareTotal ?? order.deliveryFee)
+          + (order.orderType === 'TAXI' ? await frozenWaitingCharge(db, orderId) : 0),
         status: 'AVAILABLE',
       });
 
@@ -2867,7 +3116,7 @@ export class OrderService {
   async reorder(userId: string, orderId: string) {
     const original = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },
-      include: { items: true },
+      include: { items: { include: { selectedOptions: true } } },
     });
 
     if (!original || !original.vendorId) {
@@ -2879,42 +3128,68 @@ export class OrderService {
       throw new AppError(400, 'VENDOR_UNAVAILABLE', 'This restaurant is no longer available');
     }
 
-    // Clear existing cart and create new one
-    await this.prisma.cart.deleteMany({ where: { customerId: userId } });
-
-    const cart = await this.prisma.cart.create({
-      data: { customerId: userId, vendorId: original.vendorId },
-    });
-
     // Add items to cart, checking availability
     const availableItems = await this.prisma.item.findMany({
       where: { id: { in: original.items.map((i) => i.itemId) }, isAvailable: true },
+      include: { optionGroups: { include: { options: true } } },
     });
-    const availableIds = new Set(availableItems.map((i) => i.id));
+    // [GUARDRAILS §8] A prohibited line does not come back: counted as unavailable.
+    const hidden = await hiddenAmong(this.prisma, availableItems.map((i) => i.id));
+    const availableById = new Map(availableItems.filter((i) => !hidden.has(i.id)).map((i) => [i.id, i]));
 
-    const cartItems = original.items
-      .filter((i) => availableIds.has(i.itemId))
-      .map((i) => ({
-        cartId: cart.id,
-        itemId: i.itemId,
-        quantity: i.quantity,
-        selectedOptions: {},
-        specialInstructions: i.specialInstructions,
-      }));
+    // [L09 · reorder] Each line comes back WITH its choices, rebuilt from the
+    // names the order kept against today's menu by the one validator. A line
+    // whose choices cannot be rebuilt exactly (one is sold out or gone, or the
+    // item now needs a choice) is not added with its choices dropped: it is
+    // named, so the customer chooses again from the menu.
+    const needsOptions: string[] = [];
+    const cartItems: Array<{ itemId: string; quantity: number; selectedOptions: OptionSelection; specialInstructions: string | null }> = [];
+    let unavailableCount = 0;
+    for (const line of original.items) {
+      const item = availableById.get(line.itemId);
+      if (!item) { unavailableCount += 1; continue; }
+      const selection = rebuildSelectionFromSnapshot(item, line.selectedOptions);
+      if (!selection) { needsOptions.push(line.name); continue; }
+      cartItems.push({
+        itemId: line.itemId,
+        quantity: line.quantity,
+        selectedOptions: selection,
+        specialInstructions: normalizeItemNote(line.specialInstructions),
+      });
+    }
 
+    const chooseAgain = needsOptions.length > 0
+      ? `Choose your options for ${[...new Set(needsOptions)].join(', ')} again from the menu.`
+      : null;
+    // Nothing could come back: refuse BEFORE touching the cart the customer has.
     if (cartItems.length === 0) {
+      if (chooseAgain) throw new AppError(409, 'REORDER_NEEDS_OPTIONS', chooseAgain);
       throw new AppError(400, 'NO_ITEMS', 'None of the items from this order are currently available');
     }
 
-    await this.prisma.cartItem.createMany({ data: cartItems });
+    // Replace the cart in one step, so a failure never leaves it emptied.
+    const cart = await this.prisma.$transaction(async (tx) => {
+      await tx.cart.deleteMany({ where: { customerId: userId } });
+      const created = await tx.cart.create({
+        data: { customerId: userId, vendorId: original.vendorId! },
+      });
+      await tx.cartItem.createMany({
+        data: cartItems.map((line) => ({ ...line, cartId: created.id, selectedOptions: line.selectedOptions as Prisma.InputJsonValue })),
+      });
+      return created;
+    });
 
-    const unavailableCount = original.items.length - cartItems.length;
+    const left = [
+      unavailableCount > 0 ? `${unavailableCount} item(s) were unavailable.` : null,
+      chooseAgain,
+    ].filter(Boolean).join(' ');
     return {
       cartId: cart.id,
       itemsAdded: cartItems.length,
       unavailableItems: unavailableCount,
-      message: unavailableCount > 0
-        ? `${cartItems.length} items added to cart. ${unavailableCount} item(s) were unavailable.`
+      needsOptions,
+      message: left
+        ? `${cartItems.length} items added to cart. ${left}`
         : `${cartItems.length} items added to cart. Ready to checkout!`,
     };
   }
@@ -2935,7 +3210,12 @@ export class OrderService {
     plans: Array<{ vendorId: string; subtotal: number }>,
   ) {
     const promo = await this.prisma.promoCode.findUnique({ where: { code: code.toUpperCase() } });
-    if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    // [L04] Another tenant's code — a platform code for a caller outside
+    // production above all — is the unknown-code answer, and so is never
+    // redeemed: its redemption count cannot move.
+    if (!(await promoBelongsToCallerTenant(this.prisma, promo, userId)) || !promo) {
+      throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
 
     const now = new Date();

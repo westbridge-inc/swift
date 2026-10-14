@@ -11,6 +11,7 @@ import { partnerRoutes } from '../modules/partner/partner.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestOtp } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
+// [Owner ruling 11 Oct 2026 — H-PLATE] A taxi (car / wagon car) plate is H-series where it is typed; fixture plates follow it. Buses keep B-series.
 
 // Unique phone prefix per file (parallel-test gotcha).
 const BIKE_PHONE = '+59200199001';
@@ -120,7 +121,7 @@ describe('partner provisioning — happy paths', () => {
   it('provisions a Driver with vehicle details and unblocks /driver', async () => {
     const res = await post(
       '/api/v1/partner/become',
-      { acceptAgreement: true, role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PXX 1234' } },
+      { acceptAgreement: true, role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'HXX 1234' } },
       carToken,
     );
     expect(res.statusCode).toBe(201);
@@ -132,7 +133,7 @@ describe('partner provisioning — happy paths', () => {
   it('is idempotent — re-provisioning a Driver returns 200, no duplicate', async () => {
     const res = await post(
       '/api/v1/partner/become',
-      { acceptAgreement: true, role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PXX 1234' } },
+      { acceptAgreement: true, role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'HXX 1234' } },
       carToken,
     );
     expect(res.statusCode).toBe(200);
@@ -167,7 +168,7 @@ describe('partner provisioning — happy paths', () => {
   it('provisions a COMFORT Driver for a wagon mover', async () => {
     const res = await post(
       '/api/v1/partner/become',
-      { acceptAgreement: true, role: 'MOVER', vehicleType: 'WAGON_CAR', vehicle: { make: 'Toyota', model: 'Fielder', year: 2017, color: 'Grey', licensePlate: 'WXX 7777' } },
+      { acceptAgreement: true, role: 'MOVER', vehicleType: 'WAGON_CAR', vehicle: { make: 'Toyota', model: 'Fielder', year: 2017, color: 'Grey', licensePlate: 'HWX 7777' } },
       wagonToken,
     );
     expect(res.statusCode).toBe(201);
@@ -203,7 +204,7 @@ describe('partner provisioning — happy paths', () => {
       post('/api/v1/partner/become', {
         acceptAgreement: true, role: 'MOVER',
         vehicleType: 'CAR',
-        vehicle: { make: 'Toyota', model: 'Axio', year: 2020, color: 'White', licensePlate: 'RACE 100' },
+        vehicle: { make: 'Toyota', model: 'Axio', year: 2020, color: 'White', licensePlate: 'HRACE 100' },
       }, raceToken),
     ]);
     expect(mixed.every((response) => [200, 201].includes(response.statusCode))).toBe(true);

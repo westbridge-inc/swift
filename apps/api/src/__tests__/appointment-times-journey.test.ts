@@ -10,7 +10,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { vendorResponseSlaMinutes } from '../modules/order/response-sla';
 import { sendBookingReminders } from '../modules/services/services.service';
 import { autoCancelUnresponsiveOrder } from '../jobs/queue';
@@ -427,14 +427,19 @@ describe('Q12 · B4 — a double booking of one provider slot is refused', () =>
 // ---------------------------------------------------------------------------
 
 describe('Q12 · B5 — the cancel windows and the reschedule behave as documented', () => {
-  it('a booking the provider has not confirmed cancels free until five minutes before the slot', async () => {
+  // [owner #50, 14 Oct] A booking nobody has confirmed is free until the
+  // provider confirms it; the countdown the app shows is the five-minute
+  // window from placing (free whatever happens inside it).
+  // [owner ruling 14 Oct] Before the provider accepts, the cancel is free with no clock to count down to; the five
+  // minutes start at the provider's acceptance (next case).
+  it('a booking the provider has not confirmed cancels free, with no countdown — the five minutes start at acceptance', async () => {
     const slot = gy(gyDay(2), 11, 0);
     const customer = await makeUser('Joy', ['CUSTOMER'], 'CUSTOMER');
     const order = await booked(customer, cutId, slot);
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
     expect(mine.json().data).toMatchObject({
       status: 'PENDING', holdExpiresAt: null, canCancel: true, freeCancellationWindow: true, cancellationFee: 0,
-      freeCancellationExpiresAt: new Date(slot.getTime() - 5 * MINUTE).toISOString(),
+      freeCancellationExpiresAt: null,
     });
     const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'Plans changed' });
     expect(res.statusCode, res.body).toBe(200);
@@ -442,21 +447,46 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).lateCancelFeeDue).toBe(0);
   });
 
-  it('a confirmed booking cancels with the recorded late-cancel marker, and the slot sells again', async () => {
+  // [owner #50, 14 Oct] No marker any more: a confirmed booking cancels free
+  // inside the five-minute window (and its slot sells again); past it the
+  // customer contacts the provider and the slot stays booked.
+  it('a confirmed booking cancels free inside the window, and the slot sells again', async () => {
     const slot = gy(gyDay(2), 12, 0);
     const customer = await makeUser('Kofi', ['CUSTOMER'], 'CUSTOMER');
     const order = await booked(customer, cutId, slot);
     expect((await accept(order.id)).statusCode).toBe(200);
+    const { acceptedAt } = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { acceptedAt: true } });
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
     expect(mine.json().data).toMatchObject({
-      status: 'ACCEPTED', canCancel: true, freeCancellationWindow: false, cancellationFee: LATE_CANCEL_FEE, freeCancellationExpiresAt: null,
+      status: 'ACCEPTED', canCancel: true, freeCancellationWindow: true, cancellationFee: 0, cancelUnavailable: null,
+      // [owner ruling 14 Oct] The countdown runs from the provider's acceptance.
+      freeCancellationExpiresAt: new Date(acceptedAt!.getTime() + FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
     });
     const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
     expect(res.statusCode, res.body).toBe(200);
-    expect(res.json().data).toEqual({ message: 'Booking cancelled', cancellationFee: LATE_CANCEL_FEE });
-    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).lateCancelFeeDue).toBe(LATE_CANCEL_FEE);
+    expect(res.json().data).toEqual({ message: 'Booking cancelled — no charge', cancellationFee: 0 });
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).lateCancelFeeDue).toBe(0);
     expect(await app.prisma.booking.count({ where: { orderId: order.id, status: { not: 'CANCELLED' } } })).toBe(0);
     expect(await picker(cutId, gyDay(2), customer.token)).toContain(slot.toISOString());
+  });
+
+  it('a confirmed booking past the window is not cancelled in the app: the customer contacts the provider, the slot stays booked', async () => {
+    const slot = gy(gyDay(3), 11, 0);
+    const customer = await makeUser('Lena', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(customer, cutId, slot);
+    expect((await accept(order.id)).statusCode).toBe(200);
+    // [owner ruling 14 Oct] Past the window = more than five minutes after the provider ACCEPTED.
+    await app.prisma.order.update({ where: { id: order.id }, data: { placedAt: new Date(Date.now() - 12 * MINUTE), acceptedAt: new Date(Date.now() - 10 * MINUTE) } });
+    const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
+    expect(mine.json().data).toMatchObject({
+      status: 'ACCEPTED', canCancel: false, cancellationFee: 0, freeCancellationExpiresAt: null,
+      cancelUnavailable: { code: 'CANCEL_WINDOW_CLOSED' },
+    });
+    const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('CANCEL_WINDOW_CLOSED');
+    expect(await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({ status: 'ACCEPTED', lateCancelFeeDue: 0 });
+    expect(await app.prisma.booking.count({ where: { orderId: order.id, status: { not: 'CANCELLED' } } })).toBe(1);
   });
 
   it('a reschedule moves the appointment on EVERY surface — the order, not just the calendar — and names both Guyana times', async () => {

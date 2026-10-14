@@ -8,7 +8,8 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthSessionSnapshot } from '../lib/authSession';
+import { explainSessionEnded } from '../lib/accountBlockedAlert';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
   getReactNativeBundleScriptUrl,
@@ -118,6 +119,11 @@ function capturedVendorAuthConfig(
 
 // Request interceptor to attach auth token
 api.interceptors.request.use((config) => {
+  // Weak mobile links need more time for reads. Writes keep their existing
+  // timeout/retry contracts, and explicit endpoint timeouts remain intact.
+  if ((config.method === 'get' || config.method === 'head') && config.timeout === 10000) {
+    config.timeout = 20000;
+  }
   if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);
@@ -176,6 +182,7 @@ const refreshCoordinator = new AuthRefreshCoordinator(
   },
   (error) => axios.isAxiosError(error)
     && (error.response?.status === 401 || error.response?.status === 403),
+  explainSessionEnded,
 );
 
 api.interceptors.response.use(
@@ -360,8 +367,13 @@ export const customerApi = {
   // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
   exportAccount: (session?: AuthSessionSnapshot) =>
     api.get('/customer/account/export', capturedAuthConfig(session)),
+  requestAccountClosure: (session?: AuthSessionSnapshot) =>
+    api.post('/customer/account/closure-request', {}, capturedAuthConfig(session)),
+  // receipts=v2: this app shows every deletion receipt by its own message, so
+  // the server may answer a closure request or a pending erasure as such. An
+  // app that does not declare it is answered in the older build's words.
   deleteAccount: (session?: AuthSessionSnapshot) =>
-    api.delete('/customer/account', capturedAuthConfig(session)),
+    api.delete('/customer/account', capturedAuthConfig(session, { params: { receipts: 'v2' } })),
   switchRole: (role: string, session?: AuthSessionSnapshot) =>
     api.post('/customer/switch-role', { role }, capturedAuthConfig(session)),
   // In-app support / dispute channel.
@@ -430,12 +442,13 @@ export const customerApi = {
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
-  // returns { success, data: { message, cancellationFee } } inside the axios
-  // body — reading one level short silently discarded the authoritative
-  // cancellation outcome and the fee actually charged.
+  // returns { success, data: { message } } inside the axios body — reading one
+  // level short silently discarded the authoritative cancellation outcome.
+  // [owner #46/#50] There is no cancellation fee (the server's
+  // `cancellationFee` is always 0, kept only for older builds).
   cancelOrder: (id: string, reason?: string) =>
     api.post(`/customer/orders/${id}/cancel`, { reason })
-      .then((res) => (res.data?.data ?? {}) as { message?: string; cancellationFee?: number }),
+      .then((res) => (res.data?.data ?? {}) as { message?: string }),
   // Order placement = checkout; it reads the server-side cart. (The old POST
   // /customer/orders had no backend route.)
   placeOrder: (data: {
@@ -447,6 +460,9 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
+    /** [L09 · price lock] The quote's total and line prices the customer saw. */
+    expectedTotal?: number;
+    expectedLines?: Array<{ lineId: string; unitPrice: number }>;
   }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
@@ -538,8 +554,9 @@ export interface TieredEstimate {
   /** [TAXI waiting charge] The terms shown beside the fare, when the server sends them. */
   waiting?: unknown;
 }
-/** The ride request body. `stops` and `expectedFare` travel only on a ride
- *  WITH stops; a ride without them sends exactly today's body. */
+/** The ride request body. `stops` travel only on a ride WITH stops.
+ *  [PRICE-LOCK] `expectedFare` travels with every ride whose quote is on
+ *  screen: the server books only at it (409 FARE_CHANGED otherwise). */
 export interface RideRequestBody {
   pickup: Point;
   dropoff: Point;
@@ -747,10 +764,15 @@ export const courierApi = {
     dropoffAddress: string;
     packageSize: CourierSize;
     packageDescription?: string;
+    /** [owner #67] The sender's tick: "This parcel has no prohibited items". */
+    declaresNoProhibitedItems?: boolean;
     speed: CourierSpeed;
     recipientName: string;
     recipientPhone: string;
     payer?: 'SENDER' | 'RECIPIENT';
+    /** [PRICE-LOCK] The fee on screen (estimate totalFee): the server creates
+     *  the job only at it (409 PRICE_CHANGED otherwise). */
+    expectedFee?: number;
   }) => api.post('/courier/order', data),
   orders: () => api.get('/courier/orders'),
   get: (id: string) => api.get(`/courier/order/${id}`),
@@ -851,7 +873,7 @@ export const verificationApi = {
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl: string; consent: true; privacyNoticeVersion: string },
+    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };
@@ -930,10 +952,11 @@ export const riderApi = {
   active: () => api.get('/rider/orders/active'),
   // [B6] Every live leg, primary first, plus the server-computed run summary.
   activeLegs: () => api.get('/rider/orders/active-legs'),
-  accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
+  // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
+  accept: (id: string) => api.post(`/rider/orders/${id}/accept`, {}),
   // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
   // this path acks the offer so it's never scored as a timeout [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   // Golden-rule handover: GPS is mandatory server-side (claims are impossible
   // without it) — an empty body 400s.
@@ -982,6 +1005,53 @@ export const riderApi = {
     })),
 };
 
+/** Resolve a lost response against the same driver's authority. Offers return
+ * the held assignment on repeat; board acceptance first checks the active ride. */
+async function acceptDriver(path: string, body: object, boardId?: string) {
+  const owner = getAuthSessionSnapshot();
+  const currentSession = () => {
+    const current = owner && authSessionForPrincipal(getAuthSessionSnapshot(), owner);
+    if (owner && !current) throw new Error('Your session changed. Please check your active ride.');
+    return current ?? undefined;
+  };
+  const config = () => capturedAuthConfig(currentSession());
+  const heldRide = async () => {
+    const active = await api.get('/driver/rides/active', config());
+    currentSession();
+    return active.data?.data?.id === boardId ? active : null;
+  };
+  try {
+    const result = await api.post(path, body, config());
+    currentSession();
+    return result;
+  } catch (error) {
+    if (!owner || !axios.isAxiosError(error) || error.response ||
+        !['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'].includes(error.code ?? '') ||
+        !authSessionForPrincipal(getAuthSessionSnapshot(), owner)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    if (boardId) {
+      const held = await heldRide();
+      if (held) return held;
+    }
+    try {
+      const result = await api.post(path, body, config());
+      currentSession();
+      return result;
+    } catch (retryError) {
+      // The first accept may finish between the active read and the retry:
+      // the retry is then refused (UNAVAILABLE before the claim, or
+      // ALREADY_TAKEN / DRIVER_BUSY when it lands during the claim). Only the
+      // server's own current ride, matched by exact id, counts as held.
+      if (boardId && axios.isAxiosError(retryError) &&
+          ['UNAVAILABLE', 'ALREADY_TAKEN', 'DRIVER_BUSY'].includes(retryError.response?.data?.error?.code)) {
+        const held = await heldRide();
+        if (held) return held;
+      }
+      throw retryError;
+    }
+  }
+}
+
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
 export const driverApi = {
   profile: () => api.get('/driver/profile'),
@@ -1003,12 +1073,13 @@ export const driverApi = {
     api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
-  accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
+  accept: (id: string) => acceptDriver(`/driver/rides/${id}/accept`, {}, id),
   /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
    * passenger's ride alive, frees this driver, and matches another driver. */
   handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => acceptDriver('/driver/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),

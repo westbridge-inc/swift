@@ -124,13 +124,22 @@ if [ -z "${WEB_URL:-}" ] && [ -f "$HERE/.env" ]; then
   WEB_HOST="$(grep -E '^WEB_HOST=' "$HERE/.env" | head -1 | cut -d= -f2- || true)"
   [ -z "$WEB_HOST" ] || WEB_URL="https://$WEB_HOST"
 fi
+# [WEB-GATE] With WEB_BASIC_AUTH_HASH set in deploy/.env the website's own name
+# sits behind a password: a 401 IS it answering, and a page served to a
+# stranger means the password is missing. The value is never printed.
+WEB_GATE=off
+if [ -f "$HERE/.env" ] && [ -n "$(grep -E '^WEB_BASIC_AUTH_HASH=' "$HERE/.env" | head -1 | cut -d= -f2- || true)" ]; then
+  WEB_GATE=on
+fi
 if [ -n "${WEB_URL:-}" ]; then
   # On no response curl still writes 000 for %{http_code}; it just exits nonzero.
   SITE=$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$WEB_URL/" 2>/dev/null || true)
-  case "${SITE:-000}" in
-    2*|3*) ok "website $WEB_URL → $SITE" ;;
-    000)   bad "website unreachable at $WEB_URL — WEB_HOST is set, so it should answer (DNS, certificate, or the web container)" ;;
-    *)     bad "website $WEB_URL/ → $SITE" ;;
+  case "$WEB_GATE ${SITE:-000}" in
+    "on 401")      ok "website $WEB_URL → 401 (password gate on)" ;;
+    "on 2"*|"on 3"*) bad "website $WEB_URL answered $SITE without its password gate (WEB_BASIC_AUTH_HASH is set in deploy/.env)" ;;
+    "off 2"*|"off 3"*) ok "website $WEB_URL → $SITE" ;;
+    *" 000")       bad "website unreachable at $WEB_URL — WEB_HOST is set, so it should answer (DNS, certificate, or the web container)" ;;
+    *)             bad "website $WEB_URL/ → $SITE" ;;
   esac
 fi
 
@@ -191,9 +200,20 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
   RS=$(db_query \
     "SELECT value FROM platform_config WHERE key='last_restore_rehearsal_seconds';" 2>/dev/null | tr -d '"' || true)
   if [ -z "$RH" ]; then
-    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh deploy/backups/<latest>.dump"
+    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh deploy/backups/<latest>.dump (production dumps are encrypted: the owner runs deploy/backup-drill.sh from his own computer)"
   else
     ok "last restore rehearsal: $RH — took ${RS:-?}s (that is the recovery time for this data)"
+  fi
+fi
+
+# [BACKUP-ENC · Opus review 14 Oct, S3-2] Production backs up hourly (owner
+# ruling, 13 Oct). The timer is installed by hand (PILOT-RUNBOOK §4), and a
+# missing one is silent until the freshness alarm: say it here.
+if [ -f "$HERE/.env" ] && [ "$(grep -E '^PILOT_ENV=' "$HERE/.env" | head -1 | cut -d= -f2- || true)" = production ]; then
+  if systemctl is-enabled --quiet swift-backup-hourly.timer 2>/dev/null && systemctl is-active --quiet swift-backup-hourly.timer 2>/dev/null; then
+    ok "the hourly backup timer is enabled and active"
+  else
+    bad "production's hourly backup timer (swift-backup-hourly.timer) is not enabled and active: sudo systemctl enable --now swift-backup-hourly.timer (PILOT-RUNBOOK §4)"
   fi
 fi
 

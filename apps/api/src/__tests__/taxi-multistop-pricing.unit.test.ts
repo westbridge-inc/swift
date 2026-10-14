@@ -5,7 +5,7 @@ import { AppError } from '../utils/errors';
 import { FareService, formulaFare } from '../modules/rides/fare.service';
 import { planTaxiStops, taxiMaxStops } from '../modules/rides/taxi-stops-flag';
 import { LEGACY_GY_TAXI_CARD } from './helpers/legacy-taxi-card';
-import { OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type RouteLegsEstimate, type RouteSource } from '../providers/maps/maps-provider';
+import { GoogleMapsProvider, HaversineMapsProvider, OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type RouteLegsEstimate, type RouteSource } from '../providers/maps/maps-provider';
 // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
 
 // ---------------------------------------------------------------------------
@@ -260,6 +260,48 @@ describe('provider → fare: a RAW OSRM body, parsed as the provider parses it (
     expect(est).toMatchObject({ billableKm: 10.15, durationMin: 25, routeSource: 'osrm' });
     expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
     expect(est.legs.map((l) => l.seconds)).toEqual([null, null]);
+  });
+});
+
+describe('production prices a ride with stops only from the real road (DS981)', () => {
+  // The straight-line estimate is never a production fare, with stops or
+  // without. A provider whose routes ARE that estimate (the straight-line
+  // provider, or Google, whose routes delegate to it) answers degraded: false,
+  // so the refusal must read the source, as the single-leg quote does.
+  afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+  const realRoad = '{"code":"Ok","routes":[{"distance":10150,"duration":1620,"legs":[{"distance":4000,"duration":600},{"distance":6150,"duration":1020}]}]}';
+
+  it.each([
+    ['the straight-line provider', () => new HaversineMapsProvider()],
+    ['the Google provider (its routes are the straight-line estimate)', () => new GoogleMapsProvider('k')],
+  ])('%s is refused in production: 503 ROUTE_UNAVAILABLE, never a price', async (_label, provider) => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const err = await refusal(price([STOP_1], provider()));
+    expect([err.statusCode, err.code, err.details]).toEqual([503, 'ROUTE_UNAVAILABLE', { stopCount: 1 }]);
+    expect(err.message).toMatch(/try again/i);
+  });
+
+  it('any engine answer from the straight-line source is refused in production, even one not marked degraded', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const { maps, asked } = engine([{ km: 4, minutes: 10 }, { km: 6.15, minutes: 17 }], { source: 'haversine', degraded: false });
+    const err = await refusal(price([STOP_1], maps));
+    expect([err.statusCode, err.code]).toEqual([503, 'ROUTE_UNAVAILABLE']);
+    expect(asked).toHaveLength(1);
+  });
+
+  it('the real road still prices a ride with stops in production (4700 / 6300)', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(realRoad, { status: 200, headers: { 'content-type': 'application/json' } })));
+    const est = await price([STOP_1], new OsrmMapsProvider('http://osrm.test'));
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(est).toMatchObject({ billableKm: 10.15, durationMin: 27, routeSource: 'osrm' });
+  });
+
+  it.each(['development', 'test'])('%s keeps the deterministic estimate for a ride with stops, as for one without', async (mode) => {
+    vi.stubEnv('NODE_ENV', mode);
+    const est = await price([STOP_1], new HaversineMapsProvider());
+    expect(est.routeSource).toBe('haversine');
+    expect(est.billableKm).toBeGreaterThan(0);
   });
 });
 
