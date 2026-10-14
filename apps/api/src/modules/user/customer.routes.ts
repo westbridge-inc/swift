@@ -1,3 +1,4 @@
+import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
@@ -1714,24 +1715,39 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const vendor = await app.prisma.vendor.findFirst({
       where: { id, ...vendorTenantForCaller() },
-      select: { id: true, averageRating: true, totalRatings: true },
+      select: { id: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     // [GUARDRAILS §8 · #54 · DS1109 S4-3] Nor its reviews: no page of a store filed under a banned category resolves.
     if (await prohibitedStoreCategory(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
-    const result = await ratingService.getVendorReviews(id, limit, skip);
+    const result = await ratingService.getVendorReviews(
+      id,
+      limit,
+      skip,
+      request.user?.userId && request.tenantId
+        ? { userId: request.user.userId, tenantId: request.tenantId }
+        : undefined,
+    );
 
     return {
       success: true,
       data: {
-        vendor: { id: vendor.id, averageRating: vendor.averageRating, totalRatings: vendor.totalRatings },
+        // The profile's materialized score also includes unreleased ratings.
+        // Keep this page's headline consistent with its published anonymous
+        // rows and distribution; other storefront surfaces
+        // retain the platform-wide vendor score.
+        vendor: {
+          id: vendor.id,
+          averageRating: result.averageRating,
+          totalRatings: result.total,
+        },
         reviews: result.reviews.map((r) => ({
           id: r.id,
           score: r.score,
           comment: r.comment,
           tags: r.tags,
-          reviewer: r.rater,
+          reviewer: { firstName: 'Customer', avatar: null },
           createdAt: r.createdAt,
           // The store's public reply (§4.1)
           response: r.response,
@@ -3200,8 +3216,9 @@ export async function customerRoutes(app: FastifyInstance) {
       note: z.string().trim().max(300).optional(),
     }).parse(request.body);
 
+    const canonicalId = await resolveVendorReviewId(app.prisma, id);
     const rating = await app.prisma.rating.findFirst({
-      where: { id, type: { in: ['CUSTOMER_TO_VENDOR', 'CUSTOMER_TO_PROVIDER'] }, isPublic: true },
+      where: { id: canonicalId, type: { in: ['CUSTOMER_TO_VENDOR', 'CUSTOMER_TO_PROVIDER'] }, isPublic: true },
       select: { id: true, orderId: true, rater: { select: { tenantId: true } } },
     });
     if (!rating) throw new NotFoundError('Review', id);
@@ -3216,13 +3233,13 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new NotFoundError('Review', id);
     }
 
-    const existing = await app.prisma.ratingReport.findFirst({ where: { ratingId: id, reporterId: userId } });
-    if (existing) return { success: true, data: existing }; // calm idempotence
+    const existing = await app.prisma.ratingReport.findFirst({ where: { ratingId: rating.id, reporterId: userId } });
+    if (existing) return { success: true, data: { ...existing, ratingId: publicVendorReviewId(existing.ratingId) } }; // calm idempotence
 
     const report = await app.prisma.ratingReport.create({
-      data: { ratingId: id, reporterId: userId, reason, note: note ?? null },
+      data: { ratingId: rating.id, reporterId: userId, reason, note: note ?? null },
     });
-    return { success: true, data: report };
+    return { success: true, data: { ...report, ratingId: publicVendorReviewId(report.ratingId) } };
   });
 
   /** POST /orders/:id/tip — post-delivery tipping FAILS CLOSED
