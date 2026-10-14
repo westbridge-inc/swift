@@ -38,6 +38,7 @@ import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { moverLocationAccepted } from '../../contracts/mover-location';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
@@ -684,7 +685,8 @@ export async function driverRoutes(app: FastifyInstance) {
       }
     }
 
-    return { success: true };
+    // The app checkpoints only an explicit acceptance (contracts/mover-location.ts).
+    return moverLocationAccepted();
   });
 
   // ─── Available Rides ───────────────────────────────────────────────────
