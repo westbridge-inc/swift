@@ -48,7 +48,7 @@ function jpeg(width: number, height: number, salt = nanoid(12)): Buffer {
   return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, com, sof0, Buffer.from([0xff, 0xd9])]);
 }
 const readable = () => jpeg(1600, 1000);
-/** #1534 makes a reviewer type the number to approve a customer ID; main ignores the field. */
+/** A number sent with a customer ID's approval: never asked for and dropped unread (rule 11 Oct 2026: no ID-number duplicate check at launch). */
 const typedNumber = () => `SYN${nanoid(8).replace(/[^A-Za-z0-9]/g, '7')}`;
 
 async function customer(extra: Record<string, unknown> = {}) {
@@ -429,11 +429,16 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
   });
 
-  it('a second approved ID replaces the first (one stands per person); withdrawing the standing one says L1', async () => {
+  it('a second ID replaces the first (one stands per person); withdrawing the standing one says L1', async () => {
     const c = await customer();
     const first = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) })).json().data;
     const second = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(420, 300)) })).json().data;
-    for (const d of [first, second]) expect((await admin('PUT', `/api/v1/admin/verification/${d.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
+    // [#1620] The second copy, sent while the first still waited, replaced it before review: the first can no
+    // longer be decided (DOCUMENT_REPLACED), and the newer one is the one approved. One stands per person.
+    const stale = await admin('PUT', `/api/v1/admin/verification/${first.id}/approve`, { documentNumber: typedNumber() });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error.code).toBe('DOCUMENT_REPLACED');
+    expect((await admin('PUT', `/api/v1/admin/verification/${second.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: first.id } })).state).toBe('SUPERSEDED');
     expect((await admin('PUT', `/api/v1/admin/verification/${first.id}/revoke`, { reason: 'Synthetic: replaced ID' })).statusCode).toBe(409);
     const last = await admin('PUT', `/api/v1/admin/verification/${second.id}/revoke`, { reason: 'Synthetic: withdrawn after review' });
@@ -441,6 +446,21 @@ describe('a withdrawal outlives the document (review S1, S3)', () => {
     expect(last.json().data.accountTrustLevel).toBe('L1');
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     expect((await notices(c.id)).map((n) => n.title)).toContain('Your ID is no longer on file');
+  });
+
+  // [Opus 12 Oct · #1620 × DOC-1 §24.2] A held customer ID a reviewer escalated is never wiped by a new upload.
+  it('a held ID under a second review is kept: a new upload is refused, and the second reviewer can still confirm', async () => {
+    const c = await customer();
+    const first = (await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) })).json().data;
+    const escalated = await admin('PUT', `/api/v1/admin/verification/${first.id}/reject`, { reason: 'Synthetic: the photo looks edited', reasonCode: 'SUSPECTED_TAMPERING' });
+    expect(escalated.statusCode, escalated.body).toBe(200);
+    expect((await app.prisma.reviewCase.findFirstOrThrow({ where: { submissionId: first.id, closedAt: null } })).queue).toBe('SECOND_REVIEW');
+    const again = await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(420, 300)) });
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error.code).toBe('DOCUMENT_STILL_IN_REVIEW');
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: first.id } })).state).toBe('REVIEW_QUEUED');
+    expect(await app.prisma.verificationDocument.count({ where: { userId: c.id, docType: 'identity_l2' } })).toBe(1);
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
   });
 
   it("the customer's own status shows a neutral line for a withdrawn ID, never the reviewer's reason", async () => {
