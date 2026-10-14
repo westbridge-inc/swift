@@ -107,21 +107,34 @@ describe('a walled API or worker refuses to start without a working system login
   });
 });
 
-describe('both composition roots run the check before they serve', () => {
+describe('both composition roots run BOTH boot attestations, in order, before they serve', () => {
+  // The tenant-wall attestation (it refuses the postures that must never run)
+  // and the system-login check live on the same boot lines of the API and the
+  // worker. Neither may be dropped when the other is edited: each root calls
+  // both, once each, tenant wall first, before it serves anything.
   const source = (file: string) => readFileSync(join(__dirname, '..', file), 'utf8');
+  const bothInOrderBefore = (text: string, calls: [string, string], serving: string[]) => {
+    for (const call of calls) expect(text.split(call).length - 1, call).toBe(1);
+    const [wall, system] = calls.map((call) => text.indexOf(call)) as [number, number];
+    expect(wall).toBeLessThan(system);
+    for (const marker of serving) {
+      expect(text.indexOf(marker), marker).toBeGreaterThan(-1);
+      expect(system).toBeLessThan(text.indexOf(marker));
+    }
+  };
 
-  it('the API checks before it listens', () => {
-    const server = source('server.ts');
-    const check = server.indexOf('attestSystemLoginAtBoot(app.prisma');
-    expect(check).toBeGreaterThan(-1);
-    expect(check).toBeLessThan(server.indexOf('app.listen('));
+  it('the API: tenant-wall attestation, then the system login, then it listens', () => {
+    bothInOrderBefore(source('server.ts'),
+      ['await attestTenantWallAtBoot(app.prisma, app.log)', 'await attestSystemLoginAtBoot(app.prisma, app.log)'],
+      ['app.listen(']);
   });
 
-  it('the worker checks before Redis and its first job', () => {
+  it('the worker: the scoped client, tenant-wall attestation, then the system login, then Redis and its first job', () => {
     const worker = source('worker.ts');
-    const check = worker.indexOf('attestSystemLoginAtBoot(prisma');
-    expect(check).toBeGreaterThan(-1);
-    expect(check).toBeLessThan(worker.indexOf('redis.ping()'));
-    expect(check).toBeLessThan(worker.indexOf('initializeJobRuntime({'));
+    expect(worker).toMatch(/createScopedProcessClient\s*\(/);
+    expect(worker).not.toMatch(/new\s+PrismaClient\s*\(/);
+    bothInOrderBefore(worker,
+      ['await attestTenantWallAtBoot(prisma, log)', 'await attestSystemLoginAtBoot(prisma, log)'],
+      ['redis.ping()', 'initializeJobRuntime({']);
   });
 });
