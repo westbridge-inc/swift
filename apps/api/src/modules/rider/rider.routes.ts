@@ -45,7 +45,6 @@ import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
 import { estimateLoad, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
-import { log } from '../../utils/logger';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';

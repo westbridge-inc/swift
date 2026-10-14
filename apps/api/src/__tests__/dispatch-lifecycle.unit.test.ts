@@ -37,6 +37,8 @@ const context = vm.createContext({
   rescueIncentiveGyd: async () => 0, riderFloatForOrder: () => 0,
   customerTrustSummaries: async () => new Map(), cashMathForOffer: () => null,
   estimateLoad: () => 'small',
+  // [owner #20] The enforced load gate's size read (a food order with no bulky line needs no vehicle size).
+  requiredPackageSizeForOrder: () => null, totalBulkUnits: () => 0, DEFAULT_LOAD_BANDS: { small: 4, medium: 12, large: 30 },
   dispatchSearchesCounter: { inc: noop }, dispatchTimeToAssign: { observe: noop },
   poolForOrder: (o: { orderType: string }) => o.orderType === 'TAXI' ? 'DRIVER' : 'RIDER',
   verticalForOrder: () => 'DELIVERY',
@@ -382,7 +384,7 @@ function publishingHarness() {
   Object.assign(h.order, { pickupLat: 1, pickupLng: 1, items: [], paymentMethod: 'CASH' });
   h.subject.initializeDeliveryGeneration = async () => {};
   h.subject.findCandidates = async () => [{ riderId: 'rider', userId: 'user', etaMinutes: 3 }];
-  h.subject.logLoadGateShadow = () => {}; h.subject.canReceiveOffer = async () => true;
+  h.subject.logLoadGate = () => {}; h.subject.canReceiveOffer = async () => true;
   const emitted: any[] = [], scheduled: string[] = [];
   h.subject.io = { to: () => ({ emit: (_event: string, payload: any) => { emitted.push(payload); } }) };
   h.subject.scheduleTimeout = async (_id: string, _rider: string, _delay: number, attempt: string) => { scheduled.push(attempt); };
@@ -1080,7 +1082,7 @@ describe('R4 exact-review regressions — service-free', () => {
     Object.assign(h.order, { pickupLat: 1, pickupLng: 1, items: [], paymentMethod: 'CASH' });
     h.subject.initializeDeliveryGeneration = async () => {};
     h.subject.findCandidates = async () => [{ riderId: 'fresh-rider', userId: 'fresh-user', etaMinutes: 3 }];
-    h.subject.logLoadGateShadow = () => {};
+    h.subject.logLoadGate = () => {};
     h.subject.canReceiveOffer = async () => true;
     const emitted: any[] = [], scheduled: any[] = [];
     h.subject.io = { to: () => ({ emit: (...args: any[]) => emitted.push(args) }) };
