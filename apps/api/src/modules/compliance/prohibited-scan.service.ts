@@ -19,6 +19,7 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import {
   PROHIBITED_CONFUSABLES,
   PROHIBITED_FORMAT_CHARS_PATTERN,
+  PROHIBITED_LEET_FROM,
   PROHIBITED_MARKS_PATTERN,
   PROHIBITED_PREFILTER_WORDS,
   PROHIBITED_ROSE_PATTERN,
@@ -32,7 +33,12 @@ export async function prefilterCandidateIds(db: Db, tenantId: string): Promise<s
   const W = [...PROHIBITED_PREFILTER_WORDS];
   // The column as the classifier reads it (see prohibited-items.ts `undisguise` and matcher `normalize`).
   const read = (column: Prisma.Sql) => Prisma.sql`lower(regexp_replace(normalize(regexp_replace(translate(regexp_replace(normalize(${column}, NFKC), ${PROHIBITED_FORMAT_CHARS_PATTERN}, '', 'g'), ${PROHIBITED_CONFUSABLES.from}, ${PROHIBITED_CONFUSABLES.to}), ${PROHIBITED_ROSE_PATTERN}, 'rosewine', 'g'), NFD), ${M}, '', 'g'))`;
-  const words = (column: Prisma.Sql) => Prisma.sql`(regexp_split_to_array(${read(column)}, '[^a-z0-9]+') && ${W}::text[] OR ${read(column)} ~ ${PROHIBITED_SINGLE_LETTER_RUN_PATTERN})`;
+  // [evasion] Every l33t character translated, "1" both as "i" and as "l" (the classifier translates only those that
+  // touch a letter: a superset); and every pair of adjacent words joined ("hen nessy" → "hennessy").
+  const leet = (column: Prisma.Sql, one: string) => Prisma.sql`regexp_split_to_array(translate(${read(column)}, ${PROHIBITED_LEET_FROM + '1'}, ${'aaeiosstl' + one}), '[^a-z0-9]+')`;
+  const pairs = (column: Prisma.Sql) => Prisma.sql`EXISTS (SELECT 1 FROM (SELECT regexp_split_to_array(${read(column)}, '[^a-z0-9]+') AS a) t, generate_series(1, greatest(cardinality(t.a) - 1, 0)) k WHERE t.a[k] || t.a[k + 1] = ANY(${W}::text[]))`;
+  const words = (column: Prisma.Sql) => Prisma.sql`(regexp_split_to_array(${read(column)}, '[^a-z0-9]+') && ${W}::text[] OR ${read(column)} ~ ${PROHIBITED_SINGLE_LETTER_RUN_PATTERN}
+    OR ${leet(column, 'i')} && ${W}::text[] OR ${leet(column, 'l')} && ${W}::text[] OR ${pairs(column)})`;
   const rows = await db.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     SELECT i.id FROM items i JOIN categories c ON c.id = i."categoryId"
     WHERE i."tenantId" = ${tenantId}

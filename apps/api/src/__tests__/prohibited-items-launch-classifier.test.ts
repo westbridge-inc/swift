@@ -22,6 +22,7 @@ import {
   PROHIBITED_CONFUSABLES,
   PROHIBITED_FORMAT_CHARS_PATTERN,
   PROHIBITED_GOODS_NOUNS,
+  PROHIBITED_LEET_FROM,
   PROHIBITED_MARKS_PATTERN,
   PROHIBITED_NEVER_APPROVABLE,
   PROHIBITED_PREFILTER_WORDS,
@@ -157,9 +158,13 @@ describe('[§8 launch] the database pre-filter still keeps every disguised spell
     .replace(new RegExp(PROHIBITED_ROSE_PATTERN, 'g'), 'rosewine')
     .normalize('NFD').replace(new RegExp(PROHIBITED_MARKS_PATTERN, 'g'), '').toLowerCase();
   const prefilter = new Set(PROHIBITED_PREFILTER_WORDS);
+  const leet = (s: string, one: string) => [...s].map((ch) => { const k = (PROHIBITED_LEET_FROM + '1').indexOf(ch); return k >= 0 ? ('aaeiosstl' + one)[k]! : ch; }).join('');
   const kept = (raw: string) => {
     const s = sqlString(raw);
-    return s.split(/[^a-z0-9]+/).some((w) => prefilter.has(w)) || new RegExp(PROHIBITED_SINGLE_LETTER_RUN_PATTERN).test(s);
+    const tokens = s.split(/[^a-z0-9]+/);
+    return tokens.some((w) => prefilter.has(w)) || new RegExp(PROHIBITED_SINGLE_LETTER_RUN_PATTERN).test(s)
+      || [leet(s, 'i'), leet(s, 'l')].some((t) => t.split(/[^a-z0-9]+/).some((w) => prefilter.has(w)))
+      || tokens.some((w, k) => k + 1 < tokens.length && prefilter.has(w + tokens[k + 1]));
   };
 
   it('every listed word and brand-first word, disguised every way, is kept when the classifier catches it', () => {
@@ -182,6 +187,18 @@ describe('[§8 launch] the database pre-filter still keeps every disguised spell
     }
     expect(checked).toBeGreaterThan(2000);
     for (const raw of ['Rosé 750ml', 'ROSÉ', 'Rose\u0301 wine', 'R\u200Bum', 'Rцm', 'Ｒｕｍ', 'R.U.M']) expect(kept(raw), raw).toBe(true);
+    // [evasion] l33t, plural and split spellings of every listed word and brand-first word are kept too.
+    const leetOf = (t: string) => t.replace(/a/g, '4').replace(/e/g, '3').replace(/i/g, '1').replace(/o/g, '0').replace(/s/g, '$');
+    let evasions = 0;
+    for (const term of [...Object.values(PROHIBITED_TERMS).flat(), ...PROHIBITED_BRAND_FIRST_WORDS]) {
+      const raws = [leetOf(term), `${term}s 6 pack`, term.length >= 5 && !term.includes(' ') ? `${term.slice(0, 3)} ${term.slice(3)}` : null].filter(Boolean) as string[];
+      for (const raw of raws) {
+        if (checkItem({ name: raw }).state === 'CLEAR') continue;
+        evasions += 1;
+        expect(kept(raw), `the pre-filter misses ${JSON.stringify(raw)} (${term})`).toBe(true);
+      }
+    }
+    expect(evasions).toBeGreaterThan(800);
   });
 
   it('the format characters it removes are exactly Unicode\'s, and the look-alike table is one-to-one', () => {
@@ -251,5 +268,33 @@ describe('[§8 launch · DS1110] the second review', () => {
   it('a notebook brand and an empty cylinder are not banned goods', () => {
     expect(verdict('Mead five star notebook').state).not.toBe('BANNED');
     expect(verdict('Empty gas cylinder').state).not.toBe('BANNED');
+  });
+});
+
+// [Coordinator, 14 Oct: commit security review "classifier evasion"] Each evasion class, probed and pinned. The text is
+// normalised once at the classifier's entry; these are the spellings that still slipped through.
+describe('[§8 launch · evasion] spellings that try to slip past the list', () => {
+  it.each([
+    ['Cherokee look-alike', 'Ꮃine 750ml'], ['small-capital look-alike', 'ᴠᴏᴅᴋᴀ 1L'],
+    ['l33t', 'v4pe'], ['l33t', 'c1garette'], ['l33t', 'w1ne 750ml'], ['l33t', 'b33r 6 pack'], ['l33t symbol', 'Hennes$y VS'], ['l33t', 'V0DK@ 1L'],
+    ['Spanish', 'Cerveza 6 pack'], ['Spanish', 'Ron 750ml'], ['French', 'Bière 330ml'], ['Spanish', 'Tabaco'], ['Spanish', 'Vino tinto 750ml'],
+    ['Portuguese', 'Cerveja 6 pack'], ['Spanish', 'Cigarrillos 20s'],
+    ['brand plural', 'Heinekens 6 pack'], ['brand plural', 'Coronas 6 pack'],
+  ] as const)('%s: %s is refused outright', (_kind, name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED' });
+  });
+
+  it.each([
+    ['l33t, a word only', { name: 'a1cohol free hand gel' }], ['split word', { name: 'Hen nessy VS' }], ['split word', { name: 'Vod ka 1L' }],
+    ['split across name and option', { name: 'Captain', optionNames: ['Morgan'] }], ['split across name and description', { name: 'Jack', description: 'Daniels' }],
+  ] as const)('%s is held for a person: %o', (_kind, item) => {
+    expect(checkItem(item).state).not.toBe('CLEAR');
+  });
+
+  it.each([
+    'Vitamin B12', 'A4 paper (500 sheets)', 'PS5 controller', '4x4 tyre', 'Size 10 shoes', '7up 2L', 'Pine apple chunks', 'Banking app',
+    'Galaxy Buds', 'MP3 player', 'G4 Plus phone case', 'Room 101 notebook', 'Cerulean blue paint',
+  ])('ordinary goods with digits, plurals or split words stay clear: %s', (name) => {
+    expect(verdict(name)).toEqual({ state: 'CLEAR' });
   });
 });

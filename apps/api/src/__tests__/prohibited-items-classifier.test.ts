@@ -199,7 +199,8 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
     for (const word of PROHIBITED_BRAND_FIRST_WORDS) {
       for (const raw of [`${word} Pineapple`, `${word.toUpperCase()} — mango`, `${word}\u2019s seltzer`]) {
         // [#55] Held for a person — or, for XM (Banks DIH's rum and nothing else), refused outright.
-        expect(checkItem({ name: raw }).state, raw).toBe(word === 'xm' ? 'BANNED' : 'WAITING');
+        // ("Truly's seltzer" reads as Truly Seltzer — never approvable.)
+        expect(checkItem({ name: raw }).state, raw).toBe(word === 'xm' || (word === 'truly' && raw.endsWith('seltzer')) ? 'BANNED' : 'WAITING');
         expect(kept(raw), `the pre-filter misses ${JSON.stringify(raw)}`).toBe(true);
       }
     }

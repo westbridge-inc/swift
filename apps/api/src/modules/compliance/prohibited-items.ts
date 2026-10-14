@@ -108,6 +108,8 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'grappa', 'sambuca', 'ouzo', 'cachaca', 'advocaat', 'pastis', 'vodka cruiser', 'vodka cruisers', 'wine cooler', 'wine coolers',
     'four loko', 'havana club', 'sailor jerry', 'disaronno', 'cointreau', 'grand marnier', 'midori', 'cruzan', 'svedka',
     'stolichnaya', 'ketel one', 'dewars', 'olmeca', 'sauza', 'casamigos', 'tsingtao', 'hairoun', 'medalla', 'kalik', 'wadadli',
+    // [evasion] the same goods in Spanish, Portuguese, French, German and Italian
+    'cerveza', 'cervezas', 'cerveja', 'cervejas', 'biere', 'bieres', 'bier', 'birra', 'vino', 'vinos', 'vinho', 'aguardiente',
   ],
   TOBACCO: [
     'tobacco', 'cigarette', 'cigarettes', 'cig', 'cigs', 'cigar', 'cigars', 'cigarillo', 'cigarillos', 'nicotine',
@@ -116,6 +118,7 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'black and mild', 'swisher', 'swisher sweets', 'backwoods', 'craven a', 'al fakher', 'zyn',
     'snus', 'heets', 'iqos', 'captain black', 'golden virginia', 'amber leaf',
     'djarum', 'gudang garam', 'sampoerna', 'mild seven',
+    'tabaco', 'cigarro', 'cigarros', 'cigarrillo', 'cigarrillos',
   ],
   VAPES: [
     'vape', 'vapes', 'vaping', 'vaper', 'e cig', 'e cigs', 'ecig', 'ecigs', 'e cigarette', 'e cigarettes',
@@ -219,6 +222,8 @@ const BRAND_FIRST: Readonly<Record<string, { prohibitedClass: ProhibitedClass; c
   newport: { prohibitedClass: 'TOBACCO', certain: false },
   kool: { prohibitedClass: 'TOBACCO', certain: false },
   winston: { prohibitedClass: 'TOBACCO', certain: false },
+  // [evasion] "ron" is Spanish for rum (and a first name)
+  ron: { prohibitedClass: 'ALCOHOL', certain: false },
 };
 export const PROHIBITED_BRAND_FIRST_WORDS: readonly string[] = Object.keys(BRAND_FIRST);
 
@@ -304,12 +309,14 @@ export const PROHIBITED_GOODS_NOUNS: readonly string[] = [
   'grappa', 'sambuca', 'ouzo', 'cachaca', 'advocaat', 'pastis', 'eye drops', 'ear drops', 'nasal spray', 'weed',
   'lottery ticket', 'lottery tickets', 'lotto', 'sex toy', 'sex toys', 'adult toy', 'adult toys', 'vibrator', 'vibrators',
   'dildo', 'dildos', 'wine coolers',
+  'cerveza', 'cervezas', 'cerveja', 'cervejas', 'biere', 'bieres', 'bier', 'birra', 'vino', 'vinos', 'vinho', 'aguardiente',
+  'tabaco', 'cigarro', 'cigarros', 'cigarrillo', 'cigarrillos',
   // [DS1109] sold with a size only ("Marsala 750ml"; "Chicken Marsala" and "Madeira cake" are dishes) — see SIZED_ONLY
   'rosewines', 'cider', 'ciders', 'madeira', 'marsala', 'amaretto', 'limoncello', 'pisco', 'irish cream',
 ];
 /** Goods nouns that are also a colour or a cut ("Dress — Wine", "Heels - Champagne", a "Stout" fit): certain only with
  *  another word in front ("Red wine", "House wine") or a size after ("Wine 750ml"); alone they hold. */
-const AMBIGUOUS_ALONE: ReadonlySet<string> = new Set(['wine', 'wines', 'champagne', 'cognac', 'stout', 'stouts', 'sherry', 'brandy', 'bourbon', 'rosewine', 'rosewines']);
+const AMBIGUOUS_ALONE: ReadonlySet<string> = new Set(['wine', 'wines', 'champagne', 'cognac', 'stout', 'stouts', 'sherry', 'brandy', 'bourbon', 'rosewine', 'rosewines', 'vino', 'vinos', 'vinho']);
 /** Goods nouns that name a dish or a flavour as often as the drink ("Chicken Marsala", "Madeira cake", "Amaretto
  *  biscotti", "Irish cream coffee creamer", sparkling apple cider): certain only with a drink measure after them. [DS1109] */
 const SIZED_ONLY: ReadonlySet<string> = new Set(['cider', 'ciders', 'madeira', 'marsala', 'amaretto', 'limoncello', 'pisco', 'irish cream', 'wine coolers']);
@@ -345,7 +352,10 @@ const DISH_HEADS: ReadonlySet<string> = new Set([
   'chips', 'fries', 'dip', 'salsa', 'wrap', 'wraps', 'tacos', 'beans', 'donut', 'donuts', 'doughnut', 'doughnuts',
 ]);
 const ends = (words: readonly string[], phrase: readonly string[]) => phrase.every((w, k) => words[words.length - phrase.length + k] === w);
-const isDish = (words: readonly string[]) => words.length > 0 && (DISH_HEADS.has(words[words.length - 1]!) || ends(words, ['ice', 'cream']));
+const isDish = (words: readonly string[]) => {
+  const last = words[words.length - 1];
+  return last !== undefined && (DISH_HEADS.has(last) || DISH_HEADS.has(`${last}s`) || DISH_HEADS.has(`${last}es`) || ends(words, ['ice', 'cream']));
+};
 const GOODS_LONGEST_FIRST = [...PROHIBITED_GOODS_NOUNS].sort((a, b) => b.split(' ').length - a.split(' ').length).map((p) => p.split(' '));
 
 /** Words that follow a goods noun without changing what it is: sizes, packs, strengths, ages, styles. */
@@ -354,7 +364,7 @@ const TRAILING_STYLE: ReadonlySet<string> = new Set([
   'gold', 'golden', 'white', 'dark', 'black', 'amber', 'silver', 'red', 'blush', 'spiced', 'overproof', 'premium', 'reserve',
   'special', 'extra', 'original', 'classic', 'select', 'superior', 'dry', 'sweet', 'brut', 'blanc', 'blanco', 'reposado',
   'anejo', 'light', 'lite', 'strong', 'draft', 'draught', 'imported', 'local', 'craft', 'double', 'triple', 'xo', 'vs',
-  'vsop', 'xxo', 'smooth', 'bold', 'export', 'label', 'foreign',
+  'vsop', 'xxo', 'smooth', 'bold', 'export', 'label', 'foreign', 'tinto', 'tinta', 'rosado', 'blanca',
 ]);
 /** Where a name or an option splits into parts: "Rum - Bristol White", "Vodka, Russian Standard", "Beer (non-alcoholic)". */
 const SEGMENT_BREAK = /\s+[-–—|]\s+|[,;:|/()[\]{}]/u;
@@ -410,6 +420,8 @@ const CONFUSABLE_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ['\u03B1', 'a'], ['\u03BF', 'o'], ['\u03BD', 'v'], ['\u03C1', 'p'], ['\u03C4', 't'], ['\u03C5', 'u'], ['\u03B9', 'i'], ['\u03BA', 'k'], ['\u03B5', 'e'], ['\u03C7', 'x'],
   ['\u0391', 'A'], ['\u0392', 'B'], ['\u0395', 'E'], ['\u0396', 'Z'], ['\u0397', 'H'], ['\u0399', 'I'], ['\u039A', 'K'], ['\u039C', 'M'], ['\u039D', 'N'], ['\u039F', 'O'],
   ['\u03A1', 'P'], ['\u03A4', 'T'], ['\u03A5', 'Y'], ['\u03A7', 'X'],
+  // [evasion] Cherokee letters (both cases) and small capitals
+  ['\u13AA', 'A'], ['\uAB7A', 'a'], ['\u13F4', 'B'], ['\u13FC', 'b'], ['\u13DF', 'C'], ['\uABAF', 'c'], ['\u13A0', 'D'], ['\uAB70', 'd'], ['\u13AC', 'E'], ['\uAB7C', 'e'], ['\u13C0', 'G'], ['\uAB90', 'g'], ['\u13BB', 'H'], ['\uAB8B', 'h'], ['\u13AB', 'J'], ['\uAB7B', 'j'], ['\u13E6', 'K'], ['\uABB6', 'k'], ['\u13DE', 'L'], ['\uABAE', 'l'], ['\u13B7', 'M'], ['\uAB87', 'm'], ['\u13E2', 'P'], ['\uABB2', 'p'], ['\u13DA', 'S'], ['\uABAA', 's'], ['\u13A2', 'T'], ['\uAB72', 't'], ['\u13D9', 'V'], ['\uABA9', 'v'], ['\u13B3', 'W'], ['\uAB83', 'w'], ['\u13D4', 'W'], ['\uABA4', 'w'], ['\u13C3', 'Z'], ['\uAB93', 'z'], ['\u13A1', 'R'], ['\uAB71', 'r'], ['\u13A5', 'i'], ['\uAB75', 'i'], ['\u1D00', 'a'], ['\u0299', 'b'], ['\u1D04', 'c'], ['\u1D05', 'd'], ['\u1D07', 'e'], ['\u0262', 'g'], ['\u029C', 'h'], ['\u026A', 'i'], ['\u1D0A', 'j'], ['\u1D0B', 'k'], ['\u029F', 'l'], ['\u1D0D', 'm'], ['\u0274', 'n'], ['\u1D0F', 'o'], ['\u1D18', 'p'], ['\u0280', 'r'], ['\uA731', 's'], ['\u1D1B', 't'], ['\u1D1C', 'u'], ['\u1D20', 'v'], ['\u1D21', 'w'], ['\u028F', 'y'], ['\u1D22', 'z'],
 ];
 export const PROHIBITED_CONFUSABLES = {
   from: CONFUSABLE_PAIRS.map(([f]) => f).join(''),
@@ -482,17 +494,61 @@ function labelSpellings(text: string): string[] {
   return [...new Set([text, unescaped, joined, anded(unescaped), anded(joined)])];
 }
 
-/** Every reading of a text that is judged: each label spelling, normalized, with spelled-out letters joined, exemptions cut. */
+/**
+ * l33t spellings ("v4pe", "c1garette", "Hennes$y", "V0DK@"): a digit or a symbol that touches a letter read as the
+ * letter it stands for — "1" both as "i" and as "l". Judged beside the text, never instead of it, so "4 pack" and
+ * "750ml" keep their meaning. The database pre-filter translates every such character (a superset). [evasion]
+ */
+export const PROHIBITED_LEET_FROM = '4@3!05$7|';
+const LEET_TO = 'aaeiosstl';
+const LEET = new Map([...PROHIBITED_LEET_FROM].map((ch, k) => [ch, LEET_TO[k]!]));
+const LEET_ANY = /[4@3!05$7|1]/;
+/** A token that is a number with its unit ("750ml", "20s", "7up", "1L"): never translated. */
+const NUMBER_WITH_UNIT = /^\d+([.,]\d+)?\p{L}{0,6}$/u;
+function leetSpellings(text: string): string[] {
+  if (!LEET_ANY.test(text)) return [];
+  const spell = (one: string) => text.split(/(\s+)/).map((token) => (
+    /\p{L}/u.test(token) && LEET_ANY.test(token) && !NUMBER_WITH_UNIT.test(token)
+      ? [...token].map((ch) => (ch === '1' ? one : LEET.get(ch) ?? ch)).join('')
+      : token)).join('');
+  const out = [spell('i'), spell('l')].filter((t) => t !== text);
+  return [...new Set(out)];
+}
+
+/** "Heinekens", "Coronas": a word with its plural "s" dropped (words of five letters or more), judged beside it. */
+const singular = (normalized: string): string =>
+  normalized.split(' ').map((w) => (w.length > 4 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w)).join(' ');
+
+/** Every reading of a text that is judged: as written and in its l33t spellings, each label spelling, normalized,
+ *  with spelled-out letters joined and plurals dropped, exemptions cut. The text is undisguised once, here. */
 function readings(text: string, noSoftDrinks: boolean): string[] {
   const out = new Set<string>();
-  for (const spelling of labelSpellings(undisguise(text))) {
-    const n = normalize(spelling);
-    for (const variant of [n, joinSingleLetters(n)]) {
-      const judged = stripExempt(variant, noSoftDrinks);
-      if (judged) out.add(judged);
+  const plain = undisguise(text);
+  for (const base of [plain, ...leetSpellings(plain)]) {
+    for (const spelling of labelSpellings(base)) {
+      const n = normalize(spelling);
+      for (const variant of [n, joinSingleLetters(n)]) {
+        const judged = stripExempt(variant, noSoftDrinks);
+        if (judged) out.add(judged);
+      }
+      // the plural dropped AFTER the exemptions are cut ("diesel jeans" stays exempt)
+      const dropped = singular(stripExempt(n, noSoftDrinks));
+      if (dropped) out.add(dropped);
     }
   }
   return [...out];
+}
+
+/** "Hen nessy", "Vod ka": two adjacent words that join into a listed word of four letters or more. Read from the
+ *  plain spelling only (the database pre-filter joins the same pairs), and only ever HOLDS. [evasion] */
+const SPLIT_TERMS_MIN = 4;
+function splitWordHit(text: string): { prohibitedClass: ProhibitedClass; term: string } | null {
+  const words = normalize(undisguise(text)).split(' ').filter(Boolean);
+  for (let i = 0; i + 1 < words.length; i += 1) {
+    const joined = words[i]! + words[i + 1]!;
+    if (joined.length >= SPLIT_TERMS_MIN && SINGLE_WORD_TERMS.has(joined)) return { prohibitedClass: CLASS_OF.get(joined)!, term: joined };
+  }
+  return null;
 }
 
 export interface ClassifyOptions {
@@ -501,6 +557,8 @@ export interface ClassifyOptions {
   noSoftDrinks?: boolean;
   /** Judge the brand-first words (default true: a name, an option, a line on an order). */
   brandFirst?: boolean;
+  /** Judge words split in two ("Hen nessy") — default true; a hold only. */
+  splitWords?: boolean;
 }
 
 /** One text → the first banned class and word it carries, or null. */
@@ -509,9 +567,13 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
   const noSoftDrinks = options.noSoftDrinks === true || qualifiesSoftDrinks(text);
   const judged = readings(text, noSoftDrinks);
   if (judged.length === 0) return null;
-  for (const prohibitedClass of CLASS_ORDER) {
-    for (const term of PROHIBITED_TERMS[prohibitedClass]) {
-      if (judged.some((j) => hasPhrase(j, term))) return { prohibitedClass, term };
+  // The spelling as written names the term first ("rolling papers"); the other readings only when it names none.
+  const asWritten = new Set(labelSpellings(undisguise(text)).map((sp) => stripExempt(normalize(sp), noSoftDrinks)));
+  for (const pool of [judged.filter((j) => asWritten.has(j)), judged]) {
+    for (const prohibitedClass of CLASS_ORDER) {
+      for (const term of PROHIBITED_TERMS[prohibitedClass]) {
+        if (pool.some((j) => hasPhrase(j, term))) return { prohibitedClass, term };
+      }
     }
   }
   if (options.brandFirst !== false) {
@@ -521,7 +583,7 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
       if (brand) return { prohibitedClass: brand.prohibitedClass, term: first };
     }
   }
-  return null;
+  return options.splitWords === false ? null : splitWordHit(text);
 }
 
 /** The goods noun heading one part of a name or option, if any ("red wine 750ml" → "wine"). */
@@ -664,6 +726,13 @@ export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; fi
     if (certain) return { ...certain, field, certain: true };
     first ??= { ...hit, field };
   }
+  if (!first) {
+    // A phrase written across fields ("Captain" named, "Morgan" as the option): the item's own words read together
+    // hold it for a person. Never certain, no brand-first word, no split word. [evasion]
+    const together = fields.map(([, text]) => text).filter(Boolean).join(' . ');
+    const hit = classifyText(together, { noSoftDrinks, brandFirst: false, splitWords: false });
+    if (hit) first = { ...hit, field: 'name' };
+  }
   return first ? { ...first, certain: false } : null;
 }
 
@@ -776,4 +845,6 @@ const PREFILTER_BASE: readonly string[] = [
 export const PROHIBITED_PREFILTER_WORDS: readonly string[] = [...new Set([
   ...PREFILTER_BASE,
   ...PREFILTER_BASE.filter((w) => w.length > 1 && w.endsWith('s')).map((w) => w.slice(0, -1)),
+  // [evasion] a plural the classifier drops ("heinekens" → "heineken")
+  ...PREFILTER_BASE.map((w) => `${w}s`),
 ])].sort();

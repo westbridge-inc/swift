@@ -549,7 +549,9 @@ describe('[§8] the admin catalogue check', () => {
   // classifier does (format characters, look-alikes, fullwidth, spelled-out letters, "rosé").
   it('a disguised word reaches the queue', async () => {
     const ids: string[] = [];
-    for (const description of ['R\u200Bum truffles', 'Rцm truffles', 'Ｒｕｍ truffles', 'R.U.M truffles', 'Rosé jelly', 'Неineken glaze']) {
+    for (const description of ['R\u200Bum truffles', 'Rцm truffles', 'Ｒｕｍ truffles', 'R.U.M truffles', 'Rosé jelly', 'Неineken glaze',
+      // [evasion] l33t, a brand plural, a split word
+      'v4pe flavour', 'Heinekens glaze', 'Hen nessy glaze']) {
       const row = await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: vendor.shelfId, name: `Gift box ${ids.length} ${RUN}`, description, basePrice: 900 } });
       ids.push(row.id);
     }
