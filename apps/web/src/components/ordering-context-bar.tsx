@@ -1,21 +1,43 @@
 'use client';
 import { lazy, Suspense, useState } from 'react';
+import Link from 'next/link';
 import { ChevronDown, MapPin } from 'lucide-react';
 import { useOrderingContext } from './ordering-context';
 import { MODE_LOCKED } from '@/lib/ordering-mode-lock';
 const Sheet = lazy(() => import('./sheet').then(module => ({ default: module.Sheet })));
 
-/** "Delivery · address at checkout · ASAP" — the order's context, one tap to change. */
-export function OrderingContextBar() {
+/**
+ * "Delivery · address at checkout · ASAP" — the order's context, one tap to change.
+ * On Home it is the page's one place control (inline in Home's top row): it
+ * shows the address the customer delivers to, which is changed from its sheet,
+ * and a guest finds the stores near them there. Pickup shows no address.
+ */
+export function OrderingContextBar({ inline = false, deliverTo, addressHref, nearMe }: {
+  inline?: boolean;
+  /** The saved address a signed-in customer delivers to (Home). */
+  deliverTo?: string | null;
+  /** Where that address is added or changed (Home, signed in). */
+  addressHref?: string;
+  /** A guest's "show stores near me" (Home). */
+  nearMe?: { busy: boolean; on: boolean; find: () => void };
+} = {}) {
   const { mode, setMode } = useOrderingContext(); const [open, setOpen] = useState(false); const [locked, setLocked] = useState(false);
   const pickup = mode === 'PICKUP';
+  const where = pickup ? 'from the store' : deliverTo || 'address at checkout';
+  const close = () => { setOpen(false); setLocked(false); };
+  // Inline (Home's top row, which on a phone also holds the menu and the
+  // profile or Sign in) the phone pill shows the address itself, like the
+  // phone app's location pill, or just "Delivery" before there is one;
+  // "Delivery", "address at checkout" and "ASAP" stay in its spoken name and
+  // show on wider screens.
+  const trigger = (
+    <button type="button" onClick={() => setOpen(true)} className={`flex min-h-11 max-w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-sm${inline ? ' min-w-0' : ''}`} aria-label={`${pickup ? 'Pickup from the store' : deliverTo ? `Delivery to ${deliverTo}` : 'Delivery, address at checkout'}, as soon as possible. Change delivery or pickup`}>
+      <MapPin size={18} aria-hidden className="flex-none text-[var(--swift-red)]" /><span className={`font-semibold${inline && !pickup && deliverTo ? ' hidden wide:inline' : ''}`}>{pickup ? 'Pickup' : 'Delivery'}</span><span className={`truncate${inline && !pickup && !deliverTo ? ' hidden wide:inline' : ''}`}>{where}</span><span className={`flex-none text-[var(--swift-muted)]${inline ? ' hidden wide:inline' : ''}`}>· ASAP</span><ChevronDown size={16} aria-hidden className="flex-none" />
+    </button>
+  );
   return <>
-    <div className="sticky top-0 z-20 bg-[var(--swift-canvas)] py-3">
-      <button type="button" onClick={() => setOpen(true)} className="flex min-h-11 max-w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-sm" aria-label={`${pickup ? 'Pickup from the store' : 'Delivery, address at checkout'}, as soon as possible. Change delivery or pickup`}>
-        <MapPin size={18} aria-hidden className="text-[var(--swift-red)]" /><span className="font-semibold">{pickup ? 'Pickup' : 'Delivery'}</span><span className="truncate">{pickup ? 'from the store' : 'address at checkout'}</span><span className="text-[var(--swift-muted)]">· ASAP</span><ChevronDown size={16} aria-hidden />
-      </button>
-    </div>
-    {open ? <Suspense fallback={<p role="status">Loading delivery or pickup…</p>}><Sheet labelledBy="ordering-context-title" onClose={() => { setOpen(false); setLocked(false); }}>
+    {inline ? trigger : <div className="sticky top-0 z-20 bg-[var(--swift-canvas)] py-3">{trigger}</div>}
+    {open ? <Suspense fallback={<p role="status">Loading delivery or pickup…</p>}><Sheet labelledBy="ordering-context-title" onClose={close} className="bg-[var(--swift-card)] px-6 pb-6 pt-5">
       <h2 id="ordering-context-title" className="mb-4 text-xl font-semibold">Delivery or pickup</h2>
       <fieldset className="grid gap-3"><legend className="mb-1 font-semibold">How would you like your order?</legend>
         {(['DELIVERY', 'PICKUP'] as const).map(value => <label key={value} className="flex min-h-11 items-start gap-3">
@@ -25,8 +47,10 @@ export function OrderingContextBar() {
         </label>)}
       </fieldset>
       {locked ? <p role="alert" className="mt-3">{MODE_LOCKED}</p> : null}
-      <p className="my-4 text-sm text-[var(--swift-muted)]">Orders are prepared as soon as possible. Swift’s server confirms the store, the price and the total before you place the order.</p>
-      <button type="button" className="sw-btn-primary" onClick={() => { setOpen(false); setLocked(false); }}>Done</button>
+      {addressHref && !pickup ? <Link href={addressHref} className="sw-btn sw-btn-md sw-btn-block sw-btn-outline mt-4">{deliverTo ? 'Change delivery address' : 'Add a delivery address'}</Link> : null}
+      {nearMe ? <button type="button" className="sw-btn sw-btn-md sw-btn-block sw-btn-outline mt-4" disabled={nearMe.busy} onClick={() => { close(); nearMe.find(); }}>{nearMe.busy ? 'Finding you…' : nearMe.on ? 'Showing stores near you' : 'Show stores near me'}</button> : null}
+      <p className="my-4 text-sm text-[var(--swift-muted)]">Orders are prepared as soon as possible. We confirm the store, price and total before you place your order.</p>
+      <button type="button" className="sw-btn sw-btn-block" onClick={close}>Done</button>
     </Sheet></Suspense> : null}
   </>;
 }

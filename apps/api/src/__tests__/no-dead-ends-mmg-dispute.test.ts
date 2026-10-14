@@ -77,7 +77,8 @@ afterAll(async () => {
 });
 
 function expectPausedWithNextStep(message: string) {
-  expect(message).toMatch(/disputes the store's payment claim/); // the sentence other suites pin
+  expect(message).toContain("The store's and the customer's MMG payment reports don't match.");
+  expect(message).not.toMatch(/The customer disputes/i);
   expect(message).toMatch(/paused/);
   expect(message).toMatch(/Swift support is reviewing it/);
   expect(message).toMatch(/told when it can move/);
