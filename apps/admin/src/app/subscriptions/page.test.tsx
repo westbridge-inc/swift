@@ -239,6 +239,36 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
     expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('[DS1122 S3] the server says a payout was reported: after a reload neither payout nor release is offered', async () => {
+    refundServer({ ...setAsideRow, refundPayoutReported: true }, () => queued);
+    renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    expect(screen.getByText(/Payment reported; recording awaits approval/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Record payout' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('[DS1122 S3] a payout reported for one set-aside never blocks the next set-aside on the same account', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'SENT9002' : REASON)));
+    let row: unknown = setAsideRow;
+    mockApi((request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [row] } };
+      if (request.method === 'POST' && request.url.pathname.startsWith('/api/v1/admin/subscriptions/sub-1/refund-credit/')) return queued;
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const { user, queryClient } = renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true));
+    // That payout is recorded; credit is later set aside again (a new set-aside).
+    row = { ...setAsideRow, refundSetAsideId: 'evt-aside-2' };
+    await queryClient.invalidateQueries();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByRole('button', { name: 'Record payout' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/set aside: pay it outside Swift/)).toBeTruthy();
+  });
+
   it('a payout refusal (a bad reference) is shown, not swallowed', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('Paid back by') ? 'BANK' : String(msg).includes('Reference of the refund') ? 'x' : REASON)));

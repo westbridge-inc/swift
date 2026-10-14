@@ -107,7 +107,34 @@ async function openSetAside(tx: Prisma.TransactionClient, subscriptionId: string
 
 /** [Sol r2 S1] The route a payout record is asked on; its approval row is
  *  the durable "a payout was reported" marker for the set-aside it names. */
-const PAID_ACTION = 'POST /subscriptions/:id/refund-credit/paid';
+export const PAID_ACTION = 'POST /subscriptions/:id/refund-credit/paid';
+
+/**
+ * [DS1122 S1] One lock per partner's refund, held to the end of the
+ * transaction. The approval gate writes a payout-record ask under it, and a
+ * release takes it before looking for that ask: a release can never commit
+ * around an ask it could not yet see. It ends with the transaction.
+ */
+export async function lockCreditRefundAsks(tx: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`credit-refund-ask:${subscriptionId}`}, 0))`;
+}
+
+/** [DS1122 S3] The subscriptions whose OPEN set-aside already has a payout
+ *  record asked for (the console shows "payment reported" and offers neither
+ *  another payout record nor a release). */
+export async function payoutReportedFor(db: Db, openIds: Map<string, string>): Promise<Set<string>> {
+  const reported = new Set<string>();
+  if (openIds.size === 0) return reported;
+  const asks = await db.privilegedApproval.findMany({
+    where: { action: PAID_ACTION, entityId: { in: [...openIds.keys()] } },
+    select: { entityId: true, bodySnapshot: true },
+  });
+  for (const ask of asks) {
+    const named = (ask.bodySnapshot as { body?: { setAsideId?: unknown } } | null)?.body?.setAsideId;
+    if (ask.entityId && named === openIds.get(ask.entityId)) reported.add(ask.entityId);
+  }
+  return reported;
+}
 
 /**
  * [Sol r2 S1] A payout record or a release acts only on the set-aside it was
@@ -283,6 +310,8 @@ export async function releaseCreditRefund(prisma: PrismaClient, input: {
     await lockPayer(tx, input.subscriptionId);
     const prior = await tx.billingEvent.findUnique({ where: { idempotencyKey: eventKey } });
     if (prior) return { replayed: true, amount: Number(prior.amount), billingEventId: prior.id };
+    // [DS1122 S1] Before looking for a payout-record ask: one being written now finishes first.
+    await lockCreditRefundAsks(tx, input.subscriptionId);
     const open = await namedOpenSetAside(tx, input.subscriptionId, input.setAsideId,
       'No refund is set aside for this account. Nothing was released.',
       'The refund this release names is no longer the one set aside (it was paid or returned since). Nothing was released: ask again for the refund that is set aside now.');

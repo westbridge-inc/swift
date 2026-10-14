@@ -1149,6 +1149,78 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     await booksAgree(fx.subId);
   });
 
+  /**
+   * [DS1122 S1] An open transaction holding the refund's ask lock (the key the
+   * approval gate and a release share), optionally with an uncommitted
+   * payout-record ask in it, until `commit()`.
+   */
+  async function holdRefundAskLock(subId: string, askFor: string | null) {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    let locked!: () => void;
+    const holding = new Promise<void>((resolve) => { locked = resolve; });
+    const tx = app.prisma.$transaction(async (db) => {
+      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`credit-refund-ask:${subId}`}, 0))`;
+      if (askFor) {
+        await db.privilegedApproval.create({ data: {
+          action: 'POST /subscriptions/:id/refund-credit/paid', cls: 'C4', capability: 'subscription.refund', entityId: subId,
+          fingerprint: ref('INFLIGHT'), bodySnapshot: { params: { id: subId }, body: { amount: 1, method: 'MMG', reference: ref('INFLIGHT'), setAsideId: askFor }, query: {} },
+          status: 'PENDING', requestedBy: other.userId, reason: TEST_ADMIN_REASON, expiresAt: new Date(Date.now() + DAY),
+        } as never });
+      }
+      locked();
+      await done;
+    }, { timeout: 20_000 });
+    await holding;
+    return { commit: async () => { finish(); await tx; } };
+  }
+  const settledWithin = async <T,>(work: Promise<T>, ms: number) => {
+    let settled = false;
+    const tracked = work.then((r) => { settled = true; return r; });
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return { settled, tracked };
+  };
+
+  it('[DS1122 S1] a release applying while a payout-record ask is being written waits for it, then refuses', async () => {
+    const fx = await storeWithCredit(5000);
+    expect((await setAside(fx.subId, 5000)).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    const payload = { amount: 5000, setAsideId };
+    const asked = await app.inject({ method: 'POST', url: url(fx.subId, 'release'), payload, headers: headersFor(admin.token) });
+    expect(asked.statusCode, asked.payload).toBe(202);
+    const approvalId = asked.json().error.details.approvalId as string;
+    const decided = await app.inject({ method: 'POST', url: `/api/v1/admin/approvals/${approvalId}/decide`, payload: { approve: true, note: 'second person' }, headers: headersFor(other.token) });
+    expect(decided.statusCode, decided.payload).toBe(200);
+    const ask = await holdRefundAskLock(fx.subId, setAsideId);
+    const apply = await settledWithin(app.inject({ method: 'POST', url: url(fx.subId, 'release'), payload, headers: { ...headersFor(admin.token), 'x-swift-approval': approvalId } }), 500);
+    await ask.commit();
+    const res = await apply.tracked;
+    expect(apply.settled, 'the release waited for the ask being written').toBe(false);
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('REFUND_PAYOUT_REPORTED');
+    expect(await wallet(fx.subId)).toBe(0);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(5000);
+    await booksAgree(fx.subId);
+  });
+
+  it('[DS1122 S1] a payout-record ask waits while a release of that refund holds the lock', async () => {
+    const fx = await storeWithCredit(3000);
+    expect((await setAside(fx.subId, 3000)).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    const releasing = await holdRefundAskLock(fx.subId, null);
+    const ask = await settledWithin(app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: { amount: 3000, method: 'MMG', reference: ref('WAITS'), setAsideId }, headers: headersFor(other.token) }), 500);
+    await releasing.commit();
+    const res = await ask.tracked;
+    expect(ask.settled, 'the ask waited for the lock').toBe(false);
+    expect(res.statusCode, res.payload).toBe(202);
+    // [DS1122 S3] The list tells the console, for the open set-aside, that a payout was reported.
+    const { openSetAsideIds, payoutReportedFor } = await import('../modules/billing/credit-refund');
+    const open = await openSetAsideIds(app.prisma, [fx.subId]);
+    expect(open.get(fx.subId)).toBe(setAsideId);
+    expect((await payoutReportedFor(app.prisma, open)).has(fx.subId)).toBe(true);
+    expect((await payoutReportedFor(app.prisma, new Map([[fx.subId, 'a-later-set-aside']]))).has(fx.subId)).toBe(false);
+  });
+
   it('a payout is recorded only for what is set aside, and only one set-aside is open at a time', async () => {
     const fx = await storeWithCredit(8000);
     const none = await paid(fx.subId, { amount: 8000, method: 'MMG', reference: ref('EARLY') });

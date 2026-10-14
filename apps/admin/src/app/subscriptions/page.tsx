@@ -124,9 +124,10 @@ export default function SubscriptionsPage() {
       told(v.id, { kind: 'done', message });
       invalidate();
     },
-    onError: (e: unknown, v: { id: string }) => {
+    onError: (e: unknown, v: { id: string; setAsideId?: string }) => {
       const outcome = outcomeOfThrown(e);
-      if (outcome.kind === 'queued' && step === 'paid') setReportedRefunds((all) => ({ ...all, [v.id]: true }));
+      // [DS1122 S3] Remembered per set-aside: a later set-aside starts clean.
+      if (outcome.kind === 'queued' && step === 'paid' && v.setAsideId) setReportedRefunds((all) => ({ ...all, [v.setAsideId!]: true }));
       told(v.id, outcome.kind === 'queued' ? {
         ...outcome, message: step === 'paid' ? QUEUED_COPY.paid : `${outcome.message} ${QUEUED_COPY[step]}`,
       } : outcome);
@@ -204,7 +205,7 @@ export default function SubscriptionsPage() {
               rows.map((s: any) => {
                 const h = holder(s);
                 const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? new Date(s.nextBillingDate).toLocaleDateString() : '—';
-                const payoutReported = reportedRefunds[s.id] || s.refundPayoutReported === true;
+                const payoutReported = (s.refundSetAsideId ? reportedRefunds[s.refundSetAsideId] === true : false) || s.refundPayoutReported === true;
                 return (
                   <Fragment key={s.id}>
                     <tr className="border-b border-[var(--border)] hover:bg-white/5">

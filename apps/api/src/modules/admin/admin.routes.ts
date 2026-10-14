@@ -68,7 +68,7 @@ import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminR
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
-import { openCreditRefunds, openSetAsideIds, recordCreditRefundPaid, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
+import { openCreditRefunds, openSetAsideIds, payoutReportedFor, recordCreditRefundPaid, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -3807,10 +3807,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // next step (record the payout, or release it) instead of a new refund.
     const setAside = await openCreditRefunds(app.prisma, subscriptions.map((sub) => sub.id));
     const setAsideIds = await openSetAsideIds(app.prisma, [...setAside.keys()]);
+    const payoutReported = await payoutReportedFor(app.prisma, setAsideIds);
     const current = await Promise.all(subscriptions.map(async (sub) => {
       const payer = sub.rider?.user.id ?? sub.driver?.user.id;
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
-      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null };
+      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null, refundPayoutReported: payoutReported.has(sub.id) };
     }));
     // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
     return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
