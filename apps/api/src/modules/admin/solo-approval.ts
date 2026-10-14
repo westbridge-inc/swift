@@ -5,7 +5,7 @@ import { isProduction } from '../../utils/runtime-mode';
 import { getChannels } from '../../providers/notifications/channels';
 import { smtpConfigFromEnv } from '../../providers/notifications/smtp-email';
 import type { AuditFacts, AuditLogWriter } from '../../lib/audit-writer';
-import { capabilitiesOf, holdsCapability } from './admin-authority';
+import { capabilitiesOf, capabilityMode, holdsCapability } from './admin-authority';
 
 /**
  * [OWNER #13 · 13 Oct 2026] SOLO MODE — while the owner is the only admin.
@@ -103,9 +103,19 @@ export async function approverRoster(db: RosterReader): Promise<ApproverRosterEn
   });
 }
 
-/** The admins who could decide an approval needing `capability`. */
-export function approversFor(roster: readonly ApproverRosterEntry[], capability: string): ApproverRosterEntry[] {
-  return roster.filter((entry) => holdsCapability(entry.held, APPROVER_CAPABILITY) && holdsCapability(entry.held, capability));
+/**
+ * The admins who could decide an approval needing `capability`.
+ *
+ * [DS1111 S3] In ADMIN_CAPABILITY_MODE=shadow the route gate logs and ALLOWS,
+ * so `approvals.decide` is not enforced at the decide route and anyone holding
+ * the action's own capability can decide: the count follows what can actually
+ * happen, never the narrower rule (over-counting switches solo off).
+ */
+export function approversFor(
+  roster: readonly ApproverRosterEntry[], capability: string,
+  mode: 'enforce' | 'shadow' = capabilityMode(),
+): ApproverRosterEntry[] {
+  return roster.filter((entry) => (mode === 'shadow' || holdsCapability(entry.held, APPROVER_CAPABILITY)) && holdsCapability(entry.held, capability));
 }
 
 /** Is `userId` the ONE admin who could approve this capability, right now? */
@@ -366,10 +376,12 @@ export type SoloRowState =
 
 /** What the Approvals screen shows on the requester's own row. */
 export function soloRowState(
-  row: Pick<SoloRow, 'status' | 'capability' | 'soloRequestedAt' | 'soloEligibleAt'>,
+  row: Pick<SoloRow, 'status' | 'capability' | 'soloRequestedAt' | 'soloEligibleAt' | 'expiresAt'>,
   ctx: { userId: string; role: string; roster: readonly ApproverRosterEntry[]; hasEmail: boolean; emailReady: boolean; coolOffHours: number; now: Date },
 ): SoloRowState | null {
   if (row.status !== 'PENDING') return null;
+  // [DS1111 S4] An expired request is never offered: the server refuses it.
+  if (row.expiresAt.getTime() <= ctx.now.getTime()) return { state: 'unavailable', why: 'expired', message: REFUSAL.expired.message };
   if (row.soloRequestedAt && row.soloEligibleAt) {
     const availableAt = row.soloEligibleAt.toISOString();
     return ctx.now.getTime() < row.soloEligibleAt.getTime() ? { state: 'waiting', availableAt } : { state: 'ready', availableAt };

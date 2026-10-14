@@ -235,3 +235,14 @@ describe('[OWNER #13] solo approval on your own request', () => {
     expect(verifyBody).toEqual({ code: '123456' });
   });
 });
+
+describe('[DS1111] your own decided request does not tell you it needs a second person', () => {
+  it('an APPROVED own row offers Execute, without the "needs a second person" copy', async () => {
+    mockApi(approvalsHandler(undefined, [{ ...APPROVED_WITH_BODY, decidedSolo: true, approvedBy: 'admin-1' }]));
+    const { user } = renderWithQuery(<ApprovalsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Approved' }));
+    expect(await screen.findByRole('button', { name: 'Execute the approved action' })).toBeTruthy();
+    expect(screen.getByText(/Approved in solo mode/)).toBeTruthy();
+    expect(screen.queryByText(/needs a second person/)).toBeNull();
+  });
+});

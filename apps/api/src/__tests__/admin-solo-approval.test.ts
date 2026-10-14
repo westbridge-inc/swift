@@ -462,3 +462,30 @@ describe('[OWNER #13] the cooling-off setting', () => {
     expect(await soloCoolOffHours(app.prisma)).toBe(12);
   });
 });
+
+describe('[DS1111] who counts follows what can actually happen', () => {
+  it('in shadow capability mode an admin without approvals.decide can still decide, so they count', async () => {
+    const { approversFor } = await import('../modules/admin/solo-approval');
+    const roster = [
+      { userId: 'owner', role: 'SUPER_ADMIN', held: ['*'] },
+      { userId: 'finance', role: 'ADMIN', held: ['platform.algo.write'] },
+    ];
+    expect(approversFor(roster, 'platform.algo.write', 'enforce').map((a) => a.userId)).toEqual(['owner']);
+    expect(approversFor(roster, 'platform.algo.write', 'shadow').map((a) => a.userId)).toEqual(['owner', 'finance']);
+  });
+});
+
+describe('[DS1111] the screen never offers solo on an expired request', () => {
+  it('a pending request past its expiry reads as unavailable, not available or ready', async () => {
+    const { soloRowState } = await import('../modules/admin/solo-approval');
+    const now = new Date('2026-10-14T12:00:00Z');
+    const ctx = { userId: 'owner', role: 'SUPER_ADMIN', roster: [{ userId: 'owner', role: 'SUPER_ADMIN', held: ['*'] }], hasEmail: true, emailReady: true, coolOffHours: 12, now };
+    const expired = new Date(now.getTime() - 1);
+    expect(soloRowState({ status: 'PENDING', capability: 'x', soloRequestedAt: null, soloEligibleAt: null, expiresAt: expired }, ctx))
+      .toMatchObject({ state: 'unavailable', why: 'expired' });
+    expect(soloRowState({ status: 'PENDING', capability: 'x', soloRequestedAt: new Date(now.getTime() - 13 * 3_600_000), soloEligibleAt: new Date(now.getTime() - 3_600_000), expiresAt: expired }, ctx))
+      .toMatchObject({ state: 'unavailable', why: 'expired' });
+    expect(soloRowState({ status: 'PENDING', capability: 'x', soloRequestedAt: null, soloEligibleAt: null, expiresAt: new Date(now.getTime() + 3_600_000) }, ctx))
+      .toMatchObject({ state: 'available', coolOffHours: 12 });
+  });
+});

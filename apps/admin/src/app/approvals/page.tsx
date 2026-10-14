@@ -219,7 +219,9 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
       )}
 
       {blocked ? (
-        blocked === 'own-request' && row.status === 'PENDING' ? null : (
+        // [DS1111 S4] Your own request explains itself in its solo panel while
+        // pending; once decided there is nothing left for you to sign.
+        blocked === 'own-request' ? null : (
           <p className="text-xs text-[var(--muted)] border-t border-[var(--border)] pt-3">{BLOCK_COPY[blocked]}</p>
         )
       ) : (
