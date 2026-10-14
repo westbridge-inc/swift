@@ -25,7 +25,7 @@ import { redactCounterpartyPhone, redactLiveLocation, riderCounterpartySelect } 
 import { invalidateHomeCache } from '../user/home-cache';
 import { SupportService } from '../support/support.service';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
-import { certainGoods, classifyText, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
+import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -227,9 +227,9 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (body.declaresNoProhibitedItems === false) {
       throw new AppError(409, 'PROHIBITED_PARCEL', 'Swift can\'t carry a parcel with a prohibited item in it.');
     }
-    // A brand-first word ("Banks", "Corona", "Tiger") alone is not enough — no reviewer stands behind a parcel —
-    // but with a pack or a measure ("Banks 6 pack") it is the goods. [DS1109 S4-1]
-    const prohibited = classifyText(body.packageDescription, { brandFirst: false }) ?? certainGoods(body.packageDescription);
+    // A brand-first word ("Banks", "Corona", "Tiger") alone is not enough, but with a pack or a measure ("Banks 6
+    // pack", "Halls 9 pack") it is the goods. [DS1109 S4-1, DS1112 S4-2]
+    const prohibited = parcelProhibited(body.packageDescription);
     if (prohibited) {
       throw new AppError(409, 'PROHIBITED_PARCEL',
         `Swift can't carry this parcel: Swift never delivers ${PROHIBITED_CLASS_LABELS[prohibited.prohibitedClass]}. If it's something else, describe it in other words.`,

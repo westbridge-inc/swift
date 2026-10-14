@@ -152,7 +152,7 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'headache relief', 'fever reducer', 'cough and cold', 'augmentin', 'coartem', 'otrivin',
   ],
   AGE_RESTRICTED: [
-    'lottery', 'lotto', 'lottery ticket', 'lottery tickets', 'betting', 'gambling', 'casino',
+    'lottery', 'lotto', 'lottery ticket', 'lottery tickets', 'lotto ticket', 'lotto tickets', 'betting', 'gambling', 'casino',
     'sex toy', 'sex toys', 'adult toy', 'adult toys', 'vibrator', 'vibrators', 'dildo', 'dildos', 'porn', 'pornographic',
     'erotic', 'adults only', 'xxx',
   ],
@@ -319,7 +319,7 @@ export const PROHIBITED_GOODS_NOUNS: readonly string[] = [
   'bong', 'bongs',
   // [DS1110] spirits sold as such; medicines named by their form; cannabis by the gram; 18+ goods
   'grappa', 'sambuca', 'ouzo', 'cachaca', 'advocaat', 'pastis', 'eye drops', 'ear drops', 'nasal spray', 'weed',
-  'lottery ticket', 'lottery tickets', 'sex toy', 'sex toys', 'adult toy', 'adult toys', 'vibrator', 'vibrators',
+  'lottery ticket', 'lottery tickets', 'lotto ticket', 'lotto tickets', 'sex toy', 'sex toys', 'adult toy', 'adult toys', 'vibrator', 'vibrators',
   'dildo', 'dildos', 'wine coolers',
   'cerveza', 'cervezas', 'cerveja', 'cervejas', 'biere', 'bieres', 'bier', 'birra', 'vino', 'vinos', 'vinho', 'aguardiente',
   'tabaco', 'cigarro', 'cigarros', 'cigarrillo', 'cigarrillos',
@@ -375,7 +375,10 @@ const DISH_HEADS: ReadonlySet<string> = new Set([
 const ends = (words: readonly string[], phrase: readonly string[]) => phrase.every((w, k) => words[words.length - phrase.length + k] === w);
 const isDish = (words: readonly string[]) => {
   const last = words[words.length - 1];
-  return last !== undefined && (DISH_HEADS.has(last) || DISH_HEADS.has(`${last}s`) || DISH_HEADS.has(`${last}es`) || ends(words, ['ice', 'cream']));
+  if (last === undefined) return false;
+  // "curries" (and its singular reading "currie") → "curry" [DS1112 S4-1]
+  return [last, `${last}s`, `${last}es`].some((w) => DISH_HEADS.has(w) || (w.endsWith('ies') && DISH_HEADS.has(`${w.slice(0, -3)}y`)))
+    || ends(words, ['ice', 'cream']);
 };
 const GOODS_LONGEST_FIRST = [...PROHIBITED_GOODS_NOUNS].sort((a, b) => b.split(' ').length - a.split(' ').length).map((p) => p.split(' '));
 
@@ -443,6 +446,8 @@ const CONFUSABLE_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ['\u03A1', 'P'], ['\u03A4', 'T'], ['\u03A5', 'Y'], ['\u03A7', 'X'],
   // [evasion] Cherokee letters (both cases) and small capitals
   ['\u13AA', 'A'], ['\uAB7A', 'a'], ['\u13F4', 'B'], ['\u13FC', 'b'], ['\u13DF', 'C'], ['\uABAF', 'c'], ['\u13A0', 'D'], ['\uAB70', 'd'], ['\u13AC', 'E'], ['\uAB7C', 'e'], ['\u13C0', 'G'], ['\uAB90', 'g'], ['\u13BB', 'H'], ['\uAB8B', 'h'], ['\u13AB', 'J'], ['\uAB7B', 'j'], ['\u13E6', 'K'], ['\uABB6', 'k'], ['\u13DE', 'L'], ['\uABAE', 'l'], ['\u13B7', 'M'], ['\uAB87', 'm'], ['\u13E2', 'P'], ['\uABB2', 'p'], ['\u13DA', 'S'], ['\uABAA', 's'], ['\u13A2', 'T'], ['\uAB72', 't'], ['\u13D9', 'V'], ['\uABA9', 'v'], ['\u13B3', 'W'], ['\uAB83', 'w'], ['\u13D4', 'W'], ['\uABA4', 'w'], ['\u13C3', 'Z'], ['\uAB93', 'z'], ['\u13A1', 'R'], ['\uAB71', 'r'], ['\u13A5', 'i'], ['\uAB75', 'i'], ['\u1D00', 'a'], ['\u0299', 'b'], ['\u1D04', 'c'], ['\u1D05', 'd'], ['\u1D07', 'e'], ['\u0262', 'g'], ['\u029C', 'h'], ['\u026A', 'i'], ['\u1D0A', 'j'], ['\u1D0B', 'k'], ['\u029F', 'l'], ['\u1D0D', 'm'], ['\u0274', 'n'], ['\u1D0F', 'o'], ['\u1D18', 'p'], ['\u0280', 'r'], ['\uA731', 's'], ['\u1D1B', 't'], ['\u1D1C', 'u'], ['\u1D20', 'v'], ['\u1D21', 'w'], ['\u028F', 'y'], ['\u1D22', 'z'],
+  // [DS1112 S3-3] the small capitals F and Q (Unicode has no small capital X)
+  ['\uA730', 'f'], ['\uA7AF', 'q'],
 ];
 export const PROHIBITED_CONFUSABLES = {
   from: CONFUSABLE_PAIRS.map(([f]) => f).join(''),
@@ -479,7 +484,10 @@ function joinSingleLetters(normalized: string): string {
 
 /** A text that takes a soft drink's exemption away: a stated strength, or a qualifier word anywhere. */
 function qualifiesSoftDrinks(text: string): boolean {
-  return STATES_A_STRENGTH.test(text) || normalize(undisguise(text)).split(' ').some((w) => EXEMPTION_BREAKERS.has(w));
+  if (STATES_A_STRENGTH.test(text)) return true;
+  // Its l33t spellings too ("str0ng", "5 p3rc3nt"), in whichever field it is written. [DS1112 S3-2]
+  const plain = undisguise(text);
+  return [plain, ...leetSpellings(plain)].some((t) => STATES_A_STRENGTH.test(t) || normalize(t).split(' ').some((w) => EXEMPTION_BREAKERS.has(w)));
 }
 
 function stripExempt(normalized: string, noSoftDrinks: boolean): string {
@@ -545,7 +553,8 @@ const singular = (normalized: string): string =>
 function readings(text: string, noSoftDrinks: boolean): string[] {
   const out = new Set<string>();
   const plain = undisguise(text);
-  for (const base of [plain, ...leetSpellings(plain)]) {
+  // "R0sé" reads "Rosé" only once its l33t is read, so "rosé" is spelled out again after it. [DS1112 S3-1]
+  for (const base of [plain, ...leetSpellings(plain).map((t) => t.replace(ROSE, 'rosewine'))]) {
     for (const spelling of labelSpellings(base)) {
       const n = normalize(spelling);
       for (const variant of [n, joinSingleLetters(n)]) {
@@ -658,11 +667,13 @@ function headGoods(words: readonly string[]): string | null {
 }
 
 /** "Banks 6 pack", "Bristol 20s", "XM Gold": a brand-first word followed only by measure and style words. */
-function brandPack(words: readonly string[]): { prohibitedClass: ProhibitedClass; term: string } | null {
+function brandPack(words: readonly string[], options: GoodsOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   const brand = BRAND_FIRST[words[0] ?? ''];
   if (!brand || words.includes('empty')) return null;
   const { core, measured, liquid, tobacco, aged } = stripTrailing(words.slice(1));
-  const kind = brand.measure ?? 'any';
+  // A word held for a person by its own rule (Halls, #58) is judged by any measure where no person stands behind
+  // the text — a parcel. [DS1112 S4-2]
+  const kind = brand.measure === 'none' && options.noReviewer ? 'any' : brand.measure ?? 'any';
   // An alcohol brand's age statement is its measure too ("Bounty 12 year old").
   const spiritAge = brand.prohibitedClass === 'ALCOHOL' && aged;
   const ofItsKind = kind === 'any' ? measured || spiritAge : kind === 'liquid' ? liquid || spiritAge : kind === 'tobacco' ? tobacco : false;
@@ -682,6 +693,11 @@ function pillsOnly(rest: readonly string[]): boolean {
   return dosed;
 }
 
+export interface GoodsOptions {
+  /** No person reviews this text (a parcel's description): a measured brand held elsewhere for a person is refused. */
+  noReviewer?: boolean;
+}
+
 /**
  * Is an item's NAME or one of its OPTIONS the banned goods themselves — never
  * approvable? A brand or product phrase anywhere in it, a goods noun heading
@@ -690,7 +706,7 @@ function pillsOnly(rest: readonly string[]): boolean {
  * refuse it ("Ginger beer" with "Strong" in its description is a check, not
  * a ban). [#55/#56, Opus S1-LAUNCH-2]
  */
-export function certainGoods(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
+export function certainGoods(text: string | null | undefined, options: GoodsOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
   const sameText = STATES_A_STRENGTH.test(text);
   const parts = undisguise(text).split(SEGMENT_BREAK).map((part) => readings(part, sameText || STATES_A_STRENGTH.test(part)).map((r) => r.split(' ')));
@@ -708,11 +724,21 @@ export function certainGoods(text: string | null | undefined): { prohibitedClass
     for (const words of readingsOfPart) {
       const noun = headGoods(words);
       if (noun) return { prohibitedClass: CLASS_OF.get(noun)!, term: noun };
-      const pack = brandPack(words);
+      const pack = brandPack(words, options);
       if (pack) return pack;
     }
   }
   return null;
+}
+
+/**
+ * A parcel's description (owner #67): no reviewer stands behind it, so any listed word refuses it, and so does a
+ * brand-first word with a measure — a lozenge brand's too ("Halls 9 pack": #58 holds it for a person, and a parcel
+ * has none). A brand-first word alone does not ("Banks birthday card", "Tiger brand shirt"). [DS1109 S4-1, DS1112 S4-2]
+ */
+export function parcelProhibited(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
+  if (!text) return null;
+  return classifyText(text, { brandFirst: false }) ?? certainGoods(text, { noReviewer: true });
 }
 
 /** A platform (discovery) category, judged by its immutable slug and its name — never its aliases. */
@@ -892,4 +918,6 @@ export const PROHIBITED_PREFILTER_WORDS: readonly string[] = [...new Set([
   ...PREFILTER_BASE.filter((w) => w.length > 1 && w.endsWith('s')).map((w) => w.slice(0, -1)),
   // [evasion] a plural the classifier drops ("heinekens" → "heineken")
   ...PREFILTER_BASE.map((w) => `${w}s`),
+  // [DS1112 S3-1] l33t "rosé" ("R0sé"): the database spells out "rosé" before it reads l33t, so it holds "rose"
+  'rose', 'roses',
 ])].sort();

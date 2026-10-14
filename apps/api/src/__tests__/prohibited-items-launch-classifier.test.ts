@@ -18,6 +18,7 @@ import {
   isHidden,
   judgedWordsHash,
   notAllowedMessage,
+  parcelProhibited,
   PROHIBITED_BRAND_FIRST_WORDS,
   PROHIBITED_CONFUSABLES,
   PROHIBITED_FORMAT_CHARS_PATTERN,
@@ -186,7 +187,7 @@ describe('[§8 launch] the database pre-filter still keeps every disguised spell
       }
     }
     expect(checked).toBeGreaterThan(2000);
-    for (const raw of ['Rosé 750ml', 'ROSÉ', 'Rose\u0301 wine', 'R\u200Bum', 'Rцm', 'Ｒｕｍ', 'R.U.M']) expect(kept(raw), raw).toBe(true);
+    for (const raw of ['Rosé 750ml', 'ROSÉ', 'Rose\u0301 wine', 'R\u200Bum', 'Rцm', 'Ｒｕｍ', 'R.U.M', 'R0sé 750ml', 'Ro$é 750ml', 'R0SÉ 750ml' /* DS1112 S3-1 */]) expect(kept(raw), raw).toBe(true);
     // [evasion] l33t, plural and split spellings of every listed word and brand-first word are kept too.
     const leetOf = (t: string) => t.replace(/a/g, '4').replace(/e/g, '3').replace(/i/g, '1').replace(/o/g, '0').replace(/s/g, '$');
     let evasions = 0;
@@ -340,5 +341,35 @@ describe('[§8 launch · regression guard] sold-as-such stays refused, in a name
   });
   it.each(['Bayer Leverkusen jersey', 'Bayer caps', 'Bayer pool chlorine 20 tablets', 'Bayer crop spray 1L', 'Halls 20 tabs' /* #58 */])('%s is not refused', (name) => {
     expect(verdict(name).state, name).not.toBe('BANNED');
+  });
+});
+
+// [DS1112, same round] l33t inside "rosé", a l33t qualifier in another field, the small capitals F and Q, "-ies"
+// dishes, a lozenge pack in a parcel (no reviewer stands behind it), and a lotto ticket.
+describe('[§8 launch · DS1112] the fourth review', () => {
+  it.each(['R0sé 750ml', 'Ro$é 750ml', 'R0SÉ 750ml', '\uA730\u1D0F\u1D1C\u0280 \u029F\u1D0F\u1D0B\u1D0F' /* small-capital Four Loko */,
+    '\uA730\u026A\u0280\u1D07\u0299\u1D00\u029F\u029F 750ml' /* small-capital Fireball 750ml */, 'Lotto ticket', 'Lotto tickets'])('%s is refused', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED' });
+    expect(verdict('Party combo', { optionNames: ['Add', name] })).toMatchObject({ state: 'BANNED', field: 'option' });
+  });
+
+  it.each([['str0ng', 'strong'], ['5 p3rc3nt', '5 percent'], ['\uFF15%', '5%']])(
+    'a ginger beer whose description says %s is judged as one that says %s', (disguised, plain) => {
+      const plainVerdict = verdict('Ginger Beer', { description: plain }).state;
+      expect(plainVerdict).not.toBe('CLEAR');
+      expect(verdict('Ginger Beer', { description: disguised }).state).toBe(plainVerdict);
+    },
+  );
+
+  it.each(['Hennessy curries', 'Captain Morgan curries', 'Jack Daniels curries', 'Campari curries'])('%s is held, not refused (a dish)', (name) => {
+    expect(verdict(name).state).toBe('WAITING');
+  });
+
+  it('a parcel of lozenges by the pack is refused; the catalogue still holds it for a person (#58)', () => {
+    for (const parcel of ['Halls 9 pack', 'Halls 20s', 'Halls 20 tabs', 'Bayer 30 tabs', 'Banks 6 pack']) expect(parcelProhibited(parcel), parcel).not.toBeNull();
+    for (const parcel of ['Halls', 'Banks birthday card', 'Bounty 2 pack', 'Davidoff Cool Water 125ml', 'Tiger brand shirt', null]) {
+      expect(parcelProhibited(parcel), String(parcel)).toBeNull();
+    }
+    expect(verdict('Halls 9 pack').state).toBe('WAITING');
   });
 });
