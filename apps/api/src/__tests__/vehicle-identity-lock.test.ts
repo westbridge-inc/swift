@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -18,6 +18,7 @@ import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { evaluateMoverDocuments } from '../modules/verification/mover-document-authority';
 import { captureSubmissionAuthority } from '../modules/verification/submission-authority';
 import { grantStepUp } from './helpers/step-up';
+import * as recusal from '../modules/verification/recusal';
 
 let app: FastifyInstance;
 const users: string[] = [];
@@ -249,5 +250,51 @@ describe('a vehicle paper under a second review survives a vehicle edit', () => 
     expect(row.status).toBe('REJECTED');
     expect(row.legalHoldId).not.toBeNull();
     expect(await system(() => app.prisma.fraudCase.findFirst({ where: { subjectUserId: mover.userId, submissionId: escalated } }))).toMatchObject({ confirmedBy: b, legalHoldId: row.legalHoldId });
+  });
+
+  // [DS1054 S3] The race: reviewer A's escalation has read the paper as waiting, and the mover's vehicle edit runs
+  // before A's write. The edit locks the paper's case FOR UPDATE before deciding what to withdraw, so the escalation
+  // must hold that same lock before it reads anything. Otherwise the edit withdraws the paper and the suspicion lands on
+  // a withdrawn paper, where no second reviewer can ever confirm it. The edit is started from inside A's transaction,
+  // right after A read the paper. The hook waits until the edit has finished or is blocked on a lock, then lets A go on.
+  it('an escalation racing a vehicle edit is never lost: the edit waits for the case and keeps the paper', async () => {
+    const mover = await fixture('driver');
+    const paper = await upload(mover.userId, 'vehicle_registration');
+    const a = await reviewer(); const b = await reviewer();
+    await grantStepUp(app, mover.token);
+    let edit: ReturnType<typeof edits['driver profile colour']> | null = null;
+    const original = recusal.assertNotRecused;
+    const spy = vi.spyOn(recusal, 'assertNotRecused').mockImplementation(async (db, reviewerId, subjectUserId) => {
+      if (edit === null && db !== app.prisma) {
+        edit = edits['driver profile colour'](mover);
+        let settled = false;
+        void edit.then(() => { settled = true; }, () => { settled = true; });
+        for (let i = 0; i < 400 && !settled; i += 1) {
+          const [row] = await app.prisma.$queryRaw<Array<{ waiting: number }>>`
+            SELECT count(*)::int AS waiting FROM pg_stat_activity
+            WHERE wait_event_type = 'Lock' AND query LIKE '%review_case%FOR UPDATE%'`;
+          if (row!.waiting > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      return original(db, reviewerId, subjectUserId);
+    });
+    try {
+      await system(() => verification().rejectDocument(paper, a, 'The registration looks altered', 'SUSPECTED_TAMPERING'));
+    } finally { spy.mockRestore(); }
+    expect(edit).not.toBeNull();
+    const edited = await edit!;
+    expect(edited.statusCode, edited.body).toBe(200);
+
+    // The suspicion survives the edit: the paper still waits, its one open case is in SECOND_REVIEW.
+    expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: paper } })).toMatchObject({ status: 'PENDING', state: 'REVIEW_QUEUED' });
+    expect(await app.prisma.reviewCase.count({ where: { submissionId: paper, closedAt: null } })).toBe(1);
+    expect(await openCase(paper)).toMatchObject({ queue: 'SECOND_REVIEW' });
+    // And reviewer B can still confirm it: the rejection, the fraud case and the legal hold land.
+    await system(() => verification().rejectDocument(paper, b, 'Confirmed: the registration was altered', 'SUSPECTED_TAMPERING'));
+    const row = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: paper } });
+    expect(row.status).toBe('REJECTED');
+    expect(row.legalHoldId).not.toBeNull();
+    expect(await system(() => app.prisma.fraudCase.findFirst({ where: { subjectUserId: mover.userId, submissionId: paper } }))).toMatchObject({ confirmedBy: b });
   });
 });
