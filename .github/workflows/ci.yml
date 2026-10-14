@@ -190,6 +190,8 @@ jobs:
           path: apps/api/ci-shard-report/
           if-no-files-found: error
           retention-days: 5
+          # "Re-run all jobs" re-uploads under the same name; replace, don't fail.
+          overwrite: true
 
   # The one required "API Tests" check. It passes only when every shard passed,
   # every test file ran in exactly one shard, and the merged results agree.
@@ -227,7 +229,7 @@ jobs:
         working-directory: apps/api
         run: |
           npx vitest list --filesOnly --json=ci-shard-report/expected-files.json
-          node ../../scripts/ci-api-shard-partition.mjs --root "$PWD" --expected ci-shard-report/expected-files.json --junit-dir ci-shard-report/junit --count 4
+          node ../../scripts/ci-api-shard-partition.mjs --root "$PWD" --expected ci-shard-report/expected-files.json --junit-dir ci-shard-report/junit --blob-dir ci-shard-report/blob --count 4
       # The merge replays every shard's results (red if any test failed) and
       # merges their coverage into the one suite-wide number.
       - name: Merge the shard results and coverage

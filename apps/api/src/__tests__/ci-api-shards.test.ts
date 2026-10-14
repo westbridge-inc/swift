@@ -41,17 +41,19 @@ function run(args: string[]): { code: number; output: string } {
   }
 }
 
-/** A suite root with these files, and shard i's JUnit report naming shards[i-1]. */
+/** A suite root with these files, and shard i's JUnit report (and results blob) naming shards[i-1]. */
 function fixture(files: string[], shards: Array<string[] | null>): string[] {
   const suite = join(root, 'apps', 'api');
   writeFileSync(join(root, 'expected.json'), JSON.stringify(files.map((f) => ({ file: join(suite, f) }))));
   mkdirSync(join(root, 'junit'), { recursive: true });
+  mkdirSync(join(root, 'blob'), { recursive: true });
   shards.forEach((names, i) => {
     if (names === null) return;
+    writeFileSync(join(root, 'blob', `blob-${i + 1}-${shards.length}.json`), '[]\n');
     const suites = names.map((n) => `  <testsuite name="${n}" tests="1" failures="0" errors="0" skipped="0" time="0.1">\n  </testsuite>`).join('\n');
     writeFileSync(join(root, 'junit', `junit-${i + 1}.xml`), `<?xml version="1.0" encoding="UTF-8" ?>\n<testsuites name="vitest tests" tests="${names.length}">\n${suites}\n</testsuites>\n`);
   });
-  return ['--root', suite, '--expected', join(root, 'expected.json'), '--junit-dir', join(root, 'junit'), '--count', String(shards.length)];
+  return ['--root', suite, '--expected', join(root, 'expected.json'), '--junit-dir', join(root, 'junit'), '--blob-dir', join(root, 'blob'), '--count', String(shards.length)];
 }
 
 const A = 'src/__tests__/a.test.ts';
@@ -102,6 +104,22 @@ describe('[CI-SPLIT] the shard partition proof', () => {
     const { code, output } = run(args);
     expect(code).toBe(1);
     expect(output).toContain('junit-3.xml is not one of the 2 shards');
+  });
+
+  it('fails when a shard left no results blob, so the merge would certify a subset', () => {
+    const args = fixture([A, B], [[A], [B]]);
+    rmSync(join(root, 'blob', 'blob-2-2.json'));
+    const { code, output } = run(args);
+    expect(code).toBe(1);
+    expect(output).toContain('shard 2 of 2 left no results blob');
+  });
+
+  it('fails when the blob directory holds anything the merge would read besides the shards\' blobs', () => {
+    const args = fixture([A, B], [[A], [B]]);
+    writeFileSync(join(root, 'blob', 'blob-1-3.json'), '[]\n');
+    const { code, output } = run(args);
+    expect(code).toBe(1);
+    expect(output).toContain('blob-1-3.json in the blob directory is not one of the 2 shards');
   });
 
   it('refuses to certify an empty suite (a partition of nothing is not proof)', () => {
@@ -157,6 +175,8 @@ describe('[CI-SPLIT] the workflow keeps one honest "API Tests" verdict', () => {
     for (const reporter of ['default', 'github-actions', 'blob', 'junit']) expect(shardJob).toContain(`--reporter=${reporter}`);
     expect(aggregate).toContain('npx vitest list --filesOnly --json=');
     expect(aggregate).toContain('node ../../scripts/ci-api-shard-partition.mjs');
+    // the partition proof checks the very blob directory the merge reads
+    expect(aggregate).toContain('--blob-dir ci-shard-report/blob');
     expect(aggregate).toContain('npx vitest run --merge-reports=ci-shard-report/blob --coverage');
   });
 });

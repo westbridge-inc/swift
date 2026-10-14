@@ -7,21 +7,25 @@
 //
 //   node scripts/ci-api-shard-partition.mjs --root <apps/api> \
 //     --expected <vitest list --filesOnly --json output> \
-//     --junit-dir <dir holding junit-1.xml … junit-N.xml> --count N
+//     --junit-dir <dir holding junit-1.xml … junit-N.xml> \
+//     --blob-dir <dir holding blob-1-N.json … blob-N-N.json> --count N
 //
 // --expected is the suite's own file list (the config's include pattern, as
 // vitest resolves it). Each junit-i.xml is shard i's JUnit report: one
 // <testsuite name="src/…test.ts"> per file that shard ran (a file that failed
 // to import or whose tests were all skipped still gets one). Exit 0 only when
 // every expected file ran in exactly one shard, no shard ran a file outside
-// the list, and every shard 1…N reported. Dependency-free on purpose.
+// the list, and every shard 1…N reported. The blob directory (what
+// `vitest --merge-reports` reads for the merged verdict and coverage) must hold
+// exactly one results blob per shard, so the merge can never certify a subset.
+// Dependency-free on purpose.
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
 function usage(message) {
   console.error(`ci-api-shard-partition: ${message}`);
-  console.error('usage: --root <dir> --expected <file> --junit-dir <dir> --count <N>');
+  console.error('usage: --root <dir> --expected <file> --junit-dir <dir> --blob-dir <dir> --count <N>');
   process.exit(2);
 }
 
@@ -33,7 +37,7 @@ for (let i = 0; i < args.length; i += 2) {
   if (!key?.startsWith('--') || value === undefined) usage(`bad argument near "${key ?? ''}"`);
   opt[key.slice(2)] = value;
 }
-for (const key of ['root', 'expected', 'junit-dir', 'count']) if (!opt[key]) usage(`--${key} is required`);
+for (const key of ['root', 'expected', 'junit-dir', 'blob-dir', 'count']) if (!opt[key]) usage(`--${key} is required`);
 const count = Number(opt.count);
 if (!Number.isInteger(count) || count < 1) usage(`--count must be a positive integer, got "${opt.count}"`);
 
@@ -88,6 +92,18 @@ for (let index = 1; index <= count; index += 1) {
     shards.push(index);
     ranBy.set(name, shards);
   }
+}
+
+// What the merge will read: exactly one results blob per shard, nothing else.
+const blobDir = opt['blob-dir'];
+if (!existsSync(blobDir)) usage(`--blob-dir ${blobDir} does not exist`);
+const blobs = readdirSync(blobDir);
+for (let index = 1; index <= count; index += 1) {
+  if (!blobs.includes(`blob-${index}-${count}.json`)) problems.push(`shard ${index} of ${count} left no results blob (blob-${index}-${count}.json): the merged verdict and coverage would miss its files`);
+}
+for (const name of blobs) {
+  const m = name.match(/^blob-(\d+)-(\d+)\.json$/);
+  if (!m || Number(m[2]) !== count || Number(m[1]) < 1 || Number(m[1]) > count) problems.push(`${name} in the blob directory is not one of the ${count} shards' results, and the merge would read it`);
 }
 
 const list = (items) => items.slice(0, 25).map((s) => `    ${s}`).join('\n') + (items.length > 25 ? `\n    … and ${items.length - 25} more` : '');
