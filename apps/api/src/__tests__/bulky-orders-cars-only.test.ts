@@ -219,10 +219,14 @@ describe('[owner #20] dispatch, the board and the grab all follow it', () => {
     expect(bikeIds).toContain(plain.id);
     expect(bikeIds).not.toContain(bulky.id);
     const carBoard = await call('GET', '/api/v1/rider/orders/available', car.token);
-    const carRows = carBoard.json().data as Array<{ id: string; items: Array<Record<string, unknown>> }>;
+    const carRows = carBoard.json().data as Array<{ id: string; itemCount: number }>;
     expect(carRows.map((o) => o.id)).toContain(bulky.id);
-    // The load integer never leaves the server.
-    expect(carRows.find((o) => o.id === bulky.id)!.items[0]).toEqual({ name: 'Crate of drinks', quantity: 1 });
+    // The load integer never leaves the server. [TRANSFORMED after #1567: the
+    // pre-accept board sends no item lines at all, only a count, so the
+    // property is asserted on the whole row instead of on one item line.]
+    const bulkyRow = carRows.find((o) => o.id === bulky.id)!;
+    expect(bulkyRow.itemCount).toBe(1);
+    expect(JSON.stringify(bulkyRow)).not.toMatch(/bulkUnits|bulkClass/);
 
     const grab = await call('POST', `/api/v1/rider/orders/${bulky.id}/accept`, bike.token, {});
     expect(grab.statusCode, grab.body).toBe(400);
