@@ -226,3 +226,30 @@ describe('[§8 launch · DS1109] sold-as-such is refused; a dish or a garment na
     for (const name of ['Malta Guinness', 'Guinness Malta 330ml', 'Gas can 5 gallon', 'Fuel can', 'Jerry can 20L']) expect(verdict(name), name).toEqual({ state: 'CLEAR' });
   });
 });
+
+// [DS1110] The second review's doors: more spirits, vapes and cigarettes sold as such; medicines with a form after
+// the noun; cannabis by the gram; ready-mixed drinks; 18+ goods; and the false refusals it found.
+describe('[§8 launch · DS1110] the second review', () => {
+  it.each([
+    'Mead 750ml', 'Mead bottle', 'Ricard 70cl', 'Grappa 750ml', 'Sambuca 700ml', 'Ouzo 750ml', 'Cachaça 700ml', 'Advocaat 750ml',
+    'Pastis 70cl', 'Vodka Cruisers 4 pack', 'Wine coolers 4 pack', 'Four Loko', 'Havana Club 3 Year', 'Sailor Jerry', 'Disaronno',
+    'Cointreau', 'Tsingtao 6 pack', 'Hairoun 6 pack',
+    'Vuse pods', 'Vuse Alto', 'Relx pods', 'Newport 20s', 'Kool 20s', 'Winston 20s', 'Djarum Black',
+    'Insulin 100 units', 'Insulin pen', 'Antibiotic cream 30g', 'Eye drops 10ml', 'Paracetamol syrup 100ml',
+    'Weed 3.5g', 'Lottery ticket', 'Sex toy', 'Vibrator',
+  ])('%s is refused outright', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED', source: 'word' });
+  });
+
+  it.each([
+    'Carib bean soup', 'Empty gas cylinder', 'Hard cider donuts', 'Mead notebook', 'Insulin cooler bag', 'Antibiotic-free chicken',
+    'Wine cooler (12 bottle)', 'Concrete vibrator', 'Lottery results board', 'Rum and raisin stew', 'Weed',
+  ])('%s is held for a person, never refused', (name) => {
+    expect(verdict(name).state, name).toBe('WAITING');
+  });
+
+  it('a notebook brand and an empty cylinder are not banned goods', () => {
+    expect(verdict('Mead five star notebook').state).not.toBe('BANNED');
+    expect(verdict('Empty gas cylinder').state).not.toBe('BANNED');
+  });
+});
