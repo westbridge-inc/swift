@@ -43,9 +43,15 @@ export function matches(row: Row, where: Row = {}): boolean {
     if ('gte' in value) return actual != null && actual >= value.gte;
     if ('some' in value) return actual.some((r: Row) => matches(r, value.some));
     if ('in' in value) return value.in.includes(actual);
-    if ('startsWith' in value) return typeof actual === 'string' && actual.startsWith(value.startsWith);
+    // Prisma's startsWith is case-sensitive unless mode: 'insensitive' (search's name
+    // prefixes ask for it; the fee-pause repair-key prefix does not).
+    if ('startsWith' in value) {
+      if (typeof actual !== 'string') return false;
+      return value.mode === 'insensitive'
+        ? actual.toLowerCase().startsWith(value.startsWith.toLowerCase())
+        : actual.startsWith(value.startsWith);
+    }
     if ('contains' in value) return typeof actual === 'string' && actual.toLowerCase().includes(value.contains.toLowerCase());
-    if ('startsWith' in value) return typeof actual === 'string' && actual.toLowerCase().startsWith(value.startsWith.toLowerCase());
     if ('hasSome' in value) return actual.some((s: string) => value.hasSome.includes(s));
     if ('has' in value) return actual.includes(value.has);
     // SQL comparison semantics: a NULL column never satisfies a range predicate.
