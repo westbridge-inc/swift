@@ -688,6 +688,61 @@ describe('[DS1115] a person\'s answer is bound to THIS payment, and every held r
   });
 });
 
+describe('[security review, 14 Oct] every decision is taken on the row and the books as they are when it is written', () => {
+  const settleAt = (id: string, now: Date) => runWithTenant('swift-default', () => reversals.settle(id, { now }));
+
+  it('R1: "returned, not booked" is refused if the books hold the money again by the time it is written (stale approval)', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const sent = await ask(p.checkoutId, p.amount);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const held = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    expect(held).toMatchObject({ state: 'HELD', heldReason: 'WALLET_NO_LONGER_HOLDS_IT' });
+    // asked while the money was used; finance then put it back before the second admin approved
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: p.amount } });
+    await expect(resolveAs(held.id, 'RETURNED_NOT_BOOKED', `STMT${RUN}H`)).rejects.toMatchObject({ code: 'RETURN_NOW_BOOKABLE' });
+    expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+    // the return is booked once, on MMG's proof
+    const booked = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: held.id }));
+    expect(booked.state).toBe('REVERSED');
+    expect(await walletOf(p.subId)).toBe(0);
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('R2: a reversal reference that already proved one return can never prove another (even when MMG had named its own)', async () => {
+    const a = await paidCheckout();
+    sandboxScriptReversal(a.txn, 'pending');
+    const sentA = await ask(a.checkoutId, a.amount);
+    expect(sentA.state).toBe('SENT');
+    const heldA = await settleAt(sentA.id, new Date(Date.now() + 25 * 3_600_000));
+    expect(heldA.state).toBe('HELD');
+    expect(heldA.providerReference, 'MMG named a reference: a typed one is kept only as the note').toBeTruthy();
+    const typed = `REVT${seq}${RUN}`;
+    sandboxAddHistory({ transactionId: typed, status: 'approved', amountMinor: a.amount * 100, currencyCode: 'GYD' });
+    expect((await resolveAs(heldA.id, 'RETURNED', typed)).state).toBe('REVERSED');
+    const b = await paidCheckout();
+    sandboxScriptReversal(b.txn, 'error');
+    const heldB = await ask(b.checkoutId, b.amount);
+    await expect(resolveAs(heldB.id, 'RETURNED', typed)).rejects.toMatchObject({ code: 'NOT_A_REVERSAL' });
+    await expect(resolveAs(heldB.id, 'RETURNED', ` ${typed.toLowerCase()} `)).rejects.toMatchObject({ code: 'NOT_A_REVERSAL' });
+    expect(await reversalRow(heldB.id)).toMatchObject({ state: 'HELD', resolution: null });
+    expect(await walletOf(b.subId)).toBe(b.amount);
+    expect(await reversalEvents(b.subId)).toHaveLength(0);
+  });
+
+  it('R5: a stale tick never closes a return a person has already resolved', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    // MMG's refusal on record, and a person's "returned" answer written, its booking about to follow
+    await app.prisma.mmgFeeReversal.update({ where: { id: held.id }, data: { providerStatus: 'declined', providerReason: 'MMG refused the reversal' } });
+    await app.prisma.mmgFeeReversal.update({ where: { id: held.id }, data: { resolution: 'RETURNED_BY_REFERENCE', resolvedBy: admin.userId, resolutionNote: `REVS${RUN}` } });
+    const after = await settleAt(held.id, new Date());
+    expect(after).toMatchObject({ state: 'HELD', resolution: 'RETURNED_BY_REFERENCE' });
+  });
+});
+
 describe('[MMG REVERSAL] the record only moves forward', () => {
   it('the database refuses a backwards state, a rewritten amount, and a second wallet debit', async () => {
     const p = await paidCheckout();

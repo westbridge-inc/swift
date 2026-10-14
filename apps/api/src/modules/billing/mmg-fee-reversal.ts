@@ -160,7 +160,7 @@ export function shapeProviderText(text: string | null | undefined): string | nul
 
 export type ResolveRefusal =
   | 'NOT_HELD' | 'MMG_SHOWS_RETURNED' | 'PAYMENT_NOT_STANDING' | 'NO_PROOF'
-  | 'NOT_A_REVERSAL' | 'RETURN_NOT_BOOKABLE' | 'NOT_SHORT' | 'MMG_LOOKUP_UNAVAILABLE';
+  | 'NOT_A_REVERSAL' | 'RETURN_NOT_BOOKABLE' | 'NOT_SHORT' | 'MMG_LOOKUP_UNAVAILABLE' | 'RETURN_NOW_BOOKABLE';
 const RESOLVE_COPY: Record<ResolveRefusal, string> = {
   NOT_HELD: 'Only a return that is held for a person is resolved here.',
   MMG_SHOWS_RETURNED: "MMG's records show this payment returned. Use \"Check with MMG\" instead; nothing changed.",
@@ -169,6 +169,7 @@ const RESOLVE_COPY: Record<ResolveRefusal, string> = {
   NOT_A_REVERSAL: "That MMG reference is a payment Swift has on record (this payment's own statement line, or another payment), not a return. Enter the reference of MMG's reversal transaction. Nothing changed.",
   RETURN_NOT_BOOKABLE: "MMG returned this payment, but the money had already paid for a week of the partner's fee, so it cannot be taken back here. Close it as \"Returned, not booked\" and follow the refund procedure. Nothing changed.",
   NOT_SHORT: 'Only a return MMG made after the money had already paid for a week is closed this way. Nothing changed.',
+  RETURN_NOW_BOOKABLE: "The partner's weekly-fee payments hold this amount again, so the return can be booked: use \"Check with MMG\". Nothing changed.",
   MMG_LOOKUP_UNAVAILABLE: 'MMG could not be asked just now. Nothing changed; try again in a few minutes.',
 };
 
@@ -193,7 +194,11 @@ async function namesAKnownPayment(db: PrismaClient, reversalId: string, referenc
       + (SELECT count(*) FROM mmg_checkout_intents ci
           WHERE mmg_txn_canon(ci."mmgTransactionId") = mmg_txn_canon(${reference})
              OR EXISTS (SELECT 1 FROM unnest(ci.candidates) c WHERE mmg_txn_canon(c) = mmg_txn_canon(${reference})))
-      + (SELECT count(*) FROM mmg_fee_reversals r WHERE r.id <> ${reversalId} AND mmg_txn_canon(r."providerReference") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM mmg_fee_reversals r WHERE r.id <> ${reversalId}
+          AND (mmg_txn_canon(r."providerReference") = mmg_txn_canon(${reference})
+            -- [security review R2] a reference a person typed for another return is kept as its note
+            -- when MMG had named one: it can never prove a second return.
+            OR mmg_txn_canon(r."resolutionNote") = mmg_txn_canon(${reference})))
     )::bigint AS n`);
   return Number(hit?.n ?? 0) > 0;
 }
@@ -286,8 +291,10 @@ export class MmgFeeReversalService {
       case 'apply':
         return this.applyProof(row.id, decision.how, now);
       case 'fail': {
+        // [security review R5] Compare-and-set on the resolution too: a tick that read the row
+        // before a person answered never closes it under them.
         const moved = await this.deps.prisma.mmgFeeReversal.updateMany({
-          where: { id, state: { in: ['SENDING', 'SENT', 'HELD'] } },
+          where: { id, state: { in: ['SENDING', 'SENT', 'HELD'] }, resolution: null },
           data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: 'STANDING' },
         });
         if (moved.count === 1) {
@@ -440,9 +447,16 @@ export class MmgFeeReversalService {
       const proof = await proofOf({ ...row, providerReference: row.providerReference ?? reference });
       if (!proof.proven) throw new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
       const closed = await this.deps.prisma.$transaction(async (tx) => {
+        // [security review R1] Decided on the books as they are NOW (an approval can be
+        // hours old): under the payer's lock, the money must still be used, and the row
+        // still held for exactly that reason (compare-and-set below).
         await lockBillingAuthority(tx, row.subscriptionId);
+        const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: row.subscriptionId }, select: { balance: true, currencyCode: true } });
+        if (wallet && wallet.currencyCode === row.currencyCode && amountMinorOf(wallet.balance) >= amountMinorOf(row.amount)) {
+          throw new AppError(409, 'RETURN_NOW_BOOKABLE', RESOLVE_COPY.RETURN_NOW_BOOKABLE);
+        }
         const moved = await tx.mmgFeeReversal.updateMany({
-          where: { id: row.id, state: 'HELD', resolution: null },
+          where: { id: row.id, state: 'HELD', resolution: null, heldReason: { startsWith: 'WALLET_NO_LONGER_HOLDS_IT' } },
           data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: proof.how, resolution: 'RETURNED_NOT_BOOKED', resolvedBy: input.actorId, resolutionNote: reference },
         });
         if (moved.count !== 1) throw new AppError(409, 'NOT_HELD', RESOLVE_COPY.NOT_HELD);
