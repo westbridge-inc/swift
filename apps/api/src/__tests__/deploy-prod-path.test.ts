@@ -156,6 +156,8 @@ const PRODUCTION = {
   API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://example.org',
   // Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
+  // No card payment in production until an attorney signs off (owner ruling, 13 Oct).
+  PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1',
   // Address search (the API refuses production without it once #1563 lands;
   // osm or google is the owner's choice).
   PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon:2322',
@@ -336,6 +338,57 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
     expect(staging.stderr).not.toContain('refuses the agent-cash webhook');
+  });
+
+  // [LAUNCH-LOCK] Owner ruling, 13 Oct: until an attorney signs off,
+  // production takes no card payment and runs no ads. The API's boot guard
+  // refuses the same settings (boot-config.test.ts); turning either on is a
+  // reviewed code change in both places, never an .env edit.
+  const everyMode = [[SHA], ['--data-only', SHA], ['--no-public', SHA]];
+  const modeEnv = (args: string[]): Record<string, string> => (args.length > 1 ? { DNS_MAP: '' } : {});
+  it('production refuses any card provider but disabled, and no kill switch, in every mode, before anything changes', () => {
+    const cases: Array<[Record<string, string | undefined>, string]> = [
+      [{ PAYMENT_PROVIDER: undefined }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'stripe' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'powertranz' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'Disabled' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ CARD_RAIL_KILL: undefined }, 'needs CARD_RAIL_KILL=1'],
+      [{ CARD_RAIL_KILL: '0' }, 'needs CARD_RAIL_KILL=1'],
+      [{ CARD_RAIL_KILL: 'yes' }, 'needs CARD_RAIL_KILL=1'],
+    ];
+    for (const args of everyMode) {
+      for (const [over, refusal] of cases) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, ...over }, { args, env: modeEnv(args) });
+        expect(r.status, `${args.join(' ')} ${JSON.stringify(over)}`).not.toBe(0);
+        expect(r.stderr).toContain(`PILOT_ENV=production ${refusal}`);
+        expect(r.stderr).toContain('until an attorney signs off');
+        expect(changedNothing(r.calls)).toEqual([]);
+      }
+    }
+  });
+
+  it.each(['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'])('production refuses %s unless it is unset or 0, in every mode, before anything changes', (name) => {
+    for (const args of everyMode) {
+      for (const value of ['1', 'true', 'on']) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, [name]: value }, { args, env: modeEnv(args) });
+        expect(r.status, `${args.join(' ')} ${name}=${value}`).not.toBe(0);
+        expect(r.stderr).toContain(`PILOT_ENV=production refuses ${name} unless it is unset or 0`);
+        expect(changedNothing(r.calls)).toEqual([]);
+      }
+    }
+    for (const off of ['', '0']) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, [name]: off });
+      expect(r.status, `${name}=${JSON.stringify(off)}: ${r.stderr}`).toBe(0);
+    }
+  });
+
+  it('staging is not asked: its card and ad switches deploy exactly as before', () => {
+    const r = runPilot({ ...STAGING, PAYMENT_PROVIDER: 'sandbox', CARD_RAIL_KILL: '0', CARD_RAIL_V2: '1', CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_ENROLL: '1', ADS_ENABLED: '1' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`STAGING READY at exact SHA ${SHA}`);
   });
 });
 

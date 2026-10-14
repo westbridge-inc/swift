@@ -868,6 +868,12 @@ checkout moves to the requested SHA; everything else before that):
 - AGENT_CASH_WEBHOOK_SECRET or AGENT_CASH_WEBHOOK_SECRET_FILE set: partners
   pay the weekly fee only on the MMG checkout page, never through an agent or
   a Swift Number (the agent-cash webhook answers 503 without its secret);
+- the launch lock (owner ruling, 13 Oct): until an attorney signs off,
+  production takes no card payment and runs no ads. PAYMENT_PROVIDER must be
+  exactly `disabled` and CARD_RAIL_KILL exactly `1`; CARD_RAIL_V2,
+  CARD_RAIL_V2_DRAIN, CARD_RAIL_ENROLL and ADS_ENABLED must each be unset or
+  `0`. Lifting it is a reviewed code change here and in the API's boot guard,
+  never a deploy/.env edit;
 - for the whole stack and `--no-public` (not `--data-only`), no address-search
   provider: `PLACES_PROVIDER=osm` with `PHOTON_URL=http://photon:2322` (the
   script then also starts the private Photon service from the routing file's
@@ -934,7 +940,8 @@ explicitly off. Beyond the earlier guards:
   together (cash partners pay through the checkout page) and redeploy;
   turning a real card provider on also ends the pause, so do it only when
   partners can open the card pages (note the per-platform card switch: iOS
-  is off unless switched on).
+  is off unless switched on). While the launch lock below holds, production
+  refuses a card provider outright.
 - **OPS_ONCALL_PHONES.** One or more E.164 numbers, comma-separated. An
   unacknowledged SOS escalates to them by SMS.
 - **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
@@ -943,6 +950,13 @@ explicitly off. Beyond the earlier guards:
   AGENT_CASH_WEBHOOK_SECRET (nor its `_FILE`): the same two rules pilot-up.sh
   checks, held by the API itself however it is started (a hand-run compose,
   an old script). The refusal names the setting, never a value.
+- **The launch lock.** No card payment and no ads until an attorney signs
+  off (owner ruling, 13 Oct): the same settings pilot-up.sh checks above
+  (PAYMENT_PROVIDER `disabled`, CARD_RAIL_KILL `1`, CARD_RAIL_V2,
+  CARD_RAIL_V2_DRAIN, CARD_RAIL_ENROLL and ADS_ENABLED unset or `0`). The
+  card rail's own production checks still run first, so a refusal names the
+  real problem before the lock. The value-free preflight
+  (`deploy/preflight.ts`) lists every one.
 
 ### Database first, before the providers and DNS
 
