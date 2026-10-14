@@ -1,3 +1,4 @@
+import { emitToChatRoom } from '../modules/order/order-room-emission.service';
 import fp from 'fastify-plugin';
 import { Server } from 'socket.io';
 import { z } from 'zod';
@@ -35,6 +36,8 @@ const chatEvent = z.object({ roomId: z.string().min(1).max(64) });
 const vendorEvent = z.object({ vendorId: z.string().min(1).max(64) });
 const MAX_EARLY_AUTH_PACKETS = 4;
 const MAX_SOCKET_PACKET_BYTES = 64 * 1024;
+/** One typing (and one stop-typing) relay per socket per room per window. */
+const TYPING_RELAY_INTERVAL_MS = 1_000;
 
 const REDIS_PUBLISH_COMMANDS = ['publish', 'spublish'] as const;
 const REDIS_SUBSCRIPTION_COMMANDS = [
@@ -641,19 +644,23 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     // handler keyed only on orderId would let any signed-in user broadcast fake
     // positions into someone else's order room.
 
-    // Typing indicators relay only from sockets that were admitted to the room
-    // (`to(room)` itself doesn't require sender membership — socket.rooms does).
-    socket.on('chat:typing', (raw: unknown) => {
+    // A retained subscription cannot restore a former participant's authority.
+    // Recheck the sender and audience for every typing publication. Each check
+    // costs a socket snapshot and two reads, so one socket relays each typing
+    // event at most once per second per room; the rest are dropped before any
+    // I/O (a typing hint loses nothing by it).
+    const typingRelayedAt = new Map<string, number>();
+    const relayTyping = (event: 'chat:typing' | 'chat:stop-typing') => async (raw: unknown) => {
       const parsed = chatEvent.safeParse(raw);
       if (!parsed.success || !socket.rooms.has(`chat:${parsed.data.roomId}`)) return;
-      socket.to(`chat:${parsed.data.roomId}`).emit('chat:typing', { userId });
-    });
-
-    socket.on('chat:stop-typing', (raw: unknown) => {
-      const parsed = chatEvent.safeParse(raw);
-      if (!parsed.success || !socket.rooms.has(`chat:${parsed.data.roomId}`)) return;
-      socket.to(`chat:${parsed.data.roomId}`).emit('chat:stop-typing', { userId });
-    });
+      const key = `${event}:${parsed.data.roomId}`;
+      const now = Date.now();
+      if (now - (typingRelayedAt.get(key) ?? -Infinity) < TYPING_RELAY_INTERVAL_MS) return;
+      typingRelayedAt.set(key, now);
+      await inSocketTenant(() => emitToChatRoom(app.prisma, io, parsed.data.roomId, event, { userId }, { senderId: userId, excludeSocketId: socket.id }));
+    };
+    socket.on('chat:typing', relayTyping('chat:typing'));
+    socket.on('chat:stop-typing', relayTyping('chat:stop-typing'));
 
     // Vendor order feed — only if the authenticated user owns the vendor
     socket.on('vendor:subscribe', async (raw: unknown) => {

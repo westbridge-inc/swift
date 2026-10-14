@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
@@ -560,7 +561,7 @@ export async function ridesRoutes(app: FastifyInstance) {
         note: 'Driver arrival confirmed by the passenger — GPS gate overridden',
       },
     });
-    app.io.to(`order:${request.params.id}`).emit('order:status_changed',
+    await emitToOrderRoom(app.prisma, app.io, request.params.id, 'order:status_changed',
       { orderId: request.params.id, status: 'DRIVER_ARRIVED' });
     return { success: true, data: { orderId: request.params.id, status: 'DRIVER_ARRIVED' } };
   });

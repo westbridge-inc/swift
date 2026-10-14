@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -2365,7 +2366,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** [hold v3 · N-01] The held-for-review queue: paid MMG orders the food-age
    *  cutoff would have cancelled, held for a person instead. Tenant-scoped by
-   *  the request like every admin read. */
+   *  the request like every admin read.
+   *  [REVIEW-B #1699 S3-1] Classed C0 (writes no access record), so it carries
+   *  no customer identity and no store phone: the Orders page polls it every
+   *  minute and shows only the store's name. Who the customer is lives on
+   *  GET /orders/:id, which is C1 and records the read. */
   app.get('/orders/held', { preHandler: [adminGuard] }, async () => {
     const rows = await app.prisma.order.findMany({
       where: { foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...FOOD_AGE_WAITING] } },
@@ -2374,8 +2379,7 @@ export async function adminRoutes(app: FastifyInstance) {
       select: {
         id: true, orderNumber: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true,
         totalAmount: true, readyAt: true, foodAgeHeldAt: true, placedAt: true,
-        vendor: { select: { id: true, name: true, phone: true } },
-        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        vendor: { select: { id: true, name: true } },
       },
     });
     const now = Date.now();
@@ -2979,7 +2983,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // log + customer notification below. (Wallet credit is a Part C / fintech-phase
     // concern — see the dormant walletBalance/Transaction schema notes.)
 
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: newStatus });
 
     // [REPORT-010 F-03] Unattested MMG gets the direct-refund guidance — the
     // customer may have already paid the store's link before this cancel.
@@ -3120,7 +3124,7 @@ export async function adminRoutes(app: FastifyInstance) {
       return tx.order.findUniqueOrThrow({ where: { id } });
     });
     orderRefundCounter.labels('settled').inc();
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'REFUNDED' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'REFUNDED' });
     return { success: true, data: updated };
   });
 
@@ -5757,7 +5761,7 @@ export async function adminRoutes(app: FastifyInstance) {
       documents,
       (earlierWhere) => tenantPrisma.verificationDocument.findMany({
         where: earlierWhere,
-        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+        select: { id: true, userId: true, role: true, subjectId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
       }),
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
@@ -5844,7 +5848,7 @@ export async function adminRoutes(app: FastifyInstance) {
       });
       markReplayAudited(request as unknown as AuditRequestLike, decisionRow?.id);
     } else {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });
