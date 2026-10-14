@@ -177,7 +177,8 @@ const E = {
   contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
-  approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt'] },
+  // [OWNER #13] …and the solo wait and how it was decided.
+  approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt', 'soloEligibleAt', 'decidedSolo', 'expiresAt'] },
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
@@ -444,6 +445,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // passes through its own C4/C5 gate again. C2 — no new reason, no new
   // approval — so "apply" can never need a second approval of its own.
   'POST /approvals/:id/apply': c('C2', 'approvals.apply', E.approval),
+  // [OWNER #13] Starting the solo wait moves nothing (the decision, its own
+  // step, still needs the wait, a fresh sign-in code and the owner's email),
+  // and withdrawing one's own request stops an action rather than taking one.
+  'POST /approvals/:id/solo': c('C2', 'approvals.solo', E.approval),
+  'POST /approvals/:id/cancel': c('C2', 'approvals.cancel', E.approval),
 
   // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   blockedBecause, decidable, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, BLOCK_COPY,
-  canApply, awaitsRequester, snapshotEntries,
+  canApply, awaitsRequester, snapshotEntries, soloWaitCopy, SOLO_EXPLAIN, needsStepUp,
   type ApprovalRow,
 } from './approvals';
 
@@ -179,5 +179,25 @@ describe('[DS110-13] the stored body is what the approver reads and apply replay
     // nothing to wait for when there is nothing to execute
     expect(awaitsRequester(ROW({ ...approved, isOwnRequest: false, bodySnapshot: null }), NOW)).toBe(false);
     expect(awaitsRequester(ROW({ ...approved, isOwnRequest: false, expiresAt: at(-1) }), NOW)).toBe(false);
+  });
+});
+
+describe('[OWNER #13] solo approval words', () => {
+  it('says when the wait ends, and says "now" once it has', () => {
+    const now = new Date('2026-10-13T12:00:00Z');
+    expect(soloWaitCopy('2026-10-14T00:00:00Z', now)).toMatch(/^Solo approval: available after /);
+    expect(soloWaitCopy('2026-10-13T11:00:00Z', now)).toMatch(/^Solo approval: available now/);
+  });
+  it('names the wait in hours and the safeguards in plain words', () => {
+    const words = SOLO_EXPLAIN(12);
+    expect(words).toMatch(/12-hour wait/);
+    expect(words).toMatch(/sign-in code/);
+    expect(words).toMatch(/emails you/);
+    expect(words).toMatch(/cancel/);
+  });
+  it('recognises the server asking for a fresh code', () => {
+    expect(needsStepUp(Object.assign(new Error('x'), { code: 'STEP_UP_REQUIRED' }))).toBe(true);
+    expect(needsStepUp(Object.assign(new Error('x'), { code: 'SOLO_COOLING_OFF' }))).toBe(false);
+    expect(needsStepUp(null)).toBe(false);
   });
 });

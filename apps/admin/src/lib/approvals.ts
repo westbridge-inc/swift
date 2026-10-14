@@ -20,7 +20,7 @@ export interface ApprovalRow {
   capability: string;
   entityId: string | null;
   fingerprint: string;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED' | 'CANCELLED';
   requestedBy: string;
   /** The requester's stated reason — the thing the approver is here to read. */
   reason: string;
@@ -36,6 +36,37 @@ export interface ApprovalRow {
   createdAt: string;
   /** Server-computed: the approver raised this one themselves. */
   isOwnRequest?: boolean;
+  /** [OWNER #13] Approved by the requester in solo mode. */
+  decidedSolo?: boolean;
+  soloEligibleAt?: string | null;
+  /** [OWNER #13] Server-computed, on your own PENDING requests only. */
+  solo?: SoloState | null;
+}
+
+/**
+ * [OWNER #13] Solo mode, as the server reads it for your own pending request:
+ * the wait is running, it has ended, it can be started, or why it cannot.
+ */
+export type SoloState =
+  | { state: 'waiting'; availableAt: string }
+  | { state: 'ready'; availableAt: string }
+  | { state: 'available'; coolOffHours: number }
+  | { state: 'unavailable'; why: string; message: string };
+
+/** "Solo approval: available after 14 Oct, 07:30" — the wait, in plain words. */
+export function soloWaitCopy(availableAt: string, now = new Date()): string {
+  const at = new Date(availableAt);
+  const when = at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return at.getTime() > now.getTime() ? `Solo approval: available after ${when}` : `Solo approval: available now (since ${when})`;
+}
+
+export const SOLO_EXPLAIN = (hours: number) =>
+  `You are the only admin who can approve this. In solo mode you can approve it yourself after a ${hours}-hour wait, ` +
+  'with a sign-in code sent to your phone. Swift emails you now and when you decide, and you can cancel during the wait.';
+
+/** A server refusal that means "confirm it's you first". */
+export function needsStepUp(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'STEP_UP_REQUIRED';
 }
 
 export type BlockReason = 'own-request' | 'expired' | 'already-decided' | null;

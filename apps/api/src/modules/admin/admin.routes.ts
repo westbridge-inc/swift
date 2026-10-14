@@ -48,6 +48,10 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import {
+  approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
+  startSoloApproval,
+} from './solo-approval';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
@@ -763,7 +767,7 @@ export async function adminRoutes(app: FastifyInstance) {
         // never have it silently dropped when the approval is replayed.
         query: (request.query ?? {}) as Record<string, unknown>,
       },
-      { userId },
+      { userId, role: request.user?.role },
       typeof header === 'string' && header ? header : null,
       reasonOf(request.body, request.headers) ?? '',
     );
@@ -5755,7 +5759,7 @@ export async function adminRoutes(app: FastifyInstance) {
     requireTenantId();
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status } = z.object({
-      status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED']).optional(),
+      status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED', 'CANCELLED']).optional(),
     }).parse(request.query);
     const where = status ? { status } : { status: 'PENDING' };
     const [rows, total] = await Promise.all([
@@ -5765,11 +5769,52 @@ export async function adminRoutes(app: FastifyInstance) {
     // An approver must be able to tell their own asks apart at a glance: they
     // cannot decide those, and a queue that hides the fact wastes their time.
     const mine = request.user.userId;
+    // [OWNER #13] Solo mode, per own request: waiting, ready, available, or
+    // why not — the same facts the server checks, read live, so the screen
+    // never offers a button the server will refuse.
+    const ownPending = rows.some((row) => row.requestedBy === mine && row.status === 'PENDING');
+    const soloContext = ownPending ? {
+      userId: mine,
+      role: request.user.role,
+      roster: await approverRoster(app.prisma),
+      hasEmail: !!(await app.prisma.user.findUnique({ where: { id: mine }, select: { email: true } }))?.email?.trim(),
+      emailReady: emailChannelConfigured(),
+      coolOffHours: await soloCoolOffHours(app.prisma),
+      now: new Date(),
+    } : null;
     return {
       success: true,
-      data: rows.map((row) => ({ ...row, isOwnRequest: row.requestedBy === mine })),
+      data: rows.map((row) => ({
+        ...row,
+        isOwnRequest: row.requestedBy === mine,
+        solo: soloContext && row.requestedBy === mine ? soloRowState(row as never, soloContext) : null,
+      })),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
+  });
+
+  // [OWNER #13] SOLO MODE: the owner, as the only admin who could approve
+  // their own request, starts the cancellable wait. Refused unless every
+  // condition holds now (solo-approval.ts); the wait, its audit row and the
+  // owner's email commit together.
+  app.post<{ Params: { id: string } }>('/approvals/:id/solo', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
+    const started = await startSoloApproval(app.prisma, request.params.id,
+      { userId: request.user.userId, role: request.user.role },
+      { onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }) });
+    adminApprovalCounter.labels('solo_requested', 'C4').inc();
+    return { success: true, data: started };
+  });
+
+  // [OWNER #13] The admin who asked withdraws their own request — during a
+  // solo wait (the owner's brake) or any time it is still pending.
+  app.post<{ Params: { id: string } }>('/approvals/:id/cancel', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
+    const cancelled = await cancelOwnApproval(app.prisma, request.params.id,
+      { userId: request.user.userId, role: request.user.role },
+      { onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }) });
+    adminApprovalCounter.labels('cancelled', 'C4').inc();
+    return { success: true, data: cancelled };
   });
 
   app.post<{ Params: { id: string } }>('/approvals/:id/decide', { preHandler: [adminGuard] }, async (request) => {
@@ -5783,6 +5828,32 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const grant = await app.prisma.admin.findUnique({ where: { userId: request.user.userId }, select: { permissions: true } });
     const held = capabilitiesOf({ role: request.user.role, permissions: grant?.permissions ?? null });
+
+    // [OWNER #13] The requester deciding a request whose solo wait was
+    // started: solo mode. Every other self-decision falls through to the
+    // two-person rule below, which refuses it.
+    const own = (await app.prisma.privilegedApproval.findUnique({
+      where: { id: request.params.id }, select: { requestedBy: true, soloRequestedAt: true } as never,
+    })) as { requestedBy: string; soloRequestedAt: Date | null } | null;
+    if (own && own.requestedBy === request.user.userId && own.soloRequestedAt) {
+      try {
+        const solo = await decideSoloApproval(app.prisma, request.params.id,
+          { userId: request.user.userId, role: request.user.role, holds: (capability) => holdsCapability(held, capability) },
+          { approve: body.approve, note: body.note },
+          {
+            // [ALG-34] A fresh sign-in code, spent by this decision: one code, one decision.
+            consumeStepUp: () => requireStepUp(app, request as never, { consume: true }),
+            onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+          });
+        adminApprovalCounter.labels('solo_approved', 'C4').inc();
+        return { success: true, data: solo };
+      } catch (err) {
+        const code = (err as { code?: unknown }).code;
+        adminApprovalCounter.labels(`solo_refused_${typeof code === 'string' ? code.toLowerCase() : 'error'}`, 'C4').inc();
+        throw err;
+      }
+    }
+
     const decision = await decideApproval(
       app.prisma, request.params.id,
       { userId: request.user.userId, holds: (capability) => holdsCapability(held, capability) },

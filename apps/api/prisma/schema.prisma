@@ -6684,7 +6684,7 @@ model PrivilegedApproval {
   /// one stored request, so what executes is always what was displayed. Rows
   /// raised before this column existed are null and can never be applied.
   bodySnapshot Json?
-  /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED
+  /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED | CANCELLED (withdrawn by the requester)
   status       String    @default("PENDING")
   requestedBy  String
   /// The requester's stated reason (ADM-006) — what the approver reads
@@ -6694,6 +6694,15 @@ model PrivilegedApproval {
   decidedAt    DateTime?
   appliedAt    DateTime?
   expiresAt    DateTime
+  /// [OWNER #13] Solo mode: when the requester asked to approve their own
+  /// request (the owner was the only admin who could). The wait began here.
+  soloRequestedAt DateTime?
+  /// [OWNER #13] When the solo wait ends: from then the requester may decide,
+  /// with a fresh sign-in code, while still the only admin who could.
+  soloEligibleAt  DateTime?
+  /// [OWNER #13] The requester approved their own request under solo mode.
+  /// The only way approvedBy may equal requestedBy (a database CHECK).
+  decidedSolo     Boolean   @default(false)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
