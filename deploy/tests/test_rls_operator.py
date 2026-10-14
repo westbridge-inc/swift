@@ -121,7 +121,7 @@ def catalogue():
             'migrationOwner': 'swift', 'ownerIsPrivileged': True, 'tenantTables': 130, 'disabledTables': 0,
             'unforcedTables': 0, 'qrSchemaPresent': True, 'qrUnsafeGrants': 0, 'obsoleteExecutable': 0,
             'parentUpdateMissing': 0, 'appendOnlyUnsafeGrants': 0, 'defaultGrantCount': 0,
-            'groupUnsafeAttributes': 0, 'groupUnexpectedParents': 0,
+            'groupUnsafeAttributes': 0, 'groupUnexpectedParents': 0, 'groupOwnedObjects': 0,
             'ownershipDigest': 'a' * 64, 'aclDigest': 'b' * 64}
 
 
@@ -154,13 +154,15 @@ class Host:
         self.lock = self.tmp / 'rls.lock'
         self.outputs = []
 
-    def run(self, command, *extra, env=None, fake=None, target=True, direct=False):
+    def run(self, command, *extra, env=None, fake=None, target=True, direct=False, stack=None):
         args = [sys.executable, str(DEPLOY / 'wall' / 'operator.py'), command] if direct else ['bash', str(WRAPPER), command]
         if target and command in ('plan', 'apply', 'verify'):
             args += ['--approved-target-file', str(self.target)]
-        args += ['--project-name', 'rehearsal', '--project-directory', str(self.tmp),
-                 '--compose-file', str(self.tmp / 'compose.yml'), '--store-dir', str(self.store),
-                 '--run-dir', str(self.run_dir), '--lock-file', str(self.lock), *extra]
+        if stack is None:  # a rehearsal stack with its own store: every test but the pairing one
+            stack = ['--project-name', 'rehearsal', '--project-directory', str(self.tmp),
+                     '--compose-file', str(self.tmp / 'compose.yml'), '--store-dir', str(self.store),
+                     '--run-dir', str(self.run_dir)]
+        args += [*stack, '--lock-file', str(self.lock), *extra]
         self.config.write_text(json.dumps({'calls': str(self.calls), 'state': str(self.state), **(fake or {})}))
         full = {'PATH': f'{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(self.tmp)}
         full.update(env or {})
@@ -383,7 +385,11 @@ class OperatorEndToEnd(unittest.TestCase):
         self.assertEqual(self.host.run('apply')[1], {'status': 'hold', 'reason': 'TARGET_OR_CATALOGUE_CHANGED'})
         self.assertEqual(self.host.run('roles')[1]['status'], 'roles_hold')
         # ...but roles still holds the invariants, and both logins must exist.
-        for field, value in (('unforcedTables', 1), ('qrUnsafeGrants', 1), ('migration', 'incomplete')):
+        # A later migration that hands an object to a group (ALTER ... OWNER TO
+        # swift_app) moves only the ownership digest, which roles does not pin:
+        # the count of objects the groups own is what holds it.
+        for field, value in (('unforcedTables', 1), ('qrUnsafeGrants', 1), ('migration', 'incomplete'),
+                             ('groupOwnedObjects', 1)):
             with self.subTest(field=field):
                 broken = json.loads(self.host.state.read_text())
                 broken['catalogue'][field] = value
@@ -418,6 +424,46 @@ class OperatorEndToEnd(unittest.TestCase):
         result, report = self.host.run('plan', env={'FAKE_UID': '0'})
         self.assertEqual(report, {'status': 'hold', 'reason': 'RUN_AS_THE_DEPLOY_USER'})
         self.assertEqual(self.host.call_records(), [])
+
+    def test_the_store_is_paired_with_the_stack(self):
+        """A rehearsal stack (a project name, another project directory, or any
+        compose file beyond the deploy directory's own) never writes into
+        production's store or its live secrets, and production's stack never
+        journals into another store. Refused before the lock, Docker or the
+        store is touched."""
+        base, wall = str(DEPLOY / 'docker-compose.yml'), str(DEPLOY / 'docker-compose.wall.yml')
+        other = str(self.host.tmp / 'compose.yml')
+        rehearsal = ['--project-name', 'rehearsal', '--project-directory', str(self.host.tmp), '--compose-file', other]
+        own_store = ['--store-dir', str(self.host.store), '--run-dir', str(self.host.run_dir)]
+        for stack in (
+                rehearsal,  # production's store, by default
+                rehearsal + ['--run-dir', str(self.host.run_dir)],
+                rehearsal + ['--store-dir', str(self.host.store)],
+                rehearsal + ['--store-dir', operator.DEFAULT_STORE, '--run-dir', str(self.host.run_dir)],
+                rehearsal + ['--store-dir', operator.DEFAULT_STORE + '/', '--run-dir', str(self.host.run_dir)],
+                rehearsal + ['--store-dir', operator.DEFAULT_STORE + '/sub', '--run-dir', str(self.host.run_dir)],
+                rehearsal + ['--store-dir', str(self.host.store), '--run-dir', operator.DEFAULT_RUN],
+                rehearsal + ['--store-dir', str(self.host.store), '--run-dir', operator.DEFAULT_RUN + '/x'],
+                ['--project-name', 'rehearsal'],
+                ['--project-directory', str(self.host.tmp)],
+                ['--compose-file', other],
+                ['--compose-file', base, '--compose-file', other],
+                ['--compose-file', wall]):
+            with self.subTest(stack=stack):
+                self.assertEqual(self.host.run('apply', stack=stack)[1],
+                                 {'status': 'hold', 'reason': 'REHEARSAL_STACK_NEEDS_ITS_OWN_STORE'})
+        for stack in (own_store, ['--compose-file', base, *own_store], ['--run-dir', str(self.host.run_dir)],
+                      ['--store-dir', str(self.host.store)], ['--compose-file', base, '--compose-file', wall, *own_store]):
+            with self.subTest(stack=stack):
+                self.assertEqual(self.host.run('apply', stack=stack)[1],
+                                 {'status': 'hold', 'reason': 'PRODUCTION_STACK_NEEDS_PRODUCTION_STORE'})
+        self.assertEqual(self.host.call_records(), [])
+        self.assertFalse(self.host.lock.exists())
+        # The two allowed pairs get past the check (fingerprint reads no store).
+        for stack in ([], ['--compose-file', base], ['--compose-file', base, '--compose-file', wall],
+                      ['--project-directory', str(DEPLOY) + '/'], rehearsal + own_store):
+            with self.subTest(allowed=stack):
+                self.assertEqual(self.host.run('fingerprint', stack=stack)[1]['status'], 'fingerprint')
 
     def test_a_rehearsal_store_names_both_locations_production_names_neither(self):
         ports = operator.HostPorts(['docker', 'compose'], operator.DEFAULT_STORE, [], {'database': 'swift'})
@@ -489,6 +535,32 @@ class OperatorUnits(unittest.TestCase):
             self.assertIn(default, acls)
         self.assertNotIn("'-'", acls)
         self.assertEqual(acls.count('aclexplode('), 7)
+
+    def test_the_census_answers_every_planner_field(self):
+        """census.sql builds every field the planner reads, and the groups'
+        owned objects are counted from the cluster's ownership records."""
+        census = (DEPLOY / 'wall' / 'census.sql').read_text()
+        built = census[census.index('SELECT json_build_object('):]
+        for field in (*operator.logins.TARGET_FIELDS, *operator.logins.ZERO_FIELDS,
+                      'ownerIsPrivileged', 'qrSchemaPresent', 'tenantTables', 'roles'):
+            with self.subTest(field=field):
+                self.assertIn(f"'{field}', ", built)
+        self.assertIn('groupOwnedObjects', operator.logins.ZERO_FIELDS)
+        owned = built[built.index("'groupOwnedObjects'"):]
+        owned = owned[:owned.index('),\n') + 2]
+        self.assertRegex(owned, r"pg_shdepend d\s+WHERE d\.refclassid = 'pg_authid'::regclass AND d\.deptype = 'o'\s+"
+                                r"AND d\.refobjid IN \(SELECT oid FROM grp WHERE oid IS NOT NULL\)")
+
+    def test_column_grants_and_partitioned_tables_are_seen(self):
+        """A column-level grant in the private QR schema is a QR grant, and the
+        login's own probe counts partitioned tenant tables as the census does."""
+        census = (DEPLOY / 'wall' / 'census.sql').read_text()
+        qr = census[census.index('qr_grants AS ('):census.index('-- [APP_ROLE_MIGRATION_REVOCATIONS')]
+        self.assertIn("aclexplode(a.attacl) x", qr)
+        self.assertEqual(qr.count("s.nspname = 'swift_qr'"), 4)
+        tenant = operator.FACTS_SQL[operator.FACTS_SQL.index('tenant AS ('):operator.FACTS_SQL.index('owners AS (')]
+        self.assertIn("c.relkind IN ('r', 'p')", tenant)
+        self.assertIn("c.relkind IN ('r', 'p')", census[census.index('tenant AS ('):census.index('qr_grants AS (')])
 
     def test_published_urls_parse_back_and_others_do_not(self):
         url = operator.published_url(APP, 'swift', 'a-b_c')
