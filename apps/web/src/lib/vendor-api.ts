@@ -90,6 +90,8 @@ export interface VendorOrder {
   riderId?: string | null;
   paymentMethod?: string | null;
   paymentStatus?: string | null;
+  /** [Item 10] Set while the customer and the store disagree about a direct-MMG payment (the order is paused). */
+  mmgClaimMismatchAt?: string | null;
   placedAt: string;
   appointmentSlot?: string | null;
   acceptedAt?: string | null;

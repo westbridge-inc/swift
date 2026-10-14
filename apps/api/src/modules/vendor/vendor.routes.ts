@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
@@ -73,6 +74,7 @@ import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
@@ -1037,6 +1039,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
       mmgPayUrlPending: safeMmgPayUrl(vendor.mmgPayUrlPending),
       publicPhone: safePublicPhone(vendor.publicPhone),
+      // [owner #51] What still stands between a never-live store and going
+      // live, besides its documents (additive; older apps ignore it).
+      goLiveMissing: awaitingFirstGoLive(vendor) ? goLiveMissing(vendor) : [],
       // [GUARDRAILS §8 · owner 14 Oct, store names] Why customers can't see the store: its own words wait for Swift.
       storeCheck: partnerStoreView(storeCheckOf(vendor)),
       nameReviewApprovedHash: undefined,
@@ -1328,10 +1333,18 @@ export async function vendorRoutes(app: FastifyInstance) {
         actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
       });
     }
+    // [owner #51] A never-live store whose documents are done waits only for
+    // its published number: once it has one, the activation projection runs
+    // now (not at the next daily belt) and the store goes live. A failure
+    // there never undoes the saved number — the belt heals it.
+    if (publicPhone && awaitingFirstGoLive(vendor)) {
+      await verification.reprojectVendorActivation(await vendorOwnerUserId(app, vendorId))
+        .catch((err) => request.log.warn({ err, vendorId }, 'go-live projection after the published number was saved is held for the belt'));
+    }
     // The link state is read back AFTER staging so the response says what is
     // live and what is pending — never the value the caller sent.
     const link = await app.prisma.vendor.findUniqueOrThrow({
-      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true },
+      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, status: true, isVerified: true, acceptingOrders: true },
     });
 
     // On-write search sync [SWIFT-UG-SRCH-01]: catalog writes schedule a debounced per-vendor reindex.
@@ -1789,7 +1802,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:prep_update', evt);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:prep_update', evt);
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
     // The rider on the FRESH row is the one who needs "it's ready" — never the
     // rider the stale screen read. Re-check after commit and push only while
@@ -2204,7 +2217,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
     });
@@ -2381,7 +2394,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', rejectEvent);
     if (order.vendorId) {
       app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
     }

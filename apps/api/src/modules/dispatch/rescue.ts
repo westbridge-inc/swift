@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import type { PrismaClient, Prisma } from '@prisma/client';
 import type { Redis } from 'ioredis';
 import type { Server } from 'socket.io';
@@ -10,6 +11,7 @@ import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import { sweepPage } from '../../lib/sweep-cursor';
 import { CHECKOUT_OUTBOX_VERSION, checkoutOutboxId } from '../order/checkout-outbox';
 import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
+import { isStoreOrder } from '../order/cancel-policy';
 import {
   deliveryGenerationSuffix,
   dispatchDeclinedKey,
@@ -152,6 +154,52 @@ export function foodAge(order: { readyAt: Date | null }, limitMinutes: number | 
   if (!order.readyAt || limitMinutes == null) return { tooOld: false, ageMinutes: null };
   const ageMinutes = Math.floor((now.getTime() - order.readyAt.getTime()) / 60_000);
   return { tooOld: ageMinutes > limitMinutes, ageMinutes };
+}
+
+/** The fields the one-order cutoff reads; full order rows fit. */
+export interface TooOldSubject {
+  status: string;
+  orderType: string;
+  tenantId: string;
+  riderId: string | null;
+  driverId: string | null;
+  fulfillment: string;
+  fulfillmentMode: string | null;
+  readyAt: Date | null;
+  foodAgeWaivedAt: Date | null;
+}
+
+/**
+ * [owner #46] The food-age cutoff as a fact about ONE order — "too late to
+ * deliver". The same scope `sweepFoodAge` selects (riderless, still waiting,
+ * ready, platform-rider delivery, cutoff not waived by an operator) and the
+ * same tenant cutoff and age arithmetic, so the customer's free cancel and the
+ * system's cancel can never disagree about which orders are too old.
+ */
+export async function isTooOldToDeliver(prisma: PrismaClient, order: TooOldSubject, now = new Date()): Promise<boolean> {
+  if (order.riderId != null || order.driverId != null) return false;
+  if (!(WAITING_STATUSES as readonly string[]).includes(order.status)) return false;
+  if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY') return false;
+  if (order.readyAt == null || order.foodAgeWaivedAt != null) return false;
+  const limit = await foodAgeLimitMinutes(prisma, order.orderType, order.tenantId);
+  return foodAge(order, limit, now).tooOld;
+}
+
+/**
+ * [owner #46] Is this store order too late to deliver, for the ONE cancel
+ * predicate (order/cancel-policy.ts)? Only a store order can be; any other
+ * kind is never read, so a ride or a parcel never touches the cutoff's
+ * configuration. `config` reads the tenant's cutoff; the order fields come
+ * from the caller's row (the cancel path's is the locked one). Lives here,
+ * not in cancel-policy, so that file stays importable by the boot checks.
+ */
+export async function readTooLateToDeliver(
+  config: PrismaClient,
+  order: TooOldSubject,
+  now: Date = new Date(),
+): Promise<boolean> {
+  if (!isStoreOrder(order)) return false;
+  return isTooOldToDeliver(config, order, now);
 }
 
 export interface RetireableOrder {
@@ -337,7 +385,7 @@ export async function deliverRescueNotice(deps: RescueDeps, notice: RescueNotice
     await withdrawOfferOfClosedOrder(deps, order.id);
     await deps.redis.del(...dispatchKeys(order.id, notice.deliveryAuthorityVersion)).catch(() => {});
     // A hint for open screens: they re-read the order, so a repeat is harmless.
-    deps.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: order.status, timestamp: (order.cancelledAt ?? new Date()).toISOString() });
+    await emitToOrderRoom(deps.prisma, deps.io, order.id, 'order:status_changed', { orderId: order.id, status: order.status, timestamp: (order.cancelledAt ?? new Date()).toISOString() });
 
     const attempt = async (role: 'customer' | 'business' | 'admin', deliver: () => Promise<boolean>) => {
       try {

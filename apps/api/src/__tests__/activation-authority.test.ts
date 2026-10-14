@@ -82,6 +82,9 @@ async function makePendingVendor(ownerUserId: string, status: 'PENDING_APPROVAL'
       phone: `+59268${String(seq).padStart(5, '0')}`, addressLine1: '1 Activation St', city: 'Georgetown',
       region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
       status, isVerified: false, acceptingOrders: false,
+      // [owner #51, 14 Oct] A store's first go-live needs a published contact
+      // phone; these stores have one so the documents alone decide here.
+      publicPhone: '+5926001100',
     },
   });
 }

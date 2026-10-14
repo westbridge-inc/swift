@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -927,11 +928,14 @@ export async function riderRoutes(app: FastifyInstance) {
 
       // Authorization above and the live emit cannot be one unguarded read /
       // publish pair: another device may win GO while ETA is being computed.
-      // Take a shared lock only for this final synchronous publication
-      // checkpoint (never for maps/cache work). Concurrent pings can still
-      // publish together, while GO/offline updates wait. GO therefore
-      // linearizes either before this check and suppresses the stale sample,
-      // or after the emit has already completed.
+      // Take a shared lock only for this final authority checkpoint (never for
+      // maps/cache work, and never for the publish: the audience gate reads
+      // the room's sockets across nodes and takes its own DB connection, which
+      // must not happen while these rows are locked). Concurrent pings still
+      // run together, while GO/offline updates wait. GO therefore linearizes
+      // either before this check and suppresses the stale sample, or after it;
+      // a sample authorized here goes out right after commit, only while this
+      // rider is still the leg's mover, and the device's next ping is refused.
       const publication = await app.prisma.$transaction(async (tx) => {
         // User -> Session -> profile matches the authority writers' outer lock
         // order. The shared mode keeps concurrent authorized pings concurrent
@@ -984,32 +988,34 @@ export async function riderRoutes(app: FastifyInstance) {
             select: { id: true },
           })).map((o) => o.id),
         );
-        for (const leg of legEtas) {
-          if (!stillLive.has(leg.orderId)) continue;
-          app.io.to(`order:${leg.orderId}`).emit('rider:location', {
-            // [MOB-024] The event NAMES its order. It is emitted into that
-            // order's room, so the server already knows — and without it the
-            // customer's screen had nothing to check a fix against, so a
-            // coordinate from another room (a retained subscription, a
-            // reconnect that rejoined an old room) moved the courier marker
-            // and the ETA on the wrong customer's delivery.
-            orderId: leg.orderId,
-            riderId: rider.id,
-            lat: latitude,
-            lng: longitude,
-            heading: heading ?? null,
-            speed: speed ?? null,
-            etaMinutes: leg.etaMinutes,
-            // 'direct' for the leg the rider is on; 'after_current' for a leg
-            // behind another delivery. The screen labels it honestly.
-            etaBasis: leg.basis,
-            ts: now.toISOString(),
-          });
-        }
-        return { accepted: true as const };
+        return { accepted: true as const, stillLive };
       });
       if (!publication.accepted) {
         return { success: true, data: publication };
+      }
+      const { stillLive } = publication;
+      // Published after the commit, never under the lock (see above).
+      for (const leg of legEtas) {
+        if (!stillLive.has(leg.orderId)) continue;
+        await emitToOrderRoom(app.prisma, app.io, leg.orderId, 'rider:location', {
+          // [MOB-024] The event NAMES its order. It is emitted into that
+          // order's room, so the server already knows — and without it the
+          // customer's screen had nothing to check a fix against, so a
+          // coordinate from another room (a retained subscription, a
+          // reconnect that rejoined an old room) moved the courier marker
+          // and the ETA on the wrong customer's delivery.
+          orderId: leg.orderId,
+          riderId: rider.id,
+          lat: latitude,
+          lng: longitude,
+          heading: heading ?? null,
+          speed: speed ?? null,
+          etaMinutes: leg.etaMinutes,
+          // 'direct' for the leg the rider is on; 'after_current' for a leg
+          // behind another delivery. The screen labels it honestly.
+          etaBasis: leg.basis,
+          ts: now.toISOString(),
+        }, { fromMover: { riderId: rider.id } });
       }
     }
 
@@ -1951,7 +1957,7 @@ export async function riderRoutes(app: FastifyInstance) {
     const handbackDeclinedKey = dispatchDeclinedKey(id, outcome.order.fulfillmentModeVersion);
     await app.redis.sadd(handbackDeclinedKey, rider.id).catch(() => {});
     await app.redis.expire(handbackDeclinedKey, 3600).catch(() => {});
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
     await new NotificationService(app.prisma, app.io).send({
       userId: outcome.customerId,
       type: 'ORDER_UPDATE',

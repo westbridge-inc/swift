@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchOrders, cancelOrder } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
+import { HeldOrders } from '@/components/mc/HeldOrders';
 import { askReason } from '@/lib/ask-reason';
 
 // Orders past these states can't be cancelled/refunded by an operator.
@@ -24,6 +25,7 @@ export default function OrdersPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Orders</h1>
+      <HeldOrders />
       {cancelMutation.error && (
         <div className="mb-4">
           <MutationError error={cancelMutation.error} label="Order action did not record" />
