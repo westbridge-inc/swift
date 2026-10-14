@@ -154,6 +154,25 @@ export function SosCeremony({
     return () => clearInterval(t);
   }, [alert]);
 
+  // [DS1157] The popup stays mounted between opens. When the person closes it
+  // with nothing in flight and no alert held (a failure they have SEEN, or the
+  // untouched question), it forgets that ceremony: the next open is the clean
+  // question again, with no old "Swift was NOT alerted" banner, and a tap
+  // outside may wave it away. Never on open: an answer that lands after a
+  // mid-raise Close (paged or failed) is news the person has not seen, and it
+  // is shown when the popup opens again. A held alert is never forgotten here
+  // (confirm and cancel act only on a held alert, so it guards them too).
+  const wasVisible = useRef(visible);
+  useEffect(() => {
+    const closed = wasVisible.current && !visible;
+    wasVisible.current = visible;
+    if (!closed || alert || raisePending) return;
+    setOutcome(null);
+    rideSos.reset();
+    jobSos.reset();
+    svcSos.reset();
+  }, [visible, alert, raisePending, rideSos, jobSos, svcSos]);
+
   const announced = useRef<string | null>(null);
   const announce = (msg: string) => {
     if (announced.current === msg) return;
