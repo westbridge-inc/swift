@@ -270,8 +270,8 @@ export class CardRailService {
             || current.nextBillingDate.getTime() !== priced.periodStart.getTime()) {
             throw new AppError(409, 'MOVER_FEE_PRICE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
           }
-          // [OWNER RULING 8 Oct (2)] A Pay now pays the next unpaid week: four
-          // weeks paid ahead at most, refused before any page exists.
+          // [OWNER RULING 8 Oct (2) · owner #62] A Pay now pays the next unpaid
+          // week: one week ahead at most, refused before any page exists.
           await assertPayAheadRoom(tx, sub.id, priced.amount, now, 'partner');
         }
         await lockBillingAuthority(tx, sub.id);
@@ -1036,13 +1036,13 @@ export class CardRailService {
     await this.notifications.send({
       userId: session.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Card payment received — kept as fee paid ahead',
-      body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and kept as fee paid ahead. It did not change your plan; it pays a coming weekly fee.`,
+      title: 'Card payment received — kept for your next weekly fee',
+      body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and kept for your next weekly fee. It did not change your plan.`,
       audience: sub?.vendorId ? 'business' : 'earner',
       data: { kind: 'billing_banked', subscriptionId: session.subscriptionId },
       dedupeKey: `card-paynow-banked:${paymentId}`,
     }).catch(() => {});
-    // [OWNER RULING 8 Oct (2)] Kept, never refused; past four weeks ahead the operators refund the excess.
+    // [OWNER RULING 8 Oct (2) · owner #62] Kept, never refused; past one week ahead the operators refund the excess.
     await this.billing.pageIfPayAheadOverCap(session.subscriptionId);
   }
 
