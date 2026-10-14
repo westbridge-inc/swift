@@ -78,18 +78,18 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
   ALCOHOL: [
     'alcohol', 'alcoholic', 'liquor', 'liquors', 'liqueur', 'liqueurs', 'booze', 'hooch', 'moonshine',
     'beer', 'beers', 'lager', 'lagers', 'ale', 'ales', 'stout', 'stouts', 'ipa', 'pilsner', 'shandy',
-    'cider', 'ciders', 'hard seltzer', 'hard lemonade', 'malt liquor', 'spiked', 'boozy', 'radler', 'radlers',
+    'cider', 'ciders', 'hard cider', 'hard seltzer', 'hard lemonade', 'malt liquor', 'spiked', 'boozy', 'radler', 'radlers',
     'spiked seltzer', 'white claw', 'truly seltzer', 'twisted tea', 'abv',
     'hard tea', 'hard iced tea', 'hard kombucha', 'hard soda',
     // brands written as one word
     'whiteclaw', 'twistedtea', 'jackdaniels', 'johnniewalker', 'greygoose', 'captainmorgan', 'eldorado', 'mountgay',
     'redstripe', 'budlight',
-    'wine', 'wines', 'champagne', 'prosecco', 'sangria', 'vermouth', 'sherry', 'rosewine',
+    'wine', 'wines', 'champagne', 'prosecco', 'sangria', 'vermouth', 'sherry', 'rosewine', 'rosewines', 'madeira', 'marsala',
     'chardonnay', 'merlot', 'cabernet', 'sauvignon', 'pinot', 'shiraz', 'syrah', 'malbec', 'zinfandel', 'riesling',
     'moscato', 'lambrusco', 'chianti',
     'rum', 'rums', 'rhum', 'high wine', 'puncheon', 'vodka', 'vodkas', 'whisky', 'whiskey', 'whiskies', 'whiskeys', 'bourbon',
     'gin', 'gins', 'brandy', 'brandies', 'cognac', 'tequila', 'mezcal', 'absinthe', 'schnapps', 'soju', 'bitters',
-    'mojito', 'martini', 'daiquiri', 'pina colada',
+    'mojito', 'martini', 'daiquiri', 'pina colada', 'amaretto', 'limoncello', 'pisco', 'pisco sour', 'dubonnet', 'cinzano',
     // [#56] cooking alcohol, and drinks sold ready-mixed
     'rum essence', 'rum extract', 'rum flavouring', 'rum flavoring', 'rum punch', 'rum cream', 'rum and coke', 'gin and tonic',
     // brands on Guyanese and Caribbean shelves — phrases where the word alone is ordinary
@@ -102,12 +102,15 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'tanqueray', 'bombay sapphire', 'ballantines', 'famous grouse', 'glenlivet', 'jim beam', 'crown royal', 'campari',
     'aperol', 'martell', 'veuve clicquot', 'dom perignon', 'modelo', 'skol', 'becks', 'peroni', 'amstel', 'carlsberg',
     'kronenbourg', 'miller lite', 'michelob', 'pabst', 'hoegaarden', 'desperados',
+    // after the brands, so "Bailey's Irish Cream" reads as Baileys
+    'irish cream',
   ],
   TOBACCO: [
     'tobacco', 'cigarette', 'cigarettes', 'cig', 'cigs', 'cigar', 'cigars', 'cigarillo', 'cigarillos', 'nicotine',
-    'rolling paper', 'rolling papers', 'rizla', 'snuff', 'hookah', 'hooka', 'shisha', 'sheesha', 'grabba', 'bh',
+    'rolling paper', 'rolling papers', 'rizla', 'snuff', 'hookah', 'hooka', 'shisha', 'sheesha', 'grabba',
     'marlboro', 'benson and hedges', 'benson hedges', 'rothmans', 'du maurier', 'pall mall', 'dunhill', 'lucky strike',
     'black and mild', 'swisher', 'swisher sweets', 'backwoods', 'craven a', 'al fakher', 'zyn',
+    'snus', 'heets', 'iqos', 'captain black', 'golden virginia', 'amber leaf',
   ],
   VAPES: [
     'vape', 'vapes', 'vaping', 'vaper', 'e cig', 'e cigs', 'ecig', 'ecigs', 'e cigarette', 'e cigarettes',
@@ -149,7 +152,7 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     '20lb cylinder', '25lb cylinder', '100lb cylinder',
   ],
   FUEL: [
-    'fuel', 'fuels', 'gasoline', 'petrol', 'diesel', 'kerosene', 'kero', 'paraffin', 'lamp oil', 'avgas', 'jet fuel',
+    'fuel', 'fuels', 'gasoline', 'petrol', 'diesel', 'kerosene', 'kero', 'kero oil', 'paraffin', 'lamp oil', 'avgas', 'jet fuel',
     'lighter fluid', 'methylated spirit', 'methylated spirits',
   ],
 };
@@ -173,6 +176,8 @@ export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
   'kola champagne', 'cola champagne', 'champagne kola', 'champagne cola',
   'virgin mojito', 'virgin mojitos', 'virgin pina colada', 'virgin colada', 'virgin daiquiri',
   'bristol board', 'bristol boards', 'bristol paper',
+  // [DS1109] a non-alcoholic malt; empty fuel containers are hardware
+  'malta guinness', 'guinness malta', 'gas can', 'gas cans', 'fuel can', 'fuel cans', 'jerry can', 'jerry cans',
   'weed killer', 'weed killers', 'weed eater', 'weed eaters', 'weed whacker', 'weed wacker', 'weed trimmer',
   'weed control', 'weed spray', 'weed barrier', 'weed preventer', 'weed puller', 'weed and feed', 'weed block',
 ];
@@ -199,6 +204,10 @@ const BRAND_FIRST: Readonly<Record<string, { prohibitedClass: ProhibitedClass; c
   bristol: { prohibitedClass: 'TOBACCO', certain: false },
   halls: { prohibitedClass: 'MEDICINE', certain: false },
   bayer: { prohibitedClass: 'MEDICINE', certain: false },
+  // [DS1109] Stella (Artois), Velo (nicotine pouches), B&H (read "b h" → "bh")
+  stella: { prohibitedClass: 'ALCOHOL', certain: false },
+  velo: { prohibitedClass: 'TOBACCO', certain: false },
+  bh: { prohibitedClass: 'TOBACCO', certain: false },
 };
 export const PROHIBITED_BRAND_FIRST_WORDS: readonly string[] = Object.keys(BRAND_FIRST);
 
@@ -224,14 +233,16 @@ export const PROHIBITED_NEVER_APPROVABLE: readonly string[] = [
   'tanqueray', 'bombay sapphire', 'ballantines', 'famous grouse', 'glenlivet', 'jim beam', 'crown royal', 'campari',
   'aperol', 'martell', 'veuve clicquot', 'dom perignon', 'modelo', 'skol', 'becks', 'peroni', 'amstel', 'carlsberg',
   'kronenbourg', 'miller lite', 'michelob', 'pabst', 'hoegaarden', 'desperados',
+  'hard cider', 'pisco sour', 'dubonnet', 'cinzano',
   // tobacco and vapes: brands and the products themselves
+  'snus', 'heets', 'iqos', 'captain black', 'golden virginia', 'amber leaf',
   'marlboro', 'benson and hedges', 'benson hedges', 'rothmans', 'du maurier', 'pall mall', 'dunhill', 'lucky strike',
   'black and mild', 'swisher', 'swisher sweets', 'backwoods', 'craven a', 'al fakher', 'zyn', 'rizla',
   'juul', 'elf bar', 'elfbar', 'geek bar', 'puff bar', 'lost mary', 'smok', 'dab pen',
   'e cig', 'e cigs', 'ecig', 'ecigs', 'e cigarette', 'e cigarettes', 'e liquid', 'e liquids', 'eliquid',
   'vape juice', 'vape pen', 'vape coil', 'vape coils', 'vape pod', 'vape pods',
-  // cannabis
-  'ganja', 'marijuana', 'marihuana', 'cannabis', 'kush', 'thc',
+  // cannabis — an edible IS the drug, so no dish rescues these
+  'ganja', 'marijuana', 'marihuana', 'cannabis', 'kush', 'thc', 'cbd',
   // medicines by name (lozenges are held, #58)
   'paracetamol', 'acetaminophen', 'panadol', 'tylenol', 'ibuprofen', 'advil', 'motrin', 'nurofen', 'aspirin', 'disprin',
   'diclofenac', 'naproxen', 'aleve', 'codeine', 'tramadol', 'morphine', 'oxycodone', 'diazepam', 'valium', 'xanax', 'alprazolam',
@@ -243,7 +254,7 @@ export const PROHIBITED_NEVER_APPROVABLE: readonly string[] = [
   'theraflu', 'excedrin', 'voltaren', 'buscopan', 'tums', 'eno', 'cataflam', 'ponstan', 'brufen', 'mucinex',
   'cough syrup', 'cough mixture', 'cough medicine', 'cold and flu', 'flu tablets', 'sleeping pills', 'morning after pill',
   'headache tablets', 'headache pills', 'fever reducer', 'cough and cold', 'gripe water', 'deep heat', 'bengay', 'icy hot',
-  'liver salts', 'milk of magnesia',
+  'liver salts', 'milk of magnesia', 'tiger balm',
   // (No gas or fuel word is here: hardware stores sell "LPG regulators", "gas stoves" and "fuel cans" — held for a person.)
 ];
 const NEVER_APPROVABLE: ReadonlySet<string> = new Set(PROHIBITED_NEVER_APPROVABLE);
@@ -264,19 +275,53 @@ export const PROHIBITED_GOODS_NOUNS: readonly string[] = [
   'tobacco', 'cigarette', 'cigarettes', 'cig', 'cigs', 'cigar', 'cigars', 'cigarillo', 'cigarillos', 'snuff', 'shisha',
   'sheesha', 'hookah', 'hooka', 'grabba', 'rolling paper', 'rolling papers',
   'vape', 'vapes',
+  // [DS1109 S3-1] medicines, cooking gas, fuel and paraphernalia sold as such
+  'medicine', 'medicines', 'medication', 'medications', 'painkiller', 'painkillers', 'antibiotic', 'antibiotics', 'antacid',
+  'antacids', 'antihistamine', 'antihistamines', 'laxative', 'laxatives', 'decongestant', 'insulin', 'inhaler', 'inhalers',
+  'dewormer', 'contraceptive', 'contraceptives',
+  'lpg', 'gas', 'cooking gas', 'gas cylinder', 'gas cylinders', 'gas bottle', 'gas bottles', 'gas refill', 'gas refills', 'propane',
+  'butane', 'lp gas', 'lp refill', 'lp cylinder', 'cylinder refill', '20lb cylinder', '25lb cylinder', '100lb cylinder',
+  '20lb gas', '25lb gas', '100lb gas',
+  'fuel', 'fuels', 'gasoline', 'petrol', 'diesel', 'kerosene', 'kero', 'kero oil', 'paraffin', 'lamp oil', 'avgas', 'jet fuel',
+  'lighter fluid', 'methylated spirit', 'methylated spirits',
+  'bong', 'bongs',
+  // [DS1109] sold with a size only ("Marsala 750ml"; "Chicken Marsala" and "Madeira cake" are dishes) — see SIZED_ONLY
+  'rosewines', 'cider', 'ciders', 'madeira', 'marsala', 'amaretto', 'limoncello', 'pisco', 'irish cream',
 ];
 /** Goods nouns that are also a colour or a cut ("Dress — Wine", "Heels - Champagne", a "Stout" fit): certain only with
  *  another word in front ("Red wine", "House wine") or a size after ("Wine 750ml"); alone they hold. */
-const AMBIGUOUS_ALONE: ReadonlySet<string> = new Set(['wine', 'wines', 'champagne', 'cognac', 'stout', 'stouts', 'sherry', 'brandy', 'bourbon', 'rosewine']);
+const AMBIGUOUS_ALONE: ReadonlySet<string> = new Set(['wine', 'wines', 'champagne', 'cognac', 'stout', 'stouts', 'sherry', 'brandy', 'bourbon', 'rosewine', 'rosewines']);
+/** Goods nouns that name a dish or a flavour as often as the drink ("Chicken Marsala", "Madeira cake", "Amaretto
+ *  biscotti", "Irish cream coffee creamer", sparkling apple cider): certain only with a drink measure after them. [DS1109] */
+const SIZED_ONLY: ReadonlySet<string> = new Set(['cider', 'ciders', 'madeira', 'marsala', 'amaretto', 'limoncello', 'pisco', 'irish cream']);
+/**
+ * A drink, tobacco or pouch MEASURE ("750ml", "12oz", "6 pack", "20s", "a case"): what makes "Banks 6 pack" beer and
+ * "Wine 750ml" wine. A bare number does not ("Wine 8", "Stout 42" are shoe sizes), nor grams ("Tiger prawns 500g"). [DS1109 S2-2, S4-2]
+ */
+const DRINK_MEASURE = /^(\d+(ml|cl|dl|l|lt|ltr|ltrs|oz|floz|pk|pack|packs|s|ct)|ml|cl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|pk|pack|packs|case|cases|carton|cartons|crate|crates|bottle|bottles|btl|can|cans|nip|nips|pint|pints|magnum|flask|flasks|pouch|pouches)$/;
+/**
+ * A dish or a flavour: an alcohol BRAND in front of one names the dish, not the drink ("Hennessy wings", "Jack Daniels
+ * BBQ sauce", "Baileys ice cream", "Campari tomatoes") — held for a person, never refused. Never applied to cannabis,
+ * tobacco or medicines. [DS1109 S2-3]
+ */
+const DISH_HEADS: ReadonlySet<string> = new Set([
+  'cake', 'cakes', 'cupcake', 'cupcakes', 'cheesecake', 'sauce', 'sauces', 'marinade', 'glaze', 'bbq', 'wings', 'chicken', 'pork',
+  'ribs', 'steak', 'beef', 'fish', 'shrimp', 'prawns', 'tomato', 'tomatoes', 'chocolate', 'chocolates', 'truffle', 'truffles',
+  'fudge', 'toffee', 'candy', 'candies', 'sweets', 'cookie', 'cookies', 'biscuit', 'biscuits', 'brownie', 'brownies', 'muffin',
+  'muffins', 'pie', 'pies', 'pudding', 'puddings', 'tart', 'tarts', 'pastry', 'pastries', 'bread', 'jam', 'jelly', 'gelato',
+  'sorbet', 'mustard', 'ketchup', 'dressing', 'frosting', 'icing', 'popcorn', 'nuts', 'creamer', 'coffee', 'malta',
+]);
+const ends = (words: readonly string[], phrase: readonly string[]) => phrase.every((w, k) => words[words.length - phrase.length + k] === w);
+const isDish = (words: readonly string[]) => words.length > 0 && (DISH_HEADS.has(words[words.length - 1]!) || ends(words, ['ice', 'cream']));
 const GOODS_LONGEST_FIRST = [...PROHIBITED_GOODS_NOUNS].sort((a, b) => b.split(' ').length - a.split(' ').length).map((p) => p.split(' '));
 
 /** Words that follow a goods noun without changing what it is: sizes, packs, strengths, ages, styles. */
-const TRAILING_SIZE = /^(\d+[a-z]{0,6}(\d+[a-z]{0,6})?|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|fl|lb|lbs|kg|g|gm|mg|mcg|gal|gallon|gallons|pint|pints|quart|quarts|pk|pack|packs|ct|count|pc|pcs|piece|pieces|x|s|case|cases|carton|cartons|crate|crates|bottle|bottles|btl|can|cans|tin|tins|nip|nips|flask|flasks|mini|minis|miniature|magnum|jumbo|single|singles|each|set|sets|puff|puffs|year|years|yr|yrs|yo|old|aged|proof|abv|percent|pct|vol|alc|zero|free|non|alcoholic|alcohol|by|per|the|a|an|of|in|only)$/;
+const TRAILING_SIZE = /^(\d+[a-z]{0,6}(\d+[a-z]{0,6})?|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|fl|lb|lbs|kg|g|gm|mg|mcg|gal|gallon|gallons|pint|pints|quart|quarts|pk|pack|packs|ct|count|pc|pcs|piece|pieces|x|s|case|cases|carton|cartons|crate|crates|bottle|bottles|btl|can|cans|tin|tins|nip|nips|flask|flasks|mini|minis|miniature|magnum|jumbo|single|singles|each|puff|puffs|pouch|pouches|refill|refills|no|number|year|years|yr|yrs|yo|old|aged|proof|abv|percent|pct|vol|alc|zero|free|non|alcoholic|alcohol|by|per|the|a|an|of|in|only)$/;
 const TRAILING_STYLE: ReadonlySet<string> = new Set([
   'gold', 'golden', 'white', 'dark', 'black', 'amber', 'silver', 'red', 'blush', 'spiced', 'overproof', 'premium', 'reserve',
   'special', 'extra', 'original', 'classic', 'select', 'superior', 'dry', 'sweet', 'brut', 'blanc', 'blanco', 'reposado',
   'anejo', 'light', 'lite', 'strong', 'draft', 'draught', 'imported', 'local', 'craft', 'double', 'triple', 'xo', 'vs',
-  'vsop', 'xxo', 'smooth', 'bold', 'export',
+  'vsop', 'xxo', 'smooth', 'bold', 'export', 'label', 'foreign',
 ]);
 /** Where a name or an option splits into parts: "Rum - Bristol White", "Vodka, Russian Standard", "Beer (non-alcoholic)". */
 const SEGMENT_BREAK = /\s+[-–—|]\s+|[,;:|/()[\]{}]/u;
@@ -341,7 +386,7 @@ const CONFUSABLE = new Map(CONFUSABLE_PAIRS);
 
 /** "Rosé" is the wine; "rose" is the flower. Read before accents are removed (after NFKC, so a decomposed é counts). */
 export const PROHIBITED_ROSE_PATTERN = '[rR][oO][sS][éÉ]';
-const ROSE = new RegExp(`${PROHIBITED_ROSE_PATTERN}(?![\\p{L}\\p{N}])`, 'gu');
+const ROSE = new RegExp(`${PROHIBITED_ROSE_PATTERN}(?=[sS]?(?![\\p{L}\\p{N}]))`, 'gu');
 
 /** Two single letters in a row ("r u m" from "R.U.M"): the database keeps such a row for the exact check. */
 export const PROHIBITED_SINGLE_LETTER_RUN_PATTERN = '(^|[^a-z0-9])[a-z][^a-z0-9]+[a-z]([^a-z0-9]|$)';
@@ -447,20 +492,38 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
 }
 
 /** The goods noun heading one part of a name or option, if any ("red wine 750ml" → "wine"). */
-function headGoods(words: readonly string[]): string | null {
+/** The words left once the size, pack, strength and style words after them are stripped, and whether one of those
+ *  was a drink measure. */
+function stripTrailing(words: readonly string[]): { core: readonly string[]; measured: boolean } {
   let end = words.length;
-  let sized = false;
-  while (end > 0 && (TRAILING_SIZE.test(words[end - 1]!) || TRAILING_STYLE.has(words[end - 1]!))) {
-    if (TRAILING_SIZE.test(words[end - 1]!)) sized = true;
+  let measured = false;
+  while (end > 0 && (TRAILING_SIZE.test(words[end - 1]!) || TRAILING_STYLE.has(words[end - 1]!) || DRINK_MEASURE.test(words[end - 1]!))) {
+    if (DRINK_MEASURE.test(words[end - 1]!)) measured = true;
     end -= 1;
   }
+  return { core: words.slice(0, end), measured };
+}
+
+/** The goods noun heading one part of a name or option, if any ("red wine 750ml" → "wine"). */
+function headGoods(words: readonly string[]): string | null {
+  const { core, measured } = stripTrailing(words);
   for (const phrase of GOODS_LONGEST_FIRST) {
-    const start = end - phrase.length;
-    if (start < 0 || !phrase.every((w, k) => words[start + k] === w)) continue;
+    const start = core.length - phrase.length;
+    if (start < 0 || !ends(core, phrase)) continue;
     const noun = phrase.join(' ');
-    if (AMBIGUOUS_ALONE.has(noun) && start === 0 && !sized) return null;
+    if (SIZED_ONLY.has(noun) && !measured) return null;
+    if (AMBIGUOUS_ALONE.has(noun) && start === 0 && !measured) return null;
     return noun;
   }
+  return null;
+}
+
+/** "Banks 6 pack", "Bristol 20s", "XM Gold": a brand-first word followed only by measure and style words. */
+function brandPack(words: readonly string[]): { prohibitedClass: ProhibitedClass; term: string } | null {
+  const brand = BRAND_FIRST[words[0] ?? ''];
+  if (!brand) return null;
+  const { core, measured } = stripTrailing(words.slice(1));
+  if (brand.certain || (core.length === 0 && measured)) return { prohibitedClass: brand.prohibitedClass, term: words[0]! };
   return null;
 }
 
@@ -475,21 +538,24 @@ function headGoods(words: readonly string[]): string | null {
 export function certainGoods(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
   const sameText = STATES_A_STRENGTH.test(text);
-  const whole = readings(text, sameText);
+  const parts = undisguise(text).split(SEGMENT_BREAK).map((part) => readings(part, sameText || STATES_A_STRENGTH.test(part)).map((r) => r.split(' ')));
+  // A brand or product phrase: certain — unless an ALCOHOL one names a dish ("Hennessy wings"). [DS1109 S2-3]
   for (const prohibitedClass of CLASS_ORDER) {
     for (const term of PROHIBITED_TERMS[prohibitedClass]) {
-      if (NEVER_APPROVABLE.has(term) && whole.some((j) => hasPhrase(j, term))) return { prohibitedClass, term };
+      if (!NEVER_APPROVABLE.has(term)) continue;
+      const carriers = parts.flat().filter((words) => hasPhrase(words.join(' '), term));
+      if (carriers.length === 0) continue;
+      if (prohibitedClass === 'ALCOHOL' && carriers.every((words) => isDish(stripTrailing(words).core))) continue;
+      return { prohibitedClass, term };
     }
   }
-  for (const part of undisguise(text).split(SEGMENT_BREAK)) {
-    for (const reading of readings(part, sameText || STATES_A_STRENGTH.test(part))) {
-      const noun = headGoods(reading.split(' '));
+  for (const readingsOfPart of parts) {
+    for (const words of readingsOfPart) {
+      const noun = headGoods(words);
       if (noun) return { prohibitedClass: CLASS_OF.get(noun)!, term: noun };
+      const pack = brandPack(words);
+      if (pack) return pack;
     }
-  }
-  for (const j of whole) {
-    const first = j.split(' ')[0]!;
-    if (BRAND_FIRST[first]?.certain) return { prohibitedClass: BRAND_FIRST[first]!.prohibitedClass, term: first };
   }
   return null;
 }

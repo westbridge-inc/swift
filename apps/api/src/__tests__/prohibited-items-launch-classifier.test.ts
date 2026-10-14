@@ -199,3 +199,30 @@ describe('[§8 launch] the database pre-filter still keeps every disguised spell
     for (const ch of PROHIBITED_CONFUSABLES.to) expect(ch, 'a look-alike maps to plain ASCII').toMatch(/^[A-Za-z]$/);
   });
 });
+
+// [DS1109 S2/S3] What the first launch pass still let through, and what it refused that it should only hold.
+describe('[§8 launch · DS1109] sold-as-such is refused; a dish or a garment named after a drink is held', () => {
+  it.each([
+    'Stella 6 pack', 'Rosés 750ml', 'Madeira 750ml', 'Marsala 750ml', 'Amaretto 750ml', 'Limoncello 500ml', 'Pisco 750ml', 'Pisco sour',
+    'Dubonnet', 'Cinzano', 'Irish cream 750ml', 'Hard cider', 'Cider 750ml',
+    'Snus', 'Heets', 'IQOS', 'Captain Black', 'Golden Virginia', 'Amber Leaf',
+    'Banks 6 pack', 'Stag 12oz', 'Corona 12 pack', 'Tiger 24 pack', 'Bristol 20s', 'Camel 20 pack', 'B&H 20s', 'Velo 20 pouches',
+    'Tiger Balm', 'Insulin', 'Kero oil 1L', 'Lighter fluid 250ml', 'Methylated spirits 500ml', 'Propane 20lb', '20lb gas cylinder', 'Diesel 5L',
+    'Bong', 'CBD gummies', 'Ganja brownies', 'THC chocolate bar',
+    'Guinness Foreign Extra Stout', 'Baileys Irish Cream', 'Johnnie Walker Black Label', 'Jack Daniels Old No. 7',
+  ])('%s is refused outright', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED', source: 'word' });
+  });
+
+  it.each([
+    'Guinness cake', 'Baileys ice cream', 'Campari tomatoes', 'Jack Daniels BBQ sauce', 'Smirnoff vodka sauce', 'Vanilla rum extract cake',
+    'Hennessy wings', 'Chicken Marsala', 'Madeira cake', 'Amaretto biscotti', 'Irish cream coffee creamer', 'Wine 8', 'Stout 42',
+    'Cognac set', 'Champagne set', 'Banks', 'Banks birthday card', 'Tiger prawns 500g', 'Insulin cooler bag', 'Gas stove',
+  ])('%s is held for a person, never refused', (name) => {
+    expect(verdict(name).state, name).toBe('WAITING');
+  });
+
+  it('a non-alcoholic malt and an empty fuel can are ordinary goods', () => {
+    for (const name of ['Malta Guinness', 'Guinness Malta 330ml', 'Gas can 5 gallon', 'Fuel can', 'Jerry can 20L']) expect(verdict(name), name).toEqual({ state: 'CLEAR' });
+  });
+});

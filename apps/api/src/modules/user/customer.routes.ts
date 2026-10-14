@@ -1709,6 +1709,8 @@ export async function customerRoutes(app: FastifyInstance) {
       select: { id: true, averageRating: true, totalRatings: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
+    // [GUARDRAILS §8 · #54 · DS1109 S4-3] Nor its reviews: no page of a store filed under a banned category resolves.
+    if (await prohibitedStoreCategory(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     const result = await ratingService.getVendorReviews(id, limit, skip);
 

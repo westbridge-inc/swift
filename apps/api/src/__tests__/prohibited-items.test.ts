@@ -880,6 +880,7 @@ describe('[§8 · #54] a store filed under a banned category', () => {
     for (const [surface, read] of Object.entries(surfaces)) expect(await read(), `${surface} shows the store`).toContain(b.id);
     expect(await suggestions()).toContain(b.name);
     expect((await inject('GET', `/api/v1/customer/vendors/${b.id}`, customer.token)).statusCode).toBe(200);
+    expect((await inject('GET', `/api/v1/customer/vendors/${b.id}/reviews`, customer.token)).statusCode).toBe(200);
     expect((await inject('GET', `/api/v1/public/storefronts/${b.slug}`)).statusCode).toBe(200);
 
     await app.prisma.vendorDiscoveryCategory.create({ data: { tenantId: TENANT, vendorId: b.id, categoryId: pharmacyCategory.id, role: 'PRIMARY', source: 'ADMIN' } });
@@ -892,6 +893,7 @@ describe('[§8 · #54] a store filed under a banned category', () => {
     }
     expect(await suggestions()).not.toContain(b.name);
     expect((await inject('GET', `/api/v1/customer/vendors/${b.id}`, customer.token)).statusCode).toBe(404);
+    expect((await inject('GET', `/api/v1/customer/vendors/${b.id}/reviews`, customer.token)).statusCode).toBe(404);
     expect((await inject('GET', `/api/v1/public/storefronts/${b.slug}`)).statusCode).toBe(404);
     expect((await inject('GET', `/api/v1/customer/vendors/${vendor.id}`, customer.token)).statusCode).toBe(200);
 

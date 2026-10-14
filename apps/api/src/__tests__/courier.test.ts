@@ -597,6 +597,10 @@ describe('[§8 · #67] a parcel is screened against the prohibited-items list', 
     expect(await parcelsOf(sender.userId)).toBe(0);
     const ok = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'School books and a lunch kit' }, sender.token);
     expect(ok.statusCode, ok.body).toBe(201);
+    // [DS1109 S4-1] A brand-first word alone is not the goods; with a pack it is.
+    expect((await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'Banks birthday card' }, sender.token)).statusCode).toBe(201);
+    const pack = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'Banks 6 pack' }, sender.token);
+    expect(pack.json().error).toMatchObject({ code: 'PROHIBITED_PARCEL', message: 'Swift can\'t carry this parcel: Swift never delivers alcohol. If it\'s something else, describe it in other words.' });
   });
 
   it('the sender\'s declaration is recorded on the order\'s trail; a parcel declared as holding a prohibited item books nothing', async () => {
