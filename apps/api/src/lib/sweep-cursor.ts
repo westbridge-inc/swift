@@ -35,8 +35,15 @@ export type PoisonMap = Record<string, PoisonEntry>;
 
 export interface SweepPageOptions<T extends { id: string }> {
   pageSize: number;
-  /** The next page of eligible rows strictly after `afterId`, ordered by id ascending. */
+  /** The next page of eligible rows strictly after `afterId`, ordered by id
+   *  ascending — or, with `cursorOf`, strictly after that keyset position in
+   *  the order `cursorOf` describes. */
   fetch: (afterId: string | null, limit: number) => Promise<T[]>;
+  /** [RESCUE S1 · CX05] The keyset position a row leaves the cursor at. The
+   *  default is the row id. A sweep that walks oldest-first passes a
+   *  composite such as `<time ISO>|<id>` and its `fetch` orders by (time, id),
+   *  so rows that share a timestamp can never hide behind a full page. */
+  cursorOf?: (row: T) => string;
   /** Handle one row; a throw marks the row poison for this pass and moves on. */
   handle: (row: T) => Promise<void>;
   /** Optional population counts for the SLO gauges: total eligible, and eligible after the cursor. */
@@ -98,7 +105,7 @@ async function sweepOnePage<T extends { id: string }>(prisma: PrismaClient, work
   const boundedPoison: PoisonMap = Object.fromEntries(entries);
 
   const passCompleted = rows.length < pageSize; // a short page is the end of the population
-  const lastId = rows.length > 0 ? rows[rows.length - 1]!.id : null;
+  const lastId = rows.length > 0 ? (opts.cursorOf ? opts.cursorOf(rows[rows.length - 1]!) : rows[rows.length - 1]!.id) : null;
   await prisma.sweepCursor.update({
     where: { workType },
     data: {

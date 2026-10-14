@@ -80,7 +80,8 @@ beforeAll(async () => {
   await adminApp.ready();
   const admin = await app.prisma.user.create({ data: {
     phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Doc', lastName: `Admin${RUN}`,
-    roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } } });
+    // [VERIFY-DOCS V3] This admin opens and decides documents, so it holds the explicit document reviewer grant.
+    roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } } } });
   const mover = await app.prisma.user.create({ data: {
     phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Doc', lastName: `Mover${RUN}`,
     roles: ['RIDER'], activeRole: 'RIDER', status: 'ACTIVE', isPhoneVerified: true, selfieCapturedAt: new Date() } });
@@ -150,7 +151,7 @@ describe('test_characterization_legacy_upload_paths', () => {
         const doc = await app.prisma.verificationDocument.create({ data: {
           userId: userIds[1]!, role: 'RIDER', docType: 'national_id', fileUrl: url, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'test-1' } });
         docIds.push(doc.id);
-        const { path } = mintRenderPath(doc.id, 60);
+        const { path } = mintRenderPath(doc.id, userIds[0]!, 60);
         const res = await app.inject({ method: 'GET', url: path });
         expect(res.statusCode, res.body.slice(0, 120)).toBe(200);
         expect(res.headers['cache-control']).toContain('no-store');
@@ -162,21 +163,24 @@ describe('test_characterization_legacy_upload_paths', () => {
   });
 
   describe('4. [A-19] the approval expiry rule', () => {
+    // [VERIFY-DOCS] The example type was the police clearance; its re-check date now comes from the
+    // ISSUE date the reviewer types (reviewer-typed-fields.test.ts), so a type with a PRINTED expiry
+    // (the food handler's permit) carries this rule's characterization instead.
     it('an expiring type refuses approval without a printed date (EXPIRY_REQUIRED)', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('food_handler_cert');
       const res = await approve(d.id, {});
       expect(res.statusCode, res.body).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('EXPIRY_REQUIRED');
       expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } })).status).toBe('PENDING');
     });
     it('a date already passed is refused (EXPIRY_IN_PAST)', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('food_handler_cert');
       const res = await approve(d.id, { expiresAt: new Date(Date.now() - 86_400_000).toISOString() });
       expect(res.statusCode, res.body).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('EXPIRY_IN_PAST');
     });
     it('a future printed date is stored with the approval', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('food_handler_cert');
       const future = new Date(Date.now() + 300 * 86_400_000);
       const res = await approve(d.id, { expiresAt: future.toISOString() });
       expect(res.statusCode, res.body).toBe(200);

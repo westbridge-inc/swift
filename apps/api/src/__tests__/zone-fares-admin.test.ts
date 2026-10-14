@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -496,7 +497,7 @@ describe('[ZONE-FARES] a change prices NEW quotes only — a requested ride keep
     const driver = await sys(() => app.prisma.driver.create({
       data: {
         userId: u.userId, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020, vehicleColor: 'Silver',
-        licensePlate: `ZF-${seq}`, driverLicenseUrl: 'storage://zf/dl.jpg', vehicleInsuranceUrl: 'storage://zf/ins.jpg',
+        licensePlate: `HZF-${seq}`, /* [owner 11 Oct] a taxi plate is H-series */ driverLicenseUrl: 'storage://zf/dl.jpg', vehicleInsuranceUrl: 'storage://zf/ins.jpg',
         documentsVerified: true, isOnline: true, isAvailable: true, currentLat: point.lat, currentLng: point.lng,
         lastLocationUpdate: new Date(), locationSessionId: u.sessionId,
       },
@@ -508,6 +509,7 @@ describe('[ZONE-FARES] a change prices NEW quotes only — a requested ride keep
       fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
       coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
     } }));
+    await sys(() => currentTaxiSplitDocuments(app.prisma, u.userId));
     return { ...u, driverId: driver.id };
   }
 

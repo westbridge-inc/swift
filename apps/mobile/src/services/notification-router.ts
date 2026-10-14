@@ -92,6 +92,10 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // code; the relay rider's task waits on their dashboard until custody is theirs.
   if (kind === 'custody_handoff_code') return { screen: 'ActiveJob' };
   if (kind === 'custody_relay_assigned' || kind === 'custody_relay_cancelled') return { screen: 'Main' };
+  // [L07] The customer cancelled the delivery this RIDER held. The job is gone,
+  // so the tap opens their dashboard (MoverStack Main). Its orderId used to
+  // send it down the generic branch to Delivery, the CUSTOMER screen.
+  if (kind === 'mover_job_cancelled') return { screen: 'Main' };
   // A store told "a cancelled order may hold an MMG payment" runs a business:
   // their Main is the vendor dashboard, not a customer tracking screen.
   if (kind === 'mmg_unattested_cancellation') return { screen: 'Main' };

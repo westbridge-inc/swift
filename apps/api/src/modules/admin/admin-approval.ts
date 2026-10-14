@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { ADMIN_ACTION_CLASSES, type AdminActionClass, type AdminRouteAuthority } from './admin-authority';
+import { SOLO_ROLE, isSoleApprover } from './solo-approval';
 
 /**
  * [ADM-005] A MONEY ACTION TAKES TWO PEOPLE.
@@ -30,7 +31,8 @@ export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 
 export const APPROVAL_HEADER = 'x-swift-approval';
 
-export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED';
+/** CANCELLED: the requester withdrew it [OWNER #13]. */
+export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED' | 'CANCELLED';
 
 export interface ApprovalSubject {
   readonly method: string;
@@ -175,7 +177,10 @@ export type ApprovalRefusal =
   | 'already-applied'
   | 'request-changed'
   | 'self-approval'
-  | 'not-requester';
+  | 'not-requester'
+  /** [OWNER #13] Approved in solo mode, but the owner is no longer the only
+   *  admin who could approve it: the second admin decides (no grandfathering). */
+  | 'solo-ended';
 
 /** What the operator is told, in the terms of what they were trying to do. */
 export function approvalRefusalMessage(code: ApprovalRefusal): string {
@@ -187,6 +192,7 @@ export function approvalRefusalMessage(code: ApprovalRefusal): string {
     case 'request-changed': return 'What you are asking for is not what was approved. Request it again so the change is reviewed.';
     case 'self-approval': return 'You approved this yourself. A money or platform action needs a second person.';
     case 'not-requester': return 'Only the admin who asked for this action can execute it, once a second admin has approved it.';
+    case 'solo-ended': return 'This was approved in solo mode, but a second admin who can approve it now exists. Ask for the action again so they decide it.';
     default: {
       // [DS187] exhaustive by construction: a new refusal without a message is a compile error
       const unhandled: never = code;
@@ -207,7 +213,7 @@ export async function resolveApproval(
   prisma: PrismaClient,
   authority: AdminRouteAuthority,
   subject: ApprovalSubject,
-  actor: { userId: string },
+  actor: { userId: string; role?: string | undefined },
   approvalId: string | null,
   reason: string,
   now = new Date(),
@@ -252,9 +258,17 @@ export async function resolveApproval(
   if (approval.expiresAt.getTime() <= now.getTime()) return { outcome: 'refused', code: 'expired', approvalId };
   if (approval.fingerprint !== fingerprint) return { outcome: 'refused', code: 'request-changed', approvalId };
   // The approver is checked at the decision AND here: a record that somehow
-  // carries the requester as its approver never authorises anything.
-  if (!approval.approvedBy || approval.approvedBy === approval.requestedBy) {
-    return { outcome: 'refused', code: 'self-approval', approvalId };
+  // carries the requester as its approver never authorises anything — unless
+  // it was decided in SOLO MODE [OWNER #13], and even then only while the
+  // requester is still the owner and still the ONLY admin who could approve
+  // it, counted again now. A second admin appearing between the solo decision
+  // and this moment voids it: they decide (no grandfathering).
+  if (!approval.approvedBy) return { outcome: 'refused', code: 'self-approval', approvalId };
+  if (approval.approvedBy === approval.requestedBy) {
+    if (!(approval as { decidedSolo?: boolean }).decidedSolo) return { outcome: 'refused', code: 'self-approval', approvalId };
+    if (actor.role !== SOLO_ROLE || !(await isSoleApprover(prisma, actor.userId, approval.capability))) {
+      return { outcome: 'refused', code: 'solo-ended', approvalId };
+    }
   }
   // Spent AT THE GATE, not after the act. Checking here and marking afterwards
   // leaves a window exactly as wide as the handler: two requests carrying the

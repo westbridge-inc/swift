@@ -599,6 +599,9 @@ export function assertMmgCheckoutConfig(env: Record<string, string | undefined> 
     }
     return; // the sandbox plays both sides with in-memory keys
   }
+  if (driver === 'disabled') {
+    throw new Error('FATAL: MMG_CHECKOUT_ENABLED=1 with MMG_DRIVER=disabled — MMG is switched off, so its checkout page cannot be on. Set MMG_CHECKOUT_ENABLED=0, or switch MMG on (live). Refusing to start.');
+  }
   if (driver !== 'live') {
     throw new Error('FATAL: MMG_CHECKOUT_ENABLED=1 needs MMG_DRIVER to be sandbox or live. Refusing to start.');
   }
@@ -771,6 +774,9 @@ let sandboxProvider: SandboxMmgCheckoutProvider | null = null;
 export function getMmgCheckoutProvider(env: Record<string, string | undefined> = process.env): MmgCheckoutProvider {
   if (!mmgCheckoutEnabled(env)) return new DisabledMmgCheckoutProvider();
   const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  // [PROD-PATH] MMG fully off: the boot guard refuses the checkout on with it;
+  // should the environment change after boot, the page still refuses.
+  if (driver === 'disabled') return new DisabledMmgCheckoutProvider();
   if (isProduction(env) && driver === 'sandbox') {
     throw new Error('MMG_DRIVER=sandbox is forbidden in production');
   }
