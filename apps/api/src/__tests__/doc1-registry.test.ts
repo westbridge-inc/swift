@@ -52,18 +52,25 @@ describe('[DOC-1 §4.2] the registry', () => {
     for (const c of countries) {
       for (const [role, codes] of Object.entries(c.lists)) {
         // [P3-2] a `<ROLE>_UNREGISTERED` list is the role's set at the UNREGISTERED tier — the registry's own tier column
+        // [VERIFY-DOCS] a `<KEY>_OPTIONAL` list joins the same set as NON-blocking items (a type its required list names stays blocking)
         const key = splitChecklistKey(role);
         const set = await app.prisma.requirementSet.findUnique({
           where: { countryCode_actorRole_tier_effectiveFrom: { countryCode: c.code, actorRole: key.actorRole, tier: key.tier, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
           include: { items: { include: { docType: true }, orderBy: { sortOrder: 'asc' } } },
         });
         expect(set, `${c.code}/${role}`).not.toBeNull();
-        expect(set!.items.map((i) => i.docType.legacyCode)).toEqual(codes);
+        const requiredKey = key.optional ? role.slice(0, -'_OPTIONAL'.length) : role;
+        const required = c.lists[requiredKey] ?? [];
+        const optional = [...(c.lists[`${requiredKey}_OPTIONAL`] ?? [])].filter((code) => !required.includes(code));
+        // The set holds exactly the two lists — nothing the lists no longer name (reconciled).
+        expect(set!.items.map((i) => i.docType.legacyCode).sort(), `${c.code}/${role}`).toEqual([...required, ...optional].sort());
+        expect(set!.items.filter((i) => i.isBlocking).map((i) => i.docType.legacyCode), `${c.code}/${role}`).toEqual(required);
+        expect(set!.items.filter((i) => !i.isBlocking).map((i) => i.docType.legacyCode), `${c.code}/${role}`).toEqual(optional);
+        if (key.optional) for (const code of codes) expect(set!.items.some((i) => i.docType.legacyCode === code), `${c.code}/${role}/${code}`).toBe(true);
         for (const i of set!.items) {
           expect(i.docType.isActive).toBe(false);
           expect(i.docType.legalFactsVerifiedAt).toBeNull();
           expect(i.docType.externalProcessingAllowed).toBe(false);
-          expect(i.isBlocking).toBe(true);
         }
       }
     }
@@ -73,6 +80,14 @@ describe('[DOC-1 §4.2] the registry', () => {
     const svc = new CountryConfigService(app.prisma);
     for (const c of countries) {
       for (const [role, codes] of Object.entries(c.lists)) {
+        // [VERIFY-DOCS] an `_OPTIONAL` list is not a role: it is the role's optional documents
+        const key = splitChecklistKey(role);
+        if (key.optional) {
+          const base = role.slice(0, -'_OPTIONAL'.length);
+          const required = c.lists[base] ?? [];
+          if (key.tier === REGISTRY_TIER) expect(await svc.getOptionalDocuments(c.code, base, required), `${c.code}/${role}`).toEqual(codes.filter((code) => !required.includes(code)));
+          continue;
+        }
         expect(await registryChecklist(app.prisma, c.code, role)).toBeNull();
         expect(await svc.getDocumentChecklist(c.code, role), `${c.code}/${role}`).toEqual(codes);
       }

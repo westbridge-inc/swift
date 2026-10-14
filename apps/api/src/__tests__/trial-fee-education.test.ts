@@ -111,7 +111,8 @@ describe('the trial fee-education sweep', () => {
       const told = await prisma.notification.findFirst({ where: { userId: owing.userId }, orderBy: { createdAt: 'desc' } });
       expect(told?.body).toContain('Pay GY$2,100 with MMG in the Swift app.');
       const coveredNotice = await prisma.notification.findFirst({ where: { userId: covered.userId }, orderBy: { createdAt: 'desc' } });
-      expect(coveredNotice?.body).toContain('Your balance already covers your first weekly fee of GY$2,100.');
+      // [OWNER RULING 8 Oct, NO "WALLET"] fee paid ahead, never a "balance".
+      expect(coveredNotice?.body).toContain('Your fee paid ahead already covers your first weekly fee of GY$2,100.');
       expect(coveredNotice?.body).not.toMatch(/Pay GY\$/);
     } finally {
       if (before === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];

@@ -3,7 +3,8 @@ import { expect, it } from 'vitest';
 import { ContentSkeleton } from './customer-shell';
 import { HomeSkeleton } from './home-skeleton';
 import { VendorGridSkeleton } from './order-ui';
-import { CategorySkeleton, MarketGridSkeleton, MenuSkeleton, OrdersListSkeleton } from './customer-skeletons';
+import { CategorySkeleton, MarketGridSkeleton, OrdersListSkeleton } from './customer-skeletons';
+import { StoreSkeleton } from './storefront/store-skeleton';
 import CartSkeleton from '@/app/(app)/cart/loading';
 import OrderDetailSkeleton from '@/app/(app)/orders/[id]/loading';
 import SearchSkeleton from '@/app/(app)/order/search/loading';
@@ -12,7 +13,7 @@ it.each([
   [ContentSkeleton, 'Opening this page…'],
   [HomeSkeleton, 'Loading home feed…'],
   [VendorGridSkeleton, 'Loading stores…'],
-  [MenuSkeleton, 'Loading this store…'],
+  [StoreSkeleton, 'Loading this store…'],
   [CategorySkeleton, 'Loading categories…'],
   [MarketGridSkeleton, 'Loading market items…'],
   [OrdersListSkeleton, 'Loading your orders…'],

@@ -48,6 +48,7 @@ import {
   resolveIdentityByPhone,
   resolveSessionByRefreshCredential,
 } from './preauth-identity';
+import { accountBlockedError, isBlockedAccountStatus } from './account-blocked';
 import {
   clearPasswordFailures,
   isPasswordSignInLocked,
@@ -70,9 +71,9 @@ export type SignupRole = 'CUSTOMER' | 'MOVER' | 'VENDOR';
 
 /** What a one-time code was texted for. A code works only for its own purpose. */
 export type OtpPurpose = 'sign-in' | 'password-reset';
-/** [L04 · AUTH-2] Account states that may not start a session by any credential. */
-const BLOCKED_STATUSES: ReadonlySet<UserStatus> = new Set<UserStatus>(['SUSPENDED', 'BANNED', 'DEACTIVATED']);
-const accountSuspended = () => new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+// [L04 · AUTH-2] Suspended, banned and closed accounts may not start a session by
+// any credential. [NO-DEAD-ENDS] Each refusal names the state and the one door that
+// needs no session (account-blocked.ts); the 403 ACCOUNT_SUSPENDED contract is unchanged.
 /**
  * [L04 · MASTER-054] Compared against when there is no account or no password,
  * so every public password attempt costs one bcrypt comparison at the same
@@ -325,7 +326,7 @@ export class AuthService {
       `;
       const status = rows[0]?.status;
       if (!status) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
-      if (BLOCKED_STATUSES.has(status)) throw accountSuspended();
+      if (isBlockedAccountStatus(status)) throw accountBlockedError(status);
       const issued = await this.createSession(user.id, user.activeRole, deviceInfo, 'OTP', tx);
       await tx.user.update({
         where: { id: user.id },
@@ -572,7 +573,7 @@ export class AuthService {
       if (!session || session.expiresAt <= new Date()) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
-      if (BLOCKED_STATUSES.has(user.status)) throw accountSuspended();
+      if (isBlockedAccountStatus(user.status)) throw accountBlockedError(user.status);
 
       await requireStepUp(this.app, { user: { userId }, authSessionId: sessionId }, { consume: true });
 
@@ -807,7 +808,7 @@ export class AuthService {
         return { kind: 'invalid' as const, countAsFailure: true as const };
       }
 
-      if (BLOCKED_STATUSES.has(locked.status)) throw accountSuspended();
+      if (isBlockedAccountStatus(locked.status)) throw accountBlockedError(locked.status);
 
       const accessToken = this.app.jwt.sign({
         userId: user.id,
@@ -1011,9 +1012,7 @@ export class AuthService {
       }
 
       // SEC: a suspended/banned/deactivated account cannot rotate new tokens.
-      if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(user.status)) {
-        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
-      }
+      if (isBlockedAccountStatus(user.status)) throw accountBlockedError(user.status);
       if (
         requiresPrivilegedSessionAssurance(user.activeRole, user.roles)
         && !hasPrivilegedSessionAssurance(session.authMethod)

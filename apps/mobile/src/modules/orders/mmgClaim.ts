@@ -163,10 +163,10 @@ export function mmgClaimPresentation(v: MmgClaimView): MmgClaimPresentation {
     };
   }
   if (v.customerClaim === 'PAID') {
-    return { tone: 'neutral', title: 'Waiting for the store', body: 'You told us you paid. The store confirms once the money shows in its MMG wallet.', actions };
+    return { tone: 'neutral', title: 'Waiting for the store', body: 'You told us you paid. The store confirms once the money shows in its MMG account.', actions };
   }
   if (v.customerClaim === 'NOT_PAID') {
     return { tone: 'neutral', title: 'Not paid yet', body: 'You told us you haven’t paid. Pay the store with MMG to continue, or cancel the order.', actions };
   }
-  return { tone: 'neutral', title: 'Paid the store already?', body: 'After you pay in MMG, tell us here so the store knows to check its wallet.', actions };
+  return { tone: 'neutral', title: 'Paid the store already?', body: 'After you pay in MMG, tell us here so the store knows to check its MMG account.', actions };
 }

@@ -30,7 +30,7 @@ export async function hasActiveHold(prisma: PrismaClient, accountId: string): Pr
 export const ENFORCEMENT_COPY = {
   TRIAL_ACTIVE_ELSEWHERE: 'Your free trial is already running on your existing account. Sign in to use your remaining days.',
   TRIAL_CONSUMED: (weekly: string) => `Welcome back. Your free trial was used on a previous account, so billing starts once you're approved — ${weekly} per week.`,
-  DEBT_REINSTATE_FIRST: 'Your previous account has an outstanding balance. Settle it to reactivate — your history and standing come back with it.',
+  DEBT_REINSTATE_FIRST: 'Your previous account has an unpaid weekly fee. Pay it to reactivate — your history and standing come back with it.',
   FRAUD_HELD: "This application needs a manual check. We'll get back to you within 24 hours.",
   RETROACTIVE_REVOKE: (date: string) => `Your free trial on this account ends ${date}. Weekly billing starts then — trials are one per business owner.`,
 } as const;

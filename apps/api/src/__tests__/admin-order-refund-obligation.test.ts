@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -13,6 +13,7 @@ import { loginWithOtp } from './helpers/otp';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { OrderService } from '../modules/order/order.service';
 
 // ---------------------------------------------------------------------------
 // [A-14] A CASH ORDER REFUND IS A PROMISE UNTIL SOMEBODY PROVES IT.
@@ -139,6 +140,32 @@ describe('[A-14] deciding to refund a cash order records an obligation, not a pa
     expect(fresh.refundRef).toBeNull();
     expect(fresh.refundPaidAmount).toBeNull();
     expect(fresh.refundSettledAt).toBeNull();
+  });
+
+  it.each(['record', 'response'])('[M066] the refund %s uses an adjustment committed after the preview and before the order lock', async (projection) => {
+    const order = await makeCashOrder();
+    const transition = OrderService.prototype.transitionOrderAtomically;
+    let adjusted = false;
+    const spy = vi.spyOn(OrderService.prototype, 'transitionOrderAtomically').mockImplementation(async function (this: OrderService, input) {
+      if (input.orderId === order.id) {
+        // Deterministic boundary: the route has read its preview, but the
+        // canonical transition has not acquired the order lock yet.
+        await app.prisma.order.update({ where: { id: order.id }, data: { deliveryFee: 400, totalAmount: 1400 } });
+        adjusted = true;
+      }
+      return transition.call(this, input);
+    });
+    try {
+      const response = await cancel(order.id, { reason: 'store could not fulfil', refund: true });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(adjusted).toBe(true);
+      const stored = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(Number(stored.totalAmount)).toBe(1400);
+      expect(stored.status).toBe('CANCELLED');
+      expect(stored.refundSettledAt).toBeNull();
+      if (projection === 'record') expect(Number(stored.refundOwedAmount)).toBe(1400);
+      else expect(response.json().data.refundOwed).toBe('1400');
+    } finally { spy.mockRestore(); }
   });
 
   it('cancelling WITHOUT the refund flag records no obligation', async () => {
