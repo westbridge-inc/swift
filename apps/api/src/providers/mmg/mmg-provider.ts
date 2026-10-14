@@ -1,6 +1,7 @@
 import { fromMajor, fromMinor, toMajorString as majorStringOf } from '../../utils/currency-amount';
 import { nanoid } from 'nanoid';
 import { isProduction } from '../../utils/runtime-mode';
+import { AppError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
 // MMG (Mobile Money Guyana) — Merchant-Initiated Payments.
@@ -618,6 +619,39 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   }
 }
 
+/**
+ * [PROD-PATH] MMG fully OFF — the owner's ruling for a production launch
+ * before the live merchant keys arrive. `MMG_DRIVER=disabled`, exactly; the
+ * boot guard accepts it in production only with the hosted checkout off.
+ * Nothing in this mode reaches MMG: the billing rail never asks MMG
+ * (billing.service attemptCharge), the poller leaves every row as it is, and
+ * any other caller gets this explicit refusal — never a sandbox answer, never
+ * a silent no-op. Whether partners' fees are PAUSED is a separate rule that
+ * also asks whether a card can be used: modules/billing/fee-pause.ts.
+ */
+export function mmgDisabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env['MMG_DRIVER'] === 'disabled';
+}
+
+export class MmgDisabledError extends AppError {
+  constructor(operation: string) {
+    super(503, 'MMG_DISABLED', `MMG is switched off on this server (MMG_DRIVER=disabled); ${operation} was not sent.`);
+    this.name = 'MmgDisabledError';
+  }
+}
+
+/** Refuses every call. Holds no credential and opens no connection. */
+export class DisabledMmgProvider implements MmgMerchantProvider, MmgLookupClient {
+  readonly driver = 'disabled' as const;
+  async authenticate(): Promise<{ token: string; expiresAt?: Date }> { throw new MmgDisabledError('authentication'); }
+  async initiatePayment(_req: MmgInitiateRequest): Promise<MmgTxResult> { throw new MmgDisabledError('the payment request'); }
+  async reverseTransaction(_req: { transactionId: string; reason?: string }): Promise<MmgTxResult> { throw new MmgDisabledError('the reversal'); }
+  async transactionLookup(_req: { transactionId: string }): Promise<MmgTransaction> { throw new MmgDisabledError('the transaction lookup'); }
+  async transactionHistory(_req?: { from?: Date; to?: Date; limit?: number }): Promise<MmgTransaction[]> { throw new MmgDisabledError('the history request'); }
+  async accountBalance(): Promise<MmgBalance> { throw new MmgDisabledError('the balance request'); }
+  async transactionLookupDetail(_transactionId: string): Promise<MmgLookupDetail> { throw new MmgDisabledError('the checkout lookup'); }
+}
+
 /** The live merchant credentials, or a refusal naming what is missing. */
 function readLiveMmgConfig(env: Record<string, string | undefined>): LiveMmgConfig {
   const cfg: LiveMmgConfig = {
@@ -647,6 +681,8 @@ function readLiveMmgConfig(env: Record<string, string | undefined>): LiveMmgConf
  */
 export function getMmgLookupProvider(env: Record<string, string | undefined> = process.env): MmgLookupClient {
   const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  // [PROD-PATH] MMG fully off: every lookup refuses explicitly (MMG_DISABLED).
+  if (driver === 'disabled') return new DisabledMmgProvider();
   if (isProduction(env) && driver === 'sandbox') {
     throw new Error('MMG_DRIVER=sandbox is forbidden in production');
   }
@@ -668,6 +704,7 @@ export function getMmgLookupProvider(env: Record<string, string | undefined> = p
 /** Driver selection is config, not code. Defaults to the sandbox. */
 export function getMmgProvider(): MmgMerchantProvider {
   const driver = process.env['MMG_DRIVER'] ?? 'sandbox';
+  if (driver === 'disabled') return new DisabledMmgProvider();
   if (isProduction() && driver === 'sandbox') {
     throw new Error('MMG_DRIVER=sandbox is forbidden in production');
   }

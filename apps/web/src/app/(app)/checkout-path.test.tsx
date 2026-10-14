@@ -1,8 +1,10 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mockApi, stubIntersectionObserver, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
-import VendorPage from './order/vendor/[id]/page';
+import { StorefrontPage } from '@/components/storefront/storefront-page';
+import { loadItemSheet } from '@/components/storefront/storefront-experience';
+import { storefrontFixture } from '@/test/storefront-fixture';
 import CartPage from './cart/page';
 import OrderDetailPage from './orders/[id]/page';
 
@@ -19,6 +21,8 @@ vi.mock('next/navigation', () => ({
 // (a guest signs in first and comes back to the same item), the cart and its
 // checkout (cash, or the business's own MMG when the server offers it), then
 // the order's tracking page.
+//
+// [W6] The store is its one page now, /store/<slug>, inside the app's frame.
 // ---------------------------------------------------------------------------
 
 const ITEM = {
@@ -63,8 +67,14 @@ const ok = (data: unknown) => ({ body: { success: true, data } });
 const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(([url, init]) =>
   new URL(String(url)).pathname === pathname && (init?.method ?? 'GET').toUpperCase() === method);
 
+// [W6] As in a browser shortly after the store page is up: the item sheet's
+// code has arrived, so a tap opens the sheet at once (item-sheet-loading.test.tsx
+// covers a tap that comes before it).
+beforeAll(() => loadItemSheet());
+
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
+  sessionStorage.clear(); localStorage.clear();
   window.history.replaceState({}, '', '/');
   signedIn = true;
   liveCart = cart();
@@ -80,7 +90,7 @@ beforeEach(async () => {
     if (url.pathname === '/api/v1/customer/cart/items' && method === 'POST') return { status: 201, body: { success: true, data: {} } };
     if (url.pathname === '/api/v1/customer/cart' && method === 'GET') return ok(liveCart);
     if (url.pathname === '/api/v1/customer/addresses') return ok([ADDRESS]);
-    if (url.pathname === '/api/v1/public/storefronts/shanta-kitchen') return ok({ ...STORE, categories: [] });
+    if (url.pathname === '/api/v1/public/storefronts/shanta-kitchen') return ok(storefrontFixture(STORE));
     if (url.pathname === '/api/v1/customer/cart/address' && method === 'PUT') return ok({ cart: liveCart });
     if (url.pathname === '/api/v1/customer/checkout' && method === 'POST') return ok({ order: { id: 'o9' }, orders: [{ id: 'o9' }], paymentAction: null });
     if (url.pathname === '/api/v1/customer/orders/o9') {
@@ -96,31 +106,52 @@ function at(pathname: string, params: Record<string, string>, page: React.ReactN
   return render(<AppLayout>{page}</AppLayout>);
 }
 
+/** The store's one page, as the server draws it for this address. */
+const storePage = (query: Record<string, string> = {}) =>
+  StorefrontPage({ params: Promise.resolve({ slug: 'shanta-kitchen' }), searchParams: Promise.resolve(query) });
+
+/** The item's Choose button, once the live menu is verified. */
+async function choose(name: string) {
+  const button = await screen.findByRole('button', { name: `Choose options for ${name}` });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(button);
+}
+
 describe('[Q7b] store → cart', () => {
-  it('a guest can open the item, and is sent to sign in on the way to adding it — coming back to that same item', async () => {
+  it('a guest fills the basket, then signs in at Place order and lands on the one checkout', async () => {
     signedIn = false;
-    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
-    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
-    const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Sign in to add · $1,800' }));
-    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Forder%2Fvendor%2Fv1%3Fitem%3Di1'));
+    at('/store/shanta-kitchen', {}, await storePage());
+    await choose('Pepperpot bowl');
+    // The item sheet opens once its code is in (loaded up front here: beforeAll).
+    const sheet = await screen.findByRole('dialog', { name: 'Pepperpot bowl' });
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $1,800' }));
+    expect(state.push).not.toHaveBeenCalled();
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1') ?? '{"lines":[]}').lines[0]).toMatchObject({ itemId: 'i1', selectedOptions: { g1: 'small' }, unitPrice: 1800 }));
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
-    // It tried the refresh cookie once first — a returning customer is not
-    // sent to sign in for nothing.
+    expect(calls('POST', '/api/v1/auth/refresh')).toHaveLength(0);
+    // The browser basket is read back asynchronously; Place order opens once it has a line.
+    const placeOrder = screen.getByRole('button', { name: 'Place order' });
+    await waitFor(() => expect((placeOrder as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(placeOrder);
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fcheckout'));
     expect(calls('POST', '/api/v1/auth/refresh')).toHaveLength(1);
   });
 
   it('a signed-in customer back on the item adds it, options and all, to the server cart', async () => {
-    window.history.replaceState({}, '', '/order/vendor/v1?item=i1');
-    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
+    const report = stubIntersectionObserver();
+    window.history.replaceState({}, '', '/store/shanta-kitchen?item=i1');
+    at('/store/shanta-kitchen', {}, await storePage({ item: 'i1' }));
     // The link's ?item= reopens the item it named.
     const sheet = await screen.findByRole('dialog', { name: 'Pepperpot bowl' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /^Large/ }));
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $2,200' }));
-    await screen.findByText('Added to your cart');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $2,200' }));
+    await screen.findByText('Pepperpot bowl added to your order.');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
-    expect(screen.getByRole('link', { name: /View cart/ }).getAttribute('href')).toBe('/cart');
+    // [W4] The order is placed on the one checkout page, one tap from the floating button
+    // (#1590: shown once the order panel has scrolled off a phone's screen).
+    report(screen.getByRole('complementary', { name: 'Your order and checkout' }), false);
+    expect(screen.getByRole('link', { name: /^Checkout · 1 item/ }).getAttribute('href')).toBe('/checkout');
   });
 });
 
@@ -136,29 +167,33 @@ describe('[F4] a sold-out choice is never pre-selected or sent', () => {
 
   it('a sold-out default is neither offered nor chosen for the customer; their own choice is what is sent', async () => {
     api = ({ url }) => (url.pathname === '/api/v1/customer/vendors/v1' ? ok(storeWith([SMALL_SOLD_OUT, LARGE])) : null);
-    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
-    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
+    at('/store/shanta-kitchen', {}, await storePage());
+    await choose('Pepperpot bowl');
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
     expect(within(sheet).queryByRole('radio', { name: /^Small/ })).toBeNull();
     expect((within(sheet).getByRole('radio', { name: /^Large/ }) as HTMLInputElement).checked).toBe(false);
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
-    await screen.findByText('Choose an option for “Size”.');
+    const add = within(sheet).getByRole('button', { name: 'Add to order · $1,800' });
+    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(add);
+    expect((await within(sheet).findByRole('alert')).textContent).toBe('Choose an option for Size.');
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
 
     fireEvent.click(within(sheet).getByRole('radio', { name: /^Large/ }));
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $2,200' }));
-    await screen.findByText('Added to your cart');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $2,200' }));
+    await screen.findByText('Pepperpot bowl added to your order.');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
   });
 
   it('a required group with every choice sold out says so and sends nothing', async () => {
     api = ({ url }) => (url.pathname === '/api/v1/customer/vendors/v1' ? ok(storeWith([SMALL_SOLD_OUT, { ...LARGE, isAvailable: false }])) : null);
-    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
-    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
+    at('/store/shanta-kitchen', {}, await storePage());
+    await choose('Pepperpot bowl');
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
     expect(within(sheet).queryAllByRole('radio')).toHaveLength(0);
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
+    const add = within(sheet).getByRole('button', { name: 'Add to order · $1,800' });
+    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(add);
     await screen.findByText('“Size” is sold out right now.');
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
   });
@@ -168,9 +203,13 @@ describe('[Q7b] cart → checkout → tracking', () => {
   it('places a cash order against the server quote, once, and opens its tracking', async () => {
     at('/cart', {}, <CartPage />);
     const place = await screen.findByRole('button', { name: 'Place cash order · $2,150' });
-    // No MMG on this cart, so no choice is offered — cash, stated plainly.
-    expect(screen.queryByRole('radiogroup')).toBeNull();
+    // No MMG on this cart, so no payment choice is offered — cash, stated
+    // plainly. ([W5] The page's other choice is Delivery · Pickup.)
+    expect(screen.queryByRole('radiogroup', { name: 'Payment' })).toBeNull();
+    expect(screen.getAllByRole('radiogroup').map((group) => group.getAttribute('aria-label'))).toEqual(['How would you like your order?']);
     expect(screen.getByText('Cash at the door')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /schedule|pick a time|order later/i })).toBeNull();
+    expect(document.querySelector('input[type=date], input[type=time], input[type=datetime-local]')).toBeNull();
     fireEvent.click(place);
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/o9'));
     const [[, addressInit]] = calls('PUT', '/api/v1/customer/cart/address') as [[unknown, RequestInit]];
@@ -217,11 +256,10 @@ describe('[Q7b] cart → checkout → tracking', () => {
     expect(screen.getByRole('button', { name: 'Place cash order · $2,150' })).toBeTruthy();
   });
 
-  it('sends a guest who opens the cart to sign in and back to the cart — never showing a cart', async () => {
+  it('shows a guest their browser basket without reading anyone’s server cart', async () => {
     signedIn = false;
     at('/cart', {}, <CartPage />);
-    const door = await screen.findByRole('region', { name: 'Sign in to start a cart' });
-    expect(within(door).getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe('/login?next=%2Fcart');
+    expect(await screen.findByRole('heading', { name: 'Your basket' })).toBeTruthy();
     expect(calls('GET', '/api/v1/customer/cart')).toHaveLength(0);
   });
 

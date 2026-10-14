@@ -299,8 +299,8 @@ describe('starting a checkout — server-priced, written down first, one open at
     expect(asked).toMatchObject({ amount: '1500', merchantTransactionId: row.merchantTransactionId, merchantId: SANDBOX_MERCHANT_ID });
   });
 
-  it('nothing due: one week, banked as credit toward the next bill', async () => {
-    const s = await makeSub({ balance: 5000 });
+  it('nothing owed yet (the running week is paid): the checkout is for the coming week, exactly one week [owner #62]', async () => {
+    const s = await makeSub();
     expect((await start(s)).checkout.amountGyd).toBe(2100);
   });
 
@@ -434,6 +434,73 @@ describe('[F3] an Idempotency-Key keeps its answer', () => {
     expect(a.checkout.ref).toBe(b.checkout.ref);
     expect([a.created, b.created].filter(Boolean)).toHaveLength(1);
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [OWNER #62 · 14 Oct, NO PAYING AHEAD; was four weeks, 8 Oct] Weekly fees are
+// paid one week at a time: at most the coming week is held. The checkout is the
+// partner's door: it refuses a payment that would go past the cap, in plain
+// words, before any page exists. Money that still lands
+// past the cap (something else filled the room while the page was open) is
+// Swift's to hold for the partner: it is credited, never refused or dropped,
+// and the operators are paged to refund the part above the cap.
+// ---------------------------------------------------------------------------
+describe('[owner #62] one week ahead at most', () => {
+  const capPages = async (subscriptionId: string) => (await app.prisma.notification.findMany({
+    where: { data: { path: ['alert'], equals: 'pay-ahead-over-cap' } },
+  })).filter((n) => (n.data as Record<string, unknown>)['subscriptionId'] === subscriptionId);
+
+  it('a checkout when the coming week is already paid is refused; nothing is opened', async () => {
+    const full = await makeSub({ balance: 2100 });
+    await expect(start(full)).rejects.toMatchObject({
+      statusCode: 409, code: 'PAY_AHEAD_LIMIT',
+      message: 'Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.',
+    });
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: full.subId } })).toBe(0);
+    // Weeks paid ahead before owner #62 (staging only) are kept, and nothing is added to them.
+    const old = await makeSub({ balance: 3 * 2100 });
+    await expect(start(old)).rejects.toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
+    // Part of the coming week held: the checkout is for the rest of that one week only.
+    const part = await makeSub({ balance: 600 });
+    expect((await start(part)).checkout.amountGyd).toBe(1500);
+  });
+
+  it('a week that is owed is paid whatever is held, up to the one week allowed', async () => {
+    const owed = await makeSub({ status: 'PAST_DUE', due: new Date(Date.now() - DAY), balance: 2100 });
+    expect((await start(owed)).checkout.amountGyd).toBe(2100);
+  });
+
+  it('money that lands past the cap anyway is credited, and the operators are paged once to refund the part above it', async () => {
+    const s = await makeSub();
+    const { checkout } = await start(s);
+    const row = await intentOf(checkout.ref);
+    // Something else filled the room while the page was open.
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: s.subId }, data: { balance: 2100 } });
+    const txn = `MMGTX${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, '7')}8`;
+    approved(txn, 2100, echoOf(row));
+    expect(await reply(row, txn)).toBe('CONFIRMED');
+    expect(await walletOf(s.subId)).toBe(2 * 2100);
+    const pages = await capPages(s.subId);
+    expect(pages.length).toBeGreaterThan(0);
+    expect(pages[0]!.body).toContain('Refund the GY$2,100 above the limit');
+    // The same excess does not page again.
+    await billing.afterTopUpCommitted(s.subId, 0, { notify: false });
+    expect(await capPages(s.subId)).toHaveLength(pages.length);
+    await app.prisma.notification.deleteMany({ where: { id: { in: pages.map((p) => p.id) } } });
+  });
+
+  it('[review S4] the over-cap page still goes out when the settlement recovery throws', async () => {
+    const s = await makeSub({ balance: 5 * 2100 });
+    const failing = vi.spyOn(billing, 'recoverConfirmationSettlements').mockRejectedValueOnce(new Error('recovery down'));
+    try {
+      await expect(billing.afterTopUpCommitted(s.subId, 0, { notify: false })).rejects.toThrow('recovery down');
+    } finally {
+      failing.mockRestore();
+    }
+    const pages = await capPages(s.subId);
+    expect(pages.length).toBeGreaterThan(0);
+    await app.prisma.notification.deleteMany({ where: { id: { in: pages.map((p) => p.id) } } });
   });
 });
 
@@ -1372,7 +1439,8 @@ describe('[F2] one MMG transaction, one credit, across every channel and every e
   });
 
   it('a transaction an admin top-up credited before identities existed is refused by checkout after the backfill', async () => {
-    const s = await makeSub();
+    // [owner #62] one week at a time: the credit above already holds the coming week, so the week is made due for a checkout to open at all.
+    const s = await makeSub({ due: new Date(Date.now() - DAY) });
     // What a top-up recorded before this release left behind: the credit, its
     // receipt naming the transfer, and no provider identity.
     await app.prisma.$transaction((t) => billing.recordTopUpInTransaction(t, {
@@ -1592,7 +1660,8 @@ describe('[SX386 F2] a committed agent credit with a stale observation is never 
   });
 
   it.each(modes)('%s: without any backfill, racing admin commands and a checkout naming it post nothing', async (_name, mode) => {
-    const s = await makeSub();
+    // [owner #62] one week at a time: the credit above already holds the coming week, so the week is made due for a checkout to open at all.
+    const s = await makeSub({ due: new Date(Date.now() - DAY) });
     const txn = tx(`F2RACE${mode.observation.slice(0, 1)}${mode.identity.toUpperCase()}${mode.key.toUpperCase()}`);
     await committedLegacyCredit(s, txn, mode);
     const before = await moneyOf(s.subId);
@@ -1616,7 +1685,8 @@ describe('[F2] a historical conflict never stops the backfill from completing, a
     const operator = await operatorFor();
     // A transaction two channels credited before identities existed: the push
     // rail captured it, and an admin top-up receipt names the same transfer.
-    const s = await makeSub({ mmgPayer: '6091189' });
+    // [owner #62] one week at a time: the credit above already holds the coming week, so the week is made due for a checkout to open at all.
+    const s = await makeSub({ mmgPayer: '6091189', due: new Date(Date.now() - DAY) });
     const txn = tx('DOUBLEHISTORY');
     await app.prisma.subscriptionPayment.create({ data: { subscriptionId: s.subId, amount: 2100, status: 'CAPTURED', paymentMethod: 'MOBILE_MONEY',
       externalRef: txn, periodStart: new Date(Date.now() - 7 * DAY), periodEnd: new Date(), paidAt: new Date() } });
@@ -1916,7 +1986,9 @@ describe('shared confirmation authority fences a new MMG page', () => {
       expect((await pending).error).toMatchObject({ code: 'PAYMENT_QUOTE_CHANGED' });
       expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
     } finally { release.release(); await pending; spy.mockRestore(); }
-    expect((await start(s)).checkout.amountGyd).toBe(kind === 'rate' ? 2500 : kind === 'wallet' ? 1500 : 2100);
+    // [owner #62] When the period moved, the coming week is paid: a new checkout is refused (one week at a time).
+    if (kind === 'period') await expect(start(s)).rejects.toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
+    else expect((await start(s)).checkout.amountGyd).toBe(kind === 'rate' ? 2500 : 1500);
   });
   it.each(['same-key', 'new-key'] as const)('a %s replay keeps its intent but cannot emit a URL after a cross-rail hold wins during unseal', async (kind) => {
     const s = await makeSub();

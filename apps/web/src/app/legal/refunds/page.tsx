@@ -10,11 +10,17 @@ import { site, launch } from '@/site.config';
  *  - cancelling follows the ONE cancel-policy predicate in the API
  *    (modules/order/cancel-policy.ts) and its charge path (order.service.ts);
  *  - the weekly partner fee is paid in advance, one week at a time, and
- *    stopping a plan ends future charges (modules/billing/billing.service.ts).
+ *    stopping a plan ends future charges (modules/billing/billing.service.ts);
+ *  - it is paid one week at a time: while a week runs the coming week may be
+ *    paid, and no further (modules/billing/pay-ahead.ts, owner #62), and
+ *    closing an account waits until a fee paid for a week that has not
+ *    started is refunded (modules/user/partner-wind-down.ts, FEE_CREDIT).
  * Approved by the owner, 1 Oct 2026: the business commitments marked below.
+ * Owner ruling, 8 Oct 2026: the refund at closing. Owner #62, 14 Oct 2026: one
+ * week at a time, no paying ahead (was a four-week limit).
  */
 
-const UPDATED = '1 October 2026';
+const UPDATED = '14 October 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -106,8 +112,17 @@ export default function RefundsPage() {
           {site.supportReplyBusinessDays} business days.
         </li>
         <li>
+          <b>One week at a time.</b> You pay the fee one week at a time: while a week runs you can pay for the coming
+          week, and no further. Money received beyond that is returned to you. A fee paid before its week starts is only
+          ever used for that weekly fee.
+        </li>
+        <li>
           <b>Stopping your plan.</b> When you stop your weekly plan, {site.tradeName} stops charging for the weeks
           after it. A week that has already started is not refunded, and a fee already owed stays owed.
+        </li>
+        <li>
+          <b>Closing your account.</b> {site.tradeName} refunds any weekly fee you paid for a week that has not started,
+          records the refund, and then deletes your account. A week that has already started is not refunded.
         </li>
       </ul>
 

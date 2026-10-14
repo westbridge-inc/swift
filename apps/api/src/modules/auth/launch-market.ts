@@ -52,6 +52,19 @@ export const LAUNCH_MARKET_BOUNDS: Readonly<Record<PublicLaunchCountryCode, Mark
   GY: { south: 1, north: 9, west: -62, east: -56 },
 };
 
+/** The same rule as `launchMarketAt`, as a Prisma predicate on a row's own
+ *  `latitude`/`longitude`: inside any launch market's box (a NULL pin is in
+ *  none, as a NaN is above). For a paginated list that must filter IN the
+ *  query, so its page and its total agree. */
+export function launchMarketWhere(): { OR: Array<{ latitude: { gte: number; lte: number }; longitude: { gte: number; lte: number } }> } {
+  return {
+    OR: PUBLIC_LAUNCH_COUNTRY_CODES.map((code) => {
+      const box = LAUNCH_MARKET_BOUNDS[code];
+      return { latitude: { gte: box.south, lte: box.north }, longitude: { gte: box.west, lte: box.east } };
+    }),
+  };
+}
+
 /** The launch market a point lies in, or null when it lies in none (a NaN
  *  fails every comparison below, so it lies in none). */
 export function launchMarketAt(latitude: number, longitude: number): PublicLaunchCountryCode | null {

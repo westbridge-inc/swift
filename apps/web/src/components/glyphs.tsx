@@ -61,7 +61,7 @@ export function TabGlyph({ name, on, size = 24 }: { name: TabGlyphName; on: bool
 /** The vertical a store or item belongs to, for its placeholder drawing. */
 export function verticalPictogram(vendorType: string | null | undefined): PictogramName {
   switch (vendorType) {
-    case 'SUPERMARKET': case 'PHARMACY': return 'groceries';
+    case 'SUPERMARKET': return 'groceries';
     case 'STORE': return 'shops';
     case 'SERVICE': return 'services';
     default: return 'food';

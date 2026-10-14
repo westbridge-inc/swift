@@ -286,6 +286,55 @@ export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${i
 export const fetchVendorDetail = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}`);
 export const fetchRiderDetail = (id: string) => apiFetch(`/api/v1/admin/riders/${id}`);
 export const fetchDriverDetail = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}`);
+
+// ── [MC-PR2] Activation checklists: the per-document truth, in the gate's own terms ──
+export type ActivationItemState = 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | 'MISSING';
+export interface ActivationChecklistItem {
+  docType: string;
+  state: ActivationItemState;
+  documentId: string | null;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  /** The reviewer's note on a rejection — what the applicant was told. */
+  note: string | null;
+  /** Approved, and a newer submission of the same type is waiting for review. */
+  renewalPending: boolean;
+}
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
+export interface VendorActivationChecklist {
+  vendorId: string;
+  /** The owner's user id: the Review Center's applicant. */
+  applicantId: string;
+  storeStatus: string;
+  suspensionSource: string | null;
+  ownerAccountStatus: string | null;
+  /** The store's weekly-fee subscription state (null before it has one). */
+  subscriptionStatus?: string | null;
+  /** May the store's subscription operate now (the vendor gate's rule)? A suspended store whose fee cannot operate reads FEE_UNPAID. */
+  feeOperable?: boolean;
+  isVerified: boolean;
+  activationValidUntil: string | null;
+  role: string;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
+  ready: boolean;
+  next: VendorActivationNext;
+}
+export type MoverActivationNext = 'VERIFIED' | 'CAN_VERIFY' | 'NEEDS_INSURANCE' | 'NEEDS_DOCUMENTS';
+export interface MoverActivationChecklist {
+  moverId: string;
+  kind: 'RIDER' | 'DRIVER';
+  applicantId: string;
+  vehicleType: string;
+  documentsVerified: boolean;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  live: { allowed: boolean; reason: 'ok' | 'docs' | 'insurance' };
+  next: MoverActivationNext;
+}
+export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<VendorActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
+export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const suspendVendor = (id: string, reason: string) =>
@@ -569,6 +618,25 @@ export const resolveModerationReport = (
 // upholding a rating report REMOVES the review, while resolving a content
 // report only records the decision.
 export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/moderation');
+
+// [GUARDRAILS §8] THE CATALOGUE CHECK. A banned word in a partner's own text
+// (name, description, menu section, options) saves the item but holds it hidden
+// until a person looks. Approve shows it for the exact words seen — the
+// fingerprint the queue handed out goes back with the approval, and a partner
+// edit in between refuses it. Remove bans the item for good, with a reason the
+// partner reads. Neither can lift a certain ban (a banned category, or an
+// earlier removal).
+export const PROHIBITED_CLASSES = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'] as const;
+export type ProhibitedClass = (typeof PROHIBITED_CLASSES)[number];
+export const fetchCatalogueReview = () => apiFetch('/api/v1/admin/catalogue-review');
+export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
+export const removeCatalogueItem = (itemId: string, prohibitedClass: ProhibitedClass, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/remove`, { method: 'POST', body: JSON.stringify({ prohibitedClass }), reason });
+// [GUARDRAILS §8 · owner 14 Oct] A store whose own words (name, description, tags) mention banned goods is held with
+// its items; approve shows it for exactly the words seen. Needs the catalogue-approver grant, like an item.
+export const approveCatalogueStore = (vendorId: string, wordsHash: string, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/stores/${encodeURIComponent(vendorId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
 export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss', reason: string) =>
   apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }), reason });
 // [ADM-006] `category` says which rule was broken; `reason` is what the
@@ -609,13 +677,42 @@ export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verificatio
 export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck } | undefined, reason: string) =>
+export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
 // [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
 // reviewer's words and the server's reason code. The words also ride the
 // reason header [ADM-006].
 export const rejectDoc = (id: string, reason: string, reasonCode: RejectionReasonCode) =>
   apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason, reasonCode }), reason });
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] Withdraw a committed document (admin.routes revokeDocSchema).
+// For a customer ID the server takes the account back to L1 when no other customer ID stands, in
+// the same transaction, and answers the resulting accountTrustLevel (#1610).
+export const revokeDoc = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/revoke`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+
+// [VERIFY-DOCS V3] The document reviewer grant. Opening, approving and
+// rejecting a document need it; `*` never implies it. A SUPER_ADMIN lists the
+// team and grants or removes it — to themselves too — with a stated reason.
+// The list answers 403 to anyone else, which is how the console knows to hide
+// the panel.
+export interface DocumentReviewerRow {
+  userId: string;
+  name: string;
+  role: 'ADMIN' | 'SUPER_ADMIN';
+  active: boolean;
+  documentReviewer: boolean;
+  /** [GUARDRAILS §8 · Opus S3-9] May show an item a banned word is holding (catalogue check). */
+  catalogueApprover?: boolean;
+  you: boolean;
+}
+export const fetchDocumentReviewers = (): Promise<{ data: DocumentReviewerRow[] }> =>
+  apiFetch('/api/v1/admin/staff/document-reviewers');
+export const setDocumentReviewer = (userId: string, grant: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/staff/${encodeURIComponent(userId)}/document-reviewer`, { method: 'PUT', body: JSON.stringify({ grant }), reason });
+// [GUARDRAILS §8 · Opus S3-9] The catalogue approver grant: showing a held item needs it; `*` never implies it.
+// The same team list and the same founder door, reason and record as the document reviewer grant.
+export const setCatalogueApprover = (userId: string, grant: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/staff/${encodeURIComponent(userId)}/catalogue-approver`, { method: 'PUT', body: JSON.stringify({ grant }), reason });
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been
@@ -787,6 +884,20 @@ export const decideApproval = (id: string, approve: boolean, note: string) =>
 // always what the approver read.
 export const applyApproval = (id: string) =>
   apiFetch(`/api/v1/admin/approvals/${id}/apply`, { method: 'POST', body: '{}' });
+// [OWNER #13] SOLO MODE — while the owner is the only admin who could approve
+// their own request. Starting the wait emails the owner; the decision itself is
+// `decideApproval` after the wait, with a fresh sign-in code (step-up below).
+export const startSoloApproval = (id: string) =>
+  apiFetch(`/api/v1/admin/approvals/${id}/solo`, { method: 'POST', body: '{}' });
+// The admin who asked withdraws their own pending request (stops a solo wait too).
+export const cancelApproval = (id: string) =>
+  apiFetch(`/api/v1/admin/approvals/${id}/cancel`, { method: 'POST', body: '{}' });
+// [ALG-34] The account's existing step-up: a code texted to the phone on the
+// admin account, good for one protected decision on THIS session.
+export const sendStepUpCode = () =>
+  apiFetch('/api/v1/auth/step-up', { method: 'POST', body: '{}' });
+export const verifyStepUpCode = (code: string) =>
+  apiFetch('/api/v1/auth/step-up/verify', { method: 'POST', body: JSON.stringify({ code }) });
 
 // ── The agent-cash rail [SAN spec Part 4] ────────────────────────────────────
 // Partners pay their weekly fee in CASH at an MMG agent, quoting their SAN.
