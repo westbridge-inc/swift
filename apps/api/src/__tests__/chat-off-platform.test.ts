@@ -12,8 +12,10 @@ import { chatRoutes } from '../modules/chat/chat.routes';
 import { detectOffPlatformContact } from '../modules/chat/off-platform';
 
 // ---------------------------------------------------------------------------
-// Contact detection still supplies nudges. Launch content admission refuses
-// external contact numbers before storing or delivering them.
+// Off-platform contact detection (marketplace spec §2) supplies the nudge and
+// the risk flag. With the launch content filter OFF (the default until build
+// 10 is live in both stores) a message carrying a phone number still
+// DELIVERS; with it ON, admission refuses it before storing or delivering.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -117,7 +119,25 @@ describe('detector truths', () => {
 });
 
 describe('send path', () => {
-  it('an external phone is refused before persistence or notification', async () => {
+  it('launch filter OFF (default): a flagged message still DELIVERS, carries the nudge, and lands the flag', async () => {
+    vi.stubEnv('CHAT_CONTENT_FILTER', '0');
+    try {
+      const res = await send('text me on 592-600-1000 when you reach');
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.success).toBe(true);
+      expect(body.warning).toContain('Keep it in the app');
+
+      const row = await app.prisma.chatMessage.findUniqueOrThrow({ where: { id: body.data.id } });
+      expect(row.offPlatformFlag).toBe(true);
+      expect(row.message).toContain('592-600-1000'); // NOT censored while the switch is off
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('launch filter ON: an external phone is refused before persistence or notification', async () => {
+    vi.stubEnv('CHAT_CONTENT_FILTER', '1');
     const before = await app.prisma.chatMessage.count({ where: { chatRoomId: roomId } });
     const notify = vi.spyOn(NotificationService.prototype, 'send').mockResolvedValue('notification');
     try {
@@ -128,6 +148,7 @@ describe('send path', () => {
       expect(notify).not.toHaveBeenCalled();
     } finally {
       notify.mockRestore();
+      vi.unstubAllEnvs();
     }
   });
 

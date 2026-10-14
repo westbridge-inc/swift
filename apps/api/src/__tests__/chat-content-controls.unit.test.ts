@@ -21,6 +21,10 @@ const db = {
   contentReport: { findUnique: vi.fn(), create: vi.fn() },
   userBlock: { findFirst: vi.fn() },
   user: { findUnique: vi.fn() },
+  // The send writes inside one locked transaction (withLockedChatAccess):
+  // the double runs the callback against itself and answers the row locks.
+  $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
 };
 const order = () => ({
   tenantId: 'tenant-a', customerId: 'sender', rider: { userId: 'recipient' }, driver: null,
@@ -29,6 +33,8 @@ const order = () => ({
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  db.$transaction.mockImplementation(async (write: (tx: typeof db) => Promise<unknown>) => write(db));
+  db.$queryRaw.mockResolvedValue([{ id: 'locked-row' }]);
   db.chatRoom.findUnique.mockResolvedValue({ id: 'room', orderId: 'order', serviceJobId: null, isActive: true });
   db.order.findUnique.mockResolvedValue(order());
   db.chatRoomParticipant.findMany.mockResolvedValue([{ id: 'p1', userId: 'sender' }, { id: 'p2', userId: 'recipient' }]);
@@ -56,7 +62,7 @@ beforeEach(async () => {
   await app.register(moderationRoutes);
   await app.ready();
 });
-afterEach(async () => { await app.close(); });
+afterEach(async () => { vi.unstubAllEnvs(); await app.close(); });
 
 const send = (message: string, extra: Record<string, string> = {}) =>
   app.inject({ method: 'POST', url: '/chat/rooms/room/messages', payload: { message, ...extra } });
@@ -64,6 +70,9 @@ const report = (targetId = 'existing-message', headers: Record<string, string> =
   app.inject({ method: 'POST', url: '/reports', headers, payload: { targetType: 'CHAT_MESSAGE', targetId, reason: 'HARASSMENT' } });
 
 describe('chat content admission before persistence and delivery', () => {
+  // The launch switch is on for this suite; the next suite proves it off.
+  beforeEach(() => { vi.stubEnv('CHAT_CONTENT_FILTER', '1'); });
+
   it.each([
     'you are a skunt', 'FUCK', 'fúck', 'fu\u200bck',
     'call 6001000', 'call +592 (600) 1000', 'call ６００１０００',
@@ -116,6 +125,32 @@ describe('chat content admission before persistence and delivery', () => {
     const response = await send('whatsapp me instead');
     expect(response.statusCode).toBe(200);
     expect(response.json().warning).toContain('Keep it in the app');
+  });
+
+  it('refuses INSIDE the locked write: the transaction itself fails, so nothing is stored', async () => {
+    // A check after the commit would store the refused text first.
+    const response = await send('call 6001000');
+    expect(response.statusCode).toBe(400);
+    expect(db.$transaction).toHaveBeenCalledOnce();
+    await expect(db.$transaction.mock.results[0]!.value).rejects.toMatchObject({ code: 'CHAT_CONTENT_NOT_ALLOWED' });
+    expect(db.chatMessage.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('the launch switch is off until build 10 is live in both stores', () => {
+  // Build 9 shows no reason for a refused send, so it would look broken:
+  // with the switch off (unset, 0, or anything but exactly 1) chat behaves
+  // exactly as before the filter: the message is stored and delivered.
+  it.each([
+    [undefined, 'call 6001000'], ['0', 'you are a skunt'], ['true', 'https://outside.example/path'], ['', 'www.outside.example'],
+  ] as const)('CHAT_CONTENT_FILTER=%s: "%s" is stored and delivered, not refused', async (value, message) => {
+    vi.stubEnv('CHAT_CONTENT_FILTER', value);
+    const response = await send(message);
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().data.message).toBe(message);
+    expect(db.chatMessage.create).toHaveBeenCalledOnce();
+    expect(effects.emit).toHaveBeenCalledOnce();
+    expect(effects.notify).toHaveBeenCalledWith(expect.objectContaining({ body: message.substring(0, 100) }));
   });
 });
 

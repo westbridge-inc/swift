@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chatContentReason } from '../modules/chat/content-filter';
+import { chatContentFilterEnabled, chatContentReason } from '../modules/chat/content-filter';
 
 describe('bounded chat contact patterns', () => {
   it.each([
@@ -25,6 +25,17 @@ describe('bounded chat contact patterns', () => {
   ])('does not mistake ordinary words joined by a dot for a link: %s', (text) => {
     expect(chatContentReason(text)).toBeUndefined();
   });
+  it.each([
+    'Here.Store closed', 'call.me when here', 'wait for.me', 'Im outside.Shop is shut', 'see you.Me and him',
+    'Ok.Thanks', 'Im outside.Come out pls',
+  ])('does not mistake two words joined by a dropped space for a link: %s', (text) => {
+    expect(chatContentReason(text)).toBeUndefined();
+  });
+  it.each(['message t.me/swiftdeals', 'wa.me/5926001000', 'www.call.me', 'https://call.me', 'name@shop.store', 'my.shop/deals', 'go to food.store?x=1'])(
+    'a word suffix with a path, a www./scheme address or an e-mail address is still a link: %s', (text) => {
+      expect(chatContentReason(text)).toBe('LINK');
+    },
+  );
   it.each(['visit shop.gy today', 'join t.me/swiftdeals', 'see example.com', 'mysite.online/menu', 'order at food.store'])(
     'still refuses a bare web address %s', (text) => {
       expect(chatContentReason(text)).toBe('LINK');
@@ -47,4 +58,12 @@ describe('bounded chat contact patterns', () => {
   it.each(['skunt', 'ANTIMAN', 'fúck', 'fu\u200bck'])('reuses review language matching with normalized text', (text) => {
     expect(chatContentReason(text)).toBe('LANGUAGE');
   });
+});
+
+describe('the launch switch', () => {
+  it.each([[undefined, false], ['', false], ['0', false], ['true', false], ['on', false], [' 1', false], ['1', true]] as const)(
+    'CHAT_CONTENT_FILTER=%s turns the filter on: %s (only exactly 1 does)', (value, on) => {
+      expect(chatContentFilterEnabled({ CHAT_CONTENT_FILTER: value })).toBe(on);
+    },
+  );
 });

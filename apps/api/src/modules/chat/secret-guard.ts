@@ -1,9 +1,9 @@
 /**
  * [F-027-12 · F-028-02] The handover secret must never travel over chat.
  *
- * Chat's launch content filter (content-filter.ts) refuses phone numbers,
- * outside links and abusive language before a message is stored; the
- * off-platform detector (off-platform.ts) only nudges. The order's pickup/ride
+ * Chat's launch content filter (content-filter.ts), once its launch switch is
+ * on, refuses phone numbers, outside links and abusive language before a
+ * message is stored; the off-platform detector (off-platform.ts) only nudges. The order's pickup/ride
  * code is handled here instead, and it is not a moderation call — it is the
  * control itself: the code is redacted, never delivered.
  *

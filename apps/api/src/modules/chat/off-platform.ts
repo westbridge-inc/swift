@@ -2,8 +2,10 @@
  * Off-platform contact detection (marketplace-mechanics spec §2).
  *
  * This detector supplies a soft nudge and risk signal for allowed content.
- * The separate launch content filter refuses prohibited contact details and
- * language before storage. An overture alone can still receive the nudge.
+ * The separate launch content filter (content-filter.ts) refuses prohibited
+ * contact details and language before storage once its launch switch
+ * (CHAT_CONTENT_FILTER) is on; until then a message carrying a phone number
+ * still delivers with the nudge. An overture alone can still get the nudge.
  */
 
 // 7+ digits in a row, tolerating spaces/dashes/dots between groups, guarded

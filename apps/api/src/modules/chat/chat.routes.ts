@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
-import { chatContentReason } from './content-filter';
+import { chatContentFilterEnabled, chatContentReason } from './content-filter';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
 import {
   assertRoomAccess, chatMediaFolder, isServerIssuedMediaId, reconcileParticipants, resolveRoomAuthority, rotateLeakedRidePin,
@@ -212,8 +212,9 @@ export async function chatRoutes(app: FastifyInstance) {
       await assertUsersMayContact(app.prisma, access.tenantId, request.user.userId, other);
     }
 
-    // Retain the nudge/risk signal for allowed off-platform overtures. Content
-    // admission below also refuses prohibited contact details and language.
+    // Retain the nudge/risk signal for allowed off-platform overtures. With the
+    // launch content filter on, admission below also refuses prohibited
+    // contact details and language.
     const offPlatform = detectOffPlatformContact(message);
 
     // [F-027-12] Redact order secrets before content admission. The pickup/ride code is
@@ -242,6 +243,16 @@ export async function chatRoutes(app: FastifyInstance) {
         await assertUsersMayContact(tx, current.tenantId, request.user.userId, other);
       }
       const guarded = redactOrderSecrets(message, current.secrets, priorDigits);
+      // Content admission judges the exact text that would be stored, under the
+      // same lock: refusing here rolls the write back, so a refused message is
+      // never stored, broadcast or pushed. Off until the launch switch is on.
+      const contentReason = chatContentFilterEnabled() ? chatContentReason(guarded.text) : undefined;
+      if (contentReason) {
+        chatGuardCounter.labels('send', 'content_refused').inc();
+        throw new AppError(400, 'CHAT_CONTENT_NOT_ALLOWED',
+          'This message contains language or contact details that cannot be sent. Use Swift chat or the published support contact.',
+          { reason: contentReason });
+      }
       const mediaBlocked = mediaId !== undefined && mediaUrlCarriesSecret(mediaId, current.secrets);
       const msg = await tx.chatMessage.create({
         data: {
@@ -257,13 +268,6 @@ export async function chatRoutes(app: FastifyInstance) {
     otherUserIds = persisted.recipients;
     const { msg, guarded, mediaBlocked } = persisted;
     if (guarded.redacted) chatGuardCounter.labels('send', 'redacted').inc();
-    const contentReason = chatContentReason(body);
-    if (contentReason) {
-      chatGuardCounter.labels('send', 'content_refused').inc();
-      throw new AppError(400, 'CHAT_CONTENT_NOT_ALLOWED',
-        'This message contains language or contact details that cannot be sent. Use Swift chat or the published support contact.',
-        { reason: contentReason });
-    }
 
     // [R048-004] A server-issued id cannot name the code by construction (a random name under the
     // room's folder); the check stays as the invariant it is.

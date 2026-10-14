@@ -4666,7 +4666,8 @@ model ChatMessage {
   mediaUrl        String?
   isRead          Boolean  @default(false)
   /// Off-platform contact signal (spec §2) on admitted text, used for risk scoring.
-  /// Phone numbers, outside links and abusive text are refused before storage.
+  /// With the launch content filter on, phone numbers, outside links and
+  /// abusive text are refused before storage.
   offPlatformFlag Boolean  @default(false)
   createdAt       DateTime @default(now())
 

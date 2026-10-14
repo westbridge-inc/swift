@@ -2,6 +2,14 @@ import { needsProfanityHold } from '../rating/review-scrub';
 
 export type ChatContentReason = 'LANGUAGE' | 'PHONE' | 'LINK';
 
+/** The launch switch: server env CHAT_CONTENT_FILTER, and only exactly 1 turns
+ *  it on. It stays off until the app build that explains a refused send
+ *  (build 10) is live in both stores: build 9 shows no reason, so a refusal
+ *  there looks like a broken send (launch-day checklist). */
+export function chatContentFilterEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env['CHAT_CONTENT_FILTER'] === '1';
+}
+
 // Whole candidates, never substring exceptions. The send schema bounds text
 // to 2,000 characters. Alphanumeric order references are not phone numbers.
 // A hyphen before the digits does not hide a number ("call-6001000"); a
@@ -10,7 +18,9 @@ const PHONE = /(?<![\p{L}\p{N}])\+?\d(?:[\s().-]*\d){6,}(?![\p{L}\p{N}])/gu;
 // A bare address ("shop.gy", "t.me/x") is a link only when it ends in a web
 // suffix people actually use. Two words joined by a dot ("11.am", "I.am",
 // "do.it", "come.to") are ordinary chat, so the ambiguous two-letter suffixes
-// that are also English words are deliberately not on this list.
+// that are also English words are deliberately not on this list. The listed
+// suffixes that are words ("me", "store", "shop"…) are excused when they only
+// join two words (isWordsJoinedByDot below).
 const TLDS = [
   'com', 'net', 'org', 'info', 'biz', 'io', 'co', 'app', 'dev', 'xyz', 'online', 'site', 'shop', 'store', 'icu',
   'me', 'ly', 'gg', 'tv', 'cc', 'ws', 'gy', 'tt', 'bb', 'jm', 'lc', 'vc', 'gd', 'ag', 'dm', 'kn', 'bs', 'ky', 'tc',
@@ -52,13 +62,26 @@ function isDate(candidate: string): boolean {
   return dmy ? isCalendarDate(Number(dmy[4]), Number(dmy[3]), Number(dmy[1])) : false;
 }
 
+// A phone that drops the space after a full stop joins two words: "call.me
+// when here", "Here.Store closed", "wait for.me". "me" reads as an address
+// only with a path after it ("t.me/x", "wa.me/…"), and the dictionary-word
+// suffixes only in lower case ("food.store"): a capital starts a sentence.
+// A www. or scheme address, or an e-mail address, is never excused here.
+const WORD_SUFFIX = /\.(me|info|app|online|site|shop|store)$/i;
+function isWordsJoinedByDot(candidate: string): boolean {
+  if (/^(?:www\.|[a-z][a-z\d+.-]*:)/i.test(candidate) || candidate.includes('@')) return false;
+  const suffix = WORD_SUFFIX.exec(candidate)?.[1];
+  if (!suffix) return false;
+  return suffix.toLowerCase() === 'me' || suffix !== suffix.toLowerCase();
+}
+
 /** Admission only: preserve allowed original text; never log rejected text. */
 export function chatContentReason(message: string): ChatContentReason | undefined {
   const text = message.normalize('NFKC').replace(/\p{Cf}/gu, '');
   if (needsProfanityHold(text)) return 'LANGUAGE';
   for (const match of text.matchAll(LINK)) {
     const candidate = match[0].replace(/[.,!?;:)\]}'"]+$/u, '');
-    if (!isSupportLink(candidate)) return 'LINK';
+    if (!isSupportLink(candidate) && !isWordsJoinedByDot(candidate)) return 'LINK';
   }
   for (const match of text.matchAll(PHONE)) {
     const candidate = match[0];
