@@ -468,7 +468,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] From the driver's arrival on, the live wait (and each
     // stop's own); nothing while the switch is off.
     const waiting = ride ? await decorateRideWaiting(app.prisma, ride, itinerary?.stops ?? null) : {};
-    if (!ride?.driver) return { success: true, data: ride ? { ...ride, ...itinerary, ...waiting, ...cancel } : ride };
+    if (!ride?.driver) return { success: true, data: ride ? { ...ride, ...itinerary, ...cancel, ...waiting } : ride };
     // Vehicle visual identity [rides spec 6B]: shape + tint the client renders
     // on the card, the map marker, and the arrival screen. Classify-on-read
     // heals rows born before the assignment hook/backfill.
@@ -483,7 +483,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? safeMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
-    return { success: true, data: { ...ride, driver, ...itinerary, ...waiting, ...cancel } };
+    return { success: true, data: { ...ride, driver, ...itinerary, ...cancel, ...waiting } };
   });
 
   /** GET /:id — one owned ride. */
