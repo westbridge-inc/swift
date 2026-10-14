@@ -61,8 +61,8 @@ describe('a repeated invitation tap refreshes an already focused inbox', () => {
     const ref = createNavigationContainerRef<ParamListBase>();
     host = document.createElement('div'); document.body.append(host); root = createRoot(host);
     await act(async () => root!.render(React.createElement(QueryClientProvider, { client: fx.client! },
-      React.createElement(NavigationContainer<ParamListBase>, { ref }, React.createElement(Stack.Navigator, null,
-        React.createElement(Stack.Screen, { name: 'Storefront', component: Storefront }))))));
+      React.createElement(NavigationContainer<ParamListBase>, { ref, children: React.createElement(Stack.Navigator, null,
+        React.createElement(Stack.Screen, { name: 'Storefront', component: Storefront })) }))));
     fx.navigate = (name, params) => { ref.navigate(name, params); return true; };
     uninstall = installNotificationTapRouter();
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)); });
