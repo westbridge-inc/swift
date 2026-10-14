@@ -275,13 +275,14 @@ describe('bounded finance decision with original money retained', () => {
     await sys(async () => {
       await subscriptions.startTrialForDriver(f.driverId);
       await subscriptions.convertExpiredTrials();
-      await billing.recordTopUp(f.driver.id, 20_000, finance.userId, 'test-canonical-credit', `fee-convert-${run}-${f.driver.id}`);
+      // [owner #62] The week now due plus the coming one: the most a partner may pay (fee GY$8,000).
+      await billing.recordTopUp(f.driver.id, 16_000, finance.userId, 'test-canonical-credit', `fee-convert-${run}-${f.driver.id}`);
       expect(await billing.billSubscription(await ready(f.driver))).toBe('succeeded');
       const captures = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, status: 'CAPTURED' } });
       expect(captures).toHaveLength(1);
       expect(Number(captures[0]!.amount)).toBe(8000);
       expect(captures[0]!.subscriptionId).toBe(f.driver.id);
-      expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: f.driver.id } })).balance)).toBe(12000);
+      expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: f.driver.id } })).balance)).toBe(8000);
       const stats = await platformStats(app.prisma, { tenantId: f.tenantId, today: new Date(), subscriptionScope: { id: { in: f.authority.sourceSubscriptionIds } } });
       expect(stats.activeSubscriptions).toHaveLength(1);
       expect(stats.activeSubscriptions[0]).toMatchObject({ id: f.driver.id, type: 'TAXI_DRIVER' });
