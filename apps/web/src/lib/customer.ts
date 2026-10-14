@@ -110,7 +110,7 @@ export interface VendorDetail extends Vendor {
   description?: string;
   categories: Array<{ id: string; name: string; items: MenuItem[] }>;
 }
-export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptionNames?: string[]; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
+export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptions?: Record<string, string | string[]> | null; selectedOptionNames?: string[]; specialInstructions?: string | null; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
 export interface Cart {
   items: CartLine[];
   subtotal?: number;
@@ -133,6 +133,8 @@ export interface Cart {
   };
   meetsMinimum?: boolean;
   minimumOrderAmount?: number;
+  /** [E01] One row per future order: each store's fulfilment, fee and total, as checkout writes it. */
+  vendors?: Array<{ vendorId: string; name: string; fulfillment: string; subtotal?: number; deliveryFee: number; totalAmount?: number; meetsMinimum?: boolean }>;
   paymentCapabilities?: {
     /** Changes when the vendor set or the validated MMG destination changes. */
     scope?: string;
@@ -395,7 +397,8 @@ export function clearCheckoutAttempt(): void {
 export async function getAddresses(options?: { redirectOnExpired?: boolean }): Promise<any[]> {
   return (await apiFetch('/api/v1/customer/addresses', undefined, options)).data as any[];
 }
-export async function addAddress(body: { label: string; addressLine1: string; city: string; region: string; latitude: number; longitude: number; isDefault?: boolean }) {
+/** POST /customer/addresses — the server's own fields (region is optional there, and the phone never sends it). */
+export async function addAddress(body: { label: string; addressLine1: string; addressLine2?: string; city: string; region?: string; latitude: number; longitude: number; instructions?: string; isDefault?: boolean }) {
   return (await apiFetch('/api/v1/customer/addresses', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 
@@ -430,7 +433,8 @@ export async function watchRide(body: { lat: number; lng: number }) {
 export async function courierEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; packageSize: string }) {
   return (await apiFetch('/api/v1/courier/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
 }
-export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName?: string; recipientPhone?: string; notes?: string }) {
+/** POST /courier/order — the server's own fields: the recipient is required and what is inside is `packageDescription` (there is no `notes`). */
+export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName: string; recipientPhone: string; packageDescription?: string }) {
   return (await apiFetch('/api/v1/courier/order', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 
@@ -451,7 +455,7 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
  * [WEB-REDESIGN] Customer prices read the way the phone app writes them
  * (apps/mobile/src/lib/money.ts): `$2,500`. Every price on Swift is in Guyana
  * dollars, which the footer states on every page ("Prices in GYD"); the
- * partner consoles keep their `GY$` (lib/money.ts formatMoney). Unparseable
+ * partner consoles print the same `$` (lib/money.ts formatMoney). Unparseable
  * money is still the em-dash, never a zero.
  */
 export const money = (n: unknown) => formatAmount(n, '$');

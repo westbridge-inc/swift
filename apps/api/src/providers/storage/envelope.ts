@@ -107,10 +107,18 @@ export function resetKeyProviderForTests() {
 // [M-37] The keyring never falls open in production; see utils/signing-keys.
 const renderSecret = () => storageSigningKeys().current.secret;
 
-export function signRenderToken(docId: string, expires: number): string {
+/**
+ * [VERIFY-DOCS V3] The token names the REVIEWER it was minted for. The render
+ * route re-reads that reviewer's document-reviewer grant on every load, so a
+ * link stops working the moment the grant is revoked (or the reviewer is
+ * suspended or demoted) — it is no longer a five-minute bearer token that
+ * nobody can take back. A link cannot be re-aimed at another reviewer: the id
+ * is inside the signature.
+ */
+export function signRenderToken(docId: string, expires: number, reviewerUserId: string): string {
   return crypto
     .createHmac('sha256', renderSecret())
-    .update(`render:${docId}:${expires}`)
+    .update(`render:${docId}:${expires}:${reviewerUserId}`)
     .digest('hex')
     .slice(0, 32);
 }
@@ -119,17 +127,19 @@ export function signRenderToken(docId: string, expires: number): string {
  *  `sig === expected` compares byte-by-byte and short-circuits on the first
  *  mismatch, leaking — through response timing — how much of the HMAC an
  *  attacker has already guessed. timingSafeEqual removes that oracle. */
-export function verifyRenderToken(docId: string, expires: number, sig: string): boolean {
-  const expected = Buffer.from(signRenderToken(docId, expires));
+export function verifyRenderToken(docId: string, expires: number, reviewerUserId: string, sig: string): boolean {
+  const expected = Buffer.from(signRenderToken(docId, expires, reviewerUserId));
   const provided = Buffer.from(sig);
   return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
 }
 
-/** Path (relative to the API origin) for a time-limited decrypted render. */
-export function mintRenderPath(docId: string, ttlSeconds = 300): { path: string; expiresInSeconds: number } {
+/** Path (relative to the API origin) for a time-limited decrypted render,
+ *  bound to the reviewer who asked for it. */
+export function mintRenderPath(docId: string, reviewerUserId: string, ttlSeconds = 300): { path: string; expiresInSeconds: number } {
   const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const reviewer = encodeURIComponent(reviewerUserId);
   return {
-    path: `/api/v1/verification/render/${docId}?expires=${expires}&sig=${signRenderToken(docId, expires)}`,
+    path: `/api/v1/verification/render/${docId}?expires=${expires}&reviewer=${reviewer}&sig=${signRenderToken(docId, expires, reviewerUserId)}`,
     expiresInSeconds: ttlSeconds,
   };
 }
