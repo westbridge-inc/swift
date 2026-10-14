@@ -112,6 +112,9 @@ export async function guestSearchApp(max = 200) {
     categoryDocumentGate: { findMany: vi.fn(async () => [{ code: 'licence', categorySlug: 'licensed', categoryKind: null, enforcement: 'BLOCK_LISTING', requiredDocType: { legacyCode: 'LICENCE', displayName: 'Licence' } }]) },
     verificationDocument: { findFirst: vi.fn(async (): Promise<{ id: string } | null> => null) },
     itemDiscoveryCategory: delegate(tags),
+    // [GUARDRAILS §8] The prohibited-items pre-filter is one raw query; no fixture
+    // here names a banned good, so it finds no candidate rows.
+    $queryRaw: vi.fn(async () => []),
   };
   const app = Fastify({ logger: false });
   registerErrorHandler(app);

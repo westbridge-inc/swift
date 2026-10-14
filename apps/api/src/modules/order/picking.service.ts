@@ -6,6 +6,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
+import { hiddenAmong } from '../compliance/prohibited-gate';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -210,6 +211,10 @@ export class PickingService {
     }
     if (!substitute.isAvailable) {
       throw new AppError(409, 'SUBSTITUTE_UNAVAILABLE', 'That substitute is itself unavailable');
+    }
+    // [GUARDRAILS §8] A substitution never puts a prohibited item on an order.
+    if ((await hiddenAmong(this.prisma, [substitute.id])).size > 0) {
+      throw new AppError(409, 'SUBSTITUTE_UNAVAILABLE', 'That substitute isn\'t available on Swift');
     }
     if (original?.substitutionGroup && substitute.substitutionGroup !== original.substitutionGroup) {
       throw new AppError(400, 'WRONG_GROUP', 'Substitutes must come from the same substitution group');

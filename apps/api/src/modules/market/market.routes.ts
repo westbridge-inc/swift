@@ -6,6 +6,7 @@ import { bindBrowseTenant, decodeScopedCursor, encodeScopedCursor, requireReques
 import { ITEM_HIT_SELECT, toItemHit, type ItemHit } from '../search/item-hit';
 import { AppError } from '../../utils/errors';
 import { marketGate, thresholdsFrom } from './launch-depth';
+import { hiddenItemIds } from '../compliance/prohibited-gate';
 
 // ---------------------------------------------------------------------------
 // THE MARKET FEED [MKT G1] — items across every store, by category.
@@ -114,7 +115,8 @@ export async function marketRoutes(app: FastifyInstance) {
     // [S2-1] The same hidden-only exclusion the feed applies, so the depth
     // gate counts the catalogue a shopper can actually see — never raw rows.
     const { hiddenOnlyItemIds } = await import('../verification/category-gate');
-    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
+    // [GUARDRAILS §8] Prohibited items are left out the same way.
+    const hiddenOnly = [...(await hiddenOnlyItemIds(app.prisma, tenantId)), ...(await hiddenItemIds(app.prisma, tenantId))];
     const where = {
       isAvailable: true,
       vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), vendorType: VERTICAL_VENDOR_TYPE.RETAIL },
@@ -184,7 +186,8 @@ export async function marketRoutes(app: FastifyInstance) {
     // defensive second pass, and the page-fill loop after it means that pass
     // can never be the reason a page comes back short.
     const { listableItemsForVendors, hiddenOnlyItemIds } = await import('../verification/category-gate');
-    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
+    // [GUARDRAILS §8] Prohibited items leave the page budget alone too: excluded here, before the cap.
+    const hiddenOnly = [...(await hiddenOnlyItemIds(app.prisma, tenantId)), ...(await hiddenItemIds(app.prisma, tenantId))];
     // One `id` key for both filters: a second spread would silently overwrite
     // the category membership with the hidden exclusion (or vice versa).
     const idFilter = {

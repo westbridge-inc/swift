@@ -68,6 +68,7 @@ import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
+import { assertOrderableNow, hiddenAmong } from '../compliance/prohibited-gate';
 
 interface CheckoutInput {
   userId: string;
@@ -954,6 +955,9 @@ export class OrderService {
         requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
+      // [GUARDRAILS §8] No order carries a prohibited line (banned, or held for a check) —
+      // refused in the sold-out shape, before any write. Re-checked under the locks.
+      await assertOrderableNow(this.prisma, items.map((ci) => ({ id: ci.item.id, name: ci.item.name })));
       // [DOC-1 §18.3 · DOC-INV-26] A line in a BLOCK_ORDER category whose licence
       // is not valid fails the order — the lapse-after-publish case.
       {
@@ -1370,6 +1374,8 @@ export class OrderService {
         // loser reads identically wherever the race is caught.
         throw new AppError(409, 'ITEM_UNAVAILABLE', `${darkItem.name} just became unavailable — remove it and try again.`);
       }
+      // [GUARDRAILS §8] The same refusal against the locked menu rows.
+      await assertOrderableNow(tx, cart.items.map((line) => ({ id: line.item.id, name: line.item.name })));
       // [L09 · M023 · F4] The choices are re-read here as well, beside the
       // item check above: a choice that sold out (or was removed), or a price
       // that changed, after the pre-check is refused instead of ordered at the
@@ -3036,7 +3042,9 @@ export class OrderService {
       where: { id: { in: original.items.map((i) => i.itemId) }, isAvailable: true },
       include: { optionGroups: { include: { options: true } } },
     });
-    const availableById = new Map(availableItems.map((i) => [i.id, i]));
+    // [GUARDRAILS §8] A prohibited line does not come back: counted as unavailable.
+    const hidden = await hiddenAmong(this.prisma, availableItems.map((i) => i.id));
+    const availableById = new Map(availableItems.filter((i) => !hidden.has(i.id)).map((i) => [i.id, i]));
 
     // [L09 · reorder] Each line comes back WITH its choices, rebuilt from the
     // names the order kept against today's menu by the one validator. A line

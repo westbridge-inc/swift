@@ -8,6 +8,7 @@ import { bindBrowseTenant, requireRequestTenant } from './search-scope';
 import { customerPoint } from '../discovery/customer-point';
 import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
+import { hiddenItemIds } from '../compliance/prohibited-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 
@@ -144,13 +145,15 @@ export async function searchRoutes(app: FastifyInstance) {
 
         // Index ranking is not authority to publish a vendor after its
         // subscription stops operating. Reuse the same bounded live gate.
+        // [GUARDRAILS §8] Nor to publish a prohibited item (banned, or held for a check).
+        const prohibited = await hiddenItemIds(app.prisma, tenantId);
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
             where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), id: { in: vendors.map((v) => v.id) }, isCurrentlyOpen: true },
             select: { id: true, latitude: true, longitude: true }, take: parsedLimit,
           }),
           app.prisma.item.findMany({
-            where: { id: { in: items.map((i) => i.id) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)) },
+            where: { id: { in: items.map((i) => i.id), ...(prohibited.length > 0 ? { notIn: prohibited } : {}) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)) },
             select: { id: true, vendorId: true, vendor: { select: { latitude: true, longitude: true } } }, take: parsedLimit,
           }),
         ]);
@@ -183,9 +186,11 @@ export async function searchRoutes(app: FastifyInstance) {
 
     // [S2-1] Guest surfaces exclude hidden-only items IN the query, before
     // the window is capped; the in-memory gate below stays a defensive pass.
-    const hiddenOnly = request.publicTenantId
-      ? await hiddenOnlyItemIds(app.prisma, tenantId)
-      : [];
+    const hiddenOnly = [
+      ...(request.publicTenantId ? await hiddenOnlyItemIds(app.prisma, tenantId) : []),
+      // [GUARDRAILS §8] Prohibited items: every caller.
+      ...(await hiddenItemIds(app.prisma, tenantId)),
+    ];
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
@@ -299,9 +304,11 @@ export async function searchRoutes(app: FastifyInstance) {
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
     // [S2-1] Hidden-only items never occupy the fixed five-item window: they
     // are excluded here, before the take, not after it.
-    const hiddenOnly = request.publicTenantId
-      ? await hiddenOnlyItemIds(app.prisma, tenantId)
-      : [];
+    const hiddenOnly = [
+      ...(request.publicTenantId ? await hiddenOnlyItemIds(app.prisma, tenantId) : []),
+      // [GUARDRAILS §8] Prohibited items: every caller.
+      ...(await hiddenItemIds(app.prisma, tenantId)),
+    ];
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
@@ -350,9 +357,11 @@ export async function searchRoutes(app: FastifyInstance) {
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
     // [S2-1] Same rule, before the fixed take — a hidden-only tag must not
     // crowd a trending row out of the rail's window.
-    const hiddenOnly = request.publicTenantId
-      ? await hiddenOnlyItemIds(app.prisma, tenantId)
-      : [];
+    const hiddenOnly = [
+      ...(request.publicTenantId ? await hiddenOnlyItemIds(app.prisma, tenantId) : []),
+      // [GUARDRAILS §8] Prohibited items: every caller.
+      ...(await hiddenItemIds(app.prisma, tenantId)),
+    ];
     const items = await app.prisma.item.findMany({
       where: {
         isAvailable: true,
