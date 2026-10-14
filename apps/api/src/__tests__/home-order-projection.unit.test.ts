@@ -9,6 +9,14 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // Route registration constructs these clients; Home must never call them.
 vi.mock('../providers/maps/maps-provider', () => ({ getMapsProvider: () => ({}) }));
 vi.mock('../providers/notifications/channels', () => ({ getChannels: () => ({}) }));
+// [GUARDRAILS §8] The prohibited-items reads are proven against a real database
+// (prohibited-items.test.ts); this seam models none of their tables.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  hiddenAmong: async () => new Set<string>(),
+  hiddenItemIds: async () => [],
+  assertOrderableNow: async () => undefined,
+}));
 
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'RETURNED'];
 const LIVE = Object.values(OrderStatus).filter((s) => !TERMINAL.includes(s));

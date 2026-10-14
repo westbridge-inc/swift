@@ -41,7 +41,7 @@ const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar'
 // says how a store's Swift code opens on the web.
 const SERVICES: { key: string; label: string; href?: string; sub: string; pictogram: PictogramName }[] = [
   { key: 'food', label: 'Food', href: '/order/browse?type=RESTAURANT', sub: 'Restaurants & takeaway', pictogram: 'food' },
-  { key: 'groceries', label: 'Groceries', href: '/order/browse?type=SUPERMARKET', sub: 'Markets & pharmacies', pictogram: 'groceries' },
+  { key: 'groceries', label: 'Groceries', href: '/order/browse?type=SUPERMARKET', sub: 'Markets & corner shops', pictogram: 'groceries' },
   { key: 'taxi', label: 'Taxi', href: '/taxi', sub: 'Book in the Swift mobile app', pictogram: 'taxi' },
   { key: 'send', label: 'Send', href: '/courier', sub: 'A parcel across town', pictogram: 'send' },
   { key: 'services', label: 'Services', href: '/order/browse?type=SERVICE', sub: 'Book a local pro', pictogram: 'services' },

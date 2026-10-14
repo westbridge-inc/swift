@@ -24,4 +24,15 @@ describe('customer words', () => {
       .map((line) => `${relative(SRC, file)}: ${line.trim().slice(0, 120)}`));
     expect(found).toEqual([]);
   });
+
+  // [GUARDRAILS §8, owner 13 Oct 2026] Swift never sells alcohol, tobacco, vapes,
+  // 18+ items, medicines, cooking gas or fuel, so no page promises them — the
+  // Groceries chip once offered "Markets & pharmacies" and the Shops card "Pharmacy".
+  it('no page promises a pharmacy, medicines, alcohol, tobacco or vapes', () => {
+    const banned = /\b(pharmac\w*|medicines?|liquor|alcohol|beer|wine|rum|tobacco|cigarettes?|vapes?)\b/i;
+    const found = sources.flatMap((file) => withoutComments(readFileSync(file, 'utf8')).split('\n')
+      .filter((line) => banned.test(line))
+      .map((line) => `${relative(SRC, file)}: ${line.trim().slice(0, 120)}`));
+    expect(found).toEqual([]);
+  });
 });
