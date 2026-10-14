@@ -6,6 +6,7 @@
 // before any module below can read process.env. Keep this import on top.
 import './boot/secret-files';
 import { buildApp } from './app';
+import { attestSystemLoginAtBoot } from './boot/system-login';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
 import { attestationOf, attestationLine, readRlsFacts, assertTenantWall } from './lib/rls-attestation';
 import { rlsAttestationGauge } from './plugins/observability';
@@ -29,6 +30,10 @@ async function start() {
     rlsAttestationGauge.labels(rls.enforced ? 'enforced' : 'bypassed').set(1);
     app.log[rls.enforced ? 'info' : 'warn']({ rls: rls.facts, bypasses: rls.bypasses }, `tenant wall: ${attestationLine(rls)}`);
     assertTenantWall(rls, await app.prisma.tenant.count({ where: { isActive: true } }));
+
+    // [L04 · R1] Under the enforced wall, sign-in reads accounts through the
+    // system login: refuse to serve without a reachable bypass-member one.
+    await attestSystemLoginAtBoot(app.prisma, app.log);
 
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);

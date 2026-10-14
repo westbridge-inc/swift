@@ -27,6 +27,7 @@ import { assertSafeBootConfig } from './utils/boot-config';
 import { initSentry } from './plugins/observability';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout } from './utils/async-lifecycle';
 import { resolveDatabaseUrl } from './utils/db-pool';
+import { attestSystemLoginAtBoot } from './boot/system-login';
 import { installProcessLifecycle } from './utils/process-lifecycle';
 import { isProduction } from './utils/runtime-mode';
 
@@ -122,6 +123,10 @@ async function main() {
 
   try {
     const startupTimeoutMs = positiveDurationMs(process.env['QUEUE_STARTUP_TIMEOUT_MS'], 15_000);
+    // [L04 · R1] Under the enforced wall, system jobs (SOS escalation among
+    // them) read through the system login: refuse to run without a reachable
+    // bypass-member one, before Redis and before a single job.
+    await attestSystemLoginAtBoot(prisma, log);
     await withTimeout(redis.ping(), startupTimeoutMs, 'Worker Redis startup');
     if (isProduction()) {
       const { createAdapter } = await import('@socket.io/redis-adapter');
