@@ -203,6 +203,47 @@ class LoginPlanTests(unittest.TestCase):
                 wall.apply(p, approved())
             self.assertFalse(any(c.startswith('publish:') for c in p.calls))
 
+    def test_each_connection_fact_is_independently_required_for_both_logins(self):
+        for name in wall.LOGINS:
+            for field in ('sessionUser', 'currentUser', 'requestWallEnforced', 'systemCapabilityMember'):
+                for missing in (False, True):
+                    with self.subTest(name=name, field=field, missing=missing):
+                        p = Ports()
+                        connect = p.connect
+                        def changed(login, secret):
+                            facts = connect(login, secret)
+                            if login == name:
+                                if missing:
+                                    del facts[field]
+                                elif type(facts[field]) is bool:
+                                    facts[field] = not facts[field]
+                                else:
+                                    facts[field] = 'fixture_owner'
+                            return facts
+                        p.connect = changed
+                        with self.assertRaises(wall.Refusal):
+                            wall.apply(p, approved())
+                        self.assertFalse(any(call.startswith('publish:') for call in p.calls))
+
+    def test_verify_checks_both_connections_and_never_changes_state(self):
+        p = Ports()
+        wall.apply(p, approved())
+        p.calls.clear()
+        snapshot = copy.deepcopy(p.secrets)
+        self.assertEqual(wall.verify(p, approved())['status'], 'verified')
+        self.assertEqual(p.secrets, snapshot)
+        self.assertEqual(p.calls, ['census', 'connect:swift_app_login', 'connect:swift_system_login'])
+        connect = p.connect
+        def invalid(name, secret):
+            facts = connect(name, secret)
+            if name == 'swift_system_login':
+                facts['systemCapabilityMember'] = False
+            return facts
+        p.connect = invalid
+        with self.assertRaises(wall.Refusal):
+            wall.verify(p, approved())
+        self.assertEqual(p.secrets, snapshot)
+
     def test_exception_and_plan_outputs_do_not_echo_input(self):
         marker = 'PRIVATE_FIXTURE_MUST_NOT_ESCAPE'
         cat = catalogue()
