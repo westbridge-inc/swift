@@ -40,6 +40,7 @@ const engine = vi.hoisted(() => ({
   vendorCalls: [] as Array<{ q: string; opts: Record<string, unknown> }>,
   itemCalls: [] as Array<{ q: string; opts: Record<string, unknown> }>,
   warmed: 0,
+  syncDelayMs: 0,
   warmContexts: [] as Array<{ tenantId: string | null; mode: string; capability: string | null }>,
 }));
 
@@ -65,6 +66,7 @@ vi.mock('../modules/search/search.service', async () => {
       // under whatever context the route runs the warm-up in.
       async syncAllVendors() {
         engine.warmContexts.push(getTenantContext());
+        if (engine.syncDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, engine.syncDelayMs));
         await this.prisma.vendor.count({ where: { id: 'no-such-vendor' } });
         return 0;
       }
@@ -313,6 +315,22 @@ describe('an index that was down when the API started is tried again', () => {
       engine.ready = true;
       await late.close();
     }
+  });
+
+  // [#1678 · DS1260 S4] The warm-up reads the database in the background. A server closed mid-read waits for it, so the
+  // one shared database client is never disconnected under that read (which left it answering "Engine is not yet
+  // connected" to every later caller).
+  it('a server closed while its warm-up is still reading waits for the read before the database disconnects', async () => {
+    const warmedBefore = engine.warmed;
+    engine.syncDelayMs = 200;
+    try {
+      const late = await buildApp();
+      await late.close();
+      expect(engine.warmed).toBe(warmedBefore + 1);
+    } finally {
+      engine.syncDelayMs = 0;
+    }
+    expect(await app.prisma.vendor.count({ where: { id: 'no-such-vendor' } })).toBe(0);
   });
 
   it('under TENANT_UNSCOPED_ACCESS=deny the warm-up still fills the index (it is named system work, not an unbound read)', async () => {

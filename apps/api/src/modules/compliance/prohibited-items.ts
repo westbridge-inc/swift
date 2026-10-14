@@ -678,9 +678,25 @@ function brandPack(words: readonly string[], options: GoodsOptions = {}): { proh
   const spiritAge = brand.prohibitedClass === 'ALCOHOL' && aged;
   const ofItsKind = kind === 'any' ? measured || spiritAge : kind === 'liquid' ? liquid || spiritAge : kind === 'tobacco' ? tobacco : false;
   if (brand.certain || (core.length === 0 && ofItsKind)) return { prohibitedClass: brand.prohibitedClass, term: words[0]! };
+  // Where no person reviews the text (a parcel), the words between the brand and its measure do not make it something
+  // else ("Camel Blue 20 pack", "Halls Honey Lemon 9 pack"); the catalogue holds these for a person. [DS1260 S2]
+  if (options.noReviewer && ofItsKind) return { prohibitedClass: brand.prohibitedClass, term: words[0]! };
   // A medicine brand counted or dosed ("Bayer 30 tabs", "Bayer 325mg") is the medicine. Halls ('none') never is (#58).
-  if (brand.prohibitedClass === 'MEDICINE' && kind === 'any' && pillsOnly(words.slice(1))) return { prohibitedClass: 'MEDICINE', term: words[0]! };
+  if (brand.prohibitedClass === 'MEDICINE' && kind === 'any'
+    && (pillsOnly(words.slice(1)) || (options.noReviewer === true && pillsAtEnd(words.slice(1))))) {
+    return { prohibitedClass: 'MEDICINE', term: words[0]! };
+  }
   return null;
+}
+
+/** Ends in pill, dose, size and style words, at least one of them a pill or a dose ("One A Day 100 tablets"). */
+function pillsAtEnd(rest: readonly string[]): boolean {
+  for (let i = rest.length - 1; i >= 0; i -= 1) {
+    const w = rest[i]!;
+    if (PILL_MEASURE.test(w)) return true;
+    if (!(TRAILING_SIZE.test(w) || TRAILING_STYLE.has(w) || DRINK_MEASURE.test(w))) return false;
+  }
+  return false;
 }
 
 /** Only pill, dose, size and style words, and at least one pill or dose word. */

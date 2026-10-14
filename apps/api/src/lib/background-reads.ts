@@ -23,8 +23,8 @@ export function trackBackgroundRead<T>(work: Promise<T>): Promise<T> {
 export async function settleBackgroundReads(limitMs = BACKGROUND_READS_SETTLE_MS): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<'late'>((resolve) => {
+    // Not unref'd: the bound must hold even when nothing else keeps the process alive. [DS1260 S4]
     timer = setTimeout(() => resolve('late'), limitMs);
-    timer.unref?.();
   });
   try {
     while (pending.size > 0) {

@@ -372,4 +372,18 @@ describe('[§8 launch · DS1112] the fourth review', () => {
     }
     expect(verdict('Halls 9 pack').state).toBe('WAITING');
   });
+
+  // [DS1260 S2] A descriptor between the brand and its measure does not make a parcel something else.
+  it.each(['Halls Honey Lemon 9 pack', 'Halls Mentholyptus 9 pack', 'Camel Blue 20 pack', 'Newport Menthol 20s', 'Kool Milds 20s',
+    'Winston Blue 20 pack', 'Velo Citrus 20 pouches', 'Bayer One A Day 100 tablets', 'Tiger Crystal 6 pack'])('a parcel of %s is refused', (parcel) => {
+    expect(parcelProhibited(parcel)).not.toBeNull();
+  });
+  it.each(['Bounty paper towels 2 pack', 'Davidoff Cool Water 125ml', 'Tiger prawns 500g', 'Banks birthday card', 'Kool Aid packets'])(
+    'a parcel of %s is carried (no measure of its kind)', (parcel) => {
+      expect(parcelProhibited(parcel)).toBeNull();
+    },
+  );
+  it.each(['Camel Blue 20 pack', 'Kool Aid 2 pack', 'Tiger prawns 2 pack'])('%s in the catalogue is held for a person, never refused', (name) => {
+    expect(verdict(name).state).toBe('WAITING');
+  });
 });
