@@ -72,7 +72,7 @@ import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminR
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
-import { openCreditRefunds, openSetAsideIds, payoutReportedFor, recordCreditRefundPaid, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
+import { openCreditRefunds, openSetAsideIds, PAID_REFUND_BODY, payoutAskStateFor, recordCreditRefundPaid, REFUND_AMOUNT, REFUND_SET_ASIDE_ID, refundReferenceOf, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -3811,11 +3811,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // next step (record the payout, or release it) instead of a new refund.
     const setAside = await openCreditRefunds(app.prisma, subscriptions.map((sub) => sub.id));
     const setAsideIds = await openSetAsideIds(app.prisma, [...setAside.keys()]);
-    const payoutReported = await payoutReportedFor(app.prisma, setAsideIds);
+    const payoutAsks = await payoutAskStateFor(app.prisma, setAsideIds);
     const current = await Promise.all(subscriptions.map(async (sub) => {
       const payer = sub.rider?.user.id ?? sub.driver?.user.id;
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
-      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null, refundPayoutReported: payoutReported.has(sub.id) };
+      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null, refundPayoutReported: payoutAsks.get(sub.id) === 'ACTIVE', refundPayoutAsk: payoutAsks.get(sub.id) ?? null };
     }));
     // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
     return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
@@ -3949,10 +3949,10 @@ export async function adminRoutes(app: FastifyInstance) {
    *   3. release: a set-aside that could not be paid goes back to the wallet.
    * Every answer carries the LIVE wallet and the open set-aside.
    */
-  // A wallet is Decimal(12,2): any balance it can hold can be refunded whole.
-  const refundAmount = z.number().positive().max(9_999_999_999.99)
-    .refine((n) => new Prisma.Decimal(n).decimalPlaces() <= 2, 'At most two decimal places');
-  const refundSetAsideId = z.string().min(1, 'Name the set-aside this step is for.').max(64);
+  // One schema with the approval gate's ask check (credit-refund.ts): a wallet is Decimal(12,2),
+  // so any balance it can hold can be refunded whole.
+  const refundAmount = REFUND_AMOUNT;
+  const refundSetAsideId = REFUND_SET_ASIDE_ID;
   const refundSubject = async (request: { params: unknown }) => {
     requireDefaultTenantBilling();
     const tenantId = getTenantId();
@@ -3981,11 +3981,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/subscriptions/:id/refund-credit/paid', { preHandler: [adminGuard] }, async (request) => {
     const id = await refundSubject(request);
     // [Sol r2 S1] The set-aside this payout pays is part of what the second admin approves.
-    const body = z.object({ amount: refundAmount, method: z.enum(['MMG', 'BANK_TRANSFER']), reference: z.string().max(200), setAsideId: refundSetAsideId }).parse(request.body);
-    const reference = normaliseReference(body.reference, {
-      required: 'Enter the MMG or bank reference of the refund you paid. It is the only proof the money went back.',
-      invalid: 'That does not look like a transfer reference. Copy it from the MMG or bank record.',
-    }, 'REFUND_REFERENCE');
+    const body = PAID_REFUND_BODY.parse(request.body);
+    const reference = refundReferenceOf(body.reference);
     return refundAnswer(await recordCreditRefundPaid(app.prisma, {
       adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id,
       amount: body.amount, method: body.method, reference, setAsideId: body.setAsideId,

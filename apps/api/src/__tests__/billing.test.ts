@@ -1239,11 +1239,112 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     expect(ask.settled, 'the ask waited for the lock').toBe(false);
     expect(res.statusCode, res.payload).toBe(202);
     // [DS1122 S3] The list tells the console, for the open set-aside, that a payout was reported.
-    const { openSetAsideIds, payoutReportedFor } = await import('../modules/billing/credit-refund');
+    const { openSetAsideIds, payoutAskStateFor } = await import('../modules/billing/credit-refund');
     const open = await openSetAsideIds(app.prisma, [fx.subId]);
     expect(open.get(fx.subId)).toBe(setAsideId);
-    expect((await payoutReportedFor(app.prisma, open)).has(fx.subId)).toBe(true);
-    expect((await payoutReportedFor(app.prisma, new Map([[fx.subId, 'a-later-set-aside']]))).has(fx.subId)).toBe(false);
+    expect((await payoutAskStateFor(app.prisma, open)).get(fx.subId)).toBe('ACTIVE');
+    expect((await payoutAskStateFor(app.prisma, new Map([[fx.subId, 'a-later-set-aside']]))).has(fx.subId)).toBe(false);
+  });
+
+  // [Owner ruling 14 Oct, S1-1] While the owner is the ONLY admin, the owner may approve both steps
+  // under the solo ceremony; the gate counts "still the only admin" again at apply.
+  async function makeOwner() {
+    phoneSeq += 1;
+    const user = await app.prisma.user.create({ data: {
+      phone: `+59256${phoneRun}${String(phoneSeq).padStart(2, '0')}`, firstName: 'Solo', lastName: `Owner${phoneSeq}`,
+      roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN', isPhoneVerified: true, status: 'ACTIVE',
+      admin: { create: { permissions: ['*'] } },
+    } });
+    createdUserIds.push(user.id);
+    const token = app.jwt.sign({ userId: user.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
+    await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: 'solo-owner', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+    return { userId: user.id, token };
+  }
+  /** Every other admin who could approve is locked out for the duration (restored afterwards). */
+  async function asTheOnlyAdmin<T>(ownerId: string, work: () => Promise<T>): Promise<T> {
+    const others = await app.prisma.user.findMany({
+      where: { id: { not: ownerId }, status: { notIn: ['SUSPENDED', 'BANNED', 'DEACTIVATED'] }, OR: [{ activeRole: { in: ['ADMIN', 'SUPER_ADMIN'] } }, { roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] } }] },
+      select: { id: true, status: true },
+    });
+    await app.prisma.user.updateMany({ where: { id: { in: others.map((o) => o.id) } }, data: { status: 'SUSPENDED' } });
+    try {
+      return await work();
+    } finally {
+      for (const o of others) await app.prisma.user.update({ where: { id: o.id }, data: { status: o.status } });
+    }
+  }
+  /** The owner asks, the request is decided in solo mode exactly as decideSoloApproval stores it, and the owner re-sends it through the gate. */
+  async function soloStep(owner: { token: string; userId: string }, target: string, payload: Record<string, unknown>) {
+    const asked = await app.inject({ method: 'POST', url: target, payload, headers: headersFor(owner.token) });
+    expect(asked.statusCode, asked.payload).toBe(202);
+    const approvalId = asked.json().error.details.approvalId as string;
+    const now = Date.now();
+    await app.prisma.privilegedApproval.update({ where: { id: approvalId }, data: {
+      status: 'APPROVED', approvedBy: owner.userId, decidedSolo: true, decidedAt: new Date(now),
+      soloRequestedAt: new Date(now - 13 * 3_600_000), soloEligibleAt: new Date(now - 60_000),
+    } as never });
+    return app.inject({ method: 'POST', url: target, payload, headers: { ...headersFor(owner.token), 'x-swift-approval': approvalId } });
+  }
+
+  it('[owner ruling S1-1] the only admin approves both steps in solo mode: the payout is recorded', async () => {
+    const owner = await makeOwner();
+    const fx = await storeWithCredit(7000);
+    await asTheOnlyAdmin(owner.userId, async () => {
+      const aside = await soloStep(owner, url(fx.subId, 'set-aside'), { amount: 7000 });
+      expect(aside.statusCode, aside.payload).toBe(200);
+      const setAsideId = await openSetAsideIdOf(fx.subId);
+      const recorded = await soloStep(owner, url(fx.subId, 'paid'), { amount: 7000, method: 'MMG', reference: ref('SOLOPAID'), setAsideId });
+      expect(recorded.statusCode, recorded.payload).toBe(200);
+    });
+    expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(1);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(0);
+    await booksAgree(fx.subId);
+  });
+
+  it('[owner ruling S1-1] with a second admin, a solo-decided payout record is refused at the gate and nothing is recorded', async () => {
+    const owner = await makeOwner();
+    const fx = await storeWithCredit(6500);
+    expect((await twoPeople(owner, other, 'POST', url(fx.subId, 'set-aside'), { amount: 6500 })).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    const recorded = await soloStep(owner, url(fx.subId, 'paid'), { amount: 6500, method: 'MMG', reference: ref('NOTSOLO'), setAsideId });
+    expect(recorded.statusCode, recorded.payload).not.toBe(200);
+    expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(6500);
+  });
+
+  it('[review S2-1] a payout record that could never be recorded is refused when ASKED, and no "payout reported" marker is written', async () => {
+    const fx = await storeWithCredit(5000);
+    expect((await setAside(fx.subId, 5000)).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    const asks = () => app.prisma.privilegedApproval.count({ where: { action: 'POST /subscriptions/:id/refund-credit/paid', entityId: fx.subId } });
+    const before = await asks();
+    const bad = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: { amount: 5000, method: 'MMG', reference: 'x', setAsideId }, headers: headers() });
+    expect(bad.statusCode, bad.payload).toBe(400);
+    expect(bad.json().error.code).toBe('REFUND_REFERENCE_INVALID');
+    const inbound = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: { amount: 5000, method: 'MMG', reference: fx.creditRef!, setAsideId }, headers: headers() });
+    expect(inbound.statusCode, inbound.payload).toBe(409);
+    expect(inbound.json().error.code).toBe('REFUND_REFERENCE_IS_A_PAYMENT');
+    const wrongAmount = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: { amount: 4000, method: 'MMG', reference: ref('WRONGAMT'), setAsideId }, headers: headers() });
+    expect(wrongAmount.statusCode, wrongAmount.payload).toBe(409);
+    expect(await asks()).toBe(before);
+    // nothing became a marker: the release is still possible
+    expect((await release(fx.subId, 5000)).statusCode).toBe(200);
+  });
+
+  it('[review S2-1] after a refused payout record the set-aside can be recorded again (never released); the list says so', async () => {
+    const fx = await storeWithCredit(4500);
+    expect((await setAside(fx.subId, 4500)).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    const asked = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: { amount: 4500, method: 'BANK_TRANSFER', reference: ref('TYPO'), setAsideId }, headers: headersFor(admin.token) });
+    expect(asked.statusCode, asked.payload).toBe(202);
+    const refused = await app.inject({ method: 'POST', url: `/api/v1/admin/approvals/${asked.json().error.details.approvalId}/decide`, payload: { approve: false, note: 'reference does not match the bank record' }, headers: headersFor(other.token) });
+    expect(refused.statusCode, refused.payload).toBe(200);
+    const { openSetAsideIds, payoutAskStateFor } = await import('../modules/billing/credit-refund');
+    expect((await payoutAskStateFor(app.prisma, await openSetAsideIds(app.prisma, [fx.subId]))).get(fx.subId)).toBe('NOT_COMPLETED');
+    expect((await release(fx.subId, 4500)).json().error.code).toBe('REFUND_PAYOUT_REPORTED');
+    const again = await paid(fx.subId, { amount: 4500, method: 'BANK_TRANSFER', reference: ref('CORRECT') });
+    expect(again.statusCode, again.payload).toBe(200);
+    await booksAgree(fx.subId);
   });
 
   it('a payout is recorded only for what is set aside, and only one set-aside is open at a time', async () => {

@@ -206,6 +206,9 @@ export default function SubscriptionsPage() {
                 const h = holder(s);
                 const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? new Date(s.nextBillingDate).toLocaleDateString() : '—';
                 const payoutReported = (s.refundSetAsideId ? reportedRefunds[s.refundSetAsideId] === true : false) || s.refundPayoutReported === true;
+                // [Review S2-1] Every payout record for this set-aside was refused, expired or failed:
+                // record it again; the release stays refused (a payout may have been sent, Q-1527).
+                const payoutNotCompleted = !payoutReported && s.refundPayoutAsk === 'NOT_COMPLETED';
                 return (
                   <Fragment key={s.id}>
                     <tr className="border-b border-[var(--border)] hover:bg-white/5">
@@ -278,7 +281,7 @@ export default function SubscriptionsPage() {
                                   const reason = askReason({ action: 'return this refund set-aside to credit', subject: h.name });
                                   if (reason) release.mutate({ id: s.id, amount: owed, setAsideId: String(s.refundSetAsideId ?? ''), reason });
                                 }}
-                                disabled={refundBusy || payoutReported}
+                                disabled={refundBusy || payoutReported || payoutNotCompleted}
                                 className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                               >
                                 Release
@@ -317,6 +320,8 @@ export default function SubscriptionsPage() {
                         {Number(s.refundSetAside ?? 0) > 0 && (
                           <p className="text-xs text-amber-500 mt-2">{payoutReported
                             ? 'Payment reported; recording awaits approval. Do not pay again or release this refund.'
+                            : payoutNotCompleted
+                              ? 'The last payout record was not completed (refused, expired or failed). Do not pay again: record it again with the correct reference. This refund cannot be released.'
                             : `GY$${Number(s.refundSetAside).toLocaleString()} set aside: pay it outside Swift, then record the payout.`}</p>
                         )}
                         {refundOutcome[s.id] && <RefundOutcome outcome={refundOutcome[s.id]!} />}

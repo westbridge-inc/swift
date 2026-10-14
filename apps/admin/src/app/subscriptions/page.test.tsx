@@ -269,6 +269,16 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
     expect(screen.getByText(/set aside: pay it outside Swift/)).toBeTruthy();
   });
 
+  it('[review S2-1] after a refused, expired or failed payout record, Record payout is offered again and Release is not', async () => {
+    refundServer({ ...setAsideRow, refundPayoutReported: false, refundPayoutAsk: 'NOT_COMPLETED' }, () => queued);
+    renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    expect(screen.getByText(/last payout record was not completed/)).toBeTruthy();
+    expect(screen.queryByText(/recording awaits approval/)).toBeNull();
+    expect((screen.getByRole('button', { name: 'Record payout' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('a payout refusal (a bad reference) is shown, not swallowed', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('Paid back by') ? 'BANK' : String(msg).includes('Reference of the refund') ? 'x' : REASON)));

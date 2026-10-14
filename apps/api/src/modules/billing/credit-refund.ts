@@ -3,6 +3,9 @@ import type { AuditFacts, OnAudit } from '../../lib/audit-writer';
 import { AppError } from '../../utils/errors';
 import { isDuplicateOn } from '../money/evidence';
 import { lockMoverFeeAuthority, lockSubscriptionPayer } from '../subscription/mover-fee-authority';
+import { z } from 'zod';
+import { isSoleApprover } from '../admin/solo-approval';
+import { normaliseReference } from '../money/evidence';
 import { postLedger, refundPaidPostings, refundReleasePostings, refundSetAsidePostings } from './ledger';
 
 // ---------------------------------------------------------------------------
@@ -119,21 +122,27 @@ export async function lockCreditRefundAsks(tx: Prisma.TransactionClient, subscri
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`credit-refund-ask:${subscriptionId}`}, 0))`;
 }
 
-/** [DS1122 S3] The subscriptions whose OPEN set-aside already has a payout
- *  record asked for (the console shows "payment reported" and offers neither
- *  another payout record nor a release). */
-export async function payoutReportedFor(db: Db, openIds: Map<string, string>): Promise<Set<string>> {
-  const reported = new Set<string>();
-  if (openIds.size === 0) return reported;
+/** What the console shows about the OPEN set-aside's payout records:
+ *  ACTIVE = one is waiting for approval or to be applied (show "payment
+ *  reported", offer no other step); NOT_COMPLETED = every one was refused,
+ *  expired, withdrawn or failed (offer "record it again"; the release stays
+ *  refused, Q-1527 keeps the hold). [DS1122 S3 · review S2-1] */
+export type PayoutAskState = 'ACTIVE' | 'NOT_COMPLETED';
+export async function payoutAskStateFor(db: Db, openIds: Map<string, string>, now: Date = new Date()): Promise<Map<string, PayoutAskState>> {
+  const state = new Map<string, PayoutAskState>();
+  if (openIds.size === 0) return state;
   const asks = await db.privilegedApproval.findMany({
     where: { action: PAID_ACTION, entityId: { in: [...openIds.keys()] } },
-    select: { entityId: true, bodySnapshot: true },
+    select: { entityId: true, bodySnapshot: true, status: true, expiresAt: true },
   });
   for (const ask of asks) {
     const named = (ask.bodySnapshot as { body?: { setAsideId?: unknown } } | null)?.body?.setAsideId;
-    if (ask.entityId && named === openIds.get(ask.entityId)) reported.add(ask.entityId);
+    if (!ask.entityId || named !== openIds.get(ask.entityId)) continue;
+    const active = (ask.status === 'PENDING' || ask.status === 'APPROVED') && ask.expiresAt.getTime() > now.getTime();
+    if (active) state.set(ask.entityId, 'ACTIVE');
+    else if (!state.has(ask.entityId)) state.set(ask.entityId, 'NOT_COMPLETED');
   }
-  return reported;
+  return state;
 }
 
 /**
@@ -207,6 +216,65 @@ export async function setAsideCreditRefund(prisma: PrismaClient, input: {
   return { ...done, ...(await creditRefundState(prisma, input.subscriptionId)) };
 }
 
+// A wallet is Decimal(12,2): any balance it can hold can be refunded whole.
+export const REFUND_AMOUNT = z.number().positive().max(9_999_999_999.99)
+  .refine((n) => new Prisma.Decimal(n).decimalPlaces() <= 2, 'At most two decimal places');
+export const REFUND_SET_ASIDE_ID = z.string().min(1, 'Name the set-aside this step is for.').max(64);
+/** The payout record's body: one schema for the approval gate's ask check and the route. */
+export const PAID_REFUND_BODY = z.object({ amount: REFUND_AMOUNT, method: z.enum(['MMG', 'BANK_TRANSFER']), reference: z.string().max(200), setAsideId: REFUND_SET_ASIDE_ID });
+export const refundReferenceOf = (raw: unknown) => normaliseReference(raw, {
+  required: 'Enter the MMG or bank reference of the refund you paid. It is the only proof the money went back.',
+  invalid: 'That does not look like a transfer reference. Copy it from the MMG or bank record.',
+}, 'REFUND_REFERENCE');
+
+const REFERENCE_REUSED = 'This transfer reference already recorded a refund. One transfer pays one refund: check the reference.';
+
+/** A refund reference is money going OUT. One that names money that came IN is a typing mistake. */
+async function refuseInboundReference(tx: Prisma.TransactionClient, reference: string): Promise<void> {
+  const [inbound] = await tx.$queryRaw<Array<{ n: number }>>`
+    SELECT (
+      (SELECT count(*) FROM provider_payments p WHERE mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM provider_payment_aliases a WHERE mmg_txn_canon(a."aliasKey") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM topup_commands t WHERE upper(t."providerRef") = ${reference})
+      + (SELECT count(*) FROM subscription_payments s WHERE upper(s."externalRef") = ${reference})
+    )::int AS n`;
+  if ((inbound?.n ?? 0) > 0) {
+    throw new AppError(409, 'REFUND_REFERENCE_IS_A_PAYMENT', 'That reference is a payment Swift received, not the refund you sent. Enter the reference of the refund transfer.');
+  }
+}
+
+const NOTHING_SET_ASIDE = 'No refund is set aside for this account. Set the credit aside first; pay only after that.';
+const PAYOUT_CYCLE_CHANGED = 'The refund this payout record names is no longer the one set aside (it was paid or returned since). Nothing was recorded. If you already sent this payout, tell finance: it is settled by the refund procedure.';
+
+/**
+ * [Review S2-1] The payout record is checked when it is ASKED, before the
+ * approval gate writes the request: an ask is the "payout reported" marker,
+ * and one that could never be recorded (no reference, an inbound payment's
+ * reference, another set-aside, another amount) must never become one. Runs
+ * inside the gate's transaction, under the refund's ask lock. A re-send of a
+ * payout already recorded for this account passes (the record answers it as
+ * a replay).
+ */
+export async function validatePaidAsk(tx: Prisma.TransactionClient, subscriptionId: string, body: unknown): Promise<void> {
+  const parsed = PAID_REFUND_BODY.safeParse(body);
+  if (!parsed.success) {
+    throw new AppError(400, 'VALIDATION_ERROR', parsed.error.issues[0]?.message ?? 'The payout record is not complete.');
+  }
+  const reference = refundReferenceOf(parsed.data.reference);
+  const prior = await tx.billingEvent.findUnique({ where: { idempotencyKey: `${PAID_KEY}${reference}` }, select: { subscriptionId: true, type: true, amount: true } });
+  if (prior) {
+    if (prior.subscriptionId !== subscriptionId || prior.type !== 'PREPAID_REFUND' || cents(prior.amount) !== cents(parsed.data.amount)) {
+      throw new AppError(409, 'REFUND_REFERENCE_REUSED', REFERENCE_REUSED);
+    }
+    return;
+  }
+  await refuseInboundReference(tx, reference);
+  const open = await namedOpenSetAside(tx, subscriptionId, parsed.data.setAsideId, NOTHING_SET_ASIDE, PAYOUT_CYCLE_CHANGED);
+  if (cents(open.amount) !== cents(parsed.data.amount)) {
+    throw new AppError(409, 'REFUND_AMOUNT_MISMATCH', `The amount set aside is ${open.amount} ${open.currencyCode}. Record exactly that amount.`);
+  }
+}
+
 /**
  * Step 3: the set-aside was paid back outside Swift. The amount must be the
  * open set-aside; the reference is the transfer that paid it.
@@ -234,25 +302,14 @@ export async function recordCreditRefundPaid(prisma: PrismaClient, input: {
       const prior = await tx.billingEvent.findUnique({ where: { idempotencyKey: eventKey } });
       if (prior) {
         if (prior.subscriptionId !== input.subscriptionId || prior.type !== 'PREPAID_REFUND' || cents(prior.amount) !== cents(input.amount)) {
-          throw new AppError(409, 'REFUND_REFERENCE_REUSED', 'This transfer reference already recorded a refund. One transfer pays one refund: check the reference.');
+          throw new AppError(409, 'REFUND_REFERENCE_REUSED', REFERENCE_REUSED);
         }
         return { replayed: true, amount: Number(prior.amount), billingEventId: prior.id };
       }
       // A refund reference is money going OUT. One that names money that came
       // IN (a fee payment or a top-up) is a typing mistake, never proof of a payout.
-      const [inbound] = await tx.$queryRaw<Array<{ n: number }>>`
-        SELECT (
-          (SELECT count(*) FROM provider_payments p WHERE mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${reference}))
-          + (SELECT count(*) FROM provider_payment_aliases a WHERE mmg_txn_canon(a."aliasKey") = mmg_txn_canon(${reference}))
-          + (SELECT count(*) FROM topup_commands t WHERE upper(t."providerRef") = ${reference})
-          + (SELECT count(*) FROM subscription_payments s WHERE upper(s."externalRef") = ${reference})
-        )::int AS n`;
-      if ((inbound?.n ?? 0) > 0) {
-        throw new AppError(409, 'REFUND_REFERENCE_IS_A_PAYMENT', 'That reference is a payment Swift received, not the refund you sent. Enter the reference of the refund transfer.');
-      }
-      const open = await namedOpenSetAside(tx, input.subscriptionId, input.setAsideId,
-        'No refund is set aside for this account. Set the credit aside first; pay only after that.',
-        'The refund this payout record names is no longer the one set aside (it was paid or returned since). Nothing was recorded. If you already sent this payout, tell finance: it is settled by the refund procedure.');
+      await refuseInboundReference(tx, reference);
+      const open = await namedOpenSetAside(tx, input.subscriptionId, input.setAsideId, NOTHING_SET_ASIDE, PAYOUT_CYCLE_CHANGED);
       if (cents(open.amount) !== cents(input.amount)) {
         throw new AppError(409, 'REFUND_AMOUNT_MISMATCH', `The amount set aside is ${open.amount} ${open.currencyCode}. Record exactly that amount.`);
       }
@@ -261,12 +318,18 @@ export async function recordCreditRefundPaid(prisma: PrismaClient, input: {
       const setAsideApprovalId = open.opened.idempotencyKey.startsWith(SET_ASIDE_KEY) ? open.opened.idempotencyKey.slice(SET_ASIDE_KEY.length) : null;
       const [asked, approving] = await Promise.all([
         setAsideApprovalId ? tx.privilegedApproval.findUnique({ where: { id: setAsideApprovalId }, select: { requestedBy: true } }) : null,
-        tx.privilegedApproval.findUnique({ where: { id: input.approvalId }, select: { approvedBy: true } }),
+        tx.privilegedApproval.findUnique({ where: { id: input.approvalId }, select: { approvedBy: true, requestedBy: true, decidedSolo: true } }),
       ]);
       if (!asked || !approving?.approvedBy) {
         throw new AppError(409, 'REFUND_APPROVAL_UNKNOWN', 'The approvals behind this refund cannot be read. Nothing was recorded.');
       }
-      if (approving.approvedBy === asked.requestedBy) {
+      // [Owner ruling 14 Oct, S1-1] While the owner is the ONLY admin, the owner may approve both
+      // steps under the solo ceremony [OWNER #13]: the gate counted "still the only admin" again
+      // when this approval was applied, and it is counted once more here. Once a second admin
+      // exists, solo decisions are void at the gate and the pair rule below holds again.
+      const soloOwner = approving.decidedSolo === true && approving.approvedBy === approving.requestedBy
+        && await isSoleApprover(tx, approving.approvedBy, 'subscription.refund');
+      if (approving.approvedBy === asked.requestedBy && !soloOwner) {
         throw new AppError(403, 'REFUND_SAME_PERSON', 'You asked for this refund to be set aside, so you cannot also approve its payout. Another admin must approve it.');
       }
       const event = await tx.billingEvent.create({ data: {
@@ -286,7 +349,7 @@ export async function recordCreditRefundPaid(prisma: PrismaClient, input: {
     // Two payouts racing on one reference for different accounts: the unique
     // event key lets exactly one commit, and the other is told why.
     if (isDuplicateOn(error, 'idempotencyKey')) {
-      throw new AppError(409, 'REFUND_REFERENCE_REUSED', 'This transfer reference already recorded a refund. One transfer pays one refund: check the reference.');
+      throw new AppError(409, 'REFUND_REFERENCE_REUSED', REFERENCE_REUSED);
     }
     throw error;
   }
@@ -343,11 +406,11 @@ export async function releaseCreditRefund(prisma: PrismaClient, input: {
     const event = await tx.billingEvent.create({ data: {
       subscriptionId: input.subscriptionId, type: 'PREPAID_REFUND_RELEASED', amount: open.amount, currencyCode: open.currencyCode,
       idempotencyKey: eventKey,
-      note: `Refund set-aside returned to the wallet unpaid (asked by ${input.adminId})`,
+      note: `Refund set-aside returned to the fee credit unpaid (asked by ${input.adminId})`,
     } });
     await postLedger(tx, {
       idempotencyKey: `ledger:${eventKey}`,
-      description: 'Refund set-aside returned to the wallet unpaid',
+      description: 'Refund set-aside returned to the fee credit unpaid',
       entries: refundReleasePostings(input.subscriptionId, open.amount),
     });
     await audit(tx, input, { step: 'RELEASED', amount: open.amount, currencyCode: open.currencyCode, billingEventId: event.id });

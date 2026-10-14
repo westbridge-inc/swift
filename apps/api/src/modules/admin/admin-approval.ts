@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { ADMIN_ACTION_CLASSES, type AdminActionClass, type AdminRouteAuthority } from './admin-authority';
-import { lockCreditRefundAsks, PAID_ACTION } from '../billing/credit-refund';
+import { lockCreditRefundAsks, PAID_ACTION, validatePaidAsk } from '../billing/credit-refund';
 import { SOLO_ROLE, isSoleApprover } from './solo-approval';
 
 /**
@@ -249,7 +249,13 @@ export async function resolveApproval(
     // same moment either sees it or has finished before it.
     const refundEntity = data.action === PAID_ACTION ? data.entityId : null;
     const created = refundEntity
-      ? await prisma.$transaction(async (tx) => { await lockCreditRefundAsks(tx, refundEntity); return write(tx); })
+      ? await prisma.$transaction(async (tx) => {
+        await lockCreditRefundAsks(tx, refundEntity);
+        // [Review S2-1] Checked before it is written: an ask that could never be recorded is
+        // refused now and never becomes a "payout reported" marker.
+        await validatePaidAsk(tx, refundEntity, subject.body);
+        return write(tx);
+      })
       : await write(prisma);
     return { outcome: 'requested', approvalId: created.id, fingerprint };
   }
