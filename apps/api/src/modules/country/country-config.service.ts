@@ -11,11 +11,11 @@ type Db = PrismaClient | Prisma.TransactionClient;
 /** Weekly subscription tiers in local currency. */
 export interface SubscriptionTiers {
   /**
-   * `'complete'` declares the full partner card: every rate, both catalogue
-   * boundaries and the franchise rule are present and valid, and NO fallback
-   * below applies — a missing key refuses the whole market rather than
-   * quietly pricing it as a different card. Absent in a legacy market, which
-   * keeps the documented fallbacks exactly as before.
+   * `'complete'` declares the full partner card: every rate and both catalogue
+   * boundaries are present and valid, and NO fallback below applies — a
+   * missing key refuses the whole market rather than quietly pricing it as a
+   * different card. Absent in a legacy market, which keeps the documented
+   * fallbacks exactly as before.
    */
   card?: typeof COMPLETE_CARD;
   /** STANDARD fee band — a delivery/courier Rider on a bicycle or motorbike
@@ -40,28 +40,28 @@ export interface SubscriptionTiers {
   departmentVendor?: number;
   largeCatalogueThreshold?: number;
   departmentCatalogueThreshold?: number;
-  /** Franchise: from `franchiseMinLocations` stores under one owner, every
-   *  location takes `franchiseDiscountPct` off ITS OWN rate. Both keys or
-   *  neither — one alone is a broken rule, never "no rule". */
-  franchiseMinLocations?: number;
-  franchiseDiscountPct?: number;
+  /* [Owner, 13 Oct 2026 — decision 49] There is no multi-store pricing: every
+   * store is its own account and pays its own tier by its own catalogue. A
+   * stored card written before that ruling may still carry the old
+   * `franchiseMinLocations` / `franchiseDiscountPct` keys until its settings
+   * are re-seeded; nothing reads them, so they never discount a store and
+   * never refuse a market. */
   [tier: string]: number | string | undefined;
 }
 
 export const DEFAULT_LARGE_CATALOGUE_THRESHOLD = 1000;
 export const DEFAULT_DEPARTMENT_CATALOGUE_THRESHOLD = 10000;
 
-/** What a vendor's weekly rate is decided from. */
+/** What a vendor's weekly rate is decided from: THIS store alone. How many
+ *  other stores its owner has never enters into it (owner, 13 Oct 2026). */
 export interface VendorRateBasis {
   /** SERVICE vendors have no catalogue to count. */
   isService: boolean;
   /** Active listings on this store. */
   activeListings: number;
-  /** How many stores this owner holds — the franchise basis. */
-  ownedStores: number;
 }
 
-/** Which tier a vendor's rate is built from, before any franchise discount. */
+/** Which tier a vendor's rate is built from. */
 export type VendorRateReason = 'department' | 'large' | 'service' | 'small';
 
 /** Which tier a mover's rate is built from: a taxi Driver, or a Rider on a
@@ -79,18 +79,16 @@ export type PartnerSubject =
   | ({ kind: 'VENDOR' } & VendorRateBasis);
 
 export interface PartnerRate {
-  /** What this partner owes per week, any franchise discount already applied. */
+  /** What this partner owes per week — the full rate of its tier. */
   rate: number;
   /** The tier the rate was built from. */
   tier: PartnerTier;
-  /** Whether the franchise discount was applied (vendors only). */
-  franchised: boolean;
 }
 
 /**
  * A market whose tier config cannot price a partner — a missing, zero,
- * negative, fractional or non-numeric rate, a nonsensical catalogue boundary,
- * half a franchise rule, or a discount that leaves nothing to pay. Signup
+ * negative, fractional or non-numeric rate, or a nonsensical catalogue
+ * boundary. Signup
  * refuses, activation refuses, the re-tier holds the current rate, and the
  * public list refuses to quote: an unknown price is an error, never a free
  * subscription.
@@ -149,37 +147,6 @@ export function isCompleteCard(tiers: SubscriptionTiers): boolean {
   return true;
 }
 
-/** The franchise rule a market bills: from `minLocations` stores under one
- *  owner, every location takes `discountPct` off its OWN rate. */
-export interface FranchiseRule {
-  minLocations: number;
-  discountPct: number;
-}
-
-/**
- * The market's franchise rule, validated — the same answer for the biller and
- * the public price list, so the list never quotes a rule billing would refuse.
- * Null when the market has none: BOTH keys absent, or an explicit zero
- * discount. One key alone is half a rule — a chain silently losing its
- * discount — and is refused in every market. A location count that is not a
- * whole number of stores, or a discount that is negative, not a number, or
- * leaves nothing to pay, is a broken market.
- */
-export function franchiseRuleFor(tiers: SubscriptionTiers): FranchiseRule | null {
-  const minLocations: unknown = tiers.franchiseMinLocations;
-  const discountPct: unknown = tiers.franchiseDiscountPct;
-  if (minLocations == null && discountPct == null) return null;
-  if (minLocations == null) throw new PricingConfigError('franchiseMinLocations');
-  if (discountPct == null) throw new PricingConfigError('franchiseDiscountPct');
-  if (typeof minLocations !== 'number' || !Number.isInteger(minLocations) || minLocations < 1) {
-    throw new PricingConfigError('franchiseMinLocations');
-  }
-  if (typeof discountPct !== 'number' || !Number.isFinite(discountPct) || discountPct < 0 || discountPct >= 100) {
-    throw new PricingConfigError('franchiseDiscountPct');
-  }
-  return discountPct > 0 ? { minLocations, discountPct } : null;
-}
-
 /** One catalogue step: from `minItems` active items, `rate` per week. */
 export interface CatalogueStep {
   minItems: number;
@@ -220,52 +187,29 @@ const CARD_RATE_KEYS = ['mover', 'moverHeavy', 'taxiDriver', 'serviceVendor', 's
 function assertCompleteCard(tiers: SubscriptionTiers): void {
   for (const key of CARD_RATE_KEYS) requiredRate(tiers, key);
   catalogueStepsFor(tiers);
-  franchiseRuleFor(tiers);
 }
 
 /**
- * The weekly rate a vendor pays.
+ * The weekly rate a vendor pays: the full rate of THIS store's tier — service
+ * (no catalogue), else department, large or small by its own active listing
+ * count. The threshold count itself qualifies.
  *
- * TIER first, then DISCOUNT:
- *   1. The store's own rate — service (no catalogue), else department, large
- *      or small by active listing count. The threshold count itself qualifies.
- *   2. If the owner holds `franchiseMinLocations` or more stores, take
- *      `franchiseDiscountPct` off THAT rate.
+ * [Owner, 13 Oct 2026 — decision 49] "No franchises — they pay per store and
+ * each store has to have its own account and pay per size of catalogue." No
+ * discount applies for owning several stores: an owner's fifth store pays
+ * exactly what it would pay alone.
  *
- * The discount is deliberately applied to each store's own tier rather than
- * replacing it with a flat bundle: a flat bundle would let a chain of five
- * department stores pay less than a single one, which is not a volume
- * discount, it is a loophole.
- *
- * Every threshold, price and percentage is config. A LEGACY market that has
- * set none of the optional keys behaves exactly as it did before they existed.
+ * Every threshold and price is config. A LEGACY market that has set none of
+ * the optional keys behaves exactly as it did before they existed.
  */
-function vendorRateFor(tiers: SubscriptionTiers, basis: VendorRateBasis): { rate: number; reason: VendorRateReason; franchised: boolean } {
-  let rate: number;
-  let reason: VendorRateReason;
-
+function vendorRateFor(tiers: SubscriptionTiers, basis: VendorRateBasis): { rate: number; reason: VendorRateReason } {
   if (basis.isService) {
-    rate = optionalRate(tiers, 'serviceVendor', isCompleteCard(tiers)) ?? requiredRate(tiers, 'smallVendor');
-    reason = 'service';
-  } else {
-    const steps = catalogueStepsFor(tiers);
-    let step = steps[0]!;
-    for (const candidate of steps) if (basis.activeListings >= candidate.minItems) step = candidate;
-    rate = step.rate;
-    reason = step.tier;
+    return { rate: optionalRate(tiers, 'serviceVendor', isCompleteCard(tiers)) ?? requiredRate(tiers, 'smallVendor'), reason: 'service' };
   }
-
-  const franchise = franchiseRuleFor(tiers);
-  const franchised = franchise != null && basis.ownedStores >= franchise.minLocations;
-
-  // Round to whole currency units: a weekly fee is a number a shop owner reads
-  // off an invoice, and 787.7 is not one. GYD has no subunit in practice, and
-  // the column is Decimal(10,2), so this never loses money to rounding drift.
-  if (franchised) rate = Math.round(rate * (1 - franchise.discountPct / 100));
-  // A "discount" that leaves nothing to pay is a misconfiguration, not a price.
-  if (!(rate > 0)) throw new PricingConfigError('franchiseDiscountPct');
-
-  return { rate, reason, franchised };
+  const steps = catalogueStepsFor(tiers);
+  let step = steps[0]!;
+  for (const candidate of steps) if (basis.activeListings >= candidate.minItems) step = candidate;
+  return { rate: step.rate, reason: step.tier };
 }
 
 /**
@@ -299,11 +243,10 @@ export function partnerRateFor(tiers: SubscriptionTiers, subject: PartnerSubject
   if (tiers == null || typeof tiers !== 'object' || Array.isArray(tiers)) throw new PricingConfigError('subscriptionTiers');
   if (isCompleteCard(tiers)) assertCompleteCard(tiers);
   if (subject.kind === 'VENDOR') {
-    const { rate, reason, franchised } = vendorRateFor(tiers, subject);
-    return { rate, tier: reason, franchised };
+    const { rate, reason } = vendorRateFor(tiers, subject);
+    return { rate, tier: reason };
   }
-  const { rate, tier } = moverRateFor(tiers, subject.kind, subject.vehicleType);
-  return { rate, tier, franchised: false };
+  return moverRateFor(tiers, subject.kind, subject.vehicleType);
 }
 
 /** Shared tariff read for services and already-locked money transactions. */
