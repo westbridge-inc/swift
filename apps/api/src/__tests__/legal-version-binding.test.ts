@@ -156,12 +156,14 @@ const PUBLISHED: Record<
   // no cancellation fee ever; a store order is free until the store accepts,
   // then the customer contacts the store; rides, parcels and bookings free
   // while unaccepted and for five minutes after acceptance (owner ruling
-  // 14 Oct); a service job free until the provider
-  // starts; no-mover and very-late exits. Proven the only change: putting the
+  // 14 Oct); a service job request free in the app until it is booked, then
+  // the customer contacts the provider; an MMG Order whose payment the
+  // Business confirmed is never cancelled in the app (the Business cancels and
+  // refunds); no-mover and very-late exits. Proven the only change: putting the
   // 14 Oct paragraph and date back reproduces all four 2026-10-14 hashes
   // exactly. The date re-pins all four.
   '2026-10-15': {
-    terms: '59a99f717a44f8738ab241d03e1a1ed7864498e268ce4045bd995e26f872e4df',
+    terms: '20757d114063d24da7d8f11cab48a0674ffe8b28ed0b4a151293853e86df2b41',
     privacy: '9b0bc20a6fef07772523483fa63d120bb915cb9c588214c519dfc506042ab2fe',
     driver_agreement: 'b148daa56ef00e9325cd364e90b7c5f19bc262ee260c557237bcd4d517c3b4d8',
     vendor_agreement: '89b9d5525e22546b9102b56421436bb7970e66ae63192bc5e31a5886de3e8c99',
@@ -191,6 +193,14 @@ describe('legal version binding [F-035-08]', () => {
   it('the Terms name no cancellation fee — Swift never charges one [owner #46/#50/#52]', () => {
     expect(TERMS).toContain('<b>Swift never charges a cancellation fee.</b>');
     expect(TERMS).not.toMatch(/cancellation fee may apply|including any fee/i);
+  });
+
+  it('the Terms never promise an in-app cancel the app refuses [Opus review 14 Oct S3-1/S3-3]', () => {
+    // An MMG Order whose payment the Business confirmed (CAPTURED/CLAIMED) is refused at every stage, even before acceptance.
+    expect(TERMS).toContain('If you paid by MMG and the Business has already confirmed your payment, the app cannot cancel the Order at any stage, even before the Business accepts it: contact the Business to cancel it.');
+    // The app offers a customer Cancel on a service job only while it is a request (REQUESTED/QUOTED), not once booked.
+    expect(TERMS).toContain('A service job request can be cancelled free in the app until the job is booked; once it is booked, contact the provider to change or cancel it.');
+    expect(TERMS).not.toMatch(/service job can be cancelled free until the provider starts/i);
   });
 
   it('the served version is a version this file has pinned', () => {

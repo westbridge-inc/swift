@@ -53,7 +53,8 @@ export default function RefundsPage() {
       <h2>Cancelling an order</h2>
       <ul>
         <li>
-          <b>Before the business accepts your order</b>, cancelling is free, however long it has been waiting.
+          <b>Before the business accepts your order</b>, cancelling is free, however long it has been waiting
+          (unless you paid by MMG and the business has already confirmed your payment: see below).
         </li>
         <li>
           <b>After the business accepts it</b>, the order can no longer be cancelled in the app. Contact the business to
@@ -67,8 +68,8 @@ export default function RefundsPage() {
           You can still cancel free if no driver or rider was found, or if they are running very late, as the app shows.
         </li>
         <li>
-          <b>A service job</b> (a local pro you hired through the app) can be cancelled free until the provider starts
-          the work. After that, contact the provider.
+          <b>A service job</b> (a local pro you hired through the app) can be cancelled free in the app while it is a
+          request, until the job is booked. Once it is booked, contact the provider to change or cancel it.
         </li>
         <li>
           <b>Once the order is on its way</b> (the rider has collected it, or you are in the taxi), it can no longer be
@@ -83,8 +84,8 @@ export default function RefundsPage() {
           account, not {site.tradeName}&apos;s.
         </li>
         <li>
-          <b>Paid by MMG, and the business has not accepted the order yet:</b> you can cancel in the app. If your payment
-          had already gone through, the business refunds it to you directly.
+          <b>Paid by MMG, but the business has not confirmed your payment yet:</b> you can cancel in the app. If your
+          payment had already gone through, the business refunds it to you directly.
         </li>
         <li>
           <b>Paying cash:</b> you pay only when the order is handed over, so there is nothing to refund on a cancelled
