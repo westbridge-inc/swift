@@ -85,15 +85,13 @@ describe('no stored-money words on any screen [owner ruling 8 Oct]', () => {
 
 // [OWNER #62 · 14 Oct, NO PAYING AHEAD] "shouldn't they just pay the weekly
 // fee, no paying ahead": partners pay one week at a time, so no screen offers
-// or describes paying ahead or covering several weeks. The published legal
-// pages (website /legal) change only through a legal change with its own
-// version bump, so they are outside this rule until then.
-const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
-const PUBLISHED_LEGAL = /[\\/]web[\\/]src[\\/]app[\\/]legal[\\/]/;
+// or describes paying ahead or covering several weeks — the website's
+// published legal pages included.
+const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\b(?:two|three|four|five|several|many|\d+) weeks ahead\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
 
 describe('no screen offers paying ahead [owner #62]', () => {
   it('the phone app, the website and the admin console never say "paid ahead" or several weeks', () => {
-    const list = SURFACES.flatMap((dir) => files(root(dir))).filter((file) => !PUBLISHED_LEGAL.test(file));
+    const list = SURFACES.flatMap((dir) => files(root(dir)));
     expect(list.length).toBeGreaterThan(600);
     const hits = list.flatMap((file) => screenWords(file, readFileSync(file, 'utf8'), PAYING_AHEAD_WORDS, [])
       .map((hit) => `${relative(root('../..'), file)}:${hit.line} ${hit.text}`));

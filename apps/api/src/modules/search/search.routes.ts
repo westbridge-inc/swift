@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { launchMarketAt } from '../auth/launch-market';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -195,7 +196,7 @@ export async function searchRoutes(app: FastifyInstance) {
       // [B2] The ONE visibility predicate — this fallback previously
       // dropped tenant.isActive, so a shut-off operator's store surfaced
       // whenever Meilisearch was down.
-      ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode),
+      ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode, await readFeePause(app.prisma)),
       // Empty stores stay out; CLOSED ones are found, marked closed (owner, 13 Oct).
       ...(ctx.publicMode && { items: { some: { isAvailable: true } } }),
       ...(ctx.type && { vendorType: ctx.type }),
@@ -260,7 +261,7 @@ export async function searchRoutes(app: FastifyInstance) {
     /** false: the exact-spelling tiers only (see TOP_UP_TIERS). */
     slips?: boolean;
   }): Promise<ItemHit[]> {
-    // [S2-1] Guest surfaces exclude hidden-only items IN the query, before
+    // [S2-1] Every surface excludes hidden-only items IN the query, before
     // the window is capped; the listing gate below stays a defensive pass.
     // [GUARDRAILS §8] Prohibited items (banned, or held for a check): every
     // caller, on every path that reads here — the DB search, the top-up of a
@@ -273,7 +274,7 @@ export async function searchRoutes(app: FastifyInstance) {
       // relation filter is not reached by the tenant-scoping extension: the
       // tenant is named here.
       // A closed store's dishes are found too, marked by its closed state (owner, 13 Oct).
-      vendor: catalogueVendorInTenant(ctx.tenantId, ctx.publicMode),
+      vendor: catalogueVendorInTenant(ctx.tenantId, ctx.publicMode, await readFeePause(app.prisma)),
       ...(excluded.length > 0 ? { id: { notIn: excluded } } : {}),
     };
     const byName = nameFirst(ctx.q);
@@ -289,9 +290,10 @@ export async function searchRoutes(app: FastifyInstance) {
       }),
       keep: async (found) => {
         const marketItems = found.filter((item) => inLaunchMarket(item.vendor));
+        // [§8 · review S2-PRE] the shared listing gate, for EVERY caller (it was guests only)
         // [GUARDRAILS §8] The exact last pass, before a row counts toward the
         // page: a prohibited row is never returned, whatever the cached list said.
-        return withoutHidden(app.prisma, ctx.publicMode ? await listableItemsForVendors(app.prisma, ctx.tenantId, marketItems) : marketItems);
+        return withoutHidden(app.prisma, await listableItemsForVendors(app.prisma, ctx.tenantId, marketItems));
       },
       rank: (found, tier) => openFirst(byName(found, tier), (i) => i.vendor.isCurrentlyOpen),
       limit: ctx.limit,
@@ -312,8 +314,9 @@ export async function searchRoutes(app: FastifyInstance) {
       return { success: true, data: { vendors: [], items: [] } };
     }
 
-    // [S2-1] Hidden-only items never occupy a guest's window: excluded in the query.
-    const hiddenOnly = publicMode ? await hiddenOnlyItemIds(app.prisma, tenantId) : [];
+    // [S2-1] Hidden-only items never occupy the window: excluded in the query,
+    // for every caller (§8 · review S2-PRE: this was guests only).
+    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
 
     // Public discovery reads live browse eligibility. An index hit alone is
     // not authority to publish a listing whose visibility may have changed.
@@ -361,18 +364,21 @@ export async function searchRoutes(app: FastifyInstance) {
         const prohibited = await hiddenItemIds(app.prisma, tenantId);
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
-            where: { ...catalogueVendorInTenant(tenantId, false), id: { in: vendorHits.map((v) => v.id) } },
+            where: { ...catalogueVendorInTenant(tenantId, false, await readFeePause(app.prisma)), id: { in: vendorHits.map((v) => v.id) } },
             select: { id: true, latitude: true, longitude: true, isCurrentlyOpen: true },
           }),
           app.prisma.item.findMany({
-            where: { id: { in: itemHits.map((i) => i.id), ...(prohibited.length > 0 ? { notIn: prohibited } : {}) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, false) },
+            where: { id: { in: itemHits.map((i) => i.id), ...(prohibited.length > 0 ? { notIn: prohibited } : {}) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, false, await readFeePause(app.prisma)) },
             select: { id: true, vendorId: true, vendor: { select: { latitude: true, longitude: true, isCurrentlyOpen: true } } },
           }),
         ]);
+        // [§8 · review S2-PRE] the index holds what the listing gate refuses (hidden-only
+        // tags, a lapsed licence): the same shared gate the Market feed and guests get
+        const listedLive = await listableItemsForVendors(app.prisma, tenantId, liveItems.filter((i) => inLaunchMarket(i.vendor)));
         // open-now as the DATABASE says, for stores and for each dish's store —
         // the hit's copy may predate an opening or a closing
         const vendorOpen = new Map(liveVendors.filter(inLaunchMarket).map((v) => [v.id, v.isCurrentlyOpen]));
-        const itemStoreOpenNow = new Map(liveItems.filter((i) => inLaunchMarket(i.vendor)).map((i) => [i.id, i.vendor.isCurrentlyOpen]));
+        const itemStoreOpenNow = new Map(listedLive.map((i) => [i.id, i.vendor.isCurrentlyOpen]));
         const visibleVendors = openFirst(
           vendorHits.filter((v) => vendorOpen.has(v.id)).map((v) => ({ ...v, isCurrentlyOpen: vendorOpen.get(v.id)! })),
           storeOpen,
@@ -443,20 +449,20 @@ export async function searchRoutes(app: FastifyInstance) {
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
     const publicMode = Boolean(request.publicTenantId);
     // [S2-1] Hidden-only items never occupy the fixed five-item window: they
-    // are excluded here, before the take, not after it.
+    // are excluded here, before the take, not after it — for every caller.
     const hiddenOnly = [
-      ...(publicMode ? await hiddenOnlyItemIds(app.prisma, tenantId) : []),
+      ...(await hiddenOnlyItemIds(app.prisma, tenantId)),
       // [GUARDRAILS §8] Prohibited items: every caller.
       ...(await hiddenItemIds(app.prisma, tenantId)),
     ];
     const tiers = searchTiers(q, NAME_COLUMNS);
     // Closed stores and their dishes are suggested too, marked closed (owner, 13 Oct).
-    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode), ...(publicMode && { items: { some: { isAvailable: true } } }) };
+    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode, await readFeePause(app.prisma)), ...(publicMode && { items: { some: { isAvailable: true } } }) };
     const itemBase = {
       isAvailable: true,
       // [B2] This query had NO vendor predicate at all — a banned store's
       // dish names kept autocompleting for every customer who typed.
-      vendor: catalogueVendorInTenant(tenantId, publicMode),
+      vendor: catalogueVendorInTenant(tenantId, publicMode, await readFeePause(app.prisma)),
       ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
     };
 
@@ -487,7 +493,7 @@ export async function searchRoutes(app: FastifyInstance) {
           const marketItems = found.filter((i) => inLaunchMarket(i.vendor));
           // [GUARDRAILS §8] The exact last pass, before a row counts toward the five:
           // a prohibited row is never returned, whatever the cached list said.
-          return withoutHidden(app.prisma, publicMode ? await listableItemsForVendors(app.prisma, tenantId, marketItems) : marketItems);
+          return withoutHidden(app.prisma, await listableItemsForVendors(app.prisma, tenantId, marketItems));
         },
         limit: 5,
       }),
@@ -512,16 +518,16 @@ export async function searchRoutes(app: FastifyInstance) {
   app.get('/search/trending', { preHandler: [browseSearch] }, async (request) => {
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
     // [S2-1] Same rule, before the fixed take — a hidden-only tag must not
-    // crowd a trending row out of the rail's window.
+    // crowd a trending row out of the rail's window. Every caller (§8).
     const hiddenOnly = [
-      ...(request.publicTenantId ? await hiddenOnlyItemIds(app.prisma, tenantId) : []),
+      ...(await hiddenOnlyItemIds(app.prisma, tenantId)),
       // [GUARDRAILS §8] Prohibited items: every caller.
       ...(await hiddenItemIds(app.prisma, tenantId)),
     ];
     const items = await app.prisma.item.findMany({
       where: {
         isAvailable: true,
-        vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), isCurrentlyOpen: true },
+        vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)), isCurrentlyOpen: true },
         ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
       },
       // The shared select again. Trending is the Market tab's fallback rail, so
@@ -535,10 +541,9 @@ export async function searchRoutes(app: FastifyInstance) {
 
     // [DS982] A dish from a store outside the launch market never trends.
     const marketItems = items.filter((i) => inLaunchMarket(i.vendor));
+    // [§8 · review S2-PRE] the shared listing gate for every caller, as the Market feed
     // [GUARDRAILS §8] The exact last pass: a prohibited row is never returned, whatever the cached list said.
-    const listable = await withoutHidden(app.prisma, request.publicTenantId
-      ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
-      : marketItems);
+    const listable = await withoutHidden(app.prisma, await listableItemsForVendors(app.prisma, tenantId, marketItems));
     return {
       success: true,
       // ItemHit plus the one field that makes it *trending* — a superset, never
@@ -582,7 +587,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const vendors = await app.prisma.vendor.findMany({
       where: {
-        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
+        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)),
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.
         items: { some: { isAvailable: true } },

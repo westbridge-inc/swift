@@ -12,6 +12,7 @@ import { useVerificationStatus, useBecomePartner, useChangeVehicle } from '../..
 import { useStepUp, type MutationGuard } from '../../../hooks/useStepUp';
 import { StepUpDismissed } from '../../../lib/stepUp';
 import { VEHICLE_COPY, vehicleOffered } from '../../../lib/vehicleOffer';
+import { taxiPlateMessage } from '../../../lib/taxiPlate';
 import { usePartnerPricing } from '../../../hooks/partnerPricing';
 import { moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
@@ -120,7 +121,10 @@ export function VehicleSetup({
   // exact version at provisioning, the same way signup records the Terms.
   const [agree, setAgree] = useState(false);
   const needsDetails = DRIVER_VEHICLE_KINDS.includes(vt);
-  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate);
+  // [Owner ruling 11 Oct 2026 — H-PLATE] A taxi plate starts with H: said under the field, and a
+  // non-H taxi plate cannot be saved (the server refuses it too, in the same words).
+  const plateMessage = needsDetails ? taxiPlateMessage(vt, plate) : null;
+  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate && !plateMessage?.error);
   // The agreement was recorded when the first vehicle was saved; a change does not re-ask.
   const needsAgreement = mode === 'join';
   const sameAsSaved = mode === 'change' && vt === current && !needsDetails;
@@ -177,7 +181,10 @@ export function VehicleSetup({
             <LabeledInput containerStyle={{ flex: 1 }} value={year} onChangeText={setYear} placeholder="Year" keyboardType="number-pad" />
             <LabeledInput containerStyle={{ flex: 1 }} value={colr} onChangeText={setColr} placeholder="Colour" />
           </View>
-          <LabeledInput value={plate} onChangeText={setPlate} placeholder="Licence plate" autoCapitalize="characters" />
+          <LabeledInput value={plate} onChangeText={setPlate} placeholder="Licence plate" autoCapitalize="characters" error={plateMessage?.error ? plateMessage.text : undefined} />
+          {plateMessage && !plateMessage.error ? (
+            <T variant="caption" tone="muted">{plateMessage.text}</T>
+          ) : null}
         </View>
       ) : null}
       {needsAgreement ? (
