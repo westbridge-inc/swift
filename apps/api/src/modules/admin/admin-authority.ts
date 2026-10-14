@@ -166,8 +166,9 @@ export function isExplicitOnly(capability: string): boolean {
   return EXPLICIT_ONLY_CAPABILITIES.includes(capability);
 }
 
-/** A route that opens or decides a document: its capability AND the reviewer grant. */
-const reviewed = (authority: AdminRouteAuthority): AdminRouteAuthority => ({ ...authority, requires: DOCUMENT_REVIEWER_CAPABILITY });
+/** A route that opens or decides a document: its capability AND the reviewer grant. [GUARDRAILS §8 · Opus S3-9]
+ *  The same wrapper names the catalogue approver grant on the one route that shows a held item. */
+const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIEWER_CAPABILITY): AdminRouteAuthority => ({ ...authority, requires: grant });
 
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
@@ -308,7 +309,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // an item for the exact words seen; removing bans it for good. Both touch a
   // partner's livelihood, so a reason is owed (C3).
   'GET /catalogue-review': c('C1', 'moderation.read'),
-  'POST /catalogue-review/:id/approve': { ...c('C3', 'moderation.decide', E.item), requires: CATALOGUE_APPROVER_CAPABILITY },
+  'POST /catalogue-review/:id/approve': reviewed(c('C3', 'moderation.decide', E.item), CATALOGUE_APPROVER_CAPABILITY),
   'POST /catalogue-review/:id/remove': c('C3', 'moderation.decide', E.item),
 
   // ── National pricing (founder + default tenant) ─────────────────────────
