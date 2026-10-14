@@ -4,7 +4,7 @@ import { chatRoutes } from '../modules/chat/chat.routes';
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 
-const effects = vi.hoisted(() => ({ notify: vi.fn(), emit: vi.fn() }));
+const effects = vi.hoisted(() => ({ notify: vi.fn(), emit: vi.fn(), to: vi.fn() }));
 vi.mock('../modules/notification/notification.service', () => ({
   NotificationService: class { send = effects.notify; },
 }));
@@ -53,7 +53,18 @@ beforeEach(async () => {
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   app.decorate('prisma', db as unknown as FastifyInstance['prisma']);
-  app.decorate('io', { to: () => ({ emit: effects.emit }) } as unknown as FastifyInstance['io']);
+  // Chat publications go through the room gate (emitToChatRoom): it takes the
+  // room's connected sockets first, then addresses only the sockets of the
+  // conversation's current people, by id. Seat the recipient's socket in the
+  // room so delivery is observed where it actually lands.
+  const recipientSocket = {
+    id: 'recipient-socket', leave: async () => {},
+    data: { userId: 'recipient', tenantId: 'tenant-a', authorizationExpiresAtMs: Date.now() + 3_600_000 },
+  };
+  app.decorate('io', {
+    in: (room: string) => ({ fetchSockets: async () => (room === 'chat:room' ? [recipientSocket] : []) }),
+    to: (target: unknown) => { effects.to(target); return { emit: effects.emit }; },
+  } as unknown as FastifyInstance['io']);
   app.decorate('authenticate', async (request: FastifyRequest) => {
     request.user = { userId: request.headers['x-user'] ?? 'sender', role: 'CUSTOMER' } as FastifyRequest['user'];
     request.tenantId = String(request.headers['x-tenant'] ?? 'tenant-a');
@@ -102,6 +113,8 @@ describe('chat content admission before persistence and delivery', () => {
     expect(response.json().data.message).toBe(message);
     expect(db.chatMessage.create).toHaveBeenCalledOnce();
     expect(effects.emit).toHaveBeenCalledOnce();
+    expect(effects.to).toHaveBeenCalledWith(['recipient-socket']);
+    expect(effects.emit).toHaveBeenCalledWith('chat:message', expect.objectContaining({ message }));
     expect(effects.notify).toHaveBeenCalledWith(expect.objectContaining({ body: message.substring(0, 100) }));
   });
 
@@ -150,6 +163,8 @@ describe('the launch switch is off until build 10 is live in both stores', () =>
     expect(response.json().data.message).toBe(message);
     expect(db.chatMessage.create).toHaveBeenCalledOnce();
     expect(effects.emit).toHaveBeenCalledOnce();
+    expect(effects.to).toHaveBeenCalledWith(['recipient-socket']);
+    expect(effects.emit).toHaveBeenCalledWith('chat:message', expect.objectContaining({ message }));
     expect(effects.notify).toHaveBeenCalledWith(expect.objectContaining({ body: message.substring(0, 100) }));
   });
 });
