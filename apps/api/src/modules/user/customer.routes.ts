@@ -20,6 +20,8 @@ import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/di
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
 import { customerCancelView, readNoMoverFound } from '../order/cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
+import { ORDER_TRANSITIONS } from '../order/order-status';
+import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
 import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
@@ -2645,7 +2647,13 @@ export async function customerRoutes(app: FastifyInstance) {
     // [E17 · DS202 D3] A parcel on its way back (RETURNING) is in the mover's
     // custody like the forward leg, and RETURNED is closed: neither offers a
     // Cancel the locked cancel path would refuse.
-    const cancellableState = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING', 'RETURNED'].includes(order.status)
+    // [owner #46/#50 · DS1140 S3] The statuses the locked cancel path accepts
+    // are the state machine's own (ORDER_TRANSITIONS.CANCELLED) minus a taxi
+    // with its passenger aboard — read from there, never a hand-kept list, so
+    // a FAILED or in-progress order is never promised a free cancel the
+    // server then refuses.
+    const cancellableState = ORDER_TRANSITIONS.CANCELLED.includes(order.status)
+      && !(order.orderType === 'TAXI' && hasTaxiPassengerCustody(order))
       && !(order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus));
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]

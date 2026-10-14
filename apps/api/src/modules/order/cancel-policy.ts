@@ -256,6 +256,14 @@ export function isVeryLate(order: CancellationSnapshot, now: Date = new Date()):
   return promised != null && now.getTime() >= plusMinutes(promised, VERY_LATE_AFTER_MIN).getTime();
 }
 
+/** [owner #46/#50/#52] Whose lateness frees the cancel, in the customer's words. */
+function tooLateMessage(order: CancellationSnapshot): string {
+  if (order.fulfillment === 'APPOINTMENT') return 'The provider is running very late. You can cancel the booking for free.';
+  if (order.orderType === 'TAXI') return 'Your driver is running very late. You can cancel the ride for free.';
+  if (order.orderType === 'COURIER') return 'Your rider is running very late. You can cancel for free.';
+  return TOO_LATE_FREE_CANCEL_MESSAGE;
+}
+
 /** [owner #50] Who the customer contacts instead, in the refusal's words. */
 function windowClosedMessage(order: CancellationSnapshot): string {
   const closed = `the ${FREE_CANCEL_WINDOW_MIN}-minute cancellation window has passed`;
@@ -348,7 +356,7 @@ export function customerCancelView(order: CancellationSnapshot, now: Date = new 
     ? NO_MOVER_FREE_CANCEL_MESSAGE
     : verdict.reason === 'AWAITING_STORE'
       ? AWAITING_STORE_FREE_CANCEL_MESSAGE
-      : verdict.reason === 'TOO_LATE' ? TOO_LATE_FREE_CANCEL_MESSAGE : null;
+      : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
   return {
     canCancel: true,
     freeCancellationExpiresAt: freeCancellationExpiresAt(order, now)?.toISOString() ?? null,

@@ -341,6 +341,15 @@ describe('[owner #46] the two exceptions stay free after the store accepted', ()
     expect(refused.json().error.code).toBe('STORE_ACCEPTED');
   });
 
+  it('[DS1140 S3] a failed handover is never offered a cancel, even past its promise — the server would refuse it', async () => {
+    const { vendorId } = await makeVendor();
+    const failed = await makeStoreOrder(customer.userId, vendorId, 'FAILED', { promisedAt: new Date(Date.now() - 31 * 60_000) });
+    const { data } = await preview(failed.id, customer.token);
+    expect(data).toMatchObject({ canCancel: false, freeCancellationWindow: false, cancellationMessage: null, cancelUnavailable: null });
+    const res = await inject('POST', `/api/v1/customer/orders/${failed.id}/cancel`, customer.token, {});
+    expect(res.statusCode, res.body).toBe(400);
+  });
+
   it('[owner #52] a scheduled order is never late before its slot', async () => {
     const { vendorId } = await makeVendor();
     const order = await makeStoreOrder(customer.userId, vendorId, 'ACCEPTED', {

@@ -31,7 +31,8 @@ const PUBLISHED = '+5926004321';
 const RIDE_CLOSED = 'This ride can no longer be cancelled in the app: the 5-minute cancellation window has passed. Contact your driver.';
 const PARCEL_CLOSED = 'This delivery can no longer be cancelled in the app: the 5-minute cancellation window has passed. Contact your rider.';
 const BOOKING_CLOSED = 'This booking can no longer be cancelled in the app: the 5-minute cancellation window has passed. Contact the provider to change or cancel it.';
-const VERY_LATE_MESSAGE = 'Your order is running very late. You can cancel it for free.';
+const RIDE_LATE_MESSAGE = 'Your driver is running very late. You can cancel the ride for free.';
+const PARCEL_LATE_MESSAGE = 'Your rider is running very late. You can cancel for free.';
 
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
@@ -295,7 +296,7 @@ describe('[owner #50] a ride cancels free inside the five-minute window, then no
   it('the driver is very late — 30 minutes after accepting and still not there: free; at 29 minutes: refused', async () => {
     const rider = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const late = await makeTaxi(rider.userId, 'DRIVER_EN_ROUTE', { placedAt: minutesAgo(32), acceptedAt: minutesAgo(31) });
-    expect(await activeRide(rider.token)).toMatchObject({ id: late.id, canCancel: true, cancellationMessage: VERY_LATE_MESSAGE });
+    expect(await activeRide(rider.token)).toMatchObject({ id: late.id, canCancel: true, cancellationMessage: RIDE_LATE_MESSAGE });
     const res = await inject('POST', `/api/v1/rides/${late.id}/cancel`, rider.token, {});
     await expectCancelledFree(late.id, res);
     expect(res.json().data.message).toBe('Ride cancelled because it was running very late.');
@@ -356,7 +357,7 @@ describe('[owner #50] a parcel follows the same rule — through the sender canc
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     // Quoted 20 minutes: very late from minute 50.
     const late = await makeParcel(sender.userId, 'RIDER_EN_ROUTE_PICKUP', { placedAt: minutesAgo(51) });
-    expect(await orderPreview(late.id, sender.token)).toMatchObject({ canCancel: true, cancellationMessage: VERY_LATE_MESSAGE });
+    expect(await orderPreview(late.id, sender.token)).toMatchObject({ canCancel: true, cancellationMessage: PARCEL_LATE_MESSAGE });
     expect((await inject('POST', `/api/v1/courier/order/${late.id}/cancel`, sender.token, {})).statusCode).toBe(200);
 
     const notYet = await makeParcel(sender.userId, 'RIDER_EN_ROUTE_PICKUP', { placedAt: minutesAgo(48) });
