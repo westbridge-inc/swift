@@ -34,10 +34,14 @@ async function fixture() {
     return rows;
   });
   const readItems = vi.fn(async (q: Query) => items.map(i => queryRow(i, q)).filter(i => i !== null));
+  // [S2-1 time bound] search reads run in a short transaction that first sets a local statement timeout.
+  const tx: { client?: unknown } = {};
   const prisma = prismaDouble(orderStore([]), {
     vendor: { findMany: readVendors }, item: { findMany: readItems, count: async (q: Query) => (await readItems(q)).length },
     actorRatingStat: { findMany: async () => [] }, platformConfig: { findMany: async () => [] },
+    $executeRaw: async () => 1, $transaction: async (fn: (client: unknown) => unknown) => fn(tx.client),
   });
+  tx.client = prisma;
   const parts = { prisma, redis: recordingRedis(), io: recordingIo() };
   const search = await hostRoutes(searchRoutes, parts); const market = await hostRoutes(marketRoutes, parts);
   const customer = await hostRoutes(customerRoutes, parts);

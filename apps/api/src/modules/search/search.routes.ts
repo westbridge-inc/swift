@@ -12,6 +12,7 @@ import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/cate
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 import { fillFromTiers, nameMatcher, searchTiers, type Tier } from './forgiving-text';
+import { SEARCH_DB_BUDGET_MS, boundedRead, isOutOfTime } from './search-budget';
 
 // [B2] ONE wire contract whichever engine answered. The route used to hand
 // clients raw Meilisearch hits on the fast path and raw Prisma rows on the
@@ -166,6 +167,16 @@ export async function searchRoutes(app: FastifyInstance) {
   // catalogue's tenant — the one browse binding, shared with the Home rail.
   const browseSearch = bindBrowseTenant(app);
 
+  // [Review S2-1 · time bound] Every forgiving database read is bounded in
+  // time (search-budget.ts): the database stops a read at the fill's deadline
+  // and the door answers with what the stricter tiers found. Logged without
+  // the query text.
+  const timed = (door: string) => ({
+    budgetMs: SEARCH_DB_BUDGET_MS,
+    outOfTime: isOutOfTime,
+    onOutOfTime: () => app.log.warn({ door }, 'search read ran out of time; answered with what the stricter tiers found'),
+  });
+
   /** The database search of stores: the tiers of forgiving-text.ts, strictest
    *  first, every live gate applied before a row counts toward the page. */
   async function dbVendors(ctx: {
@@ -188,7 +199,8 @@ export async function searchRoutes(app: FastifyInstance) {
     const byName = nameFirst(ctx.q);
     const rows = await fillFromTiers({
       tiers: tiersFor(ctx.q, VENDOR_COLUMNS, ctx.slips),
-      fetch: (where, take) => app.prisma.vendor.findMany({
+      ...timed('search.vendors'),
+      fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.vendor.findMany({
         where: { AND: [base, where] },
         select: {
           id: true, name: true, slug: true, vendorType: true, logoUrl: true, coverImageUrl: true,
@@ -196,7 +208,7 @@ export async function searchRoutes(app: FastifyInstance) {
         },
         take,
         orderBy: [{ averageRating: 'desc' }, { id: 'asc' }],
-      }),
+      })),
       // [DS982] A store whose committed pin lies outside the launch market is never found.
       keep: (found) => found.filter(inLaunchMarket),
       // With the customer's point, the nearest first inside each tier's window
@@ -256,14 +268,15 @@ export async function searchRoutes(app: FastifyInstance) {
     };
     const rows = await fillFromTiers({
       tiers: tiersFor(ctx.q, ITEM_COLUMNS, ctx.slips),
-      fetch: (where, take) => app.prisma.item.findMany({
+      ...timed('search.items'),
+      fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.item.findMany({
         where: { AND: [base, where] },
         // The shared select, so this path cannot quietly serve fewer fields
         // than the index path and make the engine visible to the client.
         select: ITEM_HIT_PIN_SELECT,
         take,
         orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
-      }),
+      })),
       keep: async (found) => {
         const marketItems = found.filter((item) => inLaunchMarket(item.vendor));
         return ctx.publicMode ? listableItemsForVendors(app.prisma, ctx.tenantId, marketItems) : marketItems;
@@ -423,26 +436,28 @@ export async function searchRoutes(app: FastifyInstance) {
     const [vendors, items] = await Promise.all([
       fillFromTiers({
         tiers,
-        fetch: (where, take) => app.prisma.vendor.findMany({
+        ...timed('suggestions.vendors'),
+        fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.vendor.findMany({
           where: { AND: [vendorBase, where] },
           select: { id: true, name: true, vendorType: true, latitude: true, longitude: true },
           orderBy: [{ averageRating: 'desc' }, { id: 'asc' }],
           take,
-        }),
+        })),
         // [DS982] A store outside the launch market never autocompletes, nor do its dishes.
         keep: (found) => found.filter(inLaunchMarket),
         limit: 5,
       }),
       fillFromTiers({
         tiers,
-        fetch: (where, take) => app.prisma.item.findMany({
+        ...timed('suggestions.items'),
+        fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.item.findMany({
           where: { AND: [itemBase, where] },
           select: { id: true, vendorId: true, name: true, vendor: { select: { latitude: true, longitude: true } } },
           // [DS233 F8] A stable window: the most-ordered matches first, never
           // whatever order the heap scan happens to return.
           orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
           take,
-        }),
+        })),
         keep: async (found) => {
           const marketItems = found.filter((i) => inLaunchMarket(i.vendor));
           return publicMode ? listableItemsForVendors(app.prisma, tenantId, marketItems) : marketItems;

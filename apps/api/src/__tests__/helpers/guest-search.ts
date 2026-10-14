@@ -113,6 +113,11 @@ export async function guestSearchApp(max = 200) {
     categoryDocumentGate: { findMany: vi.fn(async () => [{ code: 'licence', categorySlug: 'licensed', categoryKind: null, enforcement: 'BLOCK_LISTING', requiredDocType: { legacyCode: 'LICENCE', displayName: 'Licence' } }]) },
     verificationDocument: { findFirst: vi.fn(async (): Promise<{ id: string } | null> => null) },
     itemDiscoveryCategory: delegate(tags),
+    // [S2-1 time bound] search reads run in a short transaction that first
+    // sets a local statement timeout (search-budget.ts); the double runs the
+    // read on itself and records the setting.
+    $executeRaw: vi.fn(async (..._args: unknown[]) => 1),
+    $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(db)),
   };
   const app = Fastify({ logger: false });
   registerErrorHandler(app);
