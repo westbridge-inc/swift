@@ -114,6 +114,8 @@ describe('[owner #18] the formula never prices under the base fee', () => {
 
   it('a bad per-km rate or a surge below 1 in a market config cannot price under it', () => {
     expect(deliveryFeeFromRates(8, { ...DEFAULT_DELIVERY_RATES, perKmRate: -100 })).toBe(500);
+    // A negative per-km rate counts as none: it never eats into a surged base either.
+    expect(deliveryFeeFromRates(10, { ...DEFAULT_DELIVERY_RATES, perKmRate: -100, surgeMultiplier: 1.5 })).toBe(750);
     expect(deliveryFeeFromRates(1, { ...DEFAULT_DELIVERY_RATES, surgeMultiplier: 0.5 })).toBe(500);
     // Above the base the schedule is unchanged: 500 + 2 km × 100.
     expect(deliveryFeeFromRates(5, DEFAULT_DELIVERY_RATES)).toBe(700);
