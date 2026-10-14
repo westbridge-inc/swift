@@ -128,9 +128,15 @@ describe('[W-11] the board uses it', () => {
   });
 
   it('an outage is not an empty queue', () => {
-    expect(code).toMatch(/\{orders\.isError && \(/);
-    // the calm empty state is reachable only when the read SUCCEEDED
-    expect(code).toMatch(/!orders\.isLoading && !orders\.isError && list\.length === 0/);
+    expect(code).toMatch(/\{orders\.isError && <DataUnavailable/);
+    // The calm empty state is reachable only when the read SUCCEEDED...
+    expect(code).toMatch(/!orders\.isError && !byBucket\.get\(c\.key\)\?\.length/);
+    expect(code).toMatch(/!orders\.isError && !byBucket\.get\(bucket\)\?\.length/);
+    // ...but the orders already loaded stay on the board when a refresh fails
+    // (independent review of #1601, S2-1): the board is gated on having data,
+    // never on the last request having succeeded.
+    expect(code).toMatch(/\{orders\.data && <>/);
+    expect(code).not.toMatch(/!orders\.isError && !orders\.isLoading && <>/);
   });
 
   it('says when it is not showing everything', () => {

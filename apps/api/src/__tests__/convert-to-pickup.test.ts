@@ -200,7 +200,10 @@ describe('conversion and rider claims are mutually exclusive on one locked money
     expect(fresh.pickupCode).toBeNull();
   });
 
-  it('convert racing a fare-undercut board claim: exactly one wins and totals never fall below the goods', async () => {
+  // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the price,
+  // so the board claim racing the convert carries no fare (the seam takes none);
+  // the race invariants are unchanged. (Was: an undercut claim at fee 100.)
+  it('convert racing a board claim: exactly one wins and totals never fall below the goods', async () => {
     process.env['DISPATCH_EXHAUSTION'] = '1';
     const { OrderService } = await import('../modules/order/order.service');
     const orders = new OrderService(app.prisma, app.io);
@@ -213,7 +216,7 @@ describe('conversion and rider claims are mutually exclusive on one locked money
       const order = await makeOrder();
       const claim = app.prisma
         .$transaction(async (tx) => orders.stageDirectRiderAssignment(tx, {
-          orderId: order.id, riderId, changedBy: moverUserId, moverUserId, requestedFee: 100, note: 'race',
+          orderId: order.id, riderId, changedBy: moverUserId, moverUserId, note: 'race',
         }))
         .then(() => 'claimed' as const)
         .catch(() => 'refused' as const);
@@ -233,8 +236,8 @@ describe('conversion and rider claims are mutually exclusive on one locked money
         expect(claimOutcome).toBe('claimed');
         expect(conv.statusCode).toBe(409);
         expect(fresh.riderId).toBe(riderId);
-        // Fee clamped from the LOCKED row: market 600, floor 360 → 4900 − 240.
-        expect(Number(fresh.totalAmount)).toBe(4660);
+        // The formula fee stands: the total is the order's own, 4,000 of goods + 600 + the rest.
+        expect(Number(fresh.totalAmount)).toBe(4900);
         expect(fresh.status).toBe('RIDER_ASSIGNED');
       }
     }
