@@ -10,6 +10,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { ownedVerificationFixture } from './helpers/verification-object';
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { stepUpKey } from '../modules/auth/step-up';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
@@ -361,6 +362,9 @@ describe('proof deadlines remain authoritative at the custody write', () => {
         userId: mover.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
         coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true, fileUrl: 'storage://synthetic/deadline',
       } });
+      // [VERIFY-DOCS · ruling 8] the two hire licences a taxi now needs (the legacy flag cannot supply them):
+      // the locked verdict must be allowed, so the deadline at the write is what refuses.
+      await currentTaxiSplitDocuments(app.prisma, mover.userId);
       await app.prisma.order.update({ where: { id: order.id }, data: { orderType: 'TAXI', status: 'PENDING', taxiFareTotal: 1000 } });
     } else {
       expect((await go(mover.token)).statusCode).toBe(200);
@@ -434,6 +438,9 @@ it('driver GO enforces the proof deadline at its final SQL write', async () => {
     userId: mover.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
     coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true, fileUrl: 'storage://synthetic/driver-go',
   } });
+  // [VERIFY-DOCS · ruling 8] the two hire licences a taxi now needs (the legacy flag cannot supply them):
+  // the locked verdict must be allowed, so the deadline at the write is what refuses.
+  await currentTaxiSplitDocuments(app.prisma, mover.userId);
   const expires = new Date(Date.now() + 1500);
   await document(mover.userId, 'drivers_licence', 'APPROVED', expires);
   const original = documentAuthority.lockMoverDocuments;
