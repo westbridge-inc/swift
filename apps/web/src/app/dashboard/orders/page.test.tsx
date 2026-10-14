@@ -626,3 +626,56 @@ describe('the third lane says what it holds', () => {
     expect(screen.queryByRole('heading', { name: 'Ready' })).toBeNull();
   });
 });
+
+// [Item 10 · S1-6] A direct-MMG order the customer and the store disagree
+// about is paused until Swift support resolves it: the server refuses every
+// forward step (409 MMG_CLAIM_MISMATCH). The web board says so, as the phone
+// does, and offers no forward button that can only fail.
+describe('disputed MMG orders pause the web dashboard', () => {
+  beforeEach(() => { stubAudioContext(); });
+  it.each([
+    ['PENDING', 'DELIVERY', 'PLATFORM_RIDER'],
+    ['ACCEPTED', 'DELIVERY', 'PLATFORM_RIDER'],
+    ['PREPARING', 'DELIVERY', 'PLATFORM_RIDER'],
+    ['READY_FOR_PICKUP', 'PICKUP', 'PICKUP'],
+    ['READY_FOR_PICKUP', 'DELIVERY', 'VENDOR_DELIVERY'],
+    ['READY_FOR_PICKUP', 'DELIVERY', 'PLATFORM_RIDER'],
+  ])('%s %s %s shows the pause and withholds forward work', async (status, fulfillment, fulfillmentMode) => {
+    const over = {
+      status, fulfillment, fulfillmentMode,
+      paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', canConfirmPayment: true,
+      mmgClaimMismatchAt: '2026-10-07T12:00:00.000Z',
+      vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: true },
+    };
+    mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    // A disputed new order raises no takeover asking to accept it.
+    expect(screen.queryByText(/View later/)).toBeNull();
+    const row = await rowFor('SW-1001');
+    expect(row.textContent).toContain('Payment under review — order paused');
+    await user.click(row);
+    await screen.findByText('Total (MMG)');
+    // The phone's own words (order-dispute.ts). A dispute can be a reference
+    // mismatch where the customer says they DID pay, so the notice never says
+    // the customer is disputing the payment (review S4-1).
+    expect(screen.getByText("The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.")).toBeTruthy();
+    expect(screen.queryByText(/customer disputes/i)).toBeNull();
+    for (const name of ['Accept', 'Start preparing', 'Mark ready', 'Ready for pickup', 'Mark picked up', 'Confirm delivered', 'Search for a rider again', 'We’ll deliver', 'Get a Swift rider']) {
+      expect(screen.queryByRole('button', { name }), name).toBeNull();
+    }
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: /received in my MMG/ })).toBeNull();
+    // Declining stays where it was: the server allows it.
+    if (status === 'PENDING') expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
+  });
+
+  it('control: the same order without a dispute keeps its forward buttons', async () => {
+    const over = { status: 'ACCEPTED', fulfillment: 'DELIVERY', fulfillmentMode: 'PLATFORM_RIDER', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' };
+    mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    expect(row.textContent).not.toContain('order paused');
+    await user.click(row);
+    expect(await screen.findByRole('button', { name: 'Start preparing' })).toBeTruthy();
+  });
+});

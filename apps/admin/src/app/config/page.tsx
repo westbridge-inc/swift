@@ -48,8 +48,8 @@ const NOT_EDITABLE_HERE: { title: string; body: string }[] = [
     body: 'Per-market numbers on CountryConfig (taxiRates, courierRates, delivery schedule) — changing them is a per-country edit, not a platform-wide one.',
   },
   {
-    title: 'Cancellation window & fees',
-    body: 'Product law shipped as code (5-minute free window, G$500 late fee) so the app, the API and this dashboard can never disagree about money.',
+    title: 'Cancellation rule',
+    body: 'Product law in the API\'s one cancel rule: a cancel is free or refused, never a fee. A store order cancels free until the store accepts it; a ride, parcel or booking cancels free until a driver, rider or provider accepts it, then for 5 minutes from that acceptance; very late orders and orders with no mover found cancel free. The apps show the API\'s verdict.',
   },
   {
     title: 'Dispatch offer timeout',

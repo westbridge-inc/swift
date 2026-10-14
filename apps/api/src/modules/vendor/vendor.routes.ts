@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { confirmReturn } from '../custody/custody-recovery';
@@ -51,7 +52,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
-import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerView, unhideRestocked } from '../compliance/prohibited-gate';
+import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
@@ -60,12 +61,19 @@ import { DiscoveryService } from '../discovery/discovery.service';
 import { QrAnalyticsService } from '../qr/qr-analytics.service';
 import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr/qr-assets.service';
 import { publicWebBase } from '../qr/qr-codes';
-import { processReviewText } from '../rating/review-scrub';
+import {
+  respondToVendorReview,
+  STORE_REVIEW_PROJECTION,
+  summarizeRatingDistribution,
+  publishedVendorReviewWhere,
+  storeVisibleReview,
+} from '../rating/vendor-review-visibility';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
@@ -1030,6 +1038,12 @@ export async function vendorRoutes(app: FastifyInstance) {
       mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
       mmgPayUrlPending: safeMmgPayUrl(vendor.mmgPayUrlPending),
       publicPhone: safePublicPhone(vendor.publicPhone),
+      // [owner #51] What still stands between a never-live store and going
+      // live, besides its documents (additive; older apps ignore it).
+      goLiveMissing: awaitingFirstGoLive(vendor) ? goLiveMissing(vendor) : [],
+      // [GUARDRAILS §8 · owner 14 Oct, store names] Why customers can't see the store: its own words wait for Swift.
+      storeCheck: partnerStoreView(storeCheckOf(vendor)),
+      nameReviewApprovedHash: undefined,
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
@@ -1318,10 +1332,18 @@ export async function vendorRoutes(app: FastifyInstance) {
         actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
       });
     }
+    // [owner #51] A never-live store whose documents are done waits only for
+    // its published number: once it has one, the activation projection runs
+    // now (not at the next daily belt) and the store goes live. A failure
+    // there never undoes the saved number — the belt heals it.
+    if (publicPhone && awaitingFirstGoLive(vendor)) {
+      await verification.reprojectVendorActivation(await vendorOwnerUserId(app, vendorId))
+        .catch((err) => request.log.warn({ err, vendorId }, 'go-live projection after the published number was saved is held for the belt'));
+    }
     // The link state is read back AFTER staging so the response says what is
     // live and what is pending — never the value the caller sent.
     const link = await app.prisma.vendor.findUniqueOrThrow({
-      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true },
+      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, status: true, isVerified: true, acceptingOrders: true },
     });
 
     // On-write search sync [SWIFT-UG-SRCH-01]: catalog writes schedule a debounced per-vendor reindex.
@@ -1335,6 +1357,9 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...link,
         mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
         mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),
+        // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.
+        storeCheck: partnerStoreView(storeCheckOf(vendor)),
+        nameReviewApprovedHash: undefined,
       },
     };
   });
@@ -1776,7 +1801,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:prep_update', evt);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:prep_update', evt);
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
     // The rider on the FRESH row is the one who needs "it's ready" — never the
     // rider the stale screen read. Re-check after commit and push only while
@@ -2008,24 +2033,27 @@ export async function vendorRoutes(app: FastifyInstance) {
     // it moves the counter and writes the ledger row in two statements, so
     // outside a transaction a crash between them leaves the cache and the truth
     // disagreeing, which is the exact failure the ledger exists to prevent.
-    await app.prisma.$transaction((tx) => applyStockMovement(tx, {
-      itemId: item.id,
-      delta: body.delta,
-      reason: body.reason,
-      actorId: request.user.userId,
-      note: body.note ?? null,
-    })).catch((err) => {
+    // Mirror the inventory engine's edges in the SAME transaction as the movement: zero hides, restock un-hides —
+    // never a banned item, judged under the item's row lock with the write. [GUARDRAILS §8 · DS1266 S3 · DS1267 S4]
+    await app.prisma.$transaction(async (tx) => {
+      await applyStockMovement(tx, {
+        itemId: item.id,
+        delta: body.delta,
+        reason: body.reason,
+        actorId: request.user.userId,
+        note: body.note ?? null,
+      });
+      await tx.item.updateMany({
+        where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
+        data: { isAvailable: false, autoHiddenAt: new Date() },
+      });
+      await unhideRestocked(tx, item.id);
+    }).catch((err) => {
       if (err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') {
         throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
       }
       throw err;
     });
-    // Mirror the inventory engine's edges: zero hides, restock un-hides.
-    await app.prisma.item.updateMany({
-      where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
-      data: { isAvailable: false, autoHiddenAt: new Date() },
-    });
-    await unhideRestocked(app.prisma, item.id); // never a banned item [GUARDRAILS §8 · DS1266 S3]
 
     const adjustment = await app.prisma.stockAdjustment.create({
       data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
@@ -2188,7 +2216,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
     });
@@ -2387,7 +2415,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', rejectEvent);
     if (order.vendorId) {
       app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
     }
@@ -3777,52 +3805,54 @@ export async function vendorRoutes(app: FastifyInstance) {
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
 
-    const where: Record<string, unknown> = {
-      vendorId,
-      type: 'CUSTOMER_TO_VENDOR',
-    };
+    const tenantId = request.tenantId;
+    if (!tenantId) {
+      throw new AppError(500, 'TENANT_CONTEXT_REQUIRED', 'This review request has no authenticated tenant context.');
+    }
     const { minScore, maxScore } = reviewsQuerySchema.parse(request.query);
-    if (minScore) where['score'] = { ...(where['score'] as object || {}), gte: minScore };
-    if (maxScore) where['score'] = { ...(where['score'] as object || {}), lte: maxScore };
+    // The store console must not vary with the operator's own blocks: an
+    // operator already knows customers from orders and could link a review
+    // to a customer by toggling a block and watching this list change.
+    const publishedWhere = publishedVendorReviewWhere(vendorId);
+    const where = {
+      ...publishedWhere,
+      ...(minScore || maxScore
+        ? {
+          score: {
+            ...(minScore ? { gte: minScore } : {}),
+            ...(maxScore ? { lte: maxScore } : {}),
+          },
+        }
+        : {}),
+    };
 
-    const [reviews, total, aggregate] = await Promise.all([
+    const [reviews, scoreBuckets] = await Promise.all([
+      // Row 52: the store sees what was said, never who said it. An explicit
+      // allowlist (no rater, raterId, orderId or moderation fields) so a new
+      // column can never leak through this list by default.
       app.prisma.rating.findMany({
         where,
-        include: {
-          rater: { select: { id: true, firstName: true, lastName: true, avatar: true } },
-        },
+        select: STORE_REVIEW_PROJECTION,
         orderBy: { createdAt: 'desc' },
         skip: pagination.skip,
         take: pagination.limit,
       }),
-      app.prisma.rating.count({ where }),
-      app.prisma.rating.aggregate({
-        where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-        _avg: { score: true },
+      app.prisma.rating.groupBy({
+        by: ['score'],
+        where,
         _count: true,
+        orderBy: { score: 'asc' },
       }),
     ]);
-
-    // Score distribution
-    const distribution = await app.prisma.rating.groupBy({
-      by: ['score'],
-      where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-      _count: true,
-      orderBy: { score: 'asc' },
-    });
-
-    const scoreDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    for (const d of distribution) {
-      scoreDistribution[d.score] = d._count;
-    }
+    const summary = summarizeRatingDistribution(scoreBuckets);
 
     return {
       success: true,
-      ...paginatedResponse(reviews, total, pagination),
+      ...paginatedResponse(reviews.map(storeVisibleReview), summary.totalReviews, pagination),
       summary: {
-        averageRating: aggregate._avg.score ?? 0,
-        totalReviews: aggregate._count,
-        distribution: scoreDistribution,
+        averageRating: summary.averageRating,
+        totalReviews: summary.totalReviews,
+        distribution: summary.distribution,
       },
     };
   });
@@ -3832,35 +3862,21 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.post<{ Params: IdParam }>('/reviews/:id/respond', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { response } = respondReviewSchema.parse(request.body);
-
-    const rating = await app.prisma.rating.findUnique({ where: { id: request.params.id } });
-    if (!rating || rating.vendorId !== vendorId || rating.type !== 'CUSTOMER_TO_VENDOR') {
-      throw new NotFoundError('Review', request.params.id);
+    const tenantId = request.tenantId;
+    if (!tenantId) {
+      throw new AppError(500, 'TENANT_CONTEXT_REQUIRED', 'This review request has no authenticated tenant context.');
     }
-
-    // Movement R (R7): the reply rides the same scrub pipeline — PII masked;
-    // profanity is refused outright (this is the store's public face).
-    const processed = processReviewText(response);
-    if (processed.hold) {
-      throw new AppError(400, 'KEEP_IT_PROFESSIONAL', 'That language can’t go on your storefront — rephrase and post again');
-    }
-
-    const isEdit = rating.response !== null;
-    const updated = await app.prisma.rating.update({
-      where: { id: request.params.id },
-      data: { response: processed.text, respondedAt: new Date(), respondedBy: request.user.userId },
+    // Movement R (R7): scrub, live block/publication check, response CAS and
+    // durable notification fact are one serializable operation. Only delivery
+    // of the already-persisted notification happens after commit.
+    const updated = await respondToVendorReview(app.prisma, notifications, {
+      tenantId,
+      responderId: request.user.userId,
+      vendorId,
+      reviewId: request.params.id,
+      response,
+      respondedAt: new Date(),
     });
-
-    if (!isEdit) {
-      const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { name: true } });
-      await notifications.send({
-        userId: rating.raterId,
-        type: 'RATING_RECEIVED',
-        title: `${vendor.name} replied to your review`,
-        body: response.length > 120 ? `${response.slice(0, 117)}…` : response,
-        data: { kind: 'review_response', ratingId: rating.id, vendorId },
-      });
-    }
 
     return { success: true, data: updated };
   });

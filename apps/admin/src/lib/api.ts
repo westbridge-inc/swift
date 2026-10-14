@@ -300,7 +300,7 @@ export interface ActivationChecklistItem {
   /** Approved, and a newer submission of the same type is waiting for review. */
   renewalPending: boolean;
 }
-export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'NEEDS_PHONE' | 'CAN_LIFT_TO_WAITING' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
 export interface VendorActivationChecklist {
   vendorId: string;
   /** The owner's user id: the Review Center's applicant. */
@@ -633,6 +633,10 @@ export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: 
   apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
 export const removeCatalogueItem = (itemId: string, prohibitedClass: ProhibitedClass, reason: string) =>
   apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/remove`, { method: 'POST', body: JSON.stringify({ prohibitedClass }), reason });
+// [GUARDRAILS §8 · owner 14 Oct] A store whose own words (name, description, tags) mention banned goods is held with
+// its items; approve shows it for exactly the words seen. Needs the catalogue-approver grant, like an item.
+export const approveCatalogueStore = (vendorId: string, wordsHash: string, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/stores/${encodeURIComponent(vendorId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
 export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss', reason: string) =>
   apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }), reason });
 // [ADM-006] `category` says which rule was broken; `reason` is what the
@@ -976,3 +980,56 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 };
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
+
+// ── [MC-AD4] Paid MMG orders held for review (ready too long) ─────────────
+export interface HeldOrder {
+  id: string;
+  orderNumber: string;
+  orderType: string;
+  status: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  totalAmount: number;
+  readyAt: string | null;
+  foodAgeHeldAt: string | null;
+  placedAt: string | null;
+  heldMinutes: number | null;
+  readyMinutes: number | null;
+  vendor: { id: string; name: string } | null;
+}
+/** An unreadable acknowledgement does not establish whether an action completed. */
+const unreadableOrderAction = () => Object.assign(new Error('Swift returned an unreadable answer. Refresh the order and check whether the action went through before retrying.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+/** [DS878 S4] A 200 that is not a list of held orders is a failed read — never "nothing held". */
+export const fetchHeldOrders = async (): Promise<Envelope<HeldOrder[]>> => {
+  const response = await apiFetch('/api/v1/admin/orders/held');
+  if (response?.success !== true || !Array.isArray(response.data)) {
+    throw Object.assign(new Error('Swift returned an unreadable list of held orders.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+  }
+  return response;
+};
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+export const retryOrderDispatch = async (id: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/retry-dispatch`, { method: 'POST', body: '{}' });
+  if (response?.success !== true || !isRecord(response.data)) throw unreadableOrderAction();
+  return response;
+};
+/** C2 (operational): the only release the server offers today is "deliver anyway". */
+export const releaseHeldOrder = async (id: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/food-age-hold/release`, { method: 'POST', body: JSON.stringify({ decision: 'DELIVER_ANYWAY' }) });
+  if (response?.success !== true || response.data?.released !== true || response.data?.decision !== 'DELIVER_ANYWAY' || !isRecord(response.data?.dispatch)) throw unreadableOrderAction();
+  return response;
+};
+
+// ── [MC-AD5] An MMG payment dispute on a store order ──────────────────────
+/** C3: decided against the claim revision the operator reviewed; the reason is the decision note too. */
+export const resolvePaymentDispute = async (
+  id: string,
+  decision: { resolution: 'CUSTOMER_PAID' | 'CUSTOMER_DID_NOT_PAY'; expectedClaimRevision: number },
+  reason: string,
+) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/payment-claim/resolve`, {
+    method: 'POST', body: JSON.stringify({ ...decision, note: reason }), reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.resolution !== decision.resolution || response.data?.mismatch !== false) throw unreadableOrderAction();
+  return response;
+};

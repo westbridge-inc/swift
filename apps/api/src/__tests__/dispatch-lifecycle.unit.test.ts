@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { mmgDispatchBlocked } from '../modules/order/mmg-claim.service';
 import { drainCheckoutOutbox, persistDispatchCommandInTransaction } from '../modules/order/checkout-outbox';
 import { readOfferItinerary } from '../modules/rides/taxi-stops-read';
+import { offerCardAddresses } from '../modules/dispatch/board-privacy';
 
 // Execute production method bodies, not copies of the algorithm. Isolating the
 // class from module wiring makes accidental provider/service boot impossible.
@@ -51,6 +52,8 @@ const context = vm.createContext({
   // [TAXI multi-stop 3/8] the offer card's stops — the production reader itself
   // (these rides have no stops, so it reads nothing and adds nothing).
   readOfferItinerary,
+  // [L05] which addresses a rebuilt offer card may name — the production rule itself.
+  offerCardAddresses,
   TERMINAL_ORDER_STATUSES: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'],
 });
 
