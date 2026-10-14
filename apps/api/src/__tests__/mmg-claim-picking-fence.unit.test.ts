@@ -22,6 +22,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PickingService } from '../modules/order/picking.service';
 import { mmgClaimLockObserver, recordCustomerMmgClaim, resolveMmgClaimDisagreement, type MmgClaimTx } from '../modules/order/mmg-claim.service';
+// [GUARDRAILS §8] The prohibited-items reads are proven against a real database
+// (prohibited-items.test.ts); this seam models none of their tables.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  hiddenAmong: async () => new Set<string>(),
+  hiddenItemIds: async () => [],
+  assertOrderableNow: async () => undefined,
+}));
 
 type Row = Record<string, any>;
 const clone = <T>(v: T): T => structuredClone(v);

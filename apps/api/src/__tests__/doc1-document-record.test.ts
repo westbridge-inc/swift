@@ -33,6 +33,7 @@ import { isProviderVerified, providerChecklist } from '../modules/services/servi
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { rlsDdlFor, tenantLineageDdl } from '../lib/tenant-rls';
+import { reviewerTyped } from './helpers/reviewer-typed';
 
 grantSuiteCapability('ddl');
 
@@ -85,7 +86,7 @@ beforeAll(async () => {
   await system(() => seedDocRegistry(app.prisma));
   const a = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59279${NUM}0`, firstName: 'Rec', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
-    admin: { create: { permissions: ['*'] } },
+    admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
   } }));
   adminId = a.id; users.push(adminId);
   adminToken = app.jwt.sign({ userId: a.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
@@ -133,7 +134,8 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     const ids: string[] = [];
     for (const t of checklist) {
       const d = await submit(u, t);
-      expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString() })).statusCode).toBe(200);
+      // [VERIFY-DOCS] the reviewer also types the ID number or the clearance's issue date where the type needs it
+      expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString(), ...reviewerTyped(t, d.id) })).statusCode).toBe(200);
       ids.push(d.id);
     }
     expect(await system(() => service.isRoleVerified(u, 'RESTAURANT'))).toBe(true);
@@ -190,7 +192,8 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     const ids: string[] = [];
     for (const t of checklist) {
       const d = await runWithTenant('swift-default', async () => service.submitDocument(u, 'SERVICE_PROVIDER', t, await ownedVerificationFixture(app.prisma, u), 'v1'));
-      expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString() })).statusCode).toBe(200);
+      // [VERIFY-DOCS] the reviewer also types the ID number or the clearance's issue date where the type needs it
+      expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString(), ...reviewerTyped(t, d.id) })).statusCode).toBe(200);
       ids.push(d.id);
     }
     expect(await system(() => isProviderVerified(app.prisma, u))).toBe(true);

@@ -126,6 +126,9 @@ describe('[PT-1] the three tables are walled like every tenant table', () => {
       // [#1393] A Pay-now session held for payment confirmation keeps its source identity.
       'card_sessions.billing_confirmation_source_immutable',
       'card_sessions.card_sessions_frozen',
+      // [PT-4] The provider's transaction reference, the one void / refund / booking claim and a finance
+      // decision only move forward; a booking never stands beside a void or refund that may have worked.
+      'card_sessions.card_sessions_provider_actions',
       'card_sessions.card_sessions_tenant_matches_user',
       'payment_instruments.payment_instruments_frozen',
       'payment_instruments.payment_instruments_no_delete',
@@ -136,7 +139,13 @@ describe('[PT-1] the three tables are walled like every tenant table', () => {
         AND conrelid IN ('public.payment_instruments'::regclass, 'public.card_sessions'::regclass, 'public.card_observations'::regclass) ORDER BY 1`);
     expect(checks.map((c) => c.conname)).toEqual([
       'card_observations_digest_check', 'card_sessions_binding_check', 'card_sessions_currency_check',
-      'card_sessions_purpose_shape_check', 'card_sessions_state_hash_check', 'payment_instruments_binding_check',
+      // [PT-4] the provider-action markers' shapes (see the migration card_session_provider_actions)
+      'card_sessions_provider_ref_check',
+      'card_sessions_purpose_shape_check',
+      'card_sessions_refund_needs_ref_check', 'card_sessions_refund_state_check', 'card_sessions_resolution_check',
+      'card_sessions_state_hash_check',
+      'card_sessions_void_needs_ref_check', 'card_sessions_void_state_check',
+      'payment_instruments_binding_check',
       'payment_instruments_display_check', 'payment_instruments_sealed_check', 'payment_instruments_status_time_check',
     ]);
     const partial = await app.prisma.$queryRaw<{ indexname: string }[]>(Prisma.sql`

@@ -2,6 +2,7 @@ declare const styles: {
   readonly actions: string;
   readonly card: string;
   readonly copy: string;
+  readonly embedded: string;
   readonly eyebrow: string;
   readonly icon: string;
   readonly page: string;

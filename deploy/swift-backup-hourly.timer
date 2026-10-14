@@ -1,0 +1,18 @@
+[Unit]
+Description=Hourly Swift database backup (production: encrypted to the owner's key)
+# [BACKUP-ENC] Owner ruling, 13 Oct: production takes an off-site backup every
+# hour (at most about an hour lost) plus the droplet's daily snapshots.
+# Production installs THIS timer in place of swift-backup.timer (nightly,
+# which staging keeps). It starts the same swift-backup.service: backup.sh
+# encrypts every production dump to the owner's key before it leaves the box.
+
+[Timer]
+# A quarter past every hour, clear of the top of the hour.
+OnCalendar=*-*-* *:15:00
+# A server that was off still backs up when it comes back.
+Persistent=true
+RandomizedDelaySec=120
+Unit=swift-backup.service
+
+[Install]
+WantedBy=timers.target
