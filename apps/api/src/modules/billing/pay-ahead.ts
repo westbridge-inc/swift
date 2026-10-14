@@ -118,12 +118,25 @@ export function payAheadRefusal(position: PayAheadPosition, audience: 'partner' 
       `Attaching this agent payment would pay more than one week ahead on this account. It is attached whole or not at all: refund it to the partner instead (${PROCEDURE}).`, details);
   }
   if (audience === 'partner') {
-    return new AppError(409, PAY_AHEAD_LIMIT,
-      'Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.', details);
+    // [DS1114 S2] True in every case: part of the coming week held (a card Pay
+    // now quotes a whole week) names what is paid and the most payable now.
+    return new AppError(409, PAY_AHEAD_LIMIT, position.room > 0
+      ? `Swift takes the weekly fee one week at a time. ${formatMoney(position.heldAhead, position.currencyCode)} is already paid toward weeks that have not started, so you can pay at most ${formatMoney(position.room, position.currencyCode)} now.`
+      : 'Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.', details);
   }
   return new AppError(409, PAY_AHEAD_LIMIT, position.room > 0
     ? `This would pay more than one week ahead on this account. Record at most ${formatMoney(position.room, position.currencyCode)} now and refund the rest to the partner (${PROCEDURE}).`
     : `The next weekly fee on this account is already paid, and Swift takes one week at a time. Record nothing more: refund this payment to the partner (${PROCEDURE}).`, details);
+}
+
+/**
+ * [DS1114 S3] Would a payment of `amount` fit now? A pay button is shown only
+ * when it does: at the cap the door could only refuse, so there is no button
+ * (one week at a time). A read, never a lock: the door checks again under it.
+ */
+export async function payAheadAllows(db: PayAheadDb, subscriptionId: string, amount: number, now: Date): Promise<boolean> {
+  const position = await readPayAhead(db, subscriptionId, now);
+  return !position || cents(amount) <= position.room;
 }
 
 /** Refuse a payment that would take the money held ahead past the cap. Call it

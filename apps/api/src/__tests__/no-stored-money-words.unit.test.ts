@@ -116,7 +116,7 @@ describe('the server never says stored-money words [owner ruling 8 Oct]', () => 
 // says to a person offers or describes paying ahead or covering several weeks.
 // The published legal documents (modules/legal) change only through a legal
 // change with its own version bump, so they are outside this rule until then.
-const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\bweeks of weekly fees\b|\bcoming weekly fees\b/i;
+const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
 const LEGAL_DOCUMENTS = /[\\/]modules[\\/]legal[\\/]/;
 const offersPayingAhead = (text: string) => PAYING_AHEAD_WORDS.test(text);
 

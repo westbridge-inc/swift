@@ -71,6 +71,12 @@ describe('the refusal says what to do, in plain words', () => {
     expect(e.message).toBe('Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.');
   });
 
+  it('to a partner holding part of the coming week: how much is paid and the most that can be paid now, never "already paid"', () => {
+    const e = payAheadRefusal(payAheadPosition(sub(), 600, NOW), 'partner');
+    expect(e).toMatchObject({ statusCode: 409, code: 'PAY_AHEAD_LIMIT', details: { maxWeeks: 1, roomGyd: FEE - 600 } });
+    expect(e.message).toBe('Swift takes the weekly fee one week at a time. GY$600 is already paid toward weeks that have not started, so you can pay at most GY$7,400 now.');
+  });
+
   it('to an operator: the most that can still be recorded, and that the rest is refunded', () => {
     expect(payAheadRefusal(payAheadPosition(sub(), FEE / 2, NOW), 'admin').message)
       .toBe('This would pay more than one week ahead on this account. Record at most GY$4,000 now and refund the rest to the partner (finance procedure: weekly fee refunds).');

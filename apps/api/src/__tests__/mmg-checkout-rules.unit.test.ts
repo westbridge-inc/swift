@@ -497,6 +497,8 @@ describe('payActions — MMG_CHECKOUT is live only when it truly is, and off is 
     const prisma = {
       ...configWith(undefined),
       prepaidBalance: { findUnique: vi.fn(async () => ({ balance: new Prisma.Decimal(600) })) },
+      // [owner #62] A button is shown only when the payment fits one week ahead: the room is read too.
+      subscription: { findUnique: vi.fn(async () => ({ ...sub(), isTrialActive: false, trialEndDate: null })) },
       // [#1389] payInfo's due-now reads an issued charge first; none here.
       subscriptionPayment: { findFirst: vi.fn(async () => null) },
       tenantBillingCurrency: { findUnique: vi.fn(async () => null) },

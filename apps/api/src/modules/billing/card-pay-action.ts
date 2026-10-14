@@ -5,6 +5,7 @@ import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import { subscriptionPayer } from '../subscription/mover-fee-authority';
 import { weeklyFeeAmount } from './subscription-fee';
 import { readFeePaymentDecision } from './fee-payment-authority';
+import { payAheadAllows } from './pay-ahead';
 import type { ClientPlatform } from './fee-pay-actions';
 import { INSTRUMENT_DTO_SELECT, cardTestLabel, type PaymentInstrumentDto } from './card-rail.service';
 import type { CardRailProvider, CardRailSource } from '../../providers/card/card-provider';
@@ -180,6 +181,9 @@ export async function cardPayAction(
     return CARD_OFF; // nothing to pay (waived, zero), under review, or no price: no button
   }
   if (!(await readFeePaymentDecision(prisma, sub.id)).allowed) return CARD_OFF;
+  // [owner #62 · DS1114 S3] A Pay now pays a whole week: when that would go past
+  // one week ahead the door could only refuse, so there is no card button.
+  if (!(await payAheadAllows(prisma, sub.id, payNow.amount, new Date()))) return CARD_OFF;
   const addCard = decision.provider.savesCards && cardEnrollEnabled();
   const cardOnFile = addCard
     ? await prisma.paymentInstrument.findFirst({ where: { subscriptionId: sub.id, status: 'ACTIVE' }, select: INSTRUMENT_DTO_SELECT })
