@@ -255,6 +255,10 @@ export async function scanSosEscalations(prisma: PrismaClient, now = new Date())
     WHERE a."status" IN ('ACTIVE', 'ACKNOWLEDGED') AND a."triggeredAt" <= ${threshold}
       AND EXISTS (SELECT 1 FROM "sos_escalations" e WHERE e."sosAlertId" = a."id")
       AND NOT EXISTS (SELECT 1 FROM "sos_escalations" e WHERE e."sosAlertId" = a."id" AND e."channel" = 'OPS_PAGE' AND e."targetKey" = 'ops' AND e."status" IN ('SENT', 'SKIPPED'))
+      -- [GUARDRAILS §3] A store-review (demo) alert never pages real operations.
+      -- Dropped HERE, before the oldest-first bound, so old demo alerts can never
+      -- fill it and hide a real SOS. No tenant = real: when in doubt, page.
+      AND NOT EXISTS (SELECT 1 FROM "tenants" t WHERE t."id" = a."tenantId" AND t."kind" = 'REVIEW')
     ORDER BY a."triggeredAt" ASC LIMIT 100`;
   const [counts] = await prisma.$queryRaw<Array<{ pending: bigint; failed: bigint }>>`
     SELECT count(*) FILTER (WHERE "status" = 'PENDING')::bigint AS pending, count(*) FILTER (WHERE "status" = 'FAILED')::bigint AS failed FROM "sos_escalations"`;
