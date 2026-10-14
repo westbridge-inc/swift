@@ -48,7 +48,7 @@ function jpeg(width: number, height: number, salt = nanoid(12)): Buffer {
   return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, com, sof0, Buffer.from([0xff, 0xd9])]);
 }
 const readable = () => jpeg(1600, 1000);
-/** #1534 makes a reviewer type the number to approve a customer ID; main ignores the field. */
+/** A number sent with a customer ID's approval: never asked for and dropped unread (rule 11 Oct 2026: no ID-number duplicate check at launch). */
 const typedNumber = () => `SYN${nanoid(8).replace(/[^A-Za-z0-9]/g, '7')}`;
 
 async function customer(extra: Record<string, unknown> = {}) {
