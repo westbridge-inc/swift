@@ -128,6 +128,8 @@ export async function guestSearchApp(max = 200) {
     categoryDocumentGate: { findMany: vi.fn(async () => [{ code: 'licence', categorySlug: 'licensed', categoryKind: null, enforcement: 'BLOCK_LISTING', requiredDocType: { legacyCode: 'LICENCE', displayName: 'Licence' } }]) },
     verificationDocument: { findFirst: vi.fn(async (): Promise<{ id: string } | null> => null) },
     itemDiscoveryCategory: delegate(tags),
+    // [GUARDRAILS §8 · #54] No fixture store is filed under a banned category.
+    vendorDiscoveryCategory: { findMany: vi.fn(async () => []) },
     // [S2-1 time bound] search reads run in a short transaction that first
     // sets a local statement timeout (search-budget.ts); the double runs the
     // read on itself and records the setting.

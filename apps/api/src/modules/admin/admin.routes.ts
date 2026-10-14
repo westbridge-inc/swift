@@ -33,6 +33,7 @@ import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
 import { reviewerTypedFields } from '../verification/identity-signal-policy';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
+import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
 import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
@@ -716,7 +717,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // [VERIFY-DOCS V3] The document reviewer grant is refused in EVERY mode:
     // shadow mode exists to watch capability decisions before enforcing them,
     // never to open a person's identity documents to an operator without it.
-    if (decision.reason === 'missing-explicit-grant') throw documentReviewerRequired();
+    if (decision.reason === 'missing-explicit-grant') {
+      throw decision.capability === CATALOGUE_APPROVER_CAPABILITY ? catalogueApproverRequired() : documentReviewerRequired();
+    }
     if (capabilityMode() === 'shadow') {
       adminCapabilityCounter.labels('shadow_denied', decision.cls ?? 'none').inc();
       app.log.warn({ userId, routeUrl, method: request.method, capability: decision.capability, reason: decision.reason },
@@ -1462,6 +1465,8 @@ export async function adminRoutes(app: FastifyInstance) {
         throw new AppError(409, 'ITEM_CHANGED', 'This item changed — review it again.');
       }
       await tx.item.update({ where: { id }, data: { reviewApprovedHash: body.wordsHash, reviewApprovedAt: new Date() } });
+      // [Opus S3-9] The record is written in the same transaction as the approval: no approval without its record.
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { approvedWordsHash: body.wordsHash } });
     });
     return { success: true, data: { itemId: id, state: 'APPROVED' } };
   });
@@ -5850,6 +5855,7 @@ export async function adminRoutes(app: FastifyInstance) {
         role: u.roles.includes('SUPER_ADMIN') ? 'SUPER_ADMIN' : 'ADMIN',
         active: u.status === 'ACTIVE',
         documentReviewer: holdsDocumentReviewerGrant(u.admin?.permissions),
+        catalogueApprover: holdsCatalogueApproverGrant(u.admin?.permissions),
         you: u.id === request.user.userId,
       })),
     };
@@ -5879,6 +5885,40 @@ export async function adminRoutes(app: FastifyInstance) {
         await tx.auditLog.create({ data: {
           userId: request.user.userId,
           action: body.grant ? 'DOCUMENT_REVIEWER_GRANTED' : 'DOCUMENT_REVIEWER_REVOKED',
+          entity: 'Admin',
+          entityId: target.id,
+          changes: { targetUserId: target.id, self, reason },
+          ipAddress: request.ip,
+          userAgent: request.headers['user-agent'] ?? null,
+        } });
+      }
+      return change;
+    });
+    return { success: true, data: result };
+  });
+
+  // [GUARDRAILS §8 · Opus S3-9] The catalogue approver grant: who may SHOW an item a banned word is holding.
+  // The same founder door as the document reviewer, a reason (C3), the Admin row before and after, and a named row.
+  app.put('/staff/:userId/catalogue-approver', { preHandler: [founderGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { userId } = request.params as { userId: string };
+    const body = z.object({ grant: z.boolean() }).passthrough().parse(request.body ?? {});
+    const target = await app.prisma.user.findFirst({ where: { id: userId, tenantId }, select: { id: true, roles: true, status: true } });
+    if (!target) throw new NotFoundError('Admin', userId);
+    if (!target.roles.some((r) => r === 'ADMIN' || r === 'SUPER_ADMIN') || target.status !== 'ACTIVE') {
+      throw new AppError(409, 'NOT_ACTIVE_STAFF', 'Only an active admin of this team can hold the catalogue-approver permission.');
+    }
+    const reason = reasonOf(request.body, request.headers as never);
+    const self = target.id === request.user.userId;
+    const result = await app.prisma.$transaction(async (tx) => {
+      const change = await setCatalogueApproverGrant(tx, target.id, body.grant);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        extra: { catalogueApprover: change.catalogueApprover, grantChanged: change.changed, self },
+      });
+      if (change.changed) {
+        await tx.auditLog.create({ data: {
+          userId: request.user.userId,
+          action: body.grant ? 'CATALOGUE_APPROVER_GRANTED' : 'CATALOGUE_APPROVER_REVOKED',
           entity: 'Admin',
           entityId: target.id,
           changes: { targetUserId: target.id, self, reason },

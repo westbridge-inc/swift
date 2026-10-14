@@ -8,9 +8,10 @@ import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';
 import { bindBrowseTenant, requireRequestTenant } from './search-scope';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { customerPoint } from '../discovery/customer-point';
-import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
+import { catalogueVendorInTenant, notProhibitedStore } from '../vendor/vendor-visibility';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
-import { hiddenItemIds, withoutHidden } from '../compliance/prohibited-gate';
+import { hiddenItemIds, prohibitedStoreIds, withoutHidden } from '../compliance/prohibited-gate';
+import { trackBackgroundRead } from '../../lib/background-reads';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 import { fillFromTiers, nameMatcher, searchTiers, type Tier } from './forgiving-text';
@@ -162,7 +163,8 @@ export async function searchRoutes(app: FastifyInstance) {
     if (lastWarmAttempt !== 0 && Date.now() - lastWarmAttempt < SEARCH_WARM_RETRY_MS) return;
     warming = true;
     lastWarmAttempt = Date.now();
-    void runAsSystem(SEARCH_WARM_CAPABILITY, async () => {
+    // Tracked: a server closing waits for its reads before the database disconnects. [#1678 · DS1260 S4]
+    void trackBackgroundRead(runAsSystem(SEARCH_WARM_CAPABILITY, async () => {
       try {
         const svc = new SearchService(app.prisma);
         await svc.initialize();
@@ -175,7 +177,7 @@ export async function searchRoutes(app: FastifyInstance) {
       } finally {
         warming = false;
       }
-    });
+    }));
   };
   warm();
 
@@ -208,6 +210,8 @@ export async function searchRoutes(app: FastifyInstance) {
       // dropped tenant.isActive, so a shut-off operator's store surfaced
       // whenever Meilisearch was down.
       ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode, await readFeePause(app.prisma)),
+      // [GUARDRAILS §8 · #54] A store filed under a banned category: never in the database fallback or the top-up.
+      ...notProhibitedStore(await prohibitedStoreIds(app.prisma, ctx.tenantId)),
       // Empty stores stay out; CLOSED ones are found, marked closed (owner, 13 Oct).
       ...(ctx.publicMode && { items: { some: { isAvailable: true } } }),
       ...(ctx.type && { vendorType: ctx.type }),
@@ -377,7 +381,8 @@ export async function searchRoutes(app: FastifyInstance) {
         const prohibited = await hiddenItemIds(app.prisma, tenantId);
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
-            where: { ...catalogueVendorInTenant(tenantId, false, await readFeePause(app.prisma)), id: { in: vendorHits.map((v) => v.id) } },
+            // [GUARDRAILS §8 · #54] Nor to publish a store filed under a banned category.
+            where: { ...catalogueVendorInTenant(tenantId, false, await readFeePause(app.prisma)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), id: { in: vendorHits.map((v) => v.id) } },
             select: { id: true, latitude: true, longitude: true, isCurrentlyOpen: true },
           }),
           app.prisma.item.findMany({
@@ -470,7 +475,8 @@ export async function searchRoutes(app: FastifyInstance) {
     ];
     const tiers = searchTiers(q, NAME_COLUMNS);
     // Closed stores and their dishes are suggested too, marked closed (owner, 13 Oct).
-    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode, await readFeePause(app.prisma)), ...(publicMode && { items: { some: { isAvailable: true } } }) };
+    // [GUARDRAILS §8 · #54] Nor does a store filed under a banned category autocomplete.
+    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode, await readFeePause(app.prisma)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), ...(publicMode && { items: { some: { isAvailable: true } } }) };
     const itemBase = {
       isAvailable: true,
       // [B2] This query had NO vendor predicate at all — a banned store's
@@ -603,6 +609,7 @@ export async function searchRoutes(app: FastifyInstance) {
     const vendors = await app.prisma.vendor.findMany({
       where: {
         ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)),
+        ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), // [GUARDRAILS §8 · #54]
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.
         items: { some: { isAvailable: true } },

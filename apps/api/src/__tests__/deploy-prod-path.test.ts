@@ -1024,6 +1024,8 @@ function runSeed(settings: Record<string, string>, env: Record<string, string> =
       PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`,
       CALL_LOG: log, GIT_HEAD: SHA, STORE_NAMES: 'POSTGRES_PASSWORD SEED_APPROVER_KEYS',
       SEED_ADMIN_PHONE: '+5920400000', IDENTITY_ROW: '1:production', SEED_FX_GYD_PER_USD: '209.5',
+      // The owner's admin email (production: seed-production.sh's hidden prompt on a terminal).
+      SEED_ADMIN_EMAIL: 'owner.seed@example.invalid',
       ...env,
     },
   });

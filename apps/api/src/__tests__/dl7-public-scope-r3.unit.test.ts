@@ -17,6 +17,8 @@ vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
   hiddenAmong: async () => new Set<string>(),
   hiddenItemIds: async () => [],
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
   assertOrderableNow: async () => undefined,
   withoutHidden: async <T,>(_db: unknown, rows: readonly T[]) => [...rows],
 }));

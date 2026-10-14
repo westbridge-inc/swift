@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { seedPlatformSpine } from './seed-platform';
 import { spineRequestContext } from '../src/modules/ops/platform-config';
 import { planApprovalRequest, promoteBootstrapAdmin, promotionApprovalRequest, type ApplyResult, type SeedPlan } from '../src/modules/ops/seed-plan';
-import { parseSignedApprovals } from '../src/modules/ops/approver-signatures';
+import { parseSignedApprovals, SOLO_COOLING_OFF_MS } from '../src/modules/ops/approver-signatures';
 
 /**
  * The PRODUCTION spine seed — the platform config plan and, optionally, the
@@ -23,6 +23,12 @@ import { parseSignedApprovals } from '../src/modules/ops/approver-signatures';
  *      with `SEED_PLAN_APPROVALS='[<line>,<line>]'`. Approvals are single-use,
  *      even when there is nothing to change. Anywhere else the plan applies
  *      directly (an empty diff applies nothing and says so).
+ *   [SOLO SEED] While there is no second admin (owner ruling 13 Oct), the
+ *      seed that mints the FIRST SUPER_ADMIN may instead be approved by ONE
+ *      pinned person: SEED_SOLO=1 prints a solo request (it says so in the
+ *      words signed, valid 48 hours), and the run with its one line is
+ *      refused until 12 hours after the request was issued. Solo never
+ *      covers anything else; the signed record is kept in the audit.
  *   3. The first SUPER_ADMIN (SEED_ADMIN_PHONE) is minted only while NONE
  *      exists — on production only by the signed plan, which names that
  *      phone; afterwards it is a break-glass change: the run prints the
@@ -49,6 +55,23 @@ function printRequest(what: string, request: string): void {
   console.warn('-----');
 }
 
+/** [SOLO SEED] The one-person request, and when its single line may run. */
+function printSoloRequest(request: string): void {
+  const issued = /^issued: (.+)$/m.exec(request)?.[1] ?? '';
+  const expires = /^expires: (.+)$/m.exec(request)?.[1] ?? '';
+  const runsFrom = new Date(Date.parse(issued) + SOLO_COOLING_OFF_MS).toISOString();
+  console.warn(`\nSolo mode (there is no second admin yet): ONE approval mints the first SUPER_ADMIN. The approver saves the request below (between the lines) to a file and signs it on their own computer:\n  ./deploy/seed-approve.sh <their-name> <their-key> < request.txt\nThen, no earlier than 12 hours after it was issued (from ${runsFrom}) and before ${expires}, re-run with SEED_SOLO=1 and the one printed line. Keep the request and the line with the seed evidence.\n-----`);
+  process.stdout.write(request);
+  console.warn('-----');
+}
+
+/** SEED_SOLO: exactly 1 (solo), or unset/empty (the two-person ceremony). */
+function soloMode(raw: string | undefined): boolean {
+  if (raw === undefined || raw === '') return false;
+  if (raw === '1') return true;
+  throw new Error('SEED_SOLO must be exactly 1 (solo: one approver, 12-hour cooling-off) or unset; refusing to guess');
+}
+
 async function main(): Promise<void> {
   const prisma = new PrismaClient();
   const databaseUrl = process.env['DATABASE_URL'] ?? '';
@@ -56,6 +79,9 @@ async function main(): Promise<void> {
   const approvals = parseSignedApprovals(process.env['SEED_PLAN_APPROVALS'], 'SEED_PLAN_APPROVALS');
   const actor = process.env['SEED_ACTOR'] ?? 'seed-production';
   const adminPhone = process.env['SEED_ADMIN_PHONE'] || null;
+  // [OWNER EMAIL] Typed by the owner at seed-production.sh's hidden prompt; never printed.
+  const adminEmail = process.env['SEED_ADMIN_EMAIL']?.trim() || null;
+  const solo = soloMode(process.env['SEED_SOLO']);
   try {
     console.warn('Seeding PRODUCTION spine (no demo data)…');
     let previewed: SeedPlan | null = null;
@@ -66,20 +92,21 @@ async function main(): Promise<void> {
         approvals,
         approverKeys,
         actor,
-        request: { adminPhone },
+        request: { adminPhone, adminEmail, solo },
         onPlan: (plan) => { previewed = plan; printPlan(plan); },
         onApplied: (result) => { applied = result; },
       });
     } catch (err) {
       const code = (err as { code?: string }).code;
       if (code === 'APPROVALS_REQUIRED' && previewed && approvals.length === 0) {
-        printRequest('This target is production: two different people must approve this plan.', planApprovalRequest(previewed as SeedPlan, spineRequestContext(adminPhone)));
+        if (solo) printSoloRequest(planApprovalRequest(previewed as SeedPlan, spineRequestContext(adminPhone, true, adminEmail)));
+        else printRequest('This target is production: two different people must approve this plan.', planApprovalRequest(previewed as SeedPlan, spineRequestContext(adminPhone, false, adminEmail)));
         process.exit(2);
       }
       throw err;
     }
     if ((applied as ApplyResult | null)?.firstAdmin) {
-      console.warn('SUPER_ADMIN minted by the signed plan for the given phone.');
+      console.warn(`SUPER_ADMIN minted by the signed plan for the given phone${solo ? ' (solo approval)' : ''}.${adminEmail ? " The owner's email is on that account." : ''}`);
     } else if (adminPhone) {
       const promotionApprovals = parseSignedApprovals(process.env['SEED_PROMOTION_APPROVALS'], 'SEED_PROMOTION_APPROVALS');
       try {
