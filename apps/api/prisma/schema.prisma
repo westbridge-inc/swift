@@ -1576,6 +1576,13 @@ model Vendor {
   /// owner only if the business is VAT-registered — for VAT tax invoices (VAT Act s.28, Sch. III). Digits
   /// only, format-checked, never looked up; no TIN certificate image is ever asked for. Never public.
   vatRegistrationNumber String?
+  /// [GUARDRAILS §8 · owner 14 Oct 2026] A store whose own words (name, description, tags) mention goods Swift never
+  /// carries ("X Liquor Store", "Rum Shop") is held for a person: hidden from customers, with every item it sells,
+  /// until someone holding the catalogue-approver grant approves exactly those words. This is the fingerprint they
+  /// approved (compliance/prohibited-items `storeWordsHash`): any later change to the words no longer matches it, so
+  /// the check comes back. Null = never approved. The verdict itself is never stored; it is read from the words.
+  nameReviewApprovedHash String?
+  nameReviewApprovedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
