@@ -3,7 +3,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { targetFingerprint, type TargetFingerprint } from './purge-plan';
 import { seedPlanCounter } from '../../plugins/observability';
 import {
-  approvalRequest, consumeApprovals, parseApproverKeys, promotionSubject, verifyApprovals,
+  approvalRequest, consumeApprovals, parseApproverKeys, promotionSubject, SOLO_DEFAULT_LIFETIME_MS, SOLO_SHOW_LINE, verifyApprovals, verifySoloApproval,
   type RequestFacts, type SignedApproval, type VerifiedApproval,
 } from './approver-signatures';
 
@@ -152,7 +152,13 @@ export async function buildSeedPlan(prisma: PrismaClient, databaseUrl: string, d
  * the phone that becomes the first SUPER_ADMIN (shown by its last four digits;
  * the request carries only its hash).
  */
-export interface RequestContext { fxGydPerUsd?: number | null; adminPhone?: string | null }
+export interface RequestContext {
+  fxGydPerUsd?: number | null;
+  adminPhone?: string | null;
+  /** [SOLO SEED] One pinned person approves, after a 12-hour cooling-off:
+   *  only the production seed that mints the first SUPER_ADMIN (approver-signatures.ts). */
+  solo?: boolean;
+}
 
 const E164 = /^\+[1-9]\d{6,14}$/;
 /** A value as the approver reads it: whole while short; a long one as its head,
@@ -167,11 +173,13 @@ const phoneTail = (phone: string) => phone.slice(-4);
 /** The words an approver reads for this plan, in order, every change listed. */
 export function planRequestFacts(plan: SeedPlan, ctx: RequestContext = {}): RequestFacts {
   if (ctx.adminPhone && !E164.test(ctx.adminPhone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
+  if (ctx.solo && !ctx.adminPhone) throw new SeedRefused('SOLO_NOT_ALLOWED', 'a solo approval covers only the seed that mints the first SUPER_ADMIN; set the admin phone, or use the two-person ceremony');
   const fx = ctx.fxGydPerUsd ?? null;
   const shows = [
     databaseLine(plan.target),
     `config: ${plan.configVersion} (${plan.configDigest.slice(0, 16)}), ${plan.changes.length} change${plan.changes.length === 1 ? '' : 's'}, FX ${fx === null ? 'not set' : `${fx} GYD per USD`}`,
     `admin phone: ${ctx.adminPhone ? `ending ${phoneTail(ctx.adminPhone)} becomes the first SUPER_ADMIN if there is none` : 'none'}`,
+    ...(ctx.solo ? [SOLO_SHOW_LINE] : []),
     ...plan.changes.map((ch) => {
       const where = ch.table === 'countryConfig' ? `${ch.table} ${ch.key}.${ch.field}` : `${ch.table} ${ch.key}`;
       return 'from' in ch ? `change: ${ch.op} ${where}: ${shown(ch.from)} -> ${shown(ch.to)}` : `change: ${ch.op} ${where}`;
@@ -190,7 +198,7 @@ export function planRequestFacts(plan: SeedPlan, ctx: RequestContext = {}): Requ
  * public keys, and at apply it rebuilds these words and requires them exactly.
  */
 export function planApprovalRequest(plan: SeedPlan, ctx: RequestContext = {}, now = new Date()): string {
-  return approvalRequest(planRequestFacts(plan, ctx), now);
+  return ctx.solo ? approvalRequest(planRequestFacts(plan, ctx), now, SOLO_DEFAULT_LIFETIME_MS) : approvalRequest(planRequestFacts(plan, ctx), now);
 }
 
 export interface ApplyOptions {
@@ -231,8 +239,15 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
   if (target.environment === 'unknown') { seedPlanCounter.labels('refused_target').inc(); throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first'); }
   let verified: VerifiedApproval[] = [];
   if (target.environment === 'production') {
-    if (!opts.approvals?.length) throw new SeedRefused('APPROVALS_REQUIRED', 'a production configuration change needs two independent approvals');
-    verified = verifyApprovals(opts.approvals, parseApproverKeys(opts.approverKeys), planRequestFacts(plan, opts.request), opts.now);
+    // [SOLO SEED] Solo covers only the seed that mints the first SUPER_ADMIN:
+    // once one exists, every production change keeps two people.
+    if (opts.request?.solo && (await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) > 0) {
+      throw new SeedRefused('SOLO_NOT_ALLOWED', 'a SUPER_ADMIN already exists: a solo approval covers only the seed that mints the first one; use the two-person ceremony');
+    }
+    if (!opts.approvals?.length) throw new SeedRefused('APPROVALS_REQUIRED', opts.request?.solo ? 'a solo production seed needs its one signed approval' : 'a production configuration change needs two independent approvals');
+    verified = opts.request?.solo
+      ? verifySoloApproval(opts.approvals, parseApproverKeys(opts.approverKeys), planRequestFacts(plan, opts.request), opts.now)
+      : verifyApprovals(opts.approvals, parseApproverKeys(opts.approverKeys), planRequestFacts(plan, opts.request), opts.now);
   }
   let applied: { count: number; firstAdmin: { userId: string } | null };
   try {
@@ -267,14 +282,15 @@ async function upsertSuperAdmin(tx: Prisma.TransactionClient, phone: string): Pr
  */
 async function mintSignedFirstAdmin(tx: Prisma.TransactionClient, plan: SeedPlan, verified: VerifiedApproval[], opts: ApplyOptions): Promise<{ userId: string } | null> {
   const phone = opts.request?.adminPhone;
-  if (plan.target.environment !== 'production' || !phone || verified.length < 2) return null;
+  const solo = opts.request?.solo === true;
+  if (plan.target.environment !== 'production' || !phone || verified.length < (solo ? 1 : 2)) return null;
   if (verified.some((v) => v.admin !== promotionSubject(phone))) return null;
   if ((await tx.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) > 0) return null;
   const u = await upsertSuperAdmin(tx, phone);
   await tx.privilegedChangeAudit.create({ data: {
     action: 'PROMOTE_SUPER_ADMIN', planDigest: sha256(canonical({ target: plan.target.digest, phone, mode: 'signed-plan' })), event: 'APPLIED',
     target: plan.target as unknown as Prisma.InputJsonValue,
-    detail: { mode: 'signed-plan', plan: plan.digest, approvers: verified.map((v) => v.approver), userId: u.id } as Prisma.InputJsonValue,
+    detail: { mode: 'signed-plan', ...(solo ? { solo: true } : {}), plan: plan.digest, approvers: verified.map((v) => v.approver), userId: u.id } as Prisma.InputJsonValue,
     actor: opts.actor ?? null,
   } });
   return { userId: u.id };
@@ -293,7 +309,8 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
     await opts.failpoint?.('after-drift-check');
     // [PROD-PATH] Single use, under the same lock as the change: an approval
     // already consumed is refused, even after a rollback of the data.
-    if (plan.target.environment === 'production') await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor });
+    const solo = plan.target.environment === 'production' && opts.request?.solo === true;
+    if (plan.target.environment === 'production') await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor }, solo ? 'solo' : 'two-person');
     for (const ch of plan.changes) {
       if (ch.table === 'platformConfig') {
         const want = desired.platformConfig.find((c) => c.key === ch.key)!;
@@ -316,7 +333,11 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
       }
     }
     const firstAdmin = await mintSignedFirstAdmin(tx, plan, verified, opts);
-    await audit(tx, plan, plan.changes.length === 0 ? 'NOOP' : 'APPLIED', { configVersion: plan.configVersion, configDigest: plan.configDigest, approvers, changes: plan.changes.length, tables: [...new Set(plan.changes.map((c) => c.table))], firstAdmin: !!firstAdmin }, opts.actor);
+    // [SOLO SEED] A solo approval is only for the seed that mints the first
+    // SUPER_ADMIN: if this transaction minted none (one appeared meanwhile),
+    // nothing of it lands and the approval is not used up.
+    if (solo && !firstAdmin) throw new SeedRefused('SOLO_NOT_ALLOWED', 'a solo approval covers only the seed that mints the first SUPER_ADMIN, and none was minted (one exists now); use the two-person ceremony');
+    await audit(tx, plan, plan.changes.length === 0 ? 'NOOP' : 'APPLIED', { configVersion: plan.configVersion, configDigest: plan.configDigest, approvers, ...(solo ? { solo: true } : {}), changes: plan.changes.length, tables: [...new Set(plan.changes.map((c) => c.table))], firstAdmin: !!firstAdmin }, opts.actor);
     return { count: plan.changes.length, firstAdmin };
   });
 }

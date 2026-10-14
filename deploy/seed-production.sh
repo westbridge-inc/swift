@@ -33,6 +33,15 @@
 #   3. the operator applies with both printed lines:
 #        SEED_PLAN_APPROVALS='[<first>,<second>]' ./deploy/seed-production.sh <sha>
 # A break-glass promotion works the same way (exit 3, SEED_PROMOTION_APPROVALS).
+# [SOLO SEED] While there is no second admin (owner ruling 13 Oct), the seed
+# that mints the FIRST SUPER_ADMIN may be approved by ONE pinned person:
+#   1. SEED_SOLO=1 ./deploy/seed-production.sh <sha>  prints a solo request
+#      (the words signed say it is one person) and exits 2;
+#   2. the approver signs it with seed-approve.sh;
+#   3. no earlier than 12 hours after the request was issued (the seed refuses
+#      an early run and says when it may run), and within its 48 hours:
+#        SEED_SOLO=1 SEED_PLAN_APPROVALS='[<the line>]' ./deploy/seed-production.sh <sha>
+# Solo never covers anything else (a later change, or a second admin).
 # Approvals expire and are single-use. The pinned keys reach the seed container
 # only as a file from the encrypted store.
 set -euo pipefail
@@ -84,6 +93,13 @@ if [ "$PILOT_ENV" = production ]; then
   [[ "${SEED_FX_GYD_PER_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "${SEED_FX_GYD_PER_USD}" =~ [1-9] ]] ||
     die "set SEED_FX_GYD_PER_USD (today's GYD per USD, a positive number) in the environment: production records the rate the operator observed, never a constant"
 fi
+# [SOLO SEED] Exactly 1, or unset/empty; solo is the production ceremony only.
+case "${SEED_SOLO:-}" in
+  "") ;;
+  1) [ "$PILOT_ENV" = production ] ||
+       die "SEED_SOLO is for the production seed ceremony only (a staging seed applies without approvals)" ;;
+  *) die "SEED_SOLO must be exactly 1 (one approver, 12-hour cooling-off) or unset" ;;
+esac
 SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 [ -n "$SEED_ADMIN_PHONE" ] || die "set SEED_ADMIN_PHONE (the first SUPER_ADMIN's E.164 phone) in the environment"
 # +592600 is DEMO_PHONE_PREFIX (apps/api/src/modules/ops/purge-plan.ts): the

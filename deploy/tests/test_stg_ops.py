@@ -436,6 +436,49 @@ class SeedBreakGlassCeremony(SeedProductionScript):
         self.assertNotIn("SEED_APPROVER_KEYS=", (DEPLOY / "seed-production.sh").read_text())
 
 
+class SeedSoloCeremony(SeedBreakGlassCeremony):
+    """[SOLO SEED] Owner ruling 13 Oct: while there is no second admin, the
+    production seed that mints the first SUPER_ADMIN may be approved by ONE
+    pinned person after a 12-hour cooling-off (enforced by the seed itself,
+    seed-solo.test.ts). The script passes SEED_SOLO through, exactly 1 or
+    unset, and only on the production host."""
+
+    def production(self):
+        (self.deploy / ".env").write_text("PILOT_ENV=production\nNODE_ENV=production\n")
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in "context show") echo default;; *"exec -T postgres"*) echo "1:production"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV solo=[$SEED_SOLO] plan=[$SEED_PLAN_APPROVALS]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
+
+    def test_solo_reaches_the_seed_container_on_production(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV solo=[1] plan=[]", self.log.read_text())
+
+    def test_without_solo_the_container_sees_none(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV solo=[] plan=[]", self.log.read_text())
+
+    def test_solo_is_the_production_ceremony_only(self):
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SOLO="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_SOLO is for the production seed ceremony only", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_solo_is_exactly_1_or_unset(self):
+        self.production()
+        for value in ("yes", "true", "0", " 1", "2"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_SOLO must be exactly 1", result.stderr)
+                self.assertNotIn("run --rm", self.log.read_text())
+
+    def test_the_compose_override_passes_solo_with_an_empty_default(self):
+        self.assertIn("SEED_SOLO: ${SEED_SOLO:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
+
+
 
 # ===========================================================================
 # [Q11] The staging website (apps/web), optional behind WEB_HOST. A stack

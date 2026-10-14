@@ -50,6 +50,9 @@ services:
       SEED_APPROVER_KEYS_FILE: ${SEED_APPROVER_KEYS_FILE:-}
       SEED_PROMOTION_APPROVALS: ${SEED_PROMOTION_APPROVALS:-}
       SEED_PLAN_APPROVALS: ${SEED_PLAN_APPROVALS:-}
+      # [SOLO SEED] Exactly 1 asks for (and applies) the one-person approval
+      # of the seed that mints the first SUPER_ADMIN; empty is two people.
+      SEED_SOLO: ${SEED_SOLO:-}
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     networks: [private]

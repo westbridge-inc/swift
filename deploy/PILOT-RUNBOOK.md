@@ -1011,6 +1011,27 @@ must be pinned first (section 6b, step 1).
        SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' \
        SEED_PLAN_APPROVALS='[<first line>,<second line>]' ./deploy/seed-production.sh "$SHA"
 
+**Solo mode (owner ruling, 13 Oct): one approver while there is no second
+admin.** Only for the seed that mints the FIRST SUPER_ADMIN (none exists, and
+SEED_ADMIN_PHONE is set); anything else on production keeps two people.
+SEED_APPROVER_KEYS may then pin just the one approver's key.
+
+   a. Request: `SEED_SOLO=1` with the same command as step 1. The request says,
+      in the words signed, that it is a one-person approval; it is valid for
+      48 hours from issue, and the run prints from when it may be applied.
+   b. The approver signs it on their own computer (section 6b, step 3).
+   c. No earlier than 12 hours after the request was issued (the seed refuses
+      an early run and says when it may run), and before it expires:
+
+          SEED_SOLO=1 SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' \
+          SEED_PLAN_APPROVALS='[<the one line>]' ./deploy/seed-production.sh "$SHA"
+
+      The approval is single-use, and its signed record (the request and the
+      signature) is kept in the append-only audit with the seed; keep the
+      request file and the line with the stand-up evidence too. If a
+      SUPER_ADMIN appears before it runs, nothing lands and the approval is
+      not used up.
+
 4. SEED_PLAN_SECRET is no longer used (approvals are the approvers' own
    signatures). If the production store still holds it, from 5 Oct, remove
    it, then confirm the list no longer names it:

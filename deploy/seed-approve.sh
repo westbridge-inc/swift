@@ -6,7 +6,8 @@
 # The request is what seed-production.sh printed between the ----- lines (a
 # production spine apply, or a break-glass SUPER_ADMIN promotion). This script
 # shows you what it changes — the database, the configuration and FX rate, the
-# first admin's phone (last four digits) and every change — asks you to type
+# first admin's phone (last four digits), whether it is a one-person (solo)
+# approval with its 12-hour cooling-off, and every change — asks you to type
 # yes, signs it with `ssh-keygen -Y sign` (your key's passphrase is asked by
 # ssh-keygen itself), and prints ONE line to hand to the operator. The server
 # rebuilds those words when it applies and refuses an approval whose words
@@ -50,7 +51,7 @@ esac
 {
   echo "You are about to approve, as $NAME, this ${KIND} change:"
   echo
-  printf '%s\n' "$REQUEST" | grep -E '^(database|config|admin phone|promote): ' | sed 's/^/    /'
+  printf '%s\n' "$REQUEST" | grep -E '^(database|config|admin phone|approval|promote): ' | sed 's/^/    /'
   if [ "$KIND" = plan ]; then
     echo "    changes:"
     printf '%s\n' "$REQUEST" | grep '^change: ' | sed 's/^change: /      /' || echo "      (none: the database already matches; your approval is still used up)"
