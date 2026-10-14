@@ -415,7 +415,8 @@ export function clearCheckoutAttempt(): void {
 export async function getAddresses(options?: { redirectOnExpired?: boolean }): Promise<any[]> {
   return (await apiFetch('/api/v1/customer/addresses', undefined, options)).data as any[];
 }
-export async function addAddress(body: { label: string; addressLine1: string; city: string; region: string; latitude: number; longitude: number; isDefault?: boolean }) {
+/** POST /customer/addresses — the server's own fields (region is optional there, and the phone never sends it). */
+export async function addAddress(body: { label: string; addressLine1: string; addressLine2?: string; city: string; region?: string; latitude: number; longitude: number; instructions?: string; isDefault?: boolean }) {
   return (await apiFetch('/api/v1/customer/addresses', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 
@@ -451,7 +452,7 @@ export async function courierEstimate(body: { pickup: { lat: number; lng: number
   return (await apiFetch('/api/v1/courier/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 /** POST /courier/order — the server's own fields: the recipient is required and what is inside is `packageDescription` (there is no `notes`). */
-export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName: string; recipientPhone: string; packageDescription?: string }) {
+export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName: string; recipientPhone: string; packageDescription?: string; expectedFee?: number }) {
   return (await apiFetch('/api/v1/courier/order', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 

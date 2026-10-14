@@ -6,6 +6,7 @@ import { checkoutRequestHash } from '../order/checkout-outbox';
 import { normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions } from '../order/options';
 import { priceCartLine } from '../order/cart-plans';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
+import { hiddenAmong } from '../compliance/prohibited-gate';
 
 const id = z.string().min(1).max(128);
 export const cartMergeSchema = z.object({
@@ -55,6 +56,8 @@ export async function mergeGuestCart(prisma: PrismaClient, userId: string, key: 
     await tx.$queryRaw`SELECT o.id FROM options o JOIN option_groups g ON g.id = o."optionGroupId" JOIN items i ON i.id = g."itemId" WHERE i.id IN (${Prisma.join(itemIds)}) AND i."tenantId" = ${tenantId} ORDER BY o.id FOR UPDATE OF o`;
     const items = await tx.item.findMany({ where: { id: { in: itemIds }, vendor: vendorTenantForCaller() }, include: { optionGroups: { include: { options: true } }, vendor: { select: { id: true, status: true } } } });
     const existing = saved ? await tx.cartItem.findMany({ where: { cartId: saved.id }, include: { item: { select: { vendorId: true } } } }) : [];
+    // [GUARDRAILS §8] A prohibited line in a guest basket answers UNAVAILABLE.
+    const hidden = await hiddenAmong(tx, items.map(i => i.id));
     // Only saved LINES from another store are a conflict. An empty saved cart
     // (its lines removed or gone) is no cart: the basket lands and the cart
     // follows this store, as a first add would.
@@ -63,7 +66,7 @@ export async function mergeGuestCart(prisma: PrismaClient, userId: string, key: 
       const verdict: MergeVerdict = { clientLineId: line.clientLineId, status: 'READY' };
       const item = items.find(i => i.id === line.itemId && i.vendorId === line.vendorId);
       let selection = {} as Record<string, string | string[]>;
-      if (!item || !item.isAvailable || item.vendor.status !== 'ACTIVE') verdict.status = 'UNAVAILABLE';
+      if (!item || !item.isAvailable || item.vendor.status !== 'ACTIVE' || hidden.has(item.id)) verdict.status = 'UNAVAILABLE';
       else {
         try {
           selection = validateSelectedOptions(item, line.selectedOptions).selection;

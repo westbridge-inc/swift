@@ -61,6 +61,10 @@ const FOREIGN_SAN_EXTERNAL_ID = `MANUAL:${FOREIGN_SAN_RECEIPT}`;
 const TENANT_B_AGENT_TOPUP_EVENT_KEY =
   `topup:${TENANT_B_SUBSCRIPTION_ID}:agent:MANUAL_ADMIN:${FOREIGN_SAN_EXTERNAL_ID}`;
 
+// [VERIFY-DOCS V3] A local admin who holds the explicit document reviewer grant
+// (an admin without it is refused 403 before any lookup).
+let localReviewerUserId: string | undefined;
+
 function tenantBPhone(offset: number): string {
   const seed = [...TENANT_B].reduce((total, character) => (total * 31 + character.charCodeAt(0)) % 1_000_000, 0);
   return `+5927${String((seed + offset) % 1_000_000).padStart(6, '0')}`;
@@ -409,7 +413,7 @@ afterAll(async () => {
       TENANT_B_COMPLIANCE_REVIEW_ID,
       TENANT_B_REIMBURSEMENT_CLAIM_ID,
     ].filter((id): id is string => Boolean(id));
-    const userIds = [tenantBUserId, TENANT_B_ADMIN_USER_ID, TENANT_B_RIDER_USER_ID, TENANT_B_DRIVER_USER_ID]
+    const userIds = [tenantBUserId, TENANT_B_ADMIN_USER_ID, TENANT_B_RIDER_USER_ID, TENANT_B_DRIVER_USER_ID, localReviewerUserId]
       .filter((id): id is string => Boolean(id));
 
     await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: entityIds } }, { userId: { in: userIds } }] }, 'test-cleanup:tenant-admin-isolation');
@@ -691,6 +695,11 @@ describe('tenant-qualified admin access', () => {
     expect(riders.json().data.map((row: { id: string }) => row.id)).not.toContain(TENANT_B_RIDER_ID);
     expect(drivers.json().meta.total).toBe(expected.drivers);
     expect(drivers.json().data.map((row: { id: string }) => row.id)).not.toContain(TENANT_B_DRIVER_ID);
+    // [Owner report 8 Oct] every mover row carries the live document verdict GO uses (or null if it could not be read).
+    for (const row of [...riders.json().data, ...drivers.json().data] as Array<{ documentsLive?: { allowed: unknown } | null }>) {
+      expect(row).toHaveProperty('documentsLive');
+      if (row.documentsLive) expect(typeof row.documentsLive.allowed).toBe('boolean');
+    }
     expect(subscriptions.json().meta.total).toBe(expected.subscriptions);
     expect(subscriptions.json().data.map((row: { id: string }) => row.id)).not.toContain(TENANT_B_SUBSCRIPTION_ID);
     expect(settlements.json().meta.total).toBe(expected.settlements);
@@ -1302,8 +1311,27 @@ describe('tenant-qualified admin access', () => {
       select: { status: true, reviewedBy: true, reviewedAt: true, expiresAt: true, updatedAt: true },
     }));
     const beforeEffects = await mutationEffects(TENANT_B_VERIFICATION_DOC_ID, TENANT_B_DRIVER_USER_ID);
-    expectNotFound(await adminRequest('PUT', `/api/v1/admin/verification/${TENANT_B_VERIFICATION_DOC_ID}/approve`, {}));
-    expectNotFound(await adminRequest('GET', `/api/v1/admin/verification/${TENANT_B_VERIFICATION_DOC_ID}/document-url`));
+    // [VERIFY-DOCS V3] Opening or deciding a document needs the explicit
+    // document reviewer grant; the tenancy law is proven by a local caller who
+    // HOLDS it — a foreign document is still indistinguishable from none.
+    const reviewer = await runWithoutTenant(() => app.prisma.user.create({
+      data: {
+        phone: tenantBPhone(90), firstName: 'Local', lastName: 'Reviewer',
+        roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true, tenantId: 'swift-default',
+        admin: { create: { permissions: ['*', 'documents.review'] } },
+      },
+    }));
+    localReviewerUserId = reviewer.id;
+    const reviewerToken = app.jwt.sign({ userId: reviewer.id, role: 'ADMIN', jti: nanoid(8) });
+    await runWithoutTenant(() => app.prisma.session.create({
+      data: {
+        userId: reviewer.id, token: reviewerToken, refreshToken: nanoid(48), authMethod: 'OTP',
+        deviceId: 'tenant-admin-isolation-reviewer', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000),
+      },
+    }));
+    const asReviewer = { authorization: `Bearer ${reviewerToken}` };
+    expectNotFound(await adminRequest('PUT', `/api/v1/admin/verification/${TENANT_B_VERIFICATION_DOC_ID}/approve`, {}, asReviewer));
+    expectNotFound(await adminRequest('GET', `/api/v1/admin/verification/${TENANT_B_VERIFICATION_DOC_ID}/document-url`, undefined, asReviewer));
 
     const afterDocument = await runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({
       where: { id: TENANT_B_VERIFICATION_DOC_ID },

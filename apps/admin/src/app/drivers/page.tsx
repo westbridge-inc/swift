@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchDrivers, verifyDriverDocuments, setDriverRideClass } from '@/lib/api';
 import { askReason } from '@/lib/ask-reason';
+import { liveDocumentsLabel, liveDocumentsTone } from '@/lib/live-documents';
 
 const RIDE_CLASSES = ['ECONOMY', 'COMFORT', 'XL'] as const;
 
@@ -67,8 +68,8 @@ export default function DriversPage() {
                   </td>
                   <td className="p-4">
                     <span className={`px-2 py-1 rounded-full text-xs ${
-                      driver.documentsVerified ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
-                    }`}>{driver.documentsVerified ? 'Verified' : 'Pending'}</span>
+                      liveDocumentsTone(driver)
+                    }`}>{liveDocumentsLabel(driver)}</span>
                   </td>
                   <td className="p-4">{driver.averageRating?.toFixed(1) || '—'}</td>
                   <td className="p-4">{driver.totalTrips || 0}</td>
