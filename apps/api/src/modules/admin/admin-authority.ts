@@ -248,6 +248,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /vendors': c('C0', 'vendor.read'),
   'GET /vendors/pending': c('C0', 'vendor.read'),
   'GET /vendors/:id': c('C1', 'vendor.read'),
+  // [MC-PR2] which of the owner's documents are approved, waiting, rejected or missing — document status, so C1
+  'GET /vendors/:id/activation-checklist': c('C1', 'vendor.read'),
   'PUT /vendors/:id/approve': c('C3', 'vendor.approve', E.vendor),
   'PUT /vendors/:id/suspend': c('C3', 'vendor.suspend', E.vendor),
   'PUT /vendors/:id/feature': c('C2', 'vendor.feature', E.vendor),
@@ -255,9 +257,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // ── Movers ──────────────────────────────────────────────────────────────
   'GET /riders': c('C1', 'mover.read'),
   'GET /riders/:id': c('C1', 'mover.read'),
+  'GET /riders/:id/activation-checklist': c('C1', 'mover.read'),
   'PUT /riders/:id/verify-documents': c('C3', 'mover.verify', E.rider),
   'GET /drivers': c('C1', 'mover.read'),
   'GET /drivers/:id': c('C1', 'mover.read'),
+  'GET /drivers/:id/activation-checklist': c('C1', 'mover.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
   // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
@@ -391,6 +395,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/agent-payments': c('C0', 'billing.read'),
   'GET /billing/agent-payments/unmatched': c('C0', 'billing.read'),
   'GET /billing/agent-cash-config': c('C0', 'billing.read'),
+  'GET /billing/fee-pause': c('C0', 'billing.read'),
   'GET /billing/confirmations': c('C0', 'billing.read'),
   // [MMG support lookup] A partner's payment, found by any of its ids or the partner's phone: identity, so C1.
   'GET /billing/mmg-checkouts': c('C1', 'billing.mmg.read'),

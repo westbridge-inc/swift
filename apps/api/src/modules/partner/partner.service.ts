@@ -4,8 +4,11 @@ import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
+import { papersUnderSecondReview, requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
+import { assertHirePlate } from '../verification/hire-plate';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
@@ -170,6 +173,8 @@ export class PartnerService {
     if (rideClass && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
+    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
   }
 
   private async provisionLocked(tx: Tx, userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
@@ -313,6 +318,8 @@ export class PartnerService {
     if (target === 'DRIVER' && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
+    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
     return this.prisma.$transaction(async (tx) => {
       const now = new Date();
       // The global lock order (mover-authority): User, then Rider, then Driver.
@@ -467,9 +474,12 @@ export class PartnerService {
       if (awaitingIds.length > 0) {
         await tx.$queryRaw`SELECT "id" FROM "review_case" WHERE "submissionId" = ANY(${awaitingIds}) FOR UPDATE`;
       }
+      // [DOC-1 §24.2] A paper under a second review is frozen too: its confirmation opens the fraud case.
+      const underSecondReview = await papersUnderSecondReview(tx, awaitingIds);
       const superseded: string[] = [];
       const withdrawn: string[] = [];
       for (const paper of toRetire) {
+        if (underSecondReview.has(paper.id)) continue;
         if (paper.committed) {
           if (await hopDocState(tx, { id: paper.id, userId }, 'COMMITTED', 'SUPERSEDED', { reviewNote: 'SUPERSEDED: the mover changed vehicle' })) superseded.push(paper.id);
         } else if (await hopDocState(tx, { id: paper.id, userId }, [...AWAITING_REVIEW], 'EXPIRED', { status: 'EXPIRED', reviewNote: 'WITHDRAWN: the mover changed vehicle' })) {
@@ -482,6 +492,20 @@ export class PartnerService {
       }
       if (withdrawn.length > 0) {
         await tx.reviewCase.updateMany({ where: { submissionId: { in: withdrawn }, closedAt: null }, data: { closedAt: now } });
+      }
+
+      // [L06 · #1551] A changed make, model, year, colour or plate is a vehicle the reviewers have not
+      // seen: its papers need a fresh review, the same rule as the profile writers. Re-declaring the SAME
+      // car as another type (a car as a wagon car, same details and plate) keeps its papers, as before.
+      const identityChanged = vehicleIdentityChanged(
+        { vehicleMake: currentProfile.vehicleMake, vehicleModel: currentProfile.vehicleModel, vehicleYear: currentProfile.vehicleYear, vehicleColor: currentProfile.vehicleColor, licensePlate: currentProfile.licensePlate },
+        { vehicleMake: details.make, vehicleModel: details.model, vehicleYear: details.year, vehicleColor: details.color, licensePlate: details.licensePlate },
+      );
+      if (identityChanged) {
+        const nextProfile = target === 'DRIVER' ? await tx.driver.findUniqueOrThrow({ where: { id: targetId } }) : await tx.rider.findUniqueOrThrow({ where: { id: targetId } });
+        const freshReview = await requireFreshVehicleReview(tx, userId, currentProfile.licensePlate, { ...nextProfile, kind: target });
+        superseded.push(...freshReview.superseded);
+        withdrawn.push(...freshReview.withdrawn);
       }
 
       // The change is on the record: what the mover drove before and after, and which
