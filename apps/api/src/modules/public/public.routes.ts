@@ -8,7 +8,7 @@ import { serveEmergencyPolicy } from '../country/emergency-policy';
 import { emergencyPolicyCounter } from '../../plugins/observability';
 import { notProhibitedStore, PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visibility';
 import { adsEnabled } from '../ads/ads-enabled';
-import { hiddenAmong, prohibitedStoreCategory, prohibitedStoreIds } from '../compliance/prohibited-gate';
+import { hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -248,8 +248,8 @@ export async function publicRoutes(app: FastifyInstance) {
       }
     }
     if (!vendor) throw new NotFoundError('Storefront');
-    // [GUARDRAILS §8 · #54] Judged exactly too: the list above may be a minute old.
-    if (await prohibitedStoreCategory(app.prisma, vendor.id)) throw new NotFoundError('Storefront');
+    // [GUARDRAILS §8 · #54 · store names] Judged exactly too: the list above may be a minute old.
+    if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Storefront');
 
     // [M-D6] Same mapper as the directory list, so a store's own page and its
     // card in the list can never show different stars.

@@ -17,4 +17,12 @@ export const JUDGED_FIELD_WORDS: Record<string, string> = {
   description: 'description',
   section: 'menu section',
   option: 'options',
+  store: 'store\'s own name, description or tags',
+};
+
+/** Where in a STORE's own words a banned word was found. [owner 14 Oct, store names] */
+export const STORE_FIELD_WORDS: Record<string, string> = {
+  name: 'store name',
+  description: 'store description',
+  tags: 'store tags',
 };
