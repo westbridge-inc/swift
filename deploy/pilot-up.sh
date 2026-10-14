@@ -273,6 +273,15 @@ if [ "$PILOT_ENV" = production ]; then
     "" | 0) ;;
     *) die "PILOT_ENV=production refuses WEB_ALLOW_SITE_TOKENS: the public site never shows unfilled company details" ;;
   esac
+  # [BACKUP-ENC] Owner ruling, 13 Oct: production backups leave the host only
+  # encrypted to the owner's PUBLIC key (deploy/backup.sh). The key file lives
+  # outside the checkout and its fingerprint is pinned here; backup.sh proves
+  # the file holds exactly that one public key before every dump.
+  [[ "$(env_setting BACKUP_GPG_FINGERPRINT)" =~ ^[0-9A-F]{40}$ ]] ||
+    die "PILOT_ENV=production needs BACKUP_GPG_FINGERPRINT (the owner's backup key fingerprint, 40 upper-case hex): production backups are encrypted to the owner's key (owner ruling, 13 Oct)"
+  backup_recipient="$(env_setting BACKUP_GPG_RECIPIENT_FILE)"
+  [[ "$backup_recipient" == /* ]] && [[ "$backup_recipient" != "$ROOT"/* ]] ||
+    die "PILOT_ENV=production needs BACKUP_GPG_RECIPIENT_FILE: an absolute path to the owner's exported PUBLIC backup key, outside the checkout"
   # Owner ruling, 8 Oct: production launches with admin top-ups ON HOLD. The
   # API refuses every manual credit of fee paid ahead (503 TOPUP_ON_HOLD,
   # nothing recorded) exactly when BILLING_TOPUP_HOLD=1, read from this file.

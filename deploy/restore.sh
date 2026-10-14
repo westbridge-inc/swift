@@ -2,7 +2,15 @@
 # Restore a local or off-site custom dump into a NEW scratch database only.
 # The live database is never a target. Keep the scratch DB for inspection.
 #
-#   ./deploy/restore.sh [--compare-source] <dump-file|s3://backup-bucket/key> [new-scratch-db]
+#   ./deploy/restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db]
+#   ./deploy/restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg > file
+#
+# [BACKUP-ENC] Production dumps are encrypted to the OWNER's key (backup.sh),
+# and this server never decrypts: an encrypted dump (.gpg) given here is
+# refused. The drill runs from the owner's computer (deploy/backup-drill.sh):
+# this script's --fetch-encrypted streams the encrypted object out on stdout,
+# the owner's computer decrypts it, and the plain dump comes back on stdin
+# (source `-`) into the same scratch restore and checks as any other dump.
 #
 # [PROD-PATH] --compare-source judges the restore against the LIVE database it
 # was dumped from, instead of fixed minimums (a new production database has no
@@ -19,7 +27,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 COMPARE_SOURCE=0
-if [ "${1:-}" = "--compare-source" ]; then COMPARE_SOURCE=1; shift; fi
+FETCH_ENCRYPTED=0
+if [ "${1:-}" = "--compare-source" ]; then COMPARE_SOURCE=1; shift
+elif [ "${1:-}" = "--fetch-encrypted" ]; then FETCH_ENCRYPTED=1; shift; fi
 SOURCE="${1:-}"
 SCRATCH="${2:-swift_restore_$(date -u +%Y%m%d%H%M%S)}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
@@ -73,7 +83,13 @@ db_psql() {
 cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
 trap cleanup EXIT
 
-[ -n "$SOURCE" ] || die "usage: restore.sh [--compare-source] <dump-file|s3://backup-bucket/key> [new-scratch-db]"
+[ -n "$SOURCE" ] || die "usage: restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db], or restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg"
+if [ "$FETCH_ENCRYPTED" = 1 ]; then
+  [[ "$SOURCE" == s3://*.dump.gpg ]] || die "--fetch-encrypted streams only an encrypted off-site dump (s3://…/….dump.gpg); a plain dump never leaves this way"
+  [ ! -t 1 ] || die "--fetch-encrypted writes the encrypted dump to stdout; redirect or pipe it (deploy/backup-drill.sh does)"
+elif [[ "$SOURCE" == *.gpg ]]; then
+  die "this dump is encrypted to the owner's key and this server never decrypts it: run deploy/backup-drill.sh on the owner's computer (it fetches, decrypts there, and restores through this script)"
+fi
 [[ "$SCRATCH" =~ ^[a-z][a-z0-9_]{0,62}$ ]] || die "scratch database name must be a lowercase SQL identifier"
 LIVE_DB="$(env_value POSTGRES_DB)"
 LIVE_DB="${LIVE_DB:-swift}"
@@ -101,6 +117,21 @@ if [[ "$SOURCE" == s3://* ]]; then
   aws_cli_image >/dev/null || die "off-site restore needs a pinned AWS_CLI_IMAGE"
   aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE" /data/restore.dump --only-show-errors
   chmod 600 "$DUMP"
+  if [ "$FETCH_ENCRYPTED" = 1 ]; then
+    # Only ciphertext: an OpenPGP message, never a plain archive.
+    if pg_restore --list "$DUMP" >/dev/null 2>&1; then die "the object is a PLAIN dump, not encrypted; refusing to stream it out"; fi
+    cat -- "$DUMP"
+    exit 0
+  fi
+elif [ "$SOURCE" = - ]; then
+  # The plain dump on stdin (backup-drill.sh decrypts it on the owner's
+  # computer), held only in this run's private temporary directory.
+  [ ! -t 0 ] || die "source - reads the dump from stdin; pipe it in (deploy/backup-drill.sh does)"
+  TMP_DIR="$(mktemp -d)"
+  chmod 700 "$TMP_DIR"
+  DUMP="$TMP_DIR/restore.dump"
+  (umask 077; cat > "$DUMP")
+  [ -s "$DUMP" ] || die "nothing arrived on stdin"
 else
   DUMP="$SOURCE"
 fi

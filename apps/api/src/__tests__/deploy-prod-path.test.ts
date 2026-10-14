@@ -159,6 +159,8 @@ const PRODUCTION = {
   // Address search (the API refuses production without it once #1563 lands;
   // osm or google is the owner's choice).
   PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon:2322',
+  // Production backups are encrypted to the owner's public key (owner ruling, 13 Oct).
+  BACKUP_GPG_FINGERPRINT: '0123456789ABCDEF0123456789ABCDEF01234567', BACKUP_GPG_RECIPIENT_FILE: '/etc/swift/backup-recipient.asc',
 };
 const STAGING = { ...PRODUCTION, PILOT_ENV: 'staging', NODE_ENV: 'development', API_HOST: 'api-staging.example.org', STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' };
 
@@ -336,6 +338,42 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
     expect(staging.stderr).not.toContain('refuses the agent-cash webhook');
+  });
+});
+
+// [BACKUP-ENC] Owner ruling, 13 Oct: production backups leave the host only
+// encrypted to the owner's public key. pilot-up refuses a production host
+// whose settings do not pin that key (backup.sh proves the file itself).
+describe('[BACKUP-ENC] pilot-up.sh: production pins the owner\'s backup key', () => {
+  const modes = [[SHA], ['--data-only', SHA], ['--no-public', SHA]];
+  it.each([
+    [{ BACKUP_GPG_FINGERPRINT: undefined }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123456789abcdef0123456789abcdef01234567' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123456789ABCDEF0123456789ABCDEF0123456' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123 4567 89AB CDEF 0123 4567 89AB CDEF 0123 4567' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_RECIPIENT_FILE: undefined }, 'BACKUP_GPG_RECIPIENT_FILE'],
+    [{ BACKUP_GPG_RECIPIENT_FILE: 'backup-recipient.asc' }, 'BACKUP_GPG_RECIPIENT_FILE'],
+  ])('refuses %j in every production mode, before anything changes', (over, named) => {
+    for (const args of modes) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, ...over }, { args, env: args.length > 1 ? { DNS_MAP: '' } : {} });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain(`PILOT_ENV=production needs ${named}`);
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  it('refuses a key file inside the checkout (the seed and the deploy refuse untracked files there)', () => {
+    const here = preparePilot();
+    const inside = join(here, '..', 'backup-recipient.asc');
+    const r = runPilot({ ...PRODUCTION, BACKUP_GPG_RECIPIENT_FILE: inside });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('PILOT_ENV=production needs BACKUP_GPG_RECIPIENT_FILE');
+  });
+
+  it('staging is not asked', () => {
+    const r = runPilot({ ...STAGING, BACKUP_GPG_FINGERPRINT: undefined, BACKUP_GPG_RECIPIENT_FILE: undefined });
+    expect(r.status, r.stderr).toBe(0);
   });
 });
 

@@ -514,6 +514,41 @@ weakened). Pin the reviewed image digest as AWS_CLI_IMAGE in deploy/.env
 (see .env.deploy.example); backup.sh refuses to run while it is unset or still
 a placeholder.
 
+**Production (PILOT_ENV=production): hourly, encrypted to the owner's key.**
+Every production dump is encrypted on the host to the owner's OpenPGP public
+key before it is kept or uploaded; the plain dump exists only between pg_dump
+and the encryption and is removed right after (and on any failure). The
+owner's private key is never on any server, so the host cannot read its own
+backups. Before the first production backup:
+
+1. On the OWNER's own computer, once: `./deploy/backup-keygen.sh <folder>`.
+   It asks for a passphrase at a hidden prompt (twice), prints the
+   fingerprint, and writes `swift-backup-public.asc` (for the host) and
+   `swift-backup-PRIVATE.asc`. The owner prints the private key, stores its
+   text in the password manager (two offline copies), deletes the file and
+   keeps the passphrase separately. Without it no production backup can be
+   restored.
+2. On the host, as root: copy ONLY the public key to a path outside the
+   checkout, e.g. `install -m 0644 swift-backup-public.asc /etc/swift/backup-recipient.asc`,
+   and set BACKUP_GPG_RECIPIENT_FILE (that path) and BACKUP_GPG_FINGERPRINT
+   (the printed fingerprint) in deploy/.env. pilot-up.sh refuses production
+   without both; backup.sh refuses a file that is not exactly that one public
+   key, and any file that carries a private key.
+3. Install the HOURLY timer in place of the nightly one (staging keeps
+   swift-backup.timer):
+
+       install -m 0644 /opt/swift/deploy/swift-backup.service /etc/systemd/system/swift-backup.service
+       install -m 0644 /opt/swift/deploy/swift-backup-hourly.timer /etc/systemd/system/swift-backup-hourly.timer
+       systemctl daemon-reload
+       systemctl start swift-backup.service
+       systemctl enable --now swift-backup-hourly.timer
+       systemctl list-timers swift-backup-hourly.timer
+
+   The journal shows `encrypted → swift-<stamp>.dump.gpg … to the owner's key
+   <fingerprint> only`. Local copies are kept 2 days on production by default
+   (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
+   daily snapshots stay on as well.
+
 ## 5. Restore drill, with no live overwrite
 
 Take a fresh backup through the unit (it holds the storage keys) and copy the
@@ -531,6 +566,21 @@ scratch database through a transient unit that receives the same two keys:
       -p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
       -p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
       /opt/swift/deploy/restore.sh "$OFFSITE_OBJECT" "$SCRATCH_DB"
+
+On production the off-site objects are `.dump.gpg` and the host cannot
+decrypt them: restore.sh refuses an encrypted dump. The drill runs from the
+OWNER's computer instead:
+
+    ./deploy/backup-drill.sh swift-deploy@<host> <ssh-key-file> 's3://<backup-bucket>/<prefix>/swift-<stamp>.dump.gpg'
+
+It asks for the private key (paste the armored block) and its passphrase at
+hidden prompts and keeps them only in a throwaway keyring for the run. The
+host streams the encrypted object out (`restore.sh --fetch-encrypted`, with
+the storage keys from the encrypted store), the owner's computer decrypts it
+on the way through, and the plain dump goes straight back into
+`restore.sh --compare-source -` on the host: a new scratch database, compared
+with the live one. Nothing plain is written on the owner's computer. Pass is
+the host's compare-source line and `RESTORE OK`, then `DRILL OK`.
 
 The restore script accepts only a new lowercase scratch database name,
 refuses an existing or live database, and fails on archive or row-count
@@ -979,7 +1029,9 @@ this host's PILOT_ENV), runs step 3, and reads step 4 back: it ends with
 `BILLING CUTOVER READY …`, or fails naming the state and the missing count.
 It is restartable: an interrupted run leaves BLOCKED and is run again.
 
-Back up and rehearse the restore (sections 4 and 5, with `--compare-source`:
+Back up and rehearse the restore (sections 4 and 5: the owner's key, the
+hourly timer and deploy/backup-drill.sh from the owner's computer, which
+restores with `--compare-source`:
 in schemas public and swift_qr it compares every table's row count and
 content checksum, column definitions and defaults, RLS switches, policies,
 constraints, indexes, triggers, function definitions, view definitions and
