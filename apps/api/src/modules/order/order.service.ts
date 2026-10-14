@@ -1,3 +1,4 @@
+import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
@@ -68,6 +69,7 @@ import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
+import { assertOrderableNow, assertOrderMayProceed, hiddenAmong, movesTowardCustomer, refusalAudience } from '../compliance/prohibited-gate';
 
 interface CheckoutInput {
   userId: string;
@@ -369,7 +371,7 @@ export function assertMmgFulfilmentAllowed(
   // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
   if (order.mmgClaimMismatchAt) {
     // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
-    throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim, so this order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don\'t hand anything over until then.');
+    throw new AppError(409, 'MMG_CLAIM_MISMATCH', "The store's and the customer's MMG payment reports don't match. This order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don't hand anything over until then.");
   }
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
@@ -694,6 +696,8 @@ export class OrderService {
     if (paymentGate) {
       await assertDispatchPairEligible(tx, paymentGate.customerId, input.moverUserId, 'RIDER');
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
+      // [GUARDRAILS §8] Nor is a rider handed an order holding a line Swift no longer allows.
+      await assertOrderMayProceed(tx, input.orderId, 'mover');
       if (withheldAwaitingReadiness(paymentGate)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(paymentGate)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
       if (paymentGate.fulfillment !== 'DELIVERY') {
@@ -954,6 +958,9 @@ export class OrderService {
         requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
+      // [GUARDRAILS §8] No order carries a prohibited line (banned, or held for a check) —
+      // refused in the sold-out shape, before any write. Re-checked under the locks.
+      await assertOrderableNow(this.prisma, items.map((ci) => ({ id: ci.item.id, name: ci.item.name })));
       // [DOC-1 §18.3 · DOC-INV-26] A line in a BLOCK_ORDER category whose licence
       // is not valid fails the order — the lapse-after-publish case.
       {
@@ -1370,6 +1377,8 @@ export class OrderService {
         // loser reads identically wherever the race is caught.
         throw new AppError(409, 'ITEM_UNAVAILABLE', `${darkItem.name} just became unavailable — remove it and try again.`);
       }
+      // [GUARDRAILS §8] The same refusal against the locked menu rows.
+      await assertOrderableNow(tx, cart.items.map((line) => ({ id: line.item.id, name: line.item.name })));
       // [L09 · M023 · F4] The choices are re-read here as well, beside the
       // item check above: a choice that sold out (or was removed), or a price
       // that changed, after the pre-check is refused instead of ordered at the
@@ -2074,6 +2083,10 @@ export class OrderService {
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
     // MMG payment-first gate lives here, on the freshly locked row.
     assertMmgFulfilmentAllowed(source, input.target);
+    // [GUARDRAILS §8] An order holding a line Swift no longer allows does not
+    // move toward the customer from this seam either (accept, prepare, ready,
+    // rider legs before pickup, the store's own handover). Cancelling is never refused.
+    if (movesTowardCustomer(source.status, input.target)) await assertOrderMayProceed(tx, source.id, refusalAudience(input.target));
     // [TAXI multi-stop 3/8] A ride is over only when every stop the passenger
     // asked for is done: arrived at and left, or skipped with a reason the
     // passenger is told. Every way to DELIVERED passes this seam (the fare
@@ -2520,6 +2533,8 @@ export class OrderService {
             },
           });
 
+          await persistRiderCancellationNotice(tx, order);
+
           if (order.riderId) {
             await new FloatService(tx).release(tx, order.riderId, riderFloatForOrder(order));
             await this.stageRiderRelease(tx, order.riderId, orderId, false, true);
@@ -2575,6 +2590,9 @@ export class OrderService {
     if (order.vendorId && !heldNow) {
       this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
     }
+    // [L07] The rider's notice committed with the cancel; this is only its
+    // first delivery attempt, started after the emits and never awaited.
+    void this.drainRiderCancelNoticeNow(orderId);
     // [REPORT-007-v4 F-02 / REPORT-008 F-02] The store must LEARN a
     // possibly-paid MMG order was cancelled — it holds the only rail that can
     // make the customer whole. HELD orders are NOT exempt: the pay link went
@@ -2611,6 +2629,18 @@ export class OrderService {
       };
     }
     return { message: cancelled ?? (freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`), cancellationFee };
+  }
+
+  /** [L07 · Opus S3] The first delivery attempt of a committed rider
+   *  cancellation notice. The cancel request never awaits it: a hung push
+   *  provider (an 8 s timeout, three tries and backoff, about 34 s) would hold
+   *  the customer's cancel past the phone's 10 s timeout, and they would read
+   *  a failed cancel that went through. The checkout-outbox sweep (every 10 s)
+   *  is the durability guarantee. Never rejects. */
+  drainRiderCancelNoticeNow(orderId: string): Promise<void> {
+    return drainRiderCancellationNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId })
+      .then(() => undefined)
+      .catch((err) => log().warn({ err, orderId }, 'rider cancellation notice awaits retry'));
   }
 
   async updateStatus(
@@ -3036,7 +3066,9 @@ export class OrderService {
       where: { id: { in: original.items.map((i) => i.itemId) }, isAvailable: true },
       include: { optionGroups: { include: { options: true } } },
     });
-    const availableById = new Map(availableItems.map((i) => [i.id, i]));
+    // [GUARDRAILS §8] A prohibited line does not come back: counted as unavailable.
+    const hidden = await hiddenAmong(this.prisma, availableItems.map((i) => i.id));
+    const availableById = new Map(availableItems.filter((i) => !hidden.has(i.id)).map((i) => [i.id, i]));
 
     // [L09 · reorder] Each line comes back WITH its choices, rebuilt from the
     // names the order kept against today's menu by the one validator. A line

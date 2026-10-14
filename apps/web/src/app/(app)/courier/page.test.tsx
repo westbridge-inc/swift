@@ -117,6 +117,49 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-1'));
   });
 
+  it('[PRICE-LOCK] the order carries the fee on the button; a fee that moved is quoted again and sent at the new fee', async () => {
+    // Owner: the price shown is the price charged. The server creates the job
+    // only at the fee the sender saw, and says so (409 PRICE_CHANGED) when it moved.
+    let fee = 1160;
+    let orders = 0;
+    fetchMock = mockApi(({ url, method }) => {
+      if (url.pathname === '/api/v1/customer/addresses' && method === 'GET') return ok([SAVED]);
+      if (url.pathname === '/api/v1/places/reverse') return ok({ address: reverseLabel });
+      if (url.pathname === '/api/v1/places/autocomplete') return ok([]);
+      if (url.pathname === '/api/v1/courier/estimate' && method === 'POST') return ok({ ...ESTIMATE, totalFee: fee });
+      if (url.pathname === '/api/v1/courier/order' && method === 'POST') {
+        orders += 1;
+        if (orders === 1) {
+          return { status: 409, body: { success: false, error: { code: 'PRICE_CHANGED', message: 'The fee for this parcel has changed. Check the new fee, then send it again.', details: { expectedFee: 1160, fee: 1280, currencyCode: 'GYD' } } } };
+        }
+        return ok({ orderId: 'co-2', orderNumber: 'SW-3002', fee: 1280, distanceKm: 3, trackingToken: 't', trackingUrl: 'https://example.test/t', expiresAt: null }, 201);
+      }
+      return { status: 404, body: { success: false, error: { message: `unmocked ${method} ${url.pathname}` } } };
+    });
+    device('ok');
+    render(<CourierPage />);
+    await screen.findByDisplayValue('Current location');
+    await pinDropoff();
+    fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
+    loadMap();
+    fireEvent.keyDown(screen.getByRole('application', { name: 'Drop-off pin map' }), { key: 'ArrowRight' });
+    loadMap();
+    await screen.findByText(`Near ${reverseLabel}`);
+    fireEvent.click(button('Use this pin'));
+    expect(await screen.findByText('$1,160')).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
+    await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
+    fee = 1280;
+    fireEvent.click(button('Request courier · $1,160'));
+    expect(await screen.findByText(/The fee for this parcel has changed/)).toBeTruthy();
+    await waitFor(() => expect(button('Request courier · $1,280').disabled).toBe(false));
+    expect(state.push).not.toHaveBeenCalled();
+    fireEvent.click(button('Request courier · $1,280'));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-2'));
+    expect(calls('POST', '/api/v1/courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
+  });
+
   it('pins the pickup when the device location is refused; an unnamed spot is sent as "Dropped pin"', async () => {
     device('denied');
     reverseLabel = null;
