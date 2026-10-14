@@ -220,22 +220,24 @@ export function riskGuidance(trade: string): string {
 // checklist proves it (ICAG Act s.25; lawyers are held; medicines are banned).
 // ---------------------------------------------------------------------------
 
-// Supply verbs, and the gas or fuel they would act on. A word naming an appliance,
-// a fitting or a part right after the fuel word ("gas stove", "fuel pump", "diesel
-// engine") is the trade's ordinary work, not fuel, and never counts. [DS1130]
-const SUPPLY = String.raw`(?:sell(?:s|ing)?|sales?|refill(?:s|ing)?|top[\s-]?ups?|topping[\s-]up|deliver(?:s|y|ies|ing)?|suppl(?:y|ies|ying|ier|iers)|provid(?:e|es|ing)|distribut(?:e|es|ing|ion|ors?)|stock(?:s|ing|ists?)?|retail(?:er|ing)?|wholesale|exchange|swap|transport(?:ing)?|carry(?:ing)?|fill(?:s|ing)?)`;
-const GAS_PARTS = String.raw`(?:stoves?|cookers?|ovens?|ranges?|hobs?|appliances?|lines?|pipes?|piping|leaks?|regulators?|hoses?|fittings?|fitters?|burners?|heaters?|dryers?|grills?|connections?|installations?|valves?|meters?|detectors?|safety|boilers?|fireplaces?)\b`;
-const FUEL_PARTS = String.raw`(?:efficient|lines?|pumps?|filters?|injectors?|injection|tanks?|systems?|gauges?|caps?|economy|savings?|consumption|doors?|hoses?|rails?|engines?|motors?|vehicles?|cars?|generators?|trucks?|mechanics?|lamps?|stoves?|heaters?)\b`;
+// Supply verbs (every tense, and the people who do it), and the gas or fuel they
+// would act on. A word naming an appliance, a fitting, a part or a filling station
+// right after the fuel word ("gas stove", "gas point", "fuel pump", "diesel engine",
+// "gas station") is the trade's ordinary work or a place, never fuel. [DS1130, DS1132]
+// A keyword rule is a first line, not a proof: reports and moderation stay the backstop.
+const SUPPLY = String.raw`(?:sell(?:s|ing|ers?)?|sold|sales?|refill(?:s|ed|ing|ers?)?|top(?:s|ped)?[\s-]?ups?|topping[\s-]up|deliver(?:s|ed|y|ies|ing|ers?)?|suppl(?:y|ies|ied|ying|iers?)|provid(?:e|es|ed|ing|ers?)|distribut(?:e|es|ed|ing|ion|ors?)|stock(?:s|ed|ing|ists?)?|retail(?:s|ed|ing|ers?)?|wholesal(?:e|ers?|ing)|exchang(?:e|es|ed|ing)|swap(?:s|ped|ping)?|transport(?:s|ed|ing|ers?)?|carr(?:y|ies|ied|ying|iers?)|fill(?:s|ed|ing)?|dealers?|vendors?|depots?|available|order(?:s|ed|ing)?|buy(?:s|ing)?|bought)`;
+const GAS_PARTS = String.raw`(?:stoves?|cookers?|ovens?|ranges?|hobs?|appliances?|lines?|pipes?|piping|leaks?|regulators?|hoses?|fittings?|fitters?|burners?|heaters?|dryers?|grills?|connections?|installations?|valves?|meters?|detectors?|safety|boilers?|fireplaces?|points?|outlets?|stations?|pumps?)\b`;
+const FUEL_PARTS = String.raw`(?:efficient|lines?|pumps?|filters?|injectors?|injection|tanks?|systems?|gauges?|caps?|economy|savings?|consumption|doors?|hoses?|rails?|engines?|motors?|vehicles?|cars?|generators?|trucks?|mechanics?|lamps?|stoves?|heaters?|stations?)\b`;
 const NOT_PART = (parts: string) => String.raw`(?![\s-]*${parts})`;
 const FUEL_WORDS = String.raw`(?:lpg|cooking\s+gas|gas)${NOT_PART(GAS_PARTS)}|gas\s+bottles?|cylinders?|propane|butane|(?:fuel|gasoline|petrol|diesel|kerosene)${NOT_PART(FUEL_PARTS)}`;
 const GAP = String.raw`\W+(?:\w+\W+){0,2}`;
 const supplyPattern = (fuel: string) => new RegExp(String.raw`\b${SUPPLY}${GAP}(?:${fuel})\b|\b(?:${fuel})${GAP}${SUPPLY}\b`, 'i');
 const FUEL_SUPPLY = supplyPattern(FUEL_WORDS);
-/** A gas fitter's "tank" is a gas tank. */
-const GAS_FITTER_SUPPLY = supplyPattern(String.raw`${FUEL_WORDS}|tanks?`);
+/** A gas fitter's "tank" is a gas tank — unless it is a water, septic or fish tank. */
+const GAS_FITTER_SUPPLY = supplyPattern(String.raw`${FUEL_WORDS}|(?<!\b(?:water|septic|fish)\s)tanks?`);
 const ACCOUNTANT_TITLES = /\b(?:chartered\s+accountants?|certified\s+(?:public\s+)?accountants?|cpa|acca)\b/i;
 // Lawyers are held (Code of Conduct advertising rule; touting): no profile offers legal work.
-const NEVER_TITLES = /\b(?:attorney[\s-]+at[\s-]+law|barristers?|solicitors?|lawyers?|legal\s+(?:advice|services?|representation|counsel)|pharmacists?|druggists?)\b|(?<!power\s+of\s+)\battorneys?\b/i;
+const NEVER_TITLES = /\b(?:attorney[\s-]+at[\s-]+law|barristers?|solicitors?|lawyers?|paralegals?|legal\s+(?:advice|services?|representation|counsel|drafting|aid)|pharmacists?|druggists?)\b|(?<!powers?[\s-]+of[\s-]+)\battorneys?\b/i;
 
 /** Refuse profile wording Swift must never publish for a service provider. */
 export function assertProviderProfileWording(trade: ServiceTradeId, bio: string | null | undefined): void {
@@ -249,8 +251,11 @@ export function assertProviderProfileWording(trade: ServiceTradeId, bio: string 
 }
 
 const DRONE_WORDS = String.raw`(?:drones?|aerial|uavs?|quad[\s-]?copters?|fpv)`;
-/** "No drone work", "drone-free", "without drones": a provider who says they do not fly. */
-const NO_DRONE = new RegExp(String.raw`\b(?:no|not|never|without|don['’]?t\s+(?:do|offer|fly|use))\s+(?:\w+\s+){0,2}?${DRONE_WORDS}\b|\b${DRONE_WORDS}[\s-]*free\b`, 'gi');
+/** "No drone work", "we avoid drone jobs", "doesn't fly drones", "drone-free", "drone work not offered":
+ *  a provider who says they do not fly. A negation elsewhere in the sentence does not count — when
+ *  unsure, Swift asks for the authorisation. [DS1132] */
+const NEGATOR = String.raw`(?:no|not|never|without|avoid(?:s|ing)?|(?:do|does|did)\s+not|(?:don|doesn|didn)['’]?t)`;
+const NO_DRONE = new RegExp(String.raw`\b${NEGATOR}\s+(?:\w+\s+){0,2}?${DRONE_WORDS}\b|\b${DRONE_WORDS}[\s-]*free\b|\b${DRONE_WORDS}(?:\s+\w+){0,2}\s+not\s+(?:offered|available|provided|done)\b`, 'gi');
 const DRONE = new RegExp(String.raw`\b${DRONE_WORDS}\b`, 'i');
 
 /** [TRADES] A profile offering drone or aerial work needs the GCAA's authorisation (services.service). */

@@ -110,9 +110,11 @@ describe('[TRADES] the 13 held trades open at launch with their own checks', () 
     for (const bio of ['Quad-copter video', 'FPV flying for events']) {
       expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual([...BASE, 'drone_authorisation']);
     }
-    for (const bio of ['No drone work', 'A drone-free studio', 'Portraits only, without drones']) {
+    for (const bio of ['No drone work', 'A drone-free studio', 'Portraits only, without drones', 'We avoid drone jobs', 'doesn’t fly drones', 'Drone work not offered']) {
       expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual(BASE);
     }
+    // a negation elsewhere in the sentence does not hide drone work: when unsure, Swift asks
+    expect(await providerChecklist(fakeDb('photographer', stored, 'Drone photos, not just stills'), 'synthetic-user')).toEqual([...BASE, 'drone_authorisation']);
     // The authorisation is offered to every photographer as a document they MAY add first.
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER_TRADE_PHOTOGRAPHER_OPTIONAL']).toEqual(['drone_authorisation']);
   });
@@ -208,6 +210,19 @@ describe('[TRADES] profile wording rules', () => {
     'We sell gas',
     'LPG distributor for the East Coast',
     'We stock cooking gas',
+    // [DS1132 S2] past tenses and the people who sell it
+    'Cooking gas delivered to your door',
+    'LPG sold and delivered',
+    'Gas refilled while you wait',
+    'Propane and butane supplied daily',
+    'Fuel stocked all week',
+    'Kerosene vendors',
+    'We are diesel dealers',
+    'We filled your gas tank',
+    'LPG available',
+    'Cooking gas available now',
+    'Order your gas from us',
+    'Buy LPG here',
   ])('refuses gas or fuel supply wording: %s', (bio) => {
     expect(() => assertProviderProfileWording('gas_fitter', bio)).toThrow(expect.objectContaining({ code: 'PROHIBITED_SERVICE_WORDING' }));
     expect(() => assertProviderProfileWording('plumber', bio)).toThrow(expect.objectContaining({ code: 'PROHIBITED_SERVICE_WORDING' }));
@@ -215,8 +230,11 @@ describe('[TRADES] profile wording rules', () => {
 
   it('a gas fitter may not offer to refill a tank either', () => {
     expect(() => assertProviderProfileWording('gas_fitter', 'We refill your tank')).toThrow(expect.objectContaining({ code: 'PROHIBITED_SERVICE_WORDING' }));
-    // a water-tank cleaner is not selling gas
+    // a water-tank cleaner is not selling gas, and neither is a gas fitter fitting water tanks [DS1132 S4]
     expect(() => assertProviderProfileWording('cleaner', 'We clean and refill your water tank')).not.toThrow();
+    for (const bio of ['We sell hot water tanks', 'I supply water tanks', 'Septic tanks supplied and installed']) {
+      expect(() => assertProviderProfileWording('gas_fitter', bio), bio).not.toThrow();
+    }
   });
 
   it.each([
@@ -237,6 +255,15 @@ describe('[TRADES] profile wording rules', () => {
     'I carry fuel filters',
     'Diesel and petrol engines; parts supply',
     'Diesel generator delivery and servicing',
+    // [DS1132 S3] a filling station is a customer or a place, not fuel
+    'We deliver meals for gas stations',
+    'We supply meals to gas stations',
+    'We deliver equipment for fuel stations',
+    'We supply gas station fittings',
+    'Diesel mechanic available weekends',
+    'Generator fuel lines checked; parts ordered',
+    'Buffet orders for gas station staff',
+    'Gas stoves available to order',
   ])('allows ordinary trade wording that names fuel parts: %s', (bio) => {
     expect(() => assertProviderProfileWording('mechanic', bio)).not.toThrow();
   });
@@ -249,7 +276,12 @@ describe('[TRADES] profile wording rules', () => {
     for (const bio of ['Attorney-at-law', 'attorney at law and notary', 'Registered pharmacist', 'Druggist', 'Lawyer by day', 'Your attorney for land matters', 'Free legal advice']) {
       expect(() => assertProviderProfileWording('accountant', bio), bio).toThrow(expect.objectContaining({ code: 'PROTECTED_TITLE' }));
     }
-    // a power of attorney is a document, not a title
-    expect(() => assertProviderProfileWording('tutor', 'I help families prepare a power of attorney form')).not.toThrow();
+    for (const bio of ['Paralegal services', 'Legal drafting service']) {
+      expect(() => assertProviderProfileWording('tutor', bio), bio).toThrow(expect.objectContaining({ code: 'PROTECTED_TITLE' }));
+    }
+    // a power of attorney is a document, not a title [DS1132 S4]
+    for (const bio of ['I help families prepare a power of attorney form', 'We prepare powers of attorney', 'power-of-attorney forms']) {
+      expect(() => assertProviderProfileWording('tutor', bio), bio).not.toThrow();
+    }
   });
 });
