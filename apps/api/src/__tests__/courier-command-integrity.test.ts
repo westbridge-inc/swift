@@ -163,6 +163,21 @@ describe('courier creation is one durable command', () => {
   });
 });
 
+describe('an immediately-due dispatch command survives clock skew [Opus review 14 Oct S3-1]', () => {
+  it('an API host clock seconds ahead of the database still lets the in-request drain publish it', async () => {
+    const a = await actor(); const created = await post(a); expect(created.statusCode, created.body).toBe(201);
+    const id = created.json().data.orderId as string;
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { tenantId: true } });
+    // The writer stamps availableAt with ITS clock; the claim compares with the database's. Lead it by 2 s.
+    const command = await app.prisma.$transaction((tx) => outbox.persistDispatchCommandInTransaction(tx, {
+      orderId: id, tenantId: order.tenantId, reason: 'clock-skew-probe', now: new Date(Date.now() + 2_000),
+    }));
+    expect(await drain(id)).toEqual({ processed: 1, failed: 0 });
+    expect((await app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: command.id } })).processedAt).not.toBeNull();
+    expect((await jobsFor(id)).map((j) => j.id)).toContain(command.id);
+  });
+});
+
 describe('held courier dispatch survives release crashes', () => {
   it('commit then crash at release is recovered by the existing outbox sweep', async () => {
     vi.stubEnv('LIFECYCLE_V2', '1'); const a = await actor(); const created = await post(a, nanoid());
