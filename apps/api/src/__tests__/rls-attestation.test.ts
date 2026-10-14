@@ -254,6 +254,28 @@ describe('[TA-S0-003] the facts come from the database, not from config', () => 
       expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(true);
       await app.prisma.$executeRawUnsafe(`DROP TABLE "${probe}"`);
       expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(false);
+      // A function, a type, or a walled schema itself handed to the group: an
+      // owner member can drop a trigger function (and the append-only trigger
+      // with it), or any table in a schema it owns.
+      await app.prisma.$executeRawUnsafe(`CREATE FUNCTION "${probe}_fn"() RETURNS int LANGUAGE sql AS 'SELECT 1'`);
+      await app.prisma.$executeRawUnsafe(`ALTER FUNCTION "${probe}_fn"() OWNER TO swift_app`);
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(true);
+      await app.prisma.$executeRawUnsafe(`DROP FUNCTION "${probe}_fn"()`);
+      await app.prisma.$executeRawUnsafe(`CREATE TYPE "${probe}_type" AS ENUM ('a')`);
+      await app.prisma.$executeRawUnsafe(`ALTER TYPE "${probe}_type" OWNER TO swift_app`);
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(true);
+      await app.prisma.$executeRawUnsafe(`DROP TYPE "${probe}_type"`);
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(false);
+      const [qr] = await app.prisma.$queryRaw<Array<{ owner: string }>>`
+        SELECT pg_get_userbyid(nspowner)::text AS owner FROM pg_namespace WHERE nspname = 'swift_qr'`;
+      expect(qr?.owner).toBeTruthy();
+      await app.prisma.$executeRawUnsafe(`ALTER SCHEMA swift_qr OWNER TO swift_app`);
+      try {
+        expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(true);
+      } finally {
+        await app.prisma.$executeRawUnsafe(`ALTER SCHEMA swift_qr OWNER TO "${qr!.owner}"`);
+      }
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(false);
       await app.prisma.$executeRawUnsafe(`GRANT "${owner.role}" TO ${role}`);
       const member = await readRlsFacts(login);
       expect([member.isSuperuser, member.hasBypassRls, member.isOwnerRoleMember]).toEqual([false, false, true]);
@@ -261,6 +283,8 @@ describe('[TA-S0-003] the facts come from the database, not from config', () => 
     } finally {
       await login.$disconnect();
       await app.prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${probe}"`);
+      await app.prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${probe}_fn"()`);
+      await app.prisma.$executeRawUnsafe(`DROP TYPE IF EXISTS "${probe}_type"`);
       await app.prisma.$executeRawUnsafe(`DROP ROLE IF EXISTS ${role}`);
     }
   });

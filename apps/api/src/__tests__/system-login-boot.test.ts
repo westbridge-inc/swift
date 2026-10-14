@@ -135,7 +135,7 @@ describe('a walled API or worker refuses to start without a working system login
       const ownerRole = (await owner.$queryRaw<Array<{ owner: string }>>`SELECT current_user::text AS owner`)[0]!.owner;
       await owner.$executeRawUnsafe(`GRANT "${ownerRole}" TO ${role}`);
       await expect(attestSystemLoginAtBoot(request, log, { ...WALL_ON, SYSTEM_DATABASE_URL: urlFor(role, password) }))
-        .rejects.toThrow(/FATAL[\s\S]*owns tables or functions in the walled schemas/);
+        .rejects.toThrow(/FATAL[\s\S]*owns a walled schema or a table, function or type in one/);
     } finally {
       await owner.$executeRawUnsafe(`DROP ROLE IF EXISTS ${role}`);
     }

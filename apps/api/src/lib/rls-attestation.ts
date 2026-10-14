@@ -96,13 +96,14 @@ export type RlsBypass =
    */
   | 'BYPASS_ROLE_MEMBER'
   /**
-   * [TA-S0-003 · R3] Membership of a role that OWNS a table or function in the
-   * walled schemas (public, swift_qr) — the owner itself included. FORCE ROW
+   * [TA-S0-003 · R3] Membership of a role that OWNS a walled schema (public,
+   * swift_qr) or a table, function or type in one — the owner itself included. FORCE ROW
    * LEVEL SECURITY binds an owner's queries, but an owner (and every member
    * that inherits from it) can ALTER the table back to NO FORCE, disable row
    * security or drop the policy: a wall its own subject can take down is not
-   * a wall. None of the role flags shows this, and `OWNER_NOT_FORCED` only
-   * counts tables owned by the connected role by name.
+   * a wall; a function owner can drop the append-only trigger it carries, and
+   * a schema owner any table in it. None of the role flags shows this, and
+   * `OWNER_NOT_FORCED` only counts tables owned by the connected role by name.
    */
   | 'OWNER_ROLE_MEMBER';
 
@@ -115,7 +116,7 @@ export interface RlsFacts {
   hasBypassRls: boolean;
   /** Member of `swift_bypass_rls` — the escape the tenant policy itself grants. */
   isBypassRoleMember: boolean;
-  /** Member of a role owning a table or function in public/swift_qr (owner included) — see OWNER_ROLE_MEMBER. */
+  /** Member of a role owning public/swift_qr or a table, function or type in one (owner included) — see OWNER_ROLE_MEMBER. */
   isOwnerRoleMember: boolean;
   /** Tables in `public` carrying a `tenantId` column. */
   tenantTables: number;
@@ -145,7 +146,7 @@ export function explainBypass(bypass: RlsBypass, facts: RlsFacts): string {
     case 'BYPASS_ROLE_MEMBER':
       return `role "${facts.role}" is a member of swift_bypass_rls — every tenant policy in this schema has an OR branch that this membership satisfies, so the wall is open to it whatever the table flags say`;
     case 'OWNER_ROLE_MEMBER':
-      return `role "${facts.role}" is (or is a member of) a role that owns tables or functions in the walled schemas — it can switch row security off or drop the policies, so the wall does not bind it`;
+      return `role "${facts.role}" is (or is a member of) a role that owns a walled schema or a table, function or type in one — it can switch row security off, drop the policies or an append-only trigger, so the wall does not bind it`;
     case 'RLS_DISABLED':
       return `${facts.rlsDisabledTables} tenant-bearing table(s) have no row security enabled at all`;
     case 'OWNER_NOT_FORCED':
@@ -201,13 +202,19 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
            -- instead of the error the name,name,text form raises.
            COALESCE((SELECT pg_has_role(current_user, b.oid, 'MEMBER')
                        FROM pg_roles b WHERE b.rolname = 'swift_bypass_rls'), false) AS bypass_member,
-           -- [TA-S0-003 · R3] Owner, or a member of an owner, of anything in
-           -- the walled schemas (distinct owners first: a handful of checks).
+           -- [TA-S0-003 · R3] Owner, or a member of an owner, of a walled
+           -- schema or of anything in one: relations, functions, types (as
+           -- deploy/wall/operator.py's login probe; distinct owners first).
            EXISTS (SELECT 1 FROM (SELECT c.relowner AS owner FROM pg_class c
                                     JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname IN ('public', 'swift_qr')
                                   UNION
                                   SELECT p.proowner FROM pg_proc p
-                                    JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname IN ('public', 'swift_qr')) o
+                                    JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname IN ('public', 'swift_qr')
+                                  UNION
+                                  SELECT n.nspowner FROM pg_namespace n WHERE n.nspname IN ('public', 'swift_qr')
+                                  UNION
+                                  SELECT t.typowner FROM pg_type t
+                                    JOIN pg_namespace n ON n.oid = t.typnamespace AND n.nspname IN ('public', 'swift_qr')) o
                     WHERE pg_has_role(current_user, o.owner, 'MEMBER')) AS owner_member
       FROM pg_roles r
      WHERE r.rolname = current_user`;

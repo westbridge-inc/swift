@@ -115,6 +115,16 @@ class RehearsalComposeRendered(unittest.TestCase):
             self.assertIn('/dev/null', [v['source'] for v in model['services'][name]['volumes']])
         self.assertIn('-h 127.0.0.1', ' '.join(model['services']['postgres']['healthcheck']['test']))
 
+    def test_the_overlay_names_its_own_project_even_without_p(self):
+        """Base first, no -p: the base file's `name: swift` is PRODUCTION's
+        project. The rehearsal layer names its own, so a hand run that forgets
+        -p still never reaches production's containers or volumes."""
+        model = compose_render(*self.FILES)
+        self.assertEqual(model['name'], 'swift-rehearsal')
+        for volume in model['volumes'].values():
+            self.assertTrue(volume['name'].startswith('swift-rehearsal_'), volume)
+        self.assertEqual(compose_render('docker-compose.yml')['name'], 'swift')
+
 
 # ── pilot-up.sh against shims ──────────────────────────────────────────────
 FAKE_DOCKER = r'''

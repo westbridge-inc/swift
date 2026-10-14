@@ -17,7 +17,10 @@
 #   is never enabled, and no service publishes a port.
 # - Postgres is healthy only once it answers over TCP (the image's first start
 #   answers on its socket while it is still initialising).
+# - Its own project name, even if -p is forgotten: the base file's `name:` is
+#   production's project (swift), and Compose takes the last file's name.
 # ===========================================================================
+name: swift-rehearsal
 services:
   postgres:
     volumes: !override
