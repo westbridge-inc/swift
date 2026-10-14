@@ -20,7 +20,11 @@ BEGIN
   IF EXISTS (SELECT 1 FROM "billing_events" WHERE "type"::text = 'PREPAID_REVERSAL') THEN
     RAISE EXCEPTION 'PREPAID_REVERSAL_IN_USE: a wallet was debited for a reversal; not rolling back';
   END IF;
+  IF EXISTS (SELECT 1 FROM "ledger_entries" WHERE "accountCode" = 'FEE_RECEIVABLE') THEN
+    RAISE EXCEPTION 'FEE_RECEIVABLE_IN_USE: a fee owed again is on the books; not rolling back';
+  END IF;
 END $$;
+DELETE FROM "ledger_accounts" WHERE "code" = 'FEE_RECEIVABLE';
 DROP TRIGGER IF EXISTS mmg_fee_reversals_forward ON "mmg_fee_reversals";
 DROP FUNCTION IF EXISTS mmg_fee_reversals_forward();
 DROP TABLE IF EXISTS "mmg_fee_reversals";

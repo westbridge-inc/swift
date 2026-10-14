@@ -418,7 +418,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
 const RESOLUTION_WORDS: Record<string, string> = {
   NOT_RETURNED: 'Closed by a person: MMG shows the payment was not returned.',
   RETURNED_BY_REFERENCE: "Closed by a person: MMG's records showed the return they named.",
-  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after the money had already paid for a week. Nothing was deducted; that week is now unpaid and finance settles it with the partner.',
+  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after the money had already paid for a week. Nothing was deducted; that week\'s fee is owed again (on the books as fee owed) and finance collects it.',
 };
 
 /**
@@ -453,7 +453,7 @@ function ResolveHeld({ reversalId, heldReason, onDone }: { reversalId: string; h
       {moneyUsed ? (
         <label className="flex items-center gap-2 text-xs">
           <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
-          MMG returned it, but the money had already paid for a week (close it; that week is then unpaid and finance settles it with the partner)
+          MMG returned it, but the money had already paid for a week (close it; that week&apos;s fee is then owed again and finance collects it)
         </label>
       ) : null}
       <input

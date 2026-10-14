@@ -134,6 +134,12 @@ END $$ LANGUAGE plpgsql;
 CREATE TRIGGER mmg_fee_reversals_forward BEFORE UPDATE ON "mmg_fee_reversals"
   FOR EACH ROW EXECUTE FUNCTION mmg_fee_reversals_forward();
 
+-- [owner Q-1654-BOOKS A] Chart of accounts (reporting mirror; modules/billing/ledger.ts is truth):
+-- a week's fee a partner owes again after MMG returned the money that paid it.
+INSERT INTO "ledger_accounts" ("code", "name", "type") VALUES
+  ('FEE_RECEIVABLE', 'Weekly fees a partner owes again (MMG returned the money that paid them; subledger = subscriptionId)', 'ASSET')
+ON CONFLICT ("code") DO NOTHING;
+
 -- Tenant wall (rlsDdlFor('mmg_fee_reversals'), src/lib/tenant-rls.ts).
 ALTER TABLE "mmg_fee_reversals" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "mmg_fee_reversals" FORCE ROW LEVEL SECURITY;

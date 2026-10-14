@@ -9,6 +9,7 @@ import { notifyAdmins, type NotificationService } from '../notification/notifica
 import { hasConfirmationInTx, lockBillingAuthority } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import type { BillingService } from './billing.service';
+import { postLedger, returnedNotBookedPostings } from './ledger';
 import { amountMinorOf, decideAfterLookup, lookupProof, REVERSAL_SENDING_STALE_MS, type ReversalProof } from './mmg-reversal-proof';
 export { lookupProof, REVERSAL_PROOF_WINDOW_MS, REVERSAL_SENDING_STALE_MS } from './mmg-reversal-proof';
 
@@ -168,7 +169,7 @@ const RESOLVE_COPY: Record<ResolveRefusal, string> = {
   PAYMENT_NOT_STANDING: "MMG's records do not show this payment still standing, so it cannot be closed as not returned. Nothing changed.",
   NO_PROOF: "MMG's records do not show that return for this payment and amount. Nothing changed.",
   NOT_A_REVERSAL: "That MMG reference is a payment Swift has on record (this payment's own statement line, or another payment), not a return. Enter the reference of MMG's reversal transaction. Nothing changed.",
-  RETURN_NOT_BOOKABLE: "MMG returned this payment, but it cannot be booked against the partner's weekly-fee payments as they stand now. If the money already paid for a week, close it as \"Returned, not booked\" (that week is then unpaid and finance settles it with the partner); otherwise put the books right and use \"Check with MMG\". Nothing changed.",
+  RETURN_NOT_BOOKABLE: "MMG returned this payment, but it cannot be booked against the partner's weekly-fee payments as they stand now. If the money already paid for a week, close it as \"Returned, not booked\" (that week's fee is then owed again and finance collects it); otherwise put the books right and use \"Check with MMG\". Nothing changed.",
   NOT_SHORT: 'Only a return MMG made after the money had already paid for a week is closed this way. Nothing changed.',
   RETURN_NOW_BOOKABLE: "The partner's weekly-fee payments hold this amount again, so the return can be booked: use \"Check with MMG\". Nothing changed.",
   MMG_LOOKUP_UNAVAILABLE: 'MMG could not be asked just now. Nothing changed; try again in a few minutes.',
@@ -632,6 +633,12 @@ export class MmgFeeReversalService {
           data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: proof.how, resolution: 'RETURNED_NOT_BOOKED', resolvedBy: input.actorId, resolutionNote: reference },
         });
         if (moved.count !== 1) throw new AppError(409, 'NOT_HELD', RESOLVE_COPY.NOT_HELD);
+        // [owner Q-1654-BOOKS A] The partner owes that week's fee again; MMG clearing holds less.
+        await postLedger(tx, {
+          idempotencyKey: `ledger:mmg-reversal-not-booked:${row.id}`,
+          description: `MMG returned payment ${row.mmgTransactionId} after it had paid for a week: that week's fee is owed again`,
+          entries: returnedNotBookedPostings(row.subscriptionId, Number(row.amount)),
+        });
         await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'RETURNED_NOT_BOOKED', mmgReference: reference });
         return tx.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } });
       });
@@ -641,7 +648,7 @@ export class MmgFeeReversalService {
         tenantId: row.tenantId,
         title: 'MMG returned a weekly-fee payment that had already paid for a week',
         body: `MMG returned payment ${row.checkoutId} (${formatMoney(Number(row.amount), row.currencyCode, { whole: true })}) to the partner, `
-          + 'but that money had already paid for a week of their fee, so nothing was deducted here and that week is now unpaid. Finance settles it with the partner.',
+          + 'but that money had already paid for a week of their fee, so nothing was deducted here: that week\'s fee is owed again (on the books as fee owed). Finance collects it from the partner.',
         data: { kind: 'billing_invariants', alert: 'mmg-fee-reversal-returned-not-booked', reversalId: row.id, checkoutId: row.checkoutId },
         dedupeKey: `mmg-fee-reversal-returned-not-booked:${row.id}`,
       }).catch((err) => log().error({ err, reversalId: row.id }, '[MMG reversal] the returned-not-booked page failed; the row is closed and listed'));

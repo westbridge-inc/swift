@@ -958,6 +958,53 @@ describe('[MMG REVERSAL · Opus S3 pattern] the rollback guard cannot be blinded
   });
 });
 
+describe('[owner Q-1654-BOOKS] the books show every MMG return', () => {
+  const ledgerOf = (key: string) => app.prisma.ledgerEntry.findMany({ where: { transaction: { idempotencyKey: key } }, select: { accountCode: true, subledgerId: true, debit: true, credit: true } });
+  const journal = async () => {
+    const { cashJournalCsv } = await import('../modules/billing/receipts');
+    return (await runWithTenant('swift-default', () => cashJournalCsv(app.prisma, new Date(Date.now() - 3_600_000), new Date(Date.now() + 3_600_000)))).split('\n');
+  };
+  const receiptOf = async (checkoutId: string) => {
+    const intent = await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: checkoutId }, select: { providerPaymentId: true } });
+    const credit = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `mmg-checkout:pp:${intent.providerPaymentId}` } });
+    return app.prisma.feeReceipt.findUniqueOrThrow({ where: { billingEventId: credit.id } });
+  };
+
+  it('A: "returned, not booked" — the partner owes that week\'s fee again: Dr fee owed (their account) / Cr MMG clearing, books in balance', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const sent = await ask(p.checkoutId, p.amount);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const held = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    expect(held.heldReason).toBe('WALLET_NO_LONGER_HOLDS_IT');
+    await resolveAs(held.id, 'RETURNED_NOT_BOOKED', `STMT${RUN}A1`);
+    const entries = await ledgerOf(`ledger:mmg-reversal-not-booked:${held.id}`);
+    expect(entries.map((e) => ({ ...e, debit: Number(e.debit), credit: Number(e.credit) })).sort((a, b) => a.accountCode.localeCompare(b.accountCode))).toEqual([
+      { accountCode: 'CLEARING_MMG', subledgerId: null, debit: 0, credit: p.amount },
+      { accountCode: 'FEE_RECEIVABLE', subledgerId: p.subId, debit: p.amount, credit: 0 },
+    ]);
+    expect((await runBillingInvariants(app.prisma)).ledgerTrialImbalance).toBeNull();
+  });
+
+  it('B: the cash journal marks the original receipt "returned" and adds a negative "returned" line with MMG\'s reference', async () => {
+    const p = await paidCheckout();
+    const receipt = await receiptOf(p.checkoutId);
+    const row = await ask(p.checkoutId, p.amount);
+    expect(row.state).toBe('REVERSED');
+    const lines = await journal();
+    expect(lines[0]).toBe('date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref,status');
+    const original = lines.find((l) => l.split(',')[1] === receipt.receiptNumber && !l.split(',')[6]!.startsWith('-'));
+    expect(original, 'the original receipt line').toBeDefined();
+    expect(original!.split(',').at(-1)).toMatch(/^returned \d{4}-\d{2}-\d{2}$/);
+    const negative = lines.find((l) => l.split(',')[1] === receipt.receiptNumber && l.split(',')[6] === `-${p.amount.toFixed(2)}`);
+    expect(negative, 'the negative returned line').toBeDefined();
+    expect(negative!.split(',')[5]).toBe('MMG_RETURN');
+    expect(negative!.split(',')[7]).toBe(row.providerReference ?? '');
+    expect(negative!.split(',').at(-1)).toBe('returned');
+  });
+});
+
 describe('[review #1654] what MMG names is checked, one reference books once, nothing closes under a return in flight', () => {
   /** MMG answers the reversal "pending", naming `named(txn)`; the lookup is the sandbox's, with the
    *  payment's own ledger number set when `ledger` is given. */
