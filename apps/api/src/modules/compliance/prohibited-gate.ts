@@ -14,17 +14,22 @@
  *   · nobody can cart or order one — cart add/edit, basket upload, reorder,
  *     substitution and checkout (also under its row locks) refuse it the way
  *     they refuse a sold-out item (409 ITEM_UNAVAILABLE), so every app already
- *     shows the reason and offers Remove. Removing a line is never refused.
+ *     shows the reason and offers Remove. Removing a line is never refused;
+ *   · an order already placed with such a line never moves toward the
+ *     customer: not accepted, prepared, made ready, handed over or given to a
+ *     rider. Rejecting or cancelling it is never refused.
  *
  * The verdict is computed from the item's current words every time, so no
  * write path — a route, a CSV import, a till sync, a seed — can leave an item
  * judged on stale words.
  */
-import { Prisma, type PrismaClient } from '@prisma/client';
+import { Prisma, type OrderStatus, type PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { custodyOf, ORDER_TRANSITIONS } from '../order/order-status';
 import {
   checkItem,
   classifyCategory,
+  classifyText,
   isHidden,
   notAllowedMessage,
   orderRefusalMessage,
@@ -198,6 +203,54 @@ export async function assertOrderableNow(db: Db, items: ReadonlyArray<{ id: stri
   const hidden = await hiddenAmong(db, items.map((i) => i.id));
   const hit = items.find((i) => hidden.has(i.id));
   if (hit) throw new AppError(409, 'ITEM_UNAVAILABLE', orderRefusalMessage(hit.name), { itemId: hit.id, reason: 'PROHIBITED' });
+}
+
+/**
+ * A move that takes an order's goods toward the customer while they are still
+ * at the store: accept, prepare, ready, a rider assigned, arriving or
+ * collecting, the store's own handover (counter pickup, own delivery). Read
+ * from the one custody law. Never a cancellation, a refund, a failure, a
+ * return or a recovery step back — and nothing once a rider holds the goods,
+ * so a delivery already under way is never stranded in a rider's bag.
+ */
+const NEVER_HELD_BACK: ReadonlySet<OrderStatus> = new Set<OrderStatus>(['CANCELLED', 'REFUNDED', 'FAILED', 'RETURNING', 'RETURNED']);
+export function movesTowardCustomer(source: OrderStatus, target: OrderStatus): boolean {
+  if (NEVER_HELD_BACK.has(target) || !ORDER_TRANSITIONS[target].includes(source)) return false;
+  const custody = custodyOf(source);
+  return custody === 'UNASSIGNED' || custody === 'ASSIGNED_NOT_HOLDING';
+}
+
+/**
+ * An order placed before this rule — or whose item a person removed, or whose
+ * words changed, after it was placed — does not go ahead while a line is
+ * hidden. Each line is judged by its item's verdict today AND by its own
+ * snapshotted name (the item may have been renamed since): a line whose own
+ * name carries a banned word goes ahead only if its item is approved. Checkout
+ * already refuses such a line; this covers the orders already in flight.
+ * [GUARDRAILS §8; owner 13 Oct: refused at "order creation, dispatch"]
+ *
+ *   · 'store' — the canonical transition seam (store, support, rider legs):
+ *     409 PROHIBITED_ITEM naming the line and what to do.
+ *   · 'mover' — an offer card or a board grab: the rider is told the job is
+ *     paused, nothing about the goods (409 JOB_UNAVAILABLE).
+ */
+export async function assertOrderMayProceed(db: Db, orderId: string, audience: 'store' | 'mover'): Promise<void> {
+  const lines = await db.orderItem.findMany({ where: { orderId }, select: { itemId: true, name: true } });
+  if (lines.length === 0) return;
+  const checks = await catalogueChecksFor(db, lines.map((l) => l.itemId));
+  for (const line of lines) {
+    const live = checks.get(line.itemId);
+    const heldLive = live !== undefined && isHidden(live);
+    const heldByOwnName = classifyText(line.name) !== null && live?.state !== 'APPROVED';
+    if (!heldLive && !heldByOwnName) continue;
+    if (audience === 'mover') {
+      throw new AppError(409, 'JOB_UNAVAILABLE', 'This job isn\'t available — Swift has paused it. Take another job.', { reason: 'PROHIBITED' });
+    }
+    const message = live?.state === 'WAITING'
+      ? `This order can't go ahead yet: ${line.name} is waiting for a quick check by Swift. Reject the order, or wait for the check.`
+      : `This order can't go ahead: ${line.name} isn't allowed on Swift. Reject the order, or ask Swift support to cancel it — the customer is told.`;
+    throw new AppError(409, 'PROHIBITED_ITEM', message, { itemId: line.itemId, reason: 'PROHIBITED' });
+  }
 }
 
 /** What a partner reads about one of their items: null when there is nothing to say. */

@@ -55,6 +55,7 @@ import {
   redispatchJobId,
   WITHDRAWN_CARD_SCREEN_SKEW_MS,
 } from './dispatch-generation-keys';
+import { assertOrderMayProceed } from '../compliance/prohibited-gate';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -2651,6 +2652,8 @@ export class DispatchService {
       // self-order check so payment state is never disclosed to an
       // unauthorized mover. Covers legacy in-flight rows that predate the gate.
       assertMmgFulfilmentAllowed(lockedOrder, assignedStatus);
+      // [GUARDRAILS §8] The third assignment writer refuses an order holding a line Swift no longer allows, too.
+      await assertOrderMayProceed(tx, orderId, 'mover');
       if (pool === 'RIDER' && withheldAwaitingReadiness(lockedOrder)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(lockedOrder)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
 

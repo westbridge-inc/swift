@@ -35,7 +35,10 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { OrderService } from '../modules/order/order.service';
 import { PickingService } from '../modules/order/picking.service';
 import { mergeGuestCart } from '../modules/user/cart-merge.service';
-import { resetHiddenItemIdsCacheForTests } from '../modules/compliance/prohibited-gate';
+import { movesTowardCustomer, resetHiddenItemIdsCacheForTests } from '../modules/compliance/prohibited-gate';
+import { DispatchService } from '../modules/dispatch/dispatch.service';
+import { HaversineMapsProvider } from '../providers/maps/maps-provider';
+import { lockUserRoleAuthority } from '../modules/mover-authority';
 
 // The index engine is the only thing replaced: what it returns is decided per
 // test, so the signed-in (index) path and the database fallback are both run.
@@ -65,6 +68,7 @@ const users: string[] = [];
 const vendorIds: string[] = [];
 const createdCategoryIds: string[] = [];
 let priorPlatformFlag: unknown = undefined;
+const inFlightOrderIds: string[] = [];
 
 let vendor: { id: string; slug: string; token: string; ownerUserId: string; shelfId: string; legacySectionId: string };
 let customer: { id: string; token: string };
@@ -231,6 +235,9 @@ afterAll(async () => {
     await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } }).catch(() => {});
     await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } }).catch(() => {});
     await app.prisma.discoveryCategory.deleteMany({ where: { id: { in: createdCategoryIds } } }).catch(() => {});
+    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: inFlightOrderIds } } }).catch(() => {});
+    await app.prisma.notification.deleteMany({ where: { userId: { in: users } } }).catch(() => {});
+    await app.prisma.rider.deleteMany({ where: { userId: { in: users } } }).catch(() => {});
     await app.prisma.address.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
@@ -534,5 +541,109 @@ describe('[§8] nobody can cart or order a hidden item', () => {
     const picked = await order('PREPARING', [control]);
     await expect(runWithTenant(TENANT, () => picking.proposeSubstitution(picked.id, picked.items[0]!.id, legacy.bottle.id, vendor.ownerUserId)))
       .rejects.toMatchObject({ code: 'SUBSTITUTE_UNAVAILABLE', message: 'That substitute isn\'t available on Swift' });
+  });
+});
+
+describe('[§8] an order already placed with a line Swift no longer allows never moves toward the customer', () => {
+  // An order placed before this rule existed — or whose item a person removed, or whose words changed,
+  // after it was placed. The store cannot accept, prepare or hand it over and no rider can be assigned
+  // to it; rejecting or cancelling it is never refused. (Checkout already refuses such a line.)
+  const lineOf = (i: { id: string; name: string }) => ({ itemId: i.id, name: i.name, quantity: 1, basePrice: 1500, markedUpPrice: 1500, markupAmount: 0, totalBase: 1500, totalMarkup: 0, totalCustomer: 1500 });
+  let n = 0;
+  const placed = async (status: 'PENDING' | 'ACCEPTED' | 'READY_FOR_PICKUP', lines: Array<{ id: string; name: string }>, fulfillment: 'PICKUP' | 'DELIVERY' = 'PICKUP') => {
+    n += 1;
+    const o = await app.prisma.order.create({ data: {
+      orderNumber: `PRHB-FLIGHT-${n}-${RUN}`, orderType: 'GROCERY_DELIVERY', customerId: customer.id, vendorId: vendor.id, status, fulfillment,
+      ...(fulfillment === 'DELIVERY' ? { fulfillmentMode: 'PLATFORM_RIDER' as const, readyAt: new Date(), pickupAddress: '1 Rule Street', pickupLat: 6.801, pickupLng: -58.156 } : {}),
+      deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 1500 * lines.length, subtotalMarkup: 0, subtotalCustomer: 1500 * lines.length, deliveryFee: 0, totalAmount: 1500 * lines.length, paymentMethod: 'CASH',
+      items: { create: lines.map(lineOf) },
+    } });
+    inFlightOrderIds.push(o.id);
+    return o;
+  };
+  const statusOf = async (id: string) => (await app.prisma.order.findUniqueOrThrow({ where: { id } })).status;
+
+  it('which moves are held back: only those taking the goods toward the customer while they are still at the store', () => {
+    for (const [from, to] of [['PENDING', 'ACCEPTED'], ['ACCEPTED', 'PREPARING'], ['PREPARING', 'READY_FOR_PICKUP'], ['READY_FOR_PICKUP', 'RIDER_ASSIGNED'],
+      ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP'], ['RIDER_ARRIVED_PICKUP', 'PICKED_UP'], ['READY_FOR_PICKUP', 'COMPLETED'], ['READY_FOR_PICKUP', 'DELIVERED']] as const) {
+      expect(movesTowardCustomer(from, to), `${from} → ${to}`).toBe(true);
+    }
+    // Never a cancellation or a step back, and never once a rider holds the goods: a delivery under way is not stranded.
+    for (const [from, to] of [['PENDING', 'CANCELLED'], ['PREPARING', 'CANCELLED'], ['RIDER_ASSIGNED', 'CANCELLED'], ['DELIVERED', 'REFUNDED'],
+      ['PICKED_UP', 'EN_ROUTE_DELIVERY'], ['EN_ROUTE_DELIVERY', 'ARRIVED'], ['ARRIVED', 'DELIVERED'], ['PICKED_UP', 'DELIVERED'], ['ARRIVED', 'FAILED'],
+      ['RIDER_ASSIGNED', 'READY_FOR_PICKUP'], ['DELIVERED', 'COMPLETED']] as const) {
+      expect(movesTowardCustomer(from, to), `${from} → ${to}`).toBe(false);
+    }
+  });
+
+  it('the store cannot accept it — removed, banned category, held by a word, or a line whose own name is banned — and can always reject it', async () => {
+    const removed = await placed('PENDING', [control, legacy.removed]);
+    const res = await inject('PUT', `/api/v1/vendor/orders/${removed.id}/accept`, vendor.token, {});
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'PROHIBITED_ITEM', details: { itemId: legacy.removed.id, reason: 'PROHIBITED' } });
+    expect(res.json().error.message).toBe(`This order can't go ahead: ${legacy.removed.name} isn't allowed on Swift. Reject the order, or ask Swift support to cancel it — the customer is told.`);
+    expect(await statusOf(removed.id)).toBe('PENDING');
+
+    const pharmacy = await placed('PENDING', [legacy.relief]);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${pharmacy.id}/accept`, vendor.token, {})).json().error).toMatchObject({ code: 'PROHIBITED_ITEM' });
+    const waiting = await placed('PENDING', [legacy.bottle]);
+    const held = await inject('PUT', `/api/v1/vendor/orders/${waiting.id}/accept`, vendor.token, {});
+    expect(held.statusCode).toBe(409);
+    expect(held.json().error.message).toBe(`This order can't go ahead yet: ${legacy.bottle.name} is waiting for a quick check by Swift. Reject the order, or wait for the check.`);
+    // The line's own words count too: the item behind it may have been renamed since.
+    const renamed = await placed('PENDING', [{ id: control.id, name: 'Paracetamol 500mg' }]);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${renamed.id}/accept`, vendor.token, {})).statusCode).toBe(409);
+    expect(await statusOf(renamed.id)).toBe('PENDING');
+
+    // Rejecting is never refused, and an ordinary order is accepted as before.
+    expect((await inject('PUT', `/api/v1/vendor/orders/${removed.id}/reject`, vendor.token, { reason: 'Item not allowed on Swift' })).statusCode).toBe(200);
+    expect(await statusOf(removed.id)).toBe('CANCELLED');
+    const ordinary = await placed('PENDING', [control]);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${ordinary.id}/accept`, vendor.token, {})).statusCode).toBe(200);
+    expect(await statusOf(ordinary.id)).toBe('ACCEPTED');
+    // A word a person approved (the catalogue check above approved this rum line's words) goes ahead.
+    const approvedWords = await placed('PENDING', [legacy.rum]);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${approvedWords.id}/accept`, vendor.token, {})).statusCode).toBe(200);
+  });
+
+  it('nor prepare it: an accepted order whose item was removed afterwards stops there', async () => {
+    const accepted = await placed('ACCEPTED', [legacy.relief]);
+    const res = await inject('PUT', `/api/v1/vendor/orders/${accepted.id}/preparing`, vendor.token, {});
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('PROHIBITED_ITEM');
+    expect(await statusOf(accepted.id)).toBe('ACCEPTED');
+    const ordinary = await placed('ACCEPTED', [control]);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${ordinary.id}/preparing`, vendor.token, {})).statusCode).toBe(200);
+  });
+
+  it('no rider is assigned to it — offer card or board grab — and an ordinary order is still assigned', async () => {
+    const redis = new Proxy({}, { get: () => vi.fn(async () => null) });
+    const io = { to: () => ({ emit: vi.fn() }), emit: vi.fn() };
+    const dispatch = new DispatchService(app.prisma, redis as never, io as never, new HaversineMapsProvider());
+    const rider = async () => {
+      const user = await userWithSession(['RIDER'], 'RIDER');
+      const session = await app.prisma.session.findFirstOrThrow({ where: { userId: user.id } });
+      const row = await app.prisma.rider.create({ data: { userId: user.id, isOnline: true, isAvailable: true, documentsVerified: true, locationSessionId: session.id,
+        currentLat: 6.801, currentLng: -58.156, lastLocationUpdate: new Date(), riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', floatLimit: 100_000 } });
+      return { userId: user.id, riderId: row.id };
+    };
+    const offerRider = await rider();
+    const boardRider = await rider();
+    const board = (orderId: string, r: { userId: string; riderId: string }) => app.prisma.$transaction(async (tx) => {
+      await lockUserRoleAuthority(tx, r.userId);
+      return orders.stageDirectRiderAssignment(tx, { orderId, riderId: r.riderId, moverUserId: r.userId, changedBy: r.userId });
+    });
+    const banned = await placed('READY_FOR_PICKUP', [control, legacy.removed], 'DELIVERY');
+    for (const door of [() => dispatch.claimOrder(banned.id, offerRider.riderId, 'RIDER'), () => board(banned.id, boardRider)]) {
+      await expect(door()).rejects.toMatchObject({ statusCode: 409, code: 'JOB_UNAVAILABLE', message: 'This job isn\'t available — Swift has paused it. Take another job.', details: { reason: 'PROHIBITED' } });
+      expect(await app.prisma.order.findUniqueOrThrow({ where: { id: banned.id } })).toMatchObject({ status: 'READY_FOR_PICKUP', riderId: null });
+    }
+    const ordinaryOffer = await placed('READY_FOR_PICKUP', [control], 'DELIVERY');
+    await dispatch.claimOrder(ordinaryOffer.id, offerRider.riderId, 'RIDER');
+    expect(await app.prisma.order.findUniqueOrThrow({ where: { id: ordinaryOffer.id } })).toMatchObject({ status: 'RIDER_ASSIGNED', riderId: offerRider.riderId });
+    const ordinaryBoard = await placed('READY_FOR_PICKUP', [control], 'DELIVERY');
+    await board(ordinaryBoard.id, boardRider);
+    expect(await app.prisma.order.findUniqueOrThrow({ where: { id: ordinaryBoard.id } })).toMatchObject({ status: 'RIDER_ASSIGNED', riderId: boardRider.riderId });
   });
 });

@@ -69,7 +69,7 @@ import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
-import { assertOrderableNow, hiddenAmong } from '../compliance/prohibited-gate';
+import { assertOrderableNow, assertOrderMayProceed, hiddenAmong, movesTowardCustomer } from '../compliance/prohibited-gate';
 
 interface CheckoutInput {
   userId: string;
@@ -696,6 +696,8 @@ export class OrderService {
     if (paymentGate) {
       await assertDispatchPairEligible(tx, paymentGate.customerId, input.moverUserId, 'RIDER');
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
+      // [GUARDRAILS §8] Nor is a rider handed an order holding a line Swift no longer allows.
+      await assertOrderMayProceed(tx, input.orderId, 'mover');
       if (withheldAwaitingReadiness(paymentGate)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(paymentGate)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
       if (paymentGate.fulfillment !== 'DELIVERY') {
@@ -2081,6 +2083,10 @@ export class OrderService {
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
     // MMG payment-first gate lives here, on the freshly locked row.
     assertMmgFulfilmentAllowed(source, input.target);
+    // [GUARDRAILS §8] An order holding a line Swift no longer allows does not
+    // move toward the customer from this seam either (accept, prepare, ready,
+    // rider legs before pickup, the store's own handover). Cancelling is never refused.
+    if (movesTowardCustomer(source.status, input.target)) await assertOrderMayProceed(tx, source.id, 'store');
     // [TAXI multi-stop 3/8] A ride is over only when every stop the passenger
     // asked for is done: arrived at and left, or skipped with a reason the
     // passenger is told. Every way to DELIVERED passes this seam (the fare
