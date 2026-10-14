@@ -10,6 +10,7 @@ import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
+import { withLiveDocuments } from './live-documents';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
@@ -30,7 +31,9 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { reviewerTypedFields } from '../verification/identity-signal-policy';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
+import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
@@ -72,6 +75,8 @@ import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-con
 import { platformStats } from './platform-stats';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
+import { catalogueChecksFor, flaggedItemsInTenant, wordsFor } from '../compliance/prohibited-gate';
+import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, type CatalogueCheck } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -335,6 +340,11 @@ const settleRefundSchema = z.object({
 const approveDocSchema = z.object({
   // Optional document expiry (e.g. licence end date entered during review)
   expiresAt: z.coerce.date().optional(),
+  // [VERIFY-DOCS · owner ruling 6 Oct 2026] What the reviewer TYPES, per type
+  // (the queue's `reviewerTypes` says which): the ID or licence number — kept
+  // only as a blind-index identity key — and a police clearance's issue date.
+  documentNumber: z.string().trim().min(1).max(40).optional(),
+  issuedOn: z.coerce.date().optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -409,6 +419,16 @@ function coerceMoney<T>(value: T): T {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = coerceMoney(v);
   return out as unknown as T;
+}
+
+/** [GUARDRAILS §8] How many held items the catalogue-check queue returns at once. */
+const CATALOGUE_REVIEW_PAGE = 200;
+
+/** [GUARDRAILS §8] One shape for "why is this item hidden", wherever an admin reads it. */
+function catalogueCheckSummary(check: Exclude<CatalogueCheck, { state: 'CLEAR' }>) {
+  return check.state === 'BANNED'
+    ? { state: check.state, prohibitedClass: check.prohibitedClass, label: PROHIBITED_CLASS_LABELS[check.prohibitedClass], source: check.source, term: check.term, reason: check.reason }
+    : { state: check.state, prohibitedClass: check.prohibitedClass, label: PROHIBITED_CLASS_LABELS[check.prohibitedClass], field: check.field, term: check.term };
 }
 
 export async function adminRoutes(app: FastifyInstance) {
@@ -506,16 +526,12 @@ export async function adminRoutes(app: FastifyInstance) {
       adCreative: childScope((tenantId) => ({ campaign: { tenantId } })),
       supportTicket: childScope((tenantId) => ({ user: { tenantId } })),
       item: childScope((tenantId) => ({ vendor: { tenantId } })),
-      // ContentReport keeps only a loose reporter id. Treat the reporter's
-      // tenant as the report boundary; target previews are independently
-      // scoped below so a bad cross-tenant target id cannot disclose content.
-      contentReport: childScope(async (tenantId) => {
-        const reporterIds = (await app.prisma.user.findMany({
-          where: { tenantId },
-          select: { id: true },
-        })).map((user) => user.id);
-        return { reporterId: { in: reporterIds } };
-      }),
+      // [DB-05] ContentReport carries its reporter's tenant on the row (held
+      // by a lineage trigger), so the boundary is the column itself — one
+      // bounded predicate, never a materialised list of every user id. Target
+      // previews are independently scoped below so a bad cross-tenant target
+      // id cannot disclose content.
+      contentReport: childScope((tenantId) => ({ tenantId })),
       // ChatMessage has no sender relation. Require both a local sender and a
       // local order-backed room; unattributable service chats fail closed.
       chatMessage: childScope(async (tenantId) => {
@@ -528,19 +544,11 @@ export async function adminRoutes(app: FastifyInstance) {
           chatRoom: { orderId: { in: orders.map((order) => order.id) } },
         };
       }),
-      // ReturnRequest has no relations or tenantId. Require both loose owner
-      // ids to resolve inside this tenant so a malformed cross-tenant row is
-      // hidden rather than being accepted through either side alone.
-      returnRequest: childScope(async (tenantId) => {
-        const [orders, customers] = await Promise.all([
-          app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
-          app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
-        ]);
-        return {
-          orderId: { in: orders.map((order) => order.id) },
-          customerId: { in: customers.map((customer) => customer.id) },
-        };
-      }),
+      // [DB-05] ReturnRequest carries its tenant on the row; the lineage
+      // trigger refuses a row whose order and customer disagree, and the
+      // backfill left such a legacy row NULL (quarantined, matching no tenant).
+      // One bounded predicate instead of every order and user id.
+      returnRequest: childScope((tenantId) => ({ tenantId })),
       // Rating's orderId is loose, while rater/ratee are User relations. All
       // populated ownership legs must agree with the request tenant; this also
       // prevents moderation side effects from reaching a foreign participant.
@@ -1373,13 +1381,98 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { id: true, orderNumber: true, status: true, totalAmount: true, paymentMethod: true, placedAt: true },
     });
 
+    // [GUARDRAILS §8] Every item of this store the prohibited-items rule touches, and why:
+    // banned (a banned category, or removed by a person), waiting for a check, or approved.
+    const catalogue = await app.prisma.item.findMany({ where: { vendorId: id }, select: { id: true, name: true } });
+    const checks = await catalogueChecksFor(app.prisma, catalogue.map((i) => i.id));
+    const prohibitedItems = catalogue.flatMap((i) => {
+      const check = checks.get(i.id);
+      return check && check.state !== 'CLEAR' ? [{ id: i.id, name: i.name, ...catalogueCheckSummary(check) }] : [];
+    });
+
     return {
       success: true,
       data: {
         ...vendor,
         recentOrders: recentOrders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
+        prohibitedItems,
       },
     };
+  });
+
+  // =========================================================================
+  // [GUARDRAILS §8] THE CATALOGUE CHECK (owner, 13 Oct 2026)
+  //
+  // A banned WORD in a partner's own text (name, description, menu section,
+  // options) saves the item but holds it hidden until a person looks. This is
+  // that person's queue. Approve shows the item for the exact words seen — the
+  // request carries the fingerprint the reviewer read, and a partner edit in
+  // between refuses the approval. Remove bans the item for good, with a reason
+  // the partner reads. Nothing here can lift a certain ban (a banned category,
+  // or an earlier removal). Both actions are C3: reason owed, audit row written.
+  // =========================================================================
+
+  app.get('/catalogue-review', { preHandler: [adminGuard] }, async () => {
+    const tenantId = requireTenantId();
+    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING');
+    // A bounded page: the first CATALOGUE_REVIEW_PAGE held items, and how many are held in all.
+    const flagged = waiting.slice(0, CATALOGUE_REVIEW_PAGE);
+    const words = await wordsFor(app.prisma, flagged.map(([id]) => id));
+    const items = flagged.flatMap(([id, check]) => {
+      const w = words.get(id);
+      if (!w || check.state !== 'WAITING') return [];
+      return [{
+        itemId: id,
+        vendor: { id: w.vendorId, name: w.vendorName },
+        name: w.name, description: w.description ?? null, sectionName: w.sectionName ?? null, optionNames: w.optionNames ?? [],
+        ...catalogueCheckSummary(check),
+        wordsHash: judgedWordsHash(w),
+      }];
+    });
+    return { success: true, data: { items, total: waiting.length } };
+  });
+
+  const approveCatalogueItemSchema = z.object({ wordsHash: z.string().regex(/^[0-9a-f]{64}$/), reason: z.string().optional() });
+  app.post('/catalogue-review/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = approveCatalogueItemSchema.parse(request.body ?? {});
+    const tenantId = requireTenantId();
+    const item = await tenantPrisma.item.findUnique({ where: { id }, select: { id: true } });
+    if (!item) throw new NotFoundError('Item', id);
+    // The words are judged and the approval written under the item's row lock, and the
+    // approval stores the fingerprint the REVIEWER saw: words edited at any moment after
+    // that never match it, so they are never shown unseen.
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "items" WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE`;
+      const check = (await catalogueChecksFor(tx, [id])).get(id);
+      if (check?.state === 'BANNED') {
+        throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. ${notAllowedMessage(check.prohibitedClass)}`, { prohibitedClass: check.prohibitedClass });
+      }
+      if (!check || check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This item has nothing waiting for a check.');
+      const words = (await wordsFor(tx, [id])).get(id);
+      if (!words || judgedWordsHash(words) !== body.wordsHash) {
+        throw new AppError(409, 'ITEM_CHANGED', 'This item changed — review it again.');
+      }
+      await tx.item.update({ where: { id }, data: { reviewApprovedHash: body.wordsHash, reviewApprovedAt: new Date() } });
+    });
+    return { success: true, data: { itemId: id, state: 'APPROVED' } };
+  });
+
+  const removeCatalogueItemSchema = z.object({ prohibitedClass: z.enum(PROHIBITED_CLASSES as [string, ...string[]]), reason: z.string().optional() });
+  app.post('/catalogue-review/:id/remove', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = removeCatalogueItemSchema.parse(request.body ?? {});
+    const header = request.headers['x-swift-reason'];
+    const reason = (typeof header === 'string' && header.trim() ? header : body.reason ?? '').trim();
+    const item = await tenantPrisma.item.findUnique({ where: { id }, select: { id: true } });
+    if (!item) throw new NotFoundError('Item', id);
+    // One way, once: the write only lands on a row not already removed.
+    const removed = await tenantPrisma.item.updateMany({
+      where: { id, prohibitedAt: null },
+      data: { prohibitedAt: new Date(), prohibitedClass: body.prohibitedClass, prohibitedReason: reason, isAvailable: false },
+    });
+    if (removed.count === 0) throw new AppError(409, 'ALREADY_REMOVED', 'This item was already removed.');
+    return { success: true, data: { itemId: id, state: 'BANNED', prohibitedClass: body.prohibitedClass } };
   });
 
   app.put('/vendors/:id/approve', { preHandler: [adminGuard] }, async (request) => {
@@ -1538,7 +1631,9 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.rider.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(riders, total, { page, limit, skip }) };
+    // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
+    const withLive = await withLiveDocuments(app.prisma, riders, 'RIDER');
+    return { success: true, ...paginatedResponse(withLive, total, { page, limit, skip }) };
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1675,7 +1770,9 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.driver.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(drivers, total, { page, limit, skip }) };
+    // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
+    const withLive = await withLiveDocuments(app.prisma, drivers, 'DRIVER');
+    return { success: true, ...paginatedResponse(withLive, total, { page, limit, skip }) };
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -5332,7 +5429,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // the queue row (verification/previous-decision.ts). Only applicants on
     // this page are read, through the same tenant-scoped client; a failed
     // lookup degrades to null and never fails the queue.
-    const rows = await withPreviousDecisions(
+    const withEarlier = await withPreviousDecisions(
       documents,
       (earlierWhere) => tenantPrisma.verificationDocument.findMany({
         where: earlierWhere,
@@ -5340,6 +5437,8 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
+    // [VERIFY-DOCS] Each row says what the reviewer must type to approve it.
+    const rows = withEarlier.map((document) => ({ ...document, reviewerTypes: reviewerTypedFields(document.docType) }));
 
     return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });
@@ -5348,7 +5447,12 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = approveDocSchema.parse(request.body ?? {});
 
-    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt, body.insurance);
+    // [VERIFY-DOCS] A reviewer approving here must type what the type needs (`required`).
+    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt, body.insurance, {
+      required: true,
+      ...(body.documentNumber !== undefined ? { documentNumber: body.documentNumber } : {}),
+      ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
+    });
     await audit(
       request.user.userId,
       'APPROVE_VERIFICATION_DOC',
@@ -5557,12 +5661,17 @@ export async function adminRoutes(app: FastifyInstance) {
     // [VERIFY-DOCS V3] The link is minted FOR this reviewer: the render route
     // re-checks their grant on every load.
     const minted = mintRenderPath(id, request.user.userId, ttlSeconds);
-    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
+    // [Item 98] Face-matching is off (row 54): an identity document comes with the
+    // applicant's own signup selfie for the reviewer to compare by eye. Recorded
+    // in the same view audit.
+    const owner = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { id: true, avatar: true, selfieCapturedAt: true } });
+    const signupSelfie = await signupSelfieFor(doc.docType, owner);
+    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true, signupSelfieShown: !!signupSelfie }, request);
     // [DS110-15] A path RELATIVE to the API origin, on purpose. The console
     // resolves it against its configured API origin and loads it through its
     // own same-origin proxy; an origin built here from the Host header would
     // be client-supplied input, and the console discards it anyway.
-    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
+    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds, signupSelfie } };
   });
 
   // ─── [VERIFY-DOCS V3] Staff: the document reviewer grant ─────────────────

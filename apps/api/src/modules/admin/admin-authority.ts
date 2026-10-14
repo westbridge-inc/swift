@@ -207,6 +207,8 @@ const E = {
   contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
+  // [GUARDRAILS §8] A catalogue item a person checked: approved for the words seen, or removed as prohibited.
+  item: { model: 'item', fields: ['prohibitedAt', 'prohibitedClass', 'prohibitedReason', 'reviewApprovedHash', 'reviewApprovedAt', 'isAvailable'] },
   approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt'] },
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
@@ -294,6 +296,12 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /ratings/at-risk': c('C1', 'moderation.read'),
   'POST /ratings/:id/moderate': c('C3', 'moderation.decide', E.rating),
   'POST /rating-reports/:id/resolve': c('C3', 'moderation.decide', E.ratingReport),
+  // [GUARDRAILS §8] The catalogue check: items a banned word is holding. Approving shows
+  // an item for the exact words seen; removing bans it for good. Both touch a
+  // partner's livelihood, so a reason is owed (C3).
+  'GET /catalogue-review': c('C1', 'moderation.read'),
+  'POST /catalogue-review/:id/approve': c('C3', 'moderation.decide', E.item),
+  'POST /catalogue-review/:id/remove': c('C3', 'moderation.decide', E.item),
 
   // ── National pricing (founder + default tenant) ─────────────────────────
   'GET /countries': c('C0', 'platform.pricing.read'),

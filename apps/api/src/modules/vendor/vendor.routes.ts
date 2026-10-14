@@ -50,6 +50,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
+import { assertNotBanned, catalogueChecksFor, partnerView } from '../compliance/prohibited-gate';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { QrService } from '../qr/qr.service';
@@ -2485,12 +2486,16 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [S1] `basePrice` is Decimal(10,2) and every option's `additionalPrice`
     // is too — raw rows shipped both as strings to the menu editor, the web
     // storefront and the POS.
+    // [GUARDRAILS §8] The partner reads, per item, whether Swift does not allow it
+    // or is holding it for a quick check — and why (the word and the field).
+    const checks = await catalogueChecksFor(app.prisma, items.map((i) => i.id));
     const data = items.map((item) => ({
       ...coerceMoney(withBulkWord(item), ITEM_MONEY_FIELDS),
       optionGroups: item.optionGroups.map((group) => ({
         ...group,
         options: group.options.map((option) => coerceMoney(option, OPTION_MONEY_FIELDS)),
       })),
+      catalogueCheck: partnerView(checks.get(item.id)),
     }));
     return { success: true, data };
   });
@@ -2572,7 +2577,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // fire-and-forget; suggestions are garnish, the save never waits.
     void discovery.runMatcherForItem(item).catch(() => undefined);
 
-    return { success: true, data: withBulkWord(item) };
+    // [GUARDRAILS §8] A banned word in the partner's own text saves the item but holds
+    // it hidden until a person checks it; the partner reads "Waiting for a quick check".
+    const check = (await catalogueChecksFor(app.prisma, [item.id])).get(item.id);
+    return { success: true, data: { ...withBulkWord(item), catalogueCheck: partnerView(check) } };
   });
 
   /** GET /items/import/template — CSV template for bulk import */
@@ -2825,6 +2833,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
 
     let imported = 0;
+    const importedIds: Array<{ id: string; row: number; name: string }> = [];
     for (const { rowNumber, data } of valid) {
       const key = data.category.toLowerCase();
       let categoryId = categoryIds.get(key);
@@ -2837,7 +2846,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       }
 
       try {
-        await app.prisma.item.create({
+        const created = await app.prisma.item.create({
+          select: { id: true },
           data: {
             vendorId,
             categoryId,
@@ -2854,6 +2864,7 @@ export async function vendorRoutes(app: FastifyInstance) {
             allergens: [],
           },
         });
+        importedIds.push({ id: created.id, row: rowNumber, name: data.name });
         imported += 1;
       } catch {
         failures.push({ row: rowNumber, errors: ['Database rejected this row'] });
@@ -2862,10 +2873,18 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     scheduleVendorSearchSync(app, vendorId);
 
+    // [GUARDRAILS §8] Imported rows a banned word is holding for a quick check, by row.
+    const importChecks = await catalogueChecksFor(app.prisma, importedIds.map((i) => i.id));
+    const waitingForCheck = importedIds
+      .filter((i) => importChecks.get(i.id)?.state === 'WAITING')
+      .map((i) => ({ row: i.row, name: i.name }));
+
     return {
       success: true,
       data: {
         imported,
+        waitingForCheck: waitingForCheck.slice(0, 100),
+        waitingForCheckCount: waitingForCheck.length,
         failedCount: failures.length,
         // Cap the detail list so a fully-broken huge file stays readable
         failures: failures.slice(0, 100),
@@ -2913,6 +2932,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
+    // [GUARDRAILS §8] An item Swift does not allow is never edited back to life.
+    await assertNotBanned(app.prisma, existing.id);
 
     const body = updateItemSchema.parse(request.body);
 
@@ -3006,7 +3027,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     scheduleVendorSearchSync(app, vendorId);
     void discovery.runMatcherForItem(item).catch(() => undefined);
 
-    return { success: true, data: withBulkWord(saved) };
+    // [GUARDRAILS §8] Re-judged on every edit: an approved item renamed into a banned word is held again.
+    const check = (await catalogueChecksFor(app.prisma, [item.id])).get(item.id);
+    return { success: true, data: { ...withBulkWord(saved), catalogueCheck: partnerView(check) } };
   });
 
   /** DELETE /items/:id — Delete an item and its option groups/options */
@@ -3034,6 +3057,8 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     const body = itemAvailabilitySchema.parse(request.body ?? {});
     const newAvailability = body.isAvailable !== undefined ? body.isAvailable : !existing.isAvailable;
+    // [GUARDRAILS §8] Switching a banned item off is always fine; back on, never.
+    if (newAvailability) await assertNotBanned(app.prisma, existing.id);
 
     const item = await app.prisma.item.update({
       where: { id: request.params.id },
@@ -3057,6 +3082,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!item) throw new NotFoundError('Item', request.params.itemId);
 
     const body = addOptionGroupSchema.parse(request.body);
+    // [GUARDRAILS §8] Options of an item Swift does not allow are not edited either.
+    await assertNotBanned(app.prisma, item.id);
 
     let sortOrder = body.sortOrder;
     if (sortOrder === undefined) {
@@ -3101,6 +3128,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: { item: { select: { vendorId: true } } },
     });
     if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
+    await assertNotBanned(app.prisma, existing.itemId);
 
     const body = updateOptionGroupSchema.parse(request.body);
 
@@ -3146,6 +3174,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: { item: { select: { vendorId: true } } },
     });
     if (!group || group.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.groupId);
+    await assertNotBanned(app.prisma, group.itemId);
 
     const body = addOptionSchema.parse(request.body);
 
@@ -3181,6 +3210,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
     });
     if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
+    await assertNotBanned(app.prisma, existing.optionGroup.itemId);
 
     const body = updateOptionSchema.parse(request.body);
 
