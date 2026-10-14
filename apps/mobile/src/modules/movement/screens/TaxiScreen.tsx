@@ -1389,7 +1389,15 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   const showStartCode = !!d
     && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status)
     && !pinVerified;
-  const canCancelRide = !pinVerified
+  // [owner #50] The server's verdict decides (`canCancel` on the ride read):
+  // free while no driver has accepted, inside the five minutes after acceptance (owner ruling 14 Oct), or when
+  // the driver is very late — otherwise the passenger contacts the driver. A
+  // server that does not say yet leaves the old status rule in charge.
+  const serverAllowsCancel = typeof ride.canCancel === 'boolean' ? ride.canCancel : true;
+  const cancelUnavailableMessage: string | null = !serverAllowsCancel && typeof ride.cancelUnavailable?.message === 'string'
+    ? ride.cancelUnavailable.message
+    : null;
+  const canCancelRide = serverAllowsCancel && !pinVerified
     && ['PENDING', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status);
 
   useEffect(() => {
@@ -1680,6 +1688,11 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               />
             ) : null}
           </View>
+          {/* [owner #50] Five minutes after the driver accepted, the passenger contacts the
+              driver — the server's own words; the driver card above has the call. */}
+          {cancelUnavailableMessage && !pinVerified ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>{cancelUnavailableMessage}</T>
+          ) : null}
 
           {/* [S-16] What the sharer gave away, and the way back.
               A live location link with no stated end is one a person forgets
@@ -1715,13 +1728,16 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
           Cancel this ride?
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {/* [owner #50] Never a fee, and never a "free" the app authored itself
+              (DS1141 S1): the server's own words when it gives them. */}
           {d
             ? arrived
-              ? 'Your driver has arrived. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
+              ? 'Your driver has arrived. Cancelling frees your driver for other rides.'
               : status === 'DRIVER_EN_ROUTE'
-                ? 'Your driver is already on the way. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
-                : 'Your driver accepted the ride. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
+                ? 'Your driver is already on the way. Cancelling frees your driver for other rides.'
+                : 'Your driver accepted the ride. Cancelling frees your driver for other rides.'
             : 'We’ll stop looking for a driver.'}
+          {typeof ride.cancellationMessage === 'string' ? ` ${ride.cancellationMessage}` : ''}
         </T>
         {cancelRideError ? (
           <T variant="body" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.lg }}>
@@ -1741,17 +1757,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               {
                 onSuccess: (result: any) => {
                   const message = typeof result?.message === 'string' ? result.message : 'Ride cancelled.';
-                  const fee = typeof result?.cancellationFee === 'number' && Number.isFinite(result.cancellationFee)
-                    ? result.cancellationFee
-                    : null;
-                  toast.show(
-                    message,
-                    fee == null
-                      ? 'Cancellation confirmed.'
-                      : fee > 0
-                        ? `A ${money(fee)} cancellation fee was recorded. Swift does not collect ride money.`
-                        : 'No cancellation fee was recorded.',
-                  );
+                  toast.show(message, 'Cancellation confirmed.');
                   setConfirmCancel(false);
                 },
                 onError: (error: any) => {

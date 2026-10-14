@@ -24,6 +24,7 @@ import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, Ide
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
+import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
 import { isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
@@ -80,6 +81,9 @@ export interface VendorGoLive {
   disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
   /** checklist complete AND (gate disengaged OR disclosure complete) — exactly the projection's `verified`. */
   ready: boolean;
+  /** [owner #51] The store has a published number customers can call (vendor/go-live.ts). A store's FIRST
+   *  go-live needs one; the projection holds a waiting store without it. Never the number itself. */
+  publishedPhone: boolean;
 }
 
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
@@ -1979,7 +1983,7 @@ export class VerificationService {
   async vendorGoLive(vendorId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VendorGoLive | null> {
     const vendor = await db.vendor.findUnique({
       where: { id: vendorId },
-      select: { vendorType: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
+      select: { vendorType: true, publicPhone: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
     });
     if (!vendor) return null;
     const role = vendor.vendorType as ChecklistRole;
@@ -1998,6 +2002,7 @@ export class VerificationService {
       checklist,
       disclosure: { engaged, complete: block ? block.complete : null, missing: block ? block.missing : [] },
       ready: checklist.complete && (!block || block.complete),
+      publishedPhone: goLiveMissing(vendor).length === 0,
     };
   }
 
@@ -2064,7 +2069,7 @@ export class VerificationService {
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
           where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
-          select: { id: true, vendorType: true, isVerified: true, status: true },
+          select: { id: true, name: true, vendorType: true, isVerified: true, status: true, publicPhone: true },
         },
       },
     });
@@ -2090,6 +2095,11 @@ export class VerificationService {
     for (const vendor of owner.vendors) {
       const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
       const verified = checklistOk && (!disclosureGate || (country != null && (await compileActivationDisclosure(db, vendor.id, { accountId: userId, tenantId: country.tenantId })).complete));
+      // [owner #51] A FIRST go-live also needs a published phone (vendor/go-live.ts).
+      if (verified && awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
+        await this.askForPublishedPhone(db, userId, vendor);
+        continue;
+      }
       if (verified) {
         // [PR1270-S2-03] This projection is the one authority that makes a
         // store live, on every path (review, auto-approval, the reconcile
@@ -2120,6 +2130,38 @@ export class VerificationService {
         });
       }
     }
+  }
+
+  /** [owner #51] The one notice that tells an owner whose documents are done
+   *  that the store goes live once it publishes a number customers can call.
+   *  Once per store: the projection runs again on every decision and on the
+   *  daily belt, and must not repeat it. Delivered after the projection commits. */
+  private async askForPublishedPhone(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    vendor: { id: string; name: string },
+  ): Promise<void> {
+    const already = await db.notification.findFirst({
+      where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
+      select: { id: true },
+    });
+    if (already) return;
+    const notice = await db.notification.create({ data: {
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Add the number customers can call',
+      body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
+      // The literal keeps the kind visible to the cross-app notification census.
+      data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
+    } });
+    this.projectionNotices.get(db)?.push(notice.id);
+  }
+
+  /** [owner #51] Re-run the activation projection for one owner — after a
+   *  store publishes its contact number, so a store that was waiting only for
+   *  it goes live at once instead of at the next daily belt. */
+  async reprojectVendorActivation(userId: string): Promise<void> {
+    await this.projectVendorActivation(this.prisma, userId);
   }
 
   /**

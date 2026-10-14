@@ -5,6 +5,7 @@ import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import NewOrderTakeover from '@/components/NewOrderTakeover';
+import { mmgDisputePaused, MMG_DISPUTE_NOTICE } from '@/lib/mmg-dispute';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
@@ -31,16 +32,16 @@ function timeAgo(iso?: string) {
   return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
 }
 
-function statusChip(s: string) {
+function statusChip(s: string, paused = false) {
   const done = ['DELIVERED', 'COMPLETED'].includes(s);
   const dead = s === 'CANCELLED';
   return (
     <span
       className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold ${
-        done ? 'bg-green-100 text-green-700' : dead ? 'bg-black/5 text-[var(--swift-muted)]' : 'bg-[var(--swift-red)]/10 text-[var(--swift-red)]'
+        paused ? 'bg-amber-100 text-amber-800' : done ? 'bg-green-100 text-green-700' : dead ? 'bg-black/5 text-[var(--swift-muted)]' : 'bg-[var(--swift-red)]/10 text-[var(--swift-red)]'
       }`}
     >
-      {s.replaceAll('_', ' ')}
+      {paused ? MMG_DISPUTE_NOTICE.title : s.replaceAll('_', ' ')}
     </span>
   );
 }
@@ -73,7 +74,8 @@ function actionsFor(o: VendorOrder) {
   ) {
     out.push({ label: 'Confirm delivered', kind: 'delivered' });
   }
-  return out;
+  // [Item 10] A disputed MMG order: only the decline survives (the server allows it).
+  return mmgDisputePaused(o) ? out.filter((a) => a.kind === 'reject') : out;
 }
 
 function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
@@ -232,6 +234,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const act = useMutation({
     mutationFn: async (kind: string) => {
       setError(null);
+      if (mmgDisputePaused(order.data)) throw new Error(MMG_DISPUTE_NOTICE.body);
       if (kind === 'accept') return acceptOrder(id, order.data?.fulfillment === 'APPOINTMENT' ? undefined : prepTime);
       if (kind === 'preparing') return markPreparing(id);
       if (kind === 'ready') return markReady(id);
@@ -292,8 +295,9 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   );
 
   const s = (o.status || '').toUpperCase();
+  const paused = mmgDisputePaused(o);
   const actions = actionsFor(o);
-  const pickable = ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
+  const pickable = !paused && ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   // [W-25] The old predicate was "not captured and not cancelled", so a
   // FAILED, REFUNDED or UNRESOLVED payment offered a one-tap "received" — a
@@ -302,14 +306,14 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // server enforces the same matrix and refuses the rest by name.
   const ATTESTABLE_PAYMENT = ['PENDING', 'AUTHORIZED'];
   const attestablePay =
-    isMmg && ATTESTABLE_PAYMENT.includes(String(o.paymentStatus ?? '')) && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
+    !paused && isMmg && ATTESTABLE_PAYMENT.includes(String(o.paymentStatus ?? '')) && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
   // Row 52: only the owner or a manager of THIS order's store may confirm; the
   // server says which per order (and refuses staff regardless).
   const showConfirmPay = attestablePay && o.canConfirmPayment === true;
   const confirmPayNeedsManager = attestablePay && o.canConfirmPayment !== true;
   // and when it is NOT attestable, the screen says why rather than going quiet
   const payBlockedReason =
-    isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED'
+    !paused && isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED'
       ? {
           REFUNDED: 'This payment was refunded — a new payment is a new transaction.',
           PARTIALLY_REFUNDED: 'This payment was partly refunded — support settles the rest.',
@@ -325,7 +329,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const isDelivery = o.fulfillment === 'DELIVERY';
   const selfDelivery = o.fulfillmentMode === 'VENDOR_DELIVERY';
   const activeDelivery = isDelivery && !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
-  const mayChangeDeliveryOwner = activeDelivery && !riderAssigned
+  const mayChangeDeliveryOwner = !paused && activeDelivery && !riderAssigned
     && ['ACCEPTED', 'CONFIRMED', 'PREPARING', 'READY', 'READY_FOR_PICKUP'].includes(s);
   const canChooseVendorDelivery = mayChangeDeliveryOwner && o.vendor?.selfDeliveryEnabled === true && !selfDelivery;
   // A store-wide preference changing later must not strand an existing
@@ -357,10 +361,12 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
           {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {statusChip(s)}
+          {statusChip(s, paused)}
           {closeButton}
         </div>
       </div>
+
+      {paused && <p role="status" className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{MMG_DISPUTE_NOTICE.body}</p>}
 
       <div className="mt-4 space-y-1.5">
         {o.items.map((it) => (
@@ -459,7 +465,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             </button>
           </span>
         ))}
-        {confirmDelivered && (
+        {confirmDelivered && !paused && (
           <div role="dialog" aria-label="Confirm store delivery" className="w-full rounded-xl border border-amber-300 bg-amber-50 p-4">
             <p className="text-sm font-semibold text-amber-950">Did your store hand this order to the customer?</p>
             <p className="mt-1 text-sm text-amber-900">Only confirm after the handoff. This closes the order as delivered.</p>
@@ -533,7 +539,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             {money(o.totalAmount)} received in my MMG
           </button>
         )}
-        {s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !selfDelivery && !riderAssigned && (
+        {!paused && s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !selfDelivery && !riderAssigned && (
           <button
             onClick={() => act.mutate('retry-dispatch')}
             disabled={act.isPending}
@@ -606,7 +612,7 @@ export default function OrdersPage() {
   ];
   const other = BUCKETS.filter(b => !board.some(c => c.key === b.key));
   const row = (o: VendorOrder) => <button key={o.id} data-order-id={o.id} onClick={() => setSelected(o.id)} className="sw-order-card w-full text-left">
-    <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase())}</div>
+    <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase(), mmgDisputePaused(o))}</div>
     <p className="sw-caption mt-1">{timeAgo(o.placedAt)}</p>
     <div className="my-3 space-y-1">{o.items.slice(0, 3).map(item => <p key={item.id} className="sw-label">{item.quantity}× {item.name}</p>)}{o.items.length > 3 && <p className="sw-caption">+{o.items.length - 3} more</p>}</div>
     <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--swift-border)] pt-3"><span className="sw-caption">{[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'}</span><span className="sw-title text-[17px]">{money(o.totalAmount)}</span></div>

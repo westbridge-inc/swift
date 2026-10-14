@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import { customerRoutes } from '../modules/user/customer.routes';
-import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
 import {
   MINUTE,
   foodDelivery,
@@ -49,7 +48,9 @@ async function customerHost(rows: Row[]) {
   const prisma = prismaDouble(store, {
     platformConfig: { findUnique: async () => null, findMany: async () => [] },
     customer: { findUnique: async () => ({ id: 'cust-1', userId: 'user-customer', referralCode: 'REF1' }) },
-    vendor: { findMany: async () => [] },
+    // [owner #46/#50, 13–14 Oct] The business's PUBLISHED number, read only
+    // for a refused cancel's "contact the provider".
+    vendor: { findMany: async () => [], findUnique: async () => ({ status: 'ACTIVE', publicPhone: '+5926001111' }) },
     item: { findMany: async () => [] },
     user: { findUnique: async () => ({ countryCode: 'GY' }) },
     countryConfig: { findUnique: async () => null },
@@ -146,28 +147,37 @@ describe('GET /orders/:id — the order screen’s contract', () => {
       canCancel: true,
       freeCancellationWindow: true,
       cancellationFee: 0,
-      // The slot is already the true instant; the window ends five minutes
-      // before it happens.
-      freeCancellationExpiresAt: new Date(slot.getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
+      // [owner #50, 14 Oct] Free until the provider accepts it — no countdown.
+      freeCancellationExpiresAt: null,
     });
   });
 
-  it('control — an accepted booking is committed: still cancellable, not free (the existing marker, unchanged here)', async () => {
-    const h = await customerHost([serviceBooking('bk-1', { status: 'ACCEPTED', acceptedAt: new Date() })]);
+  // [owner #50, 14 Oct] No marker any more: an accepted booking past the
+  // five-minute window is not cancelled in the app — the provider's published
+  // number instead.
+  it('control — an accepted booking past the window is committed: no Cancel, no fee, contact the provider', async () => {
+    // [owner ruling 14 Oct] The window counts from the provider's acceptance: accepted ten minutes ago is past it.
+    const h = await customerHost([serviceBooking('bk-1', { status: 'ACCEPTED', acceptedAt: new Date(Date.now() - 10 * MINUTE) })]);
     const res = (await h.call('get /orders/:id', asCustomer({ params: { id: 'bk-1' } }))) as Detail;
-    expect(res.data).toMatchObject({ vertical: 'SERVICE', canCancel: true, freeCancellationWindow: false, cancellationFee: LATE_CANCEL_FEE, freeCancellationExpiresAt: null });
+    expect(res.data).toMatchObject({
+      vertical: 'SERVICE', canCancel: false, freeCancellationWindow: false, cancellationFee: 0, freeCancellationExpiresAt: null,
+      cancelUnavailable: { code: 'CANCEL_WINDOW_CLOSED', contactPhone: '+5926001111' },
+    });
   });
 
-  it('control — a PENDING food order ten minutes after placing keeps the legacy clock and its fee preview', async () => {
+  // [owner #46, 13 Oct] A food order used to keep the five-minute clock and a
+  // G$500 fee preview here. It is free while it waits for the store — no fee
+  // and no countdown — and the booking above keeps the clock.
+  it('control — a PENDING food order ten minutes after placing is free while it waits for the store, with no fee preview', async () => {
     const h = await customerHost([foodDelivery('food-1')]);
     const res = (await h.call('get /orders/:id', asCustomer({ params: { id: 'food-1' } }))) as Detail;
-    expect(res.data).toMatchObject({ vertical: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', canCancel: true, freeCancellationWindow: false, cancellationFee: LATE_CANCEL_FEE });
+    expect(res.data).toMatchObject({ vertical: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', canCancel: true, freeCancellationWindow: true, cancellationFee: 0, freeCancellationExpiresAt: null });
   });
 
-  it('control — a held food order is free while the hold runs, and the hold is the window', async () => {
+  it('control — a held food order is free while the hold runs, and stays free after it (no countdown)', async () => {
     const hold = new Date(Date.now() + 3 * MINUTE);
     const h = await customerHost([foodDelivery('food-1', { holdExpiresAt: hold, placedAt: new Date(Date.now() - MINUTE) })]);
     const res = (await h.call('get /orders/:id', asCustomer({ params: { id: 'food-1' } }))) as Detail;
-    expect(res.data).toMatchObject({ freeCancellationWindow: true, cancellationFee: 0, freeCancellationExpiresAt: hold.toISOString() });
+    expect(res.data).toMatchObject({ freeCancellationWindow: true, cancellationFee: 0, freeCancellationExpiresAt: null, holdExpiresAt: hold });
   });
 });

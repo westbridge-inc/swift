@@ -163,6 +163,9 @@ async function makeOrder(
     /** [AF-MOB-001] How long ago the mover reported arriving. Default is past
      *  the grace window; pass 0 to sit inside it. */
     arrivedMinutesAgo?: number;
+    /** [owner #46/#52, 13–14 Oct] The checkout promise. A store order the
+     *  store accepted is the customer's to cancel only 30 minutes past it. */
+    promisedAt?: Date;
   } = {},
 ) {
   const at = opts.at ?? PICKUP;
@@ -189,6 +192,7 @@ async function makeOrder(
       ...(opts.taxiFareTotal != null ? { taxiFareTotal: opts.taxiFareTotal } : {}),
       ...(opts.riderId ? { riderId: opts.riderId } : {}),
       ...(opts.driverId ? { driverId: opts.driverId } : {}),
+      ...(opts.promisedAt ? { promisedAt: opts.promisedAt } : {}),
     },
   });
   createdOrderIds.push(order.id);
@@ -385,7 +389,9 @@ describe('cancelOrder frees movers and float', () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider({ online: true });
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED');
+    // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
+    // cancel only when it is very late — this one is past its promise.
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', { promisedAt: new Date(Date.now() - 31 * 60_000) });
 
     let assignmentStaged!: () => void;
     let resumeAssignment!: () => void;
@@ -446,7 +452,8 @@ describe('cancelOrder frees movers and float', () => {
     }
 
     expect(acceptResponse!.statusCode).toBe(200);
-    expect(cancellationResult).toMatchObject({ message: 'Order cancelled' });
+    // [owner #46/#52, 13–14 Oct] Free (very late) — never a fee.
+    expect(cancellationResult).toMatchObject({ message: 'Order cancelled because it was running very late.', cancellationFee: 0 });
 
     const [cancelled, freed, statusLogs] = await Promise.all([
       app.prisma.order.findUniqueOrThrow({
@@ -474,7 +481,8 @@ describe('cancelOrder frees movers and float', () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider({ committedFloat: 1000 });
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId });
+    // [owner #46/#52, 13–14 Oct] Past its promise, so the customer may cancel.
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, promisedAt: new Date(Date.now() - 31 * 60_000) });
     await app.prisma.rider.update({
       where: { id: rider.riderId },
       data: { isAvailable: false, currentOrderId: order.id },

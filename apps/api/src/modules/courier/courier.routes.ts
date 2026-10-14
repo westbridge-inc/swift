@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertRoadTripInMarket } from '../rides/road-trip-market';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
@@ -441,10 +442,15 @@ export default async function courierRoutes(app: FastifyInstance) {
       cancellation: { by: request.user.userId, reason },
       releaseStaleMoverPointer: true,
       invalidStatus: courierNotCancellable,
+      // [owner #50] The sender's cancel follows the one cancellation rule on
+      // the locked row: free while no rider has taken the parcel, inside the
+      // five-minute window, or when the rider is very late — otherwise refused
+      // (contact the rider). Never a fee.
+      customerCancel: true,
     });
 
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED', timestamp: new Date().toISOString() });
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED', timestamp: new Date().toISOString() });
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier cancellation socket publication failed after commit');
     }
@@ -635,7 +641,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       }
       const result = await cashRules.handover(id, request.user.userId, { outcome: body.outcome, gps: body.gps, photoUrl: body.proofPhotoUrl, courierProofPhotoUrl: body.proofPhotoUrl, sessionId: request.authSessionId ?? undefined });
       try {
-        app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: result.order.status });
+        await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: result.order.status });
       } catch (error) {
         request.log.warn({ err: error, orderId: id }, 'courier outcome socket publication failed after commit');
       }
@@ -671,7 +677,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     });
 
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DELIVERED', timestamp: new Date().toISOString() });
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'DELIVERED', timestamp: new Date().toISOString() });
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier proof socket publication failed after commit');
     }
@@ -744,7 +750,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       data: { orderId: id, status: 'RETURNING' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return notification failed after commit'));
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'RETURNING', timestamp: new Date().toISOString() });
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'RETURNING', timestamp: new Date().toISOString() });
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier return socket publication failed after commit');
     }
@@ -827,7 +833,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     });
 
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'RETURNED', timestamp: new Date().toISOString() });
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'RETURNED', timestamp: new Date().toISOString() });
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier return-proof socket publication failed after commit');
     }
