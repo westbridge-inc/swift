@@ -106,7 +106,7 @@ describe('the shapes actually agree, not just structurally', () => {
     imageUrl: null,
     createdAt: new Date(),
     vendorId: 'v1',
-    vendor: { name: 'City Hardware', tenantId: 'swift-default' },
+    vendor: { name: 'City Hardware', tenantId: 'swift-default', isCurrentlyOpen: false },
     category: { name: 'Power Tools' },
     isAvailable: true,
     isPopular: false,
@@ -122,6 +122,15 @@ describe('the shapes actually agree, not just structurally', () => {
     const fromDb = toItemHit(row);
     const fromIndex = itemHitFromSearchDoc(toItemSearchDoc(row, ['hardware-tools']) as never);
     expect(fromIndex).toEqual(fromDb);
+  });
+
+  it('[owner 13 Oct] both paths carry the store\'s open state; a document without it reads as closed, never a guess', () => {
+    expect(toItemHit(row).vendorIsCurrentlyOpen).toBe(false);
+    expect(itemHitFromSearchDoc(toItemSearchDoc(row, []) as never).vendorIsCurrentlyOpen).toBe(false);
+    const open = { ...row, vendor: { ...row.vendor, isCurrentlyOpen: true } };
+    expect(toItemHit(open).vendorIsCurrentlyOpen).toBe(true);
+    expect(itemHitFromSearchDoc(toItemSearchDoc(open, []) as never).vendorIsCurrentlyOpen).toBe(true);
+    expect(itemHitFromSearchDoc({ id: 'x', name: 'Old doc', basePrice: 10, vendorId: 'v', vendorName: 'S' }).vendorIsCurrentlyOpen).toBe(false);
   });
 
   it('an item too old for the badge is not new on either path', () => {

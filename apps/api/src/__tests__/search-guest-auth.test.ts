@@ -21,7 +21,8 @@ describe('guest catalogue search through real HTTP routes', () => {
       expect(data.vendors.map((v: { id: string }) => v.id)).toEqual(['public']);
       expect(data.items.map((v: { id: string }) => v.id)).toEqual(['item-public']);
     } else if (url.includes('suggestions')) {
-      expect(data).toEqual([{ text: 'Pepper public', type: 'vendor' }, { text: 'Pepper dish public', type: 'item' }]);
+      // [owner 13 Oct] each suggestion says whether its store is open now (additive)
+      expect(data).toEqual([{ text: 'Pepper public', type: 'vendor', isCurrentlyOpen: true }, { text: 'Pepper dish public', type: 'item', isCurrentlyOpen: true }]);
     } else expect(data.map((v: { id: string }) => v.id)).toEqual([url.includes('nearby') ? 'public' : 'item-public']);
   });
   it('does not trust a ready index for guest eligibility or projection', async () => {

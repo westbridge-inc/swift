@@ -21,7 +21,11 @@ it('observes whether a closed public store appears in guest text search', async 
   try {
     vendors.find((v) => v['id'] === 'public')!['isCurrentlyOpen'] = false;
     const res = await app.inject('/api/v1/search?q=Pepper');
-    expect(res.json().data.vendors.some((v: { id: string }) => v.id === 'public')).toBe(false);
+    // [Owner ruling 13 Oct] Search SHOWS a closed store, marked closed (it can
+    // be opened to see the menu and hours; checkout still refuses VENDOR_CLOSED).
+    // This used to pin the opposite rule: a closed store was absent.
+    const hit = (res.json().data.vendors as Array<{ id: string; isCurrentlyOpen: boolean }>).find((v) => v.id === 'public');
+    expect(hit?.isCurrentlyOpen).toBe(false);
   } finally { await app.close(); }
 });
 
@@ -82,12 +86,31 @@ describe('credential material never becomes an anonymous read', () => {
   });
 });
 
-it.each(['/search?q=Pepper', '/search/suggestions?q=Pepper'])('closed vendors and items stay out of %s', async (url) => {
+// [Owner ruling 13 Oct] This pinned the opposite rule ("closed vendors and items
+// stay out"). Search now SHOWS a closed store and its dishes, marked closed; the
+// eligibility rules (tenant, verification, subscription, listing gates) are unchanged.
+it('a closed public store and its dish are found by /search, each marked closed', async () => {
   const { app, vendors } = await guestSearchApp();
   try {
     vendors.find((v) => v['id'] === 'public')!['isCurrentlyOpen'] = false;
-    const res = await app.inject(`/api/v1${url}`);
-    expect(res.statusCode).toBe(200); expect(res.body).not.toContain('Pepper');
+    const res = await app.inject('/api/v1/search?q=Pepper');
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data as { vendors: Array<{ id: string; isCurrentlyOpen: boolean }>; items: Array<{ id: string; vendorIsCurrentlyOpen: boolean }> };
+    expect(data.vendors.map((v) => [v.id, v.isCurrentlyOpen])).toEqual([['public', false]]);
+    expect(data.items.map((i) => [i.id, i.vendorIsCurrentlyOpen])).toEqual([['item-public', false]]);
+  } finally { await app.close(); }
+});
+
+it('a closed public store and its dish are suggested, each marked closed', async () => {
+  const { app, vendors } = await guestSearchApp();
+  try {
+    vendors.find((v) => v['id'] === 'public')!['isCurrentlyOpen'] = false;
+    const res = await app.inject('/api/v1/search/suggestions?q=Pepper');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual([
+      { text: 'Pepper public', type: 'vendor', isCurrentlyOpen: false },
+      { text: 'Pepper dish public', type: 'item', isCurrentlyOpen: false },
+    ]);
   } finally { await app.close(); }
 });
 
