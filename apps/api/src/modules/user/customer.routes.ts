@@ -20,7 +20,10 @@ import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt, freeBecauseNoMoverFound, readNoMoverFound, NO_MOVER_FREE_CANCEL_MESSAGE } from '../order/cancel-policy';
+import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
+import { readTooLateToDeliver } from '../dispatch/rescue';
+import { ORDER_TRANSITIONS } from '../order/order-status';
+import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
 import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
@@ -67,7 +70,7 @@ import { consentSurfaceOf } from '../legal/consent-surface';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
-import { safePublicPhone } from '../../utils/vendor-public-phone';
+import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
@@ -309,9 +312,9 @@ const referralRedeemSchema = z.object({
 // ---------------------------------------------------------------------------
 
 const MAX_DELIVERY_RADIUS_KM = 25;
-// Cancel window/fee now import from the ONE policy module [UG-CRAFT-01] —
+// The cancel rule is imported from the ONE policy module [UG-CRAFT-01] —
 // the "must match order.service" comment era is over: the preview and the
-// charge read the same constants by construction.
+// cancel read the same verdict by construction.
 const MAX_ADDRESSES = 10;
 // SWIFT-163: the Home discovery scan is bounded so an ever-growing catalogue
 // can't load every ACTIVE vendor into memory per request. The feed only ever
@@ -698,6 +701,14 @@ function enrichVendor<T extends { latitude: number; longitude: number; estimated
     distanceKm = Math.round(exactKm * 10) / 10;
   }
   return { ...vendor, distanceKm, etaMin, deliveryFee };
+}
+
+/** [owner #46] The store contact on an order the customer can no longer
+ *  cancel: the storefront's published-number rule, read only when needed (the
+ *  order's own vendor select deliberately carries no phone at all). */
+async function publishedStorePhoneOf(prisma: FastifyInstance['prisma'], vendorId: string): Promise<string | null> {
+  const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { status: true, publicPhone: true } });
+  return vendor ? publishedStorePhone(vendor) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1677,9 +1688,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // number (a customer asking "when do you reopen?" is exactly who this
         // serves), but a store the PLATFORM has suspended, or one it has not yet
         // approved, must not have Swift advertising a way to reach it.
-        publicPhone: vendor.status === 'SUSPENDED' || vendor.status === 'PENDING_APPROVAL'
-          ? null
-          : safePublicPhone(vendor.publicPhone),
+        publicPhone: publishedStorePhone(vendor),
         averageRating: vendor.averageRating,
         totalRatings: vendor.totalRatings,
         ...ratingSurface,
@@ -2671,17 +2680,56 @@ export async function customerRoutes(app: FastifyInstance) {
     // [E17 · DS202 D3] A parcel on its way back (RETURNING) is in the mover's
     // custody like the forward leg, and RETURNED is closed: neither offers a
     // Cancel the locked cancel path would refuse.
-    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING', 'RETURNED'].includes(order.status)
-      && !(order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus));
+    // [owner #46/#50 · DS1140 S3] The statuses the locked cancel path accepts
+    // are the state machine's own (ORDER_TRANSITIONS.CANCELLED) minus a taxi
+    // with its passenger aboard — read from there, never a hand-kept list, so
+    // a FAILED or in-progress order is never promised a free cancel the
+    // server then refuses.
+    const mmgPaidToStore = order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus);
+    const cancellableStage = ORDER_TRANSITIONS.CANCELLED.includes(order.status)
+      && !(order.orderType === 'TAXI' && hasTaxiPassengerCustody(order));
+    const cancellableState = cancellableStage && !mmgPaidToStore;
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
-    // — the fee shown here and the marker recorded there can never drift
-    // again. The hold exemption, the assignment guard and the scheduled-slot
-    // branch all live inside it; this file no longer restates any of them.
-    // [Item 64] The dispatch journal's "no mover found" fact, read the same way
-    // the charge path reads it (there under the order lock).
-    const policyOrder = { ...order, noMoverFound: canCancel && await readNoMoverFound(app.prisma, order) };
-    const freeCancellation = canCancel && isFreeCancellation(policyOrder, previewNow);
+    // — the outcome shown here and the one the locked cancel commits can never
+    // drift again. The hold, the five-minute window, the store rule (owner
+    // #46), the ride/parcel/booking rule (#50) and the very-late exits (#52)
+    // all live inside it; this file restates none of them.
+    // [Item 64] The dispatch journal's "no mover found" fact, and [owner #46]
+    // the rescue cutoff's "too late to deliver", read the same way the charge
+    // path reads them (there under the order lock).
+    const policyOrder = {
+      ...order,
+      noMoverFound: cancellableState && await readNoMoverFound(app.prisma, order),
+      tooLateToDeliver: cancellableState && await readTooLateToDeliver(app.prisma, order, previewNow),
+      // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
+      assignedAt: cancellableState ? await readAssignedAt(app.prisma, order) : null,
+    };
+    // [owner #46/#50] A cancel the customer may no longer make is not offered
+    // at all — builds 9/10 already hide the button on `canCancel: false` — and
+    // the customer is told who to contact instead (`cancelUnavailable`).
+    // Every allowed cancel is free: there is no fee.
+    const cancelView = cancellableState ? customerCancelView(policyOrder, previewNow) : null;
+    const canCancel = cancelView?.canCancel === true;
+    // [owner #46 · Opus S3-1] An MMG order already paid to the store is the
+    // store's to cancel and refund (the locked path refuses it with
+    // MMG_CANCEL_UNAVAILABLE) — and every accepted MMG order is paid (the
+    // payment-first gate). The customer still gets the store's contact, the
+    // one rail where it matters most.
+    const refusal = cancelView?.cancelUnavailable
+      ?? (cancellableStage && mmgPaidToStore && order.vendorId
+        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: MMG_PAID_STORE_CANCELS_MESSAGE }
+        : null);
+    const cancelUnavailable = refusal
+      ? {
+          ...refusal,
+          // The store's (or the booked provider's) contact: only the number
+          // the business chose to PUBLISH, by the storefront's own rule —
+          // never `vendor.phone` (the account/OTP line). A ride or a parcel
+          // has no business; the driver or rider is reached from their card.
+          contactPhone: order.vendorId ? await publishedStorePhoneOf(app.prisma, order.vendorId) : null,
+        }
+      : null;
 
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({
@@ -2804,25 +2852,24 @@ export async function customerRoutes(app: FastifyInstance) {
         scheduledFor: order.scheduledFor,
         hasBeenRated,
         canCancel,
-        freeCancellationWindow: freeCancellation,
-        // What a cancel would cost right now (0 inside the free window) — so
-        // the app shows the fee BEFORE the customer confirms.
-        cancellationFee: canCancel && !freeCancellation ? LATE_CANCEL_FEE : 0,
-        // Held orders: the free window IS the hold; otherwise the legacy clock.
-        // Only promised while the cancel is ACTUALLY free right now — a mover
-        // assignment or a committed vendor voids the promise, so it must never
-        // be minted for those states.
+        freeCancellationWindow: canCancel,
+        // [owner #46/#50] Always 0 — there is no cancellation fee. Kept only
+        // because builds 9 and 10 refuse to open the cancel confirmation
+        // unless this is a number.
+        cancellationFee: 0,
         holdExpiresAt: order.holdExpiresAt,
-        // ONE implementation, shared with the predicate [cancel-policy.ts] —
-        // built inline this used to promise `placedAt + 5min`, which on a
-        // scheduled order is a countdown that expired hours before the window
-        // it claims to describe.
-        freeCancellationExpiresAt: canCancel
-          ? (freeCancellationExpiresAt(policyOrder, previewNow)?.toISOString() ?? null)
-          : null,
-        // [Item 64] Why the cancel is free, in plain words — only when no
-        // mover was found (additive; older apps ignore it).
-        cancellationMessage: freeCancellation && freeBecauseNoMoverFound(policyOrder) ? NO_MOVER_FREE_CANCEL_MESSAGE : null,
+        // ONE implementation, shared with the predicate [cancel-policy.ts]:
+        // the moment the five-minute window of a ride, parcel or booking
+        // closes; null when there is no countdown (refused, or free for as
+        // long as nobody accepts / nobody was found / the order stays late).
+        freeCancellationExpiresAt: cancelView?.freeCancellationExpiresAt ?? null,
+        // [Item 64] Why the cancel is free, in plain words (additive; older
+        // apps ignore it). [owner #46/#52] Also for a store order waiting for
+        // the store, or for any order running very late.
+        cancellationMessage: cancelView?.cancellationMessage ?? null,
+        // [owner #46/#50] Why there is no Cancel, and who to contact instead —
+        // the server's verdict, so no client re-derives the rule (additive).
+        cancelUnavailable,
       },
     };
   });

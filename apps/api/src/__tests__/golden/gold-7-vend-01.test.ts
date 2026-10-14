@@ -96,6 +96,11 @@ describe('GOLD-7 · VEND-01 — join, documents and approval', () => {
     const early = await h.call('PUT', `/api/v1/admin/vendors/${vendorId}/approve`, admin.token, {}, REASON);
     expect(early.statusCode).toBe(409);
     expect(early.json().error.code).toBe('CHECKLIST_INCOMPLETE');
+    // [owner #51, 14 Oct] A first go-live also needs a published contact phone: the applicant adds it on
+    // the waiting store's screen, and it changes nothing while documents are still open.
+    const phone = await h.call('PUT', '/api/v1/vendor/profile', applicant.token, { publicPhone: '+592 600 3322' });
+    expect(phone.statusCode, phone.body).toBe(200);
+    expect(await vendorRow()).toMatchObject({ status: 'PENDING_APPROVAL', isVerified: false });
     for (const type of ['owner_national_id', 'storefront_photo', 'business_registration']) {
       const document = await submit(applicant, type);
       const before = await h.sys(() => h.app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: document.id } }));

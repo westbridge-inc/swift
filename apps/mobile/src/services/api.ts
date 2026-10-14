@@ -442,12 +442,13 @@ export const customerApi = {
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
-  // returns { success, data: { message, cancellationFee } } inside the axios
-  // body — reading one level short silently discarded the authoritative
-  // cancellation outcome and the fee actually charged.
+  // returns { success, data: { message } } inside the axios body — reading one
+  // level short silently discarded the authoritative cancellation outcome.
+  // [owner #46/#50] There is no cancellation fee (the server's
+  // `cancellationFee` is always 0, kept only for older builds).
   cancelOrder: (id: string, reason?: string) =>
     api.post(`/customer/orders/${id}/cancel`, { reason })
-      .then((res) => (res.data?.data ?? {}) as { message?: string; cancellationFee?: number }),
+      .then((res) => (res.data?.data ?? {}) as { message?: string }),
   // Order placement = checkout; it reads the server-side cart. (The old POST
   // /customer/orders had no backend route.)
   placeOrder: (data: {

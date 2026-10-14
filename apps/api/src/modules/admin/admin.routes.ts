@@ -9,6 +9,7 @@ import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
@@ -1597,6 +1598,10 @@ export async function adminRoutes(app: FastifyInstance) {
    *  - suspended with every rule met → reinstated by CAS, carrying the same
    *    expiry the projection would write [Fable #1481 S4-2: the suspension
    *    source is cleared, so no stale BILLING survives for a later heal];
+   *  - never live and no published phone [owner #51]: waiting → refused 409
+   *    PUBLISHED_PHONE_MISSING (it goes live by itself once the owner adds
+   *    one); suspended → lifted back to waiting, where the owner can add it
+   *    [DS1145 S3];
    *  - suspended while its subscription cannot operate (the vendor gate's
    *    rule: fee unpaid or billing stopped) → refused 409 FEE_UNPAID [MC-AD2]:
    *    only a confirmed payment (or billing's own heal) lifts a fee hold, and
@@ -1637,6 +1642,36 @@ export async function adminRoutes(app: FastifyInstance) {
       if (updated.status !== 'ACTIVE') {
         throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
+    } else if (next === 'CAN_LIFT_TO_WAITING') {
+      // [owner #51 · DS1145 S3] Suspended before it was ever live, every other rule met, no published phone. It
+      // cannot go live without one, and a suspended store cannot add one in the app — so approving lifts the
+      // suspension back to waiting for approval: the owner adds the number there and the activation projection
+      // makes the store live by itself. No subscription is created (that is the activation's), so the store still
+      // reads as never live. Decided again under the same locks as a reinstatement.
+      updated = await app.prisma.$transaction(async (tx) => {
+        await bindTenantTransaction(tx);
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-lift-to-waiting-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-lift-to-waiting-store */`;
+        const fresh = await tx.vendor.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, suspensionSource: true, owner: { select: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+        });
+        const freshGoLive = await verification.vendorGoLive(id, tx);
+        if (!freshGoLive) throw new NotFoundError('Vendor', id);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null, feePause: await readFeePause(tx, process.env, fresh.subscription?.id) }, freshGoLive);
+        const refusedNow = again === 'CAN_LIFT_TO_WAITING' ? null
+          : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        if (refusedNow) throw refusedNow;
+        const won = await tx.vendor.updateMany({
+          where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
+          data: { status: 'PENDING_APPROVAL', suspensionSource: null },
+        });
+        if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+          extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },
+        });
+        return tx.vendor.findUniqueOrThrow({ where: { id } });
+      });
     } else {
       // CAN_REINSTATE. [PR1270-S2-03] Price BEFORE the activation write: a
       // market that cannot price this store refuses here and it stays suspended.
@@ -1678,11 +1713,20 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
-      body: next === 'CAN_REINSTATE'
-        ? `${vendor.name} has been reinstated and can take orders again once you open it.`
-        : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
-      data: { vendorId: id },
+      ...(next === 'CAN_LIFT_TO_WAITING'
+        ? {
+            title: 'Add the number customers can call',
+            body: `${vendor.name} is no longer suspended. Add the phone number customers can call in Account, and your store goes live.`,
+          }
+        : {
+            title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
+            body: next === 'CAN_REINSTATE'
+              ? `${vendor.name} has been reinstated and can take orders again once you open it.`
+              : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
+          }),
+      // [DS1321 S4] The lift's notice IS the one "add the number" notice: its tap opens the waiting store's screen,
+      // and the activation projection, which asks once per store, does not ask again.
+      data: next === 'CAN_LIFT_TO_WAITING' ? { kind: 'vendor_needs_public_phone', vendorId: id } : { vendorId: id },
     });
 
     // [VERIFY-DOCS V5] The owner's VAT billing number never rides an admin store reply.
