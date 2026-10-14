@@ -17,6 +17,7 @@ import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '
 import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
+import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 
 /** The server's rule for a taxi's year (partner.routes vehicle schema): 1980
  *  to next year. Checked here too, so a typo is caught before the round trip. */
@@ -317,6 +318,8 @@ export default function SignupPage() {
             </select></div>
             {mover === 'DRIVER' ? (
               <>
+                {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
+                <p className={styles.smallCopy}>{TAXI_TWO_LICENCES}</p>
                 <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
                 <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
                 <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>

@@ -130,6 +130,11 @@ export async function guestSearchApp(max = 200) {
     itemDiscoveryCategory: delegate(tags),
     // [GUARDRAILS §8 · #54] No fixture store is filed under a banned category.
     vendorDiscoveryCategory: { findMany: vi.fn(async () => []) },
+    // [S2-1 time bound] search reads run in a short transaction that first
+    // sets a local statement timeout (search-budget.ts); the double runs the
+    // read on itself and records the setting.
+    $executeRaw: vi.fn(async (..._args: unknown[]) => 1),
+    $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(db)),
     // [GUARDRAILS §8] The prohibited-items pre-filter is one raw query; no fixture
     // here names a banned good, so it finds no candidate rows.
     $queryRaw: vi.fn(async () => []),

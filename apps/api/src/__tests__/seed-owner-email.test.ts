@@ -8,7 +8,7 @@ import { PrismaClient, type UserRole } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { applySeedPlan, buildSeedPlan, planApprovalRequest, planRequestFacts, type DesiredConfig, type RequestContext } from '../modules/ops/seed-plan';
-import { SOLO_COOLING_OFF_MS, type SignedApproval } from '../modules/ops/approver-signatures';
+import { approvalRequest, canonicalRequest, parseRequest, SOLO_COOLING_OFF_MS, type RequestFacts, type SignedApproval } from '../modules/ops/approver-signatures';
 
 // This suite pins the deployment identity singleton for the whole file and restores it after.
 grantSuiteCapability('unscoped-mutation');
@@ -182,6 +182,59 @@ describe('[SECREVIEW 14 Oct] what the approver reads is the address the seed wri
     const r = approve(cut, EMAIL);
     expect(r.status).not.toBe(0);
     expect(r.stdout).toBe('');
+  });
+});
+
+describe('[SECREVIEW S4 · 14 Oct] no line an approver reads can hide or reorder text', () => {
+  // Unicode format characters (category Cf): right-to-left override and
+  // isolate, zero-width space, byte-order mark, soft hyphen, right-to-left mark.
+  // Also some rarer ones (Arabic end of ayah, Syriac abbreviation mark, a
+  // musical-symbol format control, a language tag), all category Cf.
+  const FORMAT = ['\u202e', '\u200b', '\u2066', '\ufeff', '\u00ad', '\u200f', '\u06dd', '\u070f', '\u{1d173}', '\u{e0001}'];
+  const facts = (extra: string): RequestFacts => ({ change: 'plan', target: 'a'.repeat(64), subject: 'b'.repeat(64), admin: 'none',
+    shows: [`database: swift${extra} on postgres, deployment dep-x (production)`, 'config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD', 'admin phone: none'] });
+  const forged = (extra: string, nonce: string) => canonicalRequest({ ...facts(extra), issued: new Date().toISOString(), expires: new Date(Date.now() + HOUR).toISOString(), nonce });
+
+  it('the server never prints a request holding one, and never accepts one', () => {
+    for (const ch of FORMAT) {
+      expect(() => approvalRequest(facts(ch)), JSON.stringify(ch)).toThrow(/invisible or direction-changing/);
+      expect(() => parseRequest(forged(ch, 'c'.repeat(32))), JSON.stringify(ch)).toThrow(/line by line/);
+    }
+    // Ordinary text outside ASCII still reads: an ellipsis and an accented letter.
+    expect(parseRequest(approvalRequest(facts('…é'))).shows[0]).toContain('swift…é on');
+  });
+
+  it('deploy/seed-approve.sh refuses a request holding one and signs nothing', () => {
+    for (const ch of FORMAT) {
+      const r = approve(forged(ch, 'd'.repeat(32)), null);
+      expect(r.status, JSON.stringify(ch)).not.toBe(0);
+      expect(r.stdout).toBe('');
+      expect(r.stderr).toContain('invisible or direction-changing');
+    }
+    expect(approve(forged('…é', 'e'.repeat(32)), null).status).toBe(0);
+  });
+
+  it('deploy/seed-approve.sh never pipes the request into a grep that stops early (pipefail + SIGPIPE could flip a check)', () => {
+    const text = readFileSync(APPROVE, 'utf8');
+    const piped = text.split('\n').filter((l) => /"\$REQUEST"\s*\|[^|]*\bgrep\b[^|]*\s-[A-Za-z]*q/.test(l));
+    expect(piped).toEqual([]);
+    // The checks themselves are still there, reading the request directly.
+    expect(text.match(/grep -E?q [^\n]*<<< "\$REQUEST"/g)?.length).toBe(5);
+  });
+
+  it('deploy/seed-approve.sh refuses one early in a request larger than a pipe buffer (no SIGPIPE race under pipefail)', () => {
+    // 120 long lines (~120 KB) after the bad one: a check that pipes the request
+    // into grep -q can lose its refusal when grep stops early and the writer dies.
+    const pad = Array.from({ length: 120 }, (_, i) => `change: create platformConfig pad${i}: null -> "${'x'.repeat(1000)}"`);
+    const big = (extra: string, nonce: string) => canonicalRequest({ ...facts(extra), shows: [...facts(extra).shows, ...pad],
+      issued: new Date().toISOString(), expires: new Date(Date.now() + HOUR).toISOString(), nonce });
+    for (const [bad, why] of [['\u202e', 'invisible or direction-changing'], ['\u001b[2K', 'control characters']] as const) {
+      const r = approve(big(bad, 'f'.repeat(32)), null);
+      expect(r.status, JSON.stringify(bad)).not.toBe(0);
+      expect(r.stdout).toBe('');
+      expect(r.stderr).toContain(why);
+    }
+    expect(approve(big('', 'a'.repeat(32)), null).status).toBe(0);
   });
 });
 

@@ -71,6 +71,7 @@ export function DocumentUploadCard({
   replaced = false,
   faceMatched = false,
   optionalHint,
+  hint,
 }: {
   role: string;
   docType: string;
@@ -86,6 +87,8 @@ export function DocumentUploadCard({
   /** [VERIFY-DOCS] Set for a document the person MAY add: what it is for. Never a gate, so no
    *  "keep operating" copy and no "next step" nudge. */
   optionalHint?: string;
+  /** [Owner ruling 11 Oct 2026] What this document is, in plain words (taxi checklist). */
+  hint?: string;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -247,6 +250,11 @@ function explainPermissionDenied(
           {/* [Owner, 1 Oct · truth] Only when the server says it face-matches
               this document. It used to show under every ID, while the
               server's face-matching was switched off. */}
+          {hint ? (
+            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
+              {hint}
+            </T>
+          ) : null}
           {optionalHint ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               {optionalHint}
