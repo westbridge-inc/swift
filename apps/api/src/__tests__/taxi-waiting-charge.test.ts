@@ -444,6 +444,9 @@ describe('"Fare collected" freezes the charge once, into every money surface (CO
     const event = emitted.find((e) => e.event === 'order:status_changed' && (e.payload as { status: string }).status === 'DELIVERED')!;
     expect(event.room).toBe(`order:${r.order.id}`);
     expect((event.payload as { fare: { fareBreakdown: unknown } }).fare.fareBreakdown).toEqual(breakdown);
+    // [DS1201 S3] The legacy total an older app reads is the amount collected,
+    // never the route fare alone.
+    expect(Number((event.payload as { fare: { total: unknown } }).fare.total)).toBe(2500);
     const notice = await sys(() => app.prisma.notification.findFirstOrThrow({ where: { userId: r.customer.userId, title: 'Ride Complete' } }));
     expect(notice.body).toBe('You have arrived at your destination. Total fare: $2,500 GYD (trip $2,000 + waiting $500).');
     const finished = (await call('GET', `/api/v1/rides/${r.order.id}`, r.customer.token)).json().data as Record<string, unknown>;

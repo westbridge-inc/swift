@@ -47,6 +47,9 @@ describe('the waiting-charge migration', () => {
     const rollback = readFileSync(path.join(DIR, 'rollback.sql'), 'utf8');
     const migration = readFileSync(path.join(DIR, 'migration.sql'), 'utf8');
     expect(rollback).toMatch(/IF EXISTS \(SELECT 1 FROM "taxi_ride_waiting"\) THEN\s+RAISE EXCEPTION/);
+    // [OPUS S3] The table's row-level security is FORCED: the guard must read
+    // every row, or a non-bypass role passes it blind (the repo convention).
+    expect(rollback).toMatch(/^BEGIN;(?:\s*--[^\n]*)*\s*SET LOCAL row_security = off;/m);
     // Every object the migration creates is dropped, and nothing else is.
     const created = [...migration.matchAll(/CREATE (?:OR REPLACE )?FUNCTION (\w+)\(/g)].map((m) => m[1]).sort();
     const dropped = [...rollback.matchAll(/DROP FUNCTION (\w+)\(/g)].map((m) => m[1]).sort();

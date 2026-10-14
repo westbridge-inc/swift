@@ -35,6 +35,7 @@
 -- disclosed terms and every frozen charge would be lost. Verified on PostgreSQL 16 (PostGIS 3.4):
 -- it restores the prior schema exactly.
 --   BEGIN;
+--   SET LOCAL row_security = off;
 --   SET LOCAL lock_timeout = '10s';
 --   DO $$ BEGIN
 --     IF EXISTS (SELECT 1 FROM "taxi_ride_waiting") THEN

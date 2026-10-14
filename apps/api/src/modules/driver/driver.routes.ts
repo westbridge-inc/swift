@@ -1351,7 +1351,10 @@ export async function driverRoutes(app: FastifyInstance) {
       perKm: order.taxiFarePerKm,
       perMin: order.taxiFarePerMin,
       surge: order.taxiFareSurge,
-      total: order.taxiFareTotal,
+      // [DS1201 S3] The amount collected: with a frozen waiting charge, the
+      // route fare + the charge — an older app reads only this figure. A ride
+      // with no charge keeps today's value exactly.
+      total: breakdown && breakdown.waitingCharge > 0 ? breakdown.total : order.taxiFareTotal,
       ...(breakdown ? { fareBreakdown: breakdown } : {}),
     };
     const body = breakdown && breakdown.waitingCharge > 0

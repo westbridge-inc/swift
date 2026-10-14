@@ -7,6 +7,10 @@
 -- TAXI_WAITING_CHARGE is off (the launch state) no row is ever written, so the
 -- table is empty and this rolls back cleanly.
 BEGIN;
+-- Row-level security is FORCED on this table: without this, a role that does
+-- not bypass it sees no rows, the guard passes blind, and the data is dropped.
+-- With it, such a role gets an error instead.
+SET LOCAL row_security = off;
 SET LOCAL lock_timeout = '10s';
 DO $guard$
 BEGIN
