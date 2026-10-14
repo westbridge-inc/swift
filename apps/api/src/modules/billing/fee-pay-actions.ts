@@ -2,6 +2,7 @@ import type { PrismaClient, Subscription, SubscriptionStatus } from '@prisma/cli
 import { log } from '../../utils/logger';
 import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 import { payInfo } from './agent-cash.service';
+import { payAheadAllows } from './pay-ahead';
 import { weeklyFeeAmount } from './subscription-fee';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import type { CardPayAction } from './card-pay-action';
@@ -128,8 +129,12 @@ export async function feePayActions(
   checkout?: () => MmgCheckoutProvider,
 ): Promise<PayAction[]> {
   const live = await mmgCheckoutLive(prisma, sub, platform, checkout);
-  const mmg: PayAction = live
-    ? { id: 'MMG_CHECKOUT', state: 'live', amountGyd: checkoutAmountGyd(await payInfo(prisma, sub)), currencyCode: 'GYD' }
+  const amountGyd = live ? checkoutAmountGyd(await payInfo(prisma, sub)) : 0;
+  // [owner #62 · DS1114 S3] One week at a time: once the coming week is paid the
+  // checkout could only refuse, so there is no button (the screen still says
+  // when the next fee is due).
+  const mmg: PayAction = live && await payAheadAllows(prisma, sub.id, amountGyd, new Date())
+    ? { id: 'MMG_CHECKOUT', state: 'live', amountGyd, currencyCode: 'GYD' }
     : { id: 'MMG_CHECKOUT', state: 'off' };
   return [mmg, { id: 'CARD', state: 'off' }];
 }

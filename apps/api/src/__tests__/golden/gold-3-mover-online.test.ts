@@ -295,7 +295,7 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
 
     const early = await call('PUT', '/api/v1/rider/location', mover.device.token, FIX_B);
     expect(early.statusCode).toBe(200);
-    expect(early.json()).toEqual({ success: true });
+    expect(early.json()).toEqual({ success: true, data: { accepted: true } });
     const unchanged = await riderRow(mover.riderId);
     expect({ lat: unchanged.currentLat, lng: unchanged.currentLng, at: unchanged.lastLocationUpdate })
       .toEqual({ lat: FIX_A.latitude, lng: FIX_A.longitude, at: online.lastLocationUpdate });
@@ -305,7 +305,7 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     const next = await call('PUT', '/api/v1/rider/location', mover.device.token, FIX_C);
     const after = Date.now();
     expect(next.statusCode).toBe(200);
-    expect(next.json()).toEqual({ success: true });
+    expect(next.json()).toEqual({ success: true, data: { accepted: true } });
     const written = await riderRow(mover.riderId);
     expect({ lat: written.currentLat, lng: written.currentLng }).toEqual({ lat: FIX_C.latitude, lng: FIX_C.longitude });
     expect(written.lastLocationUpdate!.getTime()).toBeGreaterThanOrEqual(before);
@@ -339,7 +339,7 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     // The relaunched device keeps streaming.
     const fresh = await call('PUT', '/api/v1/rider/location', relaunched.token, FIX_C);
     expect(fresh.statusCode).toBe(200);
-    expect(fresh.json()).toEqual({ success: true });
+    expect(fresh.json()).toEqual({ success: true, data: { accepted: true } });
     const streamed = await riderRow(mover.riderId);
     expect({ lat: streamed.currentLat, lng: streamed.currentLng }).toEqual({ lat: FIX_C.latitude, lng: FIX_C.longitude });
   });

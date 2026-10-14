@@ -606,7 +606,7 @@ export function splitChecklistKey(listKey: string): { actorRole: string; tier: s
     : { actorRole: key, tier: REGISTRY_TIER, optional };
 }
 
-export async function registryChecklist(prisma: PrismaClient, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
+export async function registryChecklist(prisma: Pick<PrismaClient, 'requirementSet'>, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
   const set = await prisma.requirementSet.findFirst({
     where: {
       countryCode, actorRole, tier,
@@ -645,3 +645,6 @@ export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
 export const POLICE_CLEARANCE_DOC_TYPE = 'police_clearance';
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];
+
+/** [L06 · #1551] The vehicle's registration — the document a vehicle subject is resolved from. Registry text (DOC-INV-2). */
+export const VEHICLE_REGISTRATION_DOC_TYPE = 'vehicle_registration';
