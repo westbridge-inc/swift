@@ -35,6 +35,8 @@ KEY="${2:-}"
 [[ "$NAME" =~ ^[a-z][a-z0-9-]{1,31}$ ]] || die "your name must be 2-32 lowercase letters, digits or hyphens (as pinned on the server)"
 [ -n "$KEY" ] && [ -r "$KEY" ] || die "pass your private key file (e.g. ~/.ssh/swift_seed_approver)"
 for tool in ssh-keygen base64 awk tr; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
+command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 ||
+  die "sha256sum, shasum or openssl is required (to check the admin email you type)"
 [ ! -t 0 ] || die "give the request on stdin:  ./deploy/seed-approve.sh $NAME $KEY < request.txt"
 
 # The request exactly: carriage returns dropped, blank lines around it dropped,
@@ -46,6 +48,12 @@ REQUEST="$(tr -d '\r' | awk 'NF { started = 1 } started { print }')"
 [ "$(printf '%s\n' "$REQUEST" | wc -l | tr -d ' ')" -le 4000 ] || die "the request is too long to be one the server printed"
 # Nothing hidden from you: no control characters (they can hide a line on a terminal).
 if printf '%s\n' "$REQUEST" | LC_ALL=C grep -q '[[:cntrl:]]'; then die "the request contains control characters; ask the operator for the request exactly as the server printed it"; fi
+# Nor invisible or direction-changing ones (Unicode format characters, as
+# UTF-8 bytes): right-to-left overrides and isolates, zero-width marks, the
+# byte-order mark, a soft hyphen, tags. They can reorder or hide text on your
+# screen. The server never prints them (approvalRequest) [SECREVIEW S4].
+FORMAT_BYTES=$'\xc2\xad|\xd8[\x80-\x85\x9c]|\xe1\xa0\x8e|\xe2\x80[\x8b-\x8f\xaa-\xae]|\xe2\x81[\xa0-\xaf]|\xef\xbb\xbf|\xef\xbf[\xb9-\xbb]|\xf3\xa0[\x80\x81]'
+if printf '%s\n' "$REQUEST" | LC_ALL=C grep -Eq "$FORMAT_BYTES"; then die "the request contains invisible or direction-changing characters; ask the operator for the request exactly as the server printed it"; fi
 # It must say what it approves, in words: the database, and the configuration
 # with its FX rate (a plan) or the promotion (a break-glass promotion).
 printf '%s\n' "$REQUEST" | grep -q '^database: ' || die "the request does not name the database; ask the operator for the full request"
@@ -89,14 +97,17 @@ fi
 # (first letter and domain) with its FULL sha256, so you could not tell two
 # addresses at the same domain apart by reading. Type the address you expect
 # (not shown, not kept): it is hashed here and must have exactly that digest,
-# or nothing is signed. Without a terminal (the test suites), SEED_APPROVE_EMAIL
-# stands in for the typing.
+# or nothing is signed. In the test suites' mode only (SEED_APPROVE_YES set to
+# this request's nonce), SEED_APPROVE_EMAIL stands in for the typing.
 EMAIL_LINES="$(printf '%s\n' "$REQUEST" | grep -c '^admin email: ' || true)"
 if [ "$EMAIL_LINES" != 0 ]; then
   [ "$EMAIL_LINES" = 1 ] || die "the request has more than one admin email line; ask the operator for the request exactly as the server printed it"
   WANT="$(printf '%s\n' "$REQUEST" | sed -n 's/^admin email: [^ ]* (sha256 \([0-9a-f]\{64\}\)) is set on that account if it has no email$/\1/p')"
   [[ "$WANT" =~ ^[0-9a-f]{64}$ ]] || die "the request's admin email line does not carry the address's full digest; ask the operator for the request exactly as the server printed it"
-  if [ -n "${SEED_APPROVE_EMAIL+set}" ]; then
+  # The stand-in counts only in the test suites' mode, where SEED_APPROVE_YES
+  # already named this request's nonce; on a terminal what you type decides,
+  # whatever your environment holds [SECREVIEW S4].
+  if [ -n "${SEED_APPROVE_YES:-}" ] && [ -n "${SEED_APPROVE_EMAIL+set}" ]; then
     typed_email="$SEED_APPROVE_EMAIL"
   else
     [ -r /dev/tty ] || die "no terminal to confirm the admin email on; run this in your own terminal"
