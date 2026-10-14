@@ -3,6 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import { API_URL, getDocSignedUrl } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 
+/** The API's own sentence for a missing document-reviewer grant (document-reviewer.ts), for the render path. */
+const DOCUMENT_REVIEWER_SENTENCE = 'You need the document-reviewer permission to open or decide documents. A super-admin grants it under Document reviewers at the top of the Review Center.';
+
 export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: string; label: string; onViewed: (_viewed: boolean) => void; onRejectMissing?: () => void }) {
   const [url, setUrl] = useState('');
   const [pdf, setPdf] = useState(false);
@@ -15,6 +18,9 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [full, setFull] = useState(false);
+  // [Item 98] Face-matching is off: the server sends the applicant's own signup
+  // selfie with an identity document so the reviewer compares the faces by eye.
+  const [selfie, setSelfie] = useState<{ url: string; capturedAt: string } | null>(null);
   const generation = useRef(0);
   const evidenceViewport = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -26,7 +32,7 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   useEffect(() => () => { generation.current++; }, []);
   const view = async () => {
     const attempt = ++generation.current;
-    setLoading(true); setError(''); setMissing(false); setPdfFailed(false); setPdfInlineLoaded(false); setUrl(''); setLoaded(false); onViewed(false);
+    setLoading(true); setError(''); setMissing(false); setPdfFailed(false); setPdfInlineLoaded(false); setUrl(''); setLoaded(false); onViewed(false); setSelfie(null);
     setZoom(1); setRotation(0);
     try {
       const signed = await getDocSignedUrl(id);
@@ -38,6 +44,11 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
       const proxy = new URL(render.pathname + render.search, window.location.origin).toString();
       const response = await fetch(proxy, { cache: 'no-store', redirect: 'error' });
       if (!response.ok) {
+        // [VERIFY-DOCS V3] The grant can be revoked after the link was minted: the render refuses, and the
+        // same-origin proxy names the code in a header (it relays no body), so the page says why.
+        if (response.status === 403 && response.headers.get('X-Swift-Error-Code') === 'DOCUMENT_REVIEWER_REQUIRED') {
+          throw Object.assign(new Error(DOCUMENT_REVIEWER_SENTENCE), { code: 'DOCUMENT_REVIEWER_REQUIRED' });
+        }
         const unavailable = response.status === 404 || response.status === 410;
         throw Object.assign(new Error('The document could not be loaded.'), { code: response.status === 410 ? 'DOCUMENT_PURGED' : unavailable ? 'VERIFICATION_OBJECT_UNAVAILABLE' : 'RENDER_FAILED' });
       }
@@ -46,6 +57,11 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
       await response.body?.cancel();
       if (generation.current !== attempt) return;
       setPdf(isPdf); setUrl(proxy);
+      const sent = signed.data?.signupSelfie as { url?: unknown; capturedAt?: unknown } | null | undefined;
+      if (sent && typeof sent.url === 'string' && sent.url && typeof sent.capturedAt === 'string') {
+        // A path is relative to the API origin (local storage); a storage address is already signed.
+        setSelfie({ url: sent.url.startsWith('/') ? new URL(sent.url, API_URL).toString() : sent.url, capturedAt: sent.capturedAt });
+      }
     } catch (err) {
       if (generation.current === attempt) {
         const code = (err as { code?: string })?.code;
@@ -61,6 +77,11 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   };
   const evidenceGeneration = generation.current;
   const failed = () => { if (generation.current !== evidenceGeneration) return; setError('The document did not render. Retry the view before approving.'); setLoaded(false); setUrl(''); onViewed(false); };
+  const comparison = selfie && <figure className="rc-selfie">
+    {/* eslint-disable-next-line @next/next/no-img-element -- evidence is rendered directly, never optimized or cached */}
+    <img src={selfie.url} alt="Applicant signup selfie" referrerPolicy="no-referrer" />
+    <figcaption>Signup selfie, taken {new Date(selfie.capturedAt).toLocaleDateString()}. Compare the two faces yourself — Swift does not compare faces automatically.</figcaption>
+  </figure>;
   const evidence = <div ref={evidenceViewport} className="rc-evidence-viewport">
     {pdf ? <>
       <div className="rc-pdf-fallback">
@@ -88,7 +109,7 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
     <div className="rc-viewer-heading"><span>Document evidence</span><button type="button" disabled={loading} onClick={() => void view()}>{loading ? 'Loading document…' : loaded ? 'View document again' : 'View document'}</button></div>
     {error && <p role="alert" className="rc-error">Document could not be displayed. {error}{missing && onRejectMissing && <> <button type="button" onClick={onRejectMissing}>Reject missing file</button></>}</p>}
     {!url && !error && <div className="rc-viewer-empty">Open the document before deciding — a decision without opening it is not a review.</div>}
-    {url && !full && <>{controls}{evidence}</>}
-    {full && <Modal title="Document full screen" onClose={() => setFull(false)} className="rc-fullscreen">{controls}{evidence}</Modal>}
+    {url && !full && <>{controls}{evidence}{comparison}</>}
+    {full && <Modal title="Document full screen" onClose={() => setFull(false)} className="rc-fullscreen">{controls}{evidence}{comparison}</Modal>}
   </section>;
 }
