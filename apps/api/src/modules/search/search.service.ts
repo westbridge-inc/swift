@@ -191,7 +191,7 @@ export class SearchService {
       // unverified or dead-tenant operator's dishes into the index.
       where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL(await readFeePause(this.prisma)) },
       include: {
-        vendor: { select: { name: true, status: true, tenantId: true } },
+        vendor: { select: { name: true, status: true, tenantId: true, isCurrentlyOpen: true } },
         category: { select: { name: true } },
       },
     });
@@ -382,7 +382,7 @@ export class SearchService {
         // switched-off operator's DISHES stay searchable — the exact shape of
         // the #790 defect, where a deactivated operator's dish sat above the
         // fold while their store was already hidden.
-        vendor: { select: { name: true, tenantId: true, ...VISIBLE_VENDOR_SELECT } },
+        vendor: { select: { name: true, tenantId: true, isCurrentlyOpen: true, ...VISIBLE_VENDOR_SELECT } },
         category: { select: { name: true } },
       },
     });

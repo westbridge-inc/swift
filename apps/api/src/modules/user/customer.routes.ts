@@ -1435,7 +1435,9 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const orderBy: Record<string, string>[] = [];
     // Category feeds read open-first, closed under the divider (honest order).
-    if (categoryRow) orderBy.push({ isCurrentlyOpen: 'desc' });
+    // So does a search: it lists closed stores too, after the open ones (owner, 13 Oct).
+    const openFirstOrder = Boolean(categoryRow || search);
+    if (openFirstOrder) orderBy.push({ isCurrentlyOpen: 'desc' });
     switch (sort) {
       case 'rating': orderBy.push({ averageRating: 'desc' }); break;
       case 'popular': orderBy.push({ totalOrders: 'desc' }); break;
@@ -1457,7 +1459,7 @@ export async function customerRoutes(app: FastifyInstance) {
       const surfAll = await ratingSurfaces(app.prisma, 'VENDOR', idRows.map((r) => r.id));
       idRows.sort(
         (a, b) =>
-          (categoryRow ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
+          (openFirstOrder ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
           (surfAll.get(b.id)!.displayRating ?? -1) - (surfAll.get(a.id)!.displayRating ?? -1) ||
           b.averageRating - a.averageRating ||
           a.name.localeCompare(b.name),
