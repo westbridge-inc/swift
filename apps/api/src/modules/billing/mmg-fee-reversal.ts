@@ -759,7 +759,8 @@ export class MmgFeeReversalService {
       } catch (err) {
         log().error({ err, reversalId: id }, '[MMG reversal] the sweep could not settle a reversal; it is read again next poll');
         // [security review: missed alert] It rotates to the back: one row that keeps failing never starves the batch.
-        await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id, state: { in: ['SENDING', 'SENT', 'HELD'] } }, data: { lastCheckedAt: now } }).catch(() => undefined);
+        await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id, state: { in: ['SENDING', 'SENT', 'HELD'] } }, data: { lastCheckedAt: now } })
+          .catch((rotateErr) => log().error({ err: rotateErr, reversalId: id }, '[MMG reversal] could not rotate a failing reversal in the sweep'));
       }
     }
     await this.watchClosedReturns(now);
@@ -813,7 +814,8 @@ export class MmgFeeReversalService {
       } catch (err) {
         log().error({ err, reversalId: row.id }, '[MMG reversal] the late-return watch could not read MMG; read again next poll');
         // [security review: missed alert] It rotates to the back: one row that keeps failing never starves the watch.
-        await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id: row.id, state: 'FAILED' }, data: { lastCheckedAt: now } }).catch(() => undefined);
+        await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id: row.id, state: 'FAILED' }, data: { lastCheckedAt: now } })
+          .catch((rotateErr) => log().error({ err: rotateErr, reversalId: row.id }, '[MMG reversal] could not rotate a failing closed return in the watch'));
       }
     }
   }

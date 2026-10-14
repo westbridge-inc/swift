@@ -67,10 +67,12 @@ describe('[hard rule 2] test_no_customer_funds_ingress — order money never ent
     const names = Object.keys(LEDGER_ACCOUNTS).sort();
     expect(names).toEqual([
       'BANK_LOCAL', 'CHARGEBACK_LOSS', 'CHARGEBACK_RESERVE', 'CLEARING_CARD', 'CLEARING_MMG',
-      'DEFERRED_REVENUE', 'FEE_REVENUE', 'FX_VARIANCE', 'OPENING_BALANCES', 'PROMO_EXPENSE',
+      // FEE_RECEIVABLE: a weekly fee a PARTNER owes again after MMG returned it (subledger = subscriptionId), never order money.
+      'DEFERRED_REVENUE', 'FEE_RECEIVABLE', 'FEE_REVENUE', 'FX_VARIANCE', 'OPENING_BALANCES', 'PROMO_EXPENSE',
       'PROVIDER_FEES', 'SUSPENSE_LIABILITY', 'WALLET_LIABILITY',
     ]);
     expect(LEDGER_ACCOUNTS['WALLET_LIABILITY']!.name).toMatch(/subscriptionId/);
+    expect(LEDGER_ACCOUNTS['FEE_RECEIVABLE']!.name).toMatch(/subscriptionId/);
   });
 
   it('User.walletBalance stays dormant — a customer balance Swift owes is custody by another name', () => {

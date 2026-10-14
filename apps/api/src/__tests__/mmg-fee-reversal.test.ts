@@ -1138,16 +1138,19 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     const other = await makeSub();
     const { checkout } = await checkoutService.createCheckout({ subscriptionId: other.subId, userId: other.userId, platform: 'ios', clientKey: `rev-${nanoid(12)}` });
     await app.prisma.mmgCheckoutIntent.update({ where: { id: checkout.ref }, data: { candidates: { push: reversal } } });
-    // Every partner-writable column, on an existing row of each table (restored afterwards).
+    // Every partner-writable column: an order of our own carries the three order columns; the other
+    // tables are written on an existing row when the database has one (restored afterwards).
     const planted: string[] = ['mmg_checkout_intents.candidates'];
     const restore: Array<() => Promise<unknown>> = [];
     await runWithoutTenant(async () => {
-      const order = await app.prisma.order.findFirst({ select: { id: true, customerPaymentRef: true, mmgAttestedRef: true, refundRef: true } });
-      if (order) {
-        await app.prisma.order.update({ where: { id: order.id }, data: { customerPaymentRef: reversal, mmgAttestedRef: reversal, refundRef: reversal } });
-        restore.push(() => app.prisma.order.update({ where: { id: order.id }, data: { customerPaymentRef: order.customerPaymentRef, mmgAttestedRef: order.mmgAttestedRef, refundRef: order.refundRef } }));
-        planted.push('orders.customerPaymentRef', 'orders.mmgAttestedRef', 'orders.refundRef');
-      }
+      const order = await app.prisma.order.create({ data: {
+        orderNumber: `RVP-${nanoid(10).toUpperCase()}`, customerId: other.userId, vendorId: vendorIds.at(-1)!,
+        orderType: 'FOOD_DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Test St', deliveryLat: 6.8055, deliveryLng: -58.1553,
+        subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+        customerPaymentRef: reversal, mmgAttestedRef: reversal, refundRef: reversal,
+      } });
+      restore.push(() => app.prisma.order.delete({ where: { id: order.id } }));
+      planted.push('orders.customerPaymentRef', 'orders.mmgAttestedRef', 'orders.refundRef');
       const claim = await app.prisma.reimbursementClaim.findFirst({ select: { id: true, paymentRef: true } });
       if (claim) {
         await app.prisma.reimbursementClaim.update({ where: { id: claim.id }, data: { paymentRef: reversal } });
@@ -1168,7 +1171,7 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
       }
     }, 'test-census-poisoning');
     try {
-      expect(planted).toContain('orders.customerPaymentRef'); // the seeded database always has orders
+      expect(planted).toEqual(expect.arrayContaining(['mmg_checkout_intents.candidates', 'orders.customerPaymentRef', 'orders.mmgAttestedRef', 'orders.refundRef']));
       const row = await askWith(serviceWith(namingClient(() => reversal)), p.checkoutId, p.amount);
       expect(row, `planted in: ${planted.join(', ')}`).toMatchObject({ state: 'REVERSED', lookupStatus: 'REVERSAL_COMPLETED' });
       expect(await reversalEvents(p.subId)).toHaveLength(1);

@@ -70,6 +70,9 @@ describe('[MMG REVERSAL] what MMG\'s lookup proves', () => {
   it('[security review: fail-open] while MMG cannot read the payment itself, nothing it named proves a return', async () => {
     const unreadable: MmgLookupClient = { transactionLookupDetail: async (id) => (id === 'TX1' ? { outcome: 'error', reason: 'timeout' } : found('approved')) };
     expect(await lookupProof(unreadable, row({ providerReference: 'REV1' }))).toEqual({ proven: false, standing: false, unreadable: true });
+    // [DS1127 S2] "not found" is no better: the payment's own ledger number cannot be ruled out.
+    const unknown: MmgLookupClient = { transactionLookupDetail: async (id) => (id === 'TX1' ? { outcome: 'not_found' } : found('approved')) };
+    expect(await lookupProof(unknown, row({ providerReference: 'REV1' }))).toEqual({ proven: false, standing: false, unreadable: true });
   });
 
   it('[DS1124 S2] a reference MMG named that Swift has on record as a payment is neither proof nor in flight', async () => {
