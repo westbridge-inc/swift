@@ -110,9 +110,14 @@ export function SosCeremony({
   const rideSos = useRideSos();
   const confirm = useConfirmSos();
   const cancel = useCancelSos();
-  // The one raise this popup makes, for its own context.
+  // The one raise this popup makes, for its own context — and none at all
+  // when the context names no record (every branch explicit, no fallthrough).
   const target = sosTarget(context);
-  const raise = target?.kind === 'ride' ? rideSos : target?.kind === 'order' ? jobSos : svcSos;
+  const raise = target === null ? null
+    : target.kind === 'ride' ? rideSos
+    : target.kind === 'order' ? jobSos
+    : target.kind === 'serviceJob' ? svcSos
+    : null;
 
   const [alert, setAlert] = useState<SosRaised | null>(null);
   const [tooLateToCancel, setTooLateToCancel] = useState(false);
@@ -124,15 +129,15 @@ export function SosCeremony({
   const [attached, setAttached] = useState<LocationAccuracyBand | null>(null);
   const { country, dial } = useEmergencyPolicy();
 
-  const raisePending = raise.isPending;
-  const raiseError = raise.isError && !alert;
-  const demoMessage = raiseError ? reviewDemoSosMessage(raise.error) : null;
+  const raisePending = raise?.isPending ?? false;
+  const raiseError = (raise?.isError ?? false) && !alert;
+  const demoMessage = raiseError ? reviewDemoSosMessage(raise?.error) : null;
   // [AUD-L5b-009] Only the untouched question may be waved away by a tap on
   // the dim backdrop (or Android back). Once help was asked for — the request
   // in flight, an alert saved, paged or cancelled, a failure on screen — the
   // popup leaves only by its own Close, so a pocket tap or a shaking hand can
   // never hide an emergency in progress, or the news that Swift was NOT alerted.
-  const untouched = !alert && !raisePending && !raise.isError && !outcome;
+  const untouched = !alert && !raisePending && !(raise?.isError ?? false) && !outcome;
 
   // The grace countdown reads the SERVER deadline; when it passes, the worker
   // is promoting — say that, don't keep a dead countdown alive.
