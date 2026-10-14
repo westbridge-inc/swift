@@ -641,13 +641,29 @@ export class VerificationService {
     // enters the 30-day reminder window the renewal is accepted early, so the
     // operator is never forced offline waiting for a lapse-then-reupload cycle.
     const renewalOpensAt = new Date(Date.now() + REMINDER_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    // [Opus 13 Oct · #1551/#1546 S3-2 · coordinator ruling] A vehicle paper is "already verified" only for the
+    // vehicle it belongs to: the one the mover's current plate names. A motorbike rider who also drives a taxi
+    // keeps the motorbike's approved papers, and must still be able to send the car's. A legacy paper bound to no
+    // vehicle still counts, as before (it cannot be told apart).
+    let sameVehicle: Prisma.VerificationDocumentWhereInput | null = null;
+    if (authority) {
+      const registrationMark = normalizeRegistrationMark(authority.profile?.licensePlate?.trim() ?? '');
+      const vehicle = registrationMark
+        ? await this.prisma.vehicleProfile.findUnique({ where: { registrationMark_countryCode: { registrationMark, countryCode: user.countryCode } }, select: { subjectId: true } })
+        : null;
+      const vehicleIds = vehicle ? [...new Set([vehicle.subjectId, await rootSubjectId(this.prisma, vehicle.subjectId)])] : [];
+      sameVehicle = { OR: [{ subjectId: null }, ...(vehicleIds.length > 0 ? [{ subjectId: { in: vehicleIds } }] : [])] };
+    }
     const alreadyApproved = await this.prisma.verificationDocument.findFirst({
       where: {
         userId,
         docType,
         status: 'APPROVED',
         state: 'COMMITTED',
-        OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }],
+        AND: [
+          { OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }] },
+          ...(sameVehicle ? [sameVehicle] : []),
+        ],
       },
     });
     if (alreadyApproved) {
