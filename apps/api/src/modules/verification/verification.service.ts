@@ -3,6 +3,7 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
+import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
@@ -35,7 +36,7 @@ import { customerIdHoldReasons, readCustomerIdFacts, ON_FILE_REVIEWER, type Cust
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
-import { approvedIdentityDocumentNumber } from './identity-signal-policy';
+import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import {
   projectProviderVerificationLocked,
@@ -53,7 +54,7 @@ export const IDENTITY_DOC_TYPE = 'identity_l2';
  *  merely OCR-checked: the portrait is face-matched against the operator's
  *  camera-captured signup selfie (master plan §3 — "face-matched to profile
  *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
-const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
+export const IDENTITY_FACE_MATCH_DOCS: ReadonlySet<string> = new Set(['national_id', 'owner_national_id']);
 
 /**
  * [DOC-1 §0.5 · FD-D5] The face-match leg of a document submission: an
@@ -115,6 +116,38 @@ export function docTypeExpires(docType: string): boolean {
  * A supplied date wins; otherwise the one already on the row stands; and for a
  * type that expires, one of them must exist and must be in the future.
  */
+/** [VERIFY-DOCS] What a reviewer types at approval (owner ruling, 6 Oct 2026). */
+export interface ReviewerTypedInput {
+  /** The ID or licence number, read off the document. Leaves the approval only as a blind index. */
+  documentNumber?: string;
+  /** A police clearance's issue date. */
+  issuedOn?: Date;
+  /** The reviewer console's contract: the fields this type needs must be typed. */
+  required?: boolean;
+}
+
+/** A police clearance is re-checked a year after it was issued. */
+export const CLEARANCE_RECHECK_DAYS = 365;
+
+/**
+ * [VERIFY-DOCS] A police clearance prints an ISSUE date, not an expiry: the
+ * reviewer types it, and the re-check falls due CLEARANCE_RECHECK_DAYS later.
+ * A date in the future is a typo; one more than a year old is already due.
+ */
+export function clearanceRecheckDate(issuedOn: Date | null, now: Date = new Date()): Date {
+  if (!issuedOn || Number.isNaN(issuedOn.getTime())) {
+    throw new AppError(400, 'ISSUE_DATE_REQUIRED', 'Type the issue date printed on the police clearance before approving it. It is re-checked a year after that date.');
+  }
+  if (issuedOn.getTime() > now.getTime()) {
+    throw new AppError(400, 'ISSUE_DATE_IN_FUTURE', 'That issue date is in the future. Check the date printed on the police clearance.');
+  }
+  const recheck = new Date(issuedOn.getTime() + CLEARANCE_RECHECK_DAYS * 86_400_000);
+  if (recheck.getTime() <= now.getTime()) {
+    throw new AppError(400, 'CLEARANCE_TOO_OLD', 'This police clearance was issued more than a year ago. Ask the person for a newer one.');
+  }
+  return recheck;
+}
+
 export function resolveApprovalExpiry(
   docType: string,
   supplied: Date | undefined,
@@ -393,7 +426,7 @@ export class VerificationService {
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      let doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
       // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
       // created on another account's subject — the impostor's link never survives a rejection,
       // and a later resubmission starts a fresh pending assignment.
@@ -402,6 +435,11 @@ export class VerificationService {
           where: { accountId: data.userId, subjectId: subject.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
           data: { validTo: new Date() },
         });
+      }
+      // [REPLACE-PENDING] A newer copy (not rejected outright) replaces any copy still waiting for review.
+      // Two uploads racing: if a newer copy already waits, this older one is the one replaced (no case for it).
+      if (doc.status !== 'REJECTED' && (await supersedeAwaitingCopies(tx, doc)).selfReplaced) {
+        doc = await tx.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
       }
       // [DOC-1 P4-5] A document waiting on a human has ONE open case, with the
       // SLA clock started here — in the same transaction, so a pending document
@@ -876,7 +914,7 @@ export class VerificationService {
   // Manual review queue (admin)
   // -------------------------------------------------------------------------
 
-  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview) {
+  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview, typed: ReviewerTypedInput = {}) {
     // [DOC-1 §21.1 · P21] No approvals without the key service (production): fail closed.
     assertKeyServiceForAccess('approval');
     // [A-19] Read the candidate first: the expiry decision needs the document's
@@ -887,6 +925,37 @@ export class VerificationService {
       select: { docType: true, expiresAt: true, status: true, userId: true, role: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    // [VERIFY-DOCS · owner ruling 6 Oct 2026] What the reviewer must TYPE for
+    // this type: the ID/licence number (kept only as a blind-index identity
+    // key) or the police clearance's issue date (the re-check falls due a year
+    // after it). Asked only of a document still PENDING: an already-decided one
+    // keeps reporting NOT_PENDING from the transition below.
+    // `required` is the reviewer console's contract (the admin route sets it):
+    // a missing field is refused there. Internal callers may omit the fields;
+    // whatever IS typed is checked and used the same way.
+    let identitySignal: string | null = null;
+    let issuedOn: Date | null = null;
+    if (candidate.status === 'PENDING') {
+      if (REVIEWER_TYPED_NUMBER_DOC_TYPES.has(candidate.docType)) {
+        const supplied = typeof typed.documentNumber === 'string' && typed.documentNumber.trim().length > 0;
+        if (!supplied && typed.required) {
+          throw new AppError(400, 'DOCUMENT_NUMBER_REQUIRED',
+            `Type the number printed on the ${candidate.docType.replace(/_/g, ' ')} before approving it. It is kept only to stop one person opening several accounts.`);
+        }
+        if (supplied) {
+          identitySignal = reviewerTypedDocumentSignal(candidate.docType, typed.documentNumber);
+          if (!identitySignal) {
+            throw new AppError(400, 'DOCUMENT_NUMBER_INVALID', 'That number is too short to be the document number. Check it against the document.');
+          }
+        }
+      }
+      if (ISSUE_DATE_DOC_TYPES.has(candidate.docType) && (typed.required || typed.issuedOn)) {
+        issuedOn = typed.issuedOn ?? null;
+        expiresAt = clearanceRecheckDate(issuedOn);
+      }
+    }
+    // Never on any later write: the typed number leaves this method only as the blind index.
+    delete typed.documentNumber;
     // Vehicle checks run on the locked, stored subject at the decision boundary.
     // An already-decided document must report NOT_PENDING, not an expiry
     // complaint — the transition below owns that refusal, so only a genuine
@@ -908,7 +977,18 @@ export class VerificationService {
           hireClassConfirmed: insurance.hireClassConfirmed,
           plateCrossChecked: insurance.plateCrossChecked,
         }),
-    }, { reviewerId: adminId, approval: { expiresAt, insurance } });
+    }, { reviewerId: adminId, approval: { expiresAt, insurance, ...(issuedOn ? { issuedOn } : {}) } });
+
+    // [VERIFY-DOCS] The typed number becomes a HARD identity key BEFORE the
+    // trial decision below (afterApproval) — the same order as an extracted
+    // number. The service hashes it (HMAC blind index) and never throws.
+    if (identitySignal) {
+      const { IdentityService } = await import('../integrity/identity.service');
+      await new IdentityService(this.prisma).capture({
+        accountId: updated.userId, actorRole: String(updated.role),
+        type: 'ID_DOC_NUMBER', normalizedValue: identitySignal, source: 'REVIEWER_TYPED',
+      });
+    }
 
     if (updated.docType === IDENTITY_DOC_TYPE) {
       await this.promoteToL2(updated.userId);
@@ -1120,7 +1200,7 @@ export class VerificationService {
     docId: string,
     requestedStatus: 'APPROVED' | 'REJECTED',
     data: Prisma.VerificationDocumentUpdateManyMutationInput,
-    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string; fraud?: { reasonCode: RejectionReasonCode }; approval?: { expiresAt?: Date; insurance?: InsuranceReview } },
+    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string; fraud?: { reasonCode: RejectionReasonCode }; approval?: { expiresAt?: Date; insurance?: InsuranceReview; issuedOn?: Date } },
   ): Promise<VerificationDocument> {
     const candidate = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
@@ -1162,9 +1242,12 @@ export class VerificationService {
       if (won.count !== 1) {
         const current = await tx.verificationDocument.findUnique({
           where: { id: docId },
-          select: { status: true },
+          select: { status: true, state: true, reviewNote: true },
         });
         if (!current) throw new NotFoundError('VerificationDocument', docId);
+        // [REPLACE-PENDING] The applicant replaced this copy: nothing to decide here — say so plainly.
+        // (A copy superseded for another reason — a vehicle change, say — keeps the ordinary answer.)
+        if (current.state === 'SUPERSEDED' && isReplacedNote(current.reviewNote)) return { kind: 'REPLACED' as const, status: current.status };
         // [REPORT-007 / STRAND-2] A terminal retry is a repair opportunity for
         // stale derived state (the duplicate-submission path already repairs
         // before ALREADY_APPROVED). RETURN instead of throwing inside the
@@ -1202,6 +1285,11 @@ export class VerificationService {
         // trigger demands (test_commit_requires_provenance); without it this hop is refused.
         const committed = await hopDocState(tx, { id: docId, userId: candidate.userId }, 'APPROVED', 'COMMITTED');
         if (!committed) throw new AppError(500, 'DOC_STATE_COMMIT_FAILED', 'The approval could not be committed');
+        // [VERIFY-DOCS] The typed issue date belongs to the kept record (the
+        // commit trigger above wrote it, without one): it outlives the image.
+        if (review.approval?.issuedOn) {
+          await tx.documentRecord.update({ where: { submissionId: docId }, data: { issuedOn: review.approval.issuedOn } });
+        }
       }
 
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
@@ -1239,6 +1327,9 @@ export class VerificationService {
       await this.projectVendorActivation(tx, updated.userId);
       return { kind: 'UPDATED' as const, document: updated };
     });
+    if (outcome.kind === 'REPLACED') {
+      throw new AppError(409, DOCUMENT_REPLACED, 'The applicant replaced this document with a newer copy. Open the newer copy in the queue.');
+    }
     if (outcome.kind === 'NOT_PENDING') {
       throw new AppError(400, 'NOT_PENDING', `Document is ${outcome.status}, only PENDING documents can be reviewed`);
     }
@@ -1391,8 +1482,10 @@ export class VerificationService {
       where: { id: { in: breachedCases.map((c) => c.id) } },
       data: { priority: 10 },
     });
+    // [DS1055 · DOC-1 §24.2] Compare-and-set: only a case that is STILL in STANDARD at the write goes to ESCALATED.
+    // A reviewer's escalation that committed after the read above has moved it to SECOND_REVIEW, and must keep it.
     await this.prisma.reviewCase.updateMany({
-      where: { id: { in: breachedCases.filter((c) => c.queue === 'STANDARD').map((c) => c.id) } },
+      where: { id: { in: breachedCases.filter((c) => c.queue === 'STANDARD').map((c) => c.id) }, queue: 'STANDARD' },
       data: { queue: 'ESCALATED' },
     });
     const oldest = breachedCases.reduce((a, c) => (c.createdAt < a ? c.createdAt : a), breachedCases[0]!.createdAt);
@@ -1503,10 +1596,16 @@ export class VerificationService {
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
     // out here, or the checklist would show an approval GO no longer counts.
-    const documents = (await this.prisma.verificationDocument.findMany({
+    const rows = await this.prisma.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
-    })).filter((d) => d.state !== 'SUPERSEDED')
+    });
+    // [REPLACE-PENDING] A copy waiting for review that replaced an earlier waiting copy says so
+    // ("Replaced — waiting for review"). Additive field; older apps ignore it.
+    // "Replaced" belongs to the copy that did the replacing (named in the replaced copy's note), never to a later copy.
+    const replacedNotes = new Set(rows.filter((d) => d.state === 'SUPERSEDED' && d.reviewNote).map((d) => d.reviewNote));
+    const documents = rows.filter((d) => d.state !== 'SUPERSEDED')
+      .map((d) => (d.status === 'PENDING' && replacedNotes.has(replacedNoteFor(d.id)) ? { ...d, replaced: true } : d))
       // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a withdrawn customer ID shows a neutral line; the
       // reviewer's reason ("REVOKED: …") stays in the staff record. Matched on the note as well as
       // the state: once the customer erases a withdrawn ID (or retention purges it) the row is
