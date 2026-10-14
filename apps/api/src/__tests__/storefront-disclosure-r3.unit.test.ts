@@ -14,6 +14,8 @@ vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
   prohibitedStoreIds: async () => [],
   prohibitedStoreCategory: async () => null,
+  // [owner 14 Oct, store names] nor the store's own words (no fixture store's name holds it)
+  storeHiddenFromCustomers: async () => false,
 }));
 
 
@@ -249,6 +251,8 @@ describe('R3 actual activation projection', () => {
   it('a pending store with a complete lawful block activates without PERSONAL extraction', async () => {
     const h = await fixture('PENDING_APPROVAL');
     h.vendor['isVerified'] = false;
+    // [owner #51, 14 Oct] A first go-live also needs a published contact phone.
+    h.vendor['publicPhone'] = '+5926001234';
     await h.activate();
     expect(h.vendor).toMatchObject({ status: 'ACTIVE', isVerified: true, acceptingOrders: true });
     expect(h.extracted).not.toHaveBeenCalled();

@@ -480,13 +480,32 @@ s = json.load(sys.stdin)["services"]
 if "osrm" not in s or any(x.get("ports") for x in s.values()):
     sys.exit("refusing routing configuration with public ports")
 ' || die "routing Compose port isolation failed"
-  # The public API never carries DEV_OTP_BYPASS or TEST_CONTROL_ENABLED, and the
-  # staging-only journeys override (api-journeys + the one-shot runner) never
-  # publishes a port, leaves the private network or gets a Caddy route.
+  # [PROD-PATH] Production never hosts journeys, so the staging-only override
+  # is never rendered there: its api-journeys extends the public api and
+  # inherits this host's NODE_ENV (production), so --require-journeys (which
+  # demands loadtest) could never pass and production could never stand up.
+  # Instead, prove none of it is in production's configuration: no Compose
+  # command here names the override or its profile, the rendered stack holds
+  # neither journey service, and the Caddyfile routes to neither.
+  if [ "$PILOT_ENV" = production ]; then
+    for compose_arg in "${COMPOSE[@]}" "${ROUTING[@]}"; do
+      case "$compose_arg" in
+        journeys | *docker-compose.journeys.yml)
+          die "PILOT_ENV=production: a Compose command here names the journeys override or profile; production never hosts journeys" ;;
+      esac
+    done
+    "${COMPOSE[@]}" config --format json |
+      python3 "$HERE/verify-journeys-isolation.py" "$HERE/Caddyfile" --forbid-journeys >/dev/null ||
+      die "production journeys exclusion failed"
+  fi
+  # The public API never carries DEV_OTP_BYPASS or TEST_CONTROL_ENABLED (every
+  # host), and on staging the journeys override (api-journeys + the one-shot
+  # runner) never publishes a port, leaves the private network or gets a Caddy
+  # route.
   "${COMPOSE[@]}" config --format json |
     python3 "$HERE/verify-journeys-isolation.py" "$HERE/Caddyfile" >/dev/null ||
     die "public API isolation failed"
-  if [ -f "$HERE/docker-compose.journeys.yml" ]; then
+  if [ "$PILOT_ENV" != production ] && [ -f "$HERE/docker-compose.journeys.yml" ]; then
     "${COMPOSE[@]}" -f "$HERE/docker-compose.journeys.yml" --profile journeys config --format json |
       python3 "$HERE/verify-journeys-isolation.py" "$HERE/Caddyfile" --require-journeys >/dev/null ||
       die "journeys override isolation failed"

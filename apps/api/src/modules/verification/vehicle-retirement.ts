@@ -47,7 +47,12 @@ export async function requireFreshVehicleReview(tx: Prisma.TransactionClient, us
   });
   const mutable = papers.filter(paper => !paper.legalHoldId);
   const awaitingIds = mutable.filter(paper => paper.state !== 'COMMITTED').map(paper => paper.id);
-  if (awaitingIds.length) await tx.$queryRaw`SELECT id FROM review_case WHERE "submissionId" = ANY(${awaitingIds}) ORDER BY id FOR UPDATE`;
+  if (awaitingIds.length) {
+    // Case, then paper (the escalation's order): the paper lock serializes with an escalation even when the paper
+    // has no open case, so the second-review read below sees an escalation that committed first [DS1064 S3].
+    await tx.$queryRaw`SELECT id FROM review_case WHERE "submissionId" = ANY(${awaitingIds}) ORDER BY id FOR UPDATE`;
+    await tx.$queryRaw`SELECT id FROM verification_documents WHERE id = ANY(${awaitingIds}) ORDER BY id FOR UPDATE`;
+  }
   const underSecondReview = await papersUnderSecondReview(tx, awaitingIds);
   const superseded: string[] = [], withdrawn: string[] = [];
   for (const paper of mutable) {

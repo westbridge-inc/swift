@@ -292,7 +292,8 @@ describe('switched off (the default): every payload is today\'s, nothing is writ
       // Today's keys, in today's order: the order row's own columns, then the relations the route adds.
       const keys = Object.keys(res.json().data).filter((k) => k in raw);
       expect(keys, url).toEqual(Object.keys(raw).filter((k) => keys.includes(k)));
-      expect(Object.keys(res.json().data).filter((k) => !(k in raw)).every((k) => ['driver', 'customer', 'statusHistory'].includes(k)), url).toBe(true);
+      // [owner #50, 14 Oct] The passenger's active ride also carries the one cancel verdict (additive; not the waiting's).
+      expect(Object.keys(res.json().data).filter((k) => !(k in raw)).every((k) => ['driver', 'customer', 'statusHistory', 'canCancel', 'freeCancellationExpiresAt', 'cancellationMessage', 'cancelUnavailable'].includes(k)), url).toBe(true);
     }
   });
 

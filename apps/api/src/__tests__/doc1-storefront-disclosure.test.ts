@@ -56,6 +56,8 @@ async function store(n: number) {
   const owner = await runWithTenant('swift-default', () => app.prisma.vendorOwner.create({ data: { userId: u.id, vendors: { create: {
     name: `Priya's Snackette ${RUN}${n}`, slug: `priyas-snackette-${RUN.toLowerCase()}-${n}`, vendorType: 'RESTAURANT', phone: `+59266${NUM}${n}`,
     addressLine1: `${n} Sheriff Street`, addressLine2: 'Georgetown', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.16, status: 'PENDING_APPROVAL',
+    // [owner #51, 14 Oct] A first go-live needs a published phone; set, so the disclosure block alone decides here.
+    publicPhone: '+5926001200',
   } } }, include: { vendors: true } }));
   return { userId: u.id, vendorId: owner.vendors[0]!.id };
 }

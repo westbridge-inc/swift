@@ -51,6 +51,7 @@ describe('background reads finish before the database disconnects', () => {
     const db = {
       discoveryCategory: { findMany: async () => { reads += 1; await wait(60); return []; } },
       vendorDiscoveryCategory: { findMany: async () => [] },
+      vendor: { findMany: async () => [] }, // [store names] the list also reads stores' own words
     } as never;
     expect(await prohibitedStoreIds(db, 'bg-reads-tenant', 0)).toEqual([]);
     expect(reads).toBe(1);
