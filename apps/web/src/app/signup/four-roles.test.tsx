@@ -76,20 +76,36 @@ describe('[W9] four ways to join', () => {
     const user = await throughName(/Drive a taxi with Swift/);
     expect(fx.register.mock.calls[0]![0]).toMatchObject({ role: 'MOVER' });
     expect(options()).toEqual([['CAR', 'Car'], ['WAGON_CAR', 'Wagon Car']]);
-    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'PAA 1234']]) {
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
     await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
     await user.click(screen.getByRole('button', { name: 'Create driver account' }));
     expect(fx.become.mock.calls[0]![0]).toEqual({
       role: 'MOVER', acceptAgreement: true, vehicleType: 'CAR',
-      vehicle: { make: 'Toyota', model: 'Axio', year: 2018, color: 'Silver', licensePlate: 'PAA 1234' },
+      vehicle: { make: 'Toyota', model: 'Axio', year: 2018, color: 'Silver', licensePlate: 'HAA 1234' },
     });
+  });
+
+  // [Owner ruling 11 Oct 2026 — H-PLATE: KEEP] taxi plates are H-series; fixture plates above follow it.
+  it('the taxi door says taxi plates start with H, and will not take a private plate', async () => {
+    const user = await throughName(/Drive a taxi with Swift/);
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver']]) {
+      fireEvent.change(screen.getByLabelText(label!), { target: { value } });
+    }
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    const create = () => screen.getByRole('button', { name: 'Create driver account' }) as HTMLButtonElement;
+    expect(screen.getByText(/Taxi plates in Guyana start with H — e\.g\. HC 1234\./)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'PLX4821' } });
+    expect(create().disabled).toBe(true);
+    expect(screen.getByRole('alert').textContent).toMatch(/private \(P\) plate cannot be approved/);
+    fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'hc-1234' } });
+    expect(create().disabled).toBe(false);
   });
 
   it('the taxi door holds the vehicle year to what the server accepts (1980 to next year)', async () => {
     const user = await throughName(/Drive a taxi with Swift/);
-    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Colour', 'Silver'], ['Licence plate', 'PAA 1234']]) {
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
     await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
