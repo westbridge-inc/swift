@@ -461,7 +461,7 @@ function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversa
       ) : paymentNotFound ? (
         <label className="flex items-center gap-2 text-xs">
           <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
-          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: nothing is deducted and that week&apos;s fee is owed again)
+          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: while the partner&apos;s weekly-fee payments still hold the amount it is deducted once; otherwise nothing is deducted and that week&apos;s fee is owed again)
         </label>
       ) : null}
       <input

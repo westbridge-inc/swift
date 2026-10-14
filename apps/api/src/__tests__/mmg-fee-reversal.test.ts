@@ -1057,19 +1057,71 @@ describe('[Opus delta S3-N1] MMG no longer finds a payment it returned: a person
     return { p, reversal, service, held };
   };
 
-  it('a definite "not found": "returned" and "not returned" say so plainly, and "returned, not booked" closes it (nothing deducted, fee owed, billing unblocked)', async () => {
+  it('a definite "not found": "returned" and "not returned" say so plainly; the not-found close BOOKS the return once while the fee credit still holds it (never the credit kept AND a fee owed) [Opus eve S2-1]', async () => {
     const { p, reversal, service, held } = await heldMissing('not_found');
     expect(held.lookupStatus).toBe('PAYMENT_NOT_FOUND');
     const before = await walletOf(p.subId);
+    expect(before).toBeGreaterThanOrEqual(p.amount);
     await expect(resolveAs(held.id, 'RETURNED', reversal, service)).rejects.toMatchObject({ code: 'PAYMENT_NOT_FOUND' });
     await expect(resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}NF`, service)).rejects.toMatchObject({ code: 'PAYMENT_NOT_FOUND' });
     const closed = await resolveAs(held.id, 'RETURNED_NOT_BOOKED', reversal, service);
+    // The credit still held the payment (billing was paused while the return was open): MMG gave it
+    // back, so Swift takes it out of the credit once, exactly as a proven return is booked.
+    expect(closed).toMatchObject({ state: 'REVERSED', resolution: 'RETURNED_BY_REFERENCE', lookupStatus: 'PAYMENT_NOT_FOUND', resolutionNote: reversal });
+    expect(closed.walletDebitedAt).not.toBeNull();
+    expect(await walletOf(p.subId)).toBe(before - p.amount);
+    const events = await reversalEvents(p.subId);
+    expect(events).toHaveLength(1);
+    expect(closed.billingEventId).toBe(events[0]!.id);
+    // No fee owed on top: the books never show the same money both returned-and-kept and owed.
+    expect(await app.prisma.ledgerEntry.count({ where: { transaction: { idempotencyKey: `ledger:mmg-reversal-not-booked:${held.id}` } } })).toBe(0);
+    expect(await app.prisma.ledgerEntry.count({ where: { accountCode: 'FEE_RECEIVABLE', subledgerId: p.subId } })).toBe(0);
+    // Closing the account would not refund that money a second time.
+    const obligations = await app.prisma.$transaction((tx) => partnerObligations(tx, p.userId));
+    expect(obligations.feeCreditAmount ?? 0).toBe(before - p.amount);
+    expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(false);
+    const report = await runBillingInvariants(app.prisma);
+    expect(report.ledgerTrialImbalance).toBeNull();
+    expect(report.walletMismatches.filter((m) => m.subscriptionId === p.subId)).toEqual([]);
+    // Closed once: a second close changes nothing.
+    await expect(resolveAs(held.id, 'RETURNED_NOT_BOOKED', reversal, service)).rejects.toMatchObject({ code: 'NOT_HELD' });
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('[Opus eve S2-1 control] the not-found close books nothing when the fee credit no longer holds the payment: that week\'s fee is owed again (fee owed)', async () => {
+    const { p, reversal, service, held } = await heldMissing('not_found');
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    const closed = await resolveAs(held.id, 'RETURNED_NOT_BOOKED', reversal, service);
     expect(closed).toMatchObject({ state: 'FAILED', resolution: 'RETURNED_NOT_BOOKED', lookupStatus: 'PAYMENT_NOT_FOUND' });
-    expect(await walletOf(p.subId)).toBe(before);
+    expect(await walletOf(p.subId)).toBe(0);
     expect(await reversalEvents(p.subId)).toHaveLength(0);
     const owed = await app.prisma.ledgerEntry.findMany({ where: { transaction: { idempotencyKey: `ledger:mmg-reversal-not-booked:${held.id}` } } });
     expect(owed.find((e) => e.accountCode === 'FEE_RECEIVABLE')).toMatchObject({ subledgerId: p.subId });
     expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(false);
+  });
+
+  it('[Opus eve S2-1] a "money already used" hold whose payment MMG later stops finding is BOOKED when the fee credit holds the amount again by the close', async () => {
+    const p = await paidCheckout();
+    const reversal = `RVWB${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    let missing = false;
+    const client: MmgReversalClient = {
+      reverseTransaction: async (req) => { reversalCalls.push(req.transactionId); return { status: 'pending', transactionId: reversal }; },
+      transactionLookupDetail: async (id) => (missing && id === p.txn ? { outcome: 'not_found' as const } : mmg.transactionLookupDetail(id)),
+    };
+    const service = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => client });
+    const sent = await runWithTenant('swift-default', () => service.requestReversal({ tenantId: 'swift-default', checkoutId: p.checkoutId, amountGyd: p.amount, reason: REASON, actorId: admin.userId, approvalId: null }, async () => {}));
+    const held = await walletOf(p.subId);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxAddHistory({ transactionId: reversal, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    const short = await runWithTenant('swift-default', () => service.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    expect(short).toMatchObject({ state: 'HELD', heldReason: 'WALLET_NO_LONGER_HOLDS_IT' });
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: held } });
+    missing = true; // MMG's records stop finding the payment; "Check with MMG" can no longer book it
+    const closed = await resolveAs(short.id, 'RETURNED_NOT_BOOKED', reversal, service);
+    expect(closed).toMatchObject({ state: 'REVERSED', resolution: 'RETURNED_BY_REFERENCE', lookupStatus: 'PAYMENT_NOT_FOUND' });
+    expect(await walletOf(p.subId)).toBe(held - p.amount);
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+    expect(await app.prisma.ledgerEntry.count({ where: { accountCode: 'FEE_RECEIVABLE', subledgerId: p.subId } })).toBe(0);
   });
 
   it('[DS1341 S3] a "money already used" hold whose payment MMG later stops finding closes on the not-found basis, never "try again" forever', async () => {

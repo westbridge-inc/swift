@@ -172,7 +172,7 @@ const RESOLVE_COPY: Record<ResolveRefusal, string> = {
   NOT_A_REVERSAL: "That MMG reference is a payment Swift has on record (this payment's own statement line, or another payment), not a return. Enter the reference of MMG's reversal transaction. Nothing changed.",
   RETURN_NOT_BOOKABLE: "MMG returned this payment, but it cannot be booked against the partner's weekly-fee payments as they stand now. If the money already paid for a week, close it as \"Returned, not booked\" (that week's fee is then owed again and finance collects it); otherwise put the books right and use \"Check with MMG\". Nothing changed.",
   NOT_SHORT: 'Only a return MMG made after the money had already paid for a week, or one whose payment MMG\'s records no longer find, is closed this way. Nothing changed.',
-  PAYMENT_NOT_FOUND: "MMG's records no longer find this payment, so it can be neither booked as returned nor closed as not returned. If the MMG statement shows it returned, close it as \"Returned, not booked\" with MMG's reversal reference: nothing is deducted and that week's fee is owed again. Nothing changed.",
+  PAYMENT_NOT_FOUND: "MMG's records no longer find this payment, so it can be neither booked as returned nor closed as not returned. If the MMG statement shows it returned, close it as \"Returned, not booked\" with MMG's reversal reference: while the partner's weekly-fee payments still hold the amount, the return is deducted from them once; otherwise nothing is deducted and that week's fee is owed again. Nothing changed.",
   RETURN_NOW_BOOKABLE: "The partner's weekly-fee payments hold this amount again, so the return can be booked: use \"Check with MMG\". Nothing changed.",
   MMG_LOOKUP_UNAVAILABLE: 'MMG could not be asked just now. Nothing changed; try again in a few minutes.',
   MMG_RETURN_IN_FLIGHT: "MMG named a return for this payment that it has not finished (or that cannot be read now). While MMG may still return the money (up to a week after the request) it cannot be closed as not returned: use \"Check with MMG\" later. Nothing changed.",
@@ -599,12 +599,15 @@ export class MmgFeeReversalService {
       throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
     }
     if (input.outcome === 'RETURNED_NOT_BOOKED') {
-      // Two bases, both closing with NOTHING deducted and the week's fee owed again:
-      //  (1) MMG proved the return, but the money had already paid for a week;
+      // Two bases:
+      //  (1) MMG proved the return, but the money had already paid for a week: closed with NOTHING
+      //      deducted and the week's fee owed again;
       //  (2) [Opus delta S3-N1] MMG's lookup definitively no longer finds the payment itself, so no
       //      return can ever be proven (or booked) automatically; a person closes it on a reversal
       //      reference MMG's lookup finds completed for this exact amount (the reason and the audit
       //      row are the C4 approval's). An error or a timeout is never this basis: it stays closed.
+      //      [Opus eve S2-1] While the fee credit holds the amount the return is BOOKED (deducted
+      //      once, no fee owed); only when it no longer does is it closed as in (1).
       const walletShort = (row.heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT');
       let how = '';
       let proofRef = reference;
@@ -647,11 +650,13 @@ export class MmgFeeReversalService {
         mmgNamedProof = !typed;
         proving = true;
       }
-      const closed = await this.deps.prisma.$transaction(async (tx) => {
+      const closed = await this.deps.prisma.$transaction(async (tx): Promise<{ row: MmgFeeReversal; booked: boolean }> => {
         // [security review R1] Decided on the books as they are NOW (an approval can be
         // hours old): under the payer's lock, the money must still be used, and the row
         // still held for exactly that reason (compare-and-set below).
         await lockBillingAuthority(tx, row.subscriptionId);
+        // The same order as a booking (payer -> this return -> its reference).
+        await tx.$queryRaw`SELECT "id" FROM "mmg_fee_reversals" WHERE "id" = ${row.id} FOR UPDATE`;
         // [security review: sibling-path parity] The same reference gate as a booking: a
         // reference that proves this return (or is written as its note) is locked and checked
         // again here, so two closes at once can never both cite one reversal.
@@ -671,6 +676,39 @@ export class MmgFeeReversalService {
             throw new AppError(409, 'RETURN_NOW_BOOKABLE', RESOLVE_COPY.RETURN_NOW_BOOKABLE);
           }
         }
+        // [Opus eve S2-1] On the not-found basis the books decide, here, under the payer's lock. While
+        // the fee credit still holds the payment (billing spends nothing while a return is open), MMG
+        // gave that money back: it is taken out of the credit once and booked as returned, exactly as
+        // a proven return is. Never the credit kept (spendable, refundable at closing) AND a fee owed.
+        // Only when the credit no longer holds it is the week's fee owed again (below).
+        if (notFoundBasis) {
+          const current = await tx.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } });
+          if (current.state !== 'HELD' || current.resolution !== null || current.lookupStatus === 'STANDING'
+            || (walletShort && !(current.heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT'))) {
+            throw new AppError(409, 'NOT_HELD', RESOLVE_COPY.NOT_HELD);
+          }
+          let debit: { eventId: string } | { short: true };
+          try {
+            debit = await this.deps.billing.debitWalletForReversalInTx(tx, {
+              subscriptionId: current.subscriptionId, amount: Number(current.amount), currencyCode: current.currencyCode,
+              eventKey: `mmg-reversal:${current.id}`,
+              note: `MMG returned payment ${current.mmgTransactionId} (checkout ${current.checkoutId}) to the partner; MMG's records no longer find the payment, its return was proven by reference ${reference}`,
+              mmgRef: current.mmgTransactionId,
+            });
+          } catch (err) {
+            if (err instanceof AppError && err.code === 'WALLET_CURRENCY_MISMATCH') throw new AppError(409, 'RETURN_NOT_BOOKABLE', RESOLVE_COPY.RETURN_NOT_BOOKABLE);
+            throw err;
+          }
+          if (!('short' in debit)) {
+            await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'RETURNED_BY_REFERENCE', mmgReference: reference, basis: 'PAYMENT_NOT_FOUND' });
+            const booked = await tx.mmgFeeReversal.update({ where: { id: row.id }, data: {
+              state: 'REVERSED', reversedAt: now, walletDebitedAt: now, billingEventId: debit.eventId, lastCheckedAt: now, lookupStatus: how,
+              resolution: 'RETURNED_BY_REFERENCE', resolvedBy: input.actorId, resolutionNote: reference,
+              ...(current.providerReference ? {} : { providerReference: reference }),
+            } });
+            return { row: booked, booked: true };
+          }
+        }
         const moved = await tx.mmgFeeReversal.updateMany({
           where: {
             id: row.id, state: 'HELD', resolution: null, ...(walletShort ? { heldReason: { startsWith: 'WALLET_NO_LONGER_HOLDS_IT' } } : {}),
@@ -683,24 +721,35 @@ export class MmgFeeReversalService {
         // [owner Q-1654-BOOKS A] The partner owes that week's fee again; MMG clearing holds less.
         await postLedger(tx, {
           idempotencyKey: `ledger:mmg-reversal-not-booked:${row.id}`,
-          description: `MMG returned payment ${row.mmgTransactionId} after it had paid for a week: that week's fee is owed again`,
+          description: notFoundBasis
+            ? `MMG returned payment ${row.mmgTransactionId} (MMG's records no longer find the payment) and the fee credit no longer holds it: that week's fee is owed again`
+            : `MMG returned payment ${row.mmgTransactionId} after it had paid for a week: that week's fee is owed again`,
           entries: returnedNotBookedPostings(row.subscriptionId, Number(row.amount)),
         });
         await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'RETURNED_NOT_BOOKED', mmgReference: reference, basis: notFoundBasis ? 'PAYMENT_NOT_FOUND' : 'MONEY_ALREADY_USED' });
-        return tx.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } });
+        return { row: await tx.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } }), booked: false };
       });
+      if (closed.booked) {
+        mmgFeeReversalsCounter.labels('resolved_returned').inc();
+        mmgFeeReversalsCounter.labels('reversed').inc();
+        log().warn({ reversalId: row.id, checkoutId: row.checkoutId, how }, '[MMG reversal] MMG no longer finds the payment; a person named the return MMG proved and the fee credit held it: booked once');
+        await this.tellPartner(closed.row);
+        return closed.row;
+      }
       mmgFeeReversalsCounter.labels('resolved_returned_not_booked').inc();
-      log().error({ reversalId: row.id, checkoutId: row.checkoutId }, '[MMG reversal] MMG returned a payment whose money had already paid for a week; closed for the refund procedure');
+      log().error({ reversalId: row.id, checkoutId: row.checkoutId, basis: notFoundBasis ? 'PAYMENT_NOT_FOUND' : 'MONEY_ALREADY_USED' }, '[MMG reversal] MMG returned a payment whose money the fee credit no longer holds; closed for the refund procedure');
       await notifyAdmins(this.deps.prisma, this.deps.notifications, {
         tenantId: row.tenantId,
-        title: 'MMG returned a weekly-fee payment that had already paid for a week',
+        title: notFoundBasis ? 'MMG returned a weekly-fee payment the fee credit no longer holds' : 'MMG returned a weekly-fee payment that had already paid for a week',
         body: `MMG returned payment ${row.checkoutId} (${formatMoney(Number(row.amount), row.currencyCode, { whole: true })}) to the partner, `
-          + 'but that money had already paid for a week of their fee, so nothing was deducted here: that week\'s fee is owed again (on the books as fee owed). Finance collects it from the partner.',
+          + (notFoundBasis
+            ? 'MMG\'s records no longer find the payment, and the partner\'s weekly-fee credit no longer holds that money, so nothing was deducted here: that week\'s fee is owed again (on the books as fee owed). Finance collects it from the partner.'
+            : 'but that money had already paid for a week of their fee, so nothing was deducted here: that week\'s fee is owed again (on the books as fee owed). Finance collects it from the partner.'),
         data: { kind: 'billing_invariants', alert: 'mmg-fee-reversal-returned-not-booked', reversalId: row.id, checkoutId: row.checkoutId },
         dedupeKey: `mmg-fee-reversal-returned-not-booked:${row.id}`,
       }).catch((err) => log().error({ err, reversalId: row.id }, '[MMG reversal] the returned-not-booked page failed; the row is closed and listed'));
-      await this.tellPartner(closed);
-      return closed;
+      await this.tellPartner(closed.row);
+      return closed.row;
     }
     const proof = await proofOf({ ...row, providerReference: reference });
     if (!proof.proven) {
