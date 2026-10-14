@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { fetchRiders } from '@/lib/api';
+import { liveDocumentsLabel, liveDocumentsTone } from '@/lib/live-documents';
 
 // [MC-PR2] Verifying a rider's documents happens on their page, beside the
 // checklist that shows what is approved and what is missing — never blind from
@@ -45,8 +46,8 @@ export default function RidersPage() {
                   </td>
                   <td className="p-4">
                     <span className={`px-2 py-1 rounded-full text-xs ${
-                      rider.documentsVerified ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
-                    }`}>{rider.documentsVerified ? 'Verified' : 'Pending'}</span>
+                      liveDocumentsTone(rider)
+                    }`}>{liveDocumentsLabel(rider)}</span>
                   </td>
                   <td className="p-4">{rider.averageRating?.toFixed(1) || '\u2014'}</td>
                   <td className="p-4 text-right">

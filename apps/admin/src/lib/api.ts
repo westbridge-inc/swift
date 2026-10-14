@@ -671,6 +671,24 @@ export const rejectDoc = (id: string, reason: string, reasonCode: RejectionReaso
 export const revokeDoc = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/revoke`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 
+// [VERIFY-DOCS V3] The document reviewer grant. Opening, approving and
+// rejecting a document need it; `*` never implies it. A SUPER_ADMIN lists the
+// team and grants or removes it — to themselves too — with a stated reason.
+// The list answers 403 to anyone else, which is how the console knows to hide
+// the panel.
+export interface DocumentReviewerRow {
+  userId: string;
+  name: string;
+  role: 'ADMIN' | 'SUPER_ADMIN';
+  active: boolean;
+  documentReviewer: boolean;
+  you: boolean;
+}
+export const fetchDocumentReviewers = (): Promise<{ data: DocumentReviewerRow[] }> =>
+  apiFetch('/api/v1/admin/staff/document-reviewers');
+export const setDocumentReviewer = (userId: string, grant: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/staff/${encodeURIComponent(userId)}/document-reviewer`, { method: 'PUT', body: JSON.stringify({ grant }), reason });
+
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been
 // registered since the mission-control spec landed, and the route-reachability

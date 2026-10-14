@@ -6,11 +6,12 @@ import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
 import { MutationError } from '@/components/MutationError';
 import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
+import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
 import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_STATUSES, applicantId, isSystemActor, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -75,8 +76,11 @@ export default function VerificationPage() {
     observer.observe(footer);
     return () => observer.disconnect();
   }, [applicant?.id, selected?.status]);
-  const queue = useQuery({ queryKey: ['verification', status, lane], queryFn: () => loadReviewQueue(status, lane) });
-  const counts = useQuery({ queryKey: ['verification-counts'], queryFn: fetchVerificationCounts });
+  // [Owner report 8 Oct] the queue re-reads when the reviewer comes back to the tab; the counts are polled lightly
+  // and a banner offers the new documents without moving the list under the reviewer.
+  const queue = useQuery({ queryKey: ['verification', status, lane], queryFn: () => loadReviewQueue(status, lane), refetchOnWindowFocus: true });
+  const counts = useQuery({ queryKey: ['verification-counts'], queryFn: fetchVerificationCounts, refetchInterval: REVIEW_COUNTS_POLL_MS, refetchOnWindowFocus: true });
+  const newDocuments = queue.data ? newSinceLoaded(counts.data?.data, status, lane, queue.data.length) : 0;
   const profile = useQuery({ queryKey: ['review-profile', applicant?.id], queryFn: () => fetchUserDetail(applicant!.id), enabled: !!applicant });
   const history = useQuery({
     queryKey: ['verification-history', status, lane], enabled: !!applicant,
@@ -208,6 +212,7 @@ export default function VerificationPage() {
   return <div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
     <div inert={decision ? true : undefined}>
       <header className="rc-page-heading"><div><h1>Review Center</h1><p>Review the evidence. Record the decision. Keep applicants moving.</p></div><span className="rc-muted">Oldest submissions first</span></header>
+      {!applicant && <ReviewerAccess />}
       {notice && <p role="status" className="rc-notice">{notice}</p>}
       <div className="rc-queue-controls">
         <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{s}</button>)}</div>
@@ -227,6 +232,7 @@ export default function VerificationPage() {
           <button onClick={clearFilters}>Clear filters</button>
         </div>
         {queue.isLoading ? <div className="rc-skeleton" aria-label="Loading verification queue">Loading the complete queue…</div> : queue.isError ? <DataUnavailable what="the verification queue" notAnAllClear="This is not an empty queue — we could not read it." onRetry={() => void queue.refetch()} /> : <section className="rc-queue" aria-label="Applicants">
+          {newDocuments > 0 && <p className="rc-new-banner" role="status">{newDocuments} new {newDocuments === 1 ? 'document' : 'documents'} since this list loaded. <button onClick={() => void queue.refetch()} disabled={queue.isFetching}>Show {newDocuments === 1 ? 'it' : 'them'}</button></p>}
           <div className="rc-queue-summary"><strong>{filtered.length} applicants</strong><span>{queue.data?.length ?? 0} documents in this lane</span><button onClick={() => void queue.refetch()} disabled={queue.isFetching}>Refresh queue</button></div>
           {!filtered.length ? <p className="rc-empty"><span>{groups.length ? 'No applicants match these filters.' : 'No documents'}</span> {groups.length ? 'Clear a filter to see more applicants.' : 'This lane has no documents with the selected status.'}</p> :
             <table className="rc-queue-table"><thead><tr><th>Applicant</th><th>Role / documents</th><th>Waiting for</th><th><span className="sr-only">Action</span></th></tr></thead><tbody>{filtered.map((a) => <tr key={a.id}>
