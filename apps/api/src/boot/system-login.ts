@@ -9,11 +9,24 @@ interface BootLog {
   warn(obj: object, msg: string): void;
 }
 
+/** Which database, on which running server, a connection reached. Roles are
+ *  server-wide, so a bypass member is one on EVERY database of the server:
+ *  membership alone cannot tell that system work would read the wrong one. */
+interface DatabaseIdentity { database: string; serverStartedAt: string }
+
+async function readDatabaseIdentity(db: RawDb): Promise<DatabaseIdentity | null> {
+  const [row] = await db.$queryRaw<Array<{ database: string; started: string }>>`
+    SELECT current_database()::text AS database, pg_postmaster_start_time()::text AS started`;
+  return row ? { database: row.database, serverStartedAt: row.started } : null;
+}
+
+interface SystemLoginProbe { facts: RlsFacts; identity: DatabaseIdentity | null }
+
 /** Read the system login's own facts on a short-lived connection, always closed. */
-async function probeSystemLogin(url: string): Promise<RlsFacts> {
+async function probeSystemLogin(url: string): Promise<SystemLoginProbe> {
   const probe = new PrismaClient({ datasourceUrl: url });
   try {
-    return await readRlsFacts(probe);
+    return { facts: await readRlsFacts(probe), identity: await readDatabaseIdentity(probe) };
   } finally {
     await probe.$disconnect().catch(() => {});
   }
@@ -31,7 +44,8 @@ async function probeSystemLogin(url: string): Promise<RlsFacts> {
  *
  * So, in production, when the request login is walled (the attestation says
  * `enforced`), the API and the worker refuse to start unless the system login
- * is reachable and a bypass member. The request login of an enforced wall is
+ * is reachable, a bypass member, and connected to the same database on the
+ * same running server as the request login. The request login of an enforced wall is
  * never a bypass member, so a system login that IS the request login is
  * refused by the same check. Every other posture — the wall-less EXPAND
  * deployment (staging today) and every non-production mode — starts exactly
@@ -43,7 +57,7 @@ export async function attestSystemLoginAtBoot(
   requestDb: RawDb,
   log: BootLog,
   env: EnvLike = process.env,
-  probe: (url: string) => Promise<RlsFacts> = probeSystemLogin,
+  probe: (url: string) => Promise<SystemLoginProbe> = probeSystemLogin,
 ): Promise<void> {
   if (runtimeMode(env) !== 'production') return;
   const request = attestationOf(await readRlsFacts(requestDb));
@@ -52,11 +66,12 @@ export async function attestSystemLoginAtBoot(
   const url = env['SYSTEM_DATABASE_URL'];
   const gaps: string[] = [];
   let system: RlsFacts | null = null;
+  let systemIdentity: DatabaseIdentity | null = null;
   if (!url) {
     gaps.push('SYSTEM_DATABASE_URL is not set — there is no system login at all');
   } else {
     try {
-      system = await probe(url);
+      ({ facts: system, identity: systemIdentity } = await probe(url));
     } catch (err) {
       const code = (err as { errorCode?: unknown; code?: unknown })?.errorCode ?? (err as { code?: unknown })?.code;
       gaps.push(`the system login could not be reached (${typeof code === 'string' ? code : 'connection failed'}) — check SYSTEM_DATABASE_URL`);
@@ -66,6 +81,13 @@ export async function attestSystemLoginAtBoot(
     gaps.push('the system login\'s role could not be read from pg_roles — its posture is unknown');
   } else if (system && !system.isBypassRoleMember) {
     gaps.push(`the system login (${system.role}) is not a member of swift_bypass_rls${system.role === request.facts.role ? ' — it is the request login itself' : ''}`);
+  }
+  if (system) {
+    const requestIdentity = await readDatabaseIdentity(requestDb);
+    if (!systemIdentity || !requestIdentity || systemIdentity.database !== requestIdentity.database
+      || systemIdentity.serverStartedAt !== requestIdentity.serverStartedAt) {
+      gaps.push('the system login reaches a database that is not the request login\'s database (another database or another server) — system work would read the wrong rows');
+    }
   }
 
   if (gaps.length === 0 && system) {

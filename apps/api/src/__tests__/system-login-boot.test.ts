@@ -57,8 +57,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await request?.$disconnect();
   await logins?.cleanup();
-  await owner.$executeRawUnsafe(`DROP ROLE IF EXISTS ${plainRole}`);
-  await owner.$disconnect();
+  await owner?.$executeRawUnsafe(`DROP ROLE IF EXISTS ${plainRole}`);
+  await owner?.$disconnect();
 });
 
 describe('a walled API or worker refuses to start without a working system login', () => {
@@ -87,6 +87,32 @@ describe('a walled API or worker refuses to start without a working system login
     expect(err?.message).toMatch(/FATAL[\s\S]*could not be reached/);
     expect(err?.message).not.toContain('not-the-password');
     expect(err?.message).not.toContain(new URL(TEST_URL).host);
+  });
+
+  it('refuses when the system login reaches a different database than the request login', async () => {
+    // A bypass member is a bypass member on every database of the server (roles are server-wide),
+    // so membership alone cannot tell that system work would read the wrong database.
+    const elsewhere = new URL(logins.systemUrl);
+    elsewhere.pathname = '/postgres';
+    await expect(attestSystemLoginAtBoot(request, log, { ...WALL_ON, SYSTEM_DATABASE_URL: elsewhere.toString() }))
+      .rejects.toThrow(/FATAL[\s\S]*not the request login's database/);
+  });
+
+  it('refuses when the system login reaches a same-named database on another server', async () => {
+    // One test server cannot host a second one, so the probe seam returns the REAL system
+    // login's facts and identity with only the server's start time changed.
+    const otherServer = async (url: string) => {
+      const db = new PrismaClient({ datasourceUrl: url });
+      try {
+        const facts = await readRlsFacts(db);
+        const [identity] = await db.$queryRaw<Array<{ database: string }>>`SELECT current_database()::text AS database`;
+        return { facts, identity: { database: identity!.database, serverStartedAt: 'another server' } };
+      } finally {
+        await db.$disconnect();
+      }
+    };
+    await expect(attestSystemLoginAtBoot(request, log, { ...WALL_ON, SYSTEM_DATABASE_URL: logins.systemUrl }, otherServer))
+      .rejects.toThrow(/FATAL[\s\S]*not the request login's database/);
   });
 
   it('starts with a reachable bypass-member system login', async () => {
