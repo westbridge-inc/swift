@@ -18,10 +18,7 @@ import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import {
-  LATE_CANCEL_FEE, cancellationVerdict, freeCancellationExpiresAt, readNoMoverFound, readTooLateToDeliver,
-  NO_MOVER_FREE_CANCEL_MESSAGE, AWAITING_STORE_FREE_CANCEL_MESSAGE, TOO_LATE_FREE_CANCEL_MESSAGE,
-} from '../order/cancel-policy';
+import { customerCancelView, readNoMoverFound, readTooLateToDeliver } from '../order/cancel-policy';
 import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
@@ -2622,9 +2619,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the outcome shown here and the one the locked cancel commits can never
-    // drift again. The hold exemption, the assignment guard, the scheduled-slot
-    // branch and the store rule (owner #46) all live inside it; this file no
-    // longer restates any of them.
+    // drift again. The hold, the five-minute window, the store rule (owner
+    // #46), the ride/parcel/booking rule (#50) and the very-late exits (#52)
+    // all live inside it; this file restates none of them.
     // [Item 64] The dispatch journal's "no mover found" fact, and [owner #46]
     // the rescue cutoff's "too late to deliver", read the same way the charge
     // path reads them (there under the order lock).
@@ -2633,20 +2630,20 @@ export async function customerRoutes(app: FastifyInstance) {
       noMoverFound: cancellableState && await readNoMoverFound(app.prisma, order),
       tooLateToDeliver: cancellableState && await readTooLateToDeliver(app.prisma, order, previewNow),
     };
-    const verdict = cancellableState ? cancellationVerdict(policyOrder, previewNow) : null;
-    // [owner #46] An accepted store order is not offered a Cancel at all —
-    // builds 9/10 already hide the button on `canCancel: false` — and the
-    // customer is pointed at the store instead (`cancelUnavailable`).
-    const canCancel = verdict?.allowed === true;
-    const freeCancellation = verdict?.allowed === true && verdict.free;
-    const freeReason = verdict?.allowed === true && verdict.free ? verdict.reason : null;
-    const cancelUnavailable = verdict && !verdict.allowed
+    // [owner #46/#50] A cancel the customer may no longer make is not offered
+    // at all — builds 9/10 already hide the button on `canCancel: false` — and
+    // the customer is told who to contact instead (`cancelUnavailable`).
+    // Every allowed cancel is free: there is no fee.
+    const cancelView = cancellableState ? customerCancelView(policyOrder, previewNow) : null;
+    const canCancel = cancelView?.canCancel === true;
+    const cancelUnavailable = cancelView?.cancelUnavailable
       ? {
-          code: verdict.code,
-          message: verdict.message,
-          // Only the number the store chose to PUBLISH, by the storefront's
-          // own rule — never `vendor.phone` (the account/OTP line).
-          storePhone: order.vendorId ? await publishedStorePhoneOf(app.prisma, order.vendorId) : null,
+          ...cancelView.cancelUnavailable,
+          // The store's (or the booked provider's) contact: only the number
+          // the business chose to PUBLISH, by the storefront's own rule —
+          // never `vendor.phone` (the account/OTP line). A ride or a parcel
+          // has no business; the driver or rider is reached from their card.
+          contactPhone: order.vendorId ? await publishedStorePhoneOf(app.prisma, order.vendorId) : null,
         }
       : null;
 
@@ -2771,31 +2768,22 @@ export async function customerRoutes(app: FastifyInstance) {
         scheduledFor: order.scheduledFor,
         hasBeenRated,
         canCancel,
-        freeCancellationWindow: freeCancellation,
-        // What a cancel would cost right now (0 inside the free window) — so
-        // the app shows the fee BEFORE the customer confirms.
-        cancellationFee: canCancel && !freeCancellation ? LATE_CANCEL_FEE : 0,
-        // Held orders: the free window IS the hold; otherwise the legacy clock.
-        // Only promised while the cancel is ACTUALLY free right now — a mover
-        // assignment or a committed vendor voids the promise, so it must never
-        // be minted for those states.
+        freeCancellationWindow: canCancel,
+        // [owner #46/#50] Always 0 — there is no cancellation fee. Kept only
+        // because builds 9 and 10 refuse to open the cancel confirmation
+        // unless this is a number.
+        cancellationFee: 0,
         holdExpiresAt: order.holdExpiresAt,
-        // ONE implementation, shared with the predicate [cancel-policy.ts] —
-        // built inline this used to promise `placedAt + 5min`, which on a
-        // scheduled order is a countdown that expired hours before the window
-        // it claims to describe.
-        freeCancellationExpiresAt: canCancel
-          ? (freeCancellationExpiresAt(policyOrder, previewNow)?.toISOString() ?? null)
-          : null,
+        // ONE implementation, shared with the predicate [cancel-policy.ts]:
+        // the moment the five-minute window of a ride, parcel or booking
+        // closes; null when there is no countdown (refused, or free for as
+        // long as nobody accepts / nobody was found / the order stays late).
+        freeCancellationExpiresAt: cancelView?.freeCancellationExpiresAt ?? null,
         // [Item 64] Why the cancel is free, in plain words (additive; older
-        // apps ignore it). [owner #46] Also for a store order waiting for the
-        // store, or too late to deliver.
-        cancellationMessage: freeReason === 'NO_MOVER'
-          ? NO_MOVER_FREE_CANCEL_MESSAGE
-          : freeReason === 'AWAITING_STORE'
-            ? AWAITING_STORE_FREE_CANCEL_MESSAGE
-            : freeReason === 'TOO_LATE' ? TOO_LATE_FREE_CANCEL_MESSAGE : null,
-        // [owner #46] Why there is no Cancel, and who to contact instead —
+        // apps ignore it). [owner #46/#52] Also for a store order waiting for
+        // the store, or for any order running very late.
+        cancellationMessage: cancelView?.cancellationMessage ?? null,
+        // [owner #46/#50] Why there is no Cancel, and who to contact instead —
         // the server's verdict, so no client re-derives the rule (additive).
         cancelUnavailable,
       },

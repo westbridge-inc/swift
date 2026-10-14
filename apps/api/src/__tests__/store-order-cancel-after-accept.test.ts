@@ -22,8 +22,9 @@ import {
 // customer — no Cancel button, no fee wording anywhere, the store's own
 // published number instead ("contact the store"). Two exceptions stay free:
 // no mover was found (11 Oct rule, retries included) and an order that is very
-// late (the food-age cutoff the rescue sweep already enforces). Swift never
-// shows or implies a fee it cannot collect.
+// late (the food-age cutoff the rescue sweep already enforces, and — owner
+// #52, 14 Oct — thirty minutes past the promised time). Swift never shows or
+// implies a fee it cannot collect.
 //
 // The rule lives in the ONE cancel predicate (cancel-policy.ts): the preview
 // and the locked charge path read the same verdict, and the server refuses a
@@ -146,7 +147,7 @@ type Preview = {
   cancellationFee: number;
   freeCancellationExpiresAt: string | null;
   cancellationMessage: string | null;
-  cancelUnavailable: { code: string; message: string; storePhone: string | null } | null;
+  cancelUnavailable: { code: string; message: string; contactPhone: string | null } | null;
 };
 
 async function preview(id: string, token: string) {
@@ -219,7 +220,7 @@ describe('[owner #46] a store order cancels free only while it waits for the sto
         cancellationFee: 0,
         freeCancellationExpiresAt: null,
         cancellationMessage: null,
-        cancelUnavailable: { code: 'STORE_ACCEPTED', message: REFUSED_MESSAGE, storePhone: PUBLISHED },
+        cancelUnavailable: { code: 'STORE_ACCEPTED', message: REFUSED_MESSAGE, contactPhone: PUBLISHED },
       });
       // The store's account/OTP line is never the contact (S1 High #6).
       expect(body).not.toContain(accountLine);
@@ -253,13 +254,13 @@ describe('[owner #46] a store order cancels free only while it waits for the sto
     const quiet = await makeVendor({ publicPhone: null });
     const quietOrder = await makeStoreOrder(customer.userId, quiet.vendorId, 'ACCEPTED');
     const q = await preview(quietOrder.id, customer.token);
-    expect(q.data.cancelUnavailable).toEqual({ code: 'STORE_ACCEPTED', message: REFUSED_MESSAGE, storePhone: null });
+    expect(q.data.cancelUnavailable).toEqual({ code: 'STORE_ACCEPTED', message: REFUSED_MESSAGE, contactPhone: null });
     expect(q.body).not.toContain(quiet.accountLine);
 
     const suspended = await makeVendor({ status: 'SUSPENDED' });
     const suspendedOrder = await makeStoreOrder(customer.userId, suspended.vendorId, 'PREPARING');
     const s = await preview(suspendedOrder.id, customer.token);
-    expect(s.data.cancelUnavailable?.storePhone).toBeNull();
+    expect(s.data.cancelUnavailable?.contactPhone).toBeNull();
     expect(s.body).not.toContain(suspended.accountLine);
   });
 });
@@ -306,6 +307,46 @@ describe('[owner #46] the two exceptions stay free after the store accepted', ()
     expect((await preview(notYet.id, customer.token)).data.cancelUnavailable?.code).toBe('STORE_ACCEPTED');
     const refused = await inject('POST', `/api/v1/customer/orders/${notYet.id}/cancel`, customer.token, {});
     expect(refused.statusCode, refused.body).toBe(409);
+  });
+
+  it('[owner #52] 30 minutes past the promised time: free at any stage before pickup; at 29 minutes: refused', async () => {
+    const { vendorId } = await makeVendor();
+    for (const [status, over] of [
+      ['ACCEPTED', {}],
+      ['PREPARING', {}],
+      // the store's own courier, ready but not gone (no food-age cutoff applies to it)
+      ['READY_FOR_PICKUP', { fulfillmentMode: 'VENDOR_DELIVERY', readyAt: new Date(Date.now() - 5 * 60_000) }],
+    ] as const) {
+      const late = await makeStoreOrder(customer.userId, vendorId, status, { promisedAt: new Date(Date.now() - 31 * 60_000), ...over });
+      const shown = await preview(late.id, customer.token);
+      expect(shown.data).toMatchObject({ canCancel: true, cancellationFee: 0, freeCancellationExpiresAt: null, cancellationMessage: TOO_LATE_MESSAGE, cancelUnavailable: null });
+      const res = await inject('POST', `/api/v1/customer/orders/${late.id}/cancel`, customer.token, {});
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().data).toEqual({ message: 'Order cancelled because it was running very late.', cancellationFee: 0 });
+    }
+    const notYet = await makeStoreOrder(customer.userId, vendorId, 'PREPARING', { promisedAt: new Date(Date.now() - 29 * 60_000) });
+    const refused = await inject('POST', `/api/v1/customer/orders/${notYet.id}/cancel`, customer.token, {});
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('STORE_ACCEPTED');
+  });
+
+  it('[owner #52] a pickup is late from "ready in about N minutes" — until the store marks it ready (then the customer is the late one)', async () => {
+    const { vendorId } = await makeVendor();
+    const pickup = { fulfillment: 'PICKUP', fulfillmentMode: 'PICKUP', estimatedPrepTime: 15, placedAt: new Date(Date.now() - 46 * 60_000) };
+    const cooking = await makeStoreOrder(customer.userId, vendorId, 'PREPARING', pickup);
+    expect((await inject('POST', `/api/v1/customer/orders/${cooking.id}/cancel`, customer.token, {})).statusCode).toBe(200);
+    const ready = await makeStoreOrder(customer.userId, vendorId, 'READY_FOR_PICKUP', { ...pickup, readyAt: new Date(Date.now() - 20 * 60_000) });
+    const refused = await inject('POST', `/api/v1/customer/orders/${ready.id}/cancel`, customer.token, {});
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('STORE_ACCEPTED');
+  });
+
+  it('[owner #52] a scheduled order is never late before its slot', async () => {
+    const { vendorId } = await makeVendor();
+    const order = await makeStoreOrder(customer.userId, vendorId, 'ACCEPTED', {
+      promisedAt: new Date(Date.now() - 60 * 60_000), scheduledFor: new Date(Date.now() + 60 * 60_000),
+    });
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {})).statusCode).toBe(409);
   });
 
   it.each([
@@ -365,10 +406,25 @@ describe('cancellationVerdict — the ONE predicate, store branch', () => {
     expect(cancellationVerdict({ ...accepted, noMoverFound: false, tooLateToDeliver: false })).toMatchObject({ allowed: false });
   });
 
-  it('out of scope for owner #46 — rides, parcels and bookings keep today’s rule', () => {
-    const taxi = { ...store, orderType: 'TAXI', placedAt: minutesAgo(10) };
-    expect(cancellationVerdict(taxi)).toEqual({ allowed: true, free: false, reason: 'LATE' });
+  it('[owner #50] rides, parcels and bookings: free in the window, refused after it — never a fee', () => {
+    const taxi = { ...store, orderType: 'TAXI', status: 'DRIVER_ASSIGNED', driverId: 'd1', placedAt: minutesAgo(10), acceptedAt: minutesAgo(9) };
+    expect(cancellationVerdict(taxi)).toMatchObject({ allowed: false, code: 'CANCEL_WINDOW_CLOSED' });
+    expect(cancellationVerdict({ ...taxi, placedAt: minutesAgo(4) })).toEqual({ allowed: true, free: true, reason: 'IN_WINDOW' });
     const booking = { ...store, fulfillment: 'APPOINTMENT', status: 'ACCEPTED' };
-    expect(cancellationVerdict(booking)).toEqual({ allowed: true, free: false, reason: 'LATE' });
+    expect(cancellationVerdict(booking)).toMatchObject({ allowed: false, code: 'CANCEL_WINDOW_CLOSED' });
+    expect(cancellationVerdict({ ...booking, status: 'PENDING' })).toEqual({ allowed: true, free: true, reason: 'NOT_ACCEPTED' });
+  });
+
+  it('no verdict ever carries a fee: every allowed cancel is free', () => {
+    const kinds = [
+      store, { ...store, status: 'ACCEPTED' }, { ...store, orderType: 'TAXI', status: 'DRIVER_EN_ROUTE', driverId: 'd1' },
+      { ...store, orderType: 'COURIER', status: 'RIDER_ASSIGNED', riderId: 'r1' }, { ...store, fulfillment: 'APPOINTMENT', status: 'ACCEPTED' },
+    ];
+    for (const order of kinds) {
+      for (const at of [0, 3, 10, 45, 300]) {
+        const verdict = cancellationVerdict({ ...order, placedAt: minutesAgo(at) });
+        expect(verdict.allowed ? verdict.free : true).toBe(true);
+      }
+    }
   });
 });

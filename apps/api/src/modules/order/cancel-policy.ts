@@ -1,38 +1,42 @@
 // ---------------------------------------------------------------------------
 // The cancellation policy — ONE implementation [SWIFT-UG-CRAFT-01].
 //
-// The service CHARGES by these numbers and the customer routes PREVIEW by
-// them. They were previously two independent literals (order.service
-// hardcoded 5/500 while customer.routes declared its own constants with a
-// "must match" comment) — the exact drift class where a customer is shown one
-// fee and "charged" another. Import from here or don't touch the policy.
+// The service CANCELS by this verdict and the customer routes PREVIEW by it.
+// They were once two independent literals (order.service hardcoded the window
+// while customer.routes declared its own constants with a "must match"
+// comment) — the exact drift class where a customer is shown one outcome and
+// handed another. Import from here or don't touch the policy.
 //
-// ADR: the fee is flat and announced-but-uncollected (cash-only platform —
-// Swift can't collect it); its role is deterrence + the risk-score signal.
-// Founder decision 2026-07-20: record it as a marker, keep displaying it.
-//
-// Owner decision 46 (13 Oct 2026) supersedes that for STORE orders: Swift
-// never shows or implies a fee it cannot collect. A store order cancels free
-// while it waits for the store to accept; once the store accepts, the customer
-// cannot cancel it in the app — they contact the store — unless no mover was
-// found or it is too late to deliver. `cancellationVerdict` is that rule; the
-// marker remains only for the kinds owner #46 did not rule on (rides, parcels,
-// bookings).
+// There is no cancellation fee anywhere. The old flat late-cancel "marker"
+// (announced, never collected — 2026-07-20) is gone: owner decisions 46 and 50
+// (13–14 Oct 2026) — Swift never shows or implies a fee it cannot collect. A
+// customer cancel is either FREE or REFUSED (the customer contacts the store,
+// the driver, the rider or the provider instead):
+//  - store orders (#46): free while the order waits for the store to accept;
+//  - rides, parcels and bookings (#50): free inside the five-minute window;
+//  - every kind: free while nobody has accepted it yet, free when no mover was
+//    found, and free when it is very late (#52) — nobody is ever stuck with an
+//    order or a ride that never comes.
+// `cancellationVerdict` is that rule.
 // ---------------------------------------------------------------------------
 
 import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-generation-keys';
 import { isTooOldToDeliver, type TooOldSubject } from '../dispatch/rescue';
 
-/** Minutes after placing during which a PENDING order cancels free. Under
- *  LIFECYCLE_V2 the hold window itself is always free regardless. */
+/** [owner #50] Minutes after placing during which a ride, a parcel or a
+ *  booking cancels free whatever has happened since. Under LIFECYCLE_V2 a held
+ *  order's window lasts at least as long as its hold. */
 export const FREE_CANCEL_WINDOW_MIN = 5;
 
-/** Flat late-cancellation fee (GYD, integer). */
-export const LATE_CANCEL_FEE = 500;
+/** [owner #52 · #50] How long past its promised moment an order (or the mover
+ *  or provider serving it) must be before the customer may cancel it free for
+ *  lateness. One number for every kind. */
+export const VERY_LATE_AFTER_MIN = 30;
 
-/** The fields the free-cancellation decision reads. Structural on purpose:
- *  both the charge path (order.service) and the customer preview
- *  (customer.routes) hold full order rows — no Prisma import needed here. */
+/** The fields the cancellation decision reads. Structural on purpose: the
+ *  cancel path (order.service, and the courier route through the canonical
+ *  transition) and the customer preview (customer.routes) hold full order
+ *  rows — no Prisma import needed here. */
 export type CancellationSnapshot = {
   status: string;
   orderType: string;
@@ -47,12 +51,21 @@ export type CancellationSnapshot = {
   /** Set at checkout when the customer picks a future slot. Null = "now". */
   scheduledFor: Date | null;
   /** A booking's slot, chosen at checkout and reserved by the provider at
-   *  acceptance. Optional because a delivery row never carries one; both the
-   *  charge path and the preview hold full order rows, so it flows unchanged. */
+   *  acceptance — the booking's promised moment. */
   appointmentSlot?: Date | null;
+  /** [owner #52] The delivery promise made at checkout (ALG-12; revised only
+   *  out loud). */
+  promisedAt?: Date | null;
+  /** [owner #52] The store's prep minutes — a pickup order's promised moment
+   *  is "ready in about this long" (what the order screen shows). */
+  estimatedPrepTime?: number | null;
+  /** [owner #50] A parcel's quoted job time in minutes. */
+  estimatedDeliveryTime?: number | null;
+  /** [owner #50] When the driver took the ride (the claim writes it). */
+  acceptedAt?: Date | null;
   /** [Item 64] The mover search for this order's current delivery generation
    *  came back with nobody. A dispatch-journal fact, not an order column: both
-   *  callers read it with `readNoMoverFound` (the charge path under the order
+   *  callers read it with `readNoMoverFound` (the cancel path under the order
    *  lock) and pass it in. Absent means "not known to be true". */
   noMoverFound?: boolean;
   /** [owner #46] The order is past the food-age cutoff with nobody to carry
@@ -63,21 +76,40 @@ export type CancellationSnapshot = {
 };
 
 /** [Item 64] What the preview tells the customer when no mover was found. */
-export const NO_MOVER_FREE_CANCEL_MESSAGE = 'No mover was found. You can cancel without a fee.';
+export const NO_MOVER_FREE_CANCEL_MESSAGE = 'No mover was found. You can cancel for free.';
 
-/** [owner #46] The refusal code and the words the clients show as-is. */
+/** [owner #46] The refusal for an accepted store order, in words the clients show as-is. */
 export const STORE_ACCEPTED_CANCEL_CODE = 'STORE_ACCEPTED';
 export const STORE_ACCEPTED_CANCEL_MESSAGE = 'The store has accepted your order, so it can no longer be cancelled in the app. Contact the store to change or cancel it.';
+/** [owner #50] The refusal for a ride, a parcel or a booking past its window. */
+export const CANCEL_WINDOW_CLOSED_CODE = 'CANCEL_WINDOW_CLOSED';
 /** [owner #46] Why a store order is free right now, in plain words. */
 export const AWAITING_STORE_FREE_CANCEL_MESSAGE = 'You can cancel for free until the store accepts your order.';
 export const TOO_LATE_FREE_CANCEL_MESSAGE = 'Your order is running very late. You can cancel it for free.';
+
+/** Why a cancel is free right now. */
+export type FreeCancelReason =
+  | 'NO_MOVER' // [Item 64] the mover search came back empty
+  | 'AWAITING_STORE' // [owner #46] a store order nobody has accepted yet
+  | 'NOT_ACCEPTED' // [owner #50] a ride, parcel or booking nobody has accepted yet
+  | 'IN_WINDOW' // [owner #50] inside the five-minute window (or the hold)
+  | 'TOO_LATE'; // [owner #46/#50/#52] very late
+
+/** What a customer cancel may do right now: free, or refused. Never a fee. */
+export type CancellationVerdict =
+  | { allowed: true; free: true; reason: FreeCancelReason }
+  | {
+      allowed: false;
+      free: false;
+      code: typeof STORE_ACCEPTED_CANCEL_CODE | typeof CANCEL_WINDOW_CLOSED_CODE;
+      message: string;
+    };
 
 /**
  * [owner #46] A STORE order: a marketplace order a business accepts and
  * prepares — food or groceries, delivered or collected. Not a ride, not a
  * parcel, and not a booking (a service business's appointment rides the same
- * FOOD_DELIVERY spine with `fulfillment: 'APPOINTMENT'`); those keep their
- * own rule until the owner rules on them.
+ * FOOD_DELIVERY spine with `fulfillment: 'APPOINTMENT'`).
  */
 export function isStoreOrder(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'>): boolean {
   return (order.orderType === 'FOOD_DELIVERY' || order.orderType === 'GROCERY_DELIVERY')
@@ -89,7 +121,7 @@ export function isStoreOrder(order: Pick<CancellationSnapshot, 'orderType' | 'fu
  * food-age cutoff, read for one order (the same scope the sweep cancels by).
  * Only a store order can be; any other kind is never read, so a ride or a
  * parcel never touches the cutoff's configuration. `config` reads the
- * tenant's cutoff; the order fields come from the caller's row (the charge
+ * tenant's cutoff; the order fields come from the caller's row (the cancel
  * path's is the locked one).
  */
 export async function readTooLateToDeliver(
@@ -155,156 +187,186 @@ export async function readNoMoverFound(db: DispatchJournalReader, order: NoMover
   return exhausted != null;
 }
 
-/** The real moment the work is scheduled to happen, or null for "now".
- * Both appointmentSlot and scheduledFor are true instants. */
-function scheduledMoment(appointmentSlot: Date | null | undefined, scheduledFor: Date | null): Date | null {
-  if (appointmentSlot != null) return appointmentSlot;
-  return scheduledFor ?? null;
+const MINUTE_MS = 60_000;
+const plusMinutes = (at: Date, minutes: number) => new Date(at.getTime() + minutes * MINUTE_MS);
+const latest = (dates: Array<Date | null | undefined>): Date | null =>
+  dates.reduce<Date | null>((a, b) => (b != null && (a == null || b.getTime() > a.getTime()) ? b : a), null);
+
+/** Nobody holds the job. */
+function unassigned(order: CancellationSnapshot): boolean {
+  return order.riderId == null && order.driverId == null;
 }
 
-/** What a customer cancel may do right now. */
-export type CancellationVerdict =
-  | { allowed: true; free: true; reason: 'NO_MOVER' | 'TOO_LATE' | 'AWAITING_STORE' | 'NOTHING_COMMITTED' }
-  | { allowed: true; free: false; reason: 'LATE' }
-  | { allowed: false; free: false; code: typeof STORE_ACCEPTED_CANCEL_CODE; message: string };
+/**
+ * Nobody has accepted the job yet: no mover holds it and it is still in the
+ * status it was born in — PENDING, or READY_FOR_PICKUP for a parcel (a parcel
+ * has no store prep step, so it is born ready and waits there for a rider).
+ * Cancelling it costs nobody anything, at any age: there is no one to contact,
+ * and a customer must never be stuck waiting for a ride or an order nobody took.
+ */
+function notAcceptedYet(order: CancellationSnapshot): boolean {
+  if (!unassigned(order)) return false;
+  return order.status === 'PENDING'
+    || (order.orderType === 'COURIER' && order.status === 'READY_FOR_PICKUP');
+}
 
 /**
- * THE one cancellation predicate — the charge path and the customer preview
+ * [owner #50] When the free window of a ride, a parcel or a booking closes:
+ * five minutes after placing — or, under LIFECYCLE_V2, the end of the order's
+ * hold when that is later (a held order is hidden and undispatched, so its
+ * whole hold is free). Nothing is "committed" inside it in a way that matters:
+ * there is no fee to protect any more, only the moment after which the
+ * customer contacts the driver, rider or provider instead.
+ */
+function freeWindowEnd(order: CancellationSnapshot): Date {
+  return latest([plusMinutes(order.placedAt, FREE_CANCEL_WINDOW_MIN), order.holdExpiresAt]) as Date;
+}
+
+/**
+ * [owner #52 · #50] The moment this order was promised for, while it can
+ * still be late — or null when nothing was promised or lateness no longer
+ * applies at this stage. Very late = `VERY_LATE_AFTER_MIN` past it.
+ *  - store order: the checkout delivery promise (ALG-12); for a pickup with no
+ *    promise, placing + the store's prep minutes (the "ready in about" the
+ *    order screen shows). A scheduled order is never "late" before its slot.
+ *    A pickup the store has already marked READY is waiting for the CUSTOMER,
+ *    so it is never late on the store's side;
+ *  - booking: the slot, while the provider has accepted but not completed it;
+ *  - ride: the driver's acceptance, while the driver has not arrived. No
+ *    pickup ETA is stored on a ride, so the quoted ETA is taken as zero: very
+ *    late = thirty minutes after the driver accepted and still not there;
+ *  - parcel: placing (or the end of its hold, or its slot) + the quoted job
+ *    minutes, while the rider has not reached the pickup.
+ */
+function promisedMoment(order: CancellationSnapshot): Date | null {
+  if (order.fulfillment === 'APPOINTMENT') {
+    return order.status === 'ACCEPTED' ? (order.appointmentSlot ?? order.scheduledFor ?? null) : null;
+  }
+  if (isStoreOrder(order)) {
+    if (order.fulfillment === 'PICKUP' && order.status === 'READY_FOR_PICKUP') return null;
+    const prep = order.estimatedPrepTime != null && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : null;
+    const promise = order.promisedAt
+      ?? (order.fulfillment === 'PICKUP' && prep != null ? plusMinutes(order.placedAt, prep) : null);
+    return latest([promise, order.scheduledFor]);
+  }
+  if (order.orderType === 'TAXI') {
+    if (order.driverId == null || (order.status !== 'DRIVER_ASSIGNED' && order.status !== 'DRIVER_EN_ROUTE')) return null;
+    return latest([order.acceptedAt ?? order.placedAt, order.scheduledFor]);
+  }
+  if (order.orderType === 'COURIER') {
+    if (order.riderId == null || (order.status !== 'RIDER_ASSIGNED' && order.status !== 'RIDER_EN_ROUTE_PICKUP')) return null;
+    const start = latest([order.placedAt, order.holdExpiresAt, order.scheduledFor]) as Date;
+    return plusMinutes(start, Math.max(0, order.estimatedDeliveryTime ?? 0));
+  }
+  return null;
+}
+
+/** [owner #52 · #50] Is the order very late — `VERY_LATE_AFTER_MIN` past its
+ *  promised moment (`promisedMoment`)? */
+export function isVeryLate(order: CancellationSnapshot, now: Date = new Date()): boolean {
+  const promised = promisedMoment(order);
+  return promised != null && now.getTime() >= plusMinutes(promised, VERY_LATE_AFTER_MIN).getTime();
+}
+
+/** [owner #50] Who the customer contacts instead, in the refusal's words. */
+function windowClosedMessage(order: CancellationSnapshot): string {
+  const closed = `the ${FREE_CANCEL_WINDOW_MIN}-minute cancellation window has passed`;
+  if (order.fulfillment === 'APPOINTMENT') return `This booking can no longer be cancelled in the app: ${closed}. Contact the provider to change or cancel it.`;
+  if (order.orderType === 'TAXI') return `This ride can no longer be cancelled in the app: ${closed}. Contact your driver.`;
+  return `This delivery can no longer be cancelled in the app: ${closed}. Contact your rider.`;
+}
+
+/**
+ * THE one cancellation predicate — the cancel path and the customer preview
  * must both route here, or the customer is shown one outcome and handed
- * another (the drift this file exists to kill).
+ * another (the drift this file exists to kill). Never a fee: free or refused.
  *
- * [Item 64] No mover found (and still nobody holds the job): free, for every
- * kind of order — the platform could not deliver what it took.
+ * Every kind of order:
+ *  - [Item 64] no mover found (and still nobody holds the job): free;
+ *  - nobody has accepted it yet (`notAcceptedYet`): free, at any age.
  *
- * [owner #46] A STORE order (`isStoreOrder`) has no fee at all:
- *  - free while it waits for the store to accept (PENDING, no clock — a
- *    scheduled order included: nobody has committed to it yet);
- *  - free when it is too late to deliver (`tooLateToDeliver`);
- *  - otherwise REFUSED — the store accepted (or a mover holds the job), so the
- *    customer contacts the store. Never a fee Swift cannot collect.
+ * [owner #46] A STORE order (`isStoreOrder`) once the store has accepted it:
+ *  - free when it is very late — past the food-age cutoff with nobody to
+ *    carry it (`tooLateToDeliver`), or [owner #52] thirty minutes past its
+ *    promised time;
+ *  - otherwise REFUSED: the customer contacts the store.
  *
- * Every other kind (rides, parcels, bookings) keeps the clock below and the
- * announced-but-uncollected marker; owner #46 did not rule on them.
+ * [owner #50] A RIDE, a PARCEL or a BOOKING once someone has accepted it:
+ *  - free inside the five-minute window (`freeWindowEnd`);
+ *  - free when the driver, rider or provider is very late (`isVeryLate`);
+ *  - otherwise REFUSED: the customer contacts the driver, rider or provider.
+ *
+ * Custody is the caller's gate, before this: an order a mover physically
+ * holds (food in the bag, a passenger aboard) is never cancelled here.
  */
 export function cancellationVerdict(order: CancellationSnapshot, now: Date = new Date()): CancellationVerdict {
   if (freeBecauseNoMoverFound(order)) return { allowed: true, free: true, reason: 'NO_MOVER' };
   if (isStoreOrder(order)) {
-    const unassigned = order.riderId == null && order.driverId == null;
-    if (unassigned && order.tooLateToDeliver === true) return { allowed: true, free: true, reason: 'TOO_LATE' };
-    if (unassigned && order.status === 'PENDING') return { allowed: true, free: true, reason: 'AWAITING_STORE' };
+    if (notAcceptedYet(order)) return { allowed: true, free: true, reason: 'AWAITING_STORE' };
+    if ((unassigned(order) && order.tooLateToDeliver === true) || isVeryLate(order, now)) {
+      return { allowed: true, free: true, reason: 'TOO_LATE' };
+    }
     return { allowed: false, free: false, code: STORE_ACCEPTED_CANCEL_CODE, message: STORE_ACCEPTED_CANCEL_MESSAGE };
   }
-  return nothingCommittedYet(order, now)
-    ? { allowed: true, free: true, reason: 'NOTHING_COMMITTED' }
-    : { allowed: true, free: false, reason: 'LATE' };
+  if (now.getTime() <= freeWindowEnd(order).getTime()) return { allowed: true, free: true, reason: 'IN_WINDOW' };
+  if (notAcceptedYet(order)) return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
+  if (isVeryLate(order, now)) return { allowed: true, free: true, reason: 'TOO_LATE' };
+  return { allowed: false, free: false, code: CANCEL_WINDOW_CLOSED_CODE, message: windowClosedMessage(order) };
 }
 
-/** Free right now — allowed AND without the marker. A refused cancel is not
- *  free; a caller deciding whether to cancel at all reads the verdict. */
+/** May the customer cancel right now? Every allowed cancel is free. */
 export function isFreeCancellation(order: CancellationSnapshot, now: Date = new Date()): boolean {
-  const verdict = cancellationVerdict(order, now);
-  return verdict.allowed && verdict.free;
-}
-
-/**
- * The clock for the kinds that still have one (rides, parcels, bookings).
- * Store orders never reach it (owner #46); no-mover is decided above it.
- *
- * Free means NOTHING WAS COMMITTED yet:
- *  - no mover holds the job (`riderId`/`driverId`) — every assignment writer
- *    CASes status forward atomically today, but the money boundary does not
- *    trust that invariant; an assignment ends the free window in every branch;
- *  - within the LIFECYCLE_V2 hold nobody has even seen the order, so an
- *    unassigned held order is always free;
- *  - after the hold, the legacy clock applies to the order's UNCOMMITTED
- *    status: PENDING for marketplace/taxi — and READY_FOR_PICKUP for COURIER,
- *    which is born there (a parcel has no vendor prep step, so it never has a
- *    PENDING phase; keying on PENDING alone silently charged every unclaimed
- *    parcel the moment its hold lapsed).
- *
- * Marketplace READY_FOR_PICKUP stays chargeable: a vendor cooked/prepared —
- * that IS commitment. The carve-out is COURIER-scoped for exactly that reason.
- *
- * SCHEDULED ORDERS get the same treatment for the same reason. "Five minutes
- * since placing" is not a rule about five minutes; it is a PROXY for "nobody
- * has started yet", and on a scheduled order that proxy is simply wrong. A
- * customer who books tomorrow's dinner at 9am this morning is handed the
- * identical five-minute clock, so from 9:05am cancelling costs the late-cancel
- * marker — for an order no vendor will touch for thirty-four hours and no
- * mover has been offered. The clock expired long before the work could
- * possibly begin.
- *
- * So a scheduled order is free while its SLOT is still more than the window
- * away. That deliberately reuses FREE_CANCEL_WINDOW_MIN rather than inventing
- * a second number: the window is the last stretch before the thing happens,
- * whether "the thing" is the kitchen picking up an order placed now or a slot
- * booked for Thursday. The two branches are OR'd, so this is never STRICTER
- * than today — an order scheduled for two minutes from now still gets its
- * ordinary post-placement window.
- *
- * The shape of a longer-horizon cancellation CURVE (does a week's notice
- * differ from an hour's?) is a founder decision and is not invented here.
- * This only stops charging for a commitment that provably has not happened.
- *
- * A BOOKING is the same fact read from its own column. A service business's
- * appointment carries `appointmentSlot`, not `scheduledFor`, and the provider
- * reserves that slot at acceptance — so a PENDING haircut booked this morning
- * for Thursday was handed the kitchen's five-minute clock and previewed the
- * late-cancellation marker before any provider had seen it. The slot IS the
- * scheduled moment; the rule above applies to it unchanged, and an accepted
- * booking is committed exactly as before.
- *
- * Both slot columns are instants, so the same cutoff arithmetic applies to
- * appointments and scheduled deliveries without any zone conversion here.
- */
-function nothingCommittedYet(order: CancellationSnapshot, now: Date): boolean {
-  const unassigned = order.riderId == null && order.driverId == null;
-  if (!unassigned) return false;
-  if (order.holdExpiresAt != null && order.holdExpiresAt > now) return true;
-  const uncommittedStatus = order.status === 'PENDING'
-    || (order.orderType === 'COURIER' && order.status === 'READY_FOR_PICKUP');
-  if (!uncommittedStatus) return false;
-  const minutesSincePlaced = (now.getTime() - order.placedAt.getTime()) / 60000;
-  if (minutesSincePlaced <= FREE_CANCEL_WINDOW_MIN) return true;
-  // Still nothing committed, and the slot has not come around yet. A booking's
-  // slot is its scheduled moment (the column bookings carry).
-  const slotAt = scheduledMoment(order.appointmentSlot, order.scheduledFor);
-  if (slotAt == null) return false;
-  const minutesUntilSlot = (slotAt.getTime() - now.getTime()) / 60000;
-  return minutesUntilSlot > FREE_CANCEL_WINDOW_MIN;
+  return cancellationVerdict(order, now).allowed;
 }
 
 /**
  * WHEN the free window closes — the timestamp the app counts down to.
  *
- * Split out for the same reason the predicate was: the preview used to build
- * this inline as `placedAt + FREE_CANCEL_WINDOW_MIN`, which is correct only
- * for an order happening now. Add the scheduled branch to `isFreeCancellation`
- * and that inline expression starts handing the client a moment in the PAST
- * while the server still answers "free" — a countdown that has already run out
- * on an order that is genuinely still free to cancel. The UI never lies, so
- * the two answers come from one place.
+ * Split out for the same reason the predicate was: built inline by a caller it
+ * drifts from the predicate and hands the client a moment that has already
+ * passed while the server still answers "free". The UI never lies, so the two
+ * answers come from one place.
  *
- * Returns null when the cancel is not free right now; there is no window to
- * promise. [Item 64] Also null when it is free because no mover was found:
- * that lasts until a mover takes the job, so there is no moment to count to.
- * [owner #46] And null for every free STORE cancel: it is free until the
- * store accepts (or because the order is too late) — no clock to count down.
+ * Only a ride, a parcel or a booking inside its five-minute window (or hold)
+ * has a moment to count down to. Null otherwise: a refused cancel has no
+ * window; a free cancel for any other reason lasts — until someone accepts it
+ * (nobody has yet; a store order, until the store accepts), or for as long as
+ * nobody was found or the order stays late.
  */
 export function freeCancellationExpiresAt(order: CancellationSnapshot, now: Date = new Date()): Date | null {
   const verdict = cancellationVerdict(order, now);
-  if (!verdict.allowed || !verdict.free || verdict.reason !== 'NOTHING_COMMITTED') return null;
-  // Held and unassigned: the hold IS the window.
-  if (order.holdExpiresAt != null && order.holdExpiresAt > now) return order.holdExpiresAt;
-  const candidates = [new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60_000)];
-  // The same moment the predicate read: a booking's slot, else the schedule.
-  const slotAt = scheduledMoment(order.appointmentSlot, order.scheduledFor);
-  if (slotAt != null) {
-    candidates.push(new Date(slotAt.getTime() - FREE_CANCEL_WINDOW_MIN * 60_000));
+  if (!verdict.allowed || verdict.reason !== 'IN_WINDOW') return null;
+  return freeWindowEnd(order);
+}
+
+/** What a customer screen is told about cancelling, straight from the verdict:
+ *  the order preview and the ride read hand this to the apps, so no client
+ *  re-derives the rule. The refusal's contact number is the caller's to add
+ *  (only the order preview knows the business). */
+export type CustomerCancelView = {
+  canCancel: boolean;
+  freeCancellationExpiresAt: string | null;
+  cancellationMessage: string | null;
+  cancelUnavailable: { code: string; message: string } | null;
+};
+
+/** [owner #46/#50/#52] The verdict in the words the apps show. */
+export function customerCancelView(order: CancellationSnapshot, now: Date = new Date()): CustomerCancelView {
+  const verdict = cancellationVerdict(order, now);
+  if (!verdict.allowed) {
+    return { canCancel: false, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: { code: verdict.code, message: verdict.message } };
   }
-  // The two branches of the predicate are OR'd, so the window ends at the
-  // LATER of them — anything else expires the countdown early.
-  return candidates.reduce((a, b) => (b.getTime() > a.getTime() ? b : a));
+  const cancellationMessage = verdict.reason === 'NO_MOVER'
+    ? NO_MOVER_FREE_CANCEL_MESSAGE
+    : verdict.reason === 'AWAITING_STORE'
+      ? AWAITING_STORE_FREE_CANCEL_MESSAGE
+      : verdict.reason === 'TOO_LATE' ? TOO_LATE_FREE_CANCEL_MESSAGE : null;
+  return {
+    canCancel: true,
+    freeCancellationExpiresAt: freeCancellationExpiresAt(order, now)?.toISOString() ?? null,
+    cancellationMessage,
+    cancelUnavailable: null,
+  };
 }
 
 // ---------------------------------------------------------------------------

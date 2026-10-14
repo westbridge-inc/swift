@@ -22,7 +22,7 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { cancellationVerdict, readNoMoverFound, readTooLateToDeliver, LATE_CANCEL_FEE } from './cancel-policy';
+import { cancellationVerdict, readNoMoverFound, readTooLateToDeliver } from './cancel-policy';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -576,7 +576,6 @@ export interface CanonicalOrderTransitionInput {
     /** Null keeps system cancellations out of customer-risk attribution. */
     by: string | null;
     reason: string;
-    lateFeeDue?: number;
   };
   /** Route-specific terminal facts that must commit with the state machine.
    * Deliberately whitelisted so callers cannot overwrite ownership, money, or
@@ -622,6 +621,10 @@ export interface CanonicalOrderTransitionInput {
     userAgent?: string;
   };
   invalidStatus?: (current: OrderStatus) => AppError;
+  /** [owner #50] A CUSTOMER's own cancel through this seam (the courier sender
+   *  cancel): the one cancellation predicate [cancel-policy.ts] decides on the
+   *  LOCKED row, exactly as `cancelOrder` does — free or refused, never a fee. */
+  customerCancel?: boolean;
 }
 
 export interface CanonicalOrderTransitionResult {
@@ -2075,6 +2078,19 @@ export class OrderService {
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
     // MMG payment-first gate lives here, on the freshly locked row.
     assertMmgFulfilmentAllowed(source, input.target);
+    // [owner #50] A customer's own cancel is the cancellation policy's to
+    // decide, on this locked row and before anything is written — the same
+    // verdict `cancelOrder` reads (the no-mover fact from the journal under
+    // this lock), so no cancel door forks the rule.
+    if (input.customerCancel === true && input.target === 'CANCELLED') {
+      const lockedNow = new Date();
+      const verdict = cancellationVerdict({
+        ...source,
+        noMoverFound: await readNoMoverFound(tx, source),
+        tooLateToDeliver: await readTooLateToDeliver(this.prisma, source, lockedNow),
+      }, lockedNow);
+      if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+    }
     // [TAXI multi-stop 3/8] A ride is over only when every stop the passenger
     // asked for is done: arrived at and left, or skipped with a reason the
     // passenger is told. Every way to DELIVERED passes this seam (the fare
@@ -2156,9 +2172,6 @@ export class OrderService {
       data.cancelledAt = now;
       data.cancelledBy = input.cancellation.by;
       data.cancellationReason = input.cancellation.reason;
-      if (input.cancellation.lateFeeDue !== undefined) {
-        data.lateCancelFeeDue = input.cancellation.lateFeeDue;
-      }
     }
     if (input.terminalMetadata?.actualDeliveryTime !== undefined) {
       data.actualDeliveryTime = input.terminalMetadata.actualDeliveryTime;
@@ -2407,10 +2420,8 @@ export class OrderService {
     let committed: {
       order: CancellationOrder;
       heldNow: boolean;
-      freeCancellation: boolean;
       noMoverFree: boolean;
       tooLateFree: boolean;
-      cancellationFee: number;
       cancelledSearches: number;
     } | undefined;
 
@@ -2468,15 +2479,13 @@ export class OrderService {
           // so the vendor-board socket below stays silent about it.
           const heldNow = isHeld(order, now) && !order.riderId && !order.driverId;
           // THE one policy predicate, shared with the customer preview
-          // [cancel-policy.ts]: free ⟺ nothing was committed — no mover holds
-          // the job, and the order is held or still in its uncommitted status
-          // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
-          // inside the window.
-          // [Item 64] ...or the mover search came back empty — read here, under
-          // the order lock and before the searches are closed below, so a mover
+          // [cancel-policy.ts], read from this LOCKED row: free or refused,
+          // never a fee (owner #46/#50).
+          // [Item 64] The mover search came back empty — read here, under the
+          // order lock and before the searches are closed below, so a mover
           // assigned after the customer's preview still ends the exemption.
-          // [owner #46] ...or, for a store order, too late to deliver (the
-          // rescue cutoff, read from this LOCKED row; the tenant's cutoff is
+          // [owner #46] For a store order, too late to deliver (the rescue
+          // cutoff, read from this LOCKED row; the tenant's cutoff is
           // configuration, read on the app client).
           const policyOrder = {
             ...order,
@@ -2484,14 +2493,13 @@ export class OrderService {
             tooLateToDeliver: await readTooLateToDeliver(this.prisma, order, now),
           };
           const verdict = cancellationVerdict(policyOrder, now);
-          // [owner #46] A store order the store has accepted is not the
-          // customer's to cancel: refused before anything is written, in the
-          // words the apps show as-is. No fee is ever recorded for it.
+          // [owner #46/#50] Not the customer's to cancel any more (the store
+          // accepted, or the five-minute window of a ride, parcel or booking
+          // has passed): refused before anything is written, in the words the
+          // apps show as-is.
           if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
-          const freeCancellation = verdict.free;
-          const noMoverFree = verdict.free && verdict.reason === 'NO_MOVER';
-          const tooLateFree = verdict.free && verdict.reason === 'TOO_LATE';
-          const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
+          const noMoverFree = verdict.reason === 'NO_MOVER';
+          const tooLateFree = verdict.reason === 'TOO_LATE';
 
           // The row lock makes this update and every dependent release below one
           // canonical state transition. No stale riderId/driverId can escape.
@@ -2502,8 +2510,8 @@ export class OrderService {
               cancelledAt: now,
               cancelledBy: userId,
               cancellationReason: reason,
-              // Founder decision #5: recorded cash-only marker, never collected.
-              lateCancelFeeDue: cancellationFee,
+              // [owner #46/#50] No late-cancel marker is ever written: there
+              // is no fee (`lateCancelFeeDue` keeps its default 0).
             },
           });
 
@@ -2550,10 +2558,8 @@ export class OrderService {
           return {
             order,
             heldNow,
-            freeCancellation,
             noMoverFree,
             tooLateFree,
-            cancellationFee,
             cancelledSearches: searches.count,
           };
         });
@@ -2568,7 +2574,7 @@ export class OrderService {
     }
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
-    const { order, heldNow, freeCancellation, noMoverFree, tooLateFree, cancellationFee, cancelledSearches } = committed;
+    const { order, heldNow, noMoverFree, tooLateFree, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
@@ -2619,23 +2625,26 @@ export class OrderService {
     // The result is the banner the customer reads first (the tracking screen
     // shows the server's message before its own fallback). A booking is a
     // booking and its money is with the PROVIDER — the noun and the party
-    // follow the committed row's fulfillment; the fee and the MMG uncertainty
-    // above are the server's and are unchanged. Food keeps its exact words.
+    // follow the committed row's fulfillment; the MMG uncertainty above is the
+    // server's and is unchanged. Food keeps its exact words.
     // A ride is a "Ride" in the customer's words [Item 64 · review S4].
+    // [owner #46/#50] Every customer cancel is free — there is no fee any more.
+    // `cancellationFee: 0` stays in the answer only because builds 9 and 10
+    // read it (a number) after a cancel; it is never anything but zero.
     const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
     const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
     // [Item 64] The plain reason, when the platform found nobody to do the job.
-    // [owner #46] ...and when it was running too late to deliver.
+    // [owner #46/#52] ...and when it was running very late.
     const cancelled = noMoverFree
-      ? `${noun} cancelled — no mover was found, so there is no fee.`
+      ? `${noun} cancelled — no mover was found.`
       : tooLateFree ? `${noun} cancelled because it was running very late.` : null;
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
         message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
-        cancellationFee,
+        cancellationFee: 0,
       };
     }
-    return { message: cancelled ?? (freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`), cancellationFee };
+    return { message: cancelled ?? `${noun} cancelled — no charge`, cancellationFee: 0 };
   }
 
   /** [L07 · Opus S3] The first delivery attempt of a committed rider
