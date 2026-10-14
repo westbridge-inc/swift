@@ -17,6 +17,9 @@ export interface MoverPriceQuote {
   band: 'STANDARD' | 'HEAVY';
   tier: 'courier' | 'courierHeavy' | 'taxi';
   rate: number;
+  /** Whether a mover can register this vehicle today. Absent from a server
+   *  that predates it. Heavy delivery is not offered at launch. */
+  offered?: boolean;
 }
 
 /** One catalogue step: from `minItems` active items, `rate` per week. */
@@ -37,9 +40,9 @@ export interface CountryPricing {
   movers?: MoverPriceQuote[];
   /** Services are flat; catalogue businesses step up by active items. */
   vendors?: { service: number; catalogue: CataloguePriceBand[] };
-  /** From `minLocations` stores, every location takes `discountPct` off its
-   *  own weekly rate. Null in a market with no franchise pricing. */
-  franchise: { minLocations: number; discountPct: number } | null;
+  /** @deprecated Always null: every store pays its own tier (owner, 13 Oct
+   *  2026). Never read. */
+  franchise?: unknown;
   /** @deprecated Conflated numbers kept for older clients — never render them:
    *  one figure here can stand for several kinds of partner at once. */
   weekly?: Record<string, number | null>;
