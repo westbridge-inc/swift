@@ -170,6 +170,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // [Q8 · DS269 F1] Someone on the team moved the store's map pin. The owner
   // lands on Account, where the Store location card shows it and moves it back.
   if (kind === 'store_pin_moved') return { screen: 'Account' };
+  // [owner #51] A store whose documents are done waits only for the number
+  // customers can call: the vendor root (the waiting store's own screen) asks for it.
+  if (kind === 'vendor_needs_public_phone') return { screen: 'Main' };
 
   // [L04 · MASTER-003] "Your password was changed" — if it wasn't the owner,
   // support is the way back, so the notice opens the help screen (mounted in
