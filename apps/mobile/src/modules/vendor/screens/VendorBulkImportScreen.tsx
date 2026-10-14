@@ -8,6 +8,7 @@ import { Card, PillButton, T } from '../../../kit';
 import { PressableScale } from '../../../kit/pressable-scale';
 import { toast } from '../../../kit/toast';
 import { useImportAutomap, useImportItems, useImportFile } from '../../../hooks/vendorops';
+import { importCheckSummary } from '../../../lib/catalogueCheck';
 import {
   AuthSessionBoundaryError,
   getAuthSessionSnapshot,
@@ -249,7 +250,8 @@ export function VendorBulkImportScreen({ navigation }: any) {
             </View>
             <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
               {importedCount != null ? `${importedCount} imported` : 'Items imported'}
-              {failedCount ? ` · ${failedCount} skipped` : ''}.
+              {failedCount ? ` · ${failedCount} skipped` : ''}
+              {importCheckSummary(result)}.
             </T>
             <PillButton label="Back to menu" variant="outline" style={{ marginTop: space.md }} onPress={() => navigation?.goBack?.()} />
           </Card>

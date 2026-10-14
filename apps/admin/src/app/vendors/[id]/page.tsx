@@ -6,6 +6,8 @@ import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, type VendorActivationChecklist } from '@/lib/api';
 import { label, ratingText, type Tone } from '@/lib/labels';
+import { JUDGED_FIELD_WORDS, PROHIBITED_CLASS_LABELS } from '@/lib/prohibited-items';
+import type { ProhibitedClass } from '@/lib/api';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -93,6 +95,22 @@ function vendorVerdict(c: VendorActivationChecklist, name: string): { tone: Tone
 }
 
 interface RecentOrder { id: string; orderNumber: string; status: string; totalAmount: number; paymentMethod: string }
+/** [GUARDRAILS §8] One of this store's items the prohibited-items rule touches, as the server explains it. */
+interface ProhibitedRow {
+  id: string; name: string; state: 'BANNED' | 'WAITING' | 'APPROVED'; prohibitedClass: ProhibitedClass;
+  source?: 'category' | 'removed'; field?: string; term: string | null; reason?: string | null;
+}
+
+function whyHidden(p: ProhibitedRow): string {
+  const what = PROHIBITED_CLASS_LABELS[p.prohibitedClass] ?? p.prohibitedClass;
+  const where = p.field ? `"${p.term}" in the ${JUDGED_FIELD_WORDS[p.field] ?? p.field}` : '';
+  if (p.state === 'BANNED') {
+    return p.source === 'removed'
+      ? `Removed as ${what}${p.reason ? `: ${p.reason}` : ''}`
+      : `Not allowed: ${what} (filed under a banned category)`;
+  }
+  return p.state === 'WAITING' ? `Waiting for a check: ${where} (${what})` : `Approved: ${where} (${what})`;
+}
 interface Sibling { id: string; name: string; status: string }
 
 export default function VendorDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -347,6 +365,16 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
               <Row label="Joined">{when(v.createdAt)}</Row>
             </dl>
           </section>
+
+          {(v.prohibitedItems ?? []).length > 0 ? (
+            <section aria-labelledby="prohibited" className="mc-card">
+              <h2 id="prohibited" className="mc-label">Items Swift does not allow, or is checking</h2>
+              <dl className="mc-rows">
+                {(v.prohibitedItems as ProhibitedRow[]).map((p) => <Row key={p.id} label={p.name}>{whyHidden(p)}</Row>)}
+              </dl>
+              <Link href="/catalogue-check" className="text-sm underline">Open the catalogue check</Link>
+            </section>
+          ) : null}
         </div>
       </div>
     </div>

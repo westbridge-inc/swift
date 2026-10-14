@@ -167,3 +167,34 @@ describe('vendor suspension mutation', () => {
     expect((suspendButton as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+describe('[GUARDRAILS §8] the items Swift does not allow, or is checking', () => {
+  it('names each one and why: removed, banned category, waiting, approved — and links to the check', async () => {
+    const prohibitedItems = [
+      { id: 'i-1', name: 'Mystery tonic', state: 'BANNED', prohibitedClass: 'MEDICINE', source: 'removed', term: null, reason: 'Sold as a cure for fever' },
+      { id: 'i-2', name: 'Cold relief', state: 'BANNED', prohibitedClass: 'MEDICINE', source: 'category', term: 'pharmacy', reason: null },
+      { id: 'i-3', name: 'Rum cake slice', state: 'WAITING', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' },
+      { id: 'i-4', name: 'Gas stove', state: 'APPROVED', prohibitedClass: 'LPG', field: 'name', term: 'gas' },
+    ];
+    mockApi((request) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target') {
+        return { body: { success: true, data: { ...vendor, prohibitedItems } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
+    const section = await screen.findByRole('region', { name: 'Items Swift does not allow, or is checking' });
+    expect(section.textContent).toContain('Removed as medicines: Sold as a cure for fever');
+    expect(section.textContent).toContain('Not allowed: medicines (filed under a banned category)');
+    expect(section.textContent).toContain('Waiting for a check: "rum" in the name (alcohol)');
+    expect(section.textContent).toContain('Approved: "gas" in the name (cooking gas (LPG))');
+    expect(within(section).getByRole('link', { name: 'Open the catalogue check' }).getAttribute('href')).toBe('/catalogue-check');
+  });
+
+  it('shows nothing when no item is touched', async () => {
+    mockApi(vendorHandler(() => { throw new Error('no mutation expected'); }));
+    renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
+    await screen.findByRole('heading', { name: 'Target Store' });
+    expect(screen.queryByRole('region', { name: 'Items Swift does not allow, or is checking' })).toBeNull();
+  });
+});

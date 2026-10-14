@@ -62,4 +62,27 @@ describe('inventory count and phone column order', () => {
     expect(screen.getByText('Your menu')).toBeTruthy();
     expect(await screen.findByText('2 active · 1 sold out')).toBeTruthy();
   });
+
+  // [GUARDRAILS §8] Owner ruling (13 Oct): a banned word in the partner's own text
+  // holds the item for a quick check, and the partner sees that on the item; an
+  // item Swift does not allow says so in the owner's words, with the reason.
+  it('says on the item when Swift is checking it, or does not allow it — and nothing on an ordinary item', async () => {
+    mockApi(({ url }) => {
+      if (url.pathname === '/api/v1/vendor/items') return { body: { data: [
+        { id: 'item-1', name: 'Rum cake', basePrice: '1200.00', stockQuantity: null, isAvailable: true,
+          catalogueCheck: { status: 'WAITING_FOR_CHECK', message: 'Waiting for a quick check', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' } },
+        { id: 'item-2', name: 'Cold relief', basePrice: '900.00', stockQuantity: null, isAvailable: false,
+          catalogueCheck: { status: 'NOT_ALLOWED', message: 'Swift doesn\'t allow this item: medicines.', prohibitedClass: 'MEDICINE', reason: 'Sold as a cure for fever' } },
+        { id: 'item-3', name: 'Sugar', basePrice: '700.00', stockQuantity: null, isAvailable: true },
+      ] } };
+      if (url.pathname === '/api/v1/vendor/categories') return { body: { data: [] } };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderWithQuery(<InventoryPage />);
+    const waiting = await screen.findByRole('article', { name: 'Rum cake' });
+    expect(within(waiting).getByRole('status').textContent).toBe('Waiting for a quick check — hidden from customers until Swift checks it.');
+    expect(within(screen.getByRole('article', { name: 'Cold relief' })).getByRole('status').textContent)
+      .toBe('Swift doesn\'t allow this item: medicines. Reason: Sold as a cure for fever');
+    expect(within(screen.getByRole('article', { name: 'Sugar' })).queryByRole('status')).toBeNull();
+  });
 });

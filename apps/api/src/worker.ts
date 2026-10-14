@@ -18,7 +18,6 @@
 // before any module below can read process.env. Keep this import on top.
 import './boot/secret-files';
 import Redis from 'ioredis';
-import { PrismaClient } from '@prisma/client';
 import { Server } from 'socket.io';
 import { pino } from 'pino';
 import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
@@ -29,6 +28,8 @@ import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout
 import { resolveDatabaseUrl } from './utils/db-pool';
 import { installProcessLifecycle } from './utils/process-lifecycle';
 import { isProduction } from './utils/runtime-mode';
+import { createScopedProcessClient } from './plugins/prisma';
+import { attestTenantWallAtBoot } from './boot/tenant-wall';
 
 async function main() {
   assertSafeBootConfig();
@@ -47,7 +48,10 @@ async function main() {
   // on pool_timeout the moment it got busy — money jobs included. Sized here at
   // the construction seam so a deploy that supplies its own DATABASE_URL (the
   // real ones do) still gets it. See utils/db-pool.ts.
-  const prisma = new PrismaClient({ datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'worker') });
+  //
+  // [MASTER-075] The SAME construction as the API's client (tenant scoping,
+  // append-only evidence, system-transaction routing) — never a raw client.
+  const prisma = createScopedProcessClient({ datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'worker') });
   redis.on('error', (err) => log.error({ err }, 'Worker Redis connection error'));
 
   const io = new Server();
@@ -121,6 +125,10 @@ async function main() {
   });
 
   try {
+    // [MASTER-075] The worker serves Swift's data like the API does, so it
+    // attests the tenant wall the same way — and refuses the same postures —
+    // before a single job runs.
+    await attestTenantWallAtBoot(prisma, log);
     const startupTimeoutMs = positiveDurationMs(process.env['QUEUE_STARTUP_TIMEOUT_MS'], 15_000);
     await withTimeout(redis.ping(), startupTimeoutMs, 'Worker Redis startup');
     if (isProduction()) {
