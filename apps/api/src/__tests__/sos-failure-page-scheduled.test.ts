@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   pageFailed: vi.fn(async () => ({ paged: [] as string[], review: [] as string[] })),
   drain: vi.fn(async () => ({ delivered: 0, skipped: 0, failed: 1, deadLettered: 0 })),
   escalate: vi.fn(async () => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] })),
+  scan: vi.fn(async () => ({ activeWithoutPage: [] as Array<{ sosAlertId: string; tenantId: string | null; ageSeconds: number }>, pending: 0, failed: 1, liveWithoutRows: [] as string[] })),
 }));
 vi.mock('bullmq', () => ({
   Queue: class {},
@@ -31,7 +32,7 @@ vi.mock('../modules/safety/sos-escalation', () => ({
   sosEscalationWorkerKilled: () => process.env['SOS_ESCALATION_WORKER_KILL'] === '1',
   backfillSosEscalations: async () => ({ backfilled: [] }),
   drainSosEscalations: state.drain,
-  scanSosEscalations: async () => ({ activeWithoutPage: [], pending: 0, failed: 1, liveWithoutRows: [] }),
+  scanSosEscalations: state.scan,
   pageFailedSosEscalations: state.pageFailed,
 }));
 vi.mock('../modules/safety/ops-alert', () => ({
@@ -44,7 +45,7 @@ vi.mock('../modules/safety/sos-retrigger', () => ({ importLegacyRetriggers: asyn
 vi.mock('../modules/safety/evidence.service', () => ({ EvidenceService: class { async appendLiveFixes() {} } }));
 vi.mock('../providers/notifications/channels', () => ({ getChannels: () => ({ sms: {} }) }));
 
-beforeEach(() => { state.workers.clear(); state.pageFailed.mockClear(); state.drain.mockClear(); state.escalate.mockClear(); });
+beforeEach(() => { state.workers.clear(); state.pageFailed.mockClear(); state.drain.mockClear(); state.escalate.mockClear(); state.scan.mockClear(); });
 afterEach(() => { vi.unstubAllEnvs(); });
 
 async function runSosTick() {
@@ -73,6 +74,27 @@ describe('[AUD-L4-016] every SOS tick pages on-call operations about failed deli
     const [prisma, notifications] = state.pageFailed.mock.calls[0] as unknown as [unknown, unknown];
     expect(prisma).toBe(ctx.prisma);
     expect(notifications).toBeInstanceOf(NotificationService);
+  });
+
+  // [Opus review of #1659 · S3] In an SMS outage the delivery batch is up to
+  // 200 rows at the 8 s send timeout (~27 min). The alarms — the failed-delivery
+  // pager and the watchdog — must never wait behind it.
+  it('a slow delivery batch never delays the alarms: the pager, the watchdog and the ops-alert ladder run before the batch', async () => {
+    vi.stubEnv('SOS_ESCALATION_WORKER_KILL', '0');
+    let releaseBatch: () => void = () => {};
+    state.drain.mockImplementationOnce(() => new Promise((resolve) => { releaseBatch = () => resolve({ delivered: 0, skipped: 0, failed: 0, deadLettered: 0 }); }));
+    const tick = runSosTick();
+    try {
+      await vi.waitFor(() => expect(state.drain).toHaveBeenCalledTimes(1));
+      // The batch is still delivering.
+      expect(state.pageFailed, 'the failed-delivery page waited behind the delivery batch').toHaveBeenCalledTimes(1);
+      expect(state.scan, 'the watchdog waited behind the delivery batch').toHaveBeenCalledTimes(1);
+      expect(state.escalate, 'the ladder that re-pages an unacknowledged page waited behind the delivery batch').toHaveBeenCalledTimes(1);
+    } finally {
+      releaseBatch();
+      await tick;
+    }
+    expect(state.drain).toHaveBeenCalledTimes(1);
   });
 
   it('a pager that throws never takes the rest of the tick down, and is logged without its words', async () => {
