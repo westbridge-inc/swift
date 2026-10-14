@@ -123,6 +123,12 @@ export interface AdminRouteAuthority {
   readonly cls: AdminActionClass;
   readonly capability: string;
   readonly entity?: AdminRouteEntity;
+  /**
+   * [VERIFY-DOCS V3] An EXPLICIT-ONLY grant this route demands in addition to
+   * its capability (see EXPLICIT_ONLY_CAPABILITIES). Both must hold; shadow
+   * mode relaxes the capability, never this.
+   */
+  readonly requires?: string;
 }
 
 /** `"<METHOD> <route template>"`, exactly as Fastify reports `routeOptions.url`. */
@@ -130,6 +136,39 @@ export type AdminRouteKey = string;
 
 const c = (cls: AdminActionClass, capability: string, entity?: AdminRouteEntity): AdminRouteAuthority =>
   (entity ? { cls, capability, entity } : { cls, capability });
+
+/**
+ * [VERIFY-DOCS V3] THE DOCUMENT REVIEWER GRANT.
+ *
+ * Owner rulings, 6 Oct 2026: only a verification reviewer may open documents;
+ * opening, approving and rejecting all need an explicit "document reviewer"
+ * grant, never implied by `*` or a role default; today's roles stay as they
+ * are (no REVIEWER role at launch). So the grant is one permission entry on
+ * the admin account, held only by naming it exactly. Every admin row the code
+ * has ever created says `['*']`, which is precisely why `*` cannot be allowed
+ * to mean it: the day this ships, nobody opens a document until a SUPER_ADMIN
+ * grants it, with a reason, on the record.
+ */
+export const DOCUMENT_REVIEWER_CAPABILITY = 'documents.review';
+
+/**
+ * [GUARDRAILS §8 · Opus S3-9] THE CATALOGUE APPROVER GRANT. Approving an item a
+ * banned word is holding shows it to customers — a criminal-liability decision
+ * when the word was right — so it needs this exact grant, never `*` or a role
+ * default. See catalogue-approver.ts.
+ */
+export const CATALOGUE_APPROVER_CAPABILITY = 'catalogue.approve';
+
+/** Capabilities that `*`, a prefix wildcard and a role default never confer. */
+export const EXPLICIT_ONLY_CAPABILITIES: readonly string[] = [DOCUMENT_REVIEWER_CAPABILITY, CATALOGUE_APPROVER_CAPABILITY];
+
+export function isExplicitOnly(capability: string): boolean {
+  return EXPLICIT_ONLY_CAPABILITIES.includes(capability);
+}
+
+/** A route that opens or decides a document: its capability AND the reviewer grant. [GUARDRAILS §8 · Opus S3-9]
+ *  The same wrapper names the catalogue approver grant on the one route that shows a held item. */
+const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIEWER_CAPABILITY): AdminRouteAuthority => ({ ...authority, requires: grant });
 
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
@@ -163,6 +202,8 @@ const E = {
   adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
   adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'payoutRail', 'manualPayoutRef', 'providerRefundRef', 'completedAt'] },
   paymentConfirmation: { model: 'paymentConfirmationHold', fields: ['status', 'resolvedAt', 'resolvedBy', 'resolutionEvidence'] },
+  // [PT-4] A held card payment's resolution: what finance decided and the provider actions it took.
+  cardSession: { model: 'cardSession', fields: ['status', 'failureCode', 'providerTransactionRef', 'providerVoidState', 'providerRefundState', 'bookClaimedAt', 'resolution', 'resolvedBy', 'resolvedAt'] },
   agentPayment: { model: 'mmgAgentPayment', fields: ['status', 'amount', 'subscriptionId'] },
   settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
@@ -175,7 +216,10 @@ const E = {
   contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
-  approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt'] },
+  // [GUARDRAILS §8] A catalogue item a person checked: approved for the words seen, or removed as prohibited.
+  item: { model: 'item', fields: ['prohibitedAt', 'prohibitedClass', 'prohibitedReason', 'reviewApprovedHash', 'reviewApprovedAt', 'isAvailable'] },
+  // [OWNER #13] …and the solo wait and how it was decided.
+  approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt', 'soloEligibleAt', 'decidedSolo', 'expiresAt'] },
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
@@ -183,6 +227,8 @@ const E = {
   supportTicket: { model: 'supportTicket', fields: ['status', 'resolution', 'resolvedAt', 'resolvedById'], tenantVia: ['user'] },
   // [AF-MOB-006] A custody recovery case: who owns it, where it stands, who holds the goods.
   custodyCase: { model: 'custodyRecoveryCase', fields: ['state', 'ownerUserId', 'holderRiderId', 'relayRiderId', 'resolvedAt', 'escalationCount'] },
+  // [VERIFY-DOCS V3] An admin's grant. Admin has no tenant column: walled through its user.
+  adminGrant: { model: 'admin', routeParam: 'userId', uniqueField: 'userId', fields: ['permissions'], tenantVia: ['user'] },
 } as const satisfies Record<string, AdminRouteEntity>;
 
 /**
@@ -211,6 +257,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /vendors': c('C0', 'vendor.read'),
   'GET /vendors/pending': c('C0', 'vendor.read'),
   'GET /vendors/:id': c('C1', 'vendor.read'),
+  // [MC-PR2] which of the owner's documents are approved, waiting, rejected or missing — document status, so C1
+  'GET /vendors/:id/activation-checklist': c('C1', 'vendor.read'),
   'PUT /vendors/:id/approve': c('C3', 'vendor.approve', E.vendor),
   'PUT /vendors/:id/suspend': c('C3', 'vendor.suspend', E.vendor),
   'PUT /vendors/:id/feature': c('C2', 'vendor.feature', E.vendor),
@@ -218,9 +266,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // ── Movers ──────────────────────────────────────────────────────────────
   'GET /riders': c('C1', 'mover.read'),
   'GET /riders/:id': c('C1', 'mover.read'),
+  'GET /riders/:id/activation-checklist': c('C1', 'mover.read'),
   'PUT /riders/:id/verify-documents': c('C3', 'mover.verify', E.rider),
   'GET /drivers': c('C1', 'mover.read'),
   'GET /drivers/:id': c('C1', 'mover.read'),
+  'GET /drivers/:id/activation-checklist': c('C1', 'mover.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
   // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
@@ -260,6 +310,12 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /ratings/at-risk': c('C1', 'moderation.read'),
   'POST /ratings/:id/moderate': c('C3', 'moderation.decide', E.rating),
   'POST /rating-reports/:id/resolve': c('C3', 'moderation.decide', E.ratingReport),
+  // [GUARDRAILS §8] The catalogue check: items a banned word is holding. Approving shows
+  // an item for the exact words seen; removing bans it for good. Both touch a
+  // partner's livelihood, so a reason is owed (C3).
+  'GET /catalogue-review': c('C1', 'moderation.read'),
+  'POST /catalogue-review/:id/approve': reviewed(c('C3', 'moderation.decide', E.item), CATALOGUE_APPROVER_CAPABILITY),
+  'POST /catalogue-review/:id/remove': c('C3', 'moderation.decide', E.item),
 
   // ── National pricing (founder + default tenant) ─────────────────────────
   'GET /countries': c('C0', 'platform.pricing.read'),
@@ -348,6 +404,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/agent-payments': c('C0', 'billing.read'),
   'GET /billing/agent-payments/unmatched': c('C0', 'billing.read'),
   'GET /billing/agent-cash-config': c('C0', 'billing.read'),
+  'GET /billing/fee-pause': c('C0', 'billing.read'),
   'GET /billing/confirmations': c('C0', 'billing.read'),
   // [MMG support lookup] A partner's payment, found by any of its ids or the partner's phone: identity, so C1.
   'GET /billing/mmg-checkouts': c('C1', 'billing.mmg.read'),
@@ -381,6 +438,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/card-sessions': c('C0', 'billing.read'),
   'GET /billing/card-sessions/:id': c('C0', 'billing.read'),
   'GET /billing/subscriptions/:subscriptionId/cards': c('C0', 'billing.read'),
+  // [PT-4 · review S2-2] A held card payment: book, refund, record a portal refund, or nothing taken — money, two people.
+  'POST /billing/card-sessions/:id/resolve': c('C4', 'billing.card.resolve', E.cardSession),
 
   // ── Algorithms ──────────────────────────────────────────────────────────
   'GET /algo/eta/report': c('C0', 'algo.read'),
@@ -399,10 +458,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /verification/queue': c('C0', 'verification.read'),
   // [DOC-1 §8.4 · P8-4] SUPPORT sees status counts, never a document, a name or a phone (DOC-INV-19).
   'GET /verification/queue/counts': c('C0', 'verification.counts'),
-  'PUT /verification/:id/approve': c('C3', 'verification.decide', E.verification),
-  'PUT /verification/:id/reject': c('C3', 'verification.decide', E.verification),
-  'PUT /verification/:id/revoke': c('C3', 'verification.decide', E.verification),
-  'GET /verification/:id/document-url': c('C1', 'verification.document.read'),
+  // [VERIFY-DOCS V3] The four document doors also demand the explicit reviewer grant.
+  'PUT /verification/:id/approve': reviewed(c('C3', 'verification.decide', E.verification)),
+  'PUT /verification/:id/reject': reviewed(c('C3', 'verification.decide', E.verification)),
+  'PUT /verification/:id/revoke': reviewed(c('C3', 'verification.decide', E.verification)),
+  'GET /verification/:id/document-url': reviewed(c('C1', 'verification.document.read')),
   // [DOC-1 §20.2 · P20-2] the custody narrative is metadata about a document, never its content — still a logged read
   'GET /verification/:id/custody': c('C1', 'verification.custody.read'),
   // [DOC-1 §9.4 · P9-4] Legal holds on a person's documents: placing or releasing
@@ -440,6 +500,21 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // passes through its own C4/C5 gate again. C2 — no new reason, no new
   // approval — so "apply" can never need a second approval of its own.
   'POST /approvals/:id/apply': c('C2', 'approvals.apply', E.approval),
+  // [OWNER #13] Starting the solo wait moves nothing (the decision, its own
+  // step, still needs the wait, a fresh sign-in code and the owner's email),
+  // and withdrawing one's own request stops an action rather than taking one.
+  'POST /approvals/:id/solo': c('C2', 'approvals.solo', E.approval),
+  'POST /approvals/:id/cancel': c('C2', 'approvals.cancel', E.approval),
+
+  // ── Staff ───────────────────────────────────────────────────────────────
+  // [VERIFY-DOCS V3] Granting or revoking the document reviewer grant decides
+  // whether a person may see other people's identity documents: C3, a reason
+  // is owed, and the Admin row's permissions are recorded before and after.
+  // SUPER_ADMIN only (founderGuard on the route). The list names staff only.
+  'GET /staff/document-reviewers': c('C1', 'staff.read'),
+  'PUT /staff/:userId/document-reviewer': c('C3', 'staff.reviewer.grant', E.adminGrant),
+  // [GUARDRAILS §8 · Opus S3-9] Granting the catalogue approver: the same founder door, reason and record.
+  'PUT /staff/:userId/catalogue-approver': c('C3', 'staff.reviewer.grant', E.adminGrant),
 
   // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),
@@ -520,8 +595,10 @@ export const REVIEW_CONSOLE_PRESETS: Readonly<Record<'DOC_REVIEWER' | 'DOC_SENIO
   SUPPORT: SUPPORT_OPERATOR_CAPABILITIES,
 };
 
-/** Does a held pattern cover a needed capability? `*`, `finance.*`, or exact. */
+/** Does a held pattern cover a needed capability? `*`, `finance.*`, or exact.
+ *  [VERIFY-DOCS V3] An explicit-only capability is covered by its exact name alone. */
 export function capabilityMatches(held: string, needed: string): boolean {
+  if (isExplicitOnly(needed)) return held === needed;
   if (held === '*') return true;
   if (held === needed) return true;
   if (held.endsWith('.*')) return needed.startsWith(held.slice(0, -1));
@@ -532,11 +609,17 @@ export function holdsCapability(held: readonly string[], needed: string): boolea
   return held.some((pattern) => capabilityMatches(pattern, needed));
 }
 
-/** What this actor may do: their explicit grant, else their role's container. */
+/** What this actor may do: their explicit grant, else their role's container.
+ *
+ *  [VERIFY-DOCS V3] An explicit-only entry never NARROWS an actor: it is not an
+ *  "ordinary" grant, so a list holding only explicit-only entries still falls
+ *  back to the role's container, with those entries kept beside it. Granting
+ *  the document reviewer permission to an admin on the role default must not
+ *  silently take everything else away. */
 export function capabilitiesOf(actor: { role?: string | null; permissions?: readonly string[] | null }): readonly string[] {
   const granted = actor.permissions?.filter((p) => typeof p === 'string' && p.length > 0) ?? [];
-  if (granted.length > 0) return granted;
-  return ROLE_DEFAULT_CAPABILITIES[actor.role ?? ''] ?? [];
+  if (granted.some((p) => !isExplicitOnly(p))) return granted;
+  return [...(ROLE_DEFAULT_CAPABILITIES[actor.role ?? ''] ?? []), ...granted];
 }
 
 /**
@@ -566,7 +649,9 @@ export interface CapabilityDecision {
   readonly allowed: boolean;
   readonly capability: string | null;
   readonly cls: AdminActionClass | null;
-  readonly reason: 'granted' | 'missing-capability' | 'unregistered-route';
+  /** `missing-explicit-grant`: the route's `requires` grant is absent. Shadow
+   *  mode never relaxes it (VERIFY-DOCS V3). */
+  readonly reason: 'granted' | 'missing-capability' | 'missing-explicit-grant' | 'unregistered-route';
 }
 
 /** The whole engine, as one pure function. */
@@ -578,6 +663,12 @@ export function decideCapability(
   const authority = authorityFor(method, routeUrl);
   if (!authority) return { allowed: false, capability: null, cls: null, reason: 'unregistered-route' };
   const held = capabilitiesOf(actor);
+  // [VERIFY-DOCS V3] The explicit grant is decided first: it is the refusal
+  // that holds in every mode, so it must never be masked by a capability miss
+  // that shadow mode would let through.
+  if (authority.requires && !holdsCapability(held, authority.requires)) {
+    return { allowed: false, capability: authority.requires, cls: authority.cls, reason: 'missing-explicit-grant' };
+  }
   const allowed = holdsCapability(held, authority.capability);
   return {
     allowed,

@@ -1,8 +1,8 @@
 import { act, fireEvent, render as renderComponent, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { INSTALL_PROMPT_KEY, InstallPrompt, isIosSafari } from './install-prompt';
+import { beforeAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { INSTALL_PROMPT_KEY, InstallPrompt, isIosSafari, loadInstallCard } from './install-prompt';
 
 // ---------------------------------------------------------------------------
 // [PWA-1] The install card waits for engagement: Android at most once per 14 days,
@@ -22,6 +22,10 @@ const IPHONE_INSTAGRAM =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 350.0.0.0';
 const ANDROID_CHROME =
   'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
+
+// [PWA-1] As once an offer is possible on Home: the card's code has arrived
+// (install-prompt-loading.test.tsx covers an offer that comes before it).
+beforeAll(() => loadInstallCard());
 
 const restores: Array<() => void> = [];
 function override(target: object, key: string, descriptor: PropertyDescriptor) {
