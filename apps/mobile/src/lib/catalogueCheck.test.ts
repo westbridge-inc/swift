@@ -28,7 +28,8 @@ describe('the partner reads why Swift hides an item', () => {
   });
   it('the menu and the bulk import screens both show it', () => {
     const menu = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorMenuScreen.tsx'), 'utf8');
-    expect(menu).toMatch(/catalogueCheckLine\(item\.catalogueCheck\)/);
+    // The line is rendered when there is one — not merely computed.
+    expect(menu).toMatch(/\{catalogueCheckLine\(item\.catalogueCheck\) \? \(\s*<T[^>]*>\s*\{catalogueCheckLine\(item\.catalogueCheck\)\}/);
     const bulk = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorBulkImportScreen.tsx'), 'utf8');
     expect(bulk).toMatch(/importCheckSummary\(result\)/);
   });
