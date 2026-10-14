@@ -87,6 +87,9 @@ describe('an appointment slot is the moment the work happens', () => {
     const shortHold = booking({ placedAt: new Date(NOW.getTime() - MINUTE), holdExpiresAt: new Date(NOW.getTime() + 2 * MINUTE) });
     expect(freeCancellationExpiresAt(shortHold, NOW)?.getTime()).toBe(shortHold.holdExpiresAt!.getTime());
     expect(isFreeCancellation(booking({ placedAt: new Date(NOW.getTime() - 60 * MINUTE), holdExpiresAt: new Date(NOW.getTime() - 50 * MINUTE) }), NOW)).toBe(true);
+    // Once the provider accepts, the window is the five minutes from that acceptance.
+    const accepted = booking({ status: 'ACCEPTED', placedAt: new Date(NOW.getTime() - 60 * MINUTE), acceptedAt: new Date(NOW.getTime() - MINUTE) });
+    expect(freeCancellationExpiresAt(accepted, NOW)?.getTime()).toBe(NOW.getTime() - MINUTE + FREE_CANCEL_WINDOW_MIN * MINUTE);
   });
 
   it('a booking whose slot takes precedence over a scheduledFor that would already have closed', () => {
