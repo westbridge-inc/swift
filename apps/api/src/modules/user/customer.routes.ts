@@ -20,7 +20,7 @@ import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { customerCancelView, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
+import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { ORDER_TRANSITIONS } from '../order/order-status';
 import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
@@ -2699,6 +2699,8 @@ export async function customerRoutes(app: FastifyInstance) {
       ...order,
       noMoverFound: cancellableState && await readNoMoverFound(app.prisma, order),
       tooLateToDeliver: cancellableState && await readTooLateToDeliver(app.prisma, order, previewNow),
+      // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
+      assignedAt: cancellableState ? await readAssignedAt(app.prisma, order) : null,
     };
     // [owner #46/#50] A cancel the customer may no longer make is not offered
     // at all — builds 9/10 already hide the button on `canCancel: false` — and

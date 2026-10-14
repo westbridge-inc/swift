@@ -16,7 +16,7 @@ import {
 import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from './taxi-stops-flag';
 import { readRideItinerary } from './taxi-stops-read';
 import { hasTaxiPassengerCustody } from './passenger-custody';
-import { customerCancelView, readNoMoverFound } from '../order/cancel-policy';
+import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';
 import { decorateRideWaiting, taxiWaitingEnabled, waitingDisclosure } from './taxi-waiting';
 import {
   CHECKOUT_CLAIM_TTL_S,
@@ -463,7 +463,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     const cancel = ride
       ? (hasTaxiPassengerCustody(ride) || ride.status === 'RIDE_IN_PROGRESS'
           ? { canCancel: false, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: null }
-          : customerCancelView({ ...ride, noMoverFound: await readNoMoverFound(app.prisma, ride) }))
+          : customerCancelView({ ...ride, noMoverFound: await readNoMoverFound(app.prisma, ride), assignedAt: await readAssignedAt(app.prisma, ride) }))
       : null;
     // [TAXI waiting charge] From the driver's arrival on, the live wait (and each
     // stop's own); nothing while the switch is off.

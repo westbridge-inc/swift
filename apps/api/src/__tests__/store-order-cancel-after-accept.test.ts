@@ -444,7 +444,8 @@ describe('cancellationVerdict — the ONE predicate, store branch', () => {
   it('[owner #50] rides, parcels and bookings: free in the window, refused after it — never a fee', () => {
     const taxi = { ...store, orderType: 'TAXI', status: 'DRIVER_ASSIGNED', driverId: 'd1', placedAt: minutesAgo(10), acceptedAt: minutesAgo(9) };
     expect(cancellationVerdict(taxi)).toMatchObject({ allowed: false, code: 'CANCEL_WINDOW_CLOSED' });
-    expect(cancellationVerdict({ ...taxi, placedAt: minutesAgo(4) })).toEqual({ allowed: true, free: true, reason: 'IN_WINDOW' });
+    // [owner ruling 14 Oct] The window counts from acceptance: placed ten minutes ago, accepted four — still free.
+    expect(cancellationVerdict({ ...taxi, acceptedAt: minutesAgo(4) })).toEqual({ allowed: true, free: true, reason: 'IN_WINDOW' });
     const booking = { ...store, fulfillment: 'APPOINTMENT', status: 'ACCEPTED' };
     expect(cancellationVerdict(booking)).toMatchObject({ allowed: false, code: 'CANCEL_WINDOW_CLOSED' });
     expect(cancellationVerdict({ ...booking, status: 'PENDING' })).toEqual({ allowed: true, free: true, reason: 'NOT_ACCEPTED' });

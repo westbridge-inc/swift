@@ -77,14 +77,16 @@ describe('an appointment slot is the moment the work happens', () => {
     expect(freeCancellationExpiresAt(booking({ status: 'ACCEPTED' }), NOW)).toBeNull();
   });
 
-  // [owner #50, 14 Oct] The window is the LATER of the hold and five minutes
-  // after placing (production holds are never shorter than the window).
+  // [owner #50 · owner ruling 14 Oct] Before anyone accepts, cancelling is
+  // free with no clock; a held order counts down to its hold (and stays free
+  // after it, until someone accepts). The five minutes count from acceptance.
   it('the checkout hold still wins while it runs, and the window it promises is the hold', () => {
     const held = booking({ placedAt: new Date(NOW.getTime() - MINUTE), holdExpiresAt: new Date(NOW.getTime() + 7 * MINUTE) });
     expect(isFreeCancellation(held, NOW)).toBe(true);
     expect(freeCancellationExpiresAt(held, NOW)?.getTime()).toBe(held.holdExpiresAt!.getTime());
     const shortHold = booking({ placedAt: new Date(NOW.getTime() - MINUTE), holdExpiresAt: new Date(NOW.getTime() + 2 * MINUTE) });
-    expect(freeCancellationExpiresAt(shortHold, NOW)?.getTime()).toBe(shortHold.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * MINUTE);
+    expect(freeCancellationExpiresAt(shortHold, NOW)?.getTime()).toBe(shortHold.holdExpiresAt!.getTime());
+    expect(isFreeCancellation(booking({ placedAt: new Date(NOW.getTime() - 60 * MINUTE), holdExpiresAt: new Date(NOW.getTime() - 50 * MINUTE) }), NOW)).toBe(true);
   });
 
   it('a booking whose slot takes precedence over a scheduledFor that would already have closed', () => {

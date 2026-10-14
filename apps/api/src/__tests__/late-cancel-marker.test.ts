@@ -387,9 +387,11 @@ describe('freeCancellationExpiresAt — the countdown never expires before the w
   // yet has no clock at all (null) — never a moment in the past.
   it('THE INVARIANT: whenever the cancel is free, the promised moment is still ahead — or there is none', () => {
     const now = new Date();
+    // [owner ruling 14 Oct] The five minutes count from acceptance: before anyone accepts, the cancel is free with
+    // no clock (below); once accepted, the window counts from that moment.
     const windowed = [
-      { ...base, placedAt: minutesAgo(1) },
-      { ...base, placedAt: minutesAgo(1), scheduledFor: inMinutes(2) },
+      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt: minutesAgo(1) },
+      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt: minutesAgo(1), scheduledFor: inMinutes(2) },
       { ...base, placedAt: minutesAgo(90), holdExpiresAt: inMinutes(3) },
       { ...base, status: 'ACCEPTED', placedAt: minutesAgo(2) },
     ];
@@ -399,19 +401,21 @@ describe('freeCancellationExpiresAt — the countdown never expires before the w
       expect(until, 'a free cancel in its window must name its window').not.toBeNull();
       expect(until!.getTime(), `promised ${until?.toISOString()} which is in the past`).toBeGreaterThan(now.getTime());
     }
-    const clockless = { ...base, scheduledFor: inMinutes(60 * 34) };
-    expect(isFreeCancellation(clockless, now)).toBe(true);
-    expect(freeCancellationExpiresAt(clockless, now)).toBeNull();
+    for (const clockless of [{ ...base, scheduledFor: inMinutes(60 * 34) }, { ...base, placedAt: minutesAgo(1) }, { ...base, placedAt: minutesAgo(1), scheduledFor: inMinutes(2) }]) {
+      expect(isFreeCancellation(clockless, now)).toBe(true);
+      expect(freeCancellationExpiresAt(clockless, now)).toBeNull();
+    }
   });
 
   it('a scheduled booking nobody accepted has no countdown — free until the provider accepts', () => {
     expect(freeCancellationExpiresAt({ ...base, scheduledFor: inMinutes(60 * 34) })).toBeNull();
   });
 
-  it('an immediate order still counts down from placing', () => {
-    const placedAt = minutesAgo(1);
-    const until = freeCancellationExpiresAt({ ...base, placedAt })!;
-    expect(until.getTime()).toBe(placedAt.getTime() + 5 * 60_000);
+  // [owner ruling 14 Oct] "counts down from placing" became "counts down from acceptance".
+  it('an accepted booking counts down from its acceptance, not from placing', () => {
+    const acceptedAt = minutesAgo(1);
+    const until = freeCancellationExpiresAt({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt })!;
+    expect(until.getTime()).toBe(acceptedAt.getTime() + 5 * 60_000);
   });
 
   it('a held order counts down to the hold', () => {

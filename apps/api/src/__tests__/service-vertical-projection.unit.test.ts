@@ -154,7 +154,8 @@ describe('GET /orders/:id — the order screen’s contract', () => {
   // five-minute window is not cancelled in the app — the provider's published
   // number instead.
   it('control — an accepted booking past the window is committed: no Cancel, no fee, contact the provider', async () => {
-    const h = await customerHost([serviceBooking('bk-1', { status: 'ACCEPTED', acceptedAt: new Date() })]);
+    // [owner ruling 14 Oct] The window counts from the provider's acceptance: accepted ten minutes ago is past it.
+    const h = await customerHost([serviceBooking('bk-1', { status: 'ACCEPTED', acceptedAt: new Date(Date.now() - 10 * MINUTE) })]);
     const res = (await h.call('get /orders/:id', asCustomer({ params: { id: 'bk-1' } }))) as Detail;
     expect(res.data).toMatchObject({
       vertical: 'SERVICE', canCancel: false, freeCancellationWindow: false, cancellationFee: 0, freeCancellationExpiresAt: null,

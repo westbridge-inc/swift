@@ -23,7 +23,7 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { cancellationVerdict, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
+import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
@@ -2121,6 +2121,7 @@ export class OrderService {
         ...source,
         noMoverFound: await readNoMoverFound(tx, source),
         tooLateToDeliver: await readTooLateToDeliver(this.prisma, source, lockedNow),
+        assignedAt: await readAssignedAt(tx, source),
       }, lockedNow);
       if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
     }
@@ -2534,6 +2535,8 @@ export class OrderService {
             ...order,
             noMoverFound: await readNoMoverFound(tx, order),
             tooLateToDeliver: await readTooLateToDeliver(this.prisma, order, now),
+            // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
+            assignedAt: await readAssignedAt(tx, order),
           };
           const verdict = cancellationVerdict(policyOrder, now);
           // [owner #46/#50] Not the customer's to cancel any more (the store

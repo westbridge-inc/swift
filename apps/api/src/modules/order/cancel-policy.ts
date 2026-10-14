@@ -66,6 +66,13 @@ export type CancellationSnapshot = {
   estimatedDeliveryTime?: number | null;
   /** [owner #50] When the driver took the ride (the claim writes it). */
   acceptedAt?: Date | null;
+  /** [owner ruling 14 Oct] When the driver, rider or provider took THIS job —
+   *  the current assignment: a ride's and a booking's `acceptedAt` (the claim
+   *  and the provider's accept write it; a release clears it), a parcel's
+   *  latest rider-assignment record (both claim doors append it). The caller
+   *  reads it with `readAssignedAt` and passes it in, like `noMoverFound`.
+   *  Absent: `acceptedAt` stands in. */
+  assignedAt?: Date | null;
   /** [Item 64] The mover search for this order's current delivery generation
    *  came back with nobody. A dispatch-journal fact, not an order column: both
    *  callers read it with `readNoMoverFound` (the cancel path under the order
@@ -184,6 +191,30 @@ export async function readNoMoverFound(db: DispatchJournalReader, order: NoMover
   return exhausted != null;
 }
 
+/** The fields `readAssignedAt` reads. */
+type AssignedAtSubject = { id: string; orderType: string; fulfillment: string; riderId: string | null; acceptedAt?: Date | null };
+export interface AssignmentLogReader {
+  orderStatusLog: { findFirst(args: unknown): Promise<unknown> };
+}
+
+/**
+ * [owner ruling 14 Oct 2026] When the current driver, rider or provider took
+ * the job — the moment a ride's, a parcel's or a booking's five-minute window
+ * starts. No new field: a ride's and a booking's `acceptedAt` (the driver's
+ * claim and the provider's accept write it; a release clears it); a parcel
+ * has none, so its latest rider-assignment record (orderStatusLog
+ * RIDER_ASSIGNED, appended in the same transaction by both claim doors).
+ * Store orders do not use it (they are refused once the store accepts).
+ */
+export async function readAssignedAt(db: AssignmentLogReader, order: AssignedAtSubject): Promise<Date | null> {
+  if (order.orderType === 'COURIER') {
+    if (order.riderId == null) return null;
+    const row = await db.orderStatusLog.findFirst({ where: { orderId: order.id, status: 'RIDER_ASSIGNED' }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }) as { createdAt: Date } | null;
+    return row?.createdAt ?? null;
+  }
+  return order.acceptedAt ?? null;
+}
+
 const MINUTE_MS = 60_000;
 const plusMinutes = (at: Date, minutes: number) => new Date(at.getTime() + minutes * MINUTE_MS);
 const latest = (dates: Array<Date | null | undefined>): Date | null =>
@@ -208,17 +239,20 @@ function notAcceptedYet(order: CancellationSnapshot): boolean {
 }
 
 /**
- * [owner #50] When the free window of a ride, a parcel or a booking closes:
- * five minutes after placing — or, under LIFECYCLE_V2, the end of the order's
- * hold when that is later (a held order is hidden and undispatched, so its
- * whole hold is free). The hold extends the window only while nobody holds
- * the job: the hold exemption is for orders nobody committed to (no writer
- * assigns a held order today; the policy does not trust that invariant).
+ * [owner #50 · owner ruling 14 Oct 2026] When the free window of a ride, a
+ * parcel or a booking closes: five minutes after the driver, rider or provider
+ * ACCEPTED it (`assignedAt`). Before anyone accepts, cancelling is free at any
+ * age (`notAcceptedYet`), so the window only exists once someone took the job.
+ * An accepted job whose acceptance moment is unknown (a record older than the
+ * assignment evidence) counts from placing, the rule it was placed under.
+ * Under LIFECYCLE_V2 a held order nobody holds is free for its whole hold.
  * There is no fee to protect inside the window, only the moment after which
  * the customer contacts the driver, rider or provider instead.
  */
-function freeWindowEnd(order: CancellationSnapshot): Date {
-  return latest([plusMinutes(order.placedAt, FREE_CANCEL_WINDOW_MIN), unassigned(order) ? order.holdExpiresAt : null]) as Date;
+function freeWindowEnd(order: CancellationSnapshot): Date | null {
+  if (notAcceptedYet(order)) return order.holdExpiresAt ?? null;
+  const accepted = order.assignedAt ?? order.acceptedAt ?? order.placedAt;
+  return plusMinutes(accepted, FREE_CANCEL_WINDOW_MIN);
 }
 
 /**
@@ -299,7 +333,8 @@ function windowClosedMessage(order: CancellationSnapshot): string {
  *  - otherwise REFUSED: the customer contacts the store.
  *
  * [owner #50] A RIDE, a PARCEL or a BOOKING once someone has accepted it:
- *  - free inside the five-minute window (`freeWindowEnd`);
+ *  - free for five minutes from that acceptance (`freeWindowEnd`, owner
+ *    ruling 14 Oct — not from placing);
  *  - free when the driver, rider or provider is very late (`isVeryLate`);
  *  - otherwise REFUSED: the customer contacts the driver, rider or provider.
  *
@@ -315,7 +350,8 @@ export function cancellationVerdict(order: CancellationSnapshot, now: Date = new
     }
     return { allowed: false, free: false, code: STORE_ACCEPTED_CANCEL_CODE, message: STORE_ACCEPTED_CANCEL_MESSAGE };
   }
-  if (now.getTime() <= freeWindowEnd(order).getTime()) return { allowed: true, free: true, reason: 'IN_WINDOW' };
+  const windowEnd = freeWindowEnd(order);
+  if (windowEnd != null && now.getTime() <= windowEnd.getTime()) return { allowed: true, free: true, reason: 'IN_WINDOW' };
   if (notAcceptedYet(order)) return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
   if (isVeryLate(order, now)) return { allowed: true, free: true, reason: 'TOO_LATE' };
   return { allowed: false, free: false, code: CANCEL_WINDOW_CLOSED_CODE, message: windowClosedMessage(order) };

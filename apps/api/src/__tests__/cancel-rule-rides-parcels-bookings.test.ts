@@ -140,7 +140,10 @@ async function makeTaxi(customerId: string, status: OrderStatus, over: Record<st
   return order;
 }
 
-async function makeParcel(customerId: string, status: OrderStatus, over: Record<string, unknown> = {}) {
+/** [owner ruling 14 Oct] A parcel's acceptance moment is its rider-assignment record (both claim doors append it). */
+const ASSIGNMENT_FIXTURE_NOTE = 'fixture: rider assignment';
+
+async function makeParcel(customerId: string, status: OrderStatus, over: Record<string, unknown> = {}, assignedAt?: Date) {
   const riderId = status === 'READY_FOR_PICKUP' || status === 'PENDING' ? null : await makeRider();
   const order = await app.prisma.order.create({
     data: {
@@ -153,6 +156,9 @@ async function makeParcel(customerId: string, status: OrderStatus, over: Record<
     } as never,
   });
   createdOrderIds.push(order.id);
+  if (riderId && assignedAt) {
+    await app.prisma.orderStatusLog.create({ data: { orderId: order.id, status: 'RIDER_ASSIGNED', changedBy: riderId, note: ASSIGNMENT_FIXTURE_NOTE, createdAt: assignedAt } });
+  }
   return order;
 }
 
@@ -207,7 +213,8 @@ async function expectUntouched(id: string, status: OrderStatus, mover: { driverI
   const row = await app.prisma.order.findUniqueOrThrow({ where: { id } });
   expect({ status: row.status, lateCancelFeeDue: row.lateCancelFeeDue, cancelledAt: row.cancelledAt, driverId: row.driverId, riderId: row.riderId })
     .toEqual({ status, lateCancelFeeDue: 0, cancelledAt: null, driverId: mover.driverId ?? null, riderId: mover.riderId ?? null });
-  expect(await app.prisma.orderStatusLog.count({ where: { orderId: id } })).toBe(0);
+  // Nothing written by the refused cancel (a parcel fixture's own assignment record aside).
+  expect(await app.prisma.orderStatusLog.count({ where: { orderId: id, NOT: { note: ASSIGNMENT_FIXTURE_NOTE } } })).toBe(0);
 }
 
 /** A free cancel: CANCELLED, no marker, and no fee in the answer. */
@@ -249,6 +256,45 @@ afterAll(async () => {
   await app.close();
 });
 
+describe('[owner ruling 14 Oct] the five minutes count from ACCEPTANCE — rides, parcels and bookings alike', () => {
+  const kinds = ['ride', 'parcel', 'booking'] as const;
+  async function accepted(kind: (typeof kinds)[number], placedMinutesAgo: number, acceptedMinutesAgo: number) {
+    const me = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const placedAt = minutesAgo(placedMinutesAgo);
+    const at = minutesAgo(acceptedMinutesAgo);
+    if (kind === 'ride') return { me, order: await makeTaxi(me.userId, 'DRIVER_ASSIGNED', { placedAt, acceptedAt: at }), at, closed: RIDE_CLOSED };
+    if (kind === 'parcel') return { me, order: await makeParcel(me.userId, 'RIDER_ASSIGNED', { placedAt }, at), at, closed: PARCEL_CLOSED };
+    return { me, order: await makeBooking(me.userId, await makeProvider(), 'ACCEPTED', { placedAt, acceptedAt: at }), at, closed: BOOKING_CLOSED };
+  }
+
+  it.each(kinds)('%s accepted at minute 7: free for five more minutes from that acceptance', async (kind) => {
+    const { me, order, at } = await accepted(kind, 7, 0);
+    const shown = await orderPreview(order.id, me.token);
+    expect(shown).toMatchObject({ canCancel: true, cancellationFee: 0, cancelUnavailable: null });
+    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(at.getTime() + 5 * 60_000);
+    await expectCancelledFree(order.id, await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, me.token, {}));
+  });
+
+  it.each(kinds)('%s six minutes after acceptance: refused, with who to contact', async (kind) => {
+    const { me, order, closed } = await accepted(kind, 9, 6);
+    expect(await orderPreview(order.id, me.token)).toMatchObject({
+      canCancel: false, cancellationFee: 0, freeCancellationExpiresAt: null, cancelUnavailable: { code: 'CANCEL_WINDOW_CLOSED', message: closed },
+    });
+    const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, me.token, {});
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'CANCEL_WINDOW_CLOSED', message: closed });
+  });
+
+  it.each(kinds)('%s nobody has accepted at minute 20: free', async (kind) => {
+    const me = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const order = kind === 'ride' ? await makeTaxi(me.userId, 'PENDING', { placedAt: minutesAgo(20) })
+      : kind === 'parcel' ? await makeParcel(me.userId, 'READY_FOR_PICKUP', { placedAt: minutesAgo(20) })
+        : await makeBooking(me.userId, await makeProvider(), 'PENDING', { placedAt: minutesAgo(20) });
+    expect(await orderPreview(order.id, me.token)).toMatchObject({ canCancel: true, cancellationFee: 0, cancelUnavailable: null });
+    await expectCancelledFree(order.id, await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, me.token, {}));
+  });
+});
+
 describe('[owner #50] a ride cancels free inside the five-minute window, then not at all', () => {
   it('a driver accepted a minute in: still free at minute three — no fee, the driver is freed', async () => {
     const rider = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -256,7 +302,8 @@ describe('[owner #50] a ride cancels free inside the five-minute window, then no
 
     const shown = await activeRide(rider.token);
     expect(shown).toMatchObject({ id: ride.id, canCancel: true, cancelUnavailable: null });
-    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(ride.placedAt.getTime() + 5 * 60_000);
+    // [owner ruling 14 Oct] The window counts from the driver's acceptance, not from placing.
+    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(ride.acceptedAt!.getTime() + 5 * 60_000);
 
     const res = await inject('POST', `/api/v1/rides/${ride.id}/cancel`, rider.token, {});
     await expectCancelledFree(ride.id, res);
@@ -322,7 +369,7 @@ describe('[owner #50] a ride cancels free inside the five-minute window, then no
 describe('[owner #50] a parcel follows the same rule — through the sender cancel too (no fork)', () => {
   it('a rider holds the parcel job past the window: the sender cancel is refused, nothing changes', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const parcel = await makeParcel(sender.userId, 'RIDER_ASSIGNED', { placedAt: minutesAgo(10) });
+    const parcel = await makeParcel(sender.userId, 'RIDER_ASSIGNED', { placedAt: minutesAgo(10) }, minutesAgo(8));
 
     const res = await inject('POST', `/api/v1/courier/order/${parcel.id}/cancel`, sender.token, {});
     expect(res.statusCode, res.body).toBe(409);
@@ -340,7 +387,7 @@ describe('[owner #50] a parcel follows the same rule — through the sender canc
 
   it('inside the window the sender cancel is free even with a rider on it', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const parcel = await makeParcel(sender.userId, 'RIDER_ASSIGNED', { placedAt: minutesAgo(2) });
+    const parcel = await makeParcel(sender.userId, 'RIDER_ASSIGNED', { placedAt: minutesAgo(2) }, minutesAgo(1));
     const res = await inject('POST', `/api/v1/courier/order/${parcel.id}/cancel`, sender.token, {});
     expect(res.statusCode, res.body).toBe(200);
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: parcel.id } })).status).toBe('CANCELLED');
@@ -356,11 +403,11 @@ describe('[owner #50] a parcel follows the same rule — through the sender canc
   it('the rider is very late — 30 minutes past the quoted job time and still not at the pickup: free', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     // Quoted 20 minutes: very late from minute 50.
-    const late = await makeParcel(sender.userId, 'RIDER_EN_ROUTE_PICKUP', { placedAt: minutesAgo(51) });
+    const late = await makeParcel(sender.userId, 'RIDER_EN_ROUTE_PICKUP', { placedAt: minutesAgo(51) }, minutesAgo(45));
     expect(await orderPreview(late.id, sender.token)).toMatchObject({ canCancel: true, cancellationMessage: PARCEL_LATE_MESSAGE });
     expect((await inject('POST', `/api/v1/courier/order/${late.id}/cancel`, sender.token, {})).statusCode).toBe(200);
 
-    const notYet = await makeParcel(sender.userId, 'RIDER_EN_ROUTE_PICKUP', { placedAt: minutesAgo(48) });
+    const notYet = await makeParcel(sender.userId, 'RIDER_EN_ROUTE_PICKUP', { placedAt: minutesAgo(48) }, minutesAgo(45));
     expect((await inject('POST', `/api/v1/courier/order/${notYet.id}/cancel`, sender.token, {})).statusCode).toBe(409);
   });
 });
@@ -369,7 +416,7 @@ describe('[owner #50] a booking: free in the window or until the provider accept
   it('accepted, past the window: no Cancel, the provider’s published number, the server refuses', async () => {
     const vendorId = await makeProvider();
     const me = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const booking = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(10) });
+    const booking = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(10), acceptedAt: minutesAgo(8) });
 
     expect(await orderPreview(booking.id, me.token)).toMatchObject({
       canCancel: false, cancellationFee: 0, freeCancellationExpiresAt: null,
@@ -381,13 +428,13 @@ describe('[owner #50] a booking: free in the window or until the provider accept
     await expectUntouched(booking.id, 'ACCEPTED', {});
   });
 
-  it('accepted within the window: free, counting down to placing + 5 minutes', async () => {
+  it('accepted within the window: free, counting down to acceptance + 5 minutes', async () => {
     const vendorId = await makeProvider();
     const me = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const booking = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(2) });
     const shown = await orderPreview(booking.id, me.token);
     expect(shown).toMatchObject({ canCancel: true, cancellationFee: 0, cancelUnavailable: null });
-    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(booking.placedAt.getTime() + 5 * 60_000);
+    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(booking.acceptedAt!.getTime() + 5 * 60_000);
     const res = await inject('POST', `/api/v1/customer/orders/${booking.id}/cancel`, me.token, {});
     await expectCancelledFree(booking.id, res);
     expect(res.json().data).toEqual({ message: 'Booking cancelled — no charge', cancellationFee: 0 });
@@ -403,9 +450,10 @@ describe('[owner #50] a booking: free in the window or until the provider accept
   it('the provider is very late — 30 minutes past the slot, never completed: free; at 29: refused', async () => {
     const vendorId = await makeProvider();
     const me = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const late = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(3 * 60), appointmentSlot: minutesAgo(31) });
+    // [owner ruling 14 Oct] Accepted long ago (the five minutes from acceptance are over), so only lateness frees it.
+    const late = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(3 * 60), acceptedAt: minutesAgo(2 * 60), appointmentSlot: minutesAgo(31) });
     await expectCancelledFree(late.id, await inject('POST', `/api/v1/customer/orders/${late.id}/cancel`, me.token, {}));
-    const notYet = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(3 * 60), appointmentSlot: minutesAgo(29) });
+    const notYet = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(3 * 60), acceptedAt: minutesAgo(2 * 60), appointmentSlot: minutesAgo(29) });
     expect((await inject('POST', `/api/v1/customer/orders/${notYet.id}/cancel`, me.token, {})).statusCode).toBe(409);
   });
 });

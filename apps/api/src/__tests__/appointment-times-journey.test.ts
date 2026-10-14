@@ -430,15 +430,16 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
   // [owner #50, 14 Oct] A booking nobody has confirmed is free until the
   // provider confirms it; the countdown the app shows is the five-minute
   // window from placing (free whatever happens inside it).
-  it('a booking the provider has not confirmed cancels free; the countdown is the five-minute window', async () => {
+  // [owner ruling 14 Oct] Before the provider accepts, the cancel is free with no clock to count down to; the five
+  // minutes start at the provider's acceptance (next case).
+  it('a booking the provider has not confirmed cancels free, with no countdown — the five minutes start at acceptance', async () => {
     const slot = gy(gyDay(2), 11, 0);
     const customer = await makeUser('Joy', ['CUSTOMER'], 'CUSTOMER');
     const order = await booked(customer, cutId, slot);
-    const { placedAt } = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { placedAt: true } });
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
     expect(mine.json().data).toMatchObject({
       status: 'PENDING', holdExpiresAt: null, canCancel: true, freeCancellationWindow: true, cancellationFee: 0,
-      freeCancellationExpiresAt: new Date(placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
+      freeCancellationExpiresAt: null,
     });
     const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'Plans changed' });
     expect(res.statusCode, res.body).toBe(200);
@@ -454,9 +455,12 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     const customer = await makeUser('Kofi', ['CUSTOMER'], 'CUSTOMER');
     const order = await booked(customer, cutId, slot);
     expect((await accept(order.id)).statusCode).toBe(200);
+    const { acceptedAt } = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { acceptedAt: true } });
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
     expect(mine.json().data).toMatchObject({
       status: 'ACCEPTED', canCancel: true, freeCancellationWindow: true, cancellationFee: 0, cancelUnavailable: null,
+      // [owner ruling 14 Oct] The countdown runs from the provider's acceptance.
+      freeCancellationExpiresAt: new Date(acceptedAt!.getTime() + FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
     });
     const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
     expect(res.statusCode, res.body).toBe(200);
@@ -471,7 +475,8 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     const customer = await makeUser('Lena', ['CUSTOMER'], 'CUSTOMER');
     const order = await booked(customer, cutId, slot);
     expect((await accept(order.id)).statusCode).toBe(200);
-    await app.prisma.order.update({ where: { id: order.id }, data: { placedAt: new Date(Date.now() - 10 * MINUTE) } });
+    // [owner ruling 14 Oct] Past the window = more than five minutes after the provider ACCEPTED.
+    await app.prisma.order.update({ where: { id: order.id }, data: { placedAt: new Date(Date.now() - 12 * MINUTE), acceptedAt: new Date(Date.now() - 10 * MINUTE) } });
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
     expect(mine.json().data).toMatchObject({
       status: 'ACCEPTED', canCancel: false, cancellationFee: 0, freeCancellationExpiresAt: null,
