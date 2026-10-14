@@ -6,6 +6,7 @@ import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
 import { MutationError } from '@/components/MutationError';
 import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
+import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
 import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
@@ -203,6 +204,7 @@ export default function VerificationPage() {
   return <div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
     <div inert={decision ? true : undefined}>
       <header className="rc-page-heading"><div><h1>Review Center</h1><p>Review the evidence. Record the decision. Keep applicants moving.</p></div><span className="rc-muted">Oldest submissions first</span></header>
+      {!applicant && <ReviewerAccess />}
       {notice && <p role="status" className="rc-notice">{notice}</p>}
       <div className="rc-queue-controls">
         <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{s}</button>)}</div>
