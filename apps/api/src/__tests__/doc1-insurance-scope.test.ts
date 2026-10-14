@@ -20,6 +20,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VALIDATOR_IMPLEMENTATIONS } from '../modules/verification/validators';
 import { VALIDATOR_CATALOGUE } from '../modules/verification/doc-registry';
+import { resolveSubject } from '../modules/verification/subjects';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -45,7 +46,18 @@ async function mover(n: number, vehicleType: 'CAR' | 'MOTORCYCLE') {
   }
   return u.id;
 }
-const pending = (userId: string) => system(() => app.prisma.verificationDocument.create({ data: { userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING' } }));
+const pending = (userId: string) => system(async () => {
+  // Real taxi intake binds evidence to its stored registration before review.
+  // Keep the insurance checks below exercising that independent approval gate.
+  const driver = await app.prisma.driver.findUnique({ where: { userId } });
+  const subject = driver ? await resolveSubject(app.prisma, {
+    userId, countryCode: 'GY', tenantId: 'swift-default', docType: 'vehicle_insurance', vehicleProfile: { ...driver, kind: 'DRIVER' },
+  }) : null;
+  return app.prisma.verificationDocument.create({ data: {
+    userId, subjectId: subject?.subjectId ?? null, role: 'MOVER', docType: 'vehicle_insurance',
+    fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING',
+  } });
+});
 const approve = (docId: string, insurance?: Record<string, unknown>) => adminApp.inject({
   method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, payload: { expiresAt: new Date(Date.now() + 100 * DAY).toISOString(), ...(insurance ? { insurance } : {}) },
   headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
@@ -73,7 +85,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await system(async () => {
+    const docs = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } })).map((d) => d.id);
+    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs } } } });
+    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.subject.deleteMany({ where: { createdById: { in: users } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });

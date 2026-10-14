@@ -45,6 +45,7 @@ export function matches(row: Row, where: Row = {}): boolean {
     if ('in' in value) return value.in.includes(actual);
     if ('startsWith' in value) return typeof actual === 'string' && actual.startsWith(value.startsWith);
     if ('contains' in value) return typeof actual === 'string' && actual.toLowerCase().includes(value.contains.toLowerCase());
+    if ('startsWith' in value) return typeof actual === 'string' && actual.toLowerCase().startsWith(value.startsWith.toLowerCase());
     if ('hasSome' in value) return actual.some((s: string) => value.hasSome.includes(s));
     if ('has' in value) return actual.includes(value.has);
     // SQL comparison semantics: a NULL column never satisfies a range predicate.
