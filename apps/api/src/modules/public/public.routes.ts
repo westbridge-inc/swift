@@ -8,6 +8,7 @@ import { serveEmergencyPolicy } from '../country/emergency-policy';
 import { emergencyPolicyCounter } from '../../plugins/observability';
 import { PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visibility';
 import { adsEnabled } from '../ads/ads-enabled';
+import { hiddenAmong } from '../compliance/prohibited-gate';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -246,6 +247,8 @@ export async function publicRoutes(app: FastifyInstance) {
     // [M-D6] Same mapper as the directory list, so a store's own page and its
     // card in the list can never show different stars.
     const surface = (await ratingSurfaces(app.prisma, 'VENDOR', [vendor.id])).get(vendor.id);
+    // [GUARDRAILS §8] The website's menu leaves prohibited items out (banned, or held for a check).
+    const hidden = await hiddenAmong(app.prisma, vendor.categories.flatMap((c) => c.items.map((i) => i.id)));
 
     return {
       success: true,
@@ -258,7 +261,7 @@ export async function publicRoutes(app: FastifyInstance) {
         categories: vendor.categories
           .map((c) => ({
             ...c,
-            items: c.items.map((i) => ({ ...i, basePrice: Number(i.basePrice) })),
+            items: c.items.filter((i) => !hidden.has(i.id)).map((i) => ({ ...i, basePrice: Number(i.basePrice) })),
           }))
           // An empty category is vendor housekeeping, not a public menu section.
           .filter((c) => c.items.length > 0),

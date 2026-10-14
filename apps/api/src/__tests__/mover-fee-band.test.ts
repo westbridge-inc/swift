@@ -73,65 +73,53 @@ describe('mover fee band — the rate resolver', () => {
   it('a market with a taxi rate prices every Driver by role, car or bus; Riders stay on their band', () => {
     const taxi: SubscriptionTiers = { ...tiers, taxiDriver: 11000 };
     for (const v of [...STANDARD_VEHICLES, ...HEAVY_VEHICLES]) {
-      expect(partnerRateFor(taxi, { kind: 'DRIVER', vehicleType: v })).toEqual({ rate: 11000, tier: 'taxi', franchised: false });
+      expect(partnerRateFor(taxi, { kind: 'DRIVER', vehicleType: v })).toEqual({ rate: 11000, tier: 'taxi' });
     }
     for (const v of STANDARD_VEHICLES) expect(rateOf(taxi, 'RIDER', v)).toBe(10000);
     for (const v of HEAVY_VEHICLES) expect(rateOf(taxi, 'RIDER', v)).toBe(12000);
   });
 });
 
-describe('vendor rate — services, catalogue tiers and the franchise discount', () => {
+describe('vendor rate — services and catalogue tiers; every store pays its own tier', () => {
+  // [Owner, 13 Oct 2026 — decision 49] No multi-store discount: "they pay per
+  // store and each store has to have its own account and pay per size of
+  // catalogue." This card still carries the keys of the rule the owner removed,
+  // as a database not yet re-seeded does: they must change nothing.
   const tiers: SubscriptionTiers = {
     mover: 10000, moverHeavy: 12000, serviceVendor: 12000,
     smallVendor: 20000, largeVendor: 30000, departmentVendor: 50000,
     largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000,
     franchiseMinLocations: 5, franchiseDiscountPct: 50,
   };
-  const vendor = (isService: boolean, activeListings: number, ownedStores: number) =>
-    partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings, ownedStores });
-  const shop = (activeListings: number, ownedStores = 1) => vendor(false, activeListings, ownedStores);
+  const vendor = (isService: boolean, activeListings: number) =>
+    partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings });
+  const shop = (activeListings: number) => vendor(false, activeListings);
 
   it('a service carries no catalogue and pays the service rate', () => {
-    expect(vendor(true, 0, 1)).toEqual({ rate: 12000, tier: 'service', franchised: false });
+    expect(vendor(true, 0)).toEqual({ rate: 12000, tier: 'service' });
   });
 
   it('catalogue tiers step at their thresholds, and the threshold itself qualifies', () => {
     expect(shop(0).rate).toBe(20000);
     expect(shop(999).rate).toBe(20000);
-    expect(shop(1000)).toEqual({ rate: 30000, tier: 'large', franchised: false });
+    expect(shop(1000)).toEqual({ rate: 30000, tier: 'large' });
     expect(shop(9999).rate).toBe(30000);
-    expect(shop(10000)).toEqual({ rate: 50000, tier: 'department', franchised: false });
+    expect(shop(10000)).toEqual({ rate: 50000, tier: 'department' });
   });
 
-  it('from the fifth store every location pays half its own rate', () => {
-    expect(shop(50, 4).rate).toBe(20000); // four stores: no discount yet
-    const five = shop(50, 5);
-    expect(five).toEqual({ rate: 10000, tier: 'small', franchised: true });
-    expect(five.rate * 5).toBe(50000);
-    expect(shop(50, 10).rate * 10).toBe(100000); // scales linearly, no cliff
-  });
-
-  it('the discount applies to each location OWN tier — it never erases catalogue scale', () => {
-    // The loophole this closes: a flat 50,000 bundle would let five department
-    // stores pay less than one does alone.
-    expect(shop(20000, 5)).toEqual({ rate: 25000, tier: 'department', franchised: true });
-    expect(shop(20000, 5).rate * 5).toBe(125000); // discounted, still not 50,000
-    expect(shop(20000, 5).rate).toBeGreaterThan(shop(50, 5).rate);
-    expect(shop(5000, 5)).toEqual({ rate: 15000, tier: 'large', franchised: true });
-    expect(vendor(true, 0, 5)).toEqual({ rate: 6000, tier: 'service', franchised: true });
-  });
-
-  it('a single department store never pays less than a chain member of the same size', () => {
-    // The ordering invariant the flat bundle broke.
-    expect(shop(20000, 1).rate).toBeGreaterThanOrEqual(shop(20000, 5).rate);
+  it('every store pays the full rate of its own tier — the leftover keys of the removed rule discount nothing', () => {
+    expect(shop(50)).toEqual({ rate: 20000, tier: 'small' });
+    expect(shop(5000)).toEqual({ rate: 30000, tier: 'large' });
+    expect(shop(20000)).toEqual({ rate: 50000, tier: 'department' });
+    expect(vendor(true, 0)).toEqual({ rate: 12000, tier: 'service' });
+    // Five stores of one owner pay five full rates.
+    expect(shop(50).rate * 5).toBe(100000);
   });
 
   it('a market that has priced none of the new tiers behaves exactly as before', () => {
     const legacy: SubscriptionTiers = { mover: 10000, smallVendor: 20000, largeVendor: 30000 };
-    expect(partnerRateFor(legacy, { kind: 'VENDOR', isService: true, activeListings: 0, ownedStores: 1 }).rate).toBe(20000);
-    const many = partnerRateFor(legacy, { kind: 'VENDOR', isService: false, activeListings: 50000, ownedStores: 9 });
-    expect(many.rate).toBe(30000);
-    expect(many.franchised).toBe(false); // no franchise config = no discount
+    expect(partnerRateFor(legacy, { kind: 'VENDOR', isService: true, activeListings: 0 }).rate).toBe(20000);
+    expect(partnerRateFor(legacy, { kind: 'VENDOR', isService: false, activeListings: 50000 })).toEqual({ rate: 30000, tier: 'large' });
   });
 });
 
@@ -170,8 +158,9 @@ describe('mover fee band — what a mover is actually charged', () => {
       mover: 6000, moverHeavy: 9000, taxiDriver: 8000, serviceVendor: 8000,
       smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000,
       largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000,
-      franchiseMinLocations: 5, franchiseDiscountPct: 50,
     });
+    // No multi-store rule (owner, 13 Oct 2026): the seed writes none.
+    expect(Object.keys(seeded).filter((key) => /franchise/i.test(key))).toEqual([]);
   });
 
   async function makeMoverUser() {
