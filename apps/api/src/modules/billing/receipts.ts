@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
+import { csvTextCell } from '../../utils/csv';
 
 // Sequential receipts [san spec 20.1] — gapless per tenant per year, proven
 // under concurrency by a row lock on the counter (scenario R). Every credit
@@ -58,19 +59,21 @@ export async function cashJournalCsv(prisma: PrismaClient, from: Date, to: Date)
     select: { id: true, san: true, type: true, vendor: { select: { name: true } } },
   });
   const byId = new Map(subs.map((s) => [s.id, s]));
-  const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  // [security review: csv-formula-injection] Every text cell (the account name is partner-set) goes
+  // through one cell writer, so a spreadsheet never runs one as a formula; amounts stay numbers.
+  const esc = csvTextCell;
   const lines = ['date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref'];
   for (const r of receipts) {
     const s = byId.get(r.subscriptionId);
     lines.push([
       r.issuedAt.toISOString().slice(0, 10),
-      r.receiptNumber,
-      s?.san ?? '',
+      esc(r.receiptNumber),
+      esc(s?.san ?? ''),
       esc(s?.vendor?.name ?? r.subscriptionId),
-      s?.type ?? '',
-      r.channel ?? '',
+      esc(s?.type ?? ''),
+      esc(r.channel ?? ''),
       Number(r.amount).toFixed(2),
-      r.mmgRef ?? '',
+      esc(r.mmgRef ?? ''),
     ].join(','));
   }
   return lines.join('\n');

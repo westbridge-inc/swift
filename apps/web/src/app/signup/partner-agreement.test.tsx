@@ -68,7 +68,7 @@ async function driverDetails() {
   fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Test' } });
   fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Driver' } });
   await user.click(screen.getByRole('button', { name: 'Create account' }));
-  for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'PAA 1234']]) {
+  for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
     fireEvent.change(await screen.findByLabelText(label!), { target: { value } });
   }
   return user;

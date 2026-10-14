@@ -1,3 +1,4 @@
+import { feePausePredicate } from '../modules/billing/mmg-pause';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -40,43 +41,43 @@ describe('subscriptionOperability — the truth table', () => {
     }) as never;
 
   it('missing row: caller policy decides', () => {
-    expect(subscriptionOperability(null, { missingRow: 'BLOCK' }, at)).toEqual({ operable: false, why: 'MISSING' });
-    expect(subscriptionOperability(null, { missingRow: 'GRANDFATHER' }, at)).toEqual({ operable: true });
+    expect(subscriptionOperability(null, { missingRow: 'BLOCK' }, feePausePredicate(false), at)).toEqual({ operable: false, why: 'MISSING' });
+    expect(subscriptionOperability(null, { missingRow: 'GRANDFATHER' }, feePausePredicate(false), at)).toEqual({ operable: true });
   });
 
   it('TRIAL and ACTIVE operate; PAST_DUE only through its grace window', () => {
-    expect(subscriptionOperability(sub('TRIAL'), { missingRow: 'BLOCK' }, at).operable).toBe(true);
-    expect(subscriptionOperability(sub('ACTIVE'), { missingRow: 'BLOCK' }, at).operable).toBe(true);
-    expect(subscriptionOperability(sub('PAST_DUE', +DAY), { missingRow: 'BLOCK' }, at).operable).toBe(true);
-    expect(subscriptionOperability(sub('PAST_DUE'), { missingRow: 'BLOCK' }, at).operable).toBe(true); // no deadline set → the sweep owns it
-    const lapsed = subscriptionOperability(sub('PAST_DUE', -DAY), { missingRow: 'BLOCK' }, at);
+    expect(subscriptionOperability(sub('TRIAL'), { missingRow: 'BLOCK' }, feePausePredicate(false), at).operable).toBe(true);
+    expect(subscriptionOperability(sub('ACTIVE'), { missingRow: 'BLOCK' }, feePausePredicate(false), at).operable).toBe(true);
+    expect(subscriptionOperability(sub('PAST_DUE', +DAY), { missingRow: 'BLOCK' }, feePausePredicate(false), at).operable).toBe(true);
+    expect(subscriptionOperability(sub('PAST_DUE'), { missingRow: 'BLOCK' }, feePausePredicate(false), at).operable).toBe(true); // no deadline set → the sweep owns it
+    const lapsed = subscriptionOperability(sub('PAST_DUE', -DAY), { missingRow: 'BLOCK' }, feePausePredicate(false), at);
     expect(lapsed).toEqual({ operable: false, why: 'GRACE_LAPSED', status: 'PAST_DUE' });
     // [#1393] The deadline instant itself is lapsed: the full grace has run.
-    expect(subscriptionOperability(sub('PAST_DUE', 1), { missingRow: 'BLOCK' }, at).operable).toBe(true);
-    expect(subscriptionOperability(sub('PAST_DUE', 0), { missingRow: 'BLOCK' }, at))
+    expect(subscriptionOperability(sub('PAST_DUE', 1), { missingRow: 'BLOCK' }, feePausePredicate(false), at).operable).toBe(true);
+    expect(subscriptionOperability(sub('PAST_DUE', 0), { missingRow: 'BLOCK' }, feePausePredicate(false), at))
       .toEqual({ operable: false, why: 'GRACE_LAPSED', status: 'PAST_DUE' });
     // [#1393 owner decision] Nobody is blocked while a payment is being confirmed,
     // and a row that never auto-suspends is not blocked by its grace deadline.
-    expect(subscriptionOperability(sub('PAST_DUE', -DAY, { confirming: true }), { missingRow: 'BLOCK' }, at).operable).toBe(true);
-    expect(subscriptionOperability(sub('PAST_DUE', -DAY, { autoSuspendEnabled: false }), { missingRow: 'BLOCK' }, at).operable).toBe(true);
+    expect(subscriptionOperability(sub('PAST_DUE', -DAY, { confirming: true }), { missingRow: 'BLOCK' }, feePausePredicate(false), at).operable).toBe(true);
+    expect(subscriptionOperability(sub('PAST_DUE', -DAY, { autoSuspendEnabled: false }), { missingRow: 'BLOCK' }, feePausePredicate(false), at).operable).toBe(true);
   });
 
   it('[E12] billing stopped: work continues exactly until the paid period (or trial) ends, then the gate refuses', () => {
     const hour = 60 * 60 * 1000;
     for (const status of ['ACTIVE', 'TRIAL'] as const) {
-      expect(subscriptionOperability(sub(status, undefined, { autoRenew: false, periodEndOffsetMs: hour }), { missingRow: 'BLOCK' }, at))
+      expect(subscriptionOperability(sub(status, undefined, { autoRenew: false, periodEndOffsetMs: hour }), { missingRow: 'BLOCK' }, feePausePredicate(false), at))
         .toEqual({ operable: true });
-      expect(subscriptionOperability(sub(status, undefined, { autoRenew: false, periodEndOffsetMs: -1 }), { missingRow: 'BLOCK' }, at))
+      expect(subscriptionOperability(sub(status, undefined, { autoRenew: false, periodEndOffsetMs: -1 }), { missingRow: 'BLOCK' }, feePausePredicate(false), at))
         .toEqual({ operable: false, why: 'BILLING_STOPPED', status });
     }
     // an auto-renewing row past its period end is a renewal in flight, not a stop
-    expect(subscriptionOperability(sub('ACTIVE', undefined, { periodEndOffsetMs: -hour }), { missingRow: 'BLOCK' }, at))
+    expect(subscriptionOperability(sub('ACTIVE', undefined, { periodEndOffsetMs: -hour }), { missingRow: 'BLOCK' }, feePausePredicate(false), at))
       .toEqual({ operable: true });
   });
 
   it('every non-operating status blocks with the status verdict', () => {
     for (const status of ['PAUSED', 'SUSPENDED', 'CANCELLED', 'CHURNED']) {
-      const v = subscriptionOperability(sub(status), { missingRow: 'GRANDFATHER' }, at);
+      const v = subscriptionOperability(sub(status), { missingRow: 'GRANDFATHER' }, feePausePredicate(false), at);
       expect(v).toEqual({ operable: false, why: 'STATUS', status });
     }
   });
@@ -103,7 +104,7 @@ describe('the CI gate — no route may fork the rule again', () => {
       expect(source).toContain('moverFeeOperability(tx');
       expect(source).toContain('lockMoverSources(tx');
     }
-    expect(readFileSync(join(SRC, 'modules/subscription/mover-fee-authority.ts'), 'utf8')).toContain('subscriptionOperability(gated, opts, now)');
+    expect(readFileSync(join(SRC, 'modules/subscription/mover-fee-authority.ts'), 'utf8')).toContain('subscriptionOperability(gated, opts, await readFeePause(db, process.env, source.id), now)');
     expect(readFileSync(join(SRC, 'modules/vendor/vendor.routes.ts'), 'utf8')).toContain('subscriptionOperability');
   });
 });

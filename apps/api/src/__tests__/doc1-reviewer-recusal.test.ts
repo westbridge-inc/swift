@@ -48,7 +48,7 @@ class ManualKyc implements KycProvider {
 async function admin(n: number) {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59274${NUM}${n}`, firstName: 'Rev', lastName: `Iewer${n}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
-    admin: { create: { permissions: ['*'] } },
+    admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
   } }));
   users.push(u.id);
   const token = app.jwt.sign({ userId: u.id, role: 'SUPER_ADMIN', jti: nanoid(8) });

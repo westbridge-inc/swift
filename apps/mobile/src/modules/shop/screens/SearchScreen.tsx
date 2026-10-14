@@ -105,7 +105,7 @@ function ResultRow({
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={closed ? `${name}. Closed right now` : sub ? `${name}. ${sub}` : name}
+      accessibilityLabel={[name, sub, closed ? 'Closed right now' : null].filter(Boolean).join('. ')}
     >
       {({ pressed }) => (
         <View
@@ -132,13 +132,16 @@ function ResultRow({
               {name}
             </T>
             {meta}
+            {/* A dish keeps its store's name under it when that store is closed:
+                the closed line is added, never swapped in for the name. */}
+            {sub ? (
+              <T variant="caption" tone="muted" numberOfLines={1}>
+                {sub}
+              </T>
+            ) : null}
             {closed ? (
               <T variant="micro" tone="faint">
                 Closed right now
-              </T>
-            ) : sub ? (
-              <T variant="caption" tone="muted" numberOfLines={1}>
-                {sub}
               </T>
             ) : null}
           </View>
@@ -225,7 +228,11 @@ export function SearchScreen() {
   const places: any[] = engineMode
     ? (openNow ? engineVendors.filter((v) => v.isCurrentlyOpen !== false) : engineVendors)
     : browseResults;
-  const dishes: any[] = engineMode ? (engine.data?.items ?? []) : [];
+  // [owner 13 Oct] Search returns closed stores' dishes too, each marked by its
+  // store's live state (`vendorIsCurrentlyOpen`; an older server omits it and
+  // the dish reads as open, as before). "Open now" narrows dishes the same way.
+  const engineDishes: any[] = engineMode ? (engine.data?.items ?? []) : [];
+  const dishes: any[] = openNow ? engineDishes.filter((d) => d.vendorIsCurrentlyOpen !== false) : engineDishes;
   const suggestions: any[] = (suggestionsQ.data ?? []).filter((s: any) => s.text?.toLowerCase() !== text.toLowerCase()).slice(0, 6);
   const resultsBusy = engineMode ? engine.isLoading : vendors.isLoading;
   const resultsError = engineMode ? engine.isError : vendors.isError;
@@ -490,6 +497,7 @@ export function SearchScreen() {
                             glyph="food"
                             name={it.name}
                             sub={it.categoryName ? `${it.vendorName} · ${it.categoryName}` : it.vendorName}
+                            closed={it.vendorIsCurrentlyOpen === false}
                             trailing={<Money amount={it.basePrice} />}
                             onPress={() => navigation.navigate('MenuItem', { itemId: it.id, vendorId: it.vendorId })}
                           />

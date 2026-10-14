@@ -1,3 +1,4 @@
+import { assertPlacesConfig } from './places-config';
 import type { PrismaClient } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
@@ -369,6 +370,7 @@ export class OsmPlacesProvider implements PlacesProvider {
 
 /** Provider selection is config, not code. Defaults to local so CI needs no key. */
 export function getPlacesProvider(prisma: PrismaClient): PlacesProvider {
+  assertPlacesConfig();
   const provider = process.env['PLACES_PROVIDER'] ?? 'local';
   switch (provider) {
     case 'local':

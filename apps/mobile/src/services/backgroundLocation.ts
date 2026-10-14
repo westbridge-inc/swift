@@ -9,7 +9,7 @@ import { queryClient } from '../lib/queryClient';
 import { initSecureStorage, zustandStorage } from '../lib/storage';
 import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
 import type { AuthPrincipalBoundary, AuthSessionSnapshot } from '../lib/authSession';
-import { createMoverBackgroundLocationRuntime } from '../lib/moverBackgroundRuntime';
+import { createMoverBackgroundLocationRuntime, locationReplyAnswer } from '../lib/moverBackgroundRuntime';
 import {
   createMoverLocationDurableStorage,
   MOVER_LOCATION_LEGACY_SECURE_STORE_KEY,
@@ -88,7 +88,9 @@ const runtime = createMoverBackgroundLocationRuntime({
     const response = fix
       ? await service.location(sample.latitude, sample.longitude, session, fix)
       : await service.location(sample.latitude, sample.longitude, session);
-    return { accepted: response?.data?.data?.accepted };
+    // [LOCATION-BG] The whole reply body, read by the one adapter: an accepted
+    // fix used to arrive as a bare { success: true } and count as malformed.
+    return locationReplyAnswer(response?.data);
   },
   invalidateMoverQueries: () => {
     void queryClient.invalidateQueries({ queryKey: ['mover'] });

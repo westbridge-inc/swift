@@ -200,9 +200,20 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
   RS=$(db_query \
     "SELECT value FROM platform_config WHERE key='last_restore_rehearsal_seconds';" 2>/dev/null | tr -d '"' || true)
   if [ -z "$RH" ]; then
-    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh deploy/backups/<latest>.dump"
+    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh deploy/backups/<latest>.dump (production dumps are encrypted: the owner runs deploy/backup-drill.sh from his own computer)"
   else
     ok "last restore rehearsal: $RH — took ${RS:-?}s (that is the recovery time for this data)"
+  fi
+fi
+
+# [BACKUP-ENC · Opus review 14 Oct, S3-2] Production backs up hourly (owner
+# ruling, 13 Oct). The timer is installed by hand (PILOT-RUNBOOK §4), and a
+# missing one is silent until the freshness alarm: say it here.
+if [ -f "$HERE/.env" ] && [ "$(grep -E '^PILOT_ENV=' "$HERE/.env" | head -1 | cut -d= -f2- || true)" = production ]; then
+  if systemctl is-enabled --quiet swift-backup-hourly.timer 2>/dev/null && systemctl is-active --quiet swift-backup-hourly.timer 2>/dev/null; then
+    ok "the hourly backup timer is enabled and active"
+  else
+    bad "production's hourly backup timer (swift-backup-hourly.timer) is not enabled and active: sudo systemctl enable --now swift-backup-hourly.timer (PILOT-RUNBOOK §4)"
   fi
 fi
 
