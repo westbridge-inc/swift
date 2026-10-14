@@ -37,6 +37,7 @@ import {
 async function customerHost(rows: Row[]) {
   const store = orderStore(rows);
   const prisma = prismaDouble(store, {
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
     customer: { findUnique: async () => ({ id: 'cust-1', userId: 'user-customer', referralCode: 'REF1' }) },
     vendor: { findMany: async () => [] },
     item: { findMany: async () => [] },

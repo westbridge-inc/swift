@@ -1,3 +1,4 @@
+import { readFeePause } from '../modules/billing/mmg-pause';
 import { resolveFinanceConfirmation, confirmationReviewQueue } from '../modules/billing/confirmation-finance';
 import { ExpoPushProvider, withPushRetry, type NotificationChannels } from '../providers/notifications/channels';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -72,8 +73,8 @@ describe('owner: a full 48 active hours of weekly-fee grace on every path', () =
     const { sub } = await fixture();
     await run(sub.id, 0);
     const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(47)).operable).toBe(true);
-    expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(at(47)) } })).toBe(0);
+    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, await readFeePause(db), at(47)).operable).toBe(true);
+    expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(await readFeePause(db), at(47)) } })).toBe(0);
   });
 
   it('three direct failures inside 47 hours cannot suspend or close the vendor', async () => {
@@ -84,7 +85,7 @@ describe('owner: a full 48 active hours of weekly-fee grace on every path', () =
     const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(fresh.status).toBe('PAST_DUE');
     expect((await db.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).status).toBe('ACTIVE');
-    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(47)).operable).toBe(true);
+    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, await readFeePause(db), at(47)).operable).toBe(true);
   });
 
   it('the ordinary three-failure ladder can suspend after 48 full hours', async () => {
@@ -101,8 +102,8 @@ describe('owner: a full 48 active hours of weekly-fee grace on every path', () =
     await run(sub.id, 0); await run(sub.id, 24); await run(sub.id, 48); await run(sub.id, 100);
     const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(fresh.status).toBe('PAST_DUE');
-    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
-    expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(at(100)) } })).toBe(0);
+    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, await readFeePause(db), at(100)).operable).toBe(true);
+    expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(await readFeePause(db), at(100)) } })).toBe(0);
   });
 });
 
@@ -139,7 +140,7 @@ describe.each(['MMG_HELD', 'CARD_UNKNOWN', 'CARD_3DS', 'LEGACY_CARD_UNKNOWN'] as
     const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(fresh.status).toBe('PAST_DUE');
     expect(fresh.failedAttempts).toBe(2);
-    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
+    expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, await readFeePause(db), at(100)).operable).toBe(true);
     expect(await db.notification.count({ where: { userId: user.id } })).toBe(before);
   });
 });
@@ -171,7 +172,7 @@ describe('remaining active time and exact source resolution', () => {
     expect(resumed.status).toBe('PAST_DUE');
     expect(resumed.billingEnforcementDueAt).toEqual(at(101));
     expect(resumed.nextRetryAt).toEqual(at(101));
-    expect(subscriptionOperability(resumed, { missingRow: 'BLOCK' }, new Date(at(101).getTime() - 1)).operable).toBe(true);
+    expect(subscriptionOperability(resumed, { missingRow: 'BLOCK' }, await readFeePause(db), new Date(at(101).getTime() - 1)).operable).toBe(true);
     const attempts = await db.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_ATTEMPT' } });
     expect(await run(sub.id, 100.999)).toBe('pending');
     expect(await run(sub.id, 101)).toBe('suspended');
@@ -209,8 +210,8 @@ describe('remaining active time and exact source resolution', () => {
     await run(sub.id, 0); await run(sub.id, 1); await run(sub.id, 2);
     const checkout = await heldCheckout(sub.id, user.id, 50);
     const held = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(subscriptionOperability(held, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
-    expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(at(100)) } })).toBe(0);
+    expect(subscriptionOperability(held, { missingRow: 'BLOCK' }, await readFeePause(db), at(100)).operable).toBe(true);
+    expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(await readFeePause(db), at(100)) } })).toBe(0);
     await rejectCheckout(sub.id, checkout.id, 100);
     expect((await db.subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe('PAST_DUE');
     expect(await run(sub.id, 100)).toBe('pending');
@@ -222,7 +223,7 @@ describe('remaining active time and exact source resolution', () => {
     await run(sub.id, 0); await run(sub.id, 24); await run(sub.id, 48);
     await heldCheckout(sub.id, user.id, 49);
     const held = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(subscriptionOperability(held, { missingRow: 'BLOCK' }, at(100)).operable).toBe(false);
+    expect(subscriptionOperability(held, { missingRow: 'BLOCK' }, await readFeePause(db), at(100)).operable).toBe(false);
     expect((await db.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).status).toBe('SUSPENDED');
   });
 
