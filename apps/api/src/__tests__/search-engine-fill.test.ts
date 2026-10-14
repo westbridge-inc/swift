@@ -138,7 +138,7 @@ async function store(key: string, name: string, dish: string, opts: { at?: { lat
   // What the index holds — its own copy, taken at its last sync.
   docs[key] = {
     vendor: { id: `${TENANT}__${vendor.id}`, entityId: vendor.id, tenantId: TENANT, name, vendorType: 'RESTAURANT', ...at, isCurrentlyOpen: opts.indexedOpen ?? opts.open ?? true },
-    item: { id: `${TENANT}__${item.id}`, entityId: item.id, tenantId: TENANT, name: dish, vendorId: vendor.id, vendorName: name, basePrice: 1500, createdAt: Date.now() },
+    item: { id: `${TENANT}__${item.id}`, entityId: item.id, tenantId: TENANT, name: dish, vendorId: vendor.id, vendorName: name, basePrice: 1500, createdAt: Date.now(), vendorIsCurrentlyOpen: opts.indexedOpen ?? opts.open ?? true },
   };
 }
 
@@ -193,18 +193,35 @@ describe('the index path fills the page from live matches', () => {
     expect(data.items.map((i: { id: string }) => i.id)).toEqual([ids['nearDish']]);
   });
 
-  it('ten since-closed hits ahead of an open one do not leave the page empty', async () => {
+  it('[owner 13 Oct] since-closed hits stay in the answer, marked closed, after the open one', async () => {
     engine.vendorDocs = [...Array.from({ length: 10 }, (_, i) => docs[`closed${i + 1}`]!.vendor), docs['near']!.vendor];
     engine.itemDocs = [];
     const res = await signedIn('qzxv', 10);
-    expect(res.json().data.vendors.map((v: { id: string }) => v.id)).toEqual([ids['near']]);
+    const vendors = res.json().data.vendors as Array<{ id: string; isCurrentlyOpen: boolean }>;
+    expect(vendors).toHaveLength(10);
+    expect(vendors[0]).toMatchObject({ id: ids['near'], isCurrentlyOpen: true });
+    const closedIds = new Set(Array.from({ length: 10 }, (_, i) => ids[`closed${i + 1}`]));
+    for (const v of vendors.slice(1)) {
+      expect(closedIds.has(v.id)).toBe(true);
+      expect(v.isCurrentlyOpen).toBe(false); // the live state, not the index copy (which says open)
+    }
   });
 
-  it('a store that opened after its last index sync is found (the live gate decides open, not the stale copy)', async () => {
+  it('a store that opened after its last index sync is found and shown open (the live gate decides open, not the stale copy)', async () => {
     engine.vendorDocs = [docs['bakery']!.vendor];
     engine.itemDocs = [];
     const res = await signedIn('qzxv', 10);
-    expect(res.json().data.vendors.map((v: { id: string }) => v.id)).toEqual([ids['bakery']]);
+    const vendors = res.json().data.vendors as Array<{ id: string; isCurrentlyOpen: boolean }>;
+    expect(vendors.map((v) => v.id)).toEqual([ids['bakery']]);
+    expect(vendors[0]!.isCurrentlyOpen).toBe(true);
+  });
+
+  it('[owner 13 Oct] a dish is marked by its store\'s LIVE open state, open stores\' dishes first', async () => {
+    engine.vendorDocs = [];
+    // the index copies are stale both ways: closed1 indexed open, the bakery indexed closed
+    engine.itemDocs = [docs['closed1']!.item, docs['bakery']!.item];
+    const items = (await signedIn('qzxv', 10)).json().data.items as Array<{ id: string; vendorIsCurrentlyOpen: boolean }>;
+    expect(items.map((i) => [i.id, i.vendorIsCurrentlyOpen])).toEqual([[ids['bakeryDish'], true], [ids['closed1Dish'], false]]);
   });
 
   it('never more than the page asked for', async () => {
@@ -227,18 +244,23 @@ describe('a short index answer is topped up from the database', () => {
     expect(data.vendors.map((v: { id: string }) => v.id)).toContain(ids['tandoori']);
   });
 
-  it('a top-up never repeats what the index already returned, and never adds a closed or out-of-market store', async () => {
+  it('a top-up never repeats what the index already returned, never adds an out-of-market store, and lists closed stores after open ones, marked closed', async () => {
     engine.vendorDocs = [docs['tandoori']!.vendor];
     engine.itemDocs = [docs['tandoori']!.item];
     const data = (await signedIn('grill', 50)).json().data;
-    const vendorIdsOut = data.vendors.map((v: { id: string }) => v.id);
+    const vendors = data.vendors as Array<{ id: string; isCurrentlyOpen: boolean }>;
+    const vendorIdsOut = vendors.map((v) => v.id);
     expect(vendorIdsOut[0]).toBe(ids['tandoori']);
     expect(new Set(vendorIdsOut).size).toBe(vendorIdsOut.length);
     expect(vendorIdsOut).toContain(ids['near']);
     for (let n = 1; n <= 10; n += 1) {
       expect(vendorIdsOut).not.toContain(ids[`abroad${n}`]);
-      expect(vendorIdsOut).not.toContain(ids[`closed${n}`]);
+      // [owner 13 Oct] closed stores are found too, marked closed
+      expect(vendors.find((v) => v.id === ids[`closed${n}`])?.isCurrentlyOpen).toBe(false);
     }
+    const lastOpen = vendors.map((v) => v.isCurrentlyOpen).lastIndexOf(true);
+    const firstClosed = vendors.map((v) => v.isCurrentlyOpen).indexOf(false);
+    expect(lastOpen).toBeLessThan(firstClosed);
   });
 });
 
