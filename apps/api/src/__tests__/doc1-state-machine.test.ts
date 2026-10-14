@@ -37,6 +37,9 @@ const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 const REASON = `Decision ${RUN}: the document was reviewed against the checklist`;
 const MIGRATION = join(__dirname, '..', '..', 'prisma', 'migrations', '20260906090000_doc_state_machine', 'migration.sql');
+// [REPLACE-PENDING · owner request 8 Oct 2026] The table grew (a newer copy replaces one waiting for review); the newest
+// state-machine migration re-installs the generator, so it is the one that must mirror it verbatim.
+const LATEST_MIGRATION = join(__dirname, '..', '..', 'prisma', 'migrations', '20261011190000_doc_state_replace_pending', 'migration.sql');
 
 let app: FastifyInstance;
 let adminApp: FastifyInstance;
@@ -130,7 +133,8 @@ describe('[DOC-1 P5-1] the transition table is ONE table', () => {
     expect(isTransitionAllowed('REVIEW_QUEUED', 'APPROVED')).toBe(false);
     const sql = readFileSync(MIGRATION, 'utf8');
     expect(sql.startsWith(DOC_STATE_MIGRATION_HEADER)).toBe(true);
-    for (const statement of docStateMachineDdl()) expect(sql).toContain(statement);
+    const latest = readFileSync(LATEST_MIGRATION, 'utf8');
+    for (const statement of docStateMachineDdl()) expect(latest).toContain(statement);
   });
 
   it('a legacy insert (status only) derives its state; a planted state projects its legacy status', async () => {

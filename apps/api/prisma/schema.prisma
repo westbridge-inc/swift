@@ -1707,6 +1707,18 @@ model Item {
   /// Set when the inventory engine hid the item (stock hit 0) — distinguishes
   /// auto-hides (undone automatically on restock) from the owner's own toggle.
   autoHiddenAt      DateTime?
+  /// [GUARDRAILS §8] A person removed this item as prohibited (alcohol, tobacco,
+  /// vapes, 18+, medicines, cooking gas, fuel). One way: hidden everywhere and
+  /// never editable back. The class names what it is; the reason is shown to
+  /// the partner. Who did it lives in the admin audit trail, not on the row.
+  prohibitedAt      DateTime?
+  prohibitedClass   String?
+  prohibitedReason  String?
+  /// [GUARDRAILS §8] A banned WORD in the partner's own text holds the item
+  /// hidden until a person checks it. The approval is bound to the exact words
+  /// approved — the hash of the judged text — so any edit brings the check back.
+  reviewApprovedHash String?
+  reviewApprovedAt   DateTime?
   dietaryTags       String[]
   allergens         String[]
   totalOrdered      Int               @default(0)
