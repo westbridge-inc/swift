@@ -37,6 +37,11 @@ describe('destinationForUrl', () => {
     expect(destinationForUrl('swift://s/BCDFGHJKMN')).toEqual({ kind: 'short', code: 'BCDFGHJKMN' });
   });
 
+  it('opens stores whose address has capitals or underscores (the server mints name + nanoid)', () => {
+    expect(destinationForUrl('https://swiftgy.com/store/green-bowl-MSFa7a')).toEqual({ kind: 'store', slug: 'green-bowl-MSFa7a', code: null });
+    expect(destinationForUrl('https://swiftgy.com/store/sample-kitchen-aaKL9_')).toEqual({ kind: 'store', slug: 'sample-kitchen-aaKL9_', code: null });
+  });
+
   it('everything else is null — deeper paths, bad slugs, bad codes, junk', () => {
     for (const url of [
       'https://swiftgy.com/',
