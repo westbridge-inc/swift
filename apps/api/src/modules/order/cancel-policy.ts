@@ -20,8 +20,11 @@
 // `cancellationVerdict` is that rule.
 // ---------------------------------------------------------------------------
 
+// Kept light on purpose: boot-config imports FREE_CANCEL_WINDOW_MIN from here
+// and the value-free deploy preflight loads boot-config with no services, so
+// nothing heavy (Prisma, queues, notification) may be imported by this file.
+// The food-age fact is read by `readTooLateToDeliver` in dispatch/rescue.ts.
 import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-generation-keys';
-import { isTooOldToDeliver, type TooOldSubject } from '../dispatch/rescue';
 
 /** [owner #50] Minutes after placing during which a ride, a parcel or a
  *  booking cancels free whatever has happened since. Under LIFECYCLE_V2 a held
@@ -70,8 +73,8 @@ export type CancellationSnapshot = {
   noMoverFound?: boolean;
   /** [owner #46] The order is past the food-age cutoff with nobody to carry
    *  it — the rescue sweep's own rule (`isTooOldToDeliver`, dispatch/rescue).
-   *  Read by the caller with `readTooLateToDeliver` and passed in, like
-   *  `noMoverFound`. Absent means "not known to be true". */
+   *  Read by the caller with `readTooLateToDeliver` (dispatch/rescue) and
+   *  passed in, like `noMoverFound`. Absent means "not known to be true". */
   tooLateToDeliver?: boolean;
 };
 
@@ -114,23 +117,6 @@ export type CancellationVerdict =
 export function isStoreOrder(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'>): boolean {
   return (order.orderType === 'FOOD_DELIVERY' || order.orderType === 'GROCERY_DELIVERY')
     && order.fulfillment !== 'APPOINTMENT';
-}
-
-/**
- * [owner #46] Is this store order too late to deliver? The rescue sweep's
- * food-age cutoff, read for one order (the same scope the sweep cancels by).
- * Only a store order can be; any other kind is never read, so a ride or a
- * parcel never touches the cutoff's configuration. `config` reads the
- * tenant's cutoff; the order fields come from the caller's row (the cancel
- * path's is the locked one).
- */
-export async function readTooLateToDeliver(
-  config: Parameters<typeof isTooOldToDeliver>[0],
-  order: TooOldSubject & Pick<CancellationSnapshot, 'orderType' | 'fulfillment'>,
-  now: Date = new Date(),
-): Promise<boolean> {
-  if (!isStoreOrder(order)) return false;
-  return isTooOldToDeliver(config, order, now);
 }
 
 /**

@@ -10,6 +10,7 @@ import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import { sweepPage } from '../../lib/sweep-cursor';
 import { CHECKOUT_OUTBOX_VERSION, checkoutOutboxId } from '../order/checkout-outbox';
 import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
+import { isStoreOrder } from '../order/cancel-policy';
 import {
   deliveryGenerationSuffix,
   dispatchDeclinedKey,
@@ -181,6 +182,23 @@ export async function isTooOldToDeliver(prisma: PrismaClient, order: TooOldSubje
   if (order.readyAt == null || order.foodAgeWaivedAt != null) return false;
   const limit = await foodAgeLimitMinutes(prisma, order.orderType, order.tenantId);
   return foodAge(order, limit, now).tooOld;
+}
+
+/**
+ * [owner #46] Is this store order too late to deliver, for the ONE cancel
+ * predicate (order/cancel-policy.ts)? Only a store order can be; any other
+ * kind is never read, so a ride or a parcel never touches the cutoff's
+ * configuration. `config` reads the tenant's cutoff; the order fields come
+ * from the caller's row (the cancel path's is the locked one). Lives here,
+ * not in cancel-policy, so that file stays importable by the boot checks.
+ */
+export async function readTooLateToDeliver(
+  config: PrismaClient,
+  order: TooOldSubject,
+  now: Date = new Date(),
+): Promise<boolean> {
+  if (!isStoreOrder(order)) return false;
+  return isTooOldToDeliver(config, order, now);
 }
 
 export interface RetireableOrder {

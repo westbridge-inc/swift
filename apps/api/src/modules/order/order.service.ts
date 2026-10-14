@@ -22,7 +22,8 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { cancellationVerdict, readNoMoverFound, readTooLateToDeliver } from './cancel-policy';
+import { cancellationVerdict, readNoMoverFound } from './cancel-policy';
+import { readTooLateToDeliver } from '../dispatch/rescue';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
