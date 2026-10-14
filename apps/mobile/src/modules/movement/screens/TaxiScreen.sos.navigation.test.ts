@@ -211,6 +211,7 @@ vi.mock('../../../stores/authStore', () => {
 });
 
 import { api } from '../../../services/api';
+import { toast } from '../../../kit/toast';
 import { TaxiScreen } from './TaxiScreen';
 
 const ok = (data: unknown, status = 200): Reply => ({ status, data: { success: true, data } });
@@ -367,5 +368,109 @@ describe('the taxi passenger’s SOS is the ceremony, on the ride’s own immedi
     expect(dialog()).not.toBeNull();
     expect(dialogText()).toContain('App Review demo — nobody was alerted.');
     expect(dialogText()).toContain('This is the App Review demo. No one was alerted.');
+  });
+});
+
+// [DS1157] The ceremony stays mounted between opens. A failure the passenger
+// has SEEN and closed must not come back with the next question: the old
+// banner would greet a fresh SOS, and a question that still looks "pressed"
+// could not be waved away by a tap outside. What the passenger has NOT seen —
+// an answer that landed after they closed the popup mid-raise — is shown when
+// it opens again, never replaced unseen by a clean question.
+describe('a closed SOS opens again as a fresh question, never over an answer the passenger has not seen', () => {
+  it.each([
+    ['no signal at all', { status: 0, network: true } as Reply, 'You appear to be offline — Swift was NOT alerted.'],
+    ['a refused raise', refuse(500, 'INTERNAL'), 'Swift was NOT alerted — the request failed.'],
+  ] as const)('after %s was shown and closed: no old failure, a tap outside may close the question, and the press reaches the ride again', async (_label, failure, banner) => {
+    fx.routes[RIDE_SOS] = () => failure;
+    await mount();
+    await openSos();
+    await click(buttonNamed('Yes — get help now'));
+    expect(dialogText()).toContain(banner);
+    await click(buttonNamed('Close'));
+    expect(dialog()).toBeNull();
+
+    await openSos();
+    expect(dialogText()).toContain('Get emergency help?');
+    expect(dialogText(), 'the old failure came back with the fresh question').not.toContain('NOT alerted');
+    expect(buttonNamed('Try alerting Swift again')).toBeNull();
+    expect(buttonNamed('Yes — get help now')).not.toBeNull();
+    await tapOutside();
+    expect(dialog(), 'the fresh question could not be waved away by a tap outside').toBeNull();
+
+    fx.routes[RIDE_SOS] = () => ok(PAGED);
+    await openSos();
+    await click(buttonNamed('Yes — get help now'));
+    expect(sent(RIDE_SOS)).toHaveLength(2);
+    expect(dialogText()).toContain("Swift's safety team has been paged");
+  });
+
+  it('closed mid-raise, the answer still lands: reopening shows the paged alert, not a fresh question', async () => {
+    const answer = deferred();
+    fx.routes[RIDE_SOS] = answer.handler;
+    await mount();
+    await openSos();
+    await click(buttonNamed('Yes — get help now'));
+    expect(buttonNamed('Alerting Swift…')).not.toBeNull();
+    await click(buttonNamed('Close'));
+    expect(dialog()).toBeNull();
+    await act(async () => { answer.release(ok(PAGED)); });
+    await settle();
+
+    await openSos();
+    expect(dialogText(), 'the alert that landed while the popup was closed was lost').toContain("Swift's safety team has been paged");
+    await tapOutside();
+    expect(dialog()).not.toBeNull();
+    expect(sent(RIDE_SOS)).toHaveLength(1);
+  });
+
+  it('a failure that lands while the popup is closed is shown when it opens again; once seen and closed, the next open is fresh', async () => {
+    const answer = deferred();
+    fx.routes[RIDE_SOS] = answer.handler;
+    await mount();
+    await openSos();
+    await click(buttonNamed('Yes — get help now'));
+    await click(buttonNamed('Close'));
+    await act(async () => { answer.release({ status: 0, network: true }); });
+    await settle();
+
+    await openSos();
+    expect(dialogText(), 'a clean question replaced the news that Swift was NOT alerted').toContain('You appear to be offline — Swift was NOT alerted.');
+    expect(buttonNamed('Call 911')).not.toBeNull();
+    await tapOutside();
+    expect(dialog(), 'a tap outside hid the news that Swift was NOT alerted').not.toBeNull();
+
+    await click(buttonNamed('Close'));
+    await openSos();
+    expect(dialogText()).not.toContain('NOT alerted');
+    await tapOutside();
+    expect(dialog()).toBeNull();
+  });
+});
+
+// [DS1157 S4] Trip Guardian's "I need help" — the check-in answer, then the
+// SOS question one press away (never a raise the passenger did not press).
+describe('the Trip Guardian’s “I need help” opens the SOS ceremony', () => {
+  it.each([
+    ['the answer reached Swift', ok({ recorded: true }), false],
+    ['the answer did not send', { status: 0, network: true } as Reply, true],
+  ] as const)('%s: NEED_HELP is sent, the SOS question opens, and one press reaches the ride’s route', async (_label, reply, failed) => {
+    fx.routes['post /safety/guardian/checkin'] = () => reply;
+    await mount();
+    await act(async () => { fx.fire('guardian:checkin', { orderId: RIDE.id }); });
+    await settle();
+    expect(dialogText()).toContain('Everything okay?');
+
+    await click(buttonNamed('I need help'));
+    expect(sent('post /safety/guardian/checkin').map(bodyOf)).toEqual([{ response: 'NEED_HELP' }]);
+    expect(dialog(), 'I need help left the passenger with no SOS on screen').not.toBeNull();
+    expect(dialogText()).toContain('Get emergency help?');
+    expect(dialogText()).not.toContain('Everything okay?');
+    expect(sent(RIDE_SOS), 'an SOS was raised without the passenger pressing for it').toHaveLength(0);
+    expect(vi.mocked(toast.show).mock.calls.some(([m]) => m === "Your answer didn't send — if you need help, use SOS now.")).toBe(failed);
+
+    await click(buttonNamed('Yes — get help now'));
+    expect(sent(RIDE_SOS)).toHaveLength(1);
+    expect(dialogText()).toContain("Swift's safety team has been paged");
   });
 });
