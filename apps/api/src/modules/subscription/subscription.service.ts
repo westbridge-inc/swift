@@ -110,7 +110,6 @@ export class SubscriptionService {
         owner: {
           select: {
             user: { select: { countryCode: true } },
-            _count: { select: { vendors: true } },
           },
         },
       },
@@ -121,14 +120,13 @@ export class SubscriptionService {
     const countryCode = vendor.owner.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
     // A brand-new store has no catalogue yet, so it is born on the small tier
-    // and the weekly re-tier moves it up once its listings are counted. The
-    // franchise basis IS known at signup, though: the owner's fifth store
-    // should not spend its first week at the single-store price.
+    // and the weekly re-tier moves it up once its listings are counted. Each
+    // store is its own account with its own tier: how many other stores its
+    // owner has never changes its price (owner, 13 Oct 2026).
     const priced = partnerRateFor(tiers, {
       kind: 'VENDOR',
       isService: vendor.vendorType === 'SERVICE',
       activeListings: 0,
-      ownedStores: vendor.owner._count.vendors,
     });
     return { existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
   }
