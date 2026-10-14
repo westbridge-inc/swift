@@ -147,7 +147,9 @@ describe('[S3-L1] both entry points run the check before anything is served or r
   it('worker.ts: on its own client, before the job runtime starts, awaited, failure exits', () => {
     const w = code('worker.ts');
     const main = w.indexOf('async function main()');
-    const client = w.indexOf('const prisma = new PrismaClient(', main);
+    // [MASTER-075] The worker's one client is the shared scoped construction
+    // (master075-worker-wall.test.ts), never a raw PrismaClient.
+    const client = w.indexOf('const prisma = createScopedProcessClient(', main);
     const check = w.indexOf('await assertDeploymentIdentityMatchesMode(prisma);', main);
     const runtime = w.indexOf('initializeJobRuntime(', main);
     expect(main).toBeGreaterThan(-1);
