@@ -219,8 +219,6 @@ async function expectCancelledFree(id: string, res: { statusCode: number; body: 
   expect({ status: row.status, lateCancelFeeDue: row.lateCancelFeeDue }).toEqual({ status: 'CANCELLED', lateCancelFeeDue: 0 });
 }
 
-let customer: { userId: string; token: string };
-
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   app = Fastify({ logger: false });
