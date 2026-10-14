@@ -33,6 +33,13 @@ async function submit(actor: Actor, docType: string) {
   return { id: submitted.json().data.id as string, bytes };
 }
 
+/** [VERIFY-DOCS V3] An admin who reviews documents holds the explicit document reviewer grant (`*` never confers it). */
+async function reviewer(): Promise<Actor> {
+  const admin = await h.actor(['ADMIN']);
+  await h.sys(() => h.app.prisma.admin.update({ where: { userId: admin.userId }, data: { permissions: ['*', 'documents.review'] } }));
+  return admin;
+}
+
 async function review(admin: Actor, document: { id: string; bytes: Buffer }, approve: boolean) {
   const link = await h.call('GET', `/api/v1/admin/verification/${document.id}/document-url`, admin.token, undefined, REASON);
   expect(link.statusCode).toBe(200);
@@ -60,7 +67,7 @@ async function review(admin: Actor, document: { id: string; bytes: Buffer }, app
 describe('GOLD-7 · VEND-01 — join, documents and approval', () => {
   it('requires the agreement, creates a pending store and approves it only after every uploaded document is reviewed', async () => {
     const applicant = await h.actor();
-    const admin = await h.actor(['ADMIN']);
+    const admin = await reviewer();
     const outsider = await h.actor();
     for (const acceptance of [{}, { acceptAgreement: false }]) {
       const refused = await h.call('POST', '/api/v1/partner/become', applicant.token, { ...application(applicant), ...acceptance });
@@ -106,7 +113,7 @@ describe('GOLD-7 · VEND-01 — join, documents and approval', () => {
 
   it('rejects an unreadable submitted document and leaves that applicant pending, with one durable decision', async () => {
     const applicant = await h.actor();
-    const admin = await h.actor(['ADMIN']);
+    const admin = await reviewer();
     const joined = await h.call('POST', '/api/v1/partner/become', applicant.token, { ...application(applicant), acceptAgreement: true });
     expect(joined.statusCode, joined.json().error?.code).toBe(201);
     const document = await submit(applicant, 'business_registration');
