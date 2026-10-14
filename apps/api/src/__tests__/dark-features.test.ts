@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DARK_FEATURES, darkFeatureStatus, darkFeaturesOff } from '../modules/ops/dark-features';
+import { moverPushRequired } from '../modules/notification/mover-push-authority';
 
 // ---------------------------------------------------------------------------
 // A capability may ship switched off. It may not ship switched off SILENTLY.
@@ -55,6 +56,16 @@ describe('[dark features] every silent switch is registered', () => {
     expect(byKey({ LIFECYCLE_V2: '1' }).off).not.toContain('order_hold');
   });
 
+  it('push before going online is registered, and reads exactly as the GO doors read it', () => {
+    // [L07] Off is the deliberate launch posture; it still may not be silent.
+    for (const value of [undefined, '', 'false', '1', 'TRUE', 'true']) {
+      const env = value === undefined ? {} : { MOVER_PUSH_REQUIRED: value };
+      const row = darkFeatureStatus(env, {}).find((r) => r.key === 'mover_push_required');
+      expect(row, 'MOVER_PUSH_REQUIRED is in the register').toBeTruthy();
+      expect([value, row!.on]).toEqual([value, moverPushRequired(env)]);
+    }
+  });
+
   it('whitespace is not a fingerprint', () => {
     expect(darkFeatureStatus({ ANDROID_CERT_SHA256: '   ' }).find((r) => r.key === 'android_app_links')!.on).toBe(false);
   });
@@ -102,6 +113,7 @@ describe('[dark features] the registry matches the code that reads the switch', 
       read('apps/api/src/modules/safety/sos-escalation.ts'),
       read('apps/api/src/modules/discovery/discovery.routes.ts'),
       read('apps/api/src/modules/order/order.service.ts'),
+      read('apps/api/src/modules/notification/mover-push-authority.ts'),
     ].join('\n');
     expect(sources.length, 'could not read the sources — the check cannot run').toBeGreaterThan(500);
     for (const f of DARK_FEATURES) {
