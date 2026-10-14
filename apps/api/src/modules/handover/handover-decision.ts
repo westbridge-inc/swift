@@ -37,6 +37,25 @@ export async function authorizeHandover(tx: Prisma.TransactionClient, source: Or
   }
 }
 
+/** [MOB-023 · F-103-01] The delivered door's own answers, on the locked row and
+ *  BEFORE the seam's generic gates (as the door answered on main): a screen
+ *  that rendered an older payment or custody state is refused as stale, and a
+ *  rail whose money has not landed is refused with the door's ONE mapping. */
+export function preflightHandoverDoor(source: Order, proof: HandoverDecision): void {
+  if (proof.purpose !== 'delivery') return;
+  if (!handoverVersionMatches(source, proof.handoverVersion)) {
+    handoverBlockCounter.labels('STALE_VERSION').inc();
+    throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
+  }
+  const authority = handoverAuthorityFor(source);
+  if (authority.permitted === 'BLOCKED') {
+    handoverBlockCounter.labels(authority.blockReason ?? 'BLOCKED').inc();
+    const refusal = HANDOVER_REFUSALS[authority.blockReason ?? ''];
+    throw new AppError(409, refusal?.code ?? (source.paymentStatus === 'PENDING' ? 'MMG_PAYMENT_PENDING' : 'PAYMENT_NOT_CAPTURED'),
+      refusal?.message ?? `Payment is ${source.paymentStatus.toLowerCase()} — do not hand over. Refresh, or ask the store to confirm the payment.`);
+  }
+}
+
 /** A wrong guess returns a value, so its attempt commits before the caller
  * reports the error. Success and the terminal facts share this same lock. */
 export async function verifyHandoverDecision(tx: Prisma.TransactionClient, source: Order, proof: HandoverDecision): Promise<HandoverFailure | null> {
@@ -46,17 +65,6 @@ export async function verifyHandoverDecision(tx: Prisma.TransactionClient, sourc
       throw new AppError(409, 'CASH_HANDOVER_ONLY', 'Customer cash handover is available only for cash orders.');
     }
     if (proof.purpose === 'delivery') {
-      if (!handoverVersionMatches(source, proof.handoverVersion)) {
-        handoverBlockCounter.labels('STALE_VERSION').inc();
-        throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
-      }
-      const authority = handoverAuthorityFor(source);
-      if (authority.permitted === 'BLOCKED') {
-        handoverBlockCounter.labels(authority.blockReason ?? 'BLOCKED').inc();
-        const refusal = HANDOVER_REFUSALS[authority.blockReason ?? ''];
-        throw new AppError(409, refusal?.code ?? (source.paymentStatus === 'PENDING' ? 'MMG_PAYMENT_PENDING' : 'PAYMENT_NOT_CAPTURED'),
-          refusal?.message ?? `Payment is ${source.paymentStatus.toLowerCase()} — do not hand over. Refresh, or ask the store to confirm the payment.`);
-      }
       if (source.paymentMethod === 'CASH' && source.paymentStatus !== 'CAPTURED') {
         throw new AppError(409, 'PAYMENT_NOT_CAPTURED', 'Collect the cash first — use “Confirm payment & hand over” to record it, which completes the delivery.');
       }

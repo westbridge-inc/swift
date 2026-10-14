@@ -206,12 +206,15 @@ describe('handover attempt budget is one locked order decision', () => {
       expect(await f.request('135790')).toMatchObject({ status: 200 });
       const row = await app.prisma.orderOutbox.findFirstOrThrow({ where: { orderId: f.order.id, kind: HANDOVER_NOTICE_KIND } });
       await app.prisma.deviceToken.create({ data: { userId: f.customer.id, token: `ExpoPushToken[synthetic-${nanoid(8)}]`, platform: 'ios' } });
+      // [TRANSFORMED after REVIEW-B S2-1] A customer with no device at completion is told once through the
+      // inbox and the row closes; this case grades a customer WITH a device whose first push failed.
+      await app.prisma.orderOutbox.update({ where: { id: row.id }, data: { processedAt: null, attempts: 0, availableAt: new Date() } });
       const push = vi.fn().mockRejectedValueOnce(new Error('synthetic provider outage')).mockResolvedValue({ sent: 1 });
       const publisher = new NotificationService(app.prisma, io as never, { push: { sendPush: push } } as never);
       const now = new Date(Date.now() + 600_000);
-      expect(await drainHandoverNotices({ prisma: app.prisma, notifications: publisher, now: () => now }, { orderId: f.order.id })).toEqual({ delivered: 0, pending: 1 });
+      expect(await drainHandoverNotices({ prisma: app.prisma, notifications: publisher, now: () => now }, { orderId: f.order.id })).toEqual({ delivered: 0, pending: 1, expired: 0 });
       expect((await app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: row.id } })).processedAt).toBeNull();
-      expect(await drainHandoverNotices({ prisma: app.prisma, notifications: publisher, now: () => new Date(now.getTime() + 600_000) }, { orderId: f.order.id })).toEqual({ delivered: 1, pending: 0 });
+      expect(await drainHandoverNotices({ prisma: app.prisma, notifications: publisher, now: () => new Date(now.getTime() + 600_000) }, { orderId: f.order.id })).toEqual({ delivered: 1, pending: 0, expired: 0 });
       expect(push).toHaveBeenCalledTimes(2);
       expect(await app.prisma.notification.count({ where: { dedupeKey: row.dedupeKey } })).toBe(1);
       expect(await app.prisma.orderStatusLog.count({ where: { orderId: f.order.id, status: door === 'pickup' ? 'COMPLETED' : 'DELIVERED' } })).toBe(1);
@@ -237,4 +240,56 @@ describe('handover attempt budget is one locked order decision', () => {
       expect((await app.prisma.order.findUniqueOrThrow({ where: { id: f.order.id } })).status).toBe(door === 'pickup' ? 'COMPLETED' : 'DELIVERED');
     });
   }
+});
+
+describe('[REVIEW-B 14 Oct S3-1] the store\'s authority is re-proved under the order lock', () => {
+  it('a store suspended after the route read but before the lock cannot complete the pickup, and no attempt is spent', async () => {
+    const f = await fixture('pickup');
+    if (!f.order.vendorId) throw new Error('pickup fixture has a store');
+    const held = await holdOrder(f.order.id, (tx) => tx.vendor.update({ where: { id: f.order.vendorId! }, data: { status: 'SUSPENDED', suspensionSource: 'ADMIN' } }));
+    const response = f.request('135790');
+    try { await waitForOrderWaiters(1); } finally { held.release(); await held.transaction; }
+    expect(await response).toMatchObject({ status: 403, code: 'VENDOR_SUSPENDED' });
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: f.order.id } });
+    expect(row).toMatchObject({ status: 'READY_FOR_PICKUP', pickupCodeAttempts: 0 });
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: f.order.id, status: 'COMPLETED' } })).toBe(0);
+  });
+});
+
+describe('[REVIEW-B 14 Oct S2-1] every handover notice ends', () => {
+  const later = (row: { createdAt: Date }, minutes: number) => new Date(row.createdAt.getTime() + minutes * 60_000);
+  it('a customer with no push channel is told once through the inbox, and the row closes', async () => {
+    const publish = vi.spyOn(NotificationService.prototype, 'publishPersisted');
+    const f = await fixture('delivered');
+    expect(await f.request('135790')).toMatchObject({ status: 200 });
+    const row = await app.prisma.orderOutbox.findFirstOrThrow({ where: { orderId: f.order.id, kind: HANDOVER_NOTICE_KIND } });
+    expect(row.processedAt).not.toBeNull();
+    const publisher = new NotificationService(app.prisma, io as never, { push: { sendPush: vi.fn() } } as never);
+    for (let hour = 1; hour <= 4; hour += 1) {
+      expect(await drainHandoverNotices({ prisma: app.prisma, notifications: publisher, now: () => later(row, hour * 60) }, { orderId: f.order.id }))
+        .toEqual({ delivered: 0, pending: 0, expired: 0 });
+    }
+    const notificationId = (row.payload as { notificationId: string }).notificationId;
+    expect(publish.mock.calls.filter(([id]) => id === notificationId)).toHaveLength(1);
+  });
+  it('a push that never confirms is retried within its window, then closed unconfirmed; the inbox notice remains', async () => {
+    const f = await fixture('delivered');
+    expect(await f.request('135790')).toMatchObject({ status: 200 });
+    const row = await app.prisma.orderOutbox.findFirstOrThrow({ where: { orderId: f.order.id, kind: HANDOVER_NOTICE_KIND } });
+    await app.prisma.deviceToken.create({ data: { userId: f.customer.id, token: `ExpoPushToken[synthetic-${nanoid(8)}]`, platform: 'ios' } });
+    await app.prisma.orderOutbox.update({ where: { id: row.id }, data: { processedAt: null, attempts: 0, availableAt: new Date() } });
+    const push = vi.fn().mockRejectedValue(new Error('synthetic provider outage'));
+    const publisher = new NotificationService(app.prisma, io as never, { push: { sendPush: push } } as never);
+    expect(await drainHandoverNotices({ prisma: app.prisma, notifications: publisher, now: () => later(row, 10) }, { orderId: f.order.id }))
+      .toEqual({ delivered: 0, pending: 1, expired: 0 });
+    expect(await drainHandoverNotices({ prisma: app.prisma, notifications: publisher, now: () => later(row, 31) }, { orderId: f.order.id }))
+      .toEqual({ delivered: 0, pending: 0, expired: 1 });
+    const closed = await app.prisma.orderOutbox.findUniqueOrThrow({ where: { id: row.id } });
+    expect(closed.processedAt).not.toBeNull();
+    expect(closed.lastError).toMatch(/within its window; the inbox notice remains/);
+    expect(await drainHandoverNotices({ prisma: app.prisma, notifications: publisher, now: () => later(row, 240) }, { orderId: f.order.id }))
+      .toEqual({ delivered: 0, pending: 0, expired: 0 });
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(await app.prisma.notification.count({ where: { dedupeKey: row.dedupeKey } })).toBe(1);
+  });
 });

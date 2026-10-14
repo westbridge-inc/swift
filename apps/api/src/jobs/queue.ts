@@ -1356,6 +1356,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { drainHandoverNotices } = await import('../modules/handover/handover-notice');
           const handovers = await drainHandoverNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
           if (handovers.pending > 0) ctx.log.warn(handovers, 'handover notices remain pending');
+          else if (handovers.expired > 0) ctx.log.warn(handovers, 'handover pushes closed unconfirmed; the inbox notices remain');
         });
         if (drainFailure !== undefined) throw drainFailure;
         return;

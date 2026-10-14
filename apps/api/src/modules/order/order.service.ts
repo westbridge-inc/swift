@@ -1,5 +1,5 @@
 import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
-import { authorizeHandover, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
+import { authorizeHandover, preflightHandoverDoor, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
 import { readFeePause } from '../billing/mmg-pause';
 import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
@@ -2108,6 +2108,7 @@ export class OrderService {
         const order = await tx.order.findUniqueOrThrow({ where: { id: input.orderId }, omit: HANDOVER_SECRETS_OMIT, include: CANONICAL_TRANSITION_INCLUDE });
         return { order, sourceStatus: source.status, cancelledSearches: 0, earningNotices: [], replayed: true };
       }
+      preflightHandoverDoor(source, input.handover);
     }
     if (!input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)

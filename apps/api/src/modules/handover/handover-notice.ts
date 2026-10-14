@@ -4,6 +4,9 @@ import type { NotificationService } from '../notification/notification.service';
 import { checkoutOutboxId } from '../order/checkout-outbox';
 
 export const HANDOVER_NOTICE_KIND = 'handover-completed-notice';
+/** [REVIEW-B 14 Oct S2-1] A failing push is retried for this long, then closed
+ *  unconfirmed (the inbox notice remains), as the rider-cancel notice does. */
+export const HANDOVER_NOTICE_WINDOW_MS = 30 * 60_000;
 
 /** Terminal proof and its customer-facing obligation share the same commit. */
 export async function persistHandoverNotice(tx: Prisma.TransactionClient, order: {
@@ -25,15 +28,19 @@ export async function persistHandoverNotice(tx: Prisma.TransactionClient, order:
   } });
 }
 
-/** One inbox row; retry push submission after outages or a lost response. */
+/** One inbox row; retry push submission after outages or a lost response.
+ *  Every row ends: delivered once when the customer has no push channel (the
+ *  inbox row IS the channel), delivered when push confirms, or closed
+ *  unconfirmed after HANDOVER_NOTICE_WINDOW_MS. */
 export async function drainHandoverNotices(
   deps: { prisma: PrismaClient; notifications: Pick<NotificationService, 'publishPersisted'>; now?: () => Date },
   options: { orderId?: string; limit?: number } = {},
-): Promise<{ delivered: number; pending: number }> {
+): Promise<{ delivered: number; pending: number; expired: number }> {
   const system = <T>(fn: () => Promise<T>) => runAsSystem('handover-notice-drain', fn);
   const clock = () => deps.now?.() ?? new Date();
   let delivered = 0;
   let pending = 0;
+  let expired = 0;
   for (let i = 0; i < Math.min(200, Math.max(1, options.limit ?? 50)); i += 1) {
     const now = clock();
     const due = {
@@ -49,6 +56,15 @@ export async function drainHandoverNotices(
     }));
     if (claim.count !== 1) continue;
     const attempts = row.attempts + 1;
+    if (now.getTime() - row.createdAt.getTime() >= HANDOVER_NOTICE_WINDOW_MS) {
+      // The end state for a push that never confirms: closed, recorded, no more socket repeats.
+      await system(() => deps.prisma.orderOutbox.updateMany({
+        where: { id: row.id, processedAt: null, attempts },
+        data: { processedAt: clock(), claimedAt: null, lastError: 'Handover push not confirmed within its window; the inbox notice remains' },
+      }));
+      expired += 1;
+      continue;
+    }
     let sent = false;
     try {
       const payload = row.payload as Record<string, unknown>;
@@ -58,7 +74,14 @@ export async function drainHandoverNotices(
             id: payload['notificationId'] as string, user: { tenantId: row.tenantId }, userId: payload['customerUserId'] as string,
             dedupeKey: row.dedupeKey,
           }, select: { id: true } });
-          return notice ? deps.notifications.publishPersisted(notice.id, { requirePush: true }) : false;
+          if (!notice) return false;
+          // No push channel (push turned off, or no active device): the inbox
+          // row is the delivery, so publish it once and close; push is
+          // required only where a device could actually receive it.
+          const customer = await deps.prisma.user.findFirst({ where: { id: payload['customerUserId'] as string, tenantId: row.tenantId }, select: { notificationPrefs: true } });
+          const pushOn = (customer?.notificationPrefs as { push?: unknown } | null)?.push !== false;
+          const devices = pushOn ? await deps.prisma.deviceToken.count({ where: { userId: payload['customerUserId'] as string, isActive: true } }) : 0;
+          return deps.notifications.publishPersisted(notice.id, { requirePush: devices > 0 });
         });
       }
     } catch { /* The durable notice remains pending; the sweep retries it. */ }
@@ -71,5 +94,5 @@ export async function drainHandoverNotices(
     }));
     if (sent) delivered += 1; else pending += 1;
   }
-  return { delivered, pending };
+  return { delivered, pending, expired };
 }
