@@ -353,7 +353,7 @@ describe('proof deadlines remain authoritative at the custody write', () => {
       const session = await app.prisma.session.findFirstOrThrow({ where: { userId: mover.userId } });
       const driver = await app.prisma.driver.create({ data: {
         userId: mover.userId, vehicleType: 'CAR', vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleColor: 'Blue',
-        vehicleYear: 2020, licensePlate: 'SYNTHETIC', driverLicenseUrl: '', vehicleInsuranceUrl: '',
+        vehicleYear: 2020, licensePlate: 'HSYNTHETIC' /* [owner 11 Oct] a taxi plate is H-series: the gate must let this driver reach the deadline write */, driverLicenseUrl: '', vehicleInsuranceUrl: '',
         isOnline: true, isAvailable: true, documentsVerified: true, locationSessionId: session.id,
       } });
       moverId = driver.id;
@@ -369,9 +369,11 @@ describe('proof deadlines remain authoritative at the custody write', () => {
     const expires = new Date(Date.now() + 1500);
     await document(mover.userId, 'drivers_licence', 'APPROVED', expires);
     const original = documentAuthority.lockMoverDocuments;
+    let lockedVerdictAllowed = false;
     vi.spyOn(documentAuthority, 'lockMoverDocuments').mockImplementationOnce(async (...args) => {
       const verdict = await original(...args); expect(verdict.allowed).toBe(true);
       expect(verdict.validUntil).toEqual(expires);
+      lockedVerdictAllowed = true;
       await beforeDeadlinePasses(expires); return verdict;
     });
     if (door === 'board') {
@@ -382,6 +384,8 @@ describe('proof deadlines remain authoritative at the custody write', () => {
       const dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
       await expect(dispatch.claimOrder(order.id, moverId, door === 'driver' ? 'DRIVER' : 'RIDER')).rejects.toThrow();
     }
+    // The refusal must come from the deadline at the write, after an ALLOWED locked verdict — never earlier.
+    expect(lockedVerdictAllowed).toBe(true);
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(fresh.status).toBe(door === 'driver' ? 'PENDING' : 'READY_FOR_PICKUP');
     expect(fresh.riderId).toBeNull(); expect(fresh.driverId).toBeNull();
@@ -420,7 +424,7 @@ it('driver GO enforces the proof deadline at its final SQL write', async () => {
   await app.prisma.user.update({ where: { id: mover.userId }, data: { activeRole: 'DRIVER', roles: ['RIDER', 'DRIVER'] } });
   const driver = await app.prisma.driver.create({ data: {
     userId: mover.userId, vehicleType: 'CAR', vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleColor: 'Blue',
-    vehicleYear: 2020, licensePlate: 'SYNTHETIC', driverLicenseUrl: '', vehicleInsuranceUrl: '', documentsVerified: true,
+    vehicleYear: 2020, licensePlate: 'HSYNTHETIC' /* [owner 11 Oct] a taxi plate is H-series: the gate must let this driver reach the deadline write */, driverLicenseUrl: '', vehicleInsuranceUrl: '', documentsVerified: true,
   } });
   await app.prisma.subscription.create({ data: {
     driverId: driver.id, type: 'TAXI_DRIVER', status: 'ACTIVE', weeklyRate: 9000,
@@ -433,13 +437,17 @@ it('driver GO enforces the proof deadline at its final SQL write', async () => {
   const expires = new Date(Date.now() + 1500);
   await document(mover.userId, 'drivers_licence', 'APPROVED', expires);
   const original = documentAuthority.lockMoverDocuments;
+  let lockedVerdictAllowed = false;
   vi.spyOn(documentAuthority, 'lockMoverDocuments').mockImplementationOnce(async (...args) => {
     const verdict = await original(...args); expect(verdict.allowed).toBe(true);
+    lockedVerdictAllowed = true;
     await beforeDeadlinePasses(expires); return verdict;
   });
   const response = await app.inject({ method: 'POST', url: '/api/v1/driver/go-online',
     headers: { authorization: `Bearer ${mover.token}` }, payload: { latitude: 6.8, longitude: -58.15 } });
   expect(response.statusCode).toBe(403);
+  // Refused at the final SQL write, after an allowed locked verdict — not by an earlier gate.
+  expect(lockedVerdictAllowed).toBe(true);
   expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } })).isOnline).toBe(false);
 });
 

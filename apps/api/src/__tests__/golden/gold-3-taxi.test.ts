@@ -124,7 +124,7 @@ async function makeDriver(firstName: string, fix: { lat: number; lng: number }) 
       vehicleModel: 'Allion',
       vehicleYear: 2020,
       vehicleColor: 'Silver',
-      licensePlate: `G3T-${seq}`,
+      licensePlate: `HG3T-${seq}`, // [owner 11 Oct] a taxi plate is H-series
       driverLicenseUrl: 'storage://gold3/dl.jpg',
       vehicleInsuranceUrl: 'storage://gold3/ins.jpg',
       documentsVerified: true,
@@ -145,7 +145,7 @@ async function makeDriver(firstName: string, fix: { lat: number; lng: number }) 
   drivers.push({ driverId: driver.id, token: u.token });
   const go = await call('POST', '/api/v1/driver/go-online', u.token, { latitude: fix.lat, longitude: fix.lng });
   expect(go.statusCode, go.body).toBe(200);
-  return { ...u, driverId: driver.id, plate: `G3T-${seq}` };
+  return { ...u, driverId: driver.id, plate: `HG3T-${seq}` };
 }
 
 /** Retire this file's free supply through the real route after each test. */
