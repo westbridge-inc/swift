@@ -2125,6 +2125,42 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
       expect((await call(p, 'GET', '/subscription')).json().data.payActions[1]).toMatchObject({ state: 'live' });
     });
 
+    it('[Opus S3-3] REFUND never sends more than the card payment took: above the session amount it is refused before any claim or call', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const { sessionId, txnId } = await heldPayment(p);
+      for (const amount of [2100.01, 2101, 4200, 99_999_999]) {
+        const over = await resolve(finance, sessionId, { action: 'REFUND', providerReference: txnId, amount });
+        expect(over.statusCode, over.body).toBe(409);
+        expect(over.json().error?.code).toBe('REFUND_ABOVE_PAYMENT');
+      }
+      expect(sent('/api/refund').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(0);
+      expect(await rowOf(sessionId)).toMatchObject({ status: 'HELD', providerRefundState: null, resolution: null });
+      // Exactly what was taken (one refund per session, so nothing was refunded before) is sent once.
+      const whole = await resolve(finance, sessionId, { action: 'REFUND', providerReference: txnId, amount: 2100 });
+      expect(whole.json().data, whole.body).toMatchObject({ status: 'FAILED', resolution: 'REFUNDED', refund: 'succeeded' });
+      expect(sent('/api/refund').filter((b) => b['TransactionIdentifier'] === txnId)).toEqual([
+        { Refund: true, TransactionIdentifier: txnId, TotalAmount: 2100, CurrencyCode: '328' },
+      ]);
+    });
+
+    it('[Opus S4-f] with the card rail off (CARD_RAIL_V2 and its drain both off) finance cannot act on a card session; draining it can', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const { sessionId, txnId } = await heldPayment(p);
+      process.env['CARD_RAIL_V2'] = '0';
+      for (const action of ['BOOK', 'REFUND', 'REFUNDED_IN_PORTAL', 'NOTHING_TAKEN'] as const) {
+        const off = await resolve(finance, sessionId, { action, providerReference: txnId, amount: 2100 });
+        expect(off.statusCode, `${action} ${off.body}`).toBe(404);
+        expect(off.json().error?.code).toBe('CARD_RAIL_UNAVAILABLE');
+      }
+      expect(await rowOf(sessionId)).toMatchObject({ status: 'HELD', providerRefundState: null, resolution: null });
+      expect(sent('/api/refund').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(0);
+      process.env['CARD_RAIL_V2_DRAIN'] = '1';
+      const drained = await resolve(finance, sessionId, { action: 'NOTHING_TAKEN', providerReference: txnId, amount: 2100 });
+      expect(drained.json().data, drained.body).toMatchObject({ status: 'FAILED', resolution: 'NOTHING_TAKEN' });
+    });
+
     it('[hypothesis: book AND refund] while a BOOK is booking, a refund or a "nothing taken" is refused; the week is booked once and nothing is refunded', async () => {
       const finance = await makeFinance();
       const p = await makeStore();
