@@ -40,6 +40,7 @@ import courierRoutes from '../modules/courier/courier.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
+import { moverPushRequired } from '../modules/notification/mover-push-authority';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { devChannelLog } from '../providers/notifications/channels';
@@ -498,6 +499,11 @@ describe('[REVIEW-PARTNER] going online works for both, exactly as in production
   });
 
   it('the rider goes online, streams location, sees an honestly EMPTY board and no offer, and goes offline', async () => {
+    // The reviewer's phone never granted notifications: no push token. GO
+    // still works, because the push rule is a server switch that is off.
+    expect(moverPushRequired()).toBe(false);
+    const riderUserId = app.jwt.verify<{ userId: string }>(tokens.rider).userId;
+    expect(await system(() => app.prisma.deviceToken.count({ where: { userId: riderUserId } }))).toBe(0);
     const on = await post('/api/v1/rider/go-online', tokens.rider, { latitude: SPOT.lat, longitude: SPOT.lng });
     expect(on.statusCode, on.body).toBe(200);
     expect(on.json().data).toEqual({ isOnline: true, isAvailable: true });
@@ -514,6 +520,9 @@ describe('[REVIEW-PARTNER] going online works for both, exactly as in production
   });
 
   it('the taxi driver goes online with NO weekly plan (the fiction holds none), streams location, sees an EMPTY board, and goes offline', async () => {
+    expect(moverPushRequired()).toBe(false);
+    const driverUserId = app.jwt.verify<{ userId: string }>(tokens.driver).userId;
+    expect(await system(() => app.prisma.deviceToken.count({ where: { userId: driverUserId } }))).toBe(0);
     const on = await post('/api/v1/driver/go-online', tokens.driver, { latitude: SPOT.lat, longitude: SPOT.lng });
     expect(on.statusCode, on.body).toBe(200);
     expect(on.json().data.isOnline).toBe(true);
