@@ -55,6 +55,7 @@ import {
   redispatchJobId,
   WITHDRAWN_CARD_SCREEN_SKEW_MS,
 } from './dispatch-generation-keys';
+import { assertOrderMayProceed } from '../compliance/prohibited-gate';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -213,12 +214,21 @@ export type OfferCashMath = {
  * model. If one ever becomes non-zero the split stops being true, so this
  * returns null and the card shows nothing rather than a breakdown that does not
  * add up. A wrong money split on a mover's screen is worse than no split.
+ *
+ * A TAXI RIDE HAS NO STORE. A ride is booked with subtotalBase = totalAmount =
+ * taxiFareTotal and deliveryFee 0, so read as a store order it told the driver
+ * "Pay the store <fare> · you keep 0" on every cash ride. For a ride the triple
+ * is: collect the total, pay no store, keep taxiFareTotal + tip — the SAME
+ * expression `createEarnings` pays the driver (TAXI_FARE + TIP). A ride with no
+ * stored fare is refused like any split that does not reconcile.
  */
 export function cashMathForOffer(order: {
+  orderType?: string;
   paymentMethod: string;
   totalAmount: unknown;
   subtotalBase: unknown;
   deliveryFee: unknown;
+  taxiFareTotal?: unknown;
   serviceFee: unknown;
   taxAmount: unknown;
   tipAmount: unknown;
@@ -227,9 +237,11 @@ export function cashMathForOffer(order: {
   if (order.paymentMethod !== 'CASH') return null;
 
   const n = (v: unknown) => Number(v);
+  const ride = order.orderType === 'TAXI';
+  if (ride && order.taxiFareTotal == null) return null;
   const total = n(order.totalAmount);
-  const vendorShare = riderFloatForOrder(order as { paymentMethod: string; subtotalBase: number });
-  const fee = n(order.deliveryFee);
+  const vendorShare = ride ? 0 : riderFloatForOrder(order as { paymentMethod: string; subtotalBase: number });
+  const fee = ride ? n(order.taxiFareTotal) : n(order.deliveryFee);
   const tip = n(order.tipAmount);
   const service = n(order.serviceFee);
   const tax = n(order.taxAmount);
@@ -1283,6 +1295,8 @@ export class DispatchService {
           // an arithmetic guess — see `cashMathForOffer`.
           totalAmount: true, subtotalCustomer: true, deliveryFee: true,
           serviceFee: true, taxAmount: true, tipAmount: true, discount: true,
+          // A ride's triple is its fare: no store, the driver keeps it all.
+          taxiFareTotal: true,
           vendor: { select: { name: true, owner: { select: { userId: true } } } },
           items: { select: { quantity: true, bulkUnits: true } },
         },
@@ -2651,6 +2665,8 @@ export class DispatchService {
       // self-order check so payment state is never disclosed to an
       // unauthorized mover. Covers legacy in-flight rows that predate the gate.
       assertMmgFulfilmentAllowed(lockedOrder, assignedStatus);
+      // [GUARDRAILS §8] The third assignment writer refuses an order holding a line Swift no longer allows, too.
+      await assertOrderMayProceed(tx, orderId, 'mover');
       if (pool === 'RIDER' && withheldAwaitingReadiness(lockedOrder)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(lockedOrder)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
 
