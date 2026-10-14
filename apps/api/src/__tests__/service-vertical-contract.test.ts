@@ -82,11 +82,14 @@ describe('the decline push distinguishes a booking from a kitchen order', () => 
 });
 
 describe('the cancellation predicate reads the booked slot', () => {
-  it('CancellationSnapshot declares appointmentSlot and both policy functions read it', () => {
+  // [owner #50, 14 Oct] A booking's slot no longer opens or closes a cancel
+  // clock; it is the booking's PROMISED moment — the "provider very late" exit
+  // the one verdict reads.
+  it('CancellationSnapshot declares appointmentSlot and the one verdict reads it as the booking’s promised moment', () => {
     expect(CANCEL_POLICY).toMatch(/appointmentSlot\?: Date \| null/);
-    const predicate = CANCEL_POLICY.slice(CANCEL_POLICY.indexOf('export function isFreeCancellation'), CANCEL_POLICY.indexOf('export function freeCancellationExpiresAt'));
-    const window = CANCEL_POLICY.slice(CANCEL_POLICY.indexOf('export function freeCancellationExpiresAt'));
-    expect(predicate).toMatch(/appointmentSlot/);
-    expect(window).toMatch(/appointmentSlot/);
+    const promised = CANCEL_POLICY.slice(CANCEL_POLICY.indexOf('function promisedMoment'), CANCEL_POLICY.indexOf('export function isVeryLate'));
+    expect(promised).toMatch(/order\.appointmentSlot/);
+    const verdict = CANCEL_POLICY.slice(CANCEL_POLICY.indexOf('export function cancellationVerdict'), CANCEL_POLICY.indexOf('export function isFreeCancellation'));
+    expect(verdict).toMatch(/isVeryLate\(order, now\)/);
   });
 });

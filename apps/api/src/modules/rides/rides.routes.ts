@@ -15,6 +15,8 @@ import {
 } from './rides.service';
 import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from './taxi-stops-flag';
 import { readRideItinerary } from './taxi-stops-read';
+import { hasTaxiPassengerCustody } from './passenger-custody';
+import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';
 import { decorateRideWaiting, taxiWaitingEnabled, waitingDisclosure } from './taxi-waiting';
 import {
   CHECKOUT_CLAIM_TTL_S,
@@ -454,10 +456,19 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] A ride with stops shows them in order, with the one it
     // is heading for; a ride without them gains no key.
     const itinerary = ride ? await readRideItinerary(app.prisma, ride) : null;
+    // [owner #50] Whether the passenger may still cancel, and who to contact
+    // when not — the one cancellation verdict, so the app never re-derives it
+    // (additive keys; older apps ignore them). A passenger already aboard is
+    // the driver's custody: no cancel at all.
+    const cancel = ride
+      ? (hasTaxiPassengerCustody(ride) || ride.status === 'RIDE_IN_PROGRESS'
+          ? { canCancel: false, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: null }
+          : customerCancelView({ ...ride, noMoverFound: await readNoMoverFound(app.prisma, ride), assignedAt: await readAssignedAt(app.prisma, ride) }))
+      : null;
     // [TAXI waiting charge] From the driver's arrival on, the live wait (and each
     // stop's own); nothing while the switch is off.
     const waiting = ride ? await decorateRideWaiting(app.prisma, ride, itinerary?.stops ?? null) : {};
-    if (!ride?.driver) return { success: true, data: ride && (itinerary || waiting.waiting) ? { ...ride, ...itinerary, ...waiting } : ride };
+    if (!ride?.driver) return { success: true, data: ride ? { ...ride, ...itinerary, ...cancel, ...waiting } : ride };
     // Vehicle visual identity [rides spec 6B]: shape + tint the client renders
     // on the card, the map marker, and the arrival screen. Classify-on-read
     // heals rows born before the assignment hook/backfill.
@@ -472,7 +483,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? safeMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
-    return { success: true, data: { ...ride, driver, ...itinerary, ...waiting } };
+    return { success: true, data: { ...ride, driver, ...itinerary, ...cancel, ...waiting } };
   });
 
   /** GET /:id — one owned ride. */

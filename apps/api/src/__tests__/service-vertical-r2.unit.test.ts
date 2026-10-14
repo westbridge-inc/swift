@@ -7,7 +7,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { computeDaySlots, fmtSlotTime } from '../modules/booking/availability';
 import {
-  LATE_CANCEL_FEE,
+  VERY_LATE_AFTER_MIN,
   freeCancellationExpiresAt,
   isFreeCancellation,
   type CancellationSnapshot,
@@ -48,6 +48,10 @@ vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
 //        through the market zone ONCE and emits the TRUE instant — 10:00 local
 //        is 14:00Z on the wire and in the row — and the policy reads that
 //        instant directly, so the customer preview and the locked cancel agree.
+//        [owner #50, 14 Oct] There is no slot-relative cutoff any more (a
+//        booking nobody accepted is free at any moment); the slot instant now
+//        opens the "provider very late" exit of an ACCEPTED booking — the TRUE
+//        slot + VERY_LATE_AFTER_MIN — and the same agreement is graded there.
 //   F02  Every order at a SERVICE business was declared SERVICE, so shampoo
 //        bought from a barbershop by delivery read "Booking confirmed" and lost
 //        its delivery stages. Only an APPOINTMENT is a booking.
@@ -142,6 +146,10 @@ describe('F01 — a booking is cancelled by its LOCAL slot, resolved through the
   const guyanaClock = (d: Date) => d.toLocaleString('en-GB', { timeZone: 'America/Guyana', hour: '2-digit', minute: '2-digit', hour12: false });
 
   const pendingBooking = () => serviceBooking('bk-r2', { placedAt: PLACED_AT, updatedAt: PLACED_AT, holdExpiresAt: null, appointmentSlot: slot });
+  /** [owner #50, 14 Oct] The provider accepted it at placing. */
+  const acceptedBooking = () => serviceBooking('bk-r2', { status: 'ACCEPTED', acceptedAt: PLACED_AT, placedAt: PLACED_AT, updatedAt: PLACED_AT, holdExpiresAt: null, appointmentSlot: slot });
+  /** 10:30 in America/Guyana — thirty minutes past the 10:00 the picker shows. */
+  const LATE_CUTOFF = new Date(slot.getTime() + VERY_LATE_AFTER_MIN * MINUTE);
 
   it('the producer stores the true 14:00Z instant and the picker shows 10:00 local', () => {
     expect(slot.toISOString()).toBe('2026-09-24T14:00:00.000Z');
@@ -150,49 +158,61 @@ describe('F01 — a booking is cancelled by its LOCAL slot, resolved through the
     expect(guyanaClock(FOUR_HOURS_EARLY)).toBe('05:55');
   });
 
-  it('RED — the predicate is free until the LOCAL cutoff and the promised window ends there, not four hours early', () => {
-    const row = pendingBooking() as unknown as CancellationSnapshot;
-    expect(isFreeCancellation(row, FOUR_HOURS_EARLY)).toBe(true);
-    expect(isFreeCancellation(row, JUST_BEFORE)).toBe(true);
-    expect(isFreeCancellation(row, LOCAL_CUTOFF)).toBe(false);
-    expect(isFreeCancellation(row, JUST_AFTER)).toBe(false);
-    expect(freeCancellationExpiresAt(row, FOUR_HOURS_EARLY)?.toISOString()).toBe(LOCAL_CUTOFF.toISOString());
-    expect(freeCancellationExpiresAt(row, JUST_BEFORE)?.toISOString()).toBe(LOCAL_CUTOFF.toISOString());
-    expect(freeCancellationExpiresAt(row, LOCAL_CUTOFF)).toBeNull();
+  it('RED — nobody accepted it: free at every moment, with no countdown; accepted: the exit opens at the TRUE slot + 30, not four hours early', () => {
+    const pending = pendingBooking() as unknown as CancellationSnapshot;
+    for (const at of [FOUR_HOURS_EARLY, JUST_BEFORE, LOCAL_CUTOFF, JUST_AFTER]) {
+      expect(isFreeCancellation(pending, at)).toBe(true);
+      expect(freeCancellationExpiresAt(pending, at)).toBeNull();
+    }
+    const accepted = acceptedBooking() as unknown as CancellationSnapshot;
+    expect(isFreeCancellation(accepted, FOUR_HOURS_EARLY)).toBe(false);
+    expect(isFreeCancellation(accepted, new Date(LATE_CUTOFF.getTime() - 1))).toBe(false);
+    expect(isFreeCancellation(accepted, LATE_CUTOFF)).toBe(true);
+    expect(freeCancellationExpiresAt(accepted, LATE_CUTOFF)).toBeNull();
   });
 
   const moments: Array<[string, Date, boolean]> = [
-    ['at 05:55 local — the four-hour-early moment the review reproduced', FOUR_HOURS_EARLY, true],
-    ['just before the local cutoff', JUST_BEFORE, true],
-    ['exactly at the local cutoff', LOCAL_CUTOFF, false],
-    ['just after the local cutoff', JUST_AFTER, false],
+    ['at 05:55 local — the four-hour-early moment the review reproduced', FOUR_HOURS_EARLY, false],
+    ['just before the provider is very late', new Date(LATE_CUTOFF.getTime() - 1), false],
+    ['exactly when the provider is very late', LATE_CUTOFF, true],
+    ['just after', new Date(LATE_CUTOFF.getTime() + 1), true],
   ];
 
   for (const [label, at, free] of moments) {
-    it(`RED — the preview and the locked cancel agree ${label}: ${free ? 'free, no marker' : `not free, the ${LATE_CANCEL_FEE} marker`}`, async () => {
+    it(`RED — the preview and the locked cancel agree on an accepted booking ${label}: ${free ? 'free' : 'refused'} — never a fee`, async () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(at);
-      const h = harness([pendingBooking()]);
+      const h = harness([acceptedBooking()]);
       const customer = await hostRoutes(customerRoutes, { prisma: h.prisma, redis: recordingRedis(), io: h.io });
       const preview = (await customer.call('get /orders/:id', asCustomer({ params: { id: 'bk-r2' } }))) as { data: Row };
       expect(preview.data).toMatchObject({
         vertical: 'SERVICE',
-        canCancel: true,
+        canCancel: free,
         freeCancellationWindow: free,
-        cancellationFee: free ? 0 : LATE_CANCEL_FEE,
-        freeCancellationExpiresAt: free ? LOCAL_CUTOFF.toISOString() : null,
+        cancellationFee: 0,
+        freeCancellationExpiresAt: null,
+        cancelUnavailable: free ? null : { code: 'CANCEL_WINDOW_CLOSED' },
       });
-      const result = await h.svc.cancelOrder('bk-r2', 'user-customer');
-      expect(result.cancellationFee).toBe(free ? 0 : LATE_CANCEL_FEE);
-      expect(h.store.rows[0]).toMatchObject({ status: 'CANCELLED', lateCancelFeeDue: free ? 0 : LATE_CANCEL_FEE });
+      if (free) {
+        const result = await h.svc.cancelOrder('bk-r2', 'user-customer');
+        expect(result.cancellationFee).toBe(0);
+        expect(h.store.rows[0]).toMatchObject({ status: 'CANCELLED' });
+      } else {
+        await expect(h.svc.cancelOrder('bk-r2', 'user-customer')).rejects.toMatchObject({ statusCode: 409, code: 'CANCEL_WINDOW_CLOSED' });
+        expect(h.store.rows[0]).toMatchObject({ status: 'ACCEPTED' });
+      }
+      expect(h.store.rows[0]!['lateCancelFeeDue'] ?? 0).toBe(0);
     });
   }
 
   it('control — scheduledFor is a real instant and is read as one: no offset is applied to it', () => {
-    const scheduled = { ...pendingBooking(), fulfillment: 'DELIVERY', appointmentSlot: null, scheduledFor: new Date('2026-09-24T18:00:00.000Z') } as unknown as CancellationSnapshot;
-    expect(isFreeCancellation(scheduled, PLACED_AT)).toBe(true);
-    expect(freeCancellationExpiresAt(scheduled, PLACED_AT)?.toISOString()).toBe('2026-09-24T17:55:00.000Z');
-    expect(isFreeCancellation(scheduled, new Date('2026-09-24T17:55:00.000Z'))).toBe(false);
+    // [owner #46, 13 Oct] Read on the booking shape: a STORE order (fulfillment
+    // DELIVERY) no longer runs the clock at all — free until the store accepts.
+    // [owner #50, 14 Oct] An accepted booking's promised moment is its
+    // scheduledFor when it has no slot: very late exactly 30 minutes after it.
+    const scheduled = { ...acceptedBooking(), appointmentSlot: null, scheduledFor: new Date('2026-09-24T18:00:00.000Z') } as unknown as CancellationSnapshot;
+    expect(isFreeCancellation(scheduled, new Date('2026-09-24T18:29:59.999Z'))).toBe(false);
+    expect(isFreeCancellation(scheduled, new Date('2026-09-24T18:30:00.000Z'))).toBe(true);
   });
 
   it('control — the checkout hold still wins while it runs, and an accepted booking is still committed', () => {
@@ -314,16 +334,21 @@ describe('F04 — the cancel result names a booking and its provider; the fee an
     const h = harness([booking()]);
     const result = await h.svc.cancelOrder('bk-r2', 'user-customer');
     expect(result).toEqual({ message: 'Booking cancelled — no charge', cancellationFee: 0 });
-    expect(h.store.rows[0]).toMatchObject({ status: 'CANCELLED', lateCancelFeeDue: 0 });
+    expect(h.store.rows[0]).toMatchObject({ status: 'CANCELLED' });
+    expect(h.store.rows[0]!['lateCancelFeeDue'] ?? 0).toBe(0);
   });
 
-  it('RED — a late cash cancel says "Booking cancelled" and still records the marker the server decided', async () => {
+  // [owner #50, 14 Oct] The old "late" moment: no marker exists any more. A
+  // booking nobody accepted cancels free there; an accepted one is refused
+  // (contact the provider) — the server decides, in its own words.
+  it('RED — at the old late moment: free with "Booking cancelled — no charge" while unaccepted, refused once accepted — never a marker', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-24T13:55:00.000Z'));
     const h = harness([booking()]);
-    const result = await h.svc.cancelOrder('bk-r2', 'user-customer');
-    expect(result).toEqual({ message: 'Booking cancelled', cancellationFee: LATE_CANCEL_FEE });
-    expect(h.store.rows[0]).toMatchObject({ status: 'CANCELLED', lateCancelFeeDue: LATE_CANCEL_FEE });
+    expect(await h.svc.cancelOrder('bk-r2', 'user-customer')).toEqual({ message: 'Booking cancelled — no charge', cancellationFee: 0 });
+    const accepted = harness([booking({ status: 'ACCEPTED', acceptedAt: PLACED_AT })]);
+    await expect(accepted.svc.cancelOrder('bk-r2', 'user-customer')).rejects.toMatchObject({ statusCode: 409, code: 'CANCEL_WINDOW_CLOSED' });
+    expect(accepted.store.rows[0]!['lateCancelFeeDue'] ?? 0).toBe(0);
   });
 
   it('RED — an unattested-MMG cancel keeps the uncertainty and points the refund at the provider; the provider is still told', async () => {
