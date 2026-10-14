@@ -4,10 +4,11 @@ import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
-import { papersUnderSecondReview, requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { alignStoredVehicleKind, papersUnderSecondReview, requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
+import { assertHirePlate } from '../verification/hire-plate';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
@@ -172,6 +173,8 @@ export class PartnerService {
     if (rideClass && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
+    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
   }
 
   private async provisionLocked(tx: Tx, userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
@@ -315,6 +318,8 @@ export class PartnerService {
     if (target === 'DRIVER' && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
+    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
     return this.prisma.$transaction(async (tx) => {
       const now = new Date();
       // The global lock order (mover-authority): User, then Rider, then Driver.
@@ -417,11 +422,28 @@ export class PartnerService {
       }
       // The other profile, if any, goes offline too and loses the legacy grant: its GO now
       // re-checks the evidence it still has (which follows its own plate).
+      // [Opus 12 Oct · H-plate follow-up] The same plate moved to the other kind of work (a motorbike
+      // re-declared as a car, or back): the retired profile no longer carries it, so the vehicle the mover
+      // really uses — not one they no longer drive — decides how that plate's papers are judged.
+      const movedPlate = (retiredPlate: string | null) => normalizeRegistrationMark(retiredPlate ?? '') !== ''
+        && samePlate(retiredPlate, details.licensePlate);
       if (target === 'DRIVER' && rider) {
-        await tx.rider.update({ where: { id: rider.id }, data: { ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } });
+        await tx.rider.update({ where: { id: rider.id }, data: {
+          ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null,
+          ...(movedPlate(rider.licensePlate) ? { licensePlate: null } : {}),
+        } });
       }
       if (target === 'RIDER' && driver) {
-        await tx.driver.update({ where: { id: driver.id }, data: { ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } });
+        await tx.driver.update({ where: { id: driver.id }, data: {
+          ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null,
+          // A Driver row always has a plate column; empty means "no vehicle on file" (it cannot go online as a taxi).
+          ...(movedPlate(driver.licensePlate) ? { licensePlate: '' } : {}),
+        } });
+      }
+
+      // The vehicle on this plate is now this class (motorbike re-declared as a car, or back).
+      if (input.vehicleType !== previousVehicleType || target !== current) {
+        await alignStoredVehicleKind(tx, userId, user.countryCode, details.licensePlate, input.vehicleType);
       }
 
       // A plate change (or a move to the other kind of work) closes the open vehicle

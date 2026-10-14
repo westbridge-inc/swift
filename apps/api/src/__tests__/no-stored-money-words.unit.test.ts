@@ -113,19 +113,24 @@ describe('the server never says stored-money words [owner ruling 8 Oct]', () => 
 
 // [OWNER #62 · 14 Oct, NO PAYING AHEAD] "shouldn't they just pay the weekly
 // fee, no paying ahead": partners pay one week at a time, so nothing the server
-// says to a person offers or describes paying ahead or covering several weeks.
-// The published legal documents (modules/legal) change only through a legal
-// change with its own version bump, so they are outside this rule until then.
-const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
-const LEGAL_DOCUMENTS = /[\\/]modules[\\/]legal[\\/]/;
+// says to a person offers or describes paying ahead or covering several weeks —
+// the published legal documents included (their version 2026-10-14 says one
+// week at a time).
+const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\b(?:two|three|four|five|several|many|\d+) weeks ahead\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
 const offersPayingAhead = (text: string) => PAYING_AHEAD_WORDS.test(text);
 
 describe('[owner #62] the server never offers paying ahead', () => {
   it('no error message, notification, operations page, fee reason or copy module says "paid ahead" or several weeks', () => {
-    const hits = files(SRC).filter((file) => !LEGAL_DOCUMENTS.test(file)).flatMap((file) => shownWords(file, readFileSync(file, 'utf8'), offersPayingAhead)
+    const hits = files(SRC).flatMap((file) => shownWords(file, readFileSync(file, 'utf8'), offersPayingAhead)
       .map((hit) => `${relative(SRC, file)}:${hit.line} ${hit.text}`));
     expect([...new Set(hits)]).toEqual([]);
   }, 120_000);
+
+  it('the published legal documents never offer paying ahead either', () => {
+    for (const [name, text] of Object.entries({ TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT, MARKETING_CONSENT })) {
+      expect(offersPayingAhead(text), name).toBe(false);
+    }
+  });
 
   it('the detector sees the words where a person reads them, not in logs or code names', () => {
     const probe = (code: string) => shownWords('probe.ts', code, offersPayingAhead).length > 0;
@@ -135,5 +140,8 @@ describe('[owner #62] the server never offers paying ahead', () => {
     expect(probe("log().warn({ n }, 'agent payment past the weeks paid ahead');")).toBe(false);
     expect(probe("import { assertPayAheadRoom } from './pay-ahead';")).toBe(false);
     expect(probe("throw new AppError(409, 'PAY_AHEAD_LIMIT', 'Your next weekly fee is already paid.');")).toBe(false);
+    expect(probe("export const FEE_COPY = { x: 'You may pay up to four weeks ahead.' };")).toBe(true);
+    expect(probe("export const FEE_COPY = { x: 'The coming weekly fee is paid.' };")).toBe(true);
+    expect(probe("throw new AppError(409, 'PAY_AHEAD_LIMIT', 'This would pay more than one week ahead on this account.');")).toBe(false);
   });
 });
