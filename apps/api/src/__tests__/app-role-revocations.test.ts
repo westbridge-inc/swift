@@ -154,12 +154,12 @@ describe('after the heal runs, swift_app holds none of the revoked privileges', 
     const held: string[] = [];
     let checked = 0;
     for (const r of tables) {
-      const [{ present }] = await prisma.$queryRaw<Array<{ present: boolean }>>`SELECT to_regclass(${r.object}) IS NOT NULL AS present`;
-      if (!present) continue; // a db-push database has no raw-SQL-only tables
+      const [table] = await prisma.$queryRaw<Array<{ present: boolean }>>`SELECT to_regclass(${r.object}) IS NOT NULL AS present`;
+      if (!table?.present) continue; // a db-push database has no raw-SQL-only tables
       for (const p of r.privileges) {
-        const [{ allowed }] = await prisma.$queryRaw<Array<{ allowed: boolean }>>`SELECT has_table_privilege('swift_app', ${r.object}, ${p}) AS allowed`;
+        const [privilege] = await prisma.$queryRaw<Array<{ allowed: boolean }>>`SELECT has_table_privilege('swift_app', ${r.object}, ${p}) AS allowed`;
         checked += 1;
-        if (allowed) held.push(`${p} ON ${r.object}`);
+        if (privilege?.allowed !== false) held.push(`${p} ON ${r.object}`);
       }
     }
     expect(checked).toBeGreaterThan(0);
