@@ -428,6 +428,10 @@ model Tenant {
   reviewFixtures    ReviewFixture[]
   items             Item[]
   categories        Category[]
+  // [DB-05 EXPAND] formerly PENDING_EXPAND
+  returnRequests     ReturnRequest[]
+  contentReports     ContentReport[]
+  collectionContacts CollectionContact[]
   transactions      Transaction[]
   earnings          Earning[]
   settlements       Settlement[]
@@ -2874,9 +2878,16 @@ model ReturnRequest {
   /// said. The delta against refundAmount is the observed refund drift.
   refundInferredAmount Decimal? @db.Decimal(12, 2)
   /// [M-33] Who funded the discount the refund is net of (PLATFORM | VENDOR).
+  /// [DB-05 EXPAND] The owner's tenant, on the row itself: stamped by the wall on
+  /// create, derived from the owners by a lineage trigger when unstamped, and
+  /// NULL (quarantined, invisible to every tenant) when the owners disagree or
+  /// are gone. CONTRACT (NOT NULL) follows once quarantined rows are adjudicated.
+  tenantId       String?
+  tenant         Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   refundFunder   String?
   createdAt      DateTime     @default(now())
 
+  @@index([tenantId])
   @@index([customerId])
   @@index([status])
   @@map("return_requests")
@@ -3678,9 +3689,16 @@ model CollectionContact {
   outcome        String // REACHED | PROMISED | REFUSED | WRONG_NUMBER
   promisedDate   DateTime?
   note           String?
+  /// [DB-05 EXPAND] The owner's tenant, on the row itself: stamped by the wall on
+  /// create, derived from the owners by a lineage trigger when unstamped, and
+  /// NULL (quarantined, invisible to every tenant) when the owners disagree or
+  /// are gone. CONTRACT (NOT NULL) follows once quarantined rows are adjudicated.
+  tenantId       String?
+  tenant         Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   byAdminId      String
   createdAt      DateTime  @default(now())
 
+  @@index([tenantId])
   @@index([subscriptionId, createdAt])
   @@map("collection_contacts")
 }
@@ -4701,6 +4719,12 @@ model ContentReport {
   /// a DIFFERENT one confirms. Acting on a report stays one click — there, the
   /// failure mode is acting too slowly.
   dismissProposedBy String?
+  /// [DB-05 EXPAND] The owner's tenant, on the row itself: stamped by the wall on
+  /// create, derived from the owners by a lineage trigger when unstamped, and
+  /// NULL (quarantined, invisible to every tenant) when the owners disagree or
+  /// are gone. CONTRACT (NOT NULL) follows once quarantined rows are adjudicated.
+  tenantId       String?
+  tenant         Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   dismissProposedAt DateTime?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
@@ -4708,6 +4732,7 @@ model ContentReport {
   // One report per reporter per target — re-reporting is idempotent, not spam.
   @@unique([reporterId, targetType, targetId])
   @@index([status, createdAt]) // the FIFO moderation queue
+  @@index([tenantId])
   @@index([targetType, targetId]) // "how many reports on this thing?"
   @@map("content_reports")
 }
@@ -4947,6 +4972,11 @@ model SosEscalation {
   lastError      String?
   deliveredAt    DateTime?
   receipt        Json?
+  /// [AUD-L4-016] A failed delivery pages on-call operations exactly once: the
+  /// claim is a lease (a page that died half-way is claimed again once it
+  /// lapses); the ops alert that covered the failure is written back as done.
+  failurePageClaimedAt  DateTime?
+  failurePageOpsAlertId String?
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 
