@@ -12,6 +12,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
+import { grantStepUp } from './helpers/step-up';
 
 // ---------------------------------------------------------------------------
 // RIDES CHARACTERIZATION [rides spec 17.1/17.4] — pins the CURRENT customer
@@ -358,6 +359,9 @@ describe('the current taxi contract (characterization — must stay green all en
   it('self-serve profile writes cannot change class or capacity [REPORT-014 F-014-01]', async () => {
     const d = await makeDriver();
     const before = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    // Vehicle colour is identity: authenticate the change, while class and
+    // capacity remain outside self-serve taxonomy authority.
+    await grantStepUp(app, d.token);
     const res = await app.inject({
       method: 'PUT', url: '/api/v1/driver/profile',
       headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' },
@@ -367,7 +371,8 @@ describe('the current taxi contract (characterization — must stay green all en
     const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
     expect(after.rideClass).toBe(before.rideClass); // taxonomy authority — ignored
     expect(after.vehicleCapacity).toBe(before.vehicleCapacity);
-    expect(after.vehicleColor).toBe('Black'); // ordinary fields still update
+    expect(after.vehicleColor).toBe('Black');
+    expect(after).toMatchObject({ documentsVerified: false, isOnline: false });
   });
 
   it('driver BOARD accept with fare 0 means NO price choice — the market fare applies, never the floor [REPORT-012 proof gap]', async () => {
@@ -391,6 +396,47 @@ describe('the current taxi contract (characterization — must stay green all en
     expect(fresh.status).toBe('DRIVER_ASSIGNED');
     expect(Number(fresh.taxiFareTotal)).toBe(Number(before.taxiFareTotal));
     expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount));
+  });
+
+  // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] "we go by the thing we set up
+  // base fee plus km": a driver never sets the price. An older app's slider may
+  // still send a lower fare; the server ignores it, never errors, and books the
+  // formula fare — on the board accept and on the offer card alike.
+  it('[owner ruling 8 Oct] a driver-sent lower fare is ignored on the board accept: the formula fare stands', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const ride = await requestRide(customer.token);
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id }, select: { taxiFareTotal: true, totalAmount: true } });
+    const lower = Math.ceil(Number(before.taxiFareTotal) * 0.6);
+    const accept = await app.inject({
+      method: 'POST', url: `/api/v1/driver/rides/${ride.id}/accept`,
+      headers: { authorization: `Bearer ${driver.token}`, 'content-type': 'application/json' },
+      payload: { fare: lower },
+    });
+    expect(accept.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(fresh.status).toBe('DRIVER_ASSIGNED');
+    expect(Number(fresh.taxiFareTotal)).toBe(Number(before.taxiFareTotal));
+    expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount));
+  });
+
+  it('[owner ruling 8 Oct] a driver-sent lower fare is ignored on the offer card: the formula fare stands', async () => {
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const driver = await makeDriver();
+    const ride = await requestRide(customer.token);
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id }, select: { taxiFareTotal: true, totalAmount: true } });
+    await app.redis.set(`dispatch:offer:${ride.id}`, driver.driverId, 'EX', 40);
+    const accept = await app.inject({
+      method: 'POST', url: '/api/v1/driver/offers/accept',
+      headers: { authorization: `Bearer ${driver.token}`, 'content-type': 'application/json' },
+      payload: { orderId: ride.id, fare: Math.ceil(Number(before.taxiFareTotal) * 0.6) },
+    });
+    expect(accept.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(fresh.driverId).toBe(driver.driverId);
+    expect(Number(fresh.taxiFareTotal)).toBe(Number(before.taxiFareTotal));
+    expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount));
+    await app.redis.del(`dispatch:offer:${ride.id}`, `dispatch:mover-offer:${driver.driverId}`);
   });
 
   it('driver cancel = controlled release: PENDING + reason driver_cancelled + honest push (T18 bones)', async () => {

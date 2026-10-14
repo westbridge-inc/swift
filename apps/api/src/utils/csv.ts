@@ -82,3 +82,15 @@ export function parseCsvWithHeader(input: string): Array<Record<string, string>>
     return record;
   });
 }
+
+/**
+ * [security review: csv-formula-injection] One CSV text cell for a file a
+ * person opens in a spreadsheet: a value starting with = + - @ tab or CR
+ * (OWASP's formula triggers) gets a leading apostrophe so it stays text, then
+ * normal RFC-4180 quoting. Use it for every cell that can carry a name, a
+ * reference or a note; write numbers Swift formats itself as they are.
+ */
+export function csvTextCell(value: string): string {
+  const text = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}

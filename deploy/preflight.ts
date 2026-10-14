@@ -118,6 +118,8 @@ const STUBS: Record<string, string> = {
   ID_ANALYZER_API_KEY: 'STUB-NOT-A-REAL-KEY',
   PAYMENT_PROVIDER: 'disabled',
   CARD_RAIL_KILL: '1',
+  // [LAUNCH-LOCK] production refuses card rail v2 and ads until an attorney signs off.
+  CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '0', CARD_RAIL_ENROLL: '0', ADS_ENABLED: '0',
   PAYMENT_GATEWAY_KEY: 'STUB-NOT-A-REAL-KEY',
   PAYMENT_GATEWAY_SECRET: 'STUB-NOT-A-REAL-KEY',
   POWERTRANZ_API_URL: 'https://stub.invalid/powertranz',
@@ -136,6 +138,12 @@ const STUBS: Record<string, string> = {
   STORAGE_SIGNING_SECRET: 'x'.repeat(48),
   STORAGE_PROVIDER: 's3',
   CONSENT_IP_PEPPER: 'x'.repeat(48),
+  OPS_ONCALL_PHONES: '+15550000001',
+  EMAIL_PROVIDER: 'smtp',
+  SMTP_HOST: 'stub.invalid', SMTP_PORT: '465', SMTP_USER: 'STUB',
+  SMTP_PASS: 'STUB-NOT-A-REAL-SECRET', EMAIL_FROM: 'stub@stub.invalid',
+  BILLING_TOPUP_HOLD: '1',
+  AGENT_CASH_WEBHOOK_SECRET: '',
 };
 
 const fileEnv: Record<string, string | undefined> = readEnvFile(envPath);

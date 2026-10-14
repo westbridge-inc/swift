@@ -131,28 +131,33 @@ export class LivenessService {
     }
 
     let outcome: LivenessOutcome;
-    try {
-      // [DOC-1 §0.5 · FD-D5] A liveness check IS a face-match. With the biometric
-      // switch off it cannot run; say so, never fall through to a guess.
-      if (!biometricFaceMatchEnabled()) {
-        throw new AppError(409, 'BIOMETRIC_DISABLED', 'Liveness needs face-match, which FEATURE_BIOMETRIC_FACE_MATCH=0 has turned off');
+    // [DOC-1 §0.5 · FD-D5] A liveness check IS a face-match, and face-matching is deliberately OFF
+    // (FEATURE_BIOMETRIC_FACE_MATCH unset). [Owner ruling, row 54] That is not an analyzer outage:
+    // keep the existing ladder's BORDERLINE rung (online + a person compares the selfie by eye) with an
+    // explicit "biometrics off" reason. No provider call, no outage page, no error log, whatever the
+    // outage policy says; no new persisted outcome.
+    const biometricsOff = !biometricFaceMatchEnabled();
+    if (biometricsOff) {
+      outcome = 'BORDERLINE';
+    } else {
+      try {
+        const res = await this.kyc.verifyIdentity({
+          userId: input.userId,
+          idDocumentUrl: user.avatar, // the reference face (already ID-proven at L2)
+          selfieUrl: input.selfieUrl,
+        });
+        outcome = res.status === 'approved' ? 'PASS' : res.status === 'rejected' ? 'FAIL' : 'BORDERLINE';
+      } catch (err) {
+        outcome = outagePolicy() === 'FAIL_CLOSED' ? 'ERROR_FAIL_CLOSED' : 'ERROR_FAIL_OPEN';
+        log().error({ err, userId: input.userId, policy: outagePolicy() }, 'liveness analyzer outage — applying tenant outage policy');
+        await notifyAdmins(this.prisma, this.notifications, {
+          // Scoped to the person being checked [NOC-A F45].
+          tenantId: await tenantOfUser(this.prisma, input.userId),
+          title: 'Liveness analyzer outage',
+          body: `Face-match provider errored during a ${purpose} check. Policy applied: ${outagePolicy()}. Investigate the provider.`,
+          data: { kind: 'liveness_outage', userId: input.userId, policy: outagePolicy() },
+        }).catch(() => {});
       }
-      const res = await this.kyc.verifyIdentity({
-        userId: input.userId,
-        idDocumentUrl: user.avatar, // the reference face (already ID-proven at L2)
-        selfieUrl: input.selfieUrl,
-      });
-      outcome = res.status === 'approved' ? 'PASS' : res.status === 'rejected' ? 'FAIL' : 'BORDERLINE';
-    } catch (err) {
-      outcome = outagePolicy() === 'FAIL_CLOSED' ? 'ERROR_FAIL_CLOSED' : 'ERROR_FAIL_OPEN';
-      log().error({ err, userId: input.userId, policy: outagePolicy() }, 'liveness analyzer outage — applying tenant outage policy');
-      await notifyAdmins(this.prisma, this.notifications, {
-        // Scoped to the person being checked [NOC-A F45].
-        tenantId: await tenantOfUser(this.prisma, input.userId),
-        title: 'Liveness analyzer outage',
-        body: `Face-match provider errored during a ${purpose} check. Policy applied: ${outagePolicy()}. Investigate the provider.`,
-        data: { kind: 'liveness_outage', userId: input.userId, policy: outagePolicy() },
-      }).catch(() => {});
     }
 
     const reviewRequired = outcome === 'BORDERLINE' || outcome === 'ERROR_FAIL_OPEN' || purpose === 'RIDER_REPORTED';
@@ -171,8 +176,10 @@ export class LivenessService {
     }
 
     if (reviewRequired) {
-      const why =
-        outcome === 'BORDERLINE'
+      const why = biometricsOff
+        ? (purpose === 'RIDER_REPORTED' ? 'A rider reported "this isn\'t my driver" — review immediately. ' : '')
+          + 'Automatic face-matching is switched off on purpose — compare this shift selfie with the profile photo by eye.'
+        : outcome === 'BORDERLINE'
           ? 'Borderline face-match — compare the shift selfie against the profile side-by-side.'
           : outcome === 'ERROR_FAIL_OPEN'
             ? 'Analyzer outage fail-open — retroactively review this shift selfie.'
@@ -181,7 +188,7 @@ export class LivenessService {
         tenantId: await tenantOfUser(this.prisma, input.userId),
         title: 'Liveness review needed',
         body: why,
-        data: { kind: 'liveness_review', livenessCheckId: check.id, userId: input.userId, outcome },
+        data: { kind: 'liveness_review', livenessCheckId: check.id, userId: input.userId, outcome, ...(biometricsOff ? { reason: 'BIOMETRICS_OFF' } : {}) },
       }).catch(() => {});
     }
 
