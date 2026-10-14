@@ -7,6 +7,11 @@ const intent = { storeSlug: 'garden-kitchen', itemId: 'roti', selectedOptions: {
 beforeEach(() => { sessionStorage.clear(); });
 
 describe('tab-scoped store Add continuation', () => {
+  it('keeps a continuation for a store address with capitals and underscores (the server mints them)', () => {
+    const real = { ...intent, storeSlug: 'garden-kitchen-Q7x_Ab', returnPath: '/store/garden-kitchen-Q7x_Ab?src=qr' };
+    queueStorefrontContinuation(real);
+    expect(readStorefrontContinuation()).toEqual(real);
+  });
   it('keeps the store and choices, drops prices and consumes before a second delivery', () => {
     queueStorefrontContinuation({ ...intent, price: 1 } as typeof intent);
     expect(JSON.parse(sessionStorage.getItem(key)!)).toEqual(intent);

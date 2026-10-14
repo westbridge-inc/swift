@@ -40,13 +40,19 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  2026-10-06.1 [VERIFY-DOCS]: the owner's document rulings of 6 Oct — movers'
  *  police clearance optional, national ID optional with a driver's licence,
  *  no separate taxi plate photo — and the data-protection note corrected
- *  (the Act is not yet in force). */
-export const PLATFORM_CONFIG_VERSION = '2026-10-06.1';
+ *  (the Act is not yet in force).
+ *  2026-10-13.3 [PRICING · owner decisions 47–49, 13 Oct]: no multi-store
+ *  ("franchise") discount in any market — every card drops
+ *  franchiseMinLocations / franchiseDiscountPct, so each store pays its own
+ *  tier by its own catalogue. On top of 2026-10-06.1. Never reuse
+ *  2026-10-07.1, 2026-10-07.2, 2026-10-13.1 or 2026-10-13.2: open branches
+ *  carry those for other values. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-13.3';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
- * every rate, both catalogue boundaries and the franchise rule are present
- * and valid, and no fallback applies. The resolver
+ * every rate and both catalogue boundaries are present and valid, and no
+ * fallback applies. The resolver
  * (country/country-config.service) refuses a declared card that is missing
  * any key, rather than quietly pricing it as a smaller card; a market that
  * declares nothing keeps the documented legacy fallbacks.
@@ -65,7 +71,12 @@ export const COMPLETE_CARD = 'complete';
 // prices them. Every rate is a whole number of dollars.
 // The owner, 2026-09-29: delivery riders (the STANDARD band) pay 6,000 a week,
 // down from 8,000. The owner, 2026-09-30: taxi drivers pay 8,000 a week,
-// including taxi drivers who also deliver. Heavy delivery stays 9,000.
+// including taxi drivers who also deliver. Heavy delivery stays 9,000, but it
+// is OFF at launch (owner, 13 Oct 2026): canters and box trucks are not
+// offered (config/vehicle-classes LAUNCH_HIDDEN_VEHICLE_TYPES), so nobody can
+// sign up on that rate and no price list shows it; the rate stays here for the
+// day they return. The owner, 13 Oct 2026: no franchise discount — every store
+// is its own account and pays its own tier by its own catalogue.
 // Existing subscriptions move at the next weekly re-tier.
 export const guyanaTiers = {
   card: COMPLETE_CARD,
@@ -79,9 +90,6 @@ export const guyanaTiers = {
   departmentVendor: 60000,
   largeCatalogueThreshold: 1000,
   departmentCatalogueThreshold: 10000,
-  // From the 5th store, every location takes 50% off its OWN rate.
-  franchiseMinLocations: 5,
-  franchiseDiscountPct: 50,
 };
 
 // The Guyana rate card every USD-pegged market was launched from. The pegs
@@ -278,8 +286,6 @@ export function desiredPlatformConfig(): DesiredConfig {
         departmentVendor: niceRound(USD.departmentVendor * c.rate),
         largeCatalogueThreshold: guyanaTiers.largeCatalogueThreshold,
         departmentCatalogueThreshold: guyanaTiers.departmentCatalogueThreshold,
-        franchiseMinLocations: guyanaTiers.franchiseMinLocations,
-        franchiseDiscountPct: guyanaTiers.franchiseDiscountPct,
       },
       documentChecklists: guyanaChecklists,
       taxiRates: {

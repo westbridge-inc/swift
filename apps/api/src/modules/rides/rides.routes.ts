@@ -195,7 +195,10 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  [TAXI multi-stop 3/8] With `stops` (TAXI_MAX_STOPS above 0) the ride is
    *  one trip over its whole road at the server's fare, booked only at the
    *  route fare the passenger was quoted (expectedFare). Without them it is
-   *  exactly the ride of today. An Idempotency-Key makes the request one
+   *  exactly the ride of today, except that [PRICE-LOCK] a ride without stops
+   *  that carries the fare the passenger was shown is booked only at it (409
+   *  FARE_CHANGED with the fare now otherwise); an app from before the lock
+   *  sends none and books as before (logged). An Idempotency-Key makes the request one
    *  command, the checkout way: a retry under the same key is answered with
    *  the first answer (201, replayed) and never books a second ride. */
   app.post('/request', creationAuth, async (request, reply) => {
@@ -213,9 +216,17 @@ export async function ridesRoutes(app: FastifyInstance) {
       dropoffAddress: body.dropoffAddress,
       passengerCount: body.passengerCount,
       rideClass: body.rideClass,
-      ...(stops.length > 0 ? { stops, expectedFare: body.expectedFare } : {}),
+      ...(stops.length > 0 ? { stops } : {}),
+      // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
+      // passenger was shown travels to the booking for every ride that has one.
+      ...(body.expectedFare !== undefined ? { expectedFare: body.expectedFare } : {}),
     };
     const userId = request.user.userId;
+    if (body.expectedFare === undefined) {
+      // Only a ride without stops gets here unquoted (the stops check above
+      // refuses the rest): an app from before the price lock. Booked as before.
+      request.log.info({ event: 'ride_request_unquoted', rideClass: body.rideClass }, '[PRICE-LOCK] ride requested without the fare the passenger was shown (an app from before the lock); booked at the server fare');
+    }
 
     const idemKey = request.headers['idempotency-key'];
     const key = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128 ? idemKey : null;
