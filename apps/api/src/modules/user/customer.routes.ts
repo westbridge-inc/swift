@@ -69,7 +69,7 @@ import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
-import { assertOrderableNow, hiddenAmong, prohibitedStoreCategory, prohibitedStoreIds } from '../compliance/prohibited-gate';
+import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
@@ -1581,8 +1581,9 @@ export async function customerRoutes(app: FastifyInstance) {
     });
 
     if (!vendor) throw new NotFoundError('Vendor', id);
-    // [GUARDRAILS §8 · #54] A store filed under a banned category has no storefront, even by a direct link.
-    if (await prohibitedStoreCategory(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
+    // [GUARDRAILS §8 · #54] A store filed under a banned category, or held for a person by its own words, has no
+    // storefront, even by a direct link.
+    if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     // Live promotions the store is running (§4.2) — shown on the storefront.
     const activePromos = await app.prisma.promoCode.findMany({
@@ -1708,8 +1709,9 @@ export async function customerRoutes(app: FastifyInstance) {
       select: { id: true, averageRating: true, totalRatings: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
-    // [GUARDRAILS §8 · #54 · DS1109 S4-3] Nor its reviews: no page of a store filed under a banned category resolves.
-    if (await prohibitedStoreCategory(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
+    // [GUARDRAILS §8 · #54 · DS1109 S4-3] Nor its reviews: no page of a store filed under a banned category, or held
+    // for a person by its own words, resolves.
+    if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     const result = await ratingService.getVendorReviews(id, limit, skip);
 
