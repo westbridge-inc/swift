@@ -4940,6 +4940,11 @@ model SosEscalation {
   lastError      String?
   deliveredAt    DateTime?
   receipt        Json?
+  /// [AUD-L4-016] A failed delivery pages on-call operations exactly once: the
+  /// claim is a lease (a page that died half-way is claimed again once it
+  /// lapses); the ops alert that covered the failure is written back as done.
+  failurePageClaimedAt  DateTime?
+  failurePageOpsAlertId String?
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 
