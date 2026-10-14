@@ -198,7 +198,9 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
     expect(labelled).toBeGreaterThan(400);
     for (const word of PROHIBITED_BRAND_FIRST_WORDS) {
       for (const raw of [`${word} Pineapple`, `${word.toUpperCase()} — mango`, `${word}\u2019s seltzer`]) {
-        expect(checkItem({ name: raw }).state, raw).toBe('WAITING');
+        // [#55] Held for a person — or, for XM (Banks DIH's rum and nothing else), refused outright.
+        // ("Truly's seltzer" reads as Truly Seltzer — never approvable.)
+        expect(checkItem({ name: raw }).state, raw).toBe(word === 'xm' || (word === 'truly' && raw.endsWith('seltzer')) ? 'BANNED' : 'WAITING');
         expect(kept(raw), `the pre-filter misses ${JSON.stringify(raw)}`).toBe(true);
       }
     }
@@ -250,7 +252,8 @@ describe('[§8] the verdict on an item: certain bans refuse, a word holds it for
       { ...rumCake, name: 'Rum cake (large)' },
       { ...rumCake, description: 'Soaked in XM rum' },
       { ...rumCake, sectionName: 'Desserts' },
-      { ...rumCake, optionNames: ['Slice', 'Whole', 'Add a shot of rum'] },
+      // [#55] An option that IS a drink ("Add a shot of rum") refuses the item outright — see the launch suite.
+      { ...rumCake, optionNames: ['Slice', 'Whole', 'Add rum glaze'] },
     ]) expect(checkItem({ ...edit, reviewApprovedHash: approvedHash }).state).toBe('WAITING');
     // Option order is not an edit.
     expect(judgedWordsHash({ ...rumCake, optionNames: ['Whole', 'Slice'] })).toBe(approvedHash);
@@ -282,8 +285,10 @@ describe('[§8] the verdict on an item: certain bans refuse, a word holds it for
 
   it('a word anywhere in the partner\'s text holds the item, and says where', () => {
     expect(checkItem({ name: 'Bottle (750ml)', sectionName: 'Beers & Wines' })).toMatchObject({ state: 'WAITING', field: 'section' });
-    expect(checkItem({ name: 'XM 10 Year', description: 'Premium aged rum' })).toMatchObject({ state: 'WAITING', field: 'description', term: 'rum' });
-    expect(checkItem({ name: 'Fried chicken combo', optionNames: ['Add a drink', 'Coke', 'Carib Lager'] })).toMatchObject({ state: 'WAITING', field: 'option' });
+    // [#55] A name or an option that IS the drink ("XM 10 Year", "Carib Lager") is refused outright — the launch
+    // suite pins that; a description, a section and an option that only mentions the word are held.
+    expect(checkItem({ name: 'Gift set', description: 'Premium aged rum' })).toMatchObject({ state: 'WAITING', field: 'description', term: 'rum' });
+    expect(checkItem({ name: 'Fried chicken combo', optionNames: ['Add a side', 'Coke', 'Beer-battered fries'] })).toMatchObject({ state: 'WAITING', field: 'option', term: 'beer' });
     expect(checkItem({ name: 'Cook-up rice', sectionName: 'Mains' })).toEqual({ state: 'CLEAR' });
     expect(WAITING_FOR_CHECK).toBe('Waiting for a quick check');
   });

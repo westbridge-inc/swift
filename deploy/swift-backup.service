@@ -32,6 +32,11 @@ LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS
 # systemd credential directory wins on the host.
 UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE
 ExecStart=/opt/swift/deploy/backup.sh /var/backups/swift
+# [S3-2, Opus review 14 Oct] A oneshot unit has no start timeout by default, so
+# one hung run (pg_dump waiting on a lock, a stalled upload) would keep the
+# unit active and every later hourly trigger would be skipped in silence.
+# Ended at 50 minutes, the run fails visibly and the next hour starts fresh.
+TimeoutStartSec=50min
 
 # The script exits non-zero when a dump cannot be verified or the offsite
 # upload cannot be proven. systemd records that as a failed unit, which is what

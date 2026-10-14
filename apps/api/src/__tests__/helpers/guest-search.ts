@@ -43,6 +43,14 @@ export function matches(row: Row, where: Row = {}): boolean {
     if ('gte' in value) return actual != null && actual >= value.gte;
     if ('some' in value) return actual.some((r: Row) => matches(r, value.some));
     if ('in' in value) return value.in.includes(actual);
+    // Prisma's startsWith is case-sensitive unless mode: 'insensitive' (search's name
+    // prefixes ask for it; the fee-pause repair-key prefix does not).
+    if ('startsWith' in value) {
+      if (typeof actual !== 'string') return false;
+      return value.mode === 'insensitive'
+        ? actual.toLowerCase().startsWith(value.startsWith.toLowerCase())
+        : actual.startsWith(value.startsWith);
+    }
     if ('contains' in value) return typeof actual === 'string' && actual.toLowerCase().includes(value.contains.toLowerCase());
     if ('hasSome' in value) return actual.some((s: string) => value.hasSome.includes(s));
     if ('has' in value) return actual.includes(value.has);
@@ -108,7 +116,10 @@ export async function guestSearchApp(max = 200) {
     });
     return { findMany, findUnique: vi.fn(async (args: Row) => (await findMany(args))[0] ?? null), count: vi.fn(async (args: Row) => (await findMany(args)).length) };
   }
+  const pauseRecords: Row[] = [];
+  const pauseClocks: Row[] = [];
   const db = {
+    platformConfig: delegate(pauseRecords), billingDunningClock: delegate(pauseClocks),
     tenant: delegate(tenants), vendor: delegate(vendors), item: delegate(items),
     actorRatingStat: { findMany: vi.fn(async () => []) },
     session: { findUnique: vi.fn(async ({ where }: Row) => sessions.get(where.token) ?? null) },
@@ -117,6 +128,13 @@ export async function guestSearchApp(max = 200) {
     categoryDocumentGate: { findMany: vi.fn(async () => [{ code: 'licence', categorySlug: 'licensed', categoryKind: null, enforcement: 'BLOCK_LISTING', requiredDocType: { legacyCode: 'LICENCE', displayName: 'Licence' } }]) },
     verificationDocument: { findFirst: vi.fn(async (): Promise<{ id: string } | null> => null) },
     itemDiscoveryCategory: delegate(tags),
+    // [GUARDRAILS §8 · #54] No fixture store is filed under a banned category.
+    vendorDiscoveryCategory: { findMany: vi.fn(async () => []) },
+    // [S2-1 time bound] search reads run in a short transaction that first
+    // sets a local statement timeout (search-budget.ts); the double runs the
+    // read on itself and records the setting.
+    $executeRaw: vi.fn(async (..._args: unknown[]) => 1),
+    $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(db)),
     // [GUARDRAILS §8] The prohibited-items pre-filter is one raw query; no fixture
     // here names a banned good, so it finds no candidate rows.
     $queryRaw: vi.fn(async () => []),
@@ -138,5 +156,5 @@ export async function guestSearchApp(max = 200) {
     sessions.set(value, { id: 'test-session', userId, expiresAt: new Date(Date.now() + 60_000), authMethod: 'OTP' });
     return value;
   }
-  return { app, db, tenants, vendors, items, categories, tags, token, sessions };
+  return { pauseRecords, pauseClocks, app, db, tenants, vendors, items, categories, tags, token, sessions };
 }

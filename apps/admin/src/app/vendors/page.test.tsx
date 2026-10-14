@@ -4,10 +4,8 @@ import VendorsPage from './page';
 import { mockApi, renderWithQuery, requestsByMethod } from '@/test/test-utils';
 
 // [MISSION CONTROL · PR-1] The store list: a failed read says so (never an
-// empty table that reads as "no stores"), statuses and ratings are words, and
-// an approval's refusal arrives in the page with the next step.
-
-const REASON = 'Checked the owner ID and the food licence against the originals';
+// empty table that reads as "no stores"), and statuses and ratings are words.
+// [MC-PR2] The list no longer approves: activation follows the documents.
 
 const rows = [
   {
@@ -63,22 +61,12 @@ describe('[MC-PR1] vendors list', () => {
     expect(longName.getAttribute('title')).toBe(rows[0]!.name);
   });
 
-  it('approve → 409 CHECKLIST_INCOMPLETE: the plain next step and the Review Center for that store’s owner', async () => {
-    const fetchMock = mockApi((request) => {
-      if (request.method === 'GET') return { body: { success: true, data: rows } };
-      if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/vendors/vendor-new/approve') {
-        return { status: 409, body: { success: false, error: { code: 'CHECKLIST_INCOMPLETE', message: "A store's required documents are not all approved and current — review them in the Verification queue first." } } };
-      }
-      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
-    });
-    const { user } = renderWithQuery(<VendorsPage />);
-    await user.click(await screen.findByRole('button', { name: /^Approve A Store With/ }));
-    const dialog = screen.getByRole('dialog');
-    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), REASON);
-    await user.click(within(dialog).getByRole('button', { name: 'Approve store' }));
-
-    expect(await within(dialog).findByText('Approve the required documents in Verification first')).toBeTruthy();
-    expect(within(dialog).getByRole('link', { name: 'Open in Review Center' }).getAttribute('href')).toBe('/verification?applicant=owner-new');
-    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+  it('[MC-PR2] offers no Approve from the list: each store links to its page, where its document checklist is', async () => {
+    const fetchMock = mockApi(() => ({ body: { success: true, data: rows } }));
+    renderWithQuery(<VendorsPage />);
+    const table = await screen.findByRole('table', { name: 'Stores' });
+    expect(within(table).queryByRole('button')).toBeNull();
+    expect(within(table).getByRole('link', { name: /^A Store With/ }).getAttribute('href')).toBe('/vendors/vendor-new');
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0));
   });
 });
