@@ -2364,7 +2364,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** [hold v3 · N-01] The held-for-review queue: paid MMG orders the food-age
    *  cutoff would have cancelled, held for a person instead. Tenant-scoped by
-   *  the request like every admin read. */
+   *  the request like every admin read.
+   *  [REVIEW-B #1699 S3-1] Classed C0 (writes no access record), so it carries
+   *  no customer identity and no store phone: the Orders page polls it every
+   *  minute and shows only the store's name. Who the customer is lives on
+   *  GET /orders/:id, which is C1 and records the read. */
   app.get('/orders/held', { preHandler: [adminGuard] }, async () => {
     const rows = await app.prisma.order.findMany({
       where: { foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...FOOD_AGE_WAITING] } },
@@ -2373,8 +2377,7 @@ export async function adminRoutes(app: FastifyInstance) {
       select: {
         id: true, orderNumber: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true,
         totalAmount: true, readyAt: true, foodAgeHeldAt: true, placedAt: true,
-        vendor: { select: { id: true, name: true, phone: true } },
-        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        vendor: { select: { id: true, name: true } },
       },
     });
     const now = Date.now();
@@ -5687,7 +5690,7 @@ export async function adminRoutes(app: FastifyInstance) {
       documents,
       (earlierWhere) => tenantPrisma.verificationDocument.findMany({
         where: earlierWhere,
-        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+        select: { id: true, userId: true, role: true, subjectId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
       }),
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
