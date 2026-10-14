@@ -8,6 +8,7 @@ import './boot/secret-files';
 import { buildApp } from './app';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
 import { attestTenantWallAtBoot } from './boot/tenant-wall';
+import { attestSystemLoginAtBoot } from './boot/system-login';
 import { isProduction } from './utils/runtime-mode';
 import { runAsSystem } from './plugins/tenant-context';
 
@@ -26,7 +27,11 @@ async function start() {
     // carry a tenant policy; under an owner/BYPASSRLS role none of them bind,
     // and until now nothing measured which of those two worlds was running.
     // [MASTER-075] The same attestation the standalone worker runs.
+    // [L04 · R1] Under the enforced wall, sign-in reads accounts through the
+    // system login, so it must be reachable and a bypass member too. Both,
+    // always, in this order (system-login-boot.test.ts gates it).
     await attestTenantWallAtBoot(app.prisma, app.log);
+    await attestSystemLoginAtBoot(app.prisma, app.log);
 
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
