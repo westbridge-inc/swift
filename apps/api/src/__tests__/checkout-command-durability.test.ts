@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { Queue } from 'bullmq';
@@ -372,6 +372,8 @@ describe('the result is written with the order and replayed from the database', 
   });
 });
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe('[M-12] the command key is claimed only for a valid, canonical request', () => {
   it('a malformed request never consumes the key: an invalid payment method is 400, the key stays free, and the corrected same-key request places immediately', async () => {
     const c = await makeCustomer();
@@ -387,6 +389,7 @@ describe('[M-12] the command key is claimed only for a valid, canonical request'
   });
 
   it('a malformed timestamp is refused, not silently accepted through two false comparisons', async () => {
+    vi.stubEnv('SCHEDULED_ORDERS_ENABLED', 'true'); // Exercise the retained, explicitly enabled timestamp contract.
     const c = await makeCustomer();
     await fillCart(c);
     const key = `dur-${nanoid(10)}`;
@@ -398,6 +401,7 @@ describe('[M-12] the command key is claimed only for a valid, canonical request'
   });
 
   it('two spellings of the same instant are the same request: the second is a replay, not a refusal', async () => {
+    vi.stubEnv('SCHEDULED_ORDERS_ENABLED', 'true'); // Exercise the retained, explicitly enabled timestamp contract.
     const c = await makeCustomer();
     await fillCart(c);
     const key = `dur-${nanoid(10)}`;

@@ -13,7 +13,7 @@ const checks: Array<[string, RegExp]> = [
   ['../app/qr/unavailable/page.tsx', /store may be offline or no longer public/i],
   ['../app/qr/retired/page.tsx', /counter code retired/i],
   ['../app/qr/not-found/page.tsx', /counter code retired/i],
-  ['../app/store/[slug]/not-found.tsx', /store may no longer be public/i],
+  ['../app/(app)/store/[slug]/not-found.tsx', /store may no longer be public/i],
   ['../app/(marketing)/account/delete/page.tsx', /encryption key destroyed|push notification tokens/i],
 ];
 

@@ -7,15 +7,21 @@
 import './boot/secret-files';
 import { buildApp } from './app';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
-import { attestationOf, attestationLine, readRlsFacts, assertTenantWall } from './lib/rls-attestation';
-import { rlsAttestationGauge } from './plugins/observability';
+import { attestTenantWallAtBoot } from './boot/tenant-wall';
+import { attestSystemLoginAtBoot } from './boot/system-login';
 import { isProduction } from './utils/runtime-mode';
+import { runAsSystem } from './plugins/tenant-context';
+import { checkDeploymentIdentityAtStart } from './utils/deployment-identity';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
 async function start() {
   try {
     assertSafeBootConfig();
+    // [S3-L1] Only on a database of this process's own kind (its
+    // deployment_identity), and BEFORE the app is built: building it starts
+    // the in-process job workers.
+    await checkDeploymentIdentityAtStart();
     const app = await buildApp();
     // SWIFT-010: refuse to serve a production DB with no active market seeded
     // (empty CountryConfig = every signup rejected). Dev/test/CI skip inside.
@@ -25,10 +31,12 @@ async function start() {
     // credential, and refuse to serve a second tenant without it. 76 tables
     // carry a tenant policy; under an owner/BYPASSRLS role none of them bind,
     // and until now nothing measured which of those two worlds was running.
-    const rls = attestationOf(await readRlsFacts(app.prisma));
-    rlsAttestationGauge.labels(rls.enforced ? 'enforced' : 'bypassed').set(1);
-    app.log[rls.enforced ? 'info' : 'warn']({ rls: rls.facts, bypasses: rls.bypasses }, `tenant wall: ${attestationLine(rls)}`);
-    assertTenantWall(rls, await app.prisma.tenant.count({ where: { isActive: true } }));
+    // [MASTER-075] The same attestation the standalone worker runs.
+    // [L04 · R1] Under the enforced wall, sign-in reads accounts through the
+    // system login, so it must be reachable and a bypass member too. Both,
+    // always, in this order (system-login-boot.test.ts gates it).
+    await attestTenantWallAtBoot(app.prisma, app.log);
+    await attestSystemLoginAtBoot(app.prisma, app.log);
 
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
@@ -52,7 +60,10 @@ async function start() {
     // extensions reach existing tenants without trampling admin additions.
     // Failure is logged, never fatal — a missing taxonomy degrades the rail,
     // it must not take the API down.
-    void (async () => {
+    // [L01 · tenant wall] Boot seeding writes platform registries and the
+    // default tenant's taxonomy (each names its tenant explicitly): named
+    // system work, never an unbound composition root.
+    void runAsSystem('boot:seed-registries', async () => {
       try {
         const { seedDiscoveryTaxonomy } = await import('./modules/discovery/taxonomy.seed');
         const { created, aliasUpdated } = await seedDiscoveryTaxonomy(app.prisma);
@@ -66,6 +77,10 @@ async function start() {
         // are never minted lazily on a request path.
         const { seedDocRegistry } = await import('./modules/verification/doc-registry');
         const registry = await seedDocRegistry(app.prisma);
+        // [VERIFY-DOCS] The hire-car permit split takes effect with this code: its 60-day window starts
+        // at the first boot that runs it on this environment, and no later boot moves it.
+        const { ensureHireSplitStarted } = await import('./modules/verification/hire-permit-grace');
+        await ensureHireSplitStarted(app.prisma);
         app.log.info({ docTypes: registry.docTypes, requirementSets: registry.requirementSets, validators: registry.validators }, 'documents: registry seeded');
         // [DOC-INV-2] An ACTIVE document type the registry cannot validate — no
         // profile, no fields, a required field without a validator, a blocking
@@ -88,7 +103,7 @@ async function start() {
       } catch (err) {
         app.log.warn({ err }, 'discovery: taxonomy seed failed — the category rail will be empty (or the document registry seed failed); readiness stays 503');
       }
-    })();
+    });
   } catch (err) {
     console.error('Failed to start server:', err);
     process.exit(1);

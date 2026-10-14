@@ -170,7 +170,7 @@ async function providerHost(rows: Row[]) {
     subscription: { findFirst: async () => null },
     alertDelivery: { updateMany: async () => ({ count: 0 }) },
     notification: { updateMany: async () => ({ count: 0 }) },
-    platformConfig: { findUnique: async () => null },
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
   });
   const host = await hostRoutes(vendorRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
   return { ...host, store, prisma };

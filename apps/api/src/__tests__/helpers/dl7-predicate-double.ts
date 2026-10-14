@@ -2,7 +2,7 @@ import { project, type Row } from './service-vertical-doubles';
 
 // Only service-free predicate evaluation. This does not model SQL/RLS or locks.
 export type Query = { where?: Row; select?: Row; include?: Row };
-const operators = new Set(['equals', 'in', 'notIn', 'not', 'gt', 'gte', 'lt', 'lte', 'is', 'isNot', 'every', 'some', 'none', 'contains', 'mode', 'has', 'hasSome']);
+const operators = new Set(['equals', 'in', 'notIn', 'not', 'gt', 'gte', 'lt', 'lte', 'is', 'isNot', 'every', 'some', 'none', 'contains', 'startsWith', 'mode', 'has', 'hasSome']);
 export function matches(row: Row, where: Row = {}): boolean {
   return Object.entries(where).every(([key, condition]) => {
     if (condition === undefined) return true;
@@ -28,6 +28,7 @@ export function matches(row: Row, where: Row = {}): boolean {
       if (op === 'none') return !(value as Row[]).some(r => matches(r, bound as Row));
       if (op === 'mode') return true;
       if (op === 'contains') return String(value).toLowerCase().includes(String(bound).toLowerCase());
+      if (op === 'startsWith') return String(value).toLowerCase().startsWith(String(bound).toLowerCase());
       if (op === 'has') return (value as unknown[]).includes(bound);
       if (op === 'hasSome') return (bound as unknown[]).some(v => (value as unknown[]).includes(v));
       if (value == null || bound == null) return false;

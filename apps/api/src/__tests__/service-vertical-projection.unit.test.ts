@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
 import {
@@ -12,6 +12,14 @@ import {
   serviceBooking,
   type Row,
 } from './helpers/service-vertical-doubles';
+// [GUARDRAILS §8 · #54] The store-level ban's reads are proven against a real database (prohibited-items.test.ts);
+// this seam models none of the category tables, and no fixture store is filed under a banned category.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
+}));
+
 
 // ---------------------------------------------------------------------------
 // THE CUSTOMER PROJECTIONS OF A SERVICE BOOKING.
@@ -37,12 +45,15 @@ import {
 async function customerHost(rows: Row[]) {
   const store = orderStore(rows);
   const prisma = prismaDouble(store, {
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
     customer: { findUnique: async () => ({ id: 'cust-1', userId: 'user-customer', referralCode: 'REF1' }) },
     vendor: { findMany: async () => [] },
     item: { findMany: async () => [] },
     user: { findUnique: async () => ({ countryCode: 'GY' }) },
     countryConfig: { findUnique: async () => null },
     rating: { findMany: async () => [] },
+    // [Item 64] The dispatch journal holds no exhausted search for these fixtures.
+    dispatchSearch: { findFirst: async () => null },
   });
   const redis = recordingRedis();
   const host = await hostRoutes(customerRoutes, { prisma, redis, io: recordingIo() });
