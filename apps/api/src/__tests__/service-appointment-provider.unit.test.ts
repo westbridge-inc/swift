@@ -5,7 +5,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { BookingService } from '../modules/booking/booking.service';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
-import { vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
+import { checkoutOutboxId, dispatchCommandDedupeKey, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import {
   HOUR,
@@ -140,11 +140,15 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     const h = releaseHarness([courierParcel('parcel-1', { holdExpiresAt: new Date(Date.now() - 1000) })]);
     const res = await h.svc.releaseDueHeldOrders(h.enqueueDispatch);
     expect(res.released).toEqual(['parcel-1']);
-    expect(h.enqueueDispatch).toHaveBeenCalledWith('parcel-1');
+    const dedupeKey = dispatchCommandDedupeKey('parcel-1', 'courier-hold-released');
+    expect(h.enqueueDispatch).toHaveBeenCalledExactlyOnceWith('parcel-1', checkoutOutboxId(dedupeKey));
     expect(h.io.emits).toEqual([]);
     expect(h.vendorAlert).not.toHaveBeenCalled();
     expect(h.counted).toEqual([]); // no store, no store counters
-    expect(h.outbox).toEqual([]); // and no store to escalate to
+    expect(h.outbox).toEqual([expect.objectContaining({
+      id: checkoutOutboxId(dedupeKey), dedupeKey, orderId: 'parcel-1',
+      kind: 'dispatch-order', queue: 'dispatch', inTransaction: true, skipDuplicates: true,
+    })]); // durable rider dispatch; no store escalation
   });
 });
 
