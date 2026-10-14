@@ -1203,6 +1203,31 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     await booksAgree(fx.subId);
   });
 
+  it('[DS1122 S1] a release and a payout record applied at the same moment: the payout is recorded, the release refused, the books agree', async () => {
+    const fx = await storeWithCredit(6000);
+    expect((await setAside(fx.subId, 6000)).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    const approve = async (step: 'paid' | 'release', payload: Record<string, unknown>, asker: { token: string }, approver: { token: string }) => {
+      const asked = await app.inject({ method: 'POST', url: url(fx.subId, step), payload, headers: headersFor(asker.token) });
+      expect(asked.statusCode, asked.payload).toBe(202);
+      const approvalId = asked.json().error.details.approvalId as string;
+      expect((await app.inject({ method: 'POST', url: `/api/v1/admin/approvals/${approvalId}/decide`, payload: { approve: true, note: 'second person' }, headers: headersFor(approver.token) })).statusCode).toBe(200);
+      return () => app.inject({ method: 'POST', url: url(fx.subId, step), payload, headers: { ...headersFor(asker.token), 'x-swift-approval': approvalId } });
+    };
+    const applyRelease = await approve('release', { amount: 6000, setAsideId }, other, admin);
+    // `admin` asked for the set-aside, so another admin approves its payout record.
+    const applyPaid = await approve('paid', { amount: 6000, method: 'BANK_TRANSFER', reference: ref('RACE'), setAsideId }, admin, other);
+    const [released, recorded] = await Promise.all([applyRelease(), applyPaid()]);
+    expect(recorded.statusCode, recorded.payload).toBe(200);
+    expect(released.statusCode, released.payload).toBe(409);
+    expect(['REFUND_PAYOUT_REPORTED', 'REFUND_CYCLE_CHANGED']).toContain(released.json().error.code);
+    expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(1);
+    expect(await events(fx.subId, 'PREPAID_REFUND_RELEASED')).toHaveLength(0);
+    expect(await wallet(fx.subId)).toBe(0);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(0);
+    await booksAgree(fx.subId);
+  });
+
   it('[DS1122 S1] a payout-record ask waits while a release of that refund holds the lock', async () => {
     const fx = await storeWithCredit(3000);
     expect((await setAside(fx.subId, 3000)).statusCode).toBe(200);
