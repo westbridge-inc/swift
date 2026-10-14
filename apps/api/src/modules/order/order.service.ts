@@ -904,6 +904,7 @@ export class OrderService {
       vendor: (typeof cart.items)[number]['item']['vendor'];
       fulfillment: FulfillmentType;
       appointmentSlot?: Date;
+      homeVisit?: { inShopAvailable: boolean };
       distanceKm: number;
       /** [ALG-18] Which engine priced `distanceKm`; frozen on the order with it. */
       distanceSource: RouteSource | null;
@@ -1012,6 +1013,7 @@ export class OrderService {
       const fulfillment: FulfillmentType = planFulfillment(items, input.fulfillmentSelections?.[vendorId]);
       const appointmentItems = items.filter((ci) => ci.item.fulfillment === 'APPOINTMENT');
       let appointmentSlot: Date | undefined;
+      let homeVisit: { inShopAvailable: boolean } | undefined;
 
       if (fulfillment === 'APPOINTMENT') {
         if (appointmentItems.length !== items.length || items.length !== 1) {
@@ -1096,6 +1098,17 @@ export class OrderService {
         }
         const mobileVisit = requestedMode ? requestedMode === 'MOBILE' : offered === 'MOBILE' || offered === 'BOTH';
         if (mobileVisit) {
+          homeVisit = { inShopAvailable: offered === 'BOTH' };
+          // [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] A home visit is booked only while
+          // the owner holds an approved, current police clearance. Refused before anything else
+          // about the visit (an address would not change the answer); the owner is told once a
+          // day what unlocks it. In-shop bookings never reach this branch.
+          const owner = await this.prisma.vendorOwner.findUnique({ where: { id: vendor.ownerId }, select: { userId: true } });
+          const { homeVisitRefusal, homeVisitsCleared, tellOwnerHomeVisitsPaused } = await import('../verification/home-visits');
+          if (!owner || !(await homeVisitsCleared(this.prisma, owner.userId))) {
+            if (owner) await tellOwnerHomeVisitsPaused(this.prisma, this.notifications, owner.userId, vendor.name).catch(() => false);
+            throw homeVisitRefusal(vendor.name, offered === 'BOTH');
+          }
           if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
           const travel = await this.maps.routeKm(
             { lat: vendor.latitude, lng: vendor.longitude },
@@ -1135,7 +1148,7 @@ export class OrderService {
         throw new AppError(400, 'MIN_ORDER', `Minimum order at ${vendor.name} is $${Number(vendor.minOrderAmount).toLocaleString()} GYD`);
       }
 
-      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
+      plans.push({ vendor, fulfillment, appointmentSlot, homeVisit, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
     }
 
     // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
@@ -1338,7 +1351,7 @@ export class OrderService {
       for (const planVendorId of planVendorIds) {
         const lockedVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: planVendorId },
-          select: { name: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
+          select: { name: true, ownerId: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
         });
         if (
           lockedVendor.status !== 'ACTIVE'
@@ -1347,6 +1360,12 @@ export class OrderService {
           || (lockedVendor.activationValidUntil != null && lockedVendor.activationValidUntil <= now)
         ) {
           throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
+        }
+        const visit = plans.find((plan) => plan.vendor.id === planVendorId)?.homeVisit;
+        if (visit) {
+          const owner = await tx.vendorOwner.findUnique({ where: { id: lockedVendor.ownerId }, select: { userId: true } });
+          const { homeVisitRefusal, homeVisitsCleared } = await import('../verification/home-visits');
+          if (!owner || !(await homeVisitsCleared(tx, owner.userId))) throw homeVisitRefusal(lockedVendor.name, visit.inShopAvailable);
         }
         const lockedSub = await tx.subscription.findFirst({
           where: { vendorId: planVendorId },

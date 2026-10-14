@@ -11,12 +11,17 @@ import { attestTenantWallAtBoot } from './boot/tenant-wall';
 import { attestSystemLoginAtBoot } from './boot/system-login';
 import { isProduction } from './utils/runtime-mode';
 import { runAsSystem } from './plugins/tenant-context';
+import { checkDeploymentIdentityAtStart } from './utils/deployment-identity';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
 async function start() {
   try {
     assertSafeBootConfig();
+    // [S3-L1] Only on a database of this process's own kind (its
+    // deployment_identity), and BEFORE the app is built: building it starts
+    // the in-process job workers.
+    await checkDeploymentIdentityAtStart();
     const app = await buildApp();
     // SWIFT-010: refuse to serve a production DB with no active market seeded
     // (empty CountryConfig = every signup rejected). Dev/test/CI skip inside.
