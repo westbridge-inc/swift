@@ -973,7 +973,11 @@ describe('a weekly fee is a whole number of currency units — never a fraction,
     const tiers = seededTiers('GY');
     const { body } = await priceList({ GY: tiers });
     const d = body.data!;
-    const quoted = [...d.movers!.map((q) => q.rate), d.vendors!.service, ...d.vendors!.catalogue.map((b) => b.rate), ...Object.values(d.weekly!)];
+    // A legacy figure may be null — moverHeavy is when no heavy-band vehicle is
+    // offered (buses hidden, #1545) — and a null is not a price; every number is.
+    const legacy = Object.values(d.weekly!).filter((n): n is number => n !== null);
+    expect(legacy.length).toBeGreaterThanOrEqual(5);
+    const quoted = [...d.movers!.map((q) => q.rate), d.vendors!.service, ...d.vendors!.catalogue.map((b) => b.rate), ...legacy];
     for (const n of quoted) {
       expect(Number.isInteger(n), String(n)).toBe(true);
       expect(n!).toBeGreaterThan(0);
