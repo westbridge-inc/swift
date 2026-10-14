@@ -401,7 +401,7 @@ describe('[§8 launch · DS1112] the fourth review', () => {
     expect(parcelProhibited(parcel)).toBeNull();
   });
   // A count before the brand is not a different product: "1 Camel 20s" is judged as "Camel 20s", as a name and an option.
-  it.each(['1 Camel 20s', 'Two Newport 20s', '1 Banks 6 pack', '2x Stag 12 pack', 'A Corona 330ml', '1 XM Gold'])('%s is refused like the same words without the count', (name) => {
+  it.each(['1 Camel 20s', 'Two Newport 20s', '1 Banks 6 pack', '2x Stag 12 pack', 'A Corona 330ml', '1 XM Gold', 'Twenty Camel 20s'])('%s is refused like the same words without the count', (name) => {
     expect(verdict(name).state).toBe('BANNED');
     expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('BANNED');
   });
@@ -435,4 +435,23 @@ describe('[§8 launch · DS1112] the fourth review', () => {
     expect(verdict(name).state).toBe('WAITING');
     expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('WAITING');
   });
+
+  // [DS1264 S3] A count spelled out or written before a tobacco or medicine brand ("Camel twenty", "twenty Camel",
+  // "20 ct Camel"), digits of another script (Arabic-Indic, Persian, Devanagari), and a brand joined to its measure
+  // ("Camel20s", or with a zero-width space between) are read as the same goods.
+  it.each(['Camel twenty', 'twenty Camel', 'thirty Bayer', '20 Camel', '20 ct Camel', '20 pc Camel', '20 s Camel',
+    'Camel \u0662\u0660', '\u0662\u0660 Camel', 'Camel \u06F2\u06F0', 'Camel \u0968\u0966', 'Camel20s', 'Camel\u200B20s', '12 s Stag'])(
+    'a parcel of %s is refused', (parcel) => {
+      expect(parcelProhibited(parcel)).not.toBeNull();
+    },
+  );
+  it.each(['twenty Camel', 'thirty Bayer', '20 ct Camel', 'Camel20s', 'Camel\u200B20s'])('%s in the catalogue is held for a person', (name) => {
+    expect(verdict(name).state).toBe('WAITING');
+    expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('WAITING');
+  });
+  it.each(['2 Tiger shirts', 'Tiger shirt size 12', 'Banks 2 birthday cards', 'Bounty 2', 'Twenty birthday cards for Ron'])(
+    'a parcel of %s is carried (an alcohol brand is not counted by a bare number)', (parcel) => {
+      expect(parcelProhibited(parcel)).toBeNull();
+    },
+  );
 });

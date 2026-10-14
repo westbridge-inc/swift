@@ -675,7 +675,9 @@ function headGoods(words: readonly string[]): string | null {
 
 /** Counts written before a brand-first word ("1 Camel 20s", "Two Newport 20s", "2x Stag"): a quantity, not another
  *  product, so the brand is still the first word. [DS1261] */
-const LEADING_COUNT = /^(\d+x?|x\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen)$/;
+const LEADING_COUNT = /^(\d+x?|x\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|hundred|dozen)$/;
+/** A count, in digits or spelled out ("20", "twenty"). [DS1264 S3] */
+const COUNT = /^(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|dozen)$/;
 function afterLeadingCount(words: readonly string[]): readonly string[] {
   let start = 0;
   while (start < words.length - 1 && LEADING_COUNT.test(words[start]!)) start += 1;
@@ -687,16 +689,35 @@ function numberLeet(w: string): string {
   return /^\d+(o+s?|[o\d]*\d)$/.test(w) ? w.replace(/o/g, '0') : w;
 }
 
-/** The text's readings for a measure: "20$" is read as "20s" (the dollar sign is a letter s, as in "Hennes$y"), and a
- *  letter o in a number as a zero. [DS1263 S3] */
+/** Digits of any script as ASCII ("\u0662\u0660" → "20"): Unicode keeps every script's decimal digits in runs of ten,
+ *  0 to 9. [DS1264 S3] */
+function asciiDigits(text: string): string {
+  return text.replace(/\p{Nd}/gu, (digit) => {
+    const at = digit.codePointAt(0)!;
+    let start = at;
+    while (start > 0 && /\p{Nd}/u.test(String.fromCodePoint(start - 1))) start -= 1;
+    return String((at - start) % 10);
+  });
+}
+
+/** The text's readings for a measure: "20$" is read as "20s" (the dollar sign is a letter s, as in "Hennes$y"), the
+ *  letter o in a number as a zero, digits of any script as ASCII, a brand joined to its measure apart ("Camel20s", a
+ *  zero-width space between), and a number with its unit written apart together ("20 ct" → "20ct"). [DS1263 S3,
+ *  DS1264 S3] */
 function measureReadings(text: string, noSoftDrinks: boolean): string[] {
-  return readings(text.replace(/(\d)\$/g, '$1s'), noSoftDrinks).map((r) => r.split(' ').map(numberLeet).join(' '));
+  const out = new Set<string>();
+  for (const reading of readings(asciiDigits(text).replace(/(\d)\$/g, '$1s'), noSoftDrinks)) {
+    const spaced = reading.replace(/([a-z])(\d)/g, '$1 $2').split(' ').map(numberLeet).join(' ');
+    out.add(spaced);
+    out.add(spaced.replace(/\b(\d+) (s|ct|pk|pc|pcs|pack|packs)\b/g, '$1$2'));
+  }
+  return [...out];
 }
 
 /**
  * A brand-first word anywhere in the text with a measure of its kind anywhere else in it, in either order: "Pack of
  * Camel 20s", "Camel Blue 20 pack king size", "20s Camel", "Camel, 20s". For a tobacco or medicine brand, a bare count
- * right after it is its measure too ("Camel 20", "Bayer 30"). The catalogue holds it for a person; a parcel, which no
+ * right after or just before it is its measure too ("Camel 20", "Bayer 30", "twenty Camel"). The catalogue holds it for a person; a parcel, which no
  * person reviews, is refused. A lozenge brand counts by any measure here: it is only ever held in the catalogue (#58).
  * An "empty" container is not let through either: held, as "Empty Hennessy bottle" is (DS1110 S3-4). [DS1261 S2,
  * DS1263 S2/S3]
@@ -712,7 +733,9 @@ function brandWithMeasure(words: readonly string[]): { prohibitedClass: Prohibit
       : kind === 'liquid' ? aged || others.some((w) => LIQUID_MEASURE.test(w))
         : others.some((w) => TOBACCO_MEASURE.test(w));
     const dosed = brand.prohibitedClass === 'MEDICINE' && others.some((w) => PILL_MEASURE.test(w));
-    const counted = (brand.prohibitedClass === 'TOBACCO' || brand.prohibitedClass === 'MEDICINE') && /^\d+$/.test(words[i + 1] ?? '');
+    // A count right after it, or just before it ("Camel 20", "Camel twenty", "twenty Camel", "20 ct Camel"). [DS1264 S3]
+    const counted = (brand.prohibitedClass === 'TOBACCO' || brand.prohibitedClass === 'MEDICINE')
+      && [words[i + 1], words[i - 1], words[i - 2]].some((w) => COUNT.test(w ?? ''));
     if (ofItsKind || dosed || counted) return { prohibitedClass: brand.prohibitedClass, term: words[i]! };
   }
   return null;
