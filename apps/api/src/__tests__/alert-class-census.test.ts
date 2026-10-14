@@ -26,6 +26,7 @@ const NOT_PUSH_KINDS = new Set([
   'stall',
   'advanced', 'banked', 'held', 'lost',
   'churned', 'dunned', 'nudged', 'preserved', 'skipped',
+  'blocked', 'reserved', 'unproven',
 ]);
 
 // Classified kinds the lower-case scan cannot see, each with the reason.

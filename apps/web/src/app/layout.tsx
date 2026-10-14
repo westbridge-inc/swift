@@ -1,4 +1,6 @@
 import type { Metadata, Viewport } from 'next';
+import { preload } from 'react-dom';
+import { PRELOADED_FONTS } from '@/lib/fonts';
 import { appleStartupImages } from '@/lib/apple-startup-images';
 import './globals.css';
 import { appChrome, swiftDesignVariables } from '@/lib/design-tokens';
@@ -69,6 +71,7 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  for (const href of PRELOADED_FONTS) preload(href, { as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' });
   return (
     <html lang="en-GY" style={swiftDesignVariables}>
       <body>

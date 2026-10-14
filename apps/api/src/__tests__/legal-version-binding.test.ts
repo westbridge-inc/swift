@@ -111,6 +111,35 @@ const PUBLISHED: Record<
     driver_agreement: '7e560184f2106df06f56b95888d6dc4e2c5e3db3aeeae193396a75bc4e3b11f7',
     vendor_agreement: '28757aca7ff1309b7c7bb6914b782c1950fb4d353c71ceb5961231f81e33b693',
   },
+  // Account closure: role-independent entry, cash/live-work guards and honest holds.
+  '2026-10-04': {
+    terms: 'cb304527a513e65d4c40ab2589d9bd650d1873cab3755317ddd50dea8f62bedf',
+    privacy: 'b78985eb02c41427eac10445d2935e92cbead3cb600d2e8796d19d28db8407d8',
+    driver_agreement: '36543a0b037d488ff96076092c65a30939fa6adf14825bd80a35120a18097089',
+    vendor_agreement: '8bbbb883fe61443878d3183f615bca68c78d787265954e7ddfb5bd823567d702',
+  },
+  // [OWNER RULING 8 Oct, NO "WALLET" · legal] The Privacy Policy's "wallet
+  // credentials" (a payer's MMG sign-in) reads "mobile-money credentials". Only
+  // that phrase changes; the shared last-updated date changes all four hashes.
+  // The Terms' denial "offers no wallet or stored value" stays as written.
+  '2026-10-11': {
+    terms: '25897b1b30a4010dbee2134560af0d0c546fb973d4398208a05b7d12a3e2a572',
+    privacy: 'ccfdfc5dcb57c3e9463d5030966d6dbfc29e1de19640000a78feb1d31f10273f',
+    driver_agreement: 'c5c776fd4b4b2d3bdccf6139154be6c2f40bd2f6a16c70f3e36b88adc79c29ba',
+    vendor_agreement: '50c3b5717806a15389a8c0416c2cf4c6d210e713f608edc24f17c1304e4fdae8',
+  },
+  // [OWNER RULING 8 Oct, NO "WALLET" (2) + (3)] The Mover and Business
+  // Agreements' fee paragraph adds: at most four weeks paid ahead; a fee paid
+  // ahead is used only for the weekly fee; unstarted weeks are refunded and
+  // recorded before an account is deleted; money received above the limit is
+  // returned. The date re-pins all four. (Pinned while unpublished: these are
+  // the first words served under this version.)
+  '2026-10-12': {
+    terms: '160fd6666250987bbd4ad6390c0ad5f9956293ebb6fcc9cb02ca6960b59cce4d',
+    privacy: 'f21df903fffd27d695aef64078fcae055ac4dcf1dc31110a9cc1dec0af5295ef',
+    driver_agreement: '5976fc9c5508c29325449db48b7b821ac658a58775d12bf1b3703e9e7f00ff9d',
+    vendor_agreement: '0bd3f6dc34d89b10a3fcad7bbd00e4332b722b993caa180176de47b80dfaca62',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -121,6 +150,15 @@ describe('legal version binding [F-035-08]', () => {
     expect(agreement).not.toMatch(/MMG\s+agent|Swift\s+Number|account\s+number/i);
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
     expect(feeParagraph).toContain("payable in the Swift app through MMG's checkout, or by card where the app offers it.");
+  });
+
+  it.each([
+    ['Mover Agreement', DRIVER_AGREEMENT],
+    ['Business Agreement', VENDOR_AGREEMENT],
+  ])('%s states the four-week pay-ahead limit and the refund of unused weeks at closing [owner ruling 8 Oct]', (_name, agreement) => {
+    const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
+    expect(feeParagraph).toContain('You may pay the weekly fee up to four weeks ahead, and no further. Money received above that limit is returned to you.');
+    expect(feeParagraph).toContain('If you close your account, Swift refunds to you the weeks you paid ahead that have not started, records the refund, and then deletes the account; a week that has started is not refunded.');
   });
 
   it('the served version is a version this file has pinned', () => {

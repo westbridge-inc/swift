@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { withIdempotency } from '../utils/idempotency';
+import { idempotencyCacheKey, withIdempotency } from '../utils/idempotency';
 
 // Request-level idempotency for money endpoints: claim-first (so concurrent
 // duplicates can't both act), replay the stored result, release on failure.
@@ -18,7 +18,7 @@ function mockRedis() {
     del: vi.fn(async (k: string) => { store.delete(k); return 1; }),
   };
 }
-const req = (key?: string) => ({ headers: key ? { 'idempotency-key': key } : {} }) as unknown as FastifyRequest;
+const req = (key?: string) => ({ headers: key ? { 'idempotency-key': key } : {}, user: { userId: 'user-1' } }) as unknown as FastifyRequest;
 const appWith = (redis: ReturnType<typeof mockRedis>) => ({ redis }) as unknown as FastifyInstance;
 const KEY = 'key-abcdef12';
 
@@ -46,7 +46,7 @@ describe('withIdempotency', () => {
 
   it('a concurrent duplicate (claimed, result not stored yet) is refused with 409', async () => {
     const redis = mockRedis();
-    await redis.set('op:idem:o1:' + KEY, 'IN_FLIGHT', 'EX', 100, 'NX'); // another request holds it
+    await redis.set(idempotencyCacheKey(req(KEY), 'op', 'o1')!, 'IN_FLIGHT', 'EX', 100, 'NX'); // another request holds it
     await expect(
       withIdempotency(appWith(redis), req(KEY), 'op', 'o1', async () => ({ ok: 1 })),
     ).rejects.toMatchObject({ statusCode: 409, code: 'DUPLICATE_REQUEST' });
@@ -57,7 +57,8 @@ describe('withIdempotency', () => {
     await expect(
       withIdempotency(appWith(redis), req(KEY), 'op', 'o1', async () => { throw new Error('boom'); }),
     ).rejects.toThrow('boom');
-    expect(redis.store.has('op:idem:o1:' + KEY)).toBe(false); // released, not left IN_FLIGHT
+    expect(redis.store.has(idempotencyCacheKey(req(KEY), 'op', 'o1')!)).toBe(false); // released, not left IN_FLIGHT
+    expect(redis.store.size).toBe(0); // and nothing else was left behind either
     let ran = 0;
     const retry = await withIdempotency(appWith(redis), req(KEY), 'op', 'o1', async () => { ran++; return { ok: 1 }; });
     expect(ran).toBe(1);

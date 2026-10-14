@@ -1,7 +1,9 @@
+import { assertMoverPushReady } from '../notification/mover-push-authority';
+import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -26,12 +28,14 @@ import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../di
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
+import { RIDER_INCIDENT_REASONS } from '../custody/custody-case';
+import { reportIncident, holderView, relayTasks, transferCustody, declineRelay, invalidTransferCodeError } from '../custody/custody-recovery';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
-import { subscriptionOperability } from '../subscription/operate-gate';
+import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { requireStepUp } from '../auth/step-up';
 import { normalizeRegistrationMark } from '../verification/subjects';
 import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
@@ -45,9 +49,10 @@ import { log } from '../../utils/logger';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
+import { goOnlineRefusal } from '../subscription/go-online-refusals';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
-import { clampDriverFare } from '../../utils/markup';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
@@ -66,6 +71,8 @@ import {
   RIDER_IN_CUSTODY_STATUSES,
   RIDER_PICKUP_FROM,
 } from '../order/order-status';
+import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
+import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -297,6 +304,12 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const rider = await getRider(app, request.user.userId); // authz before validation
+    // [MASTER-008] The order is this rider's BEFORE anything is replayed: a
+    // replay returns a stored result without running the effect, so a check
+    // that lives only inside the effect never runs for it. Answered as the
+    // cash handover itself answers a non-owner: not found.
+    const mine = await app.prisma.order.findFirst({ where: { id, riderId: rider.id }, select: { id: true } });
+    if (!mine) throw new NotFoundError('Order', id);
     const body = handoverSchema.parse(request.body);
     // Idempotent on Idempotency-Key: a network-retried handover returns the
     // original result instead of failing the (now-terminal) transition.
@@ -331,18 +344,12 @@ export async function riderRoutes(app: FastifyInstance) {
    *  acceptance — unlike the board-grab entrance, which is for the open list. */
   app.post('/offers/accept', { preHandler: [app.authenticate] }, async (request) => {
     await getRider(app, request.user.userId); // authz before validation
-    const { orderId, fare, offerAttemptId } = offerActionSchema.extend({ fare: zMoneyWhole.optional() }).parse(request.body);
-    // Rider-set delivery fee (CASH only) rides INSIDE the locked claim
-    // transaction [REPORT-005 F-005-01]: assignment, price, float, and audit
-    // commit or roll back together — never a post-assignment second commit
-    // that can fail after a durable assignment or apply a stale total.
-    // [REPORT-010 F-07] fare 0 is NEVER a legitimate choice (the floor is 60%
-    // of market): a recovered offer card whose board row hadn't loaded used
-    // to submit 0 and silently clamp the mover's pay to the floor — and on
-    // MMG it consumed the offer with MMG_PRICE_LOCKED. Zero means "no
-    // choice"; the market rate applies.
-    const chosenFare = fare && fare > 0 ? fare : undefined;
-    const order = await dispatch.acceptOffer(orderId, request.user.userId, chosenFare, offerAttemptId);
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the
+    // price: every delivery is the formula fee set at checkout. An older app's
+    // slider may still send `fare`; it is read (so that app is never refused)
+    // and ignored.
+    const { orderId, offerAttemptId } = offerActionSchema.extend({ fare: zMoneyWhole.optional() }).parse(request.body);
+    const order = await dispatch.acceptOffer(orderId, request.user.userId, undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
 
@@ -427,6 +434,7 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...rider,
+        subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription ?? null,
         // D.3 float exposure — surfaced so the app can explain "why no offers".
         float: {
           limit: Number(rider.floatLimit),
@@ -607,22 +615,20 @@ export async function riderRoutes(app: FastifyInstance) {
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
     const verified = await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
-      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
+      throw goOnlineRefusal('DOCUMENTS', 'RIDER');
     }
 
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — a missing row is
     // grandfathered (legacy accounts pre-dating birth-on-verification); the
     // verdict maps onto this route's historical codes.
-    const sub = await app.prisma.subscription.findFirst({
-      where: { riderId: rider.id },
-      select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
-    });
-    const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
-        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
+        throw goOnlineRefusal('FEE_GRACE_LAPSED', 'RIDER');
       }
-      throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your subscription is unpaid. Top up or pay to go back online.');
+      // [NO-DEAD-ENDS] Never "top up": the fee is paid under Weekly fee (go-online-refusals.ts).
+      throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
     }
 
     // Identity assurance (safety spec §7.1): when the tenant enables liveness,
@@ -639,11 +645,21 @@ export async function riderRoutes(app: FastifyInstance) {
     // allowing stale work to resurrect delivery supply.
     const { updated, retiredDriverId } = await app.prisma.$transaction(async (tx) => {
       await lockIdentityAuthority(tx);
-      const currentSubscription = await tx.subscription.findFirst({ where: { riderId: rider.id }, select: { id: true } });
+      // [SAFE-B · #1393] Only a mover with no weekly-fee subscription at all (the
+      // grandfathered path) needs the identity authority here. The shared mover
+      // fee belongs to the payer: a dual-role mover's one subscription may sit on
+      // the driver profile.
+      const currentSubscription = await tx.subscription.findFirst({
+        where: { OR: [{ riderId: rider.id }, { driver: { userId: request.user.userId } }] }, select: { id: true },
+      });
       if (!currentSubscription) await requireIdentityAuthority(tx, request.user.userId);
       const authority = await lockUserRoleAuthority(tx, request.user.userId);
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'RIDER');
+      await lockMoverSources(tx, feePayer);
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow: 'GRANDFATHER' })).operable) {
+        throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
+      }
 
       // Authentication can be revoked after the Fastify pre-handler but while
       // verification checks are still running. Lock/revalidate this exact
@@ -660,6 +676,7 @@ export async function riderRoutes(app: FastifyInstance) {
       if (!sessions[0]) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
+      await assertMoverPushReady(tx, request.user.userId);
 
       const snapshots = await tx.$queryRaw<Array<{ currentOrderId: string | null; documentsVerified: boolean; updatedAt: Date }>>`
         SELECT "currentOrderId", "documentsVerified", "updatedAt"
@@ -1038,7 +1055,7 @@ export async function riderRoutes(app: FastifyInstance) {
       orderTypes.push('COURIER');
     }
 
-    const orders = await app.prisma.order.findMany({
+    const candidates = await app.prisma.order.findMany({
       where: {
         customerId: { not: request.user.userId },
         status: { in: ['READY_FOR_PICKUP', 'ACCEPTED', 'PREPARING'] },
@@ -1077,6 +1094,8 @@ export async function riderRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
+
+    const orders = await safeBoardOrders(app.prisma, candidates, request.user.userId, 'RIDER');
 
     // §4d trust badge: WHO the rider would front cash for — trust level,
     // completed orders, strikes. One batch (3 queries), never per-row.
@@ -1246,12 +1265,10 @@ export async function riderRoutes(app: FastifyInstance) {
   /** POST /orders/:id/accept — Claim an available order. */
   app.post('/orders/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
-    // [REPORT-011 F-04] fare 0 is never a legitimate undercut choice (the floor
-    // is 60% of market). A forged/legacy client posting 0 must NOT clamp the
-    // rider's own pay to the floor — normalize zero to "no choice" so the
-    // market fee applies, at THIS entrance too, not just the offer card.
-    const { fare: rawFare } = z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
-    const fare = rawFare && rawFare > 0 ? rawFare : undefined;
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the
+    // price. An older app's `fare` is read (never refused) and ignored: the
+    // formula fee set at checkout stands, on CASH and MMG alike.
+    z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
 
     // Must be online.
@@ -1358,20 +1375,6 @@ export async function riderRoutes(app: FastifyInstance) {
         `This ${needsCourier ? 'courier parcel' : 'delivery'} needs a ${needsCourier ? 'courier' : 'delivery'} rider — your account isn't set up for it.`);
     }
 
-    // Rider-set delivery fee, capped at the market rate (deliveryFee) — CASH
-    // only [REPORT-005 F-005-01]: on CASH the customer simply pays less at the
-    // door; on MMG the checkout total was already paid/instructed to the store,
-    // so repricing would rewrite captured money. Early honest 409 here; the
-    // persistence seam re-derives the clamp from the LOCKED row either way.
-    if (fare != null && order.paymentMethod !== 'CASH'
-      && clampDriverFare(fare, Number(order.deliveryFee)) !== Number(order.deliveryFee)) {
-      throw new AppError(
-        409,
-        'MMG_PRICE_LOCKED',
-        'The delivery price can’t change on an MMG order — the customer already paid the checkout total to the store.',
-      );
-    }
-
     // D.3 cash-exposure parity with dispatch.claimOrder [debug-ledger P2]: a
     // board-grab accept must respect the same float gate the offer cascade
     // enforces — the rider fronts the vendor the CASH subtotal at pickup — and
@@ -1413,9 +1416,6 @@ export async function riderRoutes(app: FastifyInstance) {
         changedBy: request.user.userId,
         moverUserId: request.user.userId,
         note: 'Rider accepted the order',
-        // The seam clamps against the LOCKED row and applies the total as an
-        // atomic delta — no stale absolute totals from this preview [F-005-01].
-        ...(fare != null ? { requestedFee: fare } : {}),
       });
 
       // Float, order, and mover reservation share this transaction. Any failed
@@ -1555,6 +1555,9 @@ export async function riderRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { ridePin, handoverVersion } = pickupPinSchema.parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
+    // [MASTER-008] Ownership BEFORE any replay (re-checked inside, at the moment
+    // of the effect): a stored result is never handed to someone else's order.
+    await getOwnedOrder(app, id, rider.id);
     // Idempotent on Idempotency-Key: a retried final step returns the original
     // result instead of failing the now-terminal transition. The whole effect
     // (incl. the transition / payment / PIN checks) runs inside the claim so a
@@ -1980,8 +1983,12 @@ export async function riderRoutes(app: FastifyInstance) {
         throw new NotFoundError('Order', id);
       }
       if (IN_CUSTODY.includes(order.status)) {
+        // [AF-MOB-006] Still never a release after pickup — but no longer a
+        // dead end either: the refusal names the recovery report, which opens
+        // the order's one owned case for support to act on.
         throw new AppError(409, 'CUSTODY',
-          'You have already picked this order up — it cannot be handed back. Call support and we will sort it out together.');
+          'You have already picked this order up, so it cannot be handed back. Report the problem instead: support takes the case over and tells you the next step.',
+          { recovery: { action: 'REPORT_PROBLEM', path: `/api/v1/rider/orders/${id}/recovery` } });
       }
       if (!PRE_CUSTODY.includes(order.status)) {
         throw new AppError(409, 'INVALID_STATUS', `This order can no longer be handed back (${order.status}).`);
@@ -2028,6 +2035,86 @@ export async function riderRoutes(app: FastifyInstance) {
     }
 
     return { success: true, data: { orderId: id, status: outcome.reopenStatus } };
+  });
+
+  // =========================================================================
+  // [AF-MOB-006] CUSTODY RECOVERY — after pickup, a problem is a case, not a
+  // phone call. The holder reports it; operations owns and directs it; a
+  // relay rider takes the goods over only with the holder's code.
+  // =========================================================================
+  const custodyDeps = { prisma: app.prisma, io: app.io, notifications: new NotificationService(app.prisma, app.io) };
+  const recoveryReportSchema = z.object({
+    reason: z.enum(RIDER_INCIDENT_REASONS),
+    note: z.string().trim().max(300).optional(),
+    gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).optional(),
+  });
+
+  /** POST /orders/:id/recovery — the holder reports a problem after pickup.
+   *  Opens the order's ONE case (201) or returns the open one (200). */
+  app.post('/orders/:id/recovery', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const rider = await getRider(app, request.user.userId);
+    const body = recoveryReportSchema.parse(request.body ?? {});
+    const result = await reportIncident(custodyDeps, {
+      orderId: id, riderId: rider.id, userId: request.user.userId,
+      reason: body.reason, note: body.note ?? null, gps: body.gps ?? null,
+    });
+    reply.code(result.created ? 201 : 200);
+    return { success: true, data: { created: result.created, ...(await holderView(custodyDeps, id, rider.id)) } };
+  });
+
+  /** GET /orders/:id/recovery — the holder's (or former holder's) view of the
+   *  order's latest case, with the handoff code while a transfer is pending. */
+  app.get('/orders/:id/recovery', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const rider = await getRider(app, request.user.userId);
+    return { success: true, data: await holderView(custodyDeps, id, rider.id) };
+  });
+
+  /** GET /recovery/relays — handoffs this rider has been asked to take over. */
+  app.get('/recovery/relays', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    return { success: true, data: await relayTasks(custodyDeps, rider.id) };
+  });
+
+  /** POST /recovery/:caseId/transfer — the relay rider enters the holder's
+   *  code at the meeting point. Idempotent on Idempotency-Key, so an offline
+   *  retry returns the original result instead of a second attempt. */
+  app.post('/recovery/:caseId/transfer', { preHandler: [app.authenticate] }, async (request) => {
+    const { caseId } = request.params as { caseId: string };
+    const rider = await getRider(app, request.user.userId);
+    const body = z.object({
+      code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit handoff code'),
+      gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
+      version: z.number().int().min(0).optional(),
+    }).parse(request.body ?? {});
+    // [DS667 S2] A refused code is a RESULT, stored under the key like a
+    // success: one physical attempt burns one attempt, and a retry of the same
+    // request (a lost answer) replays the same refusal without re-running.
+    type TransferAnswer =
+      | { refused: 'INVALID_TRANSFER_CODE'; remaining: number }
+      | { caseId: string; orderId: string; state: string; orderStatus: string };
+    const { data, replayed } = await withIdempotency(app, request, 'custody-transfer', caseId, async (): Promise<TransferAnswer> => {
+      const outcome = await transferCustody(custodyDeps, {
+        caseId, relayRiderId: rider.id, relayUserId: request.user.userId,
+        code: body.code, gps: body.gps, ...(body.version !== undefined ? { version: body.version } : {}),
+      });
+      if (outcome.kind === 'WRONG_CODE') return { refused: 'INVALID_TRANSFER_CODE' as const, remaining: outcome.remaining };
+      return { caseId, orderId: outcome.order.id, state: outcome.kase.state, orderStatus: outcome.order.status };
+    });
+    if ('refused' in data) throw invalidTransferCodeError(data.remaining);
+    return { success: true, data, replayed };
+  });
+
+  /** POST /recovery/:caseId/decline — the relay rider cannot take it. */
+  app.post('/recovery/:caseId/decline', { preHandler: [app.authenticate] }, async (request) => {
+    const { caseId } = request.params as { caseId: string };
+    const rider = await getRider(app, request.user.userId);
+    const { reason } = z.object({ reason: z.string().trim().max(300).optional() }).parse(request.body ?? {});
+    const result = await declineRelay(custodyDeps, {
+      caseId, relayRiderId: rider.id, relayUserId: request.user.userId, ...(reason ? { reason } : {}),
+    });
+    return { success: true, data: { caseId, state: result.kase.state } };
   });
 
   /** GET /demand — unassigned deliveries near the rider, grouped by store
@@ -2080,8 +2167,10 @@ export async function riderRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    // [REVIEW-PARTNER · DL-5] No weekly fee in the fiction: no rail to choose, no step-up to run.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     await requireStepUp(app, request);
-    const sub = await app.prisma.subscription.findFirst({ where: { riderId: rider.id } });
+    const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const updated = body.method === 'NONE'
       ? await billing.stopBilling(sub.id, request.user.userId)
@@ -2122,6 +2211,21 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /subscription — Current subscription with payment history. */
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the rider starts and
+  // follows a checkout for their own weekly fee: the payer's ONE canonical
+  // subscription [#1393 mover fee authority], the same one GET /subscription
+  // shows, which may sit on the mover's driver profile.
+  const feeSubscriptionFor = async (request: FastifyRequest) => {
+    const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+    return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+  };
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, { subscriptionFor: feeSubscriptionFor });
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the rider
+  // lists, removes, adds and pays by card for the same subscription. Card rail
+  // v2 stays behind CARD_RAIL_V2 (default off).
+  const cardRail = registerPartnerCardRoutes(app, { subscriptionFor: feeSubscriptionFor });
+
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const found = await app.prisma.rider.findUnique({
       where: { userId: request.user.userId },
@@ -2139,16 +2243,15 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
     const rider = found!;
 
-    if (!rider.subscription) {
-      return { success: true, data: null };
-    }
-
-    const sub = rider.subscription;
+    const feePayer = await moverFeePayer(app.prisma, rider.userId);
+    const view = await readMoverFeeSubscription(app.prisma, feePayer);
+    if (!view) return { success: true, data: null };
+    const sub = view.subscription;
     const now = new Date();
     // THE canOperate rule (operate-gate.ts): the badge must show exactly what
     // the go-online switch allows — including the grace-lapse cutoff, which
     // this display copy used to miss.
-    const isActive = subscriptionOperability(sub, { missingRow: 'BLOCK' }, now).operable && sub.currentPeriodEnd > now;
+    const isActive = (await moverFeeOperability(app.prisma, feePayer, { missingRow: 'BLOCK' }, now)).operable && sub.currentPeriodEnd > now;
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
@@ -2156,10 +2259,13 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...sub,
+        moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
         // "My Swift Number" + Pay-screen block [san spec 2.4/6.1] — SAN,
         // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
+        // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)

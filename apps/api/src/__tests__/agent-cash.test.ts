@@ -1,11 +1,12 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { PrismaClient, type Prisma } from '@prisma/client';
 import { nanoid } from 'nanoid';
-import { AgentCashService, type InboundFeePayment } from '../modules/billing/agent-cash.service';
+import { AgentCashService, type InboundFeePayment, type IngestResult } from '../modules/billing/agent-cash.service';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { ensureSan } from '../modules/billing/san.service';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // Agent-cash ingestion [san spec PARTS 4/13] against the real engine:
@@ -87,6 +88,9 @@ afterAll(async () => {
     await prisma.$transaction(async (tx) => {
       const kept = await retainedCohort(tx, { subscriptionIds: subIds });
       const goneSubs = without(subIds, kept.subscriptionIds);
+      // [#1393] Every suite subscription's shared dunning clock evidence goes (a
+      // kept one keeps its money records, never a pending fee demand or hold).
+      await cleanupBillingClocks(tx, subIds);
       await tx.mmgAgentPayment.deleteMany({ where: { id: { in: paymentIds }, OR: [{ subscriptionId: null }, { subscriptionId: { in: goneSubs } }] } });
       await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
       await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
@@ -375,5 +379,392 @@ describe('cross-channel dedupe (edge 2 / scenario G core)', () => {
     expect(second.status).toBe('reconciled');
     const topups = await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } });
     expect(topups).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [OWNER RULING 8 Oct, NO "WALLET" (2) + (4)] Weekly fees are paid at most four
+// weeks ahead, and production credits no fee by hand or by agent
+// (BILLING_TOPUP_HOLD=1). Agent money is never refused or dropped once it is
+// Swift's: past the cap, or under the hold, it is recorded and held for a
+// person, who refunds it. An admin attaching it is refused in plain words.
+// ---------------------------------------------------------------------------
+describe('[owner ruling 8 Oct] agent money: four weeks ahead at most, and held in production', () => {
+  it('four weeks ahead credit; the fifth week is held for a person (PAY_AHEAD_LIMIT), never credited', async () => {
+    const { sub, san } = await makeVendorSub();
+    for (let week = 0; week < 4; week++) expect(track(await svc.ingest(inbound(san))).status).toBe('accepted');
+    expect(Number((await prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(8400);
+    const fifth = track(await svc.ingest(inbound(san)));
+    expect(fifth).toMatchObject({ status: 'received_unmatched', failureCode: 'PAY_AHEAD_LIMIT' });
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(4);
+    expect(Number((await prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(8400);
+    // The provider transaction is not marked credited: a person can still refund it.
+    const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: fifth.paymentId } });
+    expect(row.status).toBe('UNMATCHED');
+    if (row.providerPaymentId) expect((await prisma.providerPayment.findUniqueOrThrow({ where: { id: row.providerPaymentId } })).status).toBe('OPEN');
+
+    // An admin attaching it to the full account is refused, naming what to do.
+    await expect(svc.attach(fifth.paymentId, sub.id, 'admin-test')).rejects.toMatchObject({ statusCode: 409, code: 'PAY_AHEAD_LIMIT' });
+    // [review S4] An attach is whole or nothing: the words say refund it.
+    await expect(svc.attach(fifth.paymentId, sub.id, 'admin-test')).rejects.toThrow(/attached whole or not at all: refund it to the partner/);
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(4);
+  });
+
+  it('at the cap, an admin attaching an observation another channel already credited is told it is reconciled — never asked to refund it', async () => {
+    const { generateSan } = await import('../modules/billing/san');
+    let unknown = '';
+    for (;;) {
+      unknown = generateSan();
+      if (!(await prisma.subscription.findUnique({ where: { san: unknown } }))
+        && !(await prisma.sanTombstone.findUnique({ where: { san: unknown } }))) break;
+    }
+    const { sub, san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    // The webhook saw the payment with a mistyped Swift Number: held for a person.
+    const first = track(await svc.ingest(inbound(unknown, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+    expect(first).toMatchObject({ status: 'received_unmatched', failureCode: 'SAN_UNKNOWN' });
+    // Three weeks ahead, then MMG's statement credits that same transaction: four weeks, the cap.
+    for (let week = 0; week < 3; week++) track(await svc.ingest(inbound(san)));
+    expect(track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn }))).status).toBe('accepted');
+    // Attaching the first observation moves no money and is not a refund case.
+    expect(await svc.attach(first.paymentId, sub.id, 'admin-test')).toMatchObject({ status: 'reconciled' });
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(4);
+  });
+
+  it('under the hold, an agent payment is recorded and held for a person, and an admin cannot attach it', async () => {
+    const { sub, san } = await makeVendorSub();
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      const held = track(await svc.ingest(inbound(san)));
+      expect(held).toMatchObject({ status: 'received_unmatched', failureCode: 'TOPUP_ON_HOLD' });
+      await expect(svc.attach(held.paymentId, sub.id, 'admin-test')).rejects.toMatchObject({ statusCode: 503, code: 'TOPUP_ON_HOLD' });
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [REVIEW S3-2 · owner 11 Oct] Under the hold every agent payment is held for a
+// refund, and one real MMG payment can arrive as several observations (the
+// webhook, MMG's statement). A refund is made ONCE per MMG transaction: the
+// refund closes the transaction, its other held observations are reconciled
+// (nothing to refund twice), a later observation never credits it, and a
+// transaction already credited is never also refunded.
+// ---------------------------------------------------------------------------
+describe('[review S3-2] one refund per MMG payment', () => {
+  async function unknownSan() {
+    const { generateSan } = await import('../modules/billing/san');
+    for (;;) {
+      const s = generateSan();
+      if (!(await prisma.subscription.findUnique({ where: { san: s } })) && !(await prisma.sanTombstone.findUnique({ where: { san: s } }))) return s;
+    }
+  }
+  const observationsOf = async (paymentId: string) => {
+    const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
+    return prisma.mmgAgentPayment.findMany({ where: { providerPaymentId: row.providerPaymentId! }, select: { id: true, status: true } });
+  };
+
+  it('two observations of one held payment: one refund, the other reconciled, a second refund refused', async () => {
+    const { san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      const a = track(await svc.ingest(inbound(san, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+      const b = track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn })));
+      expect([a.status, b.status]).toEqual(['received_unmatched', 'received_unmatched']);
+      expect(await svc.flagRefund(a.paymentId, 'admin-test', 'returned at the agent')).toMatchObject({ status: 'refund_flagged' });
+      const rows = await observationsOf(a.paymentId);
+      expect(rows.filter((r) => r.status === 'REFUND_FLAGGED').map((r) => r.id)).toEqual([a.paymentId]);
+      expect(rows.find((r) => r.id === b.paymentId)?.status).toBe('RECONCILED');
+      await expect(svc.flagRefund(b.paymentId, 'admin-test', 'again')).rejects.toMatchObject({ code: 'NOT_UNMATCHED' });
+      const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: a.paymentId } });
+      expect((await prisma.providerPayment.findUniqueOrThrow({ where: { id: row.providerPaymentId! } })).status).toBe('REFUNDED');
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+  });
+
+  it('a refunded payment observed again later is never credited', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    const a = track(await svc.ingest(inbound(await unknownSan(), { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+    expect(a).toMatchObject({ status: 'received_unmatched', failureCode: 'SAN_UNKNOWN' });
+    await svc.flagRefund(a.paymentId, 'admin-test', 'returned at the agent');
+    const late = track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn })));
+    expect(late.status).toBe('reconciled');
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(0);
+  });
+
+  it('a payment another channel already credited is never also refunded', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    const a = track(await svc.ingest(inbound(await unknownSan(), { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+    expect(track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn }))).status).toBe('accepted');
+    await expect(svc.flagRefund(a.paymentId, 'admin-test', 'returned at the agent')).rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_CREDITED' });
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: a.paymentId } })).status).toBe('UNMATCHED');
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [#1609 review S3-1, S3-2, S4] A refund and an observation of the same MMG
+// payment still being judged (RECEIVED): the refund settles it under the same
+// locks, and one linked after the refund is settled at its own verdict, so it
+// never reaches the refund queue a second time. A payment already refunded is
+// answered 409 in words that say do not refund. An observation that disagrees
+// with its MMG transaction (PROVIDER_ID_CONFLICT) is for finance review: it is
+// never closed in bulk and never closes the transaction itself.
+// ---------------------------------------------------------------------------
+describe('[#1609 review] refunds vs observations still being judged, and conflict rows', () => {
+  async function unknownSan() {
+    const { generateSan } = await import('../modules/billing/san');
+    for (;;) {
+      const s = generateSan();
+      if (!(await prisma.subscription.findUnique({ where: { san: s } })) && !(await prisma.sanTombstone.findUnique({ where: { san: s } }))) return s;
+    }
+  }
+  const statusOf = async (id: string) => {
+    const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id } });
+    return { status: row.status, failureCode: row.failureCode, providerPaymentId: row.providerPaymentId };
+  };
+  const identityStatus = async (paymentId: string) => {
+    const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
+    return (await prisma.providerPayment.findUniqueOrThrow({ where: { id: row.providerPaymentId! } })).status;
+  };
+  /** An observation saved and not yet judged: its delivery is still on its way to a verdict. */
+  async function savedNotJudged(san: string, txn: string, over: Record<string, unknown> = {}) {
+    const row = await prisma.mmgAgentPayment.create({
+      data: {
+        channel: 'MMG_SETTLEMENT_FILE', externalId: `${txn}-file-${nanoid(6)}`, mmgTxnId: txn, sanRaw: san,
+        amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: { test: true },
+        ...over,
+      } as never,
+    });
+    paymentIds.push(row.id);
+    return row;
+  }
+  const door = () => {
+    let reached!: () => void;
+    let open!: () => void;
+    const isReached = new Promise<void>((r) => { reached = r; });
+    const opened = new Promise<void>((r) => { open = r; });
+    return { reached, isReached, open, opened };
+  };
+  const within = async <T>(p: Promise<T>, ms = 15_000): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([p, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`still waiting after ${ms} ms`)), ms); })]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  /** Hold one row lock (`lockSql`) until `waiters` backends queue behind it, directly or through each other. */
+  async function holding<T>(lockSql: (tx: Prisma.TransactionClient) => Promise<unknown>, waiters: number, start: () => T, meanwhile?: () => Promise<void>): Promise<{ started: T }> {
+    let started!: T;
+    await prisma.$transaction(async (tx) => {
+      await lockSql(tx);
+      const pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
+      started = start();
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const blocked = (await prisma.$queryRaw<Array<{ blocked: number }>>`
+          WITH RECURSIVE waiting(pid, path) AS (
+            SELECT a.pid, ARRAY[a.pid] FROM pg_stat_activity a WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
+            UNION ALL
+            SELECT a.pid, w.path || a.pid FROM waiting w JOIN pg_stat_activity a ON w.pid = ANY(pg_blocking_pids(a.pid))
+            WHERE NOT a.pid = ANY(w.path)
+          ) SELECT count(DISTINCT pid)::int AS blocked FROM waiting
+        `)[0]!.blocked;
+        if (blocked >= waiters) break;
+        if (Date.now() > deadline) throw new Error(`only ${blocked} of ${waiters} reached the lock`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await meanwhile?.();
+    }, { timeout: 30_000, maxWait: 5_000 });
+    return { started }; // wrapped: a returned promise would be awaited here
+  }
+
+  it('S3-1: an observation of the same payment still being judged when the refund lands is closed by the refund, and never reaches the refund queue', async () => {
+    const { san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    const proto = AgentCashService.prototype as unknown as { suspense: (paymentId: string, failureCode: string) => Promise<IngestResult> };
+    const realSuspense = proto.suspense;
+    const stall = door();
+    let armed = false;
+    const stalling = vi.spyOn(proto, 'suspense').mockImplementation(async function (this: unknown, ...args: [string, string]) {
+      if (armed) { armed = false; stall.reached(); await stall.opened; }
+      return realSuspense.apply(this, args);
+    });
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      const a = track(await svc.ingest(inbound(san, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+      expect(a).toMatchObject({ status: 'received_unmatched', failureCode: 'TOPUP_ON_HOLD' });
+      // MMG's statement brings the same payment; its delivery is judged and about to be held.
+      armed = true;
+      const second = inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn });
+      const live = svc.ingest(second);
+      live.catch(() => undefined); // awaited below
+      await within(stall.isReached);
+      const b = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { channel_externalId: { channel: 'MMG_SETTLEMENT_FILE', externalId: second.externalId } } });
+      paymentIds.push(b.id);
+      expect((await statusOf(b.id)).status).toBe('RECEIVED');
+      // The refund of the webhook's record lands while it is still being judged.
+      expect(await svc.flagRefund(a.paymentId, 'admin-test', 'returned at the agent')).toMatchObject({ status: 'refund_flagged' });
+      expect(await statusOf(b.id)).toMatchObject({ status: 'RECONCILED', providerPaymentId: (await statusOf(a.paymentId)).providerPaymentId });
+      // Its own verdict then writes nothing over the refund (a lost race, as for any finisher).
+      stall.open();
+      await expect(within(live)).rejects.toThrow('NOT_RECEIVED');
+      expect((await statusOf(b.id)).status).toBe('RECONCILED');
+      expect((await svc.unmatchedQueue(500)).map((r) => r.id)).not.toContain(b.id);
+      await expect(svc.flagRefund(b.id, 'admin-test', 'again')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/do not refund/i) });
+    } finally {
+      stall.open();
+      stalling.mockRestore();
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+  });
+
+  it('S3-1: an observation linked to the payment only after the refund committed is settled at its own verdict, never held for a second refund', async () => {
+    const { san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      const a = track(await svc.ingest(inbound(san, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+      const b = await savedNotJudged(san, txn);
+      // b's verdict reads the payment (still OPEN) and then waits to link b to it; the refund lands meanwhile.
+      const { started: judged } = await holding(
+        (tx) => tx.$queryRaw`SELECT "id" FROM "mmg_agent_payments" WHERE "id" = ${b.id} FOR UPDATE`,
+        1,
+        () => { const p = svc.resumeReceived(b.id); p.catch(() => undefined); return p; },
+        async () => {
+          expect(await svc.flagRefund(a.paymentId, 'admin-test', 'returned at the agent')).toMatchObject({ status: 'refund_flagged' });
+          expect(await statusOf(b.id)).toMatchObject({ status: 'RECEIVED', providerPaymentId: null });
+        },
+      );
+      expect(await within(judged)).toMatchObject({ status: 'reconciled', originalPaymentId: a.paymentId });
+      expect(await statusOf(b.id)).toMatchObject({ status: 'RECONCILED', providerPaymentId: (await statusOf(a.paymentId)).providerPaymentId });
+      expect((await svc.unmatchedQueue(500)).map((r) => r.id)).not.toContain(b.id);
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+  });
+
+  it('S3-1 (no hold): an observation reaching its credit after the refund landed is reconciled, not refused with an error', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    const a = track(await svc.ingest(inbound(await unknownSan(), { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+    expect(a).toMatchObject({ status: 'received_unmatched', failureCode: 'SAN_UNKNOWN' });
+    const b = await savedNotJudged(san, txn);
+    const { started: judged } = await holding(
+      (tx) => tx.$queryRaw`SELECT "id" FROM "mmg_agent_payments" WHERE "id" = ${b.id} FOR UPDATE`,
+      1,
+      () => { const p = svc.resumeReceived(b.id); p.catch(() => undefined); return p; },
+      async () => { await svc.flagRefund(a.paymentId, 'admin-test', 'returned at the agent'); },
+    );
+    expect(await within(judged)).toMatchObject({ status: 'reconciled', originalPaymentId: a.paymentId });
+    expect((await statusOf(b.id)).status).toBe('RECONCILED');
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(0);
+  });
+
+  it('S3-1: flagging a payment already refunded answers 409 "do not refund" and closes the record as a duplicate (never "Recorded")', async () => {
+    const { san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      const a = track(await svc.ingest(inbound(san, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+      await svc.flagRefund(a.paymentId, 'admin-test', 'returned at the agent');
+      const providerPaymentId = (await statusOf(a.paymentId)).providerPaymentId;
+      // A record of the same payment held after the refund (linked later, or history).
+      const b = await savedNotJudged(san, txn, { status: 'UNMATCHED', failureCode: 'TOPUP_ON_HOLD', providerPaymentId });
+      await expect(svc.flagRefund(b.id, 'admin-test', 'returned at the agent'))
+        .rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_REFUNDED', message: expect.stringMatching(/^Do not refund/) });
+      expect((await statusOf(b.id)).status).toBe('RECONCILED');
+      expect((await prisma.mmgAgentPayment.findMany({ where: { providerPaymentId, status: 'REFUND_FLAGGED' } })).map((r) => r.id)).toEqual([a.paymentId]);
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+  });
+
+  it('S3-1: a held record never linked to its MMG payment is linked before it is flagged, so the same payment is never refunded twice', async () => {
+    const { san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      // Saved, never linked, and given up on by the repair pass: in the queue as UNFINISHED.
+      const a = await savedNotJudged(san, txn, { channel: 'MMG_AGENT_WEBHOOK', status: 'UNMATCHED', failureCode: 'UNFINISHED' });
+      expect(await svc.flagRefund(a.id, 'admin-test', 'returned at the agent')).toMatchObject({ status: 'refund_flagged' });
+      expect((await statusOf(a.id)).providerPaymentId).not.toBeNull();
+      expect(await identityStatus(a.id)).toBe('REFUNDED');
+      // MMG's statement brings the same payment: reconciled against the refund, not held for another.
+      const late = track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn })));
+      expect(late).toMatchObject({ status: 'reconciled', originalPaymentId: a.id });
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+  });
+
+  it('S3-2: a refund never closes an observation that disagrees with the MMG payment (a conflict waits for finance review)', async () => {
+    const { san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      const a = track(await svc.ingest(inbound(san, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+      const c = track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn, amount: 2500 })));
+      expect(c).toMatchObject({ status: 'received_unmatched', failureCode: 'PROVIDER_ID_CONFLICT' });
+      expect((await statusOf(c.paymentId)).providerPaymentId).toBe((await statusOf(a.paymentId)).providerPaymentId);
+      expect(await svc.flagRefund(a.paymentId, 'admin-test', 'returned at the agent')).toMatchObject({ status: 'refund_flagged' });
+      expect(await statusOf(c.paymentId)).toMatchObject({ status: 'UNMATCHED', failureCode: 'PROVIDER_ID_CONFLICT' });
+      // The queue tells the operator up front that a person in finance decides it.
+      expect((await svc.unmatchedQueue(500)).find((r) => r.id === c.paymentId)?.diagnosis).toMatch(/finance review/);
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+  });
+
+  it('S3-2: a conflict observation cannot be flagged for refund: 409, nothing closed, every record stays for finance review', async () => {
+    const { san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      const a = track(await svc.ingest(inbound(san, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+      const c = track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn, amount: 2500 })));
+      await expect(svc.flagRefund(c.paymentId, 'admin-test', 'returned at the agent'))
+        .rejects.toMatchObject({ statusCode: 409, code: 'PROVIDER_ID_CONFLICT', message: expect.stringMatching(/finance review/) });
+      expect(await identityStatus(a.paymentId)).toBe('OPEN');
+      expect(await statusOf(a.paymentId)).toMatchObject({ status: 'UNMATCHED', failureCode: 'TOPUP_ON_HOLD' });
+      expect(await statusOf(c.paymentId)).toMatchObject({ status: 'UNMATCHED', failureCode: 'PROVIDER_ID_CONFLICT' });
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
+  });
+
+  it('S4: two refund flags on two records of one payment at once: one refund, the other a clean 409 (no deadlock)', async () => {
+    const { san } = await makeVendorSub();
+    const txn = `MMG-${nanoid(8)}`;
+    process.env['BILLING_TOPUP_HOLD'] = '1';
+    try {
+      const a = track(await svc.ingest(inbound(san, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
+      const b = track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn })));
+      const providerPaymentId = (await statusOf(a.paymentId)).providerPaymentId!;
+      const { started: flags } = await holding(
+        (tx) => tx.$queryRaw`SELECT "id" FROM "provider_payments" WHERE "id" = ${providerPaymentId} FOR UPDATE`,
+        2,
+        () => [a.paymentId, b.paymentId].map((id) => {
+          const p = svc.flagRefund(id, 'admin-test', 'returned at the agent');
+          p.catch(() => undefined); // settled below
+          return p;
+        }),
+      );
+      const settled = await within(Promise.allSettled(flags));
+      expect(settled.filter((s) => s.status === 'fulfilled')).toHaveLength(1);
+      const refused = settled.filter((s): s is PromiseRejectedResult => s.status === 'rejected');
+      expect(refused).toHaveLength(1);
+      expect(refused[0]!.reason).toMatchObject({ statusCode: 409 });
+      expect(await prisma.mmgAgentPayment.count({ where: { providerPaymentId, status: 'REFUND_FLAGGED' } })).toBe(1);
+    } finally {
+      delete process.env['BILLING_TOPUP_HOLD'];
+    }
   });
 });

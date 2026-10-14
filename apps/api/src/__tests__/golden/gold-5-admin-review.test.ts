@@ -60,6 +60,10 @@ const TENANT_B = `${TENANT_SLUG_PREFIX}${nanoid(6).toLowerCase()}`;
 const REASON = { 'x-swift-reason': 'GOLD-5 golden journey: reviewing a partner document' };
 const UPLOAD_DIR = mkdtempSync(path.join(os.tmpdir(), 'swift-gold5-review-'));
 const DOC_TYPE = 'business_registration';
+// [VERIFY-DOCS V3] Opening, approving and rejecting a document need the explicit
+// document reviewer grant, which neither `*` nor a preset confers: every
+// reviewer in this journey holds it; the support operator does not.
+const REVIEWER_GRANT = 'documents.review';
 
 let app: FastifyInstance;
 let seq = 0;
@@ -125,7 +129,7 @@ async function uploadAndSubmit(actor: Actor, bytes: Buffer) {
   const fileUrl = up.json().data.url as string;
   const submitted = await call('POST', '/api/v1/verification/documents', actor.token, { role: 'RESTAURANT', docType: DOC_TYPE, fileUrl, consent: true, privacyNoticeVersion: 'v1' });
   expect(submitted.statusCode, submitted.body).toBe(201);
-  return { docId: submitted.json().data.id as string, fileUrl, duplicate: up.json().data.duplicate as boolean };
+  return { docId: submitted.json().data.id as string, fileUrl, uploadResponse: up.json() };
 }
 
 function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token?: string, payload?: unknown, headers: Record<string, string> = {}) {
@@ -300,10 +304,10 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
   beforeAll(async () => {
     // The pilot's operators hold the ADMIN default grant; the narrower
     // presets appear where their limits are the point.
-    rev1 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*'], firstName: 'Rhea' });
-    rev2 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*'], firstName: 'Ravi' });
+    rev1 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*', REVIEWER_GRANT], firstName: 'Rhea' });
+    rev2 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*', REVIEWER_GRANT], firstName: 'Ravi' });
     support = await makeUser(['ADMIN'], 'ADMIN', { grant: SUPPORT_OPERATOR_CAPABILITIES, firstName: 'Suki' });
-    revB = await makeUser(['ADMIN'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, tenantId: TENANT_B, firstName: 'Bram' });
+    revB = await makeUser(['ADMIN'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], tenantId: TENANT_B, firstName: 'Bram' });
     partner = await makeApplicant('Priya');
   }, 60_000);
 
@@ -317,7 +321,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
     bytes = documentBytes();
     const submitted = await uploadAndSubmit(partner, bytes);
     docId = submitted.docId;
-    expect(submitted.duplicate).toBe(false);
+    expect(submitted.uploadResponse).toEqual({ success: true, data: { url: submitted.fileUrl } });
 
     // At rest: ciphertext only; the envelope records the true type and size.
     const envelope = await sys(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: submitted.fileUrl } }));
@@ -438,7 +442,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
   it('RECUSAL: a reviewer cannot claim or decide their own document, nor one whose subject shares an identity node with them', async () => {
     // Their own: a reviewer who is also applying for a store.
-    const moonlighter = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, firstName: 'Mona' });
+    const moonlighter = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], firstName: 'Mona' });
     const own = await uploadAndSubmit(moonlighter, documentBytes());
     const ownCase = await openCaseOf(rev1, own.docId);
     const selfClaim = await admin({ method: 'POST', url: `/api/v1/admin/verification/cases/${ownCase.caseId}/claim`, token: moonlighter.token, payload: {} });
@@ -452,13 +456,15 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
     // Linked: a reviewer whose own paperwork is byte-identical to an applicant's
     // (the same registration on two accounts — one identity-graph node).
-    const relative = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, firstName: 'Lionel' });
+    const relative = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], firstName: 'Lionel' });
     const applicant = await makeApplicant('Lorna');
     const shared = documentBytes();
     const first = await upload(relative, shared);
     expect(first.statusCode, first.body).toBe(200);
     const linked = await uploadAndSubmit(applicant, shared);
-    expect(linked.duplicate).toBe(true);
+    // A matching document remains opaque to its uploader. The privileged
+    // case still proves the collision and enforces recusal below.
+    expect(linked.uploadResponse).toEqual({ success: true, data: { url: linked.fileUrl } });
     const linkedCase = await openCaseOf(rev1, linked.docId);
     expect(linkedCase.queue).toBe('SECOND_REVIEW'); // a collision is never an ordinary review
     // One identity, as the resolver recusal itself uses sees it.

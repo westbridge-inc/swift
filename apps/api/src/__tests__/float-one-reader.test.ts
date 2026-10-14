@@ -153,7 +153,14 @@ describe('census: nothing else turns subtotalBase into a float amount', () => {
     // watchdog and the handback, and the kernel releases the float. One fewer
     // place that computes what a rider fronted is the improvement, not a gap —
     // this census caught the change, which is what it is for.
+    // [AF-MOB-006] custody-recovery IS a place the money moves: the verified
+    // relay handoff commits the float to the new holder and releases it from
+    // the old one, in one transaction, through the one reader.
+    // custody-case only READS it, to tell a store and a rider the same fronted
+    // amount when goods come back (owner ruling, 4 Oct) — through the one reader.
     expect(importers).toEqual([
+      'modules/custody/custody-case.ts',
+      'modules/custody/custody-recovery.ts',
       'modules/dispatch/delivery-watchdog.ts',
       'modules/dispatch/dispatch.service.ts',
       'modules/dispatch/float.service.ts',

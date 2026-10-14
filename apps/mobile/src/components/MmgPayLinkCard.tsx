@@ -49,8 +49,10 @@ export function MmgPayLinkCard({
 
   const trimmed = url.trim();
   const dirty = trimmed !== (value ?? '');
-  const payer = who === 'store' ? 'Customers' : 'Riders';
-  const payerLower = who === 'store' ? 'customers' : 'riders';
+  // `rides` is the taxi driver's card: a driver's customers are passengers
+  // (in Swift, "riders" are the delivery partners).
+  const payer = who === 'store' ? 'Customers' : 'Passengers';
+  const payerLower = who === 'store' ? 'customers' : 'passengers';
   const darkCard: ViewStyle = dark
     ? { backgroundColor: color.text.primary, borderWidth: 1, borderColor: withAlpha(color.white, 0.08) }
     : {};

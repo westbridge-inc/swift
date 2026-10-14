@@ -17,6 +17,8 @@ const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
 const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
+  PLACES_PROVIDER: 'osm',
+  PHOTON_URL: 'http://photon.test',
   // [ledger E08] The settled production posture ships the hold ON in both env
   // examples, so the valid production base carries it explicitly.
   LIFECYCLE_V2: '1',
@@ -24,6 +26,7 @@ const good: Record<string, string | undefined> = {
   MASTER_KEK: KEK,
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
+  AWS_S3_BUCKET: 'synthetic-boot-bucket',
   NOTIFICATION_PROVIDER: 'twilio',
   TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
   TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
@@ -43,6 +46,8 @@ const good: Record<string, string | undefined> = {
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
   MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+  SCAN_IP_SALT: 'synthetic-scan-boot-salt',
+  ATTRIB_SALT: 'synthetic-attribution-boot-salt',
 };
 
 const cardOff = {
@@ -68,7 +73,7 @@ const paddedTwilioIdentities = ([
 function runPreflight(candidate: Record<string, string | undefined>) {
   const directory = mkdtempSync(join(tmpdir(), 'swift-twilio-preflight-'));
   try {
-    const candidatePath = join(directory, 'candidate.env');
+    const candidatePath = join(directory, 'candidate.txt');
     writeFileSync(candidatePath, Object.entries(candidate)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
       .map(([name, value]) => `${name}=${value}`).join('\n'));
@@ -84,6 +89,30 @@ function runPreflight(candidate: Record<string, string | undefined>) {
 }
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it.each([
+    ['CONSENT_REQUIRED', '0'],
+    ['ADMIN_CAPABILITY_MODE', 'shadow'],
+    ['PREVIEW_MODE', '1'],
+  ])('launch bypass %s=%s is refused by production', (name, value) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: value })).toThrow(name);
+  });
+
+  it.each(['development', 'test'])('launch bypass fixtures remain available in %s', (mode) => {
+    expect(() => assertSafeBootConfig({
+      NODE_ENV: mode,
+      CONSENT_REQUIRED: '0',
+      ADMIN_CAPABILITY_MODE: 'shadow',
+      PREVIEW_MODE: '1',
+    })).not.toThrow();
+  });
+
+  it('launch bypass defaults keep production admission open', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, CONSENT_REQUIRED: '1', ADMIN_CAPABILITY_MODE: 'enforce', PREVIEW_MODE: '0',
+    })).not.toThrow();
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+  });
+
   it('boots with the card rail explicitly disabled and no card credentials', () => {
     expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
   });
@@ -333,8 +362,9 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local' })).toThrow(/STORAGE_PROVIDER/);
   });
 
-  it('allows local storage in production only with STORAGE_ALLOW_LOCAL=1 (deliberate pilot)', () => {
-    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).not.toThrow();
+  it('allows deliberate local storage only with an explicit root and separate backup obligation', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).toThrow(/UPLOAD_DIR/);
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1', UPLOAD_DIR: '/srv/swift/uploads', STORAGE_LOCAL_BACKUP_ACK: '1' })).not.toThrow();
   });
 
   it('accepts the real object-storage providers', () => {
@@ -683,7 +713,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
   const checkoutOn = (): Record<string, string> => ({
     MMG_CHECKOUT_ENABLED: '1',
     MMG_CHECKOUT_URL: 'https://checkout.example.test/mmg-pg/web/payments',
-    MMG_CHECKOUT_MERCHANT_ID: '0000000001',
+    MMG_CHECKOUT_MERCHANT_ID: '0000001',
     MMG_CHECKOUT_CLIENT_ID: 'client-test',
     MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
     MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',
@@ -709,6 +739,18 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
   });
 
+  it('[DS632] MMG_CHECKOUT_CREATION_ZONE is exactly GUYANA_WALL_CLOCK or UTC, or unset: anything else refuses to start, in production and outside it, the checkout on or off', () => {
+    for (const zone of ['guyana', 'utc', 'UTC ', 'America/Guyana']) {
+      expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly GUYANA_WALL_CLOCK or UTC/);
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+    }
+    for (const zone of [undefined, '', 'GUYANA_WALL_CLOCK', 'UTC']) {
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+    }
+  });
+
   it('production boots with a complete checkout configuration, and never with the UAT page', () => {
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn() })).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_URL: 'https://mmgpg.mmgtest.net/mmg-pg/web/payments' }))
@@ -719,7 +761,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
 // [PT-1 · C10] Card rail v2 in production. The card simulator is a test page
 // with no real money, and this build has no production-capable v2 provider:
 // production refuses both, loudly, at boot — never at a partner's first tap.
-describe('[PT-1] card rail v2 cannot be switched on in production yet, and the simulator never', () => {
+describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set up for live cards, and the simulator never', () => {
   it('refuses the card simulator in production, whatever the flag says', () => {
     for (const flag of [undefined, '0', '1']) {
       expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_V2: flag }), String(flag))
@@ -727,8 +769,41 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
     }
   });
 
-  it('refuses CARD_RAIL_V2=1 in production: no production v2 provider exists in this build', () => {
+  it('refuses CARD_RAIL_V2=1 in production without the real card provider', () => {
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '1' })).toThrow(/FATAL: CARD_RAIL_V2=1/);
+  });
+
+  // [PT-4] Production runs v2 only on the real provider, fully set up for LIVE cards.
+  const liveCards = {
+    CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', CARD_RAIL_ACCOUNT: 'swift-gy',
+    POWERTRANZ_API_URL: 'https://gateway.ptranz.com', POWERTRANZ_ID: 'LIVEID01', POWERTRANZ_PASSWORD: 'not-a-real-password',
+    POWERTRANZ_PAGE_SET: 'PTZ/Swift', POWERTRANZ_PAGE_NAME: 'Weekly', API_PUBLIC_URL: 'https://api.example.com',
+  };
+  it('[PT-4] boots with the real provider fully set up for live cards (and drains on the same terms)', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards, CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1' })).not.toThrow();
+  });
+  it('[PT-4] refuses anything less: sandbox, a test URL, a missing credential or page, http — never echoing a value', () => {
+    const cases: Array<[Record<string, string | undefined>, RegExp]> = [
+      // A sandbox setup that is complete in itself (test root, test credentials) is still not for production.
+      [{ CARD_RAIL_ENVIRONMENT: 'sandbox', POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /real cards only: CARD_RAIL_ENVIRONMENT must be live/],
+      [{ POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /test system/],
+      [{ POWERTRANZ_API_URL: undefined }, /POWERTRANZ_API_URL/],
+      // [Review S4] The provider's API lives under ptranz.com (guide sec. 2.3): never another host.
+      [{ POWERTRANZ_API_URL: 'https://gateway.example.com' }, /ptranz\.com/],
+      [{ POWERTRANZ_ID: undefined }, /POWERTRANZ_ID/],
+      [{ POWERTRANZ_PASSWORD: undefined }, /POWERTRANZ_PASSWORD/],
+      [{ POWERTRANZ_PAGE_NAME: undefined }, /POWERTRANZ_PAGE_SET and POWERTRANZ_PAGE_NAME/],
+      [{ API_PUBLIC_URL: 'http://api.example.com' }, /API_PUBLIC_URL/],
+      [{ CARD_RAIL_PROVIDER: 'stripe' }, /CARD_RAIL_PROVIDER=powertranz/],
+    ];
+    for (const [patch, message] of cases) {
+      let thrown: Error | undefined;
+      try { assertSafeBootConfig({ ...good, ...liveCards, ...patch }); } catch (err) { thrown = err as Error; }
+      expect(thrown?.message, JSON.stringify(patch)).toMatch(/^FATAL: CARD_RAIL_V2=1/);
+      expect(thrown?.message).toMatch(message);
+      expect(thrown?.message).not.toContain('not-a-real-password');
+    }
   });
 
   it('the flag is 1 or 0 (or unset), never a guess', () => {
@@ -742,12 +817,58 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: undefined })).not.toThrow();
   });
 
+  it('[PT-2] refuses the staging-only switch that lets the simulator show the card choice, whatever its value but 0', () => {
+    for (const value of ['1', 'true', 'yes']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: value }), value).toThrow(/CARD_RAIL_SIMULATOR_LIVE/);
+    }
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: undefined })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+  });
+
+  it('[review S2] in EVERY mode, the simulator and its test switch refuse to start on the public API host; the switch needs this test server\'s own address', () => {
+    for (const env of [
+      { NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://API.swiftgy.com/' },
+      { NODE_ENV: 'development', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api.swiftgy.com' },
+    ]) {
+      expect(() => assertSafeBootConfig(env), JSON.stringify(env)).toThrow(/public API host/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1' }))
+      .toThrow(/CARD_RAIL_SIMULATOR_LIVE needs API_PUBLIC_URL/);
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api-test.example.test' }))
+      .not.toThrow();
+  });
+
+  it('[review S2-1] in EVERY mode, the provider\'s TEST system (its sandbox) refuses to start on the public API host — a trailing dot is the same host', () => {
+    const sandbox = { CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox' };
+    for (const env of [
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_V2: '0', API_PUBLIC_URL: 'https://API.swiftgy.com/' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_ENVIRONMENT: undefined, API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com./' },
+      { NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://api.swiftgy.com.' },
+    ]) {
+      expect(() => assertSafeBootConfig(env), JSON.stringify(env)).toThrow(/public API host/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+  });
+
+  it('[review S3] in EVERY mode but production, live (real) cards refuse to start: a test server never charges real cards', () => {
+    for (const mode of ['development', 'test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', API_PUBLIC_URL: 'https://api-test.example.test' }), mode)
+        .toThrow(/live \(real cards\) outside production/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox', API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).not.toThrow();
+  });
+
   it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
   });
 
   // [AX297 F5] Draining v2 after a switch-off is its own switch, held to the same rules.
-  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and never 1 in production: there is nothing there to drain', () => {
+  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and 1 in production only on the real provider', () => {
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '1' })).toThrow(/FATAL: CARD_RAIL_V2_DRAIN=1/);
     for (const value of ['true', 'yes', '2', ' 1']) {
       expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: value }), value).toThrow(/CARD_RAIL_V2_DRAIN must be 1 or 0/);
@@ -755,5 +876,18 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '0' })).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: undefined })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
+  });
+});
+
+
+describe('production address lookup is an explicit deployment choice', () => {
+  it.each([undefined, 'local', '', 'unknown'])('refuses PLACES_PROVIDER=%s instead of silently limiting addresses', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: provider })).toThrow(/PLACES_PROVIDER/);
+  });
+  it('accepts an explicit configured Photon service, without making a network request', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon.test' })).not.toThrow();
+  });
+  it('refuses explicit OSM without its Photon endpoint in preflight too', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: undefined })).toThrow(/PHOTON_URL/);
   });
 });

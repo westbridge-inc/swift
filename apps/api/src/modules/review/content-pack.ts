@@ -31,12 +31,16 @@
  *     by pack-image.ts from the pack's own words (licence/source recorded
  *     there and in PACK_IMAGE_LICENCE) and served by the public uploads route.
  *   - NO RATINGS. Ratings belong to real orders; the stores show "New".
+ *   - PARTNERS. The same seed makes the tenant's RIDER and DRIVER credential
+ *     accounts verified partners inside the fiction (partner-pack.ts), so
+ *     a reviewer can sign in as either and go online. PRESENT includes them.
  */
 import crypto from 'node:crypto';
 import type { PrismaClient, Prisma, VendorType, FulfillmentType } from '@prisma/client';
 import { runWithTenant, runWithoutTenant } from '../../plugins/tenant-context';
 import { LAUNCH_CITY } from './gate';
 import { renderPackPicture, isLetterable } from './pack-image';
+import { seedReviewPartners, reviewPartnerFacts, type ReviewPartnerFacts } from './partner-pack';
 
 export const REVIEW_CONTENT_PACK_VERSION = 'review-pack-v1';
 /** A review tenant's id/slug names the fiction as such (same rule as provision). */
@@ -274,12 +278,16 @@ export interface ContentPackFacts {
   orderableStores: number;
   expectedItems: number;
   items: number;
+  /** The rider and taxi driver logins, and how many would pass the go-online document gate. */
+  partners: ReviewPartnerFacts;
 }
 
 export interface ContentPackSeedResult extends ContentPackFacts {
   tenantId: string;
   version: string;
   categories: number;
+  /** Partner fixture documents committed by this run (0 on an idempotent re-run). */
+  partnerDocumentsCommitted: number;
 }
 
 /** Pick the synthetic owner's phone: deterministic per tenant, never one already taken. */
@@ -312,6 +320,7 @@ export async function seedReviewContentPack(prisma: PrismaClient, input: { slug:
   const { id: tenantId } = await assertReviewTenant(prisma, input.slug);
   const plan = planReviewContentPack(tenantId);
   const ownerPhone = await ownerPhoneFor(prisma, tenantId, plan.ownerUserId);
+  let partnerDocumentsCommitted = 0;
 
   await runWithTenant(tenantId, async () => {
     await prisma.user.upsert({
@@ -387,29 +396,40 @@ export async function seedReviewContentPack(prisma: PrismaClient, input: { slug:
         update: fields,
       });
     }
+
+    // The fiction's rider and taxi driver: verified partners, inside this tenant only.
+    partnerDocumentsCommitted = (await seedReviewPartners(prisma, tenantId)).documentsCommitted;
   });
 
   const facts = await reviewContentPackFacts(prisma, tenantId);
-  return { tenantId, version: REVIEW_CONTENT_PACK_VERSION, categories: plan.categories.length, ...facts };
+  return { tenantId, version: REVIEW_CONTENT_PACK_VERSION, categories: plan.categories.length, partnerDocumentsCommitted, ...facts };
+}
+
+/** At least one rider and one taxi driver login, every one of them able to go online. */
+export function partnersComplete(p: ReviewPartnerFacts): boolean {
+  return p.RIDER.credentials > 0 && p.DRIVER.credentials > 0
+    && p.RIDER.ready === p.RIDER.credentials && p.DRIVER.ready === p.DRIVER.credentials;
 }
 
 /** What of the pack exists in `tenantId` — counted by the pack's own ids only. */
 export async function reviewContentPackFacts(prisma: PrismaClient, tenantId: string): Promise<ContentPackFacts> {
   const plan = planReviewContentPack(tenantId);
-  const [vendors, items] = await Promise.all([
+  const [vendors, items, partners] = await Promise.all([
     prisma.vendor.findMany({
       where: { tenantId, id: { in: plan.vendors.map((v) => v.id) } },
       select: { status: true, isVerified: true, acceptingOrders: true, isCurrentlyOpen: true },
     }),
     prisma.item.count({ where: { tenantId, id: { in: plan.items.map((i) => i.id) }, isAvailable: true } }),
+    reviewPartnerFacts(prisma, tenantId),
   ]);
   const orderableStores = vendors.filter((v) => v.status === 'ACTIVE' && v.isVerified && v.acceptingOrders && v.isCurrentlyOpen).length;
   const expectedStores = plan.vendors.length;
   const expectedItems = plan.items.length;
-  const state: ContentPackState = vendors.length === 0 && items === 0
+  const storesComplete = vendors.length === expectedStores && orderableStores === expectedStores && items === expectedItems;
+  const state: ContentPackState = vendors.length === 0 && items === 0 && partners.profiles === 0
     ? 'ABSENT'
-    : vendors.length === expectedStores && orderableStores === expectedStores && items === expectedItems ? 'PRESENT' : 'INCOMPLETE';
-  return { state, expectedStores, stores: vendors.length, orderableStores, expectedItems, items };
+    : storesComplete && partnersComplete(partners) ? 'PRESENT' : 'INCOMPLETE';
+  return { state, expectedStores, stores: vendors.length, orderableStores, expectedItems, items, partners };
 }
 
 // ---------------------------------------------------------------------------

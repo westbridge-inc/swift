@@ -29,17 +29,17 @@ export function DataUnavailable({
   return (
     <div
       role="status"
-      className={`rounded-2xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-5 ${className}`}
+      className={`rounded-2xl bg-[var(--swift-red-50)] p-4 ${className}`}
     >
-      <p className="text-sm font-bold text-[var(--swift-red)]">Couldn&apos;t load {what}.</p>
-      <p className="mt-1 text-sm text-[var(--swift-ink)]">
+      <p className="text-[15px] font-semibold leading-5 text-[var(--swift-red-600)]">Couldn&apos;t load {what}.</p>
+      <p className="mt-1 text-[13px] leading-[18px] text-[var(--swift-ink)]">
         This is <b>not</b> an all-clear — it means we could not check, not that there is nothing.
       </p>
-      {detail && <p className="mt-1 text-xs text-[var(--swift-muted)]">{detail}</p>}
+      {detail && <p className="mt-1 text-[13px] leading-[18px] text-[var(--swift-muted)]">{detail}</p>}
       {onRetry && (
         <button
           onClick={onRetry}
-          className="mt-3 rounded-lg border border-[var(--swift-red)]/40 px-3 py-1.5 text-sm font-semibold text-[var(--swift-red)]"
+          className="sw-btn sw-btn-sm sw-btn-outline mt-3"
         >
           Try again
         </button>

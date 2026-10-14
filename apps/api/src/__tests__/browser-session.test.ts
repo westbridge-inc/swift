@@ -366,6 +366,10 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
     expect(me.statusCode, me.body).toBe(200);
     expect(me.json().data.user.id).toBe(created.id);
     expect(me.json().data.client).toBe('web');
+
+    // The Terms and Privacy consent is recorded as given on the web — the
+    // surface it was given on, as the partner agreement's is.
+    expect(await consentSurfaces(created.id)).toEqual(['web', 'web']);
   });
 
   it('a native client registering still gets tokens in the body and no cookie — the apps are untouched', async () => {
@@ -383,5 +387,29 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
     expect(res.headers['cache-control']).toContain('no-store');
     expect(res.json().data.tokens.accessToken).toBeTruthy();
     expect(res.headers['set-cookie']).toBeUndefined();
+    // An app that does not name its platform is recorded as the app.
+    expect(await consentSurfaces(res.json().data.user.id)).toEqual(['mobile', 'mobile']);
+  });
+
+  it('an app that names its platform has its Terms and Privacy consent recorded on that platform', async () => {
+    const iosPhone = `+59277${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const code = await requestOtp(app, iosPhone);
+    const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: iosPhone, code } });
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/auth/register', headers: { 'x-client-platform': 'ios' },
+      payload: { phone: iosPhone, registrationProof: verified.json().data.registrationProof, firstName: 'New', lastName: `Ios${RUN}`, acceptTerms: true },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    userIds.push(res.json().data.user.id);
+    expect(await consentSurfaces(res.json().data.user.id)).toEqual(['ios', 'ios']);
   });
 });
+
+/** The surfaces the account's Terms and Privacy consent rows were recorded on. */
+async function consentSurfaces(userId: string): Promise<string[]> {
+  const rows = await runWithoutTenant(() => app.prisma.consentRecord.findMany({
+    where: { subjectId: userId, documentType: { in: ['privacy_policy', 'terms_of_service'] }, action: 'granted' },
+    select: { surface: true }, orderBy: { documentType: 'asc' },
+  }), 'test-read:consent-surface');
+  return rows.map((r) => r.surface);
+}

@@ -16,6 +16,8 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { readDunningClock } from '../modules/billing/dunning-clock';
 
 // ---------------------------------------------------------------------------
 // [ACTIVATION AUTHORITY — task #2 slice 1] Document truth drives activation:
@@ -28,8 +30,9 @@ import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 //             live gate, and can actually SUBMIT them (the old CAR-hard-coded
 //             list made road_service_licence unsubmittable).
 // SUPERMARKET checklist (GY): owner_national_id, business_registration,
-// tin_certificate, storefront_photo. MOTORCYCLE mover checklist: national_id,
-// police_clearance, drivers_licence, vehicle_registration, vehicle_insurance.
+// tin_certificate, storefront_photo. MOTORCYCLE mover checklist [VERIFY-DOCS, 6 Oct
+// 2026]: drivers_licence, vehicle_registration, vehicle_insurance (national ID and
+// police clearance are optional for a licence holder).
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -40,7 +43,7 @@ const userIds: string[] = [];
 let seq = 0;
 
 const SUPERMARKET_DOCS = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
-const MOTORCYCLE_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+const MOTORCYCLE_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 
 async function makeUser(first: string) {
   seq += 1;
@@ -108,7 +111,14 @@ beforeAll(async () => {
 afterAll(async () => {
   if (userIds.length > 0) {
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.subscription.deleteMany({ where: { OR: [{ rider: { userId: { in: userIds } } }, { driver: { userId: { in: userIds } } }, { vendor: { owner: { userId: { in: userIds } } } }] } });
+    // Collect the payers' subscriptions before the payers go (a removed owner leaves the row unreachable by relation).
+    const subIds = (await app.prisma.subscription.findMany({ where: { OR: [{ rider: { userId: { in: userIds } } }, { driver: { userId: { in: userIds } } }, { vendor: { owner: { userId: { in: userIds } } } }] }, select: { id: true } })).map((s) => s.id);
+    await cleanupBillingClocks(app.prisma, subIds);
+    // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
+    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: userIds } } } });
@@ -296,18 +306,22 @@ describe('F-012-05 — one authority generation [REPORT-012]', () => {
     await app.prisma.vendor.update({ where: { id: vendor.id }, data: { acceptingOrders: false } });
     // [SAFE-B] Activation starts the store's trial in the same transaction (and identity lock) as the activation
     // itself, so the store already holds its one subscription: it lapses into PAST_DUE with the grace over.
+    // [#1393] The owner's grace is 48 hours of unpaused overdue time on the
+    // shared clock: due 48 hours and a minute ago, it ran out a minute ago.
+    const due = new Date(Date.now() - 2 * 86_400_000 - 60_000);
     const trial = await app.prisma.subscription.findUniqueOrThrow({ where: { vendorId: vendor.id } });
-    await app.prisma.subscription.update({
+    const lapsed = await app.prisma.subscription.update({
       where: { id: trial.id },
       data: {
         status: 'PAST_DUE', weeklyRate: 20000,
         billingMethod: 'CASH', isInGracePeriod: true,
         gracePeriodEnd: new Date(Date.now() - 60_000),
-        currentPeriodStart: new Date(Date.now() - 8 * 86_400_000),
-        currentPeriodEnd: new Date(Date.now() - 86_400_000),
-        nextBillingDate: new Date(Date.now() - 86_400_000),
+        currentPeriodStart: new Date(due.getTime() - 7 * 86_400_000),
+        currentPeriodEnd: due,
+        nextBillingDate: due,
       },
     });
+    await readDunningClock(app.prisma, lapsed.id);
 
     await app.prisma.user.update({ where: { id: owner.id }, data: { activeRole: 'VENDOR_OWNER' as never } });
     const login = await loginWithOtp(app, owner.phone);
@@ -334,6 +348,18 @@ describe('EV-ACT-11 — admin vendor approve is checklist-gated and exactly-once
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     expect(fresh.status).toBe('PENDING_APPROVAL');
     expect(fresh.isVerified).toBe(false);
+  });
+
+  it('[Fable #1481 S4-2] approving a billing-suspended store clears its suspension source (no stale BILLING for a later heal)', async () => {
+    const owner = await makeUser('Reinstate');
+    const vendor = await makePendingVendor(owner.id, 'SUSPENDED');
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { suspensionSource: 'BILLING' } });
+    for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
+    const ok = await app.inject({
+      method: 'PUT', url: `/api/v1/admin/vendors/${vendor.id}/approve`,
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
+    expect(ok.statusCode).toBe(200);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).toMatchObject({ status: 'ACTIVE', suspensionSource: null });
   });
 
   it('activates once the checklist is complete; a double-tap has exactly one winner', async () => {
@@ -408,8 +434,8 @@ describe('STRAND-3 — commercial classes carry their own checklist', () => {
       data: { userId: user.id, vehicleType: 'BUS_9' as never, documentsVerified: false, vehicleMake: 'Toyota', vehicleModel: 'Hiace', vehicleYear: 2022, vehicleColor: 'White', licensePlate: `BUS-${marker}-1`, driverLicenseUrl: 'test/lic1', vehicleInsuranceUrl: 'test/ins1' },
     });
     // Everything a CAR taxi needs, including confirmed HIRE insurance…
-    const carDocs = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
-      'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'];
+    const carDocs = ['drivers_licence', 'vehicle_registration',
+      'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert'];
     for (const docType of carDocs) await approvedDoc(user.id, docType);
     await approvedDoc(user.id, 'vehicle_insurance', {
       insurerName: 'GY Assure', policyNumber: `P-${marker}`, coverageClass: 'HIRE',

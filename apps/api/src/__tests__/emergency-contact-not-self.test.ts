@@ -1,3 +1,4 @@
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -58,6 +59,7 @@ async function makeUser(opts: { firstName?: string; phone?: string; customer?: b
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
   await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'q9', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
+  await grantStepUp(app, token);
   return { userId: user.id, token, phone };
 }
 

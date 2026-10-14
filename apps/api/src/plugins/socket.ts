@@ -25,6 +25,8 @@ import { warRoomsForSocket } from '../modules/safety/war-room';
 import { isProduction } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
 import { vendorVisibleFilter } from '../modules/order/hold-visibility';
+import { resolveIdentityById } from '../modules/auth/preauth-identity';
+import { bindTenantTransaction, runWithTenant } from './prisma';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -143,6 +145,9 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
             true
           )
         `;
+        // [L04 · R1] Bound to the tenant the caller runs in (the walled users
+        // table shows only that tenant's accounts); a no-op outside a tenant.
+        await bindTenantTransaction(tx);
         return operation(tx);
       }, {
         maxWait: authorityTransactionMaxWaitMs,
@@ -217,49 +222,58 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     if (authorityRecheckClosing || authorityRecheckPromise || activeSocketAuthorities.size === 0) return;
     authorityRecheckPromise = (async () => {
       const snapshot = [...activeSocketAuthorities.values()];
-      const sessionIds = [...new Set(snapshot.map(({ sessionId }) => sessionId))];
-      try {
-        const sessions = await readAuthoritiesBySessionIds(sessionIds);
-        const sessionsById = new Map(sessions.map((session) => [session.sessionId, session]));
-        const now = Date.now();
-        for (const authority of snapshot) {
-          const liveSocket = io.sockets.sockets.get(authority.socketId);
-          if (!liveSocket?.connected) continue;
-          const session = sessionsById.get(authority.sessionId);
-          const privilegedAssuranceValid = session
-            ? !requiresPrivilegedSessionAssurance(session.activeRole, session.roles)
-              || hasPrivilegedSessionAssurance(session.authMethod)
-            : false;
-          if (
-            !session
-            || session.token !== authority.token
-            || session.expiresAt.getTime() <= now
-            || session.userId !== authority.userId
-            || session.tenantId !== authority.tenantId
-            || session.activeRole !== authority.role
-            || ['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(session.userStatus)
-            || !privilegedAssuranceValid
-          ) {
-            app.log.warn(
-              {
-                socketId: authority.socketId,
-                userId: authority.userId,
-                sessionId: authority.sessionId,
-              },
-              'Socket authority fallback recheck failed; disconnecting transport',
-            );
-            liveSocket.disconnect(true);
+      // Serialize tenant reads so the fallback needs at most one pool slot.
+      // A failed read invalidates only the tenant whose authority is unknown.
+      const byTenant = new Map<string, typeof snapshot>();
+      for (const authority of snapshot) {
+        if (!byTenant.has(authority.tenantId)) byTenant.set(authority.tenantId, []);
+        byTenant.get(authority.tenantId)!.push(authority);
+      }
+      for (const [tenantId, authorities] of byTenant) {
+        if (authorityRecheckClosing) break;
+        const sessionIds = [...new Set(authorities.map(({ sessionId }) => sessionId))];
+        try {
+          const sessions = await runWithTenant(tenantId, () => readAuthoritiesBySessionIds(sessionIds));
+          const sessionsById = new Map(sessions.map((session) => [session.sessionId, session]));
+          const now = Date.now();
+          for (const authority of authorities) {
+            const liveSocket = io.sockets.sockets.get(authority.socketId);
+            if (!liveSocket?.connected) continue;
+            const session = sessionsById.get(authority.sessionId);
+            const privilegedAssuranceValid = session
+              ? !requiresPrivilegedSessionAssurance(session.activeRole, session.roles)
+                || hasPrivilegedSessionAssurance(session.authMethod)
+              : false;
+            if (
+              !session
+              || session.token !== authority.token
+              || session.expiresAt.getTime() <= now
+              || session.userId !== authority.userId
+              || session.tenantId !== authority.tenantId
+              || session.activeRole !== authority.role
+              || ['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(session.userStatus)
+              || !privilegedAssuranceValid
+            ) {
+              app.log.warn(
+                {
+                  socketId: authority.socketId,
+                  userId: authority.userId,
+                  sessionId: authority.sessionId,
+                },
+                'Socket authority fallback recheck failed; disconnecting transport',
+              );
+              liveSocket.disconnect(true);
+            }
           }
+        } catch (error) {
+          // Redis is the fast revocation path; unavailable DB authority still
+          // closes this tenant's transports reconnectably while others proceed.
+          app.log.error(
+            { err: error, sockets: authorities.length, sessions: sessionIds.length },
+            'Socket authority fallback recheck unavailable; closing tenant transports',
+          );
+          for (const authority of authorities) closeForAuthorityStoreFailure(authority.socketId);
         }
-      } catch (error) {
-        // Redis delivers the fast revocation path; this database pass is the
-        // fail-closed fallback when Pub/Sub is missed. If the authority store
-        // itself cannot be read, no socket from this snapshot may stay active.
-        app.log.error(
-          { err: error, sockets: snapshot.length, sessions: sessionIds.length },
-          'Socket authority fallback recheck unavailable; closing transports',
-        );
-        for (const authority of snapshot) closeForAuthorityStoreFailure(authority.socketId);
       }
     })().catch((error) => {
       app.log.error(
@@ -415,7 +429,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     'Invalid or expired token',
   ]);
 
-  async function resolveSocketAuthority(token: string, boundedPostConnectRead = false): Promise<{
+  async function resolveSocketAuthority(token: string, postConnect?: { tenantId: string }): Promise<{
     userId: string;
     tenantId: string;
     role: string;
@@ -429,36 +443,13 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
 
     // A valid JWT is not enough: the exact session and account remain the
     // authoritative principal for both the initial and post-registration read.
-    const session = boundedPostConnectRead
-      ? await readAuthorityByToken(token).then((row) => row ? ({
-        id: row.sessionId,
-        expiresAt: row.expiresAt,
-        authMethod: row.authMethod,
-        user: {
-          id: row.userId,
-          tenantId: row.tenantId,
-          status: row.userStatus,
-          roles: row.roles,
-          activeRole: row.activeRole,
-        },
-      }) : null)
-      : await app.prisma.session.findUnique({
-        where: { token },
-        select: {
-          id: true,
-          expiresAt: true,
-          authMethod: true,
-          user: {
-            select: {
-              id: true,
-              tenantId: true,
-              status: true,
-              roles: true,
-              activeRole: true,
-            },
-          },
-        },
-      });
+    // [L04 · R1 · OTA-016] The users table is walled per tenant, so the
+    // authority is read BOUND to the account's tenant: after connection, the
+    // tenant the handshake authorized (one bounded read); at the handshake,
+    // the tenant the one pre-auth identity capability resolves.
+    const session = postConnect
+      ? await runWithTenant(postConnect.tenantId, () => readBoundedPrincipal(token))
+      : await readHandshakePrincipal(token);
     const authorizationExpiresAtMs = session
       ? Math.min(session.expiresAt.getTime(), payload.exp! * 1000)
       : 0;
@@ -478,7 +469,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     ) {
       // The assurance verdict is already DECIDED; a logout hiccup must not
       // downgrade it to an infrastructure error.
-      await authService.logout(session.id, session.user.id).catch(() => {});
+      await runWithTenant(session.user.tenantId, () => authService.logout(session.id, session.user.id)).catch(() => {});
       throw new SocketAuthRefused('Invalid or expired token');
     }
     return {
@@ -488,6 +479,41 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       authSessionId: session.id,
       authorizationExpiresAtMs,
     };
+  }
+
+  /** The post-connect authority: ONE bounded read in the caller's (bound) tenant. */
+  async function readBoundedPrincipal(token: string) {
+    const row = await readAuthorityByToken(token);
+    return row ? {
+      id: row.sessionId,
+      expiresAt: row.expiresAt,
+      authMethod: row.authMethod,
+      user: {
+        id: row.userId,
+        tenantId: row.tenantId,
+        status: row.userStatus,
+        roles: row.roles,
+        activeRole: row.activeRole,
+      },
+    } : null;
+  }
+
+  /** The handshake authority: the session row (sessions carry no tenant and
+   *  are not walled), the account's tenant from the pre-auth identity
+   *  capability, then the account read bound to that tenant. */
+  async function readHandshakePrincipal(token: string) {
+    const session = await app.prisma.session.findUnique({
+      where: { token },
+      select: { id: true, userId: true, expiresAt: true, authMethod: true },
+    });
+    if (!session) return null;
+    const identity = await resolveIdentityById(app.prisma, session.userId);
+    if (!identity) return null;
+    const user = await runWithTenant(identity.tenantId, () => app.prisma.user.findUnique({
+      where: { id: identity.id },
+      select: { id: true, tenantId: true, status: true, roles: true, activeRole: true },
+    }));
+    return user ? { id: session.id, expiresAt: session.expiresAt, authMethod: session.authMethod, user } : null;
   }
 
   // Require valid JWT on every connection — no unauthenticated sockets
@@ -531,6 +557,11 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     const userId = socket.data.userId as string;
     const tenantId = socket.data.tenantId as string;
     const authSessionId = socket.data.authSessionId as string;
+    // [L04 · R5 socket] An event handler runs outside any HTTP request, so no
+    // tenant is bound for it. The socket's tenant was proven by its session at
+    // the handshake: every handler that reads the database runs inside it, so
+    // the wall scopes and binds those reads as it does a request's.
+    const inSocketTenant = <T>(fn: () => Promise<T>): Promise<T> => runWithTenant(tenantId, fn);
     let authorizationReady = false;
     let authorizationFailed = false;
     let authorizationExpiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -557,7 +588,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       const parsed = orderEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
-        const order = await app.prisma.order.findFirst({
+        const order = await inSocketTenant(() => app.prisma.order.findFirst({
           where: {
             id: parsed.data.orderId,
             OR: [
@@ -570,7 +601,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
             ],
           },
           select: { id: true },
-        });
+        }));
         if (order) {
           socket.join(`order:${parsed.data.orderId}`);
         }
@@ -592,7 +623,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       const parsed = chatEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
-        await assertRoomAccess(app.prisma, parsed.data.roomId, userId);
+        await inSocketTenant(() => assertRoomAccess(app.prisma, parsed.data.roomId, userId));
         socket.join(`chat:${parsed.data.roomId}`);
       } catch {
         // Refused or not found — non-fatal, the socket simply does not join
@@ -629,10 +660,10 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       const parsed = vendorEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
-        const vendor = await app.prisma.vendor.findFirst({
+        const vendor = await inSocketTenant(() => app.prisma.vendor.findFirst({
           where: { id: parsed.data.vendorId, owner: { userId } },
           select: { id: true },
-        });
+        }));
         if (vendor) {
           socket.join(`vendor:${parsed.data.vendorId}`);
         }
@@ -670,7 +701,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           socketAuthUserRoom(userId),
           socketAuthSessionRoom(authSessionId),
         ]);
-        const authority = await resolveSocketAuthority(token, true);
+        const authority = await resolveSocketAuthority(token, { tenantId });
         if (
           authority.userId !== userId
           || authority.tenantId !== tenantId

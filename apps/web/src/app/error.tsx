@@ -8,14 +8,14 @@ import { RefreshCcw } from 'lucide-react';
 export default function RouteError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
   return (
     <main className="flex min-h-[70vh] flex-col items-center justify-center px-6 text-center">
-      <p className="text-5xl font-black text-[var(--swift-red)]">Oops</p>
-      <h1 className="mt-3 text-xl font-bold text-[var(--swift-ink)]">Something went wrong on this page</h1>
+      <p className="font-display text-[56px] font-bold leading-none text-[var(--swift-red)]">Oops</p>
+      <h1 className="sw-title mt-3">Something went wrong on this page</h1>
       <p className="mt-2 max-w-md text-sm text-[var(--swift-muted)]">
         It&apos;s not you — a hiccup on our side. Trying again usually fixes it.
       </p>
       <button
         onClick={reset}
-        className="mt-6 inline-flex items-center gap-2 rounded-full bg-[var(--swift-red)] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
+        className="mt-6 inline-flex items-center gap-2 sw-btn sw-btn-md"
       >
         <RefreshCcw className="h-4 w-4" aria-hidden />
         Try again

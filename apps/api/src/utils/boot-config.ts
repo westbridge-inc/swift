@@ -1,10 +1,15 @@
+import { assertPlacesConfig } from '../providers/places/places-config';
 import { runtimeMode } from './runtime-mode';
+import { malformedAllowlistPositions } from '../providers/notifications/sms-recipient-allowlist';
 import { firstInvalidTwilioConfig } from './twilio-identity';
-import { assertDisabledCardRailConfig } from './card-rail';
+import { PUBLIC_API_HOST, assertDisabledCardRailConfig } from './card-rail';
+import { powerTranzConfigFromEnv } from '../providers/card/powertranz-provider';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
+import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
+import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
 /**
  * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
@@ -33,6 +38,54 @@ export function assertTestControlConfig(env: Record<string, string | undefined> 
  * STORAGE_SIGNING_SECRET = anyone can forge a render token for any applicant's
  * decrypted ID. Neither failure is visible at runtime, so we assert them here.
  */
+function assertSmsRecipientAllowlistConfig(env: Record<string, string | undefined>): void {
+  const present = env['SMS_RECIPIENT_ALLOWLIST'] !== undefined || env['SMS_RECIPIENT_ALLOWLIST_FILE'] !== undefined;
+  if (!present) return;
+  if (runtimeMode(env) === 'production') {
+    throw new Error('FATAL: SMS_RECIPIENT_ALLOWLIST is set in production — it exists only to stop non-production deployments texting strangers, and in production it would silently stop real users receiving codes. Remove it. Refusing to start.');
+  }
+  const bad = malformedAllowlistPositions(env['SMS_RECIPIENT_ALLOWLIST']);
+  if (bad.length > 0) {
+    throw new Error(`FATAL: SMS_RECIPIENT_ALLOWLIST entry ${bad.join(', ')} is not an E.164 number (+ and digits). Refusing to start rather than texting no one by mistake.`);
+  }
+}
+
+/**
+ * [PT-2 · review S2] In EVERY mode (staging runs as development): the card
+ * simulator moves no money but its "Approve" books a paid week, so it never
+ * runs where the public — or, until the DNS cutover, Apple's reviewers — can
+ * reach it: not on the public API host. Its test switch also needs this test
+ * server's own address set, so the check can be made at all.
+ */
+export function assertCardSimulatorNotPublic(env: Record<string, string | undefined>): void {
+  // [Review S2-1] …and the same for a real provider's TEST system (its sandbox).
+  const testSystem = env['CARD_RAIL_PROVIDER'] === 'simulator'
+    || (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] !== 'live');
+  if (testSystem || (env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0') {
+    let host = '';
+    // [#1511 review S4] A trailing dot names the same host.
+    try { host = new URL(env['API_PUBLIC_URL'] ?? '').hostname.toLowerCase().replace(/\.+$/, ''); } catch { host = ''; }
+    if (host === PUBLIC_API_HOST) {
+      throw new Error(`FATAL: a TEST card system (the simulator, CARD_RAIL_SIMULATOR_LIVE, or the provider's sandbox) on the public API host ${PUBLIC_API_HOST} — it books weeks without real money. Refusing to start.`);
+    }
+    if ((env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0' && !host) {
+      throw new Error('FATAL: CARD_RAIL_SIMULATOR_LIVE needs API_PUBLIC_URL set to this TEST server\'s own address (never the public host). Refusing to start.');
+    }
+  }
+}
+
+/**
+ * [PT-4 · review S3] Called for every mode but production: real (live) cards
+ * run only on the production server. A test server told "live" would charge
+ * real cards and book them into a database that is not the record. Refused at
+ * boot, loudly.
+ */
+export function assertNoLiveCardsOffProduction(env: Record<string, string | undefined>): void {
+  if (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] === 'live') {
+    throw new Error('FATAL: CARD_RAIL_ENVIRONMENT=live (real cards) outside production — a test server never charges real cards. Use sandbox here. Refusing to start.');
+  }
+}
+
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
   assertTestControlConfig(env);
@@ -41,10 +94,36 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // driver needs its whole configuration — keys parsed, the request proven to
   // fit the key. Production also refuses the sandbox and a UAT page.
   assertMmgCheckoutConfig(env);
+  // Validate the documented retention setting in every mode. Production
+  // salts are checked below after the existing configuration guards.
+  scanRawRetentionDays(env);
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
-  if (runtimeMode(env) !== 'production') return;
+  // [L04 · SMS allowlist] The non-production recipient allowlist is checked
+  // before the production gate: production refuses it outright (it must never
+  // quietly restrict real users), and elsewhere a malformed entry is refused
+  // loudly instead of silently texting no one. Values are never echoed.
+  assertSmsRecipientAllowlistConfig(env);
+  assertCardSimulatorNotPublic(env);
+  if (runtimeMode(env) !== 'production') {
+    assertNoLiveCardsOffProduction(env);
+    assertDurableStorageConfig(env);
+    return;
+  }
+
+  // Launch safeguards are enforced by the server and worker, regardless of
+  // what an older client displays. These bypasses exist only for local/test
+  // fixtures; production must never admit them.
+  if (env['CONSENT_REQUIRED'] === '0') {
+    throw new Error('FATAL: CONSENT_REQUIRED=0 bypasses signup consent in production. Refusing to start.');
+  }
+  if (env['ADMIN_CAPABILITY_MODE'] === 'shadow') {
+    throw new Error('FATAL: ADMIN_CAPABILITY_MODE=shadow bypasses administrator enforcement in production. Refusing to start.');
+  }
+  if (env['PREVIEW_MODE'] === '1') {
+    throw new Error('FATAL: PREVIEW_MODE=1 bypasses launch listing safeguards in production. Refusing to start.');
+  }
 
   if (env['DEV_OTP_BYPASS'] === '1') {
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
@@ -114,29 +193,40 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   assertDisabledCardRailConfig(env);
   // [PT-1 · C10] Card rail v2. The card simulator is a test page with no real
   // money: production refuses to start while it is even named — whatever the
-  // flag says. And this build has no production-capable v2 provider (the
-  // first real one is written from its provider's own documentation), so
-  // production refuses to switch the rail on rather than fail at a partner's
-  // first tap. The flag is 1 or 0 (or unset = 0), never a guess.
+  // flag says. The flag is 1 or 0 (or unset = 0), never a guess.
   if (env['CARD_RAIL_PROVIDER'] === 'simulator') {
     throw new Error('FATAL: CARD_RAIL_PROVIDER=simulator in production — the card simulator is a test page with no real money. Refusing to start.');
+  }
+  // [PT-2] The staging-only switch that lets the simulator show the card
+  // choice: production refuses it whatever its value, as it refuses the simulator.
+  if (env['CARD_RAIL_SIMULATOR_LIVE'] !== undefined && env['CARD_RAIL_SIMULATOR_LIVE'] !== '' && env['CARD_RAIL_SIMULATOR_LIVE'] !== '0') {
+    throw new Error('FATAL: CARD_RAIL_SIMULATOR_LIVE is a test-server switch (the card simulator shows a test card choice); production refuses it. Refusing to start.');
   }
   const cardRailV2 = env['CARD_RAIL_V2'];
   if (cardRailV2 !== undefined && cardRailV2 !== '' && cardRailV2 !== '0' && cardRailV2 !== '1') {
     throw new Error('FATAL: CARD_RAIL_V2 must be 1 or 0 in production. Refusing to start.');
   }
-  if (cardRailV2 === '1') {
-    throw new Error('FATAL: CARD_RAIL_V2=1 in production, but this build has no production card rail v2 provider (only the simulator, which production refuses). Refusing to start.');
-  }
   // [AX297 F5] Draining v2 after it was switched off is its own switch, held
-  // to the same rules: 1 or 0, and never 1 while production has no v2 provider
-  // (v2 has never run there, so there is nothing to drain).
+  // to the same rules.
   const cardRailV2Drain = env['CARD_RAIL_V2_DRAIN'];
   if (cardRailV2Drain !== undefined && cardRailV2Drain !== '' && cardRailV2Drain !== '0' && cardRailV2Drain !== '1') {
     throw new Error('FATAL: CARD_RAIL_V2_DRAIN must be 1 or 0 in production. Refusing to start.');
   }
-  if (cardRailV2Drain === '1') {
-    throw new Error('FATAL: CARD_RAIL_V2_DRAIN=1 in production, but this build has no production card rail v2 provider, so there is nothing to drain. Refusing to start.');
+  // [PT-4] Production runs card rail v2 (or drains it) only on the real
+  // provider, fully set up for LIVE cards: a non-test HTTPS API root (the
+  // guide gives production its own address), its credentials from the
+  // secrets store, the hosted payment page, and Swift's HTTPS public origin.
+  // Anything less refuses to start rather than fail at a partner's first tap.
+  if (cardRailV2 === '1' || cardRailV2Drain === '1') {
+    const which = cardRailV2 === '1' ? 'CARD_RAIL_V2=1' : 'CARD_RAIL_V2_DRAIN=1';
+    if (env['CARD_RAIL_PROVIDER'] !== 'powertranz') {
+      throw new Error(`FATAL: ${which} in production needs CARD_RAIL_PROVIDER=powertranz (the only real card provider). Refusing to start.`);
+    }
+    try {
+      powerTranzConfigFromEnv(env);
+    } catch (err) {
+      throw new Error(`FATAL: ${which} in production, but the card provider is not fully set up for live cards: ${(err as Error).message}. Refusing to start.`);
+    }
   }
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
@@ -229,6 +319,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (storage === 'local' && env['STORAGE_ALLOW_LOCAL'] !== '1') {
     throw new Error('FATAL: STORAGE_PROVIDER is local (or unset) in production — uploads and verification documents would live on a single instance\'s disk. Set STORAGE_PROVIDER=s3|r2, or STORAGE_ALLOW_LOCAL=1 only for a deliberate single-instance pilot with a persistent volume.');
   }
+  assertDurableStorageConfig(env);
 
   // [V8] CONSENT_IP_PEPPER degrades SILENTLY: when missing or under 32 chars,
   // hashIp() returns null and the consent ledger simply stops recording IP
@@ -239,6 +330,8 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     // eslint-disable-next-line no-console
     console.warn('WARN: CONSENT_IP_PEPPER is unset or under 32 characters — consent-ledger IP attribution is OFF (hashIp() returns null). Set a 32+ char pepper to record peppered IP evidence.');
   }
+  assertQrConfig(env);
+  assertPlacesConfig(env);
 }
 
 /**

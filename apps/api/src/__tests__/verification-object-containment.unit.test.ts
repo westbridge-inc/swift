@@ -31,7 +31,7 @@ vi.mock('../providers/storage/storage-provider', async (original) => ({ ...await
 vi.mock('../modules/notification/notification.service', () => ({
   NotificationService: class {}, notifyAdmins: vi.fn(), tenantOfUser: vi.fn(async () => 'tenant-a'),
 }));
-vi.mock('../modules/user/partner-wind-down', () => ({ windDownPartner: vi.fn(async () => null) }));
+vi.mock('../modules/user/partner-wind-down', async (original) => ({ ...await original<object>(), windDownPartner: vi.fn(async () => null) }));
 
 const A = 'subject-a';
 const B = 'subject-b';
@@ -96,9 +96,12 @@ function harness() {
   }]));
   const documents: Array<{ id: string; userId: string; fileUrl: string } & Record<string, any>> = [];
   const orphans = new Map<string, any>();
+  // [VERIFY-DOCS V3] The admin who mints a view link; the render route re-reads
+  // their document reviewer grant on every load (same tenant as subject A).
+  const reviewer = { id: 'reviewer', tenantId: 'tenant-a', status: 'ACTIVE', activeRole: 'ADMIN', admin: { permissions: ['documents.review'] } };
   const db: any = {
     user: {
-      findUnique: vi.fn(async ({ where }: any) => people.get(where.id)),
+      findUnique: vi.fn(async ({ where }: any) => (where.id === reviewer.id ? reviewer : people.get(where.id))),
       findUniqueOrThrow: vi.fn(async ({ where }: any) => {
         const person = people.get(where.id); if (!person) throw new Error('not found'); return { ...person };
       }),
@@ -159,19 +162,30 @@ function harness() {
       }),
     },
     auditLog: { create: vi.fn() }, deletionReceipt: { create: vi.fn(), findFirst: vi.fn() },
-    vendor: { count: vi.fn(async () => 0) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
+    vendor: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => ({ count: 0 })) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
     serviceProvider: { findUnique: vi.fn(async () => null) }, vendorOwner: { findUnique: vi.fn(async () => null) },
     docType: { findUnique: vi.fn(async () => null) },
     advertiserMember: { findMany: vi.fn(async () => []), deleteMany: vi.fn() }, vendorStaff: { deleteMany: vi.fn() },
     extractionRun: { updateMany: vi.fn() }, extractedField: { updateMany: vi.fn() },
     integritySettings: { findUnique: vi.fn() },
+    // Account erasure keeps review scores but clears review words (owner
+    // decision 2026-10-05); no review rows exist in this harness.
+    rating: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    // The deletion census reads fee subscriptions; these subjects have none.
+    subscription: { findMany: vi.fn(async () => []) },
+    $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(async (fn: any) => fn(db)),
     $queryRaw: vi.fn(async (query: unknown, ...values: unknown[]) => rawSecurityCensus(people, orphans, query, values)
       ?? [{ id: String(values[0] ?? A), status: 'ACTIVE', tenantId: 'tenant-a', countryCode: 'GY' }]),
   };
-  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart']) {
+  // Account erasure also drops the browser-basket upload receipts that ride
+  // with the cart (POST /customer/cart/merge replay records).
+  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) {
     db[name] = { deleteMany: vi.fn() };
   }
+  // The synthetic route session is not a fresh code sign-in, so deletion
+  // falls through to the step-up grant the route harness holds in Redis.
+  db.session.findUnique = vi.fn(async () => null);
   const provider = {
     engine: { name: 'test', version: '1', external: false },
     verifyDocument: vi.fn(async () => ({ status: 'pending_manual' as const, referenceToken: 'test' })),
@@ -218,7 +232,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllEnvs(); 
 // are not the subject of these tests; the input principal is explicitly bound.
 async function handlers(h: ReturnType<typeof harness>, routes: typeof verificationRoutes) {
   const registered = new Map<string, (...args: any[]) => any>();
-  const app: any = { prisma: h.db, io: {}, log: h.log, prefix: '', addHook: vi.fn() };
+  const app: any = { prisma: h.db, redis: { exists: vi.fn(async () => 1) }, io: {}, log: h.log, prefix: '', addHook: vi.fn() };
   h.db.$extends = () => h.db;
   for (const verb of ['get', 'post', 'put', 'patch', 'delete']) {
     app[verb] = (path: string, ...args: any[]) => { registered.set(`${verb} ${path}`, args.at(-1)); };
@@ -276,7 +290,7 @@ describe('verification object containment at real service boundaries', () => {
   it.each(['mint', 'render'])('poisoned document cannot reach admin %s dereference', async (operation) => {
     const h = harness(); const doc = h.poison();
     const routes = await handlers(h, operation === 'mint' ? adminRoutes : verificationRoutes);
-    const path = mintRenderPath(doc.id).path;
+    const path = mintRenderPath(doc.id, 'reviewer').path;
     const query = Object.fromEntries(new URL(path, 'http://localhost').searchParams);
     const invoke = operation === 'mint'
       ? routes.get('get /verification/:id/document-url')!({ params: { id: doc.id }, user: { userId: 'reviewer' } })
@@ -365,7 +379,7 @@ describe('verification object containment at real service boundaries', () => {
     if (fault === 'missing-storage') storage.getObject.mockRejectedValue({ code: 'ENOENT' });
     if (fault === 'storage-error') storage.getObject.mockRejectedValue(new Error('private storage error'));
     const routes = await handlers(h, verificationRoutes);
-    const query = Object.fromEntries(new URL(mintRenderPath(doc.id).path, 'http://localhost').searchParams);
+    const query = Object.fromEntries(new URL(mintRenderPath(doc.id, 'reviewer').path, 'http://localhost').searchParams);
     const reply = { send: vi.fn() };
     await expect(routes.get('get /render/:docId')!({ params: { docId: doc.id }, query }, reply)).rejects.toMatchObject({ ...unavailable, message: 'This verification file is unavailable. Upload it again.' });
     expect(reply.send).not.toHaveBeenCalled();
@@ -379,11 +393,15 @@ describe('verification object containment at real service boundaries', () => {
     expect(h.db.verificationDocument.create).toHaveBeenCalledOnce();
   });
 
-  it('owned identity and owned selfie uploads reach the identity provider', async () => {
+  // [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] "no face match": a customer's ID reaches the
+  // document check alone, even with the biometric switch on. An owned selfie (store build 9 still
+  // sends one) is still proven to be the caller's own upload, and then never compared or sent.
+  it('owned identity (with an owned selfie) reaches the document check — never a face match', async () => {
     const h = harness(); vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
     const selfie = key(A, 's'); h.objects.set(selfie, { ...h.objects.get(key(A))!, fileKey: selfie });
     await expect(h.service.submitIdentity(A, key(A), selfie, '1')).resolves.toMatchObject({ userId: A, fileUrl: key(A) });
-    expect(h.provider.verifyIdentity).toHaveBeenCalledWith({ userId: A, idDocumentUrl: key(A), selfieUrl: selfie });
+    expect(h.provider.verifyDocument).toHaveBeenCalledWith({ userId: A, docType: 'national_id', fileUrl: key(A) });
+    expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
   });
 
   it('server-persisted signup selfie keeps the checklist face-match path working', async () => {
@@ -748,7 +766,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     });
     const routes = await handlers(h, customerRoutes);
     const reply = { code: vi.fn() };
-    const result = await routes.get('delete /account')!({ user: { userId: A } }, reply);
+    const result = await routes.get('delete /account')!({ user: { userId: A }, authSessionId: 'verified-synthetic-session' }, reply);
     expect(result).toMatchObject({ success: true, data: { deleted: false, status: 'PENDING_DOCUMENT_ERASURE' } });
     expect(reply.code).toHaveBeenCalledWith(202);
     expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
@@ -1171,7 +1189,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     // The due obligation must commit WITH the account cutoff, before it can
     // lose authentication. Verify actual transaction ordering, not a bypass.
     expect(h.db.verificationDocument.updateMany.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
-    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
+    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
     expect(storage.delete).toHaveBeenCalledExactlyOnceWith(avatar(A));
     expect(storage.getObject).toHaveBeenCalledWith(avatar(A));
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();

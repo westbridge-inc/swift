@@ -8,7 +8,7 @@ vi.mock('next/navigation', () => ({ usePathname: () => '/order/search', useRoute
 vi.mock('@/components/swift-logo', () => ({ SwiftLogo: () => <span>Swift</span> }));
 vi.mock('@/components/order-ui', () => ({
   VendorGridSkeleton: () => <div aria-label="Loading stores" />,
-  VendorCard: ({ v }: any) => <p>{v.name}</p>, EmptyNote: ({ children }: any) => <p>{children}</p>,
+  VendorCard: ({ v }: any) => <p>{v.name}</p>, EmptyNote: ({ children }: any) => <p>{children}</p>, VENDOR_GRID: 'grid',
 }));
 
 describe('web guest catalogue search', () => {
@@ -16,7 +16,7 @@ describe('web guest catalogue search', () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ success: true, data: [{ id: 'public', name: 'Public pepper shop' }] }), { status: 200 }));
     vi.stubGlobal('fetch', fetcher);
     render(<AppLayout><SearchPage /></AppLayout>);
-    fireEvent.change(screen.getByPlaceholderText('Search stores, cuisines…'), { target: { value: 'Pepper' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search stores' }), { target: { value: 'Pepper' } });
     await waitFor(() => expect(screen.queryByText('Public pepper shop')).not.toBeNull());
     // [Q7b] The shell asks once who is browsing and once whether Market is
     // open; the search itself is still the one guest browse call. Nothing

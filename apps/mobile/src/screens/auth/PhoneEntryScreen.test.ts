@@ -33,4 +33,10 @@ describe('phone authentication entry contract', () => {
     expect(source).toContain("const earnerLabel = intent === 'vendor' ? 'a business' : 'a Swift driver'");
     expect(source).not.toContain("moverPreset === 'taxi'");
   });
+
+  it("[ANDROID-QA] the keyboard's done key sends the code, under the same guards as the button", () => {
+    // Android edge-to-edge does not lift Send Code above the keyboard.
+    expect(source).toContain('returnKeyType="done"');
+    expect(source).toMatch(/onSubmitEditing=\{\(\) => \{\s*if \(valid && !locked && !send\.isPending\) send\.mutate\(fullPhone\);/);
+  });
 });

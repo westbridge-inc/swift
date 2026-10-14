@@ -6,6 +6,7 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
+import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
 import { createHash } from 'node:crypto';
 import { looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
@@ -35,9 +36,11 @@ const submitDocumentSchema = z.object({
   ...consentFields,
 });
 
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match: the selfie is optional. Store build 9
+// still sends one (it must be the caller's own upload); a newer app sends the ID alone.
 const submitIdentitySchema = z.object({
   idDocumentUrl: z.string().min(5).max(2048),
-  selfieUrl: z.string().min(5).max(2048),
+  selfieUrl: z.string().min(5).max(2048).optional(),
   ...consentFields,
 });
 
@@ -144,7 +147,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       // ID. Flag it to the reviewers; it must never quietly auto-progress.
       const dup = await app.prisma.encryptedObject.findFirst({
         where: { sha256, createdBy: { not: request.user.userId } },
-        select: { createdBy: true },
+        select: { sha256: true },
       });
 
       const dek = generateDek();
@@ -172,16 +175,18 @@ export async function verificationRoutes(app: FastifyInstance) {
       });
 
       if (dup) {
-        // The hash, not the document, goes to admins — never the PII itself.
+        // Global correlation is a platform review signal. Tenant-local
+        // administrators and applicants must not learn another account's
+        // membership, identifier, or document hash from upload completion.
         await notifyAdmins(app.prisma, notifications, {
-          // Follows the uploader [NOC-A F45].
-          tenantId: await tenantOfUser(app.prisma, request.user.userId),
-          title: 'Duplicate verification document',
-          body: 'A document just uploaded is byte-identical to one already on another account. Review both before approving — possible multi-accounting or a reused/forged document.',
-          data: { kind: 'dup_doc', sha256, uploader: request.user.userId, matchesUser: dup.createdBy },
+          // notifyAdmins(null) selects SUPER_ADMIN only, never tenant admins.
+          tenantId: null,
+          title: 'Verification upload needs review',
+          body: 'Review this applicant’s verification submission before approval.',
+          data: { kind: 'dup_doc', uploader: request.user.userId },
         }).catch(() => {});
       }
-      return { success: true, data: { url, duplicate: !!dup } };
+      return { success: true, data: { url } };
     }
 
     throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Document upload is temporarily unavailable. Try again later.');
@@ -195,11 +200,15 @@ export async function verificationRoutes(app: FastifyInstance) {
    */
   app.get<{ Params: { docId: string } }>('/render/:docId', async (request, reply) => {
     const { docId } = request.params;
-    const { expires, sig } = z.object({ expires: z.coerce.number(), sig: z.string().min(16) }).parse(request.query);
+    const { expires, sig, reviewer } = z.object({
+      expires: z.coerce.number(), sig: z.string().min(16), reviewer: z.string().min(1).max(64).optional(),
+    }).parse(request.query);
     if (expires < Math.floor(Date.now() / 1000)) {
       throw new AppError(410, 'LINK_EXPIRED', 'This view link has expired — reopen the document.');
     }
-    if (!verifyRenderToken(docId, expires, sig)) {
+    // [VERIFY-DOCS V3] A link names the reviewer it was minted for, inside the
+    // signature: a link without one, or re-aimed at someone else, is refused.
+    if (!reviewer || !verifyRenderToken(docId, expires, reviewer, sig)) {
       throw new AppError(403, 'BAD_SIGNATURE', 'Invalid view link.');
     }
 
@@ -209,6 +218,12 @@ export async function verificationRoutes(app: FastifyInstance) {
     });
     if (!doc || doc.purgedAt || !doc.fileUrl) {
       throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
+    }
+    // [VERIFY-DOCS V3] ...and that reviewer must STILL be one, on every load:
+    // revoking the grant, suspending or demoting the reviewer kills links that
+    // are already open. Same tenant as the person whose document it is.
+    if (!(await isActiveDocumentReviewer(app.prisma, reviewer, doc.userId))) {
+      throw documentReviewerRequired();
     }
     const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
     const keys = getKeyProvider();
@@ -229,7 +244,10 @@ export async function verificationRoutes(app: FastifyInstance) {
     return reply.send(plaintext);
   });
 
-  /** POST /identity — L2 flow: government ID + selfie. Permanent once approved. */
+  /** POST /identity — the customer's ID (L2). [Owner ruling 8 Oct 2026] On file at once unless an
+   *  automatic check holds it for a person. `idCheck` (additive) says which, in words an app can
+   *  repeat truthfully: ON_FILE (unlocked now, no person reviewed it), WAITING (a person looks
+   *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
     const doc = await verification.submitIdentity(
@@ -239,6 +257,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       body.privacyNoticeVersion,
     );
     reply.code(201);
-    return { success: true, data: doc };
+    const idCheck = doc.status === 'APPROVED' ? 'ON_FILE' : doc.status === 'REJECTED' ? 'NOT_ACCEPTED' : 'WAITING';
+    return { success: true, data: { ...doc, idCheck } };
   });
 }

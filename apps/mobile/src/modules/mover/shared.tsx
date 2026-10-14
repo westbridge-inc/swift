@@ -9,9 +9,18 @@ import { money } from '../../lib/money';
 
 export const GUTTER = space['2xl'];
 
-/** A job's cash value, whatever vertical it came from. */
+/**
+ * A job's cash value, whatever vertical it came from. The live boards name it
+ * differently: the driver board sends `fareTotal` (null until quoted) and the
+ * rider board sends `totalEarning` (delivery fee + tip).
+ */
 export function jobAmount(j: any) {
-  return money(j?.totalAmount ?? j?.taxiFareTotal ?? j?.fare ?? 0);
+  const value: unknown = j?.totalAmount ?? j?.taxiFareTotal ?? j?.fareTotal ?? j?.fare ?? j?.totalEarning;
+  if ((typeof value !== 'number' && typeof value !== 'string') ||
+      (typeof value === 'string' && value.trim() === '') || !Number.isFinite(Number(value))) {
+    return 'Amount unavailable';
+  }
+  return money(Number(value));
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -56,13 +65,16 @@ export function JobStatusPill({ status, dark }: { status?: string; dark?: boolea
   return <TonePill label={label || 'In progress'} tone="brand" dark={dark} />;
 }
 
-/** Pickup → drop-off pair with the dot / line / pin idiom. */
+/** Pickup → drop-off pair with the dot / line / pin idiom.
+ *  [TAXI multi-stop] A ride with stops lists them between the two, numbered,
+ *  in order; with none the pair is exactly as before. */
 export function RoutePair({
   pickup,
   dropoff,
   pickupHint,
   muted,
   dark,
+  stops,
 }: {
   pickup?: string | null;
   dropoff?: string | null;
@@ -70,6 +82,7 @@ export function RoutePair({
   muted?: boolean;
   /** Render on the earner app's dark cards (dashboard plan Phase B). */
   dark?: boolean;
+  stops?: readonly { sequence: number; address: string }[];
 }) {
   const inkStyle = dark ? { color: color.white } : undefined;
   const mutedStyle = dark ? { color: withAlpha(color.white, 0.55) } : undefined;
@@ -90,6 +103,21 @@ export function RoutePair({
           </T>
         </View>
       </View>
+      {stops?.map((stop) => (
+        <React.Fragment key={`stop-${stop.sequence}`}>
+          <View style={{ marginLeft: 7, width: 2, height: 12, marginVertical: 2, borderRadius: 1, backgroundColor: dark ? withAlpha(color.white, 0.15) : color.border.subtle }} />
+          <View accessible accessibilityLabel={`Stop ${stop.sequence}: ${stop.address}`} style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={{ width: 16, alignItems: 'center' }}>
+              <View style={{ width: 16, height: 16, borderRadius: 8, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: color.text.primary, backgroundColor: color.surface.base }}>
+                <T variant="micro" weight="bold" accessible={false}>{stop.sequence}</T>
+              </View>
+            </View>
+            <T variant="label" weight={muted ? 'regular' : 'semibold'} tone={muted ? 'muted' : 'ink'} numberOfLines={1} style={[{ flex: 1, marginLeft: space.sm }, muted ? mutedStyle : inkStyle]}>
+              {stop.address}
+            </T>
+          </View>
+        </React.Fragment>
+      ))}
       {dropoff ? (
         <>
           <View style={{ marginLeft: 7, width: 2, height: 12, marginVertical: 2, borderRadius: 1, backgroundColor: dark ? withAlpha(color.white, 0.15) : color.border.subtle }} />

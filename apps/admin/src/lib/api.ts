@@ -1,4 +1,6 @@
+import type { MmgCheckoutSupportDetail, MmgCheckoutSupportPage, MmgCheckoutSupportStatus } from '@swift/types';
 import type { RejectionReasonCode } from './rejection-reasons';
+import { headerSafe, normaliseReason } from './reason-rules';
 
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 /** The header the server reads first for the reason law (ADM-006). */
@@ -62,7 +64,18 @@ export async function logout(): Promise<void> {
  * field (the vendor-visible waiver reason, the ban's record, …).
  */
 async function apiFetch(path: string, options?: RequestInit & { reason?: string }) {
-  const { reason, ...requestOptions } = options ?? {};
+  const { reason: stated, ...requestOptions } = options ?? {};
+  // [MC-PR1] A header can carry only Latin-1. iPhone keyboards type ’ “ ” – —
+  // by default, and fetch() refuses such a header before anything is sent —
+  // the click did nothing and nothing said why. Smart punctuation travels as
+  // its plain equivalent; anything else that cannot travel is refused here,
+  // with a code the outcome layer turns into words, instead of a TypeError.
+  const reason = stated ? normaliseReason(stated) : stated;
+  if (reason && !headerSafe(reason)) {
+    const error = new Error('The reason has characters that cannot be sent. Use letters, numbers and ordinary punctuation.') as Error & { code?: string };
+    error.code = 'REASON_UNSENDABLE';
+    throw error;
+  }
   const doFetch = () =>
     fetch(`${API_URL}${path}`, {
       ...requestOptions,
@@ -82,7 +95,11 @@ async function apiFetch(path: string, options?: RequestInit & { reason?: string 
       if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
         window.location.href = '/login';
       }
-      throw new Error('Session expired. Please sign in again.');
+      // [MC-PR1] status + code, so the outcome layer can say so in words
+      const expired = new Error('Session expired. Please sign in again.') as Error & { code?: string; status?: number };
+      expired.code = 'SESSION_EXPIRED';
+      expired.status = 401;
+      throw expired;
     }
   }
   const json = await res.json().catch(() => ({}));
@@ -334,6 +351,25 @@ export const resolveSupportTicket = (
     method: 'PUT',
     body: JSON.stringify({ status, adminNote, resolution, expectedStatus }),
   });
+/** [DELETION-INTEGRITY] Completes an in-app account closure request: the
+ *  server runs the same erasure checks as a person's own deletion. */
+export const completeAccountClosure = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/support/${id}/complete-account-closure`, { method: 'POST', body: JSON.stringify({ reason }), reason });
+// [AF-MOB-006] Custody recovery after pickup: the operations side of an owned
+// case. Directing, naming the relay rider and confirming a return are C3 —
+// each carries the operator's stated reason on the one reason transport.
+export const fetchCustodyCases = (open = true) =>
+  apiFetch(`/api/v1/admin/custody-cases?open=${open ? 'true' : 'false'}`);
+export const fetchCustodyCase = (id: string) => apiFetch(`/api/v1/admin/custody-cases/${id}`);
+export const claimCustodyCase = (id: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/claim`, { method: 'POST', body: '{}' });
+export const directCustodyCase = (id: string, outcome: 'SUPPORT_HOLD' | 'RELAY_REQUIRED' | 'RETURN_REQUIRED', reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/direct`, { method: 'POST', body: JSON.stringify({ outcome }), reason });
+export const assignCustodyRelay = (id: string, riderId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/relay`, { method: 'POST', body: JSON.stringify({ riderId }), reason });
+export const confirmCustodyReturn = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/confirm-return`, { method: 'POST', body: '{}', reason });
+
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 // [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.
@@ -567,17 +603,42 @@ export const rejectCreative = (id: string, reason: string, notes?: string) =>
     body: JSON.stringify({ reason, ...(notes ? { notes } : {}) }),
   });
 
-export const fetchVerificationQueue = (status = 'PENDING', role = 'operator') =>
-  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=100`);
+export const fetchVerificationQueue = (status = 'PENDING', role = 'operator', page = 1) =>
+  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=50&page=${page}`);
+export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verification/queue/counts');
+export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck } | undefined, reason: string) =>
+export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
 // [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
 // reviewer's words and the server's reason code. The words also ride the
 // reason header [ADM-006].
 export const rejectDoc = (id: string, reason: string, reasonCode: RejectionReasonCode) =>
   apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason, reasonCode }), reason });
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] Withdraw a committed document (admin.routes revokeDocSchema).
+// For a customer ID the server takes the account back to L1 when no other customer ID stands, in
+// the same transaction, and answers the resulting accountTrustLevel (#1610).
+export const revokeDoc = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/revoke`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+
+// [VERIFY-DOCS V3] The document reviewer grant. Opening, approving and
+// rejecting a document need it; `*` never implies it. A SUPER_ADMIN lists the
+// team and grants or removes it — to themselves too — with a stated reason.
+// The list answers 403 to anyone else, which is how the console knows to hide
+// the panel.
+export interface DocumentReviewerRow {
+  userId: string;
+  name: string;
+  role: 'ADMIN' | 'SUPER_ADMIN';
+  active: boolean;
+  documentReviewer: boolean;
+  you: boolean;
+}
+export const fetchDocumentReviewers = (): Promise<{ data: DocumentReviewerRow[] }> =>
+  apiFetch('/api/v1/admin/staff/document-reviewers');
+export const setDocumentReviewer = (userId: string, grant: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/staff/${encodeURIComponent(userId)}/document-reviewer`, { method: 'PUT', body: JSON.stringify({ grant }), reason });
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been
@@ -810,3 +871,24 @@ export const recordCollectionContact = (
     method: 'POST',
     body: JSON.stringify(body),
   });
+
+// ── MMG payments: support lookup [MMG-CHECKOUT-API.md section 11] ───────────
+// Support finds a partner's MMG weekly-fee payment by the Swift reference,
+// MMG's transaction ID, MMG's reference number or the partner's phone. Both
+// reads are C1: the server records each one (who, which identifier matched,
+// the checkout ids). The shapes are the shared contract in @swift/types.
+export interface MmgCheckoutSearch {
+  q?: string;
+  status?: MmgCheckoutSupportStatus | '';
+  cursor?: string | null;
+}
+export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success: boolean } & MmgCheckoutSupportPage> => {
+  const params = new URLSearchParams();
+  if (search.q?.trim()) params.set('q', search.q.trim());
+  if (search.status) params.set('status', search.status);
+  if (search.cursor) params.set('cursor', search.cursor);
+  const query = params.toString();
+  return apiFetch(`/api/v1/admin/billing/mmg-checkouts${query ? `?${query}` : ''}`);
+};
+export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);

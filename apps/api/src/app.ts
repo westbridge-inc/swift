@@ -36,7 +36,7 @@ import { registerEmptyJsonBodyParser } from './plugins/empty-json';
 import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
 import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegradedCounter, type RuntimeReadinessState } from './plugins/readiness';
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
-import { loggerRedactConfig } from './utils/logger-config';
+import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
@@ -52,6 +52,8 @@ import { installProcessLifecycle } from './utils/process-lifecycle';
 import { resolveCorsOrigins } from './utils/cors-origin';
 import { asFastifyTrustProxy } from './config/trust-proxy';
 import { isDevelopment, isProduction } from './utils/runtime-mode';
+import { getMapsProvider } from './providers/maps/maps-provider';
+import { createRoutingProbe } from './providers/maps/routing-probe';
 
 
 // Process start ≈ API boot. Grace-windows the scheduler "never booted" page so a
@@ -83,6 +85,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       level: process.env['LOG_LEVEL'] || 'info',
       // secrets and credentials never reach log output
       redact: loggerRedactConfig,
+      serializers: loggerSerializers,
       transport:
         isDevelopment()
           ? { target: 'pino-pretty', options: { colorize: true } }
@@ -101,7 +104,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // tests that grade every public GET under TENANT_UNSCOPED_ACCESS=deny.
   if (options.onRoute) app.addHook('onRoute', options.onRoute);
   let bootContractsComplete = false;
+  const checkRouting = createRoutingProbe(getMapsProvider());
+  app.addHook('onListen', async () => {
+    const routing = await checkRouting();
+    app.log[routing.status === 'degraded' ? 'warn' : 'info']({ routing }, 'routing readiness');
+  });
   const runtimeReadiness: RuntimeReadinessState = {
+    checkRouting,
     checkQueues: () => false,
     checkConsumers: () => false,
     checkWorker: async () => {
@@ -199,6 +208,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   registerRoutedWhileDegradedCounter(app);
   app.get('/health', async (request, reply) => {
     const checks: Record<string, string> = { api: 'ok' };
+    const routing = await checkRouting();
 
     try {
       await app.prisma.$queryRaw`SELECT 1`;
@@ -276,6 +286,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      routing,
       // [F-028-17] THIS process's effective dispatch tuning. The baselines
       // derive their wait math from these numbers, and a baseline shell can
       // carry different env than the server it drives — a cap-3 shell judged
@@ -320,6 +331,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
   await app.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
+  // [PT-2] Card rail v2 public doors: the provider's return (an observation
+  // that never credits by itself) and, off production, the simulator's test
+  // page. Rate-limited, body-capped, never logged; inert while CARD_RAIL_V2 is off.
+  {
+    const { cardRailPublicRoutes } = await import('./modules/billing/card-rail.routes');
+    await app.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card' });
+  }
   // Unauthenticated read-only storefront pages (web SEO) — see module header.
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
   // Printed-QR short links: /s/{code} at the ROOT path (the production web
@@ -341,6 +359,12 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // webhook secret arrives with MMG biller onboarding.
   const { agentCashRoutes } = await import('./modules/billing/agent-cash.routes');
   await app.register(agentCashRoutes, { prefix: '/api/v1/billing/mmg' });
+  // MMG hosted-checkout replies [mmg checkout 3/6]: the web return page
+  // forwards MMG's reply here and MMG's own servers may call notify. Both are
+  // rate-limited, body-capped and inert while MMG_CHECKOUT_ENABLED is off; a
+  // reply only prompts the server's own MMG lookup, never a credit.
+  const { mmgCheckoutPublicRoutes } = await import('./modules/billing/mmg-checkout.routes');
+  await app.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps

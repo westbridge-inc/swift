@@ -2,6 +2,7 @@ import type { ReactElement, ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { ReasonDialogProvider } from '@/components/mc/ReasonDialog';
 import { vi } from 'vitest';
 
 export const API_ORIGIN = 'http://admin-api.test';
@@ -62,7 +63,11 @@ export function renderWithQuery(ui: ReactElement) {
   });
 
   function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    return (
+      <QueryClientProvider client={queryClient}>
+        <ReasonDialogProvider>{children}</ReasonDialogProvider>
+      </QueryClientProvider>
+    );
   }
 
   return {

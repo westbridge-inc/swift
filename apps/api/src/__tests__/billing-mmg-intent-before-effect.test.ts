@@ -14,6 +14,7 @@ import {
   SandboxMmgProvider, sandboxAddHistory, sandboxResetMmg, sandboxSetTxStatus, type MmgInitiateRequest,
 } from '../providers/mmg/mmg-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [TA-S0-002 / M-03] No MMG request may exist without a durable local intent.
@@ -112,10 +113,14 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+  // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });

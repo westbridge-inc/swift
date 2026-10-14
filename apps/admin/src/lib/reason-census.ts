@@ -60,6 +60,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── Verification ───────────────────────────────────────────────────────
   { route: 'PUT /verification/:id/approve', helper: 'approveDoc', args: ['doc_1', undefined] },
   { route: 'PUT /verification/:id/reject', helper: 'rejectDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /staff/:userId/document-reviewer', helper: 'setDocumentReviewer', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
 
   // ── Compliance ─────────────────────────────────────────────────────────
   { route: 'POST /compliance/reviews/:id/decide', helper: 'decideComplianceReview', args: ['cre_1', true, undefined], requiredBodyKeys: ['pass'] },
@@ -84,6 +85,11 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'POST /billing/agent-payments/:id/attach', helper: 'attachAgentPayment', args: ['pay_1', 'sub_1'], requiredBodyKeys: ['subscriptionId'] },
   { route: 'POST /billing/agent-payments/:id/refund-flag', helper: 'flagAgentPaymentRefund', args: ['pay_1'], requiredBodyKeys: ['note'] },
   { route: 'POST /billing/settlement-batches/:id/confirm-deposit', helper: 'confirmSettlementDeposit', args: ['batch_1', { depositedGyd: 500, depositedAt: '2026-01-01T00:00:00Z', bankRef: 'MMG-BANK-REF-1' }], requiredBodyKeys: ['depositedGyd', 'depositedAt', 'bankRef'] },
+
+  // ── Custody recovery [AF-MOB-006] ──────────────────────────────────────
+  { route: 'POST /custody-cases/:id/direct', helper: 'directCustodyCase', args: ['cc_1', 'RELAY_REQUIRED'], requiredBodyKeys: ['outcome'] },
+  { route: 'POST /custody-cases/:id/relay', helper: 'assignCustodyRelay', args: ['cc_1', 'rdr_1'], requiredBodyKeys: ['riderId'] },
+  { route: 'POST /custody-cases/:id/confirm-return', helper: 'confirmCustodyReturn', args: ['cc_1'] },
 
   // ── Returns ────────────────────────────────────────────────────────────
   { route: 'PUT /returns/:id/resolve', helper: 'resolveReturn', args: ['ret_1', 'APPROVED', undefined], requiredBodyKeys: ['status'] },

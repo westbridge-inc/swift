@@ -109,3 +109,10 @@ export function slotFitsConfig(slotStart: Date, config: BookingConfig, now: Date
   if (slotStart.getTime() <= now.getTime() + Math.max(0, config.minNoticeMinutes ?? 0) * 60_000) return 'TOO_SOON';
   return 'OK';
 }
+
+/** [L09 · M017] Slots are minute-grained: a requested instant is truncated to
+ *  its minute so the slot identity checked, stored and enforced by the live
+ *  unique index is one value. 10:00:00.400 and 10:00:00.000 are one slot. */
+export function canonicalSlotStart(slotStart: Date): Date {
+  return new Date(Math.floor(slotStart.getTime() / 60_000) * 60_000);
+}

@@ -10,19 +10,19 @@ import { customerRoute, signInPath, signUpPath } from './customer-routes';
 
 describe('[Q7b] the customer route map', () => {
   it('lets a guest browse: Home, the store lists, search, a store, Market and the taxi explainer', () => {
-    for (const path of ['/', '/order', '/order/browse', '/order/search', '/order/vendor/v1', '/explore', '/taxi', '/market']) {
+    for (const path of ['/', '/order', '/order/browse', '/order/search', '/order/vendor/v1', '/store/shanta-kitchen', '/explore', '/taxi', '/market', '/cart']) {
       expect(customerRoute(path).public, path).toBe(true);
     }
   });
 
   it('keeps everything that belongs to an account private', () => {
-    for (const path of ['/cart', '/account', '/orders', '/orders/o1', '/order/location', '/courier']) {
+    for (const path of ['/account', '/orders', '/orders/o1', '/order/location', '/courier']) {
       expect(customerRoute(path).public, path).toBe(false);
     }
   });
 
   it('treats a page nobody listed as private', () => {
-    for (const path of ['/wallet', '/order/vendor', '/order/vendor/', '/market/goods', '/orders/o1/receipt', '/cart/extra']) {
+    for (const path of ['/wallet', '/order/vendor', '/order/vendor/', '/store', '/store/', '/market/goods', '/orders/o1/receipt', '/cart/extra']) {
       expect(customerRoute(path).public, path).toBe(false);
     }
   });
@@ -30,6 +30,7 @@ describe('[Q7b] the customer route map', () => {
   it('lights the phone app’s tabs: stores under Home, orders and addresses under Profile', () => {
     expect(customerRoute('/').tab).toBe('home');
     expect(customerRoute('/order/vendor/v1').tab).toBe('home');
+    expect(customerRoute('/store/shanta-kitchen').tab).toBe('home');
     expect(customerRoute('/market').tab).toBe('market');
     expect(customerRoute('/cart').tab).toBe('cart');
     expect(customerRoute('/account').tab).toBe('profile');
@@ -39,11 +40,21 @@ describe('[Q7b] the customer route map', () => {
 
   it('sends each back button to the page above it, and gives a tab’s first page none', () => {
     expect(customerRoute('/order/vendor/v1').parent).toBe('/');
+    expect(customerRoute('/store/shanta-kitchen').parent).toBe('/');
     expect(customerRoute('/cart').parent).toBe('/');
     expect(customerRoute('/orders/o1').parent).toBe('/orders');
     expect(customerRoute('/orders').parent).toBe('/account');
     expect(customerRoute('/order/location').parent).toBe('/account');
     for (const root of ['/', '/market', '/account']) expect(customerRoute(root).parent, root).toBeNull();
+  });
+
+  it('[WEB-REDESIGN] keeps Account’s own pages under Profile, private, going back to Account', () => {
+    for (const path of ['/account/addresses', '/account/profile', '/account/favourites', '/account/help', '/account/safety']) {
+      const route = customerRoute(path);
+      expect(route.tab, path).toBe('profile');
+      expect(route.parent, path).toBe('/account');
+      expect(route.public, path).toBe(false);
+    }
   });
 
   it('tells a guest what a private page is for', () => {

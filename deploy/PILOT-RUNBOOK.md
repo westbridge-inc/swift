@@ -244,6 +244,8 @@ phone or a laptop, open https://staging.swiftgy.com: browse stores, sign in
 with a real SMS code, place an order, track it, and open the business
 dashboard.
 
+To limit the staging name to people who have a password, see 3e.
+
 To turn the website off, empty WEB_HOST and rerun pilot-up.sh (Caddy stops
 serving the name), then remove the idle container:
 
@@ -281,8 +283,10 @@ What the public names get:
   pages, cart, checkout, orders and the customer's account show "Launching
   soon in Georgetown"; the company, policy, pricing and partner pages stay
   visible. `WEB_ORDERING=live` (exactly that; pilot-up refuses anything else)
-  opens ordering on the public names. It is fixed when the site is built:
-  change it, then redeploy. The staging name always keeps the full marketplace.
+  opens ordering on the public names. The site reads it while it runs: change
+  it, then recreate the website container (`docker compose up -d web`, or
+  redeploy as usual); no rebuild is needed, and closing it again is the same
+  one change. The staging name always keeps the full marketplace.
 
 What the front door is: presentation-only. It decides what the website shows
 on the public names. The API stays open to the apps, and to any API client, by
@@ -406,6 +410,78 @@ To turn the console off, empty ADMIN_HOST and ADMIN_BASIC_AUTH_HASH and rerun
 pilot-up.sh (Caddy stops serving the name), then remove the idle container:
 
     docker compose -f deploy/docker-compose.yml --profile admin rm --stop --force admin
+
+## 3e. A password on the staging website
+
+The staging website (3b) can be limited to the people who have a password:
+HTTP basic authentication on WEB_HOST, before any of its pages. It is
+optional and off until WEB_BASIC_AUTH_HASH is set. The browser asks once for
+the user `tester` and the password, then remembers them for that name.
+
+What stays open without the password:
+
+- The public names (WEB_ALIAS_HOSTS, 3c). swiftgy.com and www keep answering
+  everyone: the stores' privacy-policy and account-deletion links point there.
+- On WEB_HOST itself, MMG's payment returns under `/pay/mmg/` (MMG sends the
+  payer back there in the middle of a payment; that page needs nothing else
+  from the site) and the app-link files under `/.well-known/`. A path that
+  climbs (`..`) is never one of them.
+- The API's names and the admin console's name (the console has its own
+  gate, 3d).
+
+What asks for it: every other page on WEB_HOST, including "Continue on the
+web" from the MMG return page and, while APP_PUBLIC_URL names the staging
+site (3b), the QR codes and the trip and parcel links shared from staging.
+Point APP_PUBLIC_URL at the public name if those must open without one.
+
+1. Choose the password and make its hash on this host, as swift-deploy, with
+   the Caddy image the stack already runs:
+
+       docker run --rm -it --network none caddy:2.10 caddy hash-password --bcrypt-cost 12
+
+   It asks for the password twice at a prompt that does not show what is
+   typed, and prints only the hash (`$2a$12$…`). The password goes into that
+   prompt and nowhere else: never into a command argument, a chat, a log, a
+   ticket or git. Give it to testers the way you would hand over a key.
+   A hash made the console's way (3d) works the same: `htpasswd -nBC 12
+   tester` on your own computer, keeping only the part after `tester:`
+   (a `$2y$12$…` hash).
+2. Put the hash (never the password) in deploy/.env, in single quotes:
+
+       WEB_BASIC_AUTH_HASH='$2a$12$…'
+
+   The single quotes matter: without them Compose reads the `$` signs as
+   variables. pilot-up.sh refuses anything but a quoted bcrypt hash of cost
+   10 or more, and a hash without WEB_HOST, before anything changes, and it
+   never prints the value.
+3. Deploy as usual: `./deploy/pilot-up.sh "$APPROVED_SHA"`. With the password
+   on, the website is ready when its container reports healthy, its app-link
+   file `https://$WEB_HOST/.well-known/apple-app-site-association` answers
+   200, and `https://$WEB_HOST/` answers exactly 401. A website that serves
+   its home page without the password it was configured with fails the
+   deploy. The last website line reads `WEBSITE READY at https://$WEB_HOST
+   (exact SHA …; password gate on)`.
+
+Caddy does the checking: the website's container never holds the hash, and
+Caddy strips the password from each request it checked before passing it on.
+
+Verify:
+
+    WEB_HOST='staging.swiftgy.com'
+    curl -sSI --resolve "$WEB_HOST:443:127.0.0.1" "https://$WEB_HOST/" |
+      grep -iE '^HTTP|^www-authenticate'
+    curl -sSI --resolve "$WEB_HOST:443:127.0.0.1" \
+      "https://$WEB_HOST/.well-known/apple-app-site-association" | grep -iE '^HTTP'
+    ./deploy/doctor.sh
+
+The first prints `HTTP/2 401` and a `www-authenticate: Basic` line, the second
+`HTTP/2 200`, and the doctor `ok    website https://staging.swiftgy.com → 401
+(password gate on)`. Then, in a browser, https://staging.swiftgy.com asks for
+`tester` and the password, and https://swiftgy.com still opens without one.
+
+To change the password, make a new hash, replace the old one and redeploy.
+To turn the password off, empty WEB_BASIC_AUTH_HASH and redeploy: the staging
+name answers everyone again.
 
 ## 4. Start and verify off-site backups
 
@@ -668,3 +744,60 @@ The console's **Zones** page shows the zones with their per-km rates and adds, c
 The seed only creates rows; it never changes or deletes them. An install seeded before October still has the old
 Georgetown Central ↔ South 2,000 pair until an admin removes it, and it gains the airport zones only by a seed run or
 the admin calls above.
+
+## 11. Audit evidence and retention authority
+
+The current retention decision is a draft pending legal confirmation. The admin
+audit trail (`audit_logs`) is permanent legal evidence. Sensitive access records
+(`sensitive_read_logs`) have no approved expiry window or implemented legal-hold
+release check. The daily `retention-sweep` deliberately retains both: every run
+reports `audit_logs(permanent-evidence)` and
+`sensitive_read_logs(policy-unapproved)` with zero deletions. Its completion log
+includes each skipped class and reason. Adding an enabled registry clock does
+not override these decisions. No purge executor membership is granted to the
+API login or the ordinary retention worker. The API must use a non-owner,
+non-superuser login with no replication or role-administration privilege; a
+table owner can alter triggers. The role-contract cutover remains a separate
+release gate.
+
+The migration creates two NOLOGIN roles. `swift_audit_purge_owner` owns the
+bounded SECURITY DEFINER functions and must have no members.
+`swift_audit_purge_executor` can read the two trails and invoke those functions;
+it cannot delete, update or truncate tables directly. Function grants inherited
+from creation defaults are removed before granting this executor access.
+The functions enforce an explicit batch of at most 1,000 IDs and a reason, but
+do **not** determine retention eligibility or release legal holds. The admin
+trail function is retained for isolated synthetic test cleanup; it is not an
+approved live-data retention policy.
+
+Do not provision an automated purge job yet. Before enabling sensitive-read
+retention, obtain the approved configurable window and build a reviewed
+legal-hold check and deletion receipt that commit with deletion. Separate that
+job's sensitive-read authority from the permanent admin trail before granting
+it access; the current executor covers both functions.
+
+For a separately authorized maintenance executor, the database administrator
+can grant `swift_audit_purge_executor` to a dedicated, least-privilege NOINHERIT
+login provisioned outside the repository. That login must not be an API or
+ordinary worker login, table owner, superuser, or member of
+`swift_audit_purge_owner`. Use `GRANT swift_audit_purge_executor TO
+<approved_maintenance_login>` with the actual reviewed login identifier. On the
+dedicated connection, begin a transaction, run
+`SET LOCAL ROLE swift_audit_purge_executor`, select only the approved explicit
+IDs, invoke the relevant helper/function with the recorded authorization
+reason, and commit. `SET LOCAL` ends the elevated role at commit or rollback.
+Never grant the owner role. Revoke executor membership when the authorization
+ends. This procedure does not authorize purging permanent evidence.
+
+The migration's `rollback.sql` sidecar restores the exact previous trigger
+bodies and clears the new function search-path settings. It restores the legacy
+caller-setting authority, so roll back callers first and explicitly acknowledge
+that change with `SET swift.audit_purge_rollback = 'restore-legacy-guard'` on the
+same migration-runner connection before executing the sidecar. The sidecar
+locks both trails and refuses while either purge role has members or the purge
+function owner differs. It removes local purge functions, policies, grants and
+the new sensitive-read TRUNCATE trigger. It drops unused roles; cluster-wide
+roles with other database/object dependencies remain NOLOGIN with this
+database's purge grants removed. Do not remove another database's role to make
+rollback pass. Reset the acknowledgement after the rehearsal. Rollback cannot
+restore rows already deleted.
