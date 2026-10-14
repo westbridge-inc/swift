@@ -5883,11 +5883,13 @@ export async function adminRoutes(app: FastifyInstance) {
     // why not — the same facts the server checks, read live, so the screen
     // never offers a button the server will refuse.
     const ownPending = rows.some((row) => row.requestedBy === mine && row.status === 'PENDING');
+    const me = ownPending ? await app.prisma.user.findUnique({ where: { id: mine }, select: { email: true, emailChangedAt: true } }) : null;
     const soloContext = ownPending ? {
       userId: mine,
       role: request.user.role,
       roster: await approverRoster(app.prisma),
-      hasEmail: !!(await app.prisma.user.findUnique({ where: { id: mine }, select: { email: true } }))?.email?.trim(),
+      hasEmail: !!me?.email?.trim(),
+      emailChangedAt: me?.emailChangedAt ?? null,
       emailReady: emailChannelConfigured(),
       coolOffHours: await soloCoolOffHours(app.prisma),
       now: new Date(),

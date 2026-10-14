@@ -193,6 +193,8 @@ describe('[OWNER #13] solo approval words', () => {
     expect(words).toMatch(/12-hour wait/);
     expect(words).toMatch(/sign-in code/);
     expect(words).toMatch(/emails you/);
+    expect(words).toMatch(/texts your phone/);
+    expect(words).toMatch(/7 days after the email/);
     expect(words).toMatch(/cancel/);
   });
   it('recognises the server asking for a fresh code', () => {

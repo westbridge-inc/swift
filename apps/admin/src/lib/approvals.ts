@@ -62,7 +62,8 @@ export function soloWaitCopy(availableAt: string, now = new Date()): string {
 
 export const SOLO_EXPLAIN = (hours: number) =>
   `You are the only admin who can approve this. In solo mode you can approve it yourself after a ${hours}-hour wait, ` +
-  'with a sign-in code sent to your phone. Swift emails you now and when you decide, and you can cancel during the wait.';
+  'with a sign-in code sent to your phone. Swift emails you and texts your phone now and when you decide, and you can cancel during the wait. ' +
+  'Solo approval is off for 7 days after the email on your account changes.';
 
 /** A server refusal that means "confirm it's you first". */
 export function needsStepUp(error: unknown): boolean {

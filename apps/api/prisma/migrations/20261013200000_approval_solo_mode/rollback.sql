@@ -1,8 +1,14 @@
 -- [OWNER #13] Guarded rollback: the solo columns are the record of how an
 -- approval was given. They are removed only when no request ever went solo;
 -- otherwise this refuses, and the record stays.
+-- privileged_approvals forces row-level security, so a role that sees only
+-- some rows could find no solo request and pass the guard. Row security is
+-- switched off for this transaction: a role that does not bypass it is refused
+-- with an error instead. Run this as a role that bypasses row-level security
+-- (a superuser or BYPASSRLS).
 BEGIN;
 SET LOCAL lock_timeout = '10s';
+SET LOCAL row_security = off;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM "privileged_approvals" WHERE "soloRequestedAt" IS NOT NULL OR "decidedSolo") THEN

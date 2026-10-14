@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
@@ -6,6 +8,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
+import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -36,7 +39,7 @@ const REASON = 'Raise the batch cap after the Georgetown lunch peak review';
 const tenants: string[] = [];
 const userIds: string[] = [];
 
-interface Actor { token: string; userId: string; sessionId: string; email: string | null }
+interface Actor { token: string; userId: string; sessionId: string; email: string | null; phone: string }
 
 async function makeTenant(): Promise<string> {
   const id = `solo-${RUN}-${tenants.length}`;
@@ -45,16 +48,16 @@ async function makeTenant(): Promise<string> {
   return id;
 }
 
-async function makeAdmin(tenantId: string, opts: { role?: 'SUPER_ADMIN' | 'ADMIN'; email?: string | null; permissions?: string[] } = {}): Promise<Actor> {
+async function makeAdmin(tenantId: string, opts: { role?: 'SUPER_ADMIN' | 'ADMIN' | 'CUSTOMER'; email?: string | null; permissions?: string[] } = {}): Promise<Actor> {
   const role = opts.role ?? 'SUPER_ADMIN';
   const email = opts.email === undefined ? `owner-${RUN}-${userIds.length}@example.test` : opts.email;
   return runWithoutTenant(async () => {
     const user = await app.prisma.user.create({
       data: {
         phone: `+59275${String(Math.floor(Math.random() * 90000) + 10000)}`,
-        firstName: 'Solo', lastName: `Owner${RUN}${userIds.length}`, roles: [role, 'CUSTOMER'], activeRole: role,
+        firstName: 'Solo', lastName: `Owner${RUN}${userIds.length}`, roles: role === 'CUSTOMER' ? ['CUSTOMER'] : [role, 'CUSTOMER'], activeRole: role,
         status: 'ACTIVE', isPhoneVerified: true, tenantId, ...(email ? { email } : {}),
-        admin: { create: { permissions: opts.permissions ?? ['*'] } },
+        ...(role === 'CUSTOMER' ? {} : { admin: { create: { permissions: opts.permissions ?? ['*'] } } }),
       },
     });
     userIds.push(user.id);
@@ -65,7 +68,7 @@ async function makeAdmin(tenantId: string, opts: { role?: 'SUPER_ADMIN' | 'ADMIN
         deviceId: 'admin-solo', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000),
       },
     });
-    return { token, userId: user.id, sessionId: session.id, email };
+    return { token, userId: user.id, sessionId: session.id, email, phone: user.phone };
   }, 'test-fixture:solo');
 }
 
@@ -156,6 +159,7 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
+  await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.ready();
 });
 
@@ -487,5 +491,205 @@ describe('[DS1111] the screen never offers solo on an expired request', () => {
       .toMatchObject({ state: 'unavailable', why: 'expired' });
     expect(soloRowState({ status: 'PENDING', capability: 'x', soloRequestedAt: null, soloEligibleAt: null, expiresAt: new Date(now.getTime() + 3_600_000) }, ctx))
       .toMatchObject({ state: 'available', coolOffHours: 12 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [Opus money review S2 · 14 Oct] The solo warning goes to the account's
+// email. A stolen session must never be able to move that address and then
+// go solo with the warnings landing in the thief's inbox: an admin's email
+// change takes a fresh sign-in code and tells the OLD address; solo stays off
+// for seven days after any email change; and every solo notice ALSO goes by
+// text to the phone on the account.
+// ---------------------------------------------------------------------------
+
+const changeEmail = (actor: Actor, email: string, extra: Record<string, unknown> = {}) =>
+  call(actor, 'PUT', '/api/v1/customer/profile', { ...extra, email });
+
+const account = (userId: string) => runWithoutTenant(
+  () => app.prisma.user.findUniqueOrThrow({ where: { id: userId } }),
+  'test-fixture:solo',
+) as Promise<Record<string, unknown> & { email: string | null }>;
+
+/** Move the account's last email change back in time, as if the days had gone by. */
+const emailChangedDaysAgo = (userId: string, days: number) => runWithoutTenant(() => app.prisma.user.update({
+  where: { id: userId },
+  data: { emailChangedAt: new Date(Date.now() - days * 24 * 3_600_000) } as never,
+}), 'test-fixture:solo');
+
+const textsTo = (phone: string) => devChannelLog.filter((entry) => entry.channel === 'sms' && entry.to === phone);
+
+/** Texts that cannot go: a real provider shape (placeholder identity, never a
+ *  real account) whose recipient list is empty, so nothing is sent — exactly
+ *  what a non-production server does for a number not on its list. fetch is
+ *  stubbed to fail too, so nothing here can ever reach a network. */
+async function withTextsDown<T>(fn: () => Promise<T>): Promise<T> {
+  const keys = ['NOTIFICATION_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_API_KEY_SECRET', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID', 'SMS_RECIPIENT_ALLOWLIST'] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  const savedFetch = globalThis.fetch;
+  Object.assign(process.env, {
+    NOTIFICATION_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: `AC${'0'.repeat(32)}`, TWILIO_API_KEY_SID: `SK${'0'.repeat(32)}`,
+    TWILIO_API_KEY_SECRET: 'placeholder', TWILIO_FROM: '+15550000000', SMS_RECIPIENT_ALLOWLIST: '',
+  });
+  delete process.env['TWILIO_MESSAGING_SERVICE_SID'];
+  globalThis.fetch = (async () => { throw new Error('no network in this test'); }) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = savedFetch;
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]!; }
+  }
+}
+
+describe('[Opus S2] an admin account email is where solo warnings go — a session alone can never move it', () => {
+  it('changing an admin email needs a fresh sign-in code; without one nothing changes', async () => {
+    const tenantId = await makeTenant();
+    const owner = await makeAdmin(tenantId);
+    const res = await changeEmail(owner, `thief-${RUN}-a@example.test`);
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error.code).toBe('STEP_UP_REQUIRED');
+    const after = await account(owner.userId);
+    expect(after.email).toBe(owner.email);
+    expect(after['emailChangedAt'] ?? null).toBeNull();
+  });
+
+  it('with the code: the email changes, the OLD address is told, the change is dated and the code is spent', async () => {
+    const tenantId = await makeTenant();
+    const owner = await makeAdmin(tenantId);
+    const next = `new-${RUN}-b@example.test`;
+    const toOld = emailsTo(owner.email).length;
+    await stepUp(owner);
+    const res = await changeEmail(owner, next);
+    expect(res.statusCode, res.body).toBe(200);
+    const after = await account(owner.userId);
+    expect(after.email).toBe(next);
+    expect(Date.now() - (after['emailChangedAt'] as Date).getTime()).toBeLessThan(60_000);
+    expect(emailsTo(owner.email).length, 'the OLD address is told').toBe(toOld + 1);
+    const notice = emailsTo(owner.email).at(-1)!;
+    expect(notice.body).toMatch(/was not you/i);
+    expect(notice.body, 'the new address is masked, never copied').not.toContain(next);
+    expect(await hasStepUp(owner), 'the code authorises ONE change').toBe(false);
+  });
+
+  it('sending the same email again (the app does on every name edit) needs no code and tells nobody', async () => {
+    const tenantId = await makeTenant();
+    const owner = await makeAdmin(tenantId);
+    const before = emailsTo(owner.email).length;
+    const res = await changeEmail(owner, owner.email!, { firstName: 'Renamed' });
+    expect(res.statusCode, res.body).toBe(200);
+    const after = await account(owner.userId);
+    expect(after['firstName']).toBe('Renamed');
+    expect(after['emailChangedAt'] ?? null).toBeNull();
+    expect(emailsTo(owner.email).length).toBe(before);
+  });
+
+  it('a customer changes their email as before (no code, no notice), and the change is still dated', async () => {
+    const tenantId = await makeTenant();
+    const customer = await makeAdmin(tenantId, { role: 'CUSTOMER' });
+    const before = emailsTo(customer.email).length;
+    const res = await changeEmail(customer, `cust-${RUN}-c@example.test`);
+    expect(res.statusCode, res.body).toBe(200);
+    const after = await account(customer.userId);
+    expect(after.email).toBe(`cust-${RUN}-c@example.test`);
+    expect(after['emailChangedAt']).toBeTruthy();
+    expect(emailsTo(customer.email).length).toBe(before);
+  });
+
+  it('if the old address cannot be told, an admin email does not change', async () => {
+    const tenantId = await makeTenant();
+    const owner = await makeAdmin(tenantId);
+    await stepUp(owner);
+    const res = await withEmailDown(() => changeEmail(owner, `new-${RUN}-d@example.test`));
+    expect(res.statusCode, res.body).toBe(503);
+    expect(res.json().error.code).toBe('EMAIL_CHANGE_NOTICE_UNAVAILABLE');
+    const after = await account(owner.userId);
+    expect(after.email).toBe(owner.email);
+    expect(after['emailChangedAt'] ?? null).toBeNull();
+  });
+
+  it('the stolen-session attack: right after an email change solo is refused, for seven days', async () => {
+    const tenantId = await makeTenant();
+    const owner = await makeAdmin(tenantId);
+    await stepUp(owner);
+    const moved = await changeEmail(owner, `moved-${RUN}-e@example.test`);
+    expect(moved.statusCode, moved.body).toBe(200);
+    const id = await ask(owner);
+    const refused = await startSolo(owner, id);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('SOLO_EMAIL_RECENT');
+    expect((await row(id))['soloRequestedAt'] ?? null).toBeNull();
+    // the Approvals screen says why, and never offers the button
+    const list = await call(owner, 'GET', '/api/v1/admin/approvals');
+    const mine = (list.json().data as Array<{ id: string; solo: { state: string; why?: string } | null }>).find((r) => r.id === id)!;
+    expect(mine.solo).toMatchObject({ state: 'unavailable', why: 'email-recent' });
+
+    await emailChangedDaysAgo(owner.userId, 6.9);
+    expect((await startSolo(owner, id)).statusCode, 'still inside the seven days').toBe(409);
+    await emailChangedDaysAgo(owner.userId, 7.01);
+    const started = await startSolo(owner, id);
+    expect(started.statusCode, started.body).toBe(200);
+  });
+
+  it('an email change DURING the wait refuses the decision, before any code is spent', async () => {
+    const tenantId = await makeTenant();
+    const owner = await makeAdmin(tenantId);
+    const id = await ask(owner);
+    expect((await startSolo(owner, id)).statusCode).toBe(200);
+    await elapse(id);
+    await stepUp(owner);
+    expect((await changeEmail(owner, `wait-${RUN}-f@example.test`)).statusCode).toBe(200);
+    await stepUp(owner);
+    const res = await decide(owner, id);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('SOLO_EMAIL_RECENT');
+    expect((await row(id)).status).toBe('PENDING');
+    expect(await hasStepUp(owner), 'a cheap refusal never spends the code').toBe(true);
+  });
+});
+
+describe('[Opus S2] every solo notice also goes by text to the phone on the account', () => {
+  it('the start and the decision each text the owner, as well as emailing', async () => {
+    const tenantId = await makeTenant();
+    const owner = await makeAdmin(tenantId);
+    const id = await ask(owner);
+    const atStart = textsTo(owner.phone).length;
+    expect((await startSolo(owner, id)).statusCode).toBe(200);
+    expect(textsTo(owner.phone).length).toBe(atStart + 1);
+    expect(textsTo(owner.phone).at(-1)!.body).toMatch(/cancel/i);
+    await elapse(id);
+    await stepUp(owner);
+    const atDecision = textsTo(owner.phone).length;
+    expect((await decide(owner, id)).statusCode).toBe(200);
+    expect(textsTo(owner.phone).length).toBe(atDecision + 1);
+    expect(textsTo(owner.phone).at(-1)!.body).toMatch(/approved/i);
+  });
+
+  it('a text that cannot be sent refuses the step: at the start and at the decision', async () => {
+    const tenantId = await makeTenant();
+    const owner = await makeAdmin(tenantId);
+    const id = await ask(owner);
+    const down = await withTextsDown(() => startSolo(owner, id));
+    expect(down.statusCode, down.body).toBe(503);
+    expect(down.json().error.code).toBe('SOLO_SMS_UNAVAILABLE');
+    expect((await row(id))['soloRequestedAt'] ?? null, 'nothing started').toBeNull();
+
+    expect((await startSolo(owner, id)).statusCode).toBe(200);
+    await elapse(id);
+    await stepUp(owner);
+    const atDecision = await withTextsDown(() => decide(owner, id));
+    expect(atDecision.statusCode, atDecision.body).toBe(503);
+    expect(atDecision.json().error.code).toBe('SOLO_SMS_UNAVAILABLE');
+    expect((await row(id)).status, 'nothing decided').toBe('PENDING');
+  });
+});
+
+describe('[Opus S3] the solo rollback guard cannot be blinded by row-level security', () => {
+  it('switches row security off for its transaction before it looks for solo requests', () => {
+    const sql = readFileSync(path.join(__dirname, '../../prisma/migrations/20261013200000_approval_solo_mode/rollback.sql'), 'utf8');
+    const begin = sql.indexOf('BEGIN;');
+    const off = sql.indexOf('SET LOCAL row_security = off;');
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(off, 'privileged_approvals forces row security: a non-bypass role must get an error, never an empty table').toBeGreaterThan(begin);
+    expect(off).toBeLessThan(sql.indexOf('IF EXISTS'));
   });
 });

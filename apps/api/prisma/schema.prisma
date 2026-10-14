@@ -25,6 +25,11 @@ model User {
   id               String     @id @default(cuid())
   phone            String     @unique
   email            String?    @unique
+  /// [OWNER #13 · Opus S2] When the email last changed (PUT /customer/profile).
+  /// Solo approval warns the owner at this address, so it stays off for seven
+  /// days after any change (admin-email-change.ts). Null: never changed since
+  /// this was recorded.
+  emailChangedAt   DateTime?
   firstName        String
   lastName         String
   avatar           String?
