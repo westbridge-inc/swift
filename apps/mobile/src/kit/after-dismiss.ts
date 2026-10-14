@@ -1,5 +1,3 @@
-import { Platform } from 'react-native';
-
 /**
  * [#910's law, generalized] Dismissing a windowed Modal (PopupCard,
  * ConfirmDialog, ActionSheet) in the SAME TICK a navigation transition starts
@@ -9,8 +7,8 @@ import { Platform } from 'react-native';
  * followed found the same shape on four more ceremonies.
  *
  * The law: a modal exit may only CLOSE the modal in its own tick. The
- * navigation goes through here — after interactions, a beat later, when the
- * window is provably gone.
+ * navigation goes through here — after interactions, a beat later, after React has had a chance to commit
+ * the removal. Native onDismissed remains the stronger completion signal.
  *
  *   setOpen(false);
  *   afterDismiss(() => navigation.navigate('Somewhere'));
@@ -32,6 +30,5 @@ export function afterDismiss(go: () => void): void {
   // modal's removal, the second lets the platform present that commit. On iOS
   // a caller that can reach the modal itself should prefer `PopupCard`'s
   // `onDismissed` — that is the real signal; this is the floor beneath it.
-  if (Platform.OS === 'android') { go(); return; }
   requestAnimationFrame(() => requestAnimationFrame(go));
 }

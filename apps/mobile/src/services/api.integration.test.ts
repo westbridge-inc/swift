@@ -731,3 +731,124 @@ describe('weekly fee MMG transport', () => {
     auth.current = accountB; await expect(client.read('old-ref')).rejects.toThrow('paying account changed');
   });
 });
+
+describe('weak-network driver acceptance', () => {
+  it('retries the exact offer once after a lost response', async () => {
+    const requests: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => {
+      requests.push(config);
+      if (requests.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { id: 'ride-a' } });
+    });
+    const result = await driverApi.acceptOffer('ride-a', 'attempt-a');
+    expect(result.data.data.id).toBe('ride-a');
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.url)).toEqual(['/driver/offers/accept', '/driver/offers/accept']);
+    expect(requests[0]?.data).toBe(requests[1]?.data);
+    expect(JSON.parse(requests[1]!.data)).toEqual({ orderId: 'ride-a', offerAttemptId: 'attempt-a' });
+  });
+  it('[OWNER RULING 8 Oct] never sends a fare on any accept, first try or retry', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    setAdapter(async (config) => {
+      if (config.method === 'post') {
+        bodies.push(JSON.parse(config.data ?? '{}'));
+        if (bodies.length % 2 === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+      }
+      return response(config, 200, { data: { id: 'other-ride' } });
+    });
+    await driverApi.acceptOffer('ride-a', 'attempt-a');
+    await driverApi.accept('ride-b');
+    expect(bodies).toHaveLength(4);
+    for (const body of bodies) expect(body).not.toHaveProperty('fare');
+  });
+  it('reconciles a lost board response against the already-held ride', async () => {
+    const urls: string[] = [];
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') throw new AxiosError('timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { id: 'ride-a' } });
+    });
+    expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it.each(['ALREADY_TAKEN', 'DRIVER_BUSY'])('reconciles a board retry refused %s because the first accept committed', async (code) => {
+    const urls: string[] = [];
+    let posts = 0;
+    let gets = 0;
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') {
+        posts++;
+        if (posts === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+        throw new AxiosError('conflict', 'ERR_BAD_REQUEST', config, undefined,
+          response(config, 409, { success: false, error: { code } }));
+      }
+      gets++;
+      // Before the retry the first accept has not committed; after it, it has.
+      return response(config, 200, { data: gets === 1 ? null : { id: 'ride-a' } });
+    });
+    expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active', '/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it('still fails a refused board retry when the server holds a different ride', async () => {
+    const urls: string[] = [];
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') {
+        if (urls.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+        throw new AxiosError('conflict', 'ERR_BAD_REQUEST', config, undefined,
+          response(config, 409, { success: false, error: { code: 'DRIVER_BUSY' } }));
+      }
+      return response(config, 200, { data: { id: 'ride-other' } });
+    });
+    await expect(driverApi.accept('ride-a')).rejects.toThrow();
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active', '/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it('does not borrow another account for a retry', async () => {
+    let calls = 0;
+    setAdapter(async (config) => { calls++; auth.current = accountB; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(driverApi.acceptOffer('ride-a', 'attempt-a')).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  it.each([400, 401, 403, 409, 500])('does not retry an authoritative rejection %i', async (status) => {
+    let calls = 0;
+    if (status === 401) auth.current = null;
+    setAdapter(async (config) => {
+      calls++;
+      throw new AxiosError('rejected', 'ERR_BAD_RESPONSE', config, undefined, response(config, status, {}));
+    });
+    await expect(driverApi.acceptOffer('ride-a')).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  it('never exceeds two accept attempts', async () => {
+    let calls = 0;
+    setAdapter(async (config) => { calls++; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(driverApi.acceptOffer('ride-a')).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
+});
+
+describe('weak-network read lifetime', () => {
+  it('allows 20 seconds for reads while preserving write and explicit request timeouts', async () => {
+    const seen: number[] = [];
+    setAdapter(async (config) => { seen.push(config.timeout!); return response(config, 200, { data: 'success' }); });
+    await api.get('/customer/home');
+    await api.head('/customer/home');
+    await api.post('/ordinary-write', {});
+    await api.get('/explicit-read', { timeout: 45000 });
+    expect(seen).toEqual([20000, 20000, 10000, 45000]);
+  });
+  it('allows a slow successful read to finish instead of timing out at ten seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      setAdapter((config) => new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new AxiosError('timeout', 'ECONNABORTED', config)), config.timeout);
+        setTimeout(() => { clearTimeout(timeout); resolve(response(config, 200, { data: 'slow success' })); }, 15000);
+      }));
+      const result = api.get('/customer/home');
+      const observed = result.then((value) => value.data.data, (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(await observed).toBe('slow success');
+    } finally { vi.useRealTimers(); }
+  });
+});
