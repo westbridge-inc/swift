@@ -87,6 +87,34 @@ export function assertNoLiveCardsOffProduction(env: Record<string, string | unde
   }
 }
 
+/**
+ * [LAUNCH-LOCK · owner ruling 13 Oct, #34] Until an attorney signs off,
+ * production takes no card payment and runs no ads (GUARDRAILS §8). Both are
+ * already off by default; this makes "off" a refusal to boot rather than a
+ * setting someone can flip: turning either on in production is a reviewed
+ * change to this function (and to pilot-up.sh's matching refusal), never a
+ * deploy/.env edit.
+ *   Cards: no card instruction (PAYMENT_PROVIDER exactly disabled; the
+ *   card-rail contract, checked earlier, then also requires CARD_RAIL_KILL=1),
+ *   and none of card rail v2's switches (CARD_RAIL_V2, its drain, saving
+ *   cards) set to anything but 0. With v2 off the weekly fee never offers a
+ *   CARD pay action.
+ *   Ads: ADS_ENABLED unset or 0 (only exactly 1 opens the ads routes).
+ * Called only in production. Each refusal names its setting, never a value.
+ */
+function assertProductionLaunchLocks(env: Record<string, string | undefined>): void {
+  if (env['PAYMENT_PROVIDER'] !== 'disabled') {
+    throw new Error('FATAL: PAYMENT_PROVIDER must be exactly disabled in production — no card payment until an attorney signs off (owner ruling, 13 Oct); turning cards on is a reviewed code change, not a setting. Refusing to start.');
+  }
+  for (const name of ['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'] as const) {
+    const value = env[name];
+    if (value !== undefined && value !== '' && value !== '0') {
+      const what = name === 'ADS_ENABLED' ? 'ads stay off' : 'no card payment';
+      throw new Error(`FATAL: ${name} must be unset or 0 in production — ${what} until an attorney signs off (owner ruling, 13 Oct); turning it on is a reviewed code change, not a setting. Refusing to start.`);
+    }
+  }
+}
+
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
   assertTestControlConfig(env);
@@ -324,6 +352,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if ((env['AGENT_CASH_WEBHOOK_SECRET'] ?? '') !== '') {
     throw new Error('FATAL: AGENT_CASH_WEBHOOK_SECRET is set in production — partners pay the weekly fee only on the MMG checkout page, never through an agent or a Swift Number. Remove it (and its _FILE line). Refusing to start.');
   }
+  assertProductionLaunchLocks(env);
 
   // [PROD-PATH] Email: receipts, expiry warnings, data-export links. The dev
   // sender refuses only at the FIRST send in production (channels.ts), so a

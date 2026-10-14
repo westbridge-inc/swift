@@ -443,10 +443,15 @@ describe('Guyana partner rate card — owner rates are the seeded config', () =>
     // 2026-09-29 change to 6,000. 2026-10-04.2 and 2026-10-06.1 carried the
     // franchise rule the owner removed on 13 Oct 2026; 2026-10-07.1,
     // 2026-10-07.2, 2026-10-13.1 and 2026-10-13.2 are claimed by other open
-    // branches for other values.
+    // branches for other values. 2026-10-13.3 lacks the verified emergency
+    // numbers and the Market tab thresholds. 2026-10-14.3 is the emergency-
+    // numbers card the service-business document change builds on; that
+    // change carried 2026-10-14.1 on a base without 2026-10-14.3, and
+    // 2026-10-14.2 is claimed by another open branch.
     for (const applied of [
       '2026-09-02.1', '2026-09-23.1', '2026-09-23.3', '2026-09-29.1', '2026-09-30.1', '2026-10-01.1', '2026-10-01.2', '2026-10-04.1',
-      '2026-10-04.2', '2026-10-06.1', '2026-10-07.1', '2026-10-07.2', '2026-10-13.1', '2026-10-13.2',
+      '2026-10-04.2', '2026-10-06.1', '2026-10-07.1', '2026-10-07.2', '2026-10-13.1', '2026-10-13.2', '2026-10-13.3', '2026-10-14.1', '2026-10-14.2',
+      '2026-10-14.3',
     ]) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
   });
 

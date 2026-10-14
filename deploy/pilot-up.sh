@@ -285,6 +285,20 @@ if [ "$PILOT_ENV" = production ]; then
     [ -z "$(env_setting "$agent_cash_name")" ] ||
       die "PILOT_ENV=production refuses the agent-cash webhook ($agent_cash_name is set): partners pay the weekly fee only on the MMG checkout page"
   done
+  # [LAUNCH-LOCK] Owner ruling, 13 Oct: until an attorney signs off,
+  # production takes no card payment and runs no ads. The API's boot guard
+  # refuses the same settings (boot-config.ts assertProductionLaunchLocks);
+  # turning either on is a reviewed code change in both, never an .env edit.
+  [ "$(env_setting PAYMENT_PROVIDER)" = disabled ] ||
+    die "PILOT_ENV=production needs PAYMENT_PROVIDER=disabled: no card payment until an attorney signs off (owner ruling, 13 Oct)"
+  [ "$(env_setting CARD_RAIL_KILL)" = 1 ] ||
+    die "PILOT_ENV=production needs CARD_RAIL_KILL=1: no card payment until an attorney signs off (owner ruling, 13 Oct)"
+  for locked_name in CARD_RAIL_V2 CARD_RAIL_V2_DRAIN CARD_RAIL_ENROLL ADS_ENABLED; do
+    case "$(env_setting "$locked_name")" in
+      "" | 0) ;;
+      *) die "PILOT_ENV=production refuses $locked_name unless it is unset or 0: no card payment and no ads until an attorney signs off (owner ruling, 13 Oct)" ;;
+    esac
+  done
   # Address search (the API refuses to boot in production without a provider,
   # #1563): osm, the private Photon service this script then starts, or
   # google, the owner's key in the encrypted store. Which one is the owner's
@@ -484,6 +498,24 @@ if [ -n "$ADMIN_HOST" ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; the
   "${COMPOSE[@]}" build admin
 fi
 "${COMPOSE[@]}" up -d --wait postgres redis meilisearch
+# [S3-L1] The database says which deployment it belongs to (deployment_identity,
+# written once when it is set up; seed-production.sh reads it the same way). A
+# staging host never deploys onto the production database, nor a production
+# host onto another deployment's: refused here, before anything is stopped or
+# migrated. The API and worker refuse to start on a mismatch as well
+# (apps/api/src/utils/deployment-identity.ts). A database not set up yet (no
+# table or no row) passes here; production writes its row before the first boot.
+DB_IDENTITY="$("${COMPOSE[@]}" exec -T postgres sh -c \
+  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) || chr(58) || coalesce(max(environment), chr(32)) FROM deployment_identity;"' 2>/dev/null || true)"
+DB_IDENTITY_ENV=""
+if [ "${DB_IDENTITY%%:*}" = "1" ]; then DB_IDENTITY_ENV="${DB_IDENTITY#*:}"; fi
+if [ "$PILOT_ENV" = production ]; then
+  [ -z "$DB_IDENTITY_ENV" ] || [ "$DB_IDENTITY_ENV" = production ] ||
+    die "PILOT_ENV=production, but this database's deployment_identity is not production: a production host never deploys onto another deployment's database. Nothing was stopped or migrated"
+else
+  [ "$DB_IDENTITY_ENV" != production ] ||
+    die "PILOT_ENV=$PILOT_ENV, but this database's deployment_identity says production: a staging host never deploys onto the production database. Nothing was stopped or migrated"
+fi
 # [PROD-PATH] Photon only with PLACES_PROVIDER=osm on production; never
 # Nominatim (the geocoding profile's other, heavy member).
 if [ "$PLACES_PHOTON" -eq 1 ]; then

@@ -641,13 +641,29 @@ export class VerificationService {
     // enters the 30-day reminder window the renewal is accepted early, so the
     // operator is never forced offline waiting for a lapse-then-reupload cycle.
     const renewalOpensAt = new Date(Date.now() + REMINDER_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    // [Opus 13 Oct · #1551/#1546 S3-2 · coordinator ruling] A vehicle paper is "already verified" only for the
+    // vehicle it belongs to: the one the mover's current plate names. A motorbike rider who also drives a taxi
+    // keeps the motorbike's approved papers, and must still be able to send the car's. A legacy paper bound to no
+    // vehicle still counts, as before (it cannot be told apart).
+    let sameVehicle: Prisma.VerificationDocumentWhereInput | null = null;
+    if (authority) {
+      const registrationMark = normalizeRegistrationMark(authority.profile?.licensePlate?.trim() ?? '');
+      const vehicle = registrationMark
+        ? await this.prisma.vehicleProfile.findUnique({ where: { registrationMark_countryCode: { registrationMark, countryCode: user.countryCode } }, select: { subjectId: true } })
+        : null;
+      const vehicleIds = vehicle ? [...new Set([vehicle.subjectId, await rootSubjectId(this.prisma, vehicle.subjectId)])] : [];
+      sameVehicle = { OR: [{ subjectId: null }, ...(vehicleIds.length > 0 ? [{ subjectId: { in: vehicleIds } }] : [])] };
+    }
     const alreadyApproved = await this.prisma.verificationDocument.findFirst({
       where: {
         userId,
         docType,
         status: 'APPROVED',
         state: 'COMMITTED',
-        OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }],
+        AND: [
+          { OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }] },
+          ...(sameVehicle ? [sameVehicle] : []),
+        ],
       },
     });
     if (alreadyApproved) {
@@ -1674,9 +1690,23 @@ export class VerificationService {
     });
     if (!user) throw new NotFoundError('User', userId);
 
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
+    // `gate`: what this role must hold to go live — roleVerified reads it alone.
+    const gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
     // [VERIFY-DOCS] What the person MAY add. Older apps read only `checklist` and ignore this.
-    const optional = await this.optionalFor(userId, user.countryCode, roleKey, checklist, vehicleHint);
+    let optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
+    // [VERIFY-DOCS · ruling 6 Oct ~21:25] A service business that offers home visits is SHOWN the
+    // police clearance in its checklist — build 9 uploads only what `checklist` names — but the
+    // store's gate is unchanged: only its home-visit bookings wait for the clearance.
+    let checklist = gate;
+    let homeVisits: { offered: boolean; cleared: boolean } | undefined;
+    if (roleKey === 'SERVICE') {
+      const { homeVisitsCleared, ownerOffersHomeVisits } = await import('./home-visits');
+      homeVisits = { offered: await ownerOffersHomeVisits(this.prisma, userId), cleared: await homeVisitsCleared(this.prisma, userId) };
+      if (homeVisits.offered && !checklist.includes(POLICE_CLEARANCE_DOC_TYPE)) {
+        checklist = [...checklist, POLICE_CLEARANCE_DOC_TYPE];
+        optional = optional.filter((docType) => docType !== POLICE_CLEARANCE_DOC_TYPE);
+      }
+    }
     // A SUPERSEDED submission is no longer evidence (its record followed it): a renewal
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
@@ -1705,6 +1735,7 @@ export class VerificationService {
         .map((d) => d.docType),
     );
     const missing = checklist.filter((docType) => !approved.has(docType));
+    const gateMissing = gate.filter((docType) => !approved.has(docType));
 
     // The mover's saved vehicle (null until they provision one) — lets the
     // onboarding screen initialise its selector and know whether to re-prompt.
@@ -1738,14 +1769,18 @@ export class VerificationService {
       documents,
       missing,
       vehicleType,
-      roleVerified: checklist.length > 0 && missing.length === 0,
-      categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && checklist.length === 0,
+      // The gate, never the display: a home-visit owner's pending clearance never darkens the store.
+      roleVerified: gate.length > 0 && gateMissing.length === 0,
+      categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && gate.length === 0,
       trial,
       faceMatchDocTypes,
       // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
       // the one evidence rule, so the flag survives the image being deleted after review.
       // Only asked where this person's lists name the document at all.
       policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
+      // [VERIFY-DOCS] Service businesses only: whether a listing comes to the customer, and whether
+      // the owner's clearance lets those visits be booked.
+      ...(homeVisits ? { homeVisits } : {}),
     };
   }
 

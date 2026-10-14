@@ -10,6 +10,7 @@ test files. Nothing here needs root, a network, Docker or systemd.
 """
 
 import base64
+import inspect
 import json
 import os
 import re
@@ -812,6 +813,106 @@ def caddy_image_present() -> bool:
     return probe.returncode == 0
 
 
+# How long a live test waits for its Caddy to answer. On a cold CI runner,
+# starting the container and issuing the local certificates for every site name
+# once took longer than the old fixed 60 x 0.5 s poll (main CI, 14 Oct: "the test
+# Caddy never answered" after ~34 s, then green on a re-run). The bound is wall
+# time, not a count of attempts, so a slow probe cannot shorten it.
+CADDY_READY_SECONDS = 120
+
+
+def container_state(name: str) -> str:
+    """'running exit=0', 'exited exit=1', ... or '' when Docker cannot say."""
+    probe = subprocess.run(["docker", "inspect", "-f", "{{.State.Status}} exit={{.State.ExitCode}}", name],
+                           text=True, capture_output=True, timeout=30)
+    return probe.stdout.strip() if probe.returncode == 0 else ""
+
+
+def container_log_tail(name: str) -> str:
+    """The end of the test Caddy's own log (it holds no secret: the test hashes
+    are of throwaway passwords), so a failure says why it did not answer."""
+    out = subprocess.run(["docker", "logs", "--tail", "30", name], text=True, capture_output=True, timeout=30)
+    return (out.stdout + out.stderr)[-3000:]
+
+
+def wait_for_test_caddy(case: unittest.TestCase, name: str, ready, *, deadline_s: float = CADDY_READY_SECONDS,
+                        clock=time.monotonic, sleep=time.sleep, state=container_state, logs=container_log_tail) -> None:
+    """Poll ready() until it says the test Caddy answers. What "answers" means is
+    the caller's own unchanged check (the API's /metrics refusing with 403); this
+    only decides how long to wait. A container that has stopped is reported at
+    once with its exit code and log; one that never answers is reported at the
+    deadline with the same detail."""
+    end = clock() + deadline_s
+    while True:
+        if ready():
+            return
+        status = state(name)
+        if status.split(" ", 1)[0] in ("exited", "dead"):
+            case.fail(f"the test Caddy stopped before it answered ({status})\n{logs(name)}")
+        if clock() >= end:
+            case.fail(f"the test Caddy never answered within {deadline_s:g} s ({status or 'state unknown'})\n{logs(name)}")
+        sleep(0.5)
+
+
+class LiveCaddyReadinessWait(unittest.TestCase):
+    """The live tests' readiness wait, with a fake clock (no Docker needed)."""
+
+    class Clock:
+        def __init__(self):
+            self.now = 1000.0
+            self.sleeps = 0
+
+        def __call__(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.sleeps += 1
+            self.now += seconds
+
+    def wait(self, ready, state=lambda name: "running exit=0", **kw):
+        clock = self.Clock()
+        wait_for_test_caddy(self, "caddy-x", ready, clock=clock, sleep=clock.sleep, state=state,
+                            logs=lambda name: f"log of {name}", **kw)
+        return clock
+
+    def test_a_caddy_that_needs_40_seconds_on_a_cold_runner_is_waited_for(self):
+        clock = self.Clock()
+        ready_at = clock.now + 40          # longer than the old fixed ~30 s poll
+        wait_for_test_caddy(self, "caddy-x", lambda: clock.now >= ready_at, clock=clock, sleep=clock.sleep,
+                            state=lambda name: "running exit=0", logs=lambda name: "")
+        self.assertGreaterEqual(clock.now, ready_at)
+        self.assertEqual(clock.sleeps, 80)
+
+    def test_a_ready_caddy_is_not_waited_on(self):
+        self.assertEqual(self.wait(lambda: True).sleeps, 0)
+
+    def test_one_that_never_answers_fails_at_the_deadline_with_its_state_and_log(self):
+        with self.assertRaises(AssertionError) as caught:
+            self.wait(lambda: False)
+        message = str(caught.exception)
+        self.assertIn("the test Caddy never answered within 120 s (running exit=0)", message)
+        self.assertIn("log of caddy-x", message)
+
+    def test_a_stopped_container_fails_at_once_with_its_exit_code_and_log(self):
+        for status in ("exited exit=1", "dead exit=137"):
+            with self.subTest(status=status):
+                clock = self.Clock()
+                with self.assertRaises(AssertionError) as caught:
+                    wait_for_test_caddy(self, "caddy-x", lambda: False, clock=clock, sleep=clock.sleep,
+                                        state=lambda name: status, logs=lambda name: "Error: loading config")
+                self.assertIn(f"the test Caddy stopped before it answered ({status})", str(caught.exception))
+                self.assertIn("Error: loading config", str(caught.exception))
+                self.assertEqual(clock.sleeps, 0)
+
+    def test_every_live_serve_waits_through_it_and_keeps_its_own_readiness_check(self):
+        # This class names the strings it counts, so it is cut out of the text first.
+        source = Path(__file__).read_text().replace(inspect.getsource(LiveCaddyReadinessWait), "")
+        self.assertNotIn("for _ in range(60):", source)
+        self.assertEqual(source.count("wait_for_test_caddy(self, name, "), 3)
+        self.assertEqual(source.count('lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403'), 2)
+        self.assertEqual(source.count('raw_https(port, API_HOST, "/metrics")[0] == 403'), 1)
+
+
 @unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
 class Q11WebsiteCaddyfileRenderedByCaddy(unittest.TestCase):
     """The real Caddyfile through the stack's pinned Caddy (no network, no pull)."""
@@ -1531,11 +1632,8 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
         started = subprocess.run(args, text=True, capture_output=True, timeout=60)
         self.assertEqual(started.returncode, 0, started.stderr[-400:])
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
-        for _ in range(60):
-            if self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403:
-                return name
-            time.sleep(0.5)
-        self.fail("the test Caddy never answered")
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        return name
 
     @staticmethod
     def fetch(name, url, credential=None):
@@ -2292,11 +2390,8 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         started = subprocess.run(args, text=True, capture_output=True, timeout=60)
         self.assertEqual(started.returncode, 0, started.stderr[-400:])
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
-        for _ in range(60):
-            if self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403:
-                return name
-            time.sleep(0.5)
-        self.fail("the test Caddy never answered")
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        return name
 
     def reached_website(self, out, path, host=WEB_HOST, authorization=""):
         self.assertIn(f"authorization=[{authorization}] uri=[{path}] host=[{host}]", out)
@@ -2454,14 +2549,13 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
         mapped = subprocess.run(["docker", "port", name, "443/tcp"], text=True, capture_output=True, timeout=30)
         port = int(mapped.stdout.split()[0].rsplit(":", 1)[1])
-        for _ in range(60):
+        def answers() -> bool:
             try:
-                if raw_https(port, API_HOST, "/metrics")[0] == 403:
-                    return port
+                return raw_https(port, API_HOST, "/metrics")[0] == 403
             except OSError:
-                pass
-            time.sleep(0.5)
-        self.fail("the test Caddy never answered")
+                return False
+        wait_for_test_caddy(self, name, answers)
+        return port
 
     def test_live_a_refusal_keeps_the_password_box_and_says_what_to_do(self):
         port = self.serve_on_a_local_port(self.env())
