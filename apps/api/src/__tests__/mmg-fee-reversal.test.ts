@@ -16,6 +16,9 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
 import { MmgFeeReversalService, MMG_FEE_REVERSAL_SWITCH } from '../modules/billing/mmg-fee-reversal';
 import { readFeePaymentDecision } from '../modules/billing/fee-payment-authority';
+import { hasConfirmationInTx } from '../modules/billing/dunning-clock';
+import { runBillingInvariants } from '../modules/billing/invariants';
+import { partnerObligations } from '../modules/user/partner-wind-down';
 import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTests } from '../modules/billing/provider-identity-backfill';
 import { ensureLedgerAccounts } from '../modules/billing/ledger';
 import { getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
@@ -120,6 +123,8 @@ async function paidCheckout(opts: { due?: Date } = {}) {
   return { ...s, checkoutId: row.id, txn, amount };
 }
 
+/** What MMG's merchant API says about a transaction now (the sandbox the route also talks to). */
+const mmgSays = async (txn: string) => { const d = await mmg.transactionLookupDetail(txn); return d.outcome === 'found' ? d.status : d.outcome; };
 const walletOf = async (subId: string) => Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } })).balance);
 const reversalEvents = (subId: string) => app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: 'PREPAID_REVERSAL' } });
 const rowsFor = (checkoutId: string) => app.prisma.mmgFeeReversal.findMany({ where: { checkoutId }, orderBy: { createdAt: 'asc' } });
@@ -231,7 +236,7 @@ describe('[MMG REVERSAL] the admin action: two people, then MMG, then MMG\'s pro
     const res = await app.inject(reverseRoute(p.checkoutId, { amountGyd: p.amount }));
     expect(res.statusCode, res.body).toBe(202);
     expect(res.json().error.code).toBe('APPROVAL_REQUIRED');
-    expect(reversalCalls).toEqual([]);
+    expect(await mmgSays(p.txn), 'MMG was not asked').toBe('approved');
     expect(await rowsFor(p.checkoutId)).toHaveLength(0);
     expect(await walletOf(p.subId)).toBe(p.amount);
   });
@@ -258,6 +263,12 @@ describe('[MMG REVERSAL] the admin action: two people, then MMG, then MMG\'s pro
       ['CLEARING_MMG', 0, p.amount], ['WALLET_LIABILITY', p.amount, 0],
     ]);
     expect(await booksBalance(p.subId)).toEqual({ events: 0, ledger: 0, wallet: 0 });
+    // The nightly invariants agree: the wallet is provable from its events, and equals its ledger subledger.
+    const report = await runBillingInvariants(app.prisma);
+    expect(report.walletMismatches.filter((m) => m.subscriptionId === p.subId)).toEqual([]);
+    expect(report.ledgerWalletMismatches.filter((m) => m.subscriptionId === p.subId)).toEqual([]);
+    // Billing is free again once the return is settled.
+    expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(false);
     // The MMG transaction stays CREDITED: it can never be credited again.
     expect((await app.prisma.providerPayment.findMany({ where: { creditedPaymentId: `mco:${p.checkoutId}` } })).every((r) => r.status === 'CREDITED')).toBe(true);
     // The audit row of the approved act names the reversal.
@@ -267,13 +278,13 @@ describe('[MMG REVERSAL] the admin action: two people, then MMG, then MMG\'s pro
     const told = await app.prisma.notification.findMany({ where: { userId: p.userId, data: { path: ['status'], equals: 'REVERSED' } } });
     expect(told).toHaveLength(1);
     expect(told[0]!.body).toMatch(/^Your payment of .*2,?100.* on .+ was returned to your MMG account\.$/);
-    expect(reversalCalls).toEqual([p.txn]);
+    expect(await mmgSays(p.txn)).toBe('reversed');
 
-    // A second ask is refused before MMG is asked again.
+    // A second ask is refused before anything is claimed or sent.
     const again = await injectWithApproval(app, reverseRoute(p.checkoutId, { amountGyd: p.amount }));
     expect(again.statusCode, again.body).toBe(409);
     expect(again.json().error.code).toBe('ALREADY_REVERSED');
-    expect(reversalCalls).toEqual([p.txn]);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(1);
     expect(await reversalEvents(p.subId)).toHaveLength(1);
   });
 
@@ -282,7 +293,7 @@ describe('[MMG REVERSAL] the admin action: two people, then MMG, then MMG\'s pro
     const res = await injectWithApproval(app, reverseRoute(p.checkoutId, { amountGyd: p.amount - 100 }));
     expect(res.statusCode, res.body).toBe(409);
     expect(res.json().error.code).toBe('AMOUNT_MISMATCH');
-    expect(reversalCalls).toEqual([]);
+    expect(await mmgSays(p.txn)).toBe('approved');
     expect(await rowsFor(p.checkoutId)).toHaveLength(0);
   });
 
@@ -296,7 +307,7 @@ describe('[MMG REVERSAL] the admin action: two people, then MMG, then MMG\'s pro
     } finally {
       process.env[MMG_FEE_REVERSAL_SWITCH] = 'on';
     }
-    expect(reversalCalls).toEqual([]);
+    expect(await mmgSays(p.txn)).toBe('approved');
     expect(await rowsFor(p.checkoutId)).toHaveLength(0);
   });
 
@@ -316,15 +327,32 @@ describe('[MMG REVERSAL] only a payment Swift credited on MMG\'s proof, whole an
     expect(reversalCalls).toEqual([]);
   });
 
-  it('a PROVIDER_ID_CONFLICT on the same MMG transaction: never reversed', async () => {
+  it('a PROVIDER_ID_CONFLICT on the same MMG transaction (any spelling): never reversed — no claim, no call', async () => {
     const p = await paidCheckout();
     await app.prisma.mmgAgentPayment.create({ data: {
-      channel: 'MMG_AGENT_WEBHOOK', externalId: `conflict-${p.txn}`, mmgTxnId: p.txn, sanRaw: 'conflict', amount: p.amount,
+      // a different spelling of the same MMG number: the conflict is found canonically
+      channel: 'MMG_AGENT_WEBHOOK', externalId: `conflict-${p.txn}`, mmgTxnId: ` ${p.txn.toLowerCase()} `, sanRaw: 'conflict', amount: p.amount,
       currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', failureCode: 'PROVIDER_ID_CONFLICT', raw: {},
     } });
+    await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({
+      code: 'IDENTITY_CONFLICT', message: "This payment is under an MMG reference check — it can't be reversed; escalate with the MMG statement line.",
+    });
+    expect(reversalCalls).toEqual([]);
+    expect(await rowsFor(p.checkoutId), 'no claim row').toHaveLength(0);
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    // and the payment page says so before anyone asks
+    const view = await runWithTenant('swift-default', () => reversals.view({ tenantId: 'swift-default', checkoutId: p.checkoutId }));
+    expect(view).toMatchObject({ canReverse: false, refusal: { code: 'IDENTITY_CONFLICT' } });
+  });
+
+  it('another checkout naming the same MMG number: never reversed — no claim, no call', async () => {
+    const p = await paidCheckout();
+    const other = await makeSub();
+    const { checkout } = await checkoutService.createCheckout({ subscriptionId: other.subId, userId: other.userId, platform: 'ios', clientKey: `rev-${nanoid(12)}` });
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: checkout.ref }, data: { status: 'HELD', candidates: [p.txn], reason: 'ALREADY_CREDITED' } });
     await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'IDENTITY_CONFLICT' });
     expect(reversalCalls).toEqual([]);
-    expect(await walletOf(p.subId)).toBe(p.amount);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(0);
   });
 
   it('a held duplicate identity on the same MMG number: never reversed', async () => {
@@ -334,6 +362,7 @@ describe('[MMG REVERSAL] only a payment Swift credited on MMG\'s proof, whole an
     } });
     await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'IDENTITY_CONFLICT' });
     expect(reversalCalls).toEqual([]);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(0);
   });
 
   it('money already spent on a week is not returned here (the fee balance no longer holds it)', async () => {
@@ -377,8 +406,12 @@ describe('[MMG REVERSAL] only MMG\'s lookup decides — a lost answer is never g
     expect(await reversalEvents(p.subId)).toHaveLength(0);
     const paged = await app.prisma.notification.findMany({ where: { userId: admin.userId, data: { path: ['reversalId'], equals: row.id } } });
     expect(paged.length).toBeGreaterThanOrEqual(1);
-    // While it is open the partner is not asked to pay beside it, and nothing is spent.
+    // While it is open the partner is not asked to pay beside it, billing sends
+    // and spends nothing, and the account cannot close around it.
     expect(await readFeePaymentDecision(app.prisma, p.subId)).toMatchObject({ allowed: false, reason: 'PAYMENT_CONFIRMING' });
+    expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(true);
+    const obligations = await app.prisma.$transaction((tx) => partnerObligations(tx, p.userId));
+    expect(obligations.pendingFeePaymentCount).toBeGreaterThanOrEqual(1);
     // "Check with MMG": MMG still shows the payment standing and never refused — still a person's.
     const checked = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id }));
     expect(checked.state).toBe('HELD');
@@ -431,7 +464,8 @@ describe('[MMG REVERSAL] only MMG\'s lookup decides — a lost answer is never g
     const row = await ask(p.checkoutId, p.amount);
     expect(row.state).toBe('SENT');
     sandboxSetTxStatus(p.txn, 'reversed');
-    await checkoutService.pollIntents(new Date(Date.now() + 5 * 60_000));
+    // The sweep re-reads an open reversal at most every ten minutes.
+    await checkoutService.pollIntents(new Date(Date.now() + 11 * 60_000));
     expect((await app.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } })).state).toBe('REVERSED');
     expect(await reversalEvents(p.subId)).toHaveLength(1);
   });

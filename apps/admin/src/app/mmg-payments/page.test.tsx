@@ -203,3 +203,97 @@ describe('MMG payments: one payment, its timeline and what it paid', () => {
     expect(screen.queryByRole('region', { name: 'Payment detail' })).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// [MMG REVERSAL · owner #11] Returning a whole confirmed payment. The panel
+// shows only the server's answer: whether it can be returned (and why not),
+// every attempt in plain words, and "Check with MMG" on an open one. Asking
+// needs the whole amount typed and a reason, and the first answer is a second
+// admin's approval — nothing has changed yet.
+// ---------------------------------------------------------------------------
+
+const REVERSAL_PATH = `${PATH}/${confirmed.id}/reversal`;
+const reversalView = (patch: Record<string, unknown> = {}) => ({
+  body: { success: true, data: { checkoutId: confirmed.id, amountGyd: 2100, switchedOn: true, canReverse: true, reversals: [], ...patch } },
+});
+const heldReversal = {
+  id: 'rev_1', state: 'HELD', amount: 2100, currencyCode: 'GYD', reason: 'paid twice', requestedBy: 'adm_1', providerStatus: 'error',
+  lookupStatus: 'STANDING', heldReason: 'NO_ANSWER_FROM_MMG', sentAt: '2026-10-13T20:00:00.000Z', answeredAt: null,
+  lastCheckedAt: '2026-10-13T20:00:05.000Z', reversedAt: null, failedAt: null,
+};
+
+async function openConfirmed(handler: (request: ApiRequest) => { status?: number; body: unknown }) {
+  const fetchMock = mockApi((request: ApiRequest) => {
+    if (request.url.pathname === `${PATH}/${confirmed.id}`) return { body: { success: true, data: confirmedDetail } };
+    if (request.url.pathname === PATH) return page([confirmed]);
+    return handler(request);
+  });
+  const rendered = renderWithQuery(<MmgPaymentsPage />);
+  await screen.findByRole('table');
+  await rendered.user.click(screen.getByRole('button', { name: `Open payment ${confirmed.swiftReference}` }));
+  return { fetchMock, ...rendered };
+}
+
+describe('[MMG REVERSAL] returning a whole payment', () => {
+  it('asks with the whole amount and a reason; the answer is a second admin\'s approval — nothing changed yet', async () => {
+    const { fetchMock, user } = await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return reversalView();
+      if (request.method === 'POST' && request.url.pathname === `${PATH}/${confirmed.id}/reverse`) {
+        return { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this', details: { approvalId: 'ap_9' } } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const panel = await screen.findByRole('region', { name: 'Return this payment' });
+    const submit = within(panel).getByRole('button', { name: 'Return this payment' }) as HTMLButtonElement;
+    await user.type(within(panel).getByLabelText('Why it is being returned'), 'The partner paid this week twice by mistake');
+    await user.type(within(panel).getByLabelText('Amount to return'), '2000');
+    expect(submit.disabled, 'only the whole amount').toBe(true);
+    await user.clear(within(panel).getByLabelText('Amount to return'));
+    await user.type(within(panel).getByLabelText('Amount to return'), '2100');
+    expect(submit.disabled).toBe(false);
+    await user.click(submit);
+    expect(await within(panel).findByText(/Sent for a second admin's approval/)).toBeTruthy();
+    const post = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/reverse') && init?.method === 'POST');
+    expect(post).toBeTruthy();
+    expect(JSON.parse(String(post![1]!.body))).toEqual({ amountGyd: 2100, reason: 'The partner paid this week twice by mistake' });
+    expect(new Headers(post![1]!.headers).get('x-swift-reason')).toBe('The partner paid this week twice by mistake');
+  });
+
+  it('switched off: says so, and offers no way to ask', async () => {
+    await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return reversalView({ switchedOn: false });
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const panel = await screen.findByRole('region', { name: 'Return this payment' });
+    expect(within(panel).getByText(/switched off on this server/)).toBeTruthy();
+    expect(within(panel).queryByRole('button', { name: 'Return this payment' })).toBeNull();
+  });
+
+  it('cannot be returned: shows the server\'s reason in its words', async () => {
+    await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) {
+        return reversalView({ canReverse: false, refusal: { code: 'MONEY_ALREADY_USED', message: "The partner's fee balance no longer holds this whole payment." } });
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const panel = await screen.findByRole('region', { name: 'Return this payment' });
+    expect(within(panel).getByText("The partner's fee balance no longer holds this whole payment.")).toBeTruthy();
+    expect(within(panel).queryByRole('button', { name: 'Return this payment' })).toBeNull();
+  });
+
+  it('a held return says why in plain words, and "Check with MMG" asks MMG\'s records again', async () => {
+    const { fetchMock, user } = await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return reversalView({ canReverse: false, refusal: { code: 'ALREADY_REVERSING', message: 'in progress' }, reversals: [heldReversal] });
+      if (request.method === 'POST' && request.url.pathname === `${PATH.replace('mmg-checkouts', 'mmg-fee-reversals')}/rev_1/check`) {
+        return { body: { success: true, data: { ...heldReversal, state: 'REVERSED' } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const panel = await screen.findByRole('region', { name: 'Return this payment' });
+    expect(within(panel).getByText('Held for a person')).toBeTruthy();
+    expect(within(panel).getByText(/MMG did not answer, and its records do not show a return yet/)).toBeTruthy();
+    expect(within(panel).queryByText('in progress'), 'an open return is shown, not a refusal').toBeNull();
+    await user.click(within(panel).getByRole('button', { name: 'Check with MMG' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/rev_1/check') && init?.method === 'POST')).toBe(true));
+  });
+});

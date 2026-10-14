@@ -275,17 +275,16 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
     return { status: 'pending', transactionId };
   }
 
-  /** [MMG REVERSAL] A transaction this sandbox knows, still standing, is
-   *  reversed in full (its lookups then say `reversed`); anything else is
-   *  refused. Scripting picks the other answers (sandboxScriptReversal). */
+  /** [MMG REVERSAL] A transaction still standing (as this sandbox's own
+   *  lookup reads it: scripted, planted, or by its id's marker) is reversed in
+   *  full, and its lookups then say `reversed`; anything else is refused.
+   *  Scripting picks the other answers (sandboxScriptReversal). */
   async reverseTransaction(req: { transactionId: string }): Promise<MmgTxResult> {
     const id = req.transactionId;
-    const planted = historyRows.find((row) => row.transactionId === id);
-    const known = !!planted || initiatedRows.has(id);
-    const current = txStatusOverrides.get(id) ?? planted?.status ?? (initiatedRows.has(id) ? 'approved' : undefined);
+    const current = (await this.transactionLookup({ transactionId: id })).status;
     const scripted = reversalScript.get(id) ?? 'reversed';
     if (scripted === 'duplicate') return { status: 'declined', transactionId: id, reason: 'REVERSAL_FAIL_DUPLICATE' };
-    if (scripted === 'declined' || !known || current !== 'approved') {
+    if (scripted === 'declined' || current !== 'approved') {
       return { status: 'declined', transactionId: id, reason: 'MMG refused the reversal (sandbox)' };
     }
     if (scripted === 'error') return { status: 'error', transactionId: id, reason: 'MMG reversal unreachable (sandbox)' };

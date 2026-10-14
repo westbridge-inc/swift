@@ -892,3 +892,42 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 };
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
+
+// ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ────────────
+// MMG reverses in full only. Asking is a money action: a reason and a second
+// admin (or the owner's solo approval) — the first call answers 202
+// APPROVAL_REQUIRED. Only MMG's own lookup then moves the partner's balance.
+export interface MmgFeeReversalRow {
+  id: string;
+  state: 'SENDING' | 'SENT' | 'REVERSED' | 'FAILED' | 'HELD';
+  amount: number;
+  currencyCode: string;
+  reason: string;
+  requestedBy: string;
+  providerStatus: string | null;
+  lookupStatus: string | null;
+  heldReason: string | null;
+  sentAt: string;
+  answeredAt: string | null;
+  lastCheckedAt: string | null;
+  reversedAt: string | null;
+  failedAt: string | null;
+}
+export interface MmgFeeReversalView {
+  checkoutId: string;
+  amountGyd: number;
+  switchedOn: boolean;
+  canReverse: boolean;
+  refusal?: { code: string; message: string };
+  reversals: MmgFeeReversalRow[];
+}
+export const fetchMmgFeeReversal = (checkoutId: string): Promise<Envelope<MmgFeeReversalView>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reversal`);
+export const reverseMmgFeePayment = (checkoutId: string, amountGyd: number, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reverse`, {
+    method: 'POST',
+    body: JSON.stringify({ amountGyd, reason }),
+    reason,
+  });
+export const checkMmgFeeReversal = (reversalId: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/check`, { method: 'POST', body: '{}' });

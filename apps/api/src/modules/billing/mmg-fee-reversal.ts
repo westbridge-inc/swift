@@ -2,13 +2,15 @@ import type { MmgCheckoutIntent, MmgFeeReversal, Prisma, PrismaClient } from '@p
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { formatMoney } from '../../utils/currency-amount';
-import { getMmgReversalClient, type MmgLookupDetail, type MmgReversalClient, type MmgTxResult } from '../../providers/mmg/mmg-provider';
+import { getMmgReversalClient, type MmgReversalClient, type MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { mmgFeeReversalsCounter } from '../../plugins/observability';
 import type { OnAudit } from '../../lib/audit-writer';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { hasConfirmationInTx, lockBillingAuthority } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import type { BillingService } from './billing.service';
+import { amountMinorOf, decideAfterLookup, lookupProof, REVERSAL_SENDING_STALE_MS, type ReversalProof } from './mmg-reversal-proof';
+export { lookupProof, REVERSAL_PROOF_WINDOW_MS, REVERSAL_SENDING_STALE_MS } from './mmg-reversal-proof';
 
 // ---------------------------------------------------------------------------
 // [MMG REVERSAL · owner decision #11, 13 Oct 2026] RETURN A WHOLE WEEKLY-FEE
@@ -50,10 +52,6 @@ export function feeReversalEnabled(env: Record<string, string | undefined> = pro
 
 export type ReversalState = 'SENDING' | 'SENT' | 'REVERSED' | 'FAILED' | 'HELD';
 export { OPEN_REVERSAL_STATES } from './dunning-clock';
-/** A SENT reversal MMG has not proven within this long is held for a person. */
-export const REVERSAL_PROOF_WINDOW_MS = 24 * 3_600_000;
-/** A SENDING claim older than this lost its process: the sweep asks MMG's lookup. */
-export const REVERSAL_SENDING_STALE_MS = 2 * 60_000;
 /** The sweep re-reads an open reversal at most this often. */
 const SWEEP_EVERY_MS = 10 * 60_000;
 const SWEEP_BATCH = 20;
@@ -65,7 +63,7 @@ export type ReversalRefusal =
 const REFUSAL_COPY: Record<ReversalRefusal, string> = {
   NOT_CONFIRMED: 'Only a weekly-fee payment Swift confirmed with MMG can be returned this way.',
   NOT_PROVEN: "Swift's record of this payment is not bound to MMG's proof. It cannot be returned here; follow the refund procedure.",
-  IDENTITY_CONFLICT: 'This MMG payment has a conflicting record (another credit, a duplicate or a conflict). It is never returned automatically; follow the escalation procedure.',
+  IDENTITY_CONFLICT: "This payment is under an MMG reference check — it can't be reversed; escalate with the MMG statement line.",
   AMOUNT_MISMATCH: 'MMG returns a payment in full only. Enter the whole amount of this payment to confirm.',
   ALREADY_REVERSING: 'A return of this payment is already in progress or waiting for a person.',
   ALREADY_REVERSED: 'This payment has already been returned to the partner.',
@@ -87,7 +85,6 @@ export interface ReversalDeps {
   client?: () => MmgReversalClient;
 }
 
-const amountMinorOf = (amount: Prisma.Decimal | number | string) => Math.round(Number(amount) * 100);
 
 /**
  * Can this payment be returned, right now? Read under the payer's billing lock
@@ -113,16 +110,29 @@ export async function reversalEligibilityInTx(
     return { ok: false, code: 'IDENTITY_CONFLICT' };
   }
   const numbers = [...new Set([intent.mmgTransactionId, ...claimed.map((row) => row.providerTxnId)])];
-  const conflicts = await tx.$queryRaw<Array<{ n: bigint }>>`
-    SELECT count(*)::bigint AS n FROM provider_payments p
-    WHERE p.provider = 'MMG' AND p.status <> 'CREDITED'
-      AND EXISTS (SELECT 1 FROM unnest(${numbers}::text[]) r WHERE mmg_txn_canon(r) = mmg_txn_canon(p."providerTxnId"))`;
-  if (Number(conflicts[0]?.n ?? 0) > 0) return { ok: false, code: 'IDENTITY_CONFLICT' };
-  const agentConflict = await tx.mmgAgentPayment.findFirst({
-    where: { failureCode: 'PROVIDER_ID_CONFLICT', OR: [{ mmgTxnId: { in: numbers, mode: 'insensitive' } }, { providerPaymentId: { in: claimed.map((row) => row.id) } }] },
-    select: { id: true },
-  });
-  if (agentConflict) return { ok: false, code: 'IDENTITY_CONFLICT' };
+  const claimedIds = claimed.map((row) => row.id);
+  // [GUARDRAILS §1 · PROVIDER_ID_CONFLICT is never reversed] Any record of a
+  // conflict on either MMG number (canonical spelling), anywhere: an identity
+  // that is not this checkout's credit (a held duplicate, a refund), an
+  // agent-cash PROVIDER_ID_CONFLICT on the number or on these identities, or
+  // ANOTHER checkout naming the same number. Refused before any claim or call.
+  const [conflict] = await tx.$queryRaw<Array<{ identities: bigint; agents: bigint; checkouts: bigint }>>`
+    SELECT
+      (SELECT count(*) FROM provider_payments p
+        WHERE p.provider = 'MMG' AND p.status <> 'CREDITED'
+          AND EXISTS (SELECT 1 FROM unnest(${numbers}::text[]) r WHERE mmg_txn_canon(r) = mmg_txn_canon(p."providerTxnId")))::bigint AS identities,
+      (SELECT count(*) FROM mmg_agent_payments ap
+        WHERE ap."failureCode" = 'PROVIDER_ID_CONFLICT'
+          AND (ap."providerPaymentId" = ANY(${claimedIds}::text[])
+            OR EXISTS (SELECT 1 FROM unnest(${numbers}::text[]) r WHERE mmg_txn_canon(r) = mmg_txn_canon(ap."mmgTxnId"))))::bigint AS agents,
+      (SELECT count(*) FROM mmg_checkout_intents ci
+        WHERE ci.id <> ${intent.id}
+          AND EXISTS (SELECT 1 FROM unnest(${numbers}::text[]) r
+            WHERE mmg_txn_canon(r) = mmg_txn_canon(ci."mmgTransactionId")
+               OR EXISTS (SELECT 1 FROM unnest(ci.candidates) c WHERE mmg_txn_canon(c) = mmg_txn_canon(r))))::bigint AS checkouts`;
+  if (!conflict || Number(conflict.identities) > 0 || Number(conflict.agents) > 0 || Number(conflict.checkouts) > 0) {
+    return { ok: false, code: 'IDENTITY_CONFLICT' };
+  }
   // MMG reverses in full only: the request names the whole amount.
   if (expectAmount !== null && amountMinorOf(expectAmount) !== amountMinorOf(intent.amount)) return { ok: false, code: 'AMOUNT_MISMATCH' };
   // Nothing else for this fee may be in confirmation or review beside it.
@@ -134,43 +144,6 @@ export async function reversalEligibilityInTx(
   }
   return { ok: true };
 }
-
-/** What MMG's lookup proves about a reversal, or why it does not. */
-export type ReversalProof =
-  | { proven: true; how: 'ORIGINAL_REVERSED' | 'REVERSAL_COMPLETED' }
-  | { proven: false; standing: boolean; unreadable: boolean };
-
-function matchesAmount(detail: Extract<MmgLookupDetail, { outcome: 'found' }>, row: Pick<MmgFeeReversal, 'amount' | 'currencyCode'>): boolean {
-  return detail.amountMinor !== null && detail.amountMinor === amountMinorOf(row.amount) && detail.currencyCode === row.currencyCode;
-}
-
-/**
- * [Law 4] MMG's lookup is the only proof. Proven when MMG reports the original
- * transaction REVERSED, or reports the reversal transaction its own answer
- * named as completed — either way for exactly this amount and currency.
- * `standing` = MMG reports the original still successful; `unreadable` = MMG
- * could not be asked, or its answer cannot be read exactly.
- */
-export async function lookupProof(client: MmgReversalClient, row: Pick<MmgFeeReversal, 'mmgTransactionId' | 'providerReference' | 'amount' | 'currencyCode'>): Promise<ReversalProof> {
-  const original = await client.transactionLookupDetail(row.mmgTransactionId);
-  if (original.outcome === 'found' && original.status === 'reversed' && matchesAmount(original, row)) {
-    return { proven: true, how: 'ORIGINAL_REVERSED' };
-  }
-  if (row.providerReference && row.providerReference !== row.mmgTransactionId) {
-    const reversal = await client.transactionLookupDetail(row.providerReference);
-    if (reversal.outcome === 'found' && reversal.status === 'approved' && matchesAmount(reversal, row)) {
-      return { proven: true, how: 'REVERSAL_COMPLETED' };
-    }
-  }
-  return {
-    proven: false,
-    standing: original.outcome === 'found' && original.status === 'approved' && matchesAmount(original, row),
-    unreadable: original.outcome !== 'found',
-  };
-}
-
-/** MMG said "already reversed" (a duplicate): an answer that contradicts a standing payment, so a person looks. */
-const saysDuplicate = (reason: string | null | undefined) => /duplicate/i.test(reason ?? '');
 
 export class MmgFeeReversalService {
   constructor(private readonly deps: ReversalDeps) {}
@@ -254,38 +227,34 @@ export class MmgFeeReversalService {
       log().error({ err, reversalId: id }, '[MMG reversal] MMG lookup failed; the reversal stays open');
       proof = { proven: false, standing: false, unreadable: true };
     }
-    if (proof.proven) return this.applyProof(row.id, proof.how, now);
-
-    const refused = row.providerStatus === 'declined' && !saysDuplicate(row.providerReason);
-    if (refused && proof.standing) {
-      const moved = await this.deps.prisma.mmgFeeReversal.updateMany({
-        where: { id, state: { in: ['SENDING', 'SENT', 'HELD'] } },
-        data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: 'STANDING' },
-      });
-      if (moved.count === 1) {
-        mmgFeeReversalsCounter.labels('failed').inc();
-        log().warn({ reversalId: id, reason: row.providerReason }, '[MMG reversal] MMG refused; its lookup shows the payment still standing — nothing changed');
+    const decision = decideAfterLookup(proof, { state: row.state as 'SENDING' | 'SENT' | 'HELD', providerStatus: row.providerStatus, providerReason: row.providerReason, sentAt: row.sentAt }, { now, afterAnswer: !!opts.afterAnswer });
+    switch (decision.action) {
+      case 'apply':
+        return this.applyProof(row.id, decision.how, now);
+      case 'fail': {
+        const moved = await this.deps.prisma.mmgFeeReversal.updateMany({
+          where: { id, state: { in: ['SENDING', 'SENT', 'HELD'] } },
+          data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: 'STANDING' },
+        });
+        if (moved.count === 1) {
+          mmgFeeReversalsCounter.labels('failed').inc();
+          log().warn({ reversalId: id, reason: row.providerReason }, '[MMG reversal] MMG refused; its lookup shows the payment still standing — nothing changed');
+        }
+        break;
       }
-      return this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
+      case 'wait':
+        await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id, state: 'SENT' }, data: { lastCheckedAt: now, lookupStatus: decision.lookupStatus } });
+        break;
+      case 'hold':
+        await this.hold(row, decision.heldReason, decision.lookupStatus, now);
+        break;
+      case 'leave':
+        return row;
+      default: {
+        const unhandled: never = decision;
+        return unhandled;
+      }
     }
-
-    // Not proven, not refused. MMG accepted and is still working: wait inside
-    // its window. Anything else is a person's to look at.
-    const lookupStatus = proof.unreadable ? 'UNREADABLE' : proof.standing ? 'STANDING' : 'NOT_PROVEN';
-    const acceptedInWindow = row.state === 'SENT' && row.providerStatus !== 'declined'
-      && now.getTime() - row.sentAt.getTime() < REVERSAL_PROOF_WINDOW_MS;
-    if (acceptedInWindow) {
-      await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id, state: 'SENT' }, data: { lastCheckedAt: now, lookupStatus } });
-      return this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
-    }
-    const heldReason = row.providerStatus === null || row.providerStatus === 'error' ? 'NO_ANSWER_FROM_MMG'
-      : saysDuplicate(row.providerReason) ? 'MMG_SAYS_ALREADY_REVERSED'
-        : row.providerStatus === 'declined' ? 'MMG_REFUSED_LOOKUP_UNCLEAR'
-          : 'NOT_PROVEN_IN_TIME';
-    // A SENDING claim with no answer yet may still be in its own request; the
-    // sweep only holds one that is stale, the request path holds its own.
-    if (row.state === 'SENDING' && !opts.afterAnswer && now.getTime() - row.sentAt.getTime() < REVERSAL_SENDING_STALE_MS) return row;
-    await this.hold(row, heldReason, lookupStatus, now);
     return this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
   }
 
