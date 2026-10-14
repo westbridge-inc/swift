@@ -1,4 +1,5 @@
 import type { VendorGoLive } from '../verification/verification.service';
+import type { FeePausePredicate } from '../billing/mmg-pause';
 import { subscriptionOperability, type OperabilitySubscription } from '../subscription/operate-gate';
 import { AppError } from '../../utils/errors';
 
@@ -55,17 +56,20 @@ export interface VendorActivationFacts {
   ownerAccountStatus: string | null;
   /** The store's weekly-fee subscription (the operability fields); null when it has none yet. */
   subscription: OperabilitySubscription | null;
+  /** [PROD-PATH] The fee pause the vendor gate reads (billing/mmg-pause.ts readFeePause): while no partner
+   *  has a live way to pay, a lapsed grace refuses nobody, here exactly as at the gate. */
+  feePause: FeePausePredicate;
 }
 
 /** The subscription fields the operability rule reads — select these wherever the verdict is decided. */
 export const OPERABILITY_SELECT = {
-  status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true,
+  id: true, status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true,
   billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true,
 } as const;
 
 /** May this store's subscription operate now? The vendor gate's rule and missing-row policy (vendor.routes.ts). */
-export function feeOperable(subscription: OperabilitySubscription | null, now = new Date()): boolean {
-  return subscriptionOperability(subscription, { missingRow: 'GRANDFATHER' }, now).operable;
+export function feeOperable(subscription: OperabilitySubscription | null, feePause: FeePausePredicate, now = new Date()): boolean {
+  return subscriptionOperability(subscription, { missingRow: 'GRANDFATHER' }, feePause, now).operable;
 }
 
 export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick<VendorGoLive, 'checklist' | 'disclosure'>): VendorActivationNext {
@@ -73,7 +77,7 @@ export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick
   if (vendor.status === 'CLOSED') return 'CLOSED';
   if (vendor.suspensionSource === 'WIND_DOWN' || vendor.ownerAccountStatus === 'DEACTIVATED') return 'ACCOUNT_CLOSED';
   if (vendor.ownerAccountStatus === 'BANNED' || vendor.ownerAccountStatus === 'SUSPENDED') return 'OWNER_ACCOUNT_RESTRICTED';
-  if (vendor.status === 'SUSPENDED' && !feeOperable(vendor.subscription)) return 'FEE_UNPAID';
+  if (vendor.status === 'SUSPENDED' && !feeOperable(vendor.subscription, vendor.feePause)) return 'FEE_UNPAID';
   if (!goLive.checklist.complete) return 'NEEDS_DOCUMENTS';
   if (goLive.disclosure.engaged && goLive.disclosure.complete !== true) return 'NEEDS_DISCLOSURE';
   return vendor.status === 'SUSPENDED' ? 'CAN_REINSTATE' : 'CAN_ACTIVATE';

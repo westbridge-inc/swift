@@ -8,6 +8,7 @@ import { papersUnderSecondReview, requireFreshVehicleReview } from '../verificat
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
+import { assertHirePlate } from '../verification/hire-plate';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
@@ -172,6 +173,8 @@ export class PartnerService {
     if (rideClass && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
+    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
   }
 
   private async provisionLocked(tx: Tx, userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
@@ -315,6 +318,8 @@ export class PartnerService {
     if (target === 'DRIVER' && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
+    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
     return this.prisma.$transaction(async (tx) => {
       const now = new Date();
       // The global lock order (mover-authority): User, then Rider, then Driver.

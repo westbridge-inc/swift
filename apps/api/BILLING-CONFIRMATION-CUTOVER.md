@@ -13,9 +13,12 @@ without the shared confirmation clock.
   suspensions, manual stops and paid receipts are unchanged; verified payment evidence is still recorded.
 
 ## Steps
-1. Stop every API and worker process (`deploy/deploy.sh update` stops them before migrating; confirm none is running).
+1. Stop every API and worker process and confirm none is running. On a pilot host, `./deploy/pilot-up.sh --data-only <sha>` migrates
+   and refuses while either runs (`deploy/deploy.sh update` stops them on a local stack; it refuses on a production host).
 2. Apply migrations: `pnpm --filter @swift/api exec prisma migrate deploy`.
-3. Run the versioned backfill against the named database and deployment (read the identity first; never guess it):
+3. Run the versioned backfill against the named database and deployment (read the identity first; never guess it). On a pilot
+   host, `./deploy/billing-cutover.sh <sha> 20260930180000-v1` does steps 3 and 4 with the host checks, reading the database
+   and deployment from the database itself (deploy/PILOT-RUNBOOK.md section 12). Elsewhere:
    ```
    pnpm --filter @swift/api exec tsx src/scripts/backfill-billing-confirmation.ts --execute \
      --version 20260930180000-v1 --expected-database <database> --expected-deployment <deploymentId>

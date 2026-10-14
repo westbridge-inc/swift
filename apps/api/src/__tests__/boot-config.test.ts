@@ -46,8 +46,19 @@ const good: Record<string, string | undefined> = {
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
   MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+  // [PROD-PATH] Production pages a human for every unacknowledged SOS and
+  // sends receipts and expiry notices by email: both are required to boot.
+  OPS_ONCALL_PHONES: '+5926000001,+15550000002',
+  EMAIL_PROVIDER: 'smtp',
+  SMTP_HOST: 'smtp.example.test',
+  SMTP_PORT: '465',
+  SMTP_USER: 'noreply@example.test',
+  SMTP_PASS: 'smtp-password-of-the-sending-mailbox',
+  EMAIL_FROM: 'Swift <noreply@example.test>',
   SCAN_IP_SALT: 'synthetic-scan-boot-salt',
   ATTRIB_SALT: 'synthetic-attribution-boot-salt',
+  // [PROD-PATH] Admin top-ups stay on hold in production (owner ruling, 8 Oct).
+  BILLING_TOPUP_HOLD: '1',
 };
 
 const cardOff = {
@@ -879,6 +890,158 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
   });
 });
 
+// ---------------------------------------------------------------------------
+// [PROD-PATH] Owner ruling, 4 Oct 2026: production may boot with MMG fully OFF
+// until the live merchant keys arrive (before trial day 14). OFF is an
+// explicit value, MMG_DRIVER=disabled, never an unset or misspelled one; the
+// hosted checkout must be off with it; and every MMG feature then refuses
+// explicitly (providers/mmg). The live path keeps every one of its gates.
+// The same ruling makes two silent production failures loud at boot: no
+// on-call phone for an unacknowledged SOS, and no email sender.
+// ---------------------------------------------------------------------------
+describe('[PROD-PATH] production with MMG fully off', () => {
+  const mmgOff: Record<string, string | undefined> = {
+    ...cardOff,
+    MMG_DRIVER: 'disabled',
+    MMG_API_URL: undefined,
+    MMG_API_KEY: undefined,
+    MMG_MERCHANT_ID: undefined,
+    MMG_PASSWORD: undefined,
+    MMG_MKEY: undefined,
+    MMG_MSECRET: undefined,
+    MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined,
+  };
+
+  it('boots with MMG_DRIVER=disabled, the checkout off and no MMG credential', () => {
+    expect(() => assertSafeBootConfig(mmgOff)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...mmgOff, MMG_CHECKOUT_ENABLED: '0' })).not.toThrow();
+  });
+
+  it('refuses MMG off with the hosted checkout switched on, and names both switches', () => {
+    expect(() => assertSafeBootConfig({ ...mmgOff, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_ENABLED=1.*MMG_DRIVER=disabled/);
+  });
+
+  it.each([undefined, '', 'off', 'Disabled', 'disabled ', 'none', '0'])('never reads MMG_DRIVER=%j as off', (driver) => {
+    expect(() => assertSafeBootConfig({ ...mmgOff, MMG_DRIVER: driver })).toThrow(/MMG_DRIVER/);
+  });
+
+  it('keeps every live gate: live is still refused without its credentials or round-trip proof', () => {
+    expect(() => assertSafeBootConfig({ ...mmgOff, MMG_DRIVER: 'live' })).toThrow(/MMG_/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
+  });
+
+  it('the value-free preflight accepts MMG off and still refuses it with the checkout on', () => {
+    const off = runPreflight(mmgOff);
+    expect(off.status, off.stdout + off.stderr).toBe(0);
+    const checkout = runPreflight({ ...mmgOff, MMG_CHECKOUT_ENABLED: '1' });
+    expect(checkout.status, checkout.stdout + checkout.stderr).toBe(1);
+    expect(checkout.stdout).toContain('MMG_DRIVER=disabled');
+  });
+
+  it('the billing provider factory hands back a refusing provider and never contacts MMG', async () => {
+    const { getMmgProvider, MmgDisabledError } = await import('../providers/mmg/mmg-provider');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('MMG off never contacts MMG'));
+    try {
+      for (const [name, value] of Object.entries(mmgOff)) vi.stubEnv(name, value);
+      const mmg = getMmgProvider();
+      await expect(mmg.initiatePayment({ payerId: '5926000001', amountMinor: 100, currencyCode: 'GYD', reference: 'r' })).rejects.toBeInstanceOf(MmgDisabledError);
+      await expect(mmg.authenticate()).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      await expect(mmg.transactionLookup({ transactionId: 't' })).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      await expect(mmg.transactionHistory({ from: new Date() })).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      await expect(mmg.reverseTransaction({ transactionId: 't' })).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      await expect(mmg.accountBalance()).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      const { getMmgLookupProvider } = await import('../providers/mmg/mmg-provider');
+      await expect(getMmgLookupProvider(mmgOff).transactionLookupDetail('t')).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+// #1448 review (Opus S3-1): the owner's launch money rules held only in
+// pilot-up.sh, so production started any other way (a hand-run compose, an old
+// script) booted with admin top-ups live or the agent-cash webhook armed. The
+// boot guard holds them too, whatever starts the API.
+describe('[PROD-PATH] production keeps admin top-ups on hold and never arms the agent-cash webhook', () => {
+  it.each([undefined, '', '0', 'true', 'yes', ' 1'])('refuses BILLING_TOPUP_HOLD=%j: admin top-ups stay on hold in production', (hold) => {
+    expect(() => assertSafeBootConfig({ ...good, BILLING_TOPUP_HOLD: hold })).toThrow(/BILLING_TOPUP_HOLD=1/);
+  });
+
+  it('refuses an AGENT_CASH_WEBHOOK_SECRET in production, naming the setting, never its value', () => {
+    const secret = 'agent-cash-secret-'.padEnd(40, 'z');
+    let message = '';
+    try { assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: secret }); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/AGENT_CASH_WEBHOOK_SECRET/);
+    expect(message).not.toContain(secret);
+  });
+
+  it('accepts the hold with no agent-cash secret (and an empty one), and asks nothing outside production', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: '' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, BILLING_TOPUP_HOLD: undefined, NODE_ENV: 'test', AGENT_CASH_WEBHOOK_SECRET: 'x'.repeat(32) })).not.toThrow();
+  });
+});
+
+describe('[PROD-PATH] production needs an on-call phone and an email sender', () => {
+  it.each([undefined, '', ' , '])('refuses OPS_ONCALL_PHONES=%j: an unacknowledged SOS would page nobody', (phones) => {
+    expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: phones })).toThrow(/OPS_ONCALL_PHONES/);
+  });
+
+  it.each(['5926000001', '+5926000001,0592600', '+5926000001;+15550000002', '+59260 00001'])(
+    'refuses an entry that is not E.164 (it would be dropped silently): %j', (phones) => {
+      expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: phones })).toThrow(/OPS_ONCALL_PHONES/);
+    },
+  );
+
+  it('accepts one or more E.164 phones, with spaces around the commas', () => {
+    expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: '+5926000001' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: '+5926000001 , +15550000002' })).not.toThrow();
+  });
+
+  it('never echoes a configured phone in the refusal', () => {
+    let message = '';
+    try { assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: '+5926000001,59260012345' }); } catch (e) { message = String(e); }
+    expect(message).toMatch(/OPS_ONCALL_PHONES/);
+    expect(message).not.toContain('5926000001');
+    expect(message).not.toContain('59260012345');
+  });
+
+  it.each([undefined, '', 'dev', 'sendgrid'])('refuses EMAIL_PROVIDER=%j: receipts and notices would never leave', (provider) => {
+    expect(() => assertSafeBootConfig({ ...good, EMAIL_PROVIDER: provider })).toThrow(/EMAIL_PROVIDER/);
+  });
+
+  it.each(['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM'])('refuses smtp without %s, by name', (name) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: undefined })).toThrow(new RegExp(name));
+  });
+
+  it.each(['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM'])('refuses a blank %s (spaces only), by name', (name) => {
+    for (const blank of [' ', '   ', '\t']) {
+      expect(() => assertSafeBootConfig({ ...good, [name]: blank }), JSON.stringify(blank)).toThrow(new RegExp(name));
+    }
+  });
+
+  it('refuses a clear-text SMTP session in production and never echoes the password', () => {
+    let message = '';
+    try { assertSafeBootConfig({ ...good, SMTP_TLS: 'none' }); } catch (e) { message = String(e); }
+    expect(message).toMatch(/SMTP_TLS/);
+    expect(message).not.toContain(String(good['SMTP_PASS']));
+  });
+
+  it('outside production neither is required', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
+  });
+
+  it('the value-free preflight names both and walks past them', () => {
+    const result = runPreflight({ ...good, OPS_ONCALL_PHONES: undefined, EMAIL_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('OPS_ONCALL_PHONES');
+    expect(result.stdout).toContain('EMAIL_PROVIDER');
+  });
+});
 
 describe('production address lookup is an explicit deployment choice', () => {
   it.each([undefined, 'local', '', 'unknown'])('refuses PLACES_PROVIDER=%s instead of silently limiting addresses', (provider) => {

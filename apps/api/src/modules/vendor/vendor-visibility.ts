@@ -1,3 +1,4 @@
+import type { FeePausePredicate } from '../billing/mmg-pause';
 import type { Prisma, SubscriptionStatus } from '@prisma/client';
 import { inoperableSubscriptionWhere, subscriptionOperability } from '../subscription/operate-gate';
 import { getTenantId } from '../../plugins/tenant-context';
@@ -30,20 +31,23 @@ import { PRODUCTION_TENANT } from '../../lib/production-only';
 // ---------------------------------------------------------------------------
 
 /** Spread into a `vendor.findMany` where. */
-export const VISIBLE_VENDOR = {
+const VENDOR_FACTS = {
   status: 'ACTIVE',
   isVerified: true,
   tenant: { isActive: true },
-  // Evaluate the deadline when the predicate is used, never at module boot.
-  get subscription() { return { isNot: inoperableSubscriptionWhere() }; },
 } as const;
+
+/** Fresh hold state is required: a sync getter cannot read repair records. */
+export function VISIBLE_VENDOR(feePause: FeePausePredicate) {
+  return { ...VENDOR_FACTS, subscription: { isNot: inoperableSubscriptionWhere(feePause) } };
+}
 
 /** Spread into an ITEM query's `vendor:` relation filter. */
 export const VISIBLE_VENDOR_REL = VISIBLE_VENDOR;
 
 /** The tenant part of guest visibility, also used by public slug lookups. */
 export const PUBLIC_VENDOR_TENANT = {
-  tenant: { ...VISIBLE_VENDOR.tenant, ...PRODUCTION_TENANT.tenant },
+  tenant: { ...VENDOR_FACTS.tenant, ...PRODUCTION_TENANT.tenant },
 } as const;
 
 /**
@@ -55,7 +59,7 @@ export const PUBLIC_VENDOR_TENANT = {
 export function vendorTenantForCaller(): Prisma.VendorWhereInput {
   const tenantId = getTenantId();
   return tenantId
-    ? { tenantId, tenant: VISIBLE_VENDOR.tenant }
+    ? { tenantId, tenant: VENDOR_FACTS.tenant }
     : PUBLIC_VENDOR_TENANT;
 }
 
@@ -66,9 +70,9 @@ export function vendorTenantForCaller(): Prisma.VendorWhereInput {
  * tenant reaches every tenant's vendors — a reviewer would see real menus and
  * a real customer the fiction's. Anonymous callers get the production tenant.
  */
-export function visibleVendorRelForCaller(): Prisma.VendorWhereInput {
+export function visibleVendorRelForCaller(feePause: FeePausePredicate): Prisma.VendorWhereInput {
   const tenantId = getTenantId();
-  return tenantId ? { ...visibleVendorForCaller(), tenantId } : visibleVendorForCaller();
+  return tenantId ? { ...visibleVendorForCaller(feePause), tenantId } : visibleVendorForCaller(feePause);
 }
 
 /**
@@ -80,8 +84,8 @@ export function visibleVendorRelForCaller(): Prisma.VendorWhereInput {
  * is deliberately cross-operator (home-popular-rail.test.ts) — cross-operator,
  * not cross-kind.
  */
-export function visibleVendorForCaller(): Prisma.VendorWhereInput {
-  return { ...VISIBLE_VENDOR, ...vendorTenantForCaller() };
+export function visibleVendorForCaller(feePause: FeePausePredicate): Prisma.VendorWhereInput {
+  return { ...VISIBLE_VENDOR(feePause), ...vendorTenantForCaller() };
 }
 
 /**
@@ -109,14 +113,14 @@ export function isVendorVisible(vendor: {
   status: string;
   isVerified: boolean;
   tenant?: { isActive: boolean } | null;
-  subscription?: { status: SubscriptionStatus; gracePeriodEnd: Date | null; billingConfirmationPausedAt: Date | null; billingEnforcementDueAt: Date | null; autoSuspendEnabled: boolean; autoRenew: boolean; currentPeriodEnd: Date } | null;
-}): boolean {
+  subscription?: { id: string; status: SubscriptionStatus; gracePeriodEnd: Date | null; billingConfirmationPausedAt: Date | null; billingEnforcementDueAt: Date | null; autoSuspendEnabled: boolean; autoRenew: boolean; currentPeriodEnd: Date } | null;
+}, feePause: FeePausePredicate): boolean {
   return (
-    vendor.status === VISIBLE_VENDOR.status &&
-    vendor.isVerified === VISIBLE_VENDOR.isVerified &&
-    vendor.tenant?.isActive === VISIBLE_VENDOR.tenant.isActive &&
+    vendor.status === VENDOR_FACTS.status &&
+    vendor.isVerified === VENDOR_FACTS.isVerified &&
+    vendor.tenant?.isActive === VENDOR_FACTS.tenant.isActive &&
     vendor.subscription !== undefined &&
-    subscriptionOperability(vendor.subscription, { missingRow: 'GRANDFATHER' }).operable
+    subscriptionOperability(vendor.subscription, { missingRow: 'GRANDFATHER' }, feePause).operable
   );
 }
 
@@ -127,16 +131,16 @@ export const VISIBLE_VENDOR_SELECT = {
   status: true,
   isVerified: true,
   tenant: { select: { isActive: true } },
-  subscription: { select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true } },
+  subscription: { select: { id: true, status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true } },
 } as const;
 
 /** [R048-003] The visibility predicate INSIDE one tenant — for relation
  *  filters (`item.vendor`), which the tenant-scoping extension does not reach.
  *  A public catalogue or search query names its tenant here, or it is not one
  *  tenant's query. */
-export function visibleVendorInTenant(tenantId: string) {
+export function visibleVendorInTenant(tenantId: string, feePause: FeePausePredicate) {
   if (!tenantId) throw new Error('[R048-003] visibleVendorInTenant needs a tenant');
-  return { ...VISIBLE_VENDOR_REL, tenantId } as const;
+  return { ...VISIBLE_VENDOR_REL(feePause), tenantId } as const;
 }
 
 /** [DL-7 · SX397 F3] The visibility predicate for an actual catalogue read.
@@ -146,7 +150,7 @@ export function visibleVendorInTenant(tenantId: string) {
  *  resolver admitted it is never read for a guest. A bound caller keeps its
  *  own tenant's semantics: a REVIEW or CRAWLER customer still sees its own
  *  operator's catalogue. */
-export function catalogueVendorInTenant(tenantId: string, publicMode: boolean) {
-  const inTenant = visibleVendorInTenant(tenantId);
-  return publicMode ? { ...inTenant, tenant: { ...VISIBLE_VENDOR.tenant, ...PRODUCTION_TENANT.tenant } } : inTenant;
+export function catalogueVendorInTenant(tenantId: string, publicMode: boolean, feePause: FeePausePredicate) {
+  const inTenant = visibleVendorInTenant(tenantId, feePause);
+  return publicMode ? { ...inTenant, tenant: { ...VENDOR_FACTS.tenant, ...PRODUCTION_TENANT.tenant } } : inTenant;
 }
