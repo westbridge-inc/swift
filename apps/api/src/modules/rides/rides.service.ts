@@ -6,6 +6,7 @@ import { FareService, type ItineraryEstimate, type TieredEstimate } from './fare
 import { newRidePin } from './ride-pin';
 import type { TaxiStopPlan } from './taxi-itinerary';
 import { stopPreview, type TaxiStopPreview } from './taxi-stops-read';
+import { taxiWaitingEnabled, waitingDisclosure, waitingTermsCreate, type TaxiWaitingDisclosure } from './taxi-waiting';
 import type { DispatchService } from '../dispatch/dispatch.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { persistCheckoutReceiptInTransaction } from '../order/checkout-outbox';
@@ -115,6 +116,9 @@ export interface RideRequestAnswer {
     dropoffAddress: string;
     stopCount?: number;
     stops?: TaxiStopPreview[];
+    /** [TAXI waiting charge] The waiting terms frozen on this ride at booking
+     *  (CONTRACT §8.2); only for a ride booked while TAXI_WAITING_CHARGE is on. */
+    waiting?: TaxiWaitingDisclosure;
   };
   message: string;
 }
@@ -142,6 +146,7 @@ export function shapeRideRequestAnswer(facts: RideAnswerFacts, ridePin: string |
       pickupAddress: facts.pickupAddress,
       dropoffAddress: facts.dropoffAddress,
       ...(stops.length > 0 ? { stopCount: stops.length, stops: stopPreview(stops) } : {}),
+      ...(facts.waiting ? { waiting: facts.waiting } : {}),
     },
     message: 'Looking for a driver near you…',
   };
@@ -352,6 +357,13 @@ export async function createRideRequest(
   };
   // The leg that ENDS at each stop, as priced: frozen on the stop row.
   const legs = itineraryEstimate?.legs ?? [];
+  // [TAXI waiting charge] While the switch is on, the market's waiting terms are
+  // frozen on the ride with it (the passenger pays what the estimate showed),
+  // in the fare's currency. Off: nothing is read or written, today's ride.
+  const waitingTerms = taxiWaitingEnabled() ? await fareService.waitingTerms(user.countryCode) : null;
+  const waiting = waitingTerms
+    ? { terms: { chargePerBlock: waitingTerms.chargePerBlock, blockMinutes: waitingTerms.blockMinutes, currencyCode: estimate.currencyCode }, version: waitingTerms.version }
+    : null;
 
   assertL2(user);
 
@@ -435,6 +447,8 @@ export async function createRideRequest(
             })),
           },
         } : {}),
+        // [TAXI waiting charge] The terms the passenger was shown, frozen with the ride.
+        ...(waiting ? { taxiRideWaiting: { create: waitingTermsCreate(orderTenantId, waiting.terms, waiting.version) } } : {}),
         statusHistory: {
           create: {
             status: 'PENDING',
@@ -460,6 +474,7 @@ export async function createRideRequest(
       pickupAddress: body.pickupAddress,
       dropoffAddress: body.dropoffAddress,
       ...(stops.length > 0 ? { stops: stopPreview(stops) } : {}),
+      ...(waiting ? { waiting: waitingDisclosure(waiting.terms) } : {}),
     };
     // [TAXI multi-stop · CHECKOUT-IDEM] The command's one answer commits WITH
     // the ride: a same-key retry is answered from here even if Redis forgot,

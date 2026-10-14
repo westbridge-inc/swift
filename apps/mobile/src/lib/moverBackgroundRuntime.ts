@@ -104,6 +104,22 @@ export function parseAcceptance(response: unknown): Acceptance {
   return { kind: 'malformed' };
 }
 
+/**
+ * [LOCATION-BG] The HTTP body of PUT /driver/location or /rider/location, read
+ * as the publish contract above. Accepted: `{ success: true, data: { accepted:
+ * true } }`, or the bare `{ success: true }` every server before 14 Oct sent
+ * for an accepted fix. Reading that bare reply as "not an answer" stopped
+ * tracking on the third accepted fix, about 15 s after GO. Refused: `data:
+ * { accepted: false, reason }`, the reason kept. Anything else is not an answer.
+ */
+export function locationReplyAnswer(body: unknown): unknown {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const envelope = body as { success?: unknown; data?: unknown };
+  if (envelope.success !== true) return undefined;
+  if (!('data' in envelope)) return { accepted: true };
+  return envelope.data;
+}
+
 const counters = {
   publication: new Map<string, number>(),
   restore: new Map<string, number>(),
