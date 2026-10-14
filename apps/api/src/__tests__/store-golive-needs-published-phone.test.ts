@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -222,17 +222,71 @@ describe('[owner #51] a store goes live only with a published contact phone', ()
     expect((await storeRow(suspended.id)).status).toBe('ACTIVE');
   });
 
-  it('[DS1142 S3] a never-live store an admin suspended is still held: suspend-then-approve cannot launder the gate', async () => {
+  it('[DS1142 S3 · DS1145 S3] a never-live store an admin suspended never goes live without a number — approving lifts the suspension back to waiting, where the owner adds it and the store goes live', async () => {
     const approve = (id: string) => app.inject({
       method: 'PUT', url: `/api/v1/admin/vendors/${id}/approve`,
       headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}` }, payload: {},
     });
+    const checklist = (id: string) => app.inject({
+      method: 'GET', url: `/api/v1/admin/vendors/${id}/activation-checklist`, headers: { authorization: `Bearer ${adminToken}` },
+    });
     const owner = await makeOwner();
     const neverLive = await makeStore(owner.userId, { status: 'SUSPENDED' });
+    await app.prisma.vendor.update({ where: { id: neverLive.id }, data: { suspensionSource: 'ADMIN' } });
     await approvedDocs(owner.userId);
-    const held = await approve(neverLive.id);
-    expect(held.statusCode, held.body).toBe(409);
-    expect(held.json().error.code).toBe('PUBLISHED_PHONE_MISSING');
-    expect((await storeRow(neverLive.id)).status).toBe('SUSPENDED');
+    // The console says what approving will do, from the same verdict the route enforces.
+    expect((await checklist(neverLive.id)).json().data.next).toBe('CAN_LIFT_TO_WAITING');
+    const lifted = await approve(neverLive.id);
+    expect(lifted.statusCode, lifted.body).toBe(200);
+    // Not live — waiting, with no subscription started (that is the activation's), so it still reads as never live.
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: neverLive.id }, select: { status: true, suspensionSource: true, isVerified: true } }))
+      .toEqual({ status: 'PENDING_APPROVAL', suspensionSource: null, isVerified: false });
+    expect(await app.prisma.subscription.count({ where: { vendorId: neverLive.id } })).toBe(0);
+    expect((await checklist(neverLive.id)).json().data.next).toBe('NEEDS_PHONE');
+    const again = await approve(neverLive.id);
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error.code).toBe('PUBLISHED_PHONE_MISSING');
+    // The owner is asked for the number…
+    const asked = await app.prisma.notification.findMany({ where: { userId: owner.userId, title: 'Add the number customers can call' } });
+    expect(asked.length).toBeGreaterThanOrEqual(1);
+    // …and, from the waiting store, adding it puts the store live: the recovery the suspended store did not have.
+    const saved = await inject('PUT', '/api/v1/vendor/profile', owner.token, neverLive.id, { publicPhone: PUBLISHED });
+    expect(saved.statusCode, saved.body).toBe(200);
+    expect(await storeRow(neverLive.id)).toMatchObject({ status: 'ACTIVE', isVerified: true });
+  });
+
+  it('[DS1145 S3] lifting decides again under the lock: a store wound down between the first read and the write stays closed', async () => {
+    const owner = await makeOwner();
+    const store = await makeStore(owner.userId, { status: 'SUSPENDED' });
+    await app.prisma.vendor.update({ where: { id: store.id }, data: { suspensionSource: 'WIND_DOWN' } });
+    await approvedDocs(owner.userId);
+    // The route's first read sees the store a moment before its owner's account closed.
+    const real = app.prisma.vendor.findUnique.bind(app.prisma.vendor);
+    let served = false;
+    const stale = vi.spyOn(app.prisma.vendor, 'findUnique').mockImplementation((async (args: any) => {
+      const row = await real(args);
+      if (!served && args?.include?.owner && row) { served = true; return { ...row, suspensionSource: 'ADMIN' }; }
+      return row;
+    }) as never);
+    try {
+      const res = await app.inject({
+        method: 'PUT', url: `/api/v1/admin/vendors/${store.id}/approve`,
+        headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}` }, payload: {},
+      });
+      expect(served, 'the approve route read the stale row').toBe(true);
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('ACCOUNT_CLOSED');
+    } finally { stale.mockRestore(); }
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id }, select: { status: true, suspensionSource: true } }))
+      .toEqual({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' });
+  });
+
+  it('[owner #51] a store that has been live is never held for a number: suspended with a subscription, the console offers Reinstate', async () => {
+    const owner = await makeOwner();
+    const wasLive = await makeStore(owner.userId, { status: 'SUSPENDED', isVerified: true });
+    await approvedDocs(owner.userId);
+    await new SubscriptionService(app.prisma).startTrialForVendor(wasLive.id);
+    const read = await app.inject({ method: 'GET', url: `/api/v1/admin/vendors/${wasLive.id}/activation-checklist`, headers: { authorization: `Bearer ${adminToken}` } });
+    expect(read.json().data.next).toBe('CAN_REINSTATE');
   });
 });

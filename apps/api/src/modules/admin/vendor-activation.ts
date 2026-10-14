@@ -38,9 +38,13 @@ export type VendorActivationNext =
   | 'NEEDS_DOCUMENTS'
   /** Documents complete, but the storefront supplier information is incomplete while the gate is engaged. */
   | 'NEEDS_DISCLOSURE'
-  /** [owner #51] Never live, every other rule met, but no published phone customers can call: it goes live by itself
-   *  once the owner adds one (the projection holds it until then). */
+  /** [owner #51] Waiting for approval with every other rule met, but no published phone customers can call: it goes
+   *  live by itself once the owner adds one (the projection holds it until then). */
   | 'NEEDS_PHONE'
+  /** [owner #51 · DS1145 S3] Suspended before it was ever live, every other rule met, no published phone. A suspended
+   *  store cannot add the number in the app, so the console may lift the suspension back to waiting; it then goes
+   *  live by itself once the owner adds the number. */
+  | 'CAN_LIFT_TO_WAITING'
   /** Waiting for approval with every go-live rule met: the projection can make it live now. */
   | 'CAN_ACTIVATE'
   /** Suspended with every go-live rule met: it can be reinstated. */
@@ -87,7 +91,7 @@ export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick
   // subscription (its trial starts at activation), so a suspended store with none has never been live either
   // [DS1142 S3]. A store that has been live is never held for it (no automatic unpublishing).
   if (!goLive.publishedPhone && (vendor.status === 'PENDING_APPROVAL' || vendor.subscription == null)) {
-    return 'NEEDS_PHONE';
+    return vendor.status === 'SUSPENDED' ? 'CAN_LIFT_TO_WAITING' : 'NEEDS_PHONE';
   }
   return vendor.status === 'SUSPENDED' ? 'CAN_REINSTATE' : 'CAN_ACTIVATE';
 }
@@ -108,7 +112,7 @@ export function disclosureMissingWords(missing: readonly string[]): string {
 
 /**
  * The refusal for a verdict the console may not act on, in plain words — or null when the verdict allows the
- * action (CAN_ACTIVATE / CAN_REINSTATE). One place, so the first read and the re-decision inside the reinstate
+ * action (CAN_ACTIVATE / CAN_REINSTATE / CAN_LIFT_TO_WAITING). One place, so the first read and the re-decision inside the reinstate
  * transaction refuse identically. LIVE is answered by the caller (400 ALREADY_ACTIVE) before any verdict.
  */
 export function vendorActivationRefusal(
@@ -152,6 +156,7 @@ export function vendorActivationRefusal(
       return new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
     case 'CAN_ACTIVATE':
     case 'CAN_REINSTATE':
+    case 'CAN_LIFT_TO_WAITING':
       return null;
   }
 }

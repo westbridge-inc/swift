@@ -79,6 +79,8 @@ function vendorVerdict(c: VendorActivationChecklist, name: string): { tone: Tone
     case 'NEEDS_PHONE':
       // [owner #51] A store's first go-live needs a number customers can call; the owner is asked for it.
       return { tone: 'warn', text: `Documents complete, but it has no published phone number customers can call. Swift makes ${name} live by itself once the owner adds one in the app.` };
+    case 'CAN_LIFT_TO_WAITING':
+      return { tone: 'warn', text: 'Suspended before it was ever live. Its documents are approved, but it has no published phone number customers can call, and a suspended store cannot add one. Lifting the suspension returns it to waiting; it goes live by itself once the owner adds the number.' };
     case 'CAN_ACTIVATE':
       return { tone: 'info', text: 'Every required document is approved, but the store is not live yet. You can activate it now.' };
     case 'CAN_REINSTATE':
@@ -202,6 +204,22 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     success: () => `${v.name} is reinstated.`,
   }));
 
+  // [owner #51 · DS1145 S3] A never-live store an admin suspended goes back to waiting for its phone number.
+  const liftToWaiting = async () => show(await dialog.run({
+    title: `Lift ${v.name}'s suspension?`,
+    body: (
+      <p>
+        It returns to waiting for approval, where the owner can add the phone number customers can call. Its documents
+        are approved, so it goes live by itself once they do. The owner is asked for the number.
+      </p>
+    ),
+    confirmLabel: 'Lift suspension',
+    reason: { hint: 'Kept on the permanent record. The owner is asked for the number, not told your reason.' },
+    context,
+    submit: ({ reason }) => approveVendor(id, reason),
+    success: () => `${v.name} is waiting for its phone number and goes live once the owner adds it.`,
+  }));
+
   const suspend = async () => show(await dialog.run({
     title: `Suspend ${v.name}?`,
     body: (
@@ -269,6 +287,9 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
           ) : null}
           {c?.next === 'CAN_REINSTATE' ? (
             <button type="button" className="mc-btn mc-btn-primary" onClick={reinstate}>Reinstate…</button>
+          ) : null}
+          {c?.next === 'CAN_LIFT_TO_WAITING' ? (
+            <button type="button" className="mc-btn mc-btn-primary" onClick={liftToWaiting}>Lift suspension…</button>
           ) : null}
         </div>
       </header>
