@@ -368,7 +368,8 @@ export async function seedReviewContentPack(prisma: PrismaClient, input: { slug:
       await prisma.category.upsert({
         where: { id: c.id, tenantId },
         create: { id: c.id, tenantId, vendorId: c.vendorId, name: c.category.name, sortOrder: c.sortOrder, isActive: true },
-        update: { name: c.category.name, sortOrder: c.sortOrder, isActive: true },
+        // [Item 62] A pack category a tester deleted (archived) comes back.
+        update: { name: c.category.name, sortOrder: c.sortOrder, isActive: true, archivedAt: null },
       });
     }
 
@@ -393,7 +394,10 @@ export async function seedReviewContentPack(prisma: PrismaClient, input: { slug:
       await prisma.item.upsert({
         where: { id: it.id, tenantId },
         create: { id: it.id, tenantId, vendorId: it.vendorId, categoryId: it.categoryId, dietaryTags: [], allergens: [], ...fields },
-        update: fields,
+        // [Item 62] A pack listing a tester deleted is archived; the heal brings
+        // it back (unarchived and available together, or the
+        // items_archived_unavailable check refuses the write).
+        update: { ...fields, archivedAt: null, autoHiddenAt: null },
       });
     }
 
