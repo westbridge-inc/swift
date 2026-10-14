@@ -17,6 +17,10 @@ import { MARKET_GRID } from '@/components/customer-skeletons';
  * store names and descriptions only, as one exact piece of text. The chips
  * narrow the STORES by kind; dishes and products show under "All", because a
  * dish carries no kind of its own to narrow by.
+ *
+ * [Owner 13 Oct] Closed stores and their dishes are shown too, after the open
+ * ones (the server orders them): a closed store's card says "Closed right now"
+ * (VendorCard), and a closed store's dish says so under its store's name.
  */
 const KINDS: { key: string; label: string; types: string[] | null }[] = [
   { key: 'all', label: 'All', types: null },
@@ -108,7 +112,7 @@ export default function SearchPage() {
                       name={item.name}
                       price={item.basePrice}
                       imageUrl={item.imageUrl}
-                      meta={item.vendorName}
+                      meta={item.vendorIsCurrentlyOpen === false ? `${item.vendorName} · Closed right now` : item.vendorName}
                       isNew={item.isNew}
                     />
                   </li>
