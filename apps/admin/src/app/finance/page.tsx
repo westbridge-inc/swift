@@ -52,7 +52,7 @@ const METHOD_LABELS: Record<string, string> = {
   MOBILE_MONEY: 'MMG',
   BANK_TRANSFER: 'Bank transfer',
   CARD: 'Card',
-  WALLET: 'Wallet',
+  WALLET: 'Not in use',
 };
 
 const LEDGER_STATUS: Record<CashSettlementRow['status'], { label: string; cls: string }> = {

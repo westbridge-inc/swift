@@ -138,9 +138,8 @@ export const PLATFORM_WIDE: Record<string, string> = {
  *  Each is an EXPAND candidate under the child-table contract; none may be added
  *  here without a named follow-up. */
 export const PENDING_EXPAND: Record<string, string> = {
-  ReturnRequest: 'FK-less order reference',
-  CollectionContact: 'FK-less subscription/vendor reference',
-  ContentReport: 'FK-less reporter/subject references',
+  // [DB-05] ReturnRequest, CollectionContact and ContentReport left this list: they
+  // carry tenantId (EXPAND, migration 20261013221500), walled and lineage-held.
 };
 
 const models = Prisma.dmmf.datamodel.models;

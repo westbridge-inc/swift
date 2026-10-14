@@ -6,6 +6,8 @@ import { ChevronRight, Star } from 'lucide-react';
 import { Bone, LoadingRegion } from './customer-skeletons';
 import { Pictogram, verticalPictogram } from './glyphs';
 import { money, type Vendor } from '@/lib/customer';
+import { storeHref } from '@/lib/customer-routes';
+import { photo } from '@/lib/media';
 
 /**
  * [WEB-REDESIGN] The store and item cards of the owner's design. Each card and
@@ -20,7 +22,7 @@ export function ratingText(v: Pick<Vendor, 'displayRating'>): string {
 }
 
 /** "25 min · 1.2 km", from what the server sent — nothing invented. */
-export function storeMeta(v: Pick<Vendor, 'estimatedPrepTime' | 'etaMin' | 'distanceKm'>): string {
+export function storeMeta(v: { estimatedPrepTime?: number | null; etaMin?: number | null; distanceKm?: number | null }): string {
   const parts: string[] = [];
   const minutes = v.etaMin ?? v.estimatedPrepTime;
   if (minutes != null && Number.isFinite(Number(minutes))) parts.push(`${minutes} min`);
@@ -33,14 +35,19 @@ export function storeMeta(v: Pick<Vendor, 'estimatedPrepTime' | 'etaMin' | 'dist
  * the vertical's pictogram on the soft brand tint, and optionally the name.
  */
 export function Photo({
-  src, alt = '', vendorType, name, sizes, priority = false, iconSize = 30, className = '', dim = false,
+  src, alt = '', vendorType, name, sizes, priority = false, iconSize = 30, className = '', dim = false, onError,
 }: {
   src?: string | null; alt?: string; vendorType?: string | null; name?: string; sizes: string; priority?: boolean; iconSize?: number; className?: string; dim?: boolean;
+  /** Called when the photo fails to load (the caller can then show the placeholder). */
+  onError?: () => void;
 }) {
+  // [W2b] The store's photo at its full address; the web server resizes it
+  // for the screen when it is one of the API's public photos (lib/media.ts).
+  const media = photo(src);
   return (
     <span className={`sw-photo ${className}`} style={dim ? { opacity: 0.45 } : undefined}>
-      {src ? (
-        <Image src={src} alt={alt} fill unoptimized sizes={sizes} {...(priority ? { priority: true } : { loading: 'lazy' as const })} className="object-cover" />
+      {media ? (
+        <Image {...media} alt={alt} fill sizes={sizes} {...(priority ? { priority: true } : { loading: 'lazy' as const })} className="object-cover" onError={onError} />
       ) : (
         <span className="flex flex-col items-center justify-center gap-2 p-3 text-center">
           <Pictogram name={verticalPictogram(vendorType)} size={iconSize} />
@@ -68,11 +75,15 @@ const ROW_META = 'flex flex-wrap items-center gap-1.5 text-[13px] leading-[18px]
 const SQUARE_COPY = 'flex min-w-0 flex-col gap-1 pt-2';
 
 /** The list card ("Nearby", search, browse): photo, name, rating · time. */
-export function VendorCard({ v }: { v: Vendor }) {
+/** What a store row reads — a browse `Vendor` and a search hit both carry it. */
+export type VendorCardData = Pick<Vendor, 'id' | 'name' | 'vendorType' | 'coverImageUrl' | 'isCurrentlyOpen' | 'displayRating'>
+  & { slug?: string | null; estimatedPrepTime?: number | null; etaMin?: number | null; distanceKm?: number | null };
+
+export function VendorCard({ v }: { v: VendorCardData }) {
   const closed = !v.isCurrentlyOpen;
   const meta = storeMeta(v);
   return (
-    <Link href={`/order/vendor/${v.id}`} className={`${ROW_CARD} transition-opacity active:opacity-85`}>
+    <Link href={storeHref(v)} className={`${ROW_CARD} transition-opacity active:opacity-85`}>
       <span data-store-part="image" className={`${ROW_THUMB} relative overflow-hidden`}>
         <Photo src={v.coverImageUrl} alt={v.name} vendorType={v.vendorType} sizes="84px" className="absolute inset-0 rounded-xl" dim={closed} />
       </span>
@@ -115,7 +126,7 @@ export function VendorGridSkeleton({ n = 6, label = 'Loading stores' }: { n?: nu
 export function VendorHeroCard({ v }: { v: Vendor }) {
   const meta = storeMeta(v);
   return (
-    <Link href={`/order/vendor/${v.id}`} className="sw-card relative block overflow-hidden transition-transform duration-200 hover:-translate-y-0.5">
+    <Link href={storeHref(v)} className="sw-card relative block overflow-hidden transition-transform duration-200 hover:-translate-y-0.5">
       <Photo src={v.coverImageUrl} alt="" vendorType={v.vendorType} sizes="(min-width: 760px) 400px, 72vw" className="aspect-video w-full rounded-none" iconSize={40} />
       <span aria-hidden className="absolute inset-x-0 bottom-0 h-[110px]" style={{ background: 'linear-gradient(180deg, rgba(33,26,26,0), rgba(33,26,26,0.62))' }} />
       <span className="absolute inset-x-4 bottom-3 flex flex-col gap-1">
@@ -133,7 +144,7 @@ export function VendorHeroCard({ v }: { v: Vendor }) {
 export function VendorSquareCard({ v }: { v: Vendor }) {
   const meta = storeMeta(v);
   return (
-    <Link href={`/order/vendor/${v.id}`} className="flex min-w-0 flex-col text-left text-[var(--swift-ink)] active:opacity-85">
+    <Link href={storeHref(v)} className="flex min-w-0 flex-col text-left text-[var(--swift-ink)] active:opacity-85">
       <span data-store-part="image" className="relative block aspect-square w-full overflow-hidden rounded-2xl">
         <Photo src={v.coverImageUrl} alt="" vendorType={v.vendorType} sizes="(min-width: 760px) 200px, 44vw" className="absolute inset-0" />
       </span>

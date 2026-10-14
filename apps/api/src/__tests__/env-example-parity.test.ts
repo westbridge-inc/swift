@@ -63,14 +63,16 @@ const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> 
   // [DS632 · owner, 4 Oct] Unset holds every MMG payment for a person (mmgCreationZone); staging and
   // production read MMG's creationDate as Guyana time, so a developer sees the same confirmation.
   { name: 'MMG_CHECKOUT_CREATION_ZONE', whenUnset: '', what: 'how MMG payment times are read (unset: every MMG payment is held for a person)' },
-  // [PT-1] Unset reads as OFF (utils/card-rail.ts cardRailV2Enabled), and production refuses 1 until a real v2 provider exists.
+  // [PT-1] Unset reads as OFF (utils/card-rail.ts cardRailV2Enabled); production accepts 1 only with the real provider fully set up for live cards [PT-4].
   { name: 'CARD_RAIL_V2', whenUnset: '0', what: 'whether partners can add a card and pay the weekly fee by card (card rail v2)' },
-  // [AX297 F5] Unset reads as OFF (utils/card-rail.ts cardRailV2DrainEnabled); production refuses 1.
+  // [AX297 F5] Unset reads as OFF (utils/card-rail.ts cardRailV2DrainEnabled); production: as CARD_RAIL_V2.
   { name: 'CARD_RAIL_V2_DRAIN', whenUnset: '0', what: 'whether the worker still settles card rail v2 work already in flight after v2 is switched off' },
   // [PT-2] Unset reads as OFF (utils/card-rail.ts cardEnrollEnabled): Pay now by card only.
   { name: 'CARD_RAIL_ENROLL', whenUnset: '0', what: 'whether partners may save a card for the weekly fee' },
   // [PT-2] Unset reads as OFF (utils/card-rail.ts cardSimulatorLiveEnabled); production refuses any other value.
   { name: 'CARD_RAIL_SIMULATOR_LIVE', whenUnset: '0', what: 'whether a test server shows the simulator card choice' },
+  // [L07] Only exactly 'true' turns it on (notification/mover-push-authority.ts moverPushRequired).
+  { name: 'MOVER_PUSH_REQUIRED', whenUnset: 'false', what: 'whether a rider or driver needs an active push registration to go online' },
 ];
 
 /**

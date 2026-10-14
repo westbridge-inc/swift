@@ -1,8 +1,9 @@
 /**
  * What a mover is ACTUALLY paid for the job they are being offered.
  *
- * The offer card's big number is the FARE — the figure the slider governs and
- * the mover submits. It is not the same thing as what lands in their hand: the
+ * The offer card's big number is the FARE — the price Swift booked with the set
+ * formula (no mover sets it: owner ruling 8 Oct). It is not the same thing as
+ * what lands in their hand: the
  * API's own definition of a delivery's earnings is
  *
  *     totalEarning = deliveryFee + tipAmount
@@ -23,7 +24,7 @@
  * pay is worse than a quiet omission. See F-257.
  */
 export interface OfferEarnings {
-  /** The fare the slider governs — always shown. */
+  /** The booked fare (the set formula) — always shown. */
   fare: number;
   /** The customer's checkout tip. 0 whenever it is absent or not the mover's. */
   tip: number;

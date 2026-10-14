@@ -1,4 +1,5 @@
 import { PrismaClient, Prisma, TrustLevel } from '@prisma/client';
+import { floatTrustLevel } from '../verification/customer-id';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
 
@@ -119,14 +120,16 @@ export class FloatService {
     return Number(byLevel[trustLevel] ?? cfg.floatL1);
   }
 
-  /** Recompute + persist a rider's floatLimit from their User.trustLevel + country. */
+  /** Recompute + persist a rider's floatLimit from their User.trustLevel + country. A customer ID
+   *  that is only ON FILE (owner ruling 8 Oct 2026 — no person reviewed it) does not lift the
+   *  float: such an account is sized as L1 (customer-id.ts floatTrustLevel). */
   async recomputeForUser(userId: string): Promise<void> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { trustLevel: true, countryCode: true, rider: { select: { id: true } } },
     });
     if (!user?.rider) return;
-    const limit = await this.floatLimitFor(user.countryCode, user.trustLevel);
+    const limit = await this.floatLimitFor(user.countryCode, await floatTrustLevel(this.prisma, userId, user.trustLevel));
     await this.prisma.rider.update({ where: { id: user.rider.id }, data: { floatLimit: limit } });
   }
 
