@@ -216,7 +216,9 @@ describe('GooglePlacesProvider.details — Place Details (New)', () => {
   });
 
   it('an id that is not a Google place id never reaches the URL path (no request at all)', async () => {
-    for (const bad of ['../places:autocomplete', 'ChIJ/../../v1', 'ChIJ?key=x', 'addr:abc123', 'zone:z1', 'ChIJ x', '']) {
+    // '.' and '..' matter on their own: a URL parser folds /v1/places/.. into
+    // /v1/, so a guard that let dots through would send a keyed GET elsewhere.
+    for (const bad of ['../places:autocomplete', 'ChIJ/../../v1', 'ChIJ?key=x', 'addr:abc123', 'zone:z1', 'ChIJ x', '', '.', '..', 'ChIJ.x']) {
       const f = stubFetch(() => jsonResponse(200, PLACE));
       expect(await provider().details(bad)).toBeNull();
       expect(f).not.toHaveBeenCalled();
