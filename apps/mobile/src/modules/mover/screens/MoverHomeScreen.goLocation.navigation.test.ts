@@ -305,6 +305,26 @@ describe('[GO-RELIABILITY] GO with location granted goes online; it never fails 
     expect(fx.goOnline).toHaveBeenCalledWith(expect.objectContaining(GPS_FIX));
   });
 
+  it('GO’s own check finds nothing at once while the re-check is still on its GPS step: no error, GO goes online on that fix', async () => {
+    await launch();
+    nat.balancedMode = 'none';
+    nat.gpsMode = 'manual';
+
+    await tapGo();
+    await until(() => nat.gps.length === 2);
+    // GO's own GPS request (one hop ahead) answers "no fix"; the re-check's is still working.
+    nth(nat.gps, 0).reject(new Error('Current location is unavailable'));
+    await flush();
+
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(text()).toContain('Finding your location…');
+
+    nth(nat.gps, 1).resolve(fixOf(GPS_FIX));
+    await goSettles();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(fx.goOnline).toHaveBeenCalledWith(expect.objectContaining(GPS_FIX));
+  });
+
   it('the Settings round trip: "Allow all the time" in Android Settings, back to Swift, and GO re-reads the permission and goes online', async () => {
     nat.background = 'denied';
     await launch();

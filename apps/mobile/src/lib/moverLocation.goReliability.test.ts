@@ -28,6 +28,8 @@ import { BALANCED_FIX_TIMEOUT_MS, type PositionFix } from './positionFix';
 const HOP_MS = 10;
 const nativeHop = <T>(value: () => T) =>
   new Promise<T>((resolve) => setTimeout(() => resolve(value()), HOP_MS));
+const nativeFailure = <T>(message: string) =>
+  new Promise<T>((_resolve, reject) => setTimeout(() => reject(new Error(message)), HOP_MS));
 
 const GPS_FIX = { latitude: 6.8105, longitude: -58.1505 };
 const gpsFix = (): PositionFix => ({ coords: { ...GPS_FIX, accuracy: 5 }, timestamp: Date.now() });
@@ -78,7 +80,7 @@ function android(
     }),
     getCurrentPositionAsync: vi.fn(device.balanced),
     getLastKnownPositionAsync: vi.fn(device.lastKnown ?? (() => nativeHop(() => null))),
-    getHighAccuracyPositionAsync: vi.fn(device.gps ?? (() => nativeHop(() => { throw new Error('no GPS fix'); }))),
+    getHighAccuracyPositionAsync: vi.fn(device.gps ?? (() => nativeFailure<PositionFix>('no GPS fix'))),
     reverseGeocodeAsync: vi.fn(device.geocode ?? (() => nativeHop(() => [{ name: 'Regent Street', city: 'Georgetown' }]))),
   };
   return { api, resumeChecks };
@@ -86,10 +88,12 @@ function android(
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 /** The i-th pending native request (the test has already waited for it). */
@@ -156,6 +160,32 @@ describe('[GO-RELIABILITY] GO waits for the newest location answer instead of fa
     expect(go.goOnline).toHaveBeenCalledOnce();
     expect(go.goOnline).toHaveBeenCalledWith(GPS_FIX);
     expect(shared.status()).toBe('granted');
+  });
+
+  it('GO’s own check finds nothing at once, but the re-check is still on its GPS step: GO waits for it and goes online', async () => {
+    const shared = store();
+    const gps: Array<ReturnType<typeof deferred<PositionFix>>> = [];
+    const device = android(shared, {
+      // No fused fix at once (null), no cached fix.
+      balanced: () => nativeFailure<PositionFix>('Current location is unavailable'),
+      gps: () => {
+        const next = deferred<PositionFix>();
+        gps.push(next);
+        return next.promise;
+      },
+    });
+
+    const go = goOnlineWith(shared, device.api);
+    await vi.waitFor(() => expect(gps).toHaveLength(2));
+    // GO's own GPS request (one hop ahead) answers "no fix".
+    nth(gps, 0).reject(new Error('Current location is unavailable'));
+    await new Promise((resolve) => setTimeout(resolve, HOP_MS * 3));
+    expect(go.answered()).toBe(false);
+    expect(go.goOnline).not.toHaveBeenCalled();
+
+    nth(gps, 1).resolve(gpsFix());
+    await expect(go.pending).resolves.toMatchObject({ status: 'granted', ...GPS_FIX });
+    expect(go.goOnline).toHaveBeenCalledWith(GPS_FIX);
   });
 
   it('a newer re-check that starts while GO waits is waited for as well', async () => {

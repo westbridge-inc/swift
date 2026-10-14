@@ -332,7 +332,9 @@ export async function prepareMoverOnline({
   };
 
   const resolution = await resolveForeground();
-  if (resolution.status !== 'granted') return resolution;
+  // A denial is final. "No fix" from GO's own check is not, while a newer
+  // check is still on its way to one: the canonical answer decides.
+  if (resolution.status !== 'granted' && resolution.status !== 'unavailable') return resolution;
   if (!(await canonicalFix())) return { status: 'unavailable' } as const;
 
   // Background access is an enhancement. A denial still permits the explicit
@@ -350,5 +352,7 @@ export async function prepareMoverOnline({
   const authoritativeFix = await canonicalFix();
   if (!authoritativeFix) return { status: 'unavailable' } as const;
   await goOnline(authoritativeFix);
-  return resolution;
+  return resolution.status === 'granted'
+    ? resolution
+    : { status: 'granted' as const, ...authoritativeFix };
 }
