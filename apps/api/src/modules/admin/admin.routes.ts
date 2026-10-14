@@ -10,6 +10,7 @@ import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
+import { withLiveDocuments } from './live-documents';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
@@ -1647,7 +1648,9 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.rider.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(riders, total, { page, limit, skip }) };
+    // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
+    const withLive = await withLiveDocuments(app.prisma, riders, 'RIDER');
+    return { success: true, ...paginatedResponse(withLive, total, { page, limit, skip }) };
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1784,7 +1787,9 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.driver.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(drivers, total, { page, limit, skip }) };
+    // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
+    const withLive = await withLiveDocuments(app.prisma, drivers, 'DRIVER');
+    return { success: true, ...paginatedResponse(withLive, total, { page, limit, skip }) };
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
