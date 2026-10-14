@@ -10,7 +10,7 @@ import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/Cust
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_STATUSES, applicantId, isSystemActor, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_STATUSES, applicantId, isSystemActor, docLabel, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -21,6 +21,11 @@ const EXPIRING_DOC_TYPES = [
   // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
   // validity like a licence, so the console must ask for its date too.
   'self_declaration_unregistered',
+  // [TRADES · 13 Oct 2026] the service-trade licences, registrations and certificates
+  'pest_control_operator_licence', 'pesticide_applicator_certificate',
+  'chartered_accountant_practising_certificate', 'gra_practice_certificate',
+  'eating_house_registration', 'town_clerk_registration', 'town_clerk_shop_certificate',
+  'drone_authorisation',
 ] as const;
 const EMPTY_INSURANCE: InsuranceCheck = { insurerName: '', policyNumber: '', coverageClass: 'HIRE', hireClassConfirmed: false, plateCrossChecked: false };
 const LANES = [{ value: 'operator', label: 'Operators' }, { value: 'customer', label: 'Customers' }, { value: 'all', label: 'Everything' }] as const;
@@ -247,6 +252,7 @@ export default function VerificationPage() {
           </nav>
           <div className="rc-review-body">
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
+            {reviewNote(selected.docType, selected.role) && <p className="rc-muted rc-review-note">{reviewNote(selected.docType, selected.role)}</p>}
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
             <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc, accountTrustLevel) => {

@@ -1,12 +1,15 @@
 import type { QualificationType } from '@prisma/client';
 import type { ServiceCatalog, ServiceCategory } from '@swift/types';
 import { AppError } from '../../utils/errors';
+import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
+import { SERVICE_DOCUMENT_WORDS } from '../verification/doc-registry';
 
 // ---------------------------------------------------------------------------
 // Services vertical (spec §4.6). Trust is risk-tiered: verify hard where someone
 // could be physically harmed. Every provider needs ID + police clearance; a
 // trade qualification is an optional "Certified" badge. Providers without one
-// can still join, shown transparently as "self-skilled".
+// can still join, shown transparently as "self-skilled". A trade the law
+// licenses also needs that licence before it goes live (SERVICE_TRADE_LAUNCH_FLOOR).
 // ---------------------------------------------------------------------------
 
 export const SERVICE_TRADE_CATALOG = {
@@ -109,11 +112,12 @@ export function requireCanonicalServiceTrade(input: string): ServiceTradeId {
 // A category with an unresolved policy topic must never inherit the generic
 // base checklist and become live with identity documents alone. Opening one
 // requires a reviewed country checklist and an enforceable evidence path.
-const PENDING_CATEGORIES = new Set<ServiceTradeId>([
-  'gas_fitter', 'pest_control', 'heavy_equipment_operator', 'chef', 'caterer',
-  'barber', 'hairdresser', 'tutor',
-  'salon', 'nail_technician', 'makeup_artist', 'photographer', 'lawyer', 'accountant',
-]);
+// [TRADES · owner 13 Oct 2026, decisions 23 + 40] Thirteen trades opened with
+// their reviewed checklists (ops/platform-config SERVICE_TRADE_LAUNCH_FLOOR).
+// The lawyer stays held until counsel confirms it: lawyers may not advertise
+// their services, and a platform paid by a lawyer for bringing them clients may
+// itself commit an offence.
+const PENDING_CATEGORIES = new Set<ServiceTradeId>(['lawyer']);
 
 export function isServiceCategoryOperational(trade: ServiceTradeId): boolean {
   return !PENDING_CATEGORIES.has(trade);
@@ -130,7 +134,24 @@ function categoryGroup(trade: ServiceTradeId): ServiceCategory['group'] {
   return 'HOME_AND_TRADES';
 }
 
+/** [TRADES] What a trade must also know before signing up, in plain words. */
+const TRADE_NOTES: Partial<Record<ServiceTradeId, readonly string[]>> = {
+  gas_fitter: ['Installation and repair only: selling, refilling or delivering cooking gas (LPG) is not allowed on Swift.'],
+  tutor: ['The police clearance is always required: tutors work with children.'],
+  photographer: ['Drone or aerial work: add the GCAA authorisation before you offer it.'],
+};
+
 function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] {
+  const floor = SERVICE_TRADE_LAUNCH_FLOOR[trade];
+  if (floor) {
+    // [TRADES] An opened trade lists exactly what it must show, then what it may add.
+    const optional = DEFAULT_DOCUMENT_CHECKLISTS[`SERVICE_PROVIDER_TRADE_${trade.toUpperCase()}_OPTIONAL`] ?? [];
+    return [
+      ...floor.map((docType) => ({ key: `DOC_${docType.toUpperCase()}`, label: SERVICE_DOCUMENT_WORDS[docType] ?? docType, status: 'COUNTRY_CHECKLIST' as const })),
+      ...optional.map((docType) => ({ key: `OPTIONAL_${docType.toUpperCase()}`, label: `If it applies to you: ${SERVICE_DOCUMENT_WORDS[docType] ?? docType}`, status: 'COUNTRY_CHECKLIST' as const })),
+      ...(TRADE_NOTES[trade] ?? []).map((label, i) => ({ key: `NOTE_${trade.toUpperCase()}_${i + 1}`, label, status: 'COUNTRY_CHECKLIST' as const })),
+    ];
+  }
   const documents: ServiceCategory['documents'] = [{
     key: 'SERVICE_PROVIDER',
     label: 'Identity and any background checks required by your country checklist',
@@ -143,20 +164,7 @@ function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] 
   // These are review topics, not invented legal requirements or upload gates.
   // The live verification checklist remains the authority for actual uploads.
   const pending: Partial<Record<ServiceTradeId, string>> = {
-    barber: 'Premises registration and hygiene requirements for barbering',
-    hairdresser: 'Premises registration and hygiene requirements for hairdressing',
-    salon: 'Beauty service scope, premises and hygiene requirements',
-    nail_technician: 'Nail service scope, hygiene and premises requirements',
-    makeup_artist: 'Makeup service scope and hygiene requirements',
-    tutor: 'Qualifications and safeguarding for work with children',
-    photographer: 'Portfolio rights and safeguarding where children are involved',
     lawyer: 'Right to practise and current professional standing',
-    accountant: 'Professional credentials and authority for the services offered',
-    chef: 'Food handling and premises requirements',
-    caterer: 'Food handling and premises requirements',
-    gas_fitter: 'Gas work competency and applicable licence requirements',
-    pest_control: 'Chemical handling and applicable licence requirements',
-    heavy_equipment_operator: 'Equipment competency and applicable licence requirements',
   };
   if (pending[trade]) documents.push({
     key: `POLICY_${trade.toUpperCase()}`, label: pending[trade]!, status: 'POLICY_REVIEW_REQUIRED',
@@ -202,6 +210,37 @@ export function riskGuidance(trade: string): string {
   return tradeRiskTier(trade) === 'HIGH'
     ? 'Higher-risk work — we strongly recommend choosing a licensed (Certified) provider. Certified providers are shown first.'
     : 'Every provider is ID-verified and police-cleared — choose by ratings and reviews.';
+}
+
+// ---------------------------------------------------------------------------
+// [TRADES · GUARDRAILS §8] Profile wording. Cooking gas (LPG) and fuel are never
+// sold, refilled or delivered through Swift (Petroleum and Petroleum Products
+// Regulations: a GEA licence is required, with prison and forfeiture of the
+// vehicle). A protected professional title is shown only by the trade whose
+// checklist proves it (ICAG Act s.25; lawyers are held; medicines are banned).
+// ---------------------------------------------------------------------------
+
+const SUPPLY = String.raw`(?:sell(?:s|ing)?|sales?|refill(?:s|ing)?|deliver(?:s|y|ies|ing)?|supply|supplies|supplier|exchange|swap|transport(?:ing)?|carry(?:ing)?|fill(?:ing)?)`;
+const FUEL = String.raw`(?:lpg|cooking\s+gas|gas\s+(?:cylinders?|bottles?|tanks?)|cylinders?|propane|butane|fuel|gasoline|petrol|diesel|kerosene)`;
+const GAP = String.raw`\W+(?:\w+\W+){0,2}`;
+const FUEL_SUPPLY = new RegExp(String.raw`\b${SUPPLY}${GAP}${FUEL}\b|\b${FUEL}${GAP}${SUPPLY}\b|\b${FUEL}\s+for\s+sale\b`, 'i');
+const ACCOUNTANT_TITLES = /\b(?:chartered\s+accountants?|certified\s+(?:public\s+)?accountants?|cpa|acca)\b/i;
+const NEVER_TITLES = /\b(?:attorney[\s-]+at[\s-]+law|barrister|solicitor|pharmacists?|druggists?)\b/i;
+
+/** Refuse profile wording Swift must never publish for a service provider. */
+export function assertProviderProfileWording(trade: ServiceTradeId, bio: string | null | undefined): void {
+  if (!bio) return;
+  if (FUEL_SUPPLY.test(bio)) {
+    throw new AppError(400, 'PROHIBITED_SERVICE_WORDING', 'Swift does not allow selling, refilling or delivering cooking gas (LPG) or fuel. Remove it from your profile.');
+  }
+  if (NEVER_TITLES.test(bio) || (trade !== 'accountant' && ACCOUNTANT_TITLES.test(bio))) {
+    throw new AppError(400, 'PROTECTED_TITLE', 'Your profile uses a professional title that this service on Swift does not check. Remove the title from your profile.');
+  }
+}
+
+/** [TRADES] A profile offering drone or aerial work needs the GCAA's authorisation (services.service). */
+export function profileOffersDroneWork(bio: string | null | undefined): boolean {
+  return !!bio && /\b(?:drones?|aerial|uavs?|quadcopters?)\b/i.test(bio);
 }
 
 /** A credential can only badge the exact trade selected when it was submitted.

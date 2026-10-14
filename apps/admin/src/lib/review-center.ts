@@ -28,6 +28,12 @@ const LABELS: Record<string, string> = {
   trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
   self_declaration_unregistered: 'Unregistered business declaration',
+  // [TRADES · 13 Oct 2026] service-trade documents
+  pest_control_operator_licence: 'PTCCB pest-control operator licence', pesticide_applicator_certificate: 'PTCCB applicator certificate',
+  chartered_accountant_practising_certificate: 'ICAG practising certificate', gra_practice_certificate: 'GRA practice certificate',
+  eating_house_registration: 'Eating-house registration', town_clerk_registration: 'Town Clerk registration',
+  town_clerk_shop_certificate: 'Town Clerk shop certificate', drone_authorisation: 'GCAA drone authorisation',
+  gei_electrical_licence: 'GEI electrical licence',
   VENDOR_OWNER: 'Business owner', MOVER: 'Rider/Driver', CUSTOMER: 'Customer',
   RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
   CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',
@@ -45,6 +51,29 @@ const LABELS: Record<string, string> = {
   V_MRZ_CHECKSUM: 'Machine-readable information check', V_VEHICLE_COLOUR: 'Vehicle colour check',
 };
 export const docLabel = (type: string) => LABELS[type] ?? 'Document';
+
+/**
+ * [TRADES · 13 Oct 2026] What the reviewer checks on a service-trade document, in plain words.
+ * A person decides every one of these; nothing here approves anything. `role` is the document's
+ * filing role: a service provider's documents are filed under CUSTOMER (their super-app account).
+ */
+const REVIEW_NOTES: Record<string, string> = {
+  pest_control_operator_licence: 'Pesticides and Toxic Chemicals Control Board licence to run a pest-control business, in this person’s name. Key the printed expiry.',
+  pesticide_applicator_certificate: 'PTCCB commercial applicator certificate (urban/domestic) for this person. Valid two years from issue.',
+  chartered_accountant_practising_certificate: 'ICAG practising certificate, not only membership. ICAG lists practising accountants in the Gazette each January.',
+  gra_practice_certificate: 'GRA practice certificate for the current calendar year; it expires on 31 December.',
+  eating_house_registration: 'Georgetown: the Town Clerk’s eating-house registration (renewed each 1 January). Outside Georgetown: the local council’s sanitary certificate for the premises.',
+  town_clerk_registration: 'Town Clerk registration of this person as a barber (the by-laws cover hair, nails, face massage and similar work). Never accept a medical certificate instead.',
+  town_clerk_shop_certificate: 'Town Clerk certificate of registration of the shop, for the current calendar year; it expires on 31 December.',
+  drone_authorisation: 'Written authorisation from the Guyana Civil Aviation Authority to fly a camera drone, in this person’s name.',
+  food_handler_cert: 'Food handler’s certificate with the issuing office and a valid-until date. Never a medical certificate; record only the date.',
+};
+export function reviewNote(docType: string, role: string): string | null {
+  if (docType === 'drivers_licence' && role === 'CUSTOMER') {
+    return 'Heavy-equipment operator: check the licence class covers the machine they drive on a road (for example a tractor).';
+  }
+  return REVIEW_NOTES[docType] ?? null;
+}
 export const roleLabel = (role: string) => LABELS[role] ?? 'Applicant';
 export const vehicleLabel = (type: string) => LABELS[type] ?? 'Vehicle';
 const OUTCOMES: Record<string, string> = { APPROVED: 'Approved', REJECTED: 'Rejected', PENDING: 'Awaiting review', EXPIRED: 'Expired', APPROVE: 'Approved', REJECT: 'Rejected', REQUEST_INFO: 'More information requested', ESCALATE: 'Sent for another review', SECOND_REVIEW: 'Awaiting a second reviewer', ACTIVE: 'Active', REVOKED: 'Revoked' };

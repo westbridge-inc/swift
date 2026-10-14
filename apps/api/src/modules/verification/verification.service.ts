@@ -1478,8 +1478,14 @@ export class VerificationService {
       const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
       return this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType);
     }
-    // A service category that is not open has no checklist at all — and nothing to add either.
-    if (roleKey === 'SERVICE_PROVIDER' && required.length === 0) return [];
+    if (roleKey === 'SERVICE_PROVIDER') {
+      // A service category that is not open has no checklist at all — and nothing to add either.
+      if (required.length === 0) return [];
+      // [TRADES] The provider's base and trade `_OPTIONAL` lists (a barber's shop certificate,
+      // a photographer's drone authorisation) — the same projection as the checklist.
+      const { providerOptionalDocuments } = await import('../services/services.service');
+      return providerOptionalDocuments(this.prisma, userId, required);
+    }
     return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
   }
 

@@ -1,4 +1,5 @@
-import { isNeverAcceptedDocType } from '../verification/doc-registry';
+import { DRONE_AUTHORISATION_DOC_TYPE, isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX } from '../verification/doc-registry';
+import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
@@ -13,6 +14,7 @@ type ProviderVerificationDb = PrismaClient | Prisma.TransactionClient;
 import {
   canonicalServiceTrade,
   isServiceCategoryOperational,
+  profileOffersDroneWork,
   type ServiceTradeId,
 } from './service-catalog';
 export {
@@ -111,24 +113,64 @@ function tradeChecklistKey(trade: ServiceTradeId): string {
 }
 
 /**
+ * The provider's country checklists: the code defaults under the stored JSON,
+ * as every other checklist reader merges them (a list added in code exists on a
+ * deployed row before any reseed; an edited stored list still wins). No country
+ * row means no checklist — never another market's defaults.
+ */
+async function providerLists(prisma: ProviderVerificationDb, userId: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+  if (!user) return null;
+  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
+  if (!config) return null;
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists as Record<string, string[]>) ?? {}) };
+  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true, bio: true } });
+  const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
+  if (!trade || !isServiceCategoryOperational(trade)) return null;
+  return { lists, trade, bio: provider?.bio ?? null };
+}
+
+/**
  * The full document checklist a provider must satisfy: the SERVICE_PROVIDER
  * base (identity + character) PLUS any trade-mandated extension from
  * CountryConfig (onboarding spec §3.5 — requirements are data, not code).
- * In Guyana that is exactly one trade: electrical work is illegal without a
- * GEI Electrical Contractor Licence, so electricians carry
- * `gei_electrical_licence` as a GATE, never a badge.
+ * Electrical work is illegal without a GEI Electrical Contractor Licence, so
+ * electricians carry `gei_electrical_licence` as a GATE, never a badge.
+ *
+ * [TRADES · owner 13 Oct 2026] A trade opened at launch also carries its legal
+ * floor (identity, police clearance and its own licences), which no stored
+ * edit can remove; and a profile that offers drone or aerial work must show
+ * the GCAA's authorisation.
  */
 export async function providerChecklist(prisma: ProviderVerificationDb, userId: string): Promise<string[]> {
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-  if (!user) return [];
-  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
-  const lists = (config?.documentChecklists as Record<string, string[]>) ?? {};
+  const found = await providerLists(prisma, userId);
+  if (!found) return [];
+  const { lists, trade, bio } = found;
   const base = lists['SERVICE_PROVIDER'] ?? [];
-  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true } });
-  const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
-  if (!trade || !isServiceCategoryOperational(trade)) return [];
   const extra = lists[tradeChecklistKey(trade)] ?? [];
-  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
+  const floor = SERVICE_TRADE_LAUNCH_FLOOR[trade] ?? [];
+  const drone = profileOffersDroneWork(bio) ? [DRONE_AUTHORISATION_DOC_TYPE] : [];
+  return [...new Set([...base, ...extra, ...floor, ...drone])].filter((docType) => !isNeverAcceptedDocType(docType));
+}
+
+/**
+ * [TRADES] Documents a provider MAY add — the base `SERVICE_PROVIDER_OPTIONAL`
+ * list and their trade's `_OPTIONAL` list — never one their checklist already
+ * requires. Display and upload only: no gate reads it.
+ */
+export async function providerOptionalDocuments(
+  prisma: ProviderVerificationDb,
+  userId: string,
+  required: readonly string[],
+): Promise<string[]> {
+  const found = await providerLists(prisma, userId);
+  if (!found) return [];
+  const { lists, trade } = found;
+  const optional = [
+    ...(lists[`SERVICE_PROVIDER${OPTIONAL_LIST_SUFFIX}`] ?? []),
+    ...(lists[`${tradeChecklistKey(trade)}${OPTIONAL_LIST_SUFFIX}`] ?? []),
+  ];
+  return [...new Set(optional)].filter((docType) => !required.includes(docType) && !isNeverAcceptedDocType(docType));
 }
 
 /**
