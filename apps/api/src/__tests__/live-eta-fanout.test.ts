@@ -93,8 +93,14 @@ describe('the publish reaches every live leg', () => {
   });
 
   it('every leg still live gets the sample, with its own ETA and basis', () => {
-    const block = stripped.slice(stripped.indexOf('for (const leg of legEtas)'), stripped.indexOf("return { accepted: true as const };"));
-    expect(block).toContain('io.to(`order:${leg.orderId}`)');
+    // [L05] The sample goes through the order-room audience gate, after the
+    // authority transaction returns the legs still live under its lock.
+    const txEnd = stripped.indexOf('return { accepted: true as const, stillLive };');
+    expect(txEnd, 'the authority transaction returns the legs still live').toBeGreaterThan(0);
+    const loopStart = stripped.indexOf('for (const leg of legEtas)', txEnd);
+    expect(loopStart, 'the publish loop runs after the transaction').toBeGreaterThan(txEnd);
+    const block = stripped.slice(loopStart, stripped.indexOf('return moverLocationAccepted();', loopStart));
+    expect(block).toContain("emitToOrderRoom(app.prisma, app.io, leg.orderId, 'rider:location'");
     expect(block).toContain('etaMinutes: leg.etaMinutes');
     expect(block).toContain('etaBasis: leg.basis');
     expect(block).toContain('if (!stillLive.has(leg.orderId)) continue;');

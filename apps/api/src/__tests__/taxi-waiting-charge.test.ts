@@ -18,6 +18,7 @@ import { CashRulesService, type CashHandoverObserver } from '../modules/cash/cas
 import { freezeTaxiWaiting } from '../modules/rides/taxi-waiting';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { LEGACY_GY_TAXI_CARD, pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { loginWithOtp } from './helpers/otp';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
@@ -66,6 +67,7 @@ let adminToken = '';
 let seq = 0;
 let door = 0;
 const emitted: { room: string; event: string; payload: unknown }[] = [];
+const socketCleanup: Array<() => void> = [];
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 const on = () => vi.stubEnv('TAXI_WAITING_CHARGE', '1');
 
@@ -145,6 +147,9 @@ async function makeRide(spec: RideSpec) {
     },
   }));
   await sys(() => app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: order.id } }));
+  // [L05] Order-room events reach the ride's CURRENT people: the passenger's
+  // socket in the room records what it actually receives.
+  socketCleanup.push(orderSocketFixture(app.io, order, (event, payload) => { emitted.push({ room: `order:${order.id}`, event, payload }); }));
   return { order, customer, driver, drop };
 }
 
@@ -241,13 +246,15 @@ beforeAll(async () => {
   const realTo = app.io.to.bind(app.io);
   (app.io as { to: (room: string) => unknown }).to = (room: string) => ({
     emit: (event: string, payload: unknown) => {
-      emitted.push({ room, event, payload });
+      // Socket-id deliveries (the order-room gate) are recorded where they land.
+      if (typeof room === 'string') emitted.push({ room, event, payload });
       return realTo(room).emit(event, payload);
     },
   });
 });
 
 afterAll(async () => {
+  for (const dispose of socketCleanup) dispose();
   await restoreTaxiCard();
   await purge();
   await app.close();
