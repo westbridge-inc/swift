@@ -515,8 +515,9 @@ weakened). Pin the reviewed image digest as AWS_CLI_IMAGE in deploy/.env
 a placeholder.
 
 **Production (PILOT_ENV=production): hourly, encrypted to the owner's key.**
-Every production dump is encrypted on the host to the owner's OpenPGP public
-key before it is kept or uploaded; the plain dump exists only between pg_dump
+Every production dump is encrypted on the host (gpg; provision-ubuntu.sh
+installs it, on an older host `apt-get install -y --no-install-recommends gpg`)
+to the owner's OpenPGP public key before it is kept or uploaded; the plain dump exists only between pg_dump
 and the encryption and is removed right after (and on any failure). The
 owner's private key is never on any server, so the host cannot read its own
 backups. Before the first production backup:

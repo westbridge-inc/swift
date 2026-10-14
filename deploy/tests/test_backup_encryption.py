@@ -423,5 +423,21 @@ class BackupTimers(unittest.TestCase):
         self.assertIn("OnCalendar=*-*-* 02:15:00", nightly)
 
 
+class BackupHostTools(unittest.TestCase):
+    """DS1095 S3: every production backup needs gpg on the host; a freshly
+    provisioned host must have it, not wait for a hand install."""
+
+    def test_the_provisioner_installs_gpg_in_its_one_package_step(self):
+        provision = (DEPLOY / "provision-ubuntu.sh").read_text()
+        step = provision[provision.index("apt-get install -y"):]
+        step = step[:step.index("\n#")]
+        self.assertRegex(step, r"(?m)(^|\s)gpg(\s|$)")
+
+    def test_the_doctor_points_production_at_the_owner_side_drill(self):
+        doctor = (DEPLOY / "doctor.sh").read_text()
+        line = next(l for l in doctor.splitlines() if "restore never rehearsed" in l)
+        self.assertIn("deploy/backup-drill.sh", line)
+
+
 if __name__ == "__main__":
     unittest.main()
