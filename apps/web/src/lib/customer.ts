@@ -232,6 +232,9 @@ export interface MarketDepth { visible: boolean; items: number; vendors: number 
 export interface MarketItem {
   id: string; name: string; basePrice: number; imageUrl: string | null;
   vendorId: string; vendorName: string; categoryName: string | null; isNew: boolean;
+  /** Is the item's store open now? Search shows closed stores' dishes too, marked
+   *  (owner, 13 Oct). Absent from an older server: read as open, as before. */
+  vendorIsCurrentlyOpen?: boolean;
 }
 export interface MarketCategory { slug: string; name: string; vertical: string }
 
