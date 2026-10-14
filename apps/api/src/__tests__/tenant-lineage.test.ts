@@ -139,7 +139,7 @@ export const PLATFORM_WIDE: Record<string, string> = {
  *  here without a named follow-up. */
 export const PENDING_EXPAND: Record<string, string> = {
   // [DB-05] ReturnRequest, CollectionContact and ContentReport left this list: they
-  // carry tenantId (EXPAND, migration 20261005150000), walled and lineage-held.
+  // carry tenantId (EXPAND, migration 20261013221500), walled and lineage-held.
 };
 
 const models = Prisma.dmmf.datamodel.models;

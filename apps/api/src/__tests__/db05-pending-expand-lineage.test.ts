@@ -30,7 +30,7 @@ const PRODUCTION = 'swift-default';
 const PROBE = 'swift_rls_probe';
 const TABLES = ['return_requests', 'content_reports', 'collection_contacts'] as const;
 const MODELS = ['returnRequest', 'contentReport', 'collectionContact'] as const;
-const MIGRATION = readFileSync(join(__dirname, '..', '..', 'prisma', 'migrations', '20261005150000_db05_pending_expand_tenant', 'migration.sql'), 'utf8');
+const MIGRATION = readFileSync(join(__dirname, '..', '..', 'prisma', 'migrations', '20261013221500_db05_pending_expand_tenant', 'migration.sql'), 'utf8');
 let app: FastifyInstance;
 const ids = {
   reviewUser: '', prodUser: '', reviewOrder: '', prodOrder: '',

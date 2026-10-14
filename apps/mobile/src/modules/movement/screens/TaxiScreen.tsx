@@ -1,5 +1,6 @@
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
+import { ROAD_ROUTING_UNAVAILABLE_COPY } from '../../../lib/roadRouting';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, Share, StyleSheet, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -384,9 +385,13 @@ function TaxiBooking({ navigation }: any) {
       : `You can add up to ${maxStops} ${maxStops === 1 ? 'stop' : 'stops'} now, so we removed the last ${dropped === 1 ? 'one' : dropped}. Check your trip before you book.`);
   }, [pickedStops.length, maxStops]);
 
-  const { data: estimate, isFetching: estimating, error: estimateError } = useRideEstimate(pickupPoint, dropoffPoint, stopsWire);
+  const { data: quotedEstimate, isFetching: estimating, error: estimateError } = useRideEstimate(pickupPoint, dropoffPoint, stopsWire);
   const estimateErrorBody = (estimateError as any)?.response?.data?.error;
   const estimateErrorCode: string | undefined = estimateErrorBody?.code;
+  const routingUnavailable = estimateErrorCode === 'ROUTE_UNAVAILABLE';
+  // React Query can retain a prior price after a failed refresh. A road
+  // refusal makes that price unavailable for booking until a fresh quote lands.
+  const estimate = routingUnavailable ? undefined : quotedEstimate;
   // The switch moved under a quote: re-read how many stops this server takes.
   useEffect(() => {
     if (estimateErrorCode === 'MULTI_STOP_UNAVAILABLE' || estimateErrorCode === 'TOO_MANY_STOPS') void capabilities.refetch();
@@ -460,8 +465,12 @@ function TaxiBooking({ navigation }: any) {
   const errBody = errorMatchesCurrentTrip ? (requestRide.error as any)?.response?.data : undefined;
   // A refusal about stops is said in the app's own short words; every other
   // refusal keeps the server's message, as before.
-  const errMsg = stopRefusalCopy(errBody?.error?.code, errBody?.error?.details) ?? errBody?.error?.message ?? errBody?.message;
-  const estimateStopCopy = stops.length > 0 ? stopRefusalCopy(estimateErrorCode, estimateErrorBody?.details) : null;
+  const errMsg = stops.length === 0 && errBody?.error?.code === 'ROUTE_UNAVAILABLE'
+    ? ROAD_ROUTING_UNAVAILABLE_COPY
+    : stopRefusalCopy(errBody?.error?.code, errBody?.error?.details) ?? errBody?.error?.message ?? errBody?.message;
+  const estimateStopCopy = stops.length === 0 && routingUnavailable
+    ? ROAD_ROUTING_UNAVAILABLE_COPY
+    : stops.length > 0 ? stopRefusalCopy(estimateErrorCode, estimateErrorBody?.details) : null;
   // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
   const waitingTerms = waitingDisclosure(estimate);
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
@@ -735,7 +744,7 @@ function TaxiBooking({ navigation }: any) {
           ) : null}
           {needsL2 ? (
             <PillButton
-              label="Verify your ID — takes a minute"
+              label="Add your ID — takes a minute"
               variant="outline"
               style={{ marginTop: space.md }}
               onPress={() => navigation?.navigate?.('IdentityVerification')}
@@ -829,7 +838,7 @@ function TaxiBooking({ navigation }: any) {
               ) : null}
               {queueDoor === 'identity' ? (
                 <PillButton
-                  label="Verify your ID — takes a minute"
+                  label="Add your ID — takes a minute"
                   variant="outline"
                   style={{ marginTop: space.sm }}
                   onPress={() => navigation?.navigate?.('IdentityVerification')}

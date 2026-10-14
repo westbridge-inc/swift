@@ -12,6 +12,7 @@ import { useMutation } from '@tanstack/react-query';
 import { API_URL, driverApi, riderApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
+import { weeksCovered } from '../../../lib/billing';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
@@ -291,33 +292,43 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
 
 function EarningsTools({
   sub,
-  onTopUp,
+  onPayFee,
   onStatement,
   statementLoading,
   statementError,
 }: {
   sub: unknown;
-  onTopUp: () => void;
+  onPayFee: () => void;
   onStatement: () => void;
   statementLoading: boolean;
   statementError: boolean;
 }) {
   const source = serverRecord(sub);
-  const wallet = serverNumber(source?.['walletBalanceGyd']);
+  // [OWNER RULING 8 Oct, NO "WALLET"] Weekly fees paid before they are due are
+  // "Fee paid ahead — covers N weeks", and the action is "Pay weekly fee".
+  // Swift holds no money for anyone: this is Swift's own fee, paid early.
+  const paidAhead = serverNumber(source?.['walletBalanceGyd']);
+  const showPaidAhead = paidAhead != null && paidAhead > 0;
+  const weeks = weeksCovered(paidAhead, serverNumber(source?.['weeklyFeeGyd'] ?? source?.['customRate'] ?? source?.['weeklyRate']));
   return (
     <Card style={{ marginTop: space.md }}>
-      {wallet != null ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-          <T variant="micro" tone="muted">WALLET BALANCE</T>
-          <T variant="numM">{money(wallet)}</T>
+      {showPaidAhead ? (
+        <View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <T variant="micro" tone="muted">FEE PAID AHEAD</T>
+            <T variant="numM">{money(paidAhead)}</T>
+          </View>
+          {weeks >= 1 ? (
+            <T variant="caption" tone="muted">Covers {weeks} {weeks === 1 ? 'week' : 'weeks'}</T>
+          ) : null}
         </View>
       ) : null}
       {source ? (
         <PillButton
-          label="Top up"
+          label="Pay weekly fee"
           size="md"
-          onPress={onTopUp}
-          style={{ marginTop: wallet != null ? space.md : undefined }}
+          onPress={onPayFee}
+          style={{ marginTop: showPaidAhead ? space.md : undefined }}
         />
       ) : null}
       <PillButton
@@ -526,7 +537,7 @@ export function EarningsScreen({ navigation }: any) {
 
           <EarningsTools
             sub={subQ.data}
-            onTopUp={() => navigation?.navigate?.('WeeklyFee')}
+            onPayFee={() => navigation?.navigate?.('WeeklyFee')}
             onStatement={() => statement.mutate()}
             statementLoading={statement.isPending}
             statementError={statement.isError}

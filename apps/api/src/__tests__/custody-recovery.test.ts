@@ -22,6 +22,8 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { recoverStrandedDeliveries } from '../modules/dispatch/delivery-watchdog';
 import { escalateOverdueCases } from '../modules/custody/custody-recovery';
 import { CUSTODY_CASE_ENTITY, partyCaseView } from '../modules/custody/custody-case';
+import { activateUserBlock } from '../modules/moderation/user-block.service';
+import { IncidentService } from '../modules/safety/incident.service';
 
 // ---------------------------------------------------------------------------
 // [AF-MOB-006 · S0] AFTER PICKUP, A DELIVERY THAT GOES WRONG HAS AN OWNER.
@@ -688,5 +690,74 @@ describe('[AF-MOB-006 · DS667] the handoff code contract', () => {
     expect(res.statusCode, res.body).toBe(200);
     const notices = await relayNotices(relay.user.id, caseId);
     expect(notices.map((n) => (n.data as { kind?: string }).kind)).toContain('custody_relay_cancelled');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [L07 follow-up] The owner's rule is that a blocked, incident-paired or
+// shadow-restricted mover never serves that customer, BY ANY PATH. Custody
+// recovery is a path: operations names a relay rider and that rider takes the
+// goods to the customer's door. Ops cannot see a customer's blocks or incident
+// pairings, so the server checks the same pair policy every claim door uses.
+// ---------------------------------------------------------------------------
+type PairReason = 'customer-block' | 'rider-block' | 'customer-report' | 'rider-report' | 'shadow';
+const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'test:custody-pair-safety');
+async function excludePair(reason: PairReason, customerUserId: string, rider: { user: { id: string }; rider: { id: string } }) {
+  if (reason.endsWith('block')) {
+    await sys(() => activateUserBlock(app.prisma, {
+      tenantId: 'swift-default',
+      blockerId: reason === 'customer-block' ? customerUserId : rider.user.id,
+      blockedId: reason === 'customer-block' ? rider.user.id : customerUserId,
+    }));
+  } else if (reason === 'shadow') {
+    await sys(() => app.prisma.user.update({ where: { id: customerUserId }, data: { enhancedSafetyMonitoring: true } }));
+    await sys(() => app.prisma.rider.update({ where: { id: rider.rider.id }, data: { safetyShadowRestrictedAt: new Date() } }));
+  } else {
+    await sys(() => new IncidentService(app.prisma, app.io).intake({
+      category: 'SERVICE_QUALITY', intake: 'POST_TRIP_REPORT',
+      reporterUserId: reason === 'customer-report' ? customerUserId : rider.user.id,
+      subjectUserId: reason === 'customer-report' ? rider.user.id : customerUserId,
+      summary: 'Synthetic custody pair-safety test',
+    }));
+  }
+}
+const REASONS: PairReason[] = ['customer-block', 'rider-block', 'customer-report', 'rider-report', 'shadow'];
+
+describe('[L07] a custody relay never sends a rider the customer must not get', () => {
+  it.each(REASONS)('operations cannot name a relay rider in a %s pair: refused in plain words, nothing minted', async (reason) => {
+    const holder = await makeRider();
+    const relay = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderInCustody({ riderId: holder.rider.id, customerId: customer.user.id });
+    const opened = await report(holder.token, order.id);
+    expect(opened.statusCode, opened.body).toBe(201);
+    const caseId = opened.json().data.caseId as string;
+    const direct = await as(adminToken, 'POST', `/api/v1/admin/custody-cases/${caseId}/direct`, { outcome: 'RELAY_REQUIRED', reason: REASON });
+    expect(direct.statusCode, direct.body).toBe(200);
+    await excludePair(reason, customer.user.id, relay);
+    const named = await as(adminToken, 'POST', `/api/v1/admin/custody-cases/${caseId}/relay`, { riderId: relay.rider.id }, { 'x-swift-reason': REASON });
+    expect(named.statusCode, named.body).toBe(400);
+    expect(named.json().error.code).toBe('RELAY_PAIR_EXCLUDED');
+    // Ops is told the rider cannot serve this customer, never why.
+    expect(named.body).not.toMatch(/block|report|incident|shadow|monitor/i);
+    const [kase] = await openCases(order.id);
+    expect(kase).toMatchObject({ state: 'RELAY_REQUIRED', relayRiderId: null, transferCode: null });
+    // Another rider can still be named: the refusal is about this pair only.
+    const other = await makeRider();
+    const ok = await as(adminToken, 'POST', `/api/v1/admin/custody-cases/${caseId}/relay`, { riderId: other.rider.id }, { 'x-swift-reason': REASON });
+    expect(ok.statusCode, ok.body).toBe(200);
+  });
+
+  it.each(REASONS)('a %s pair that forms after the relay is named stops the handoff: custody does not move', async (reason) => {
+    const { holder, relay, customer, order, caseId, code } = await relayArranged();
+    await excludePair(reason, customer.user.id, relay);
+    const res = await transfer(relay.token, caseId, code);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('JOB_UNAVAILABLE');
+    expect(res.body).not.toMatch(/block|report|incident|shadow|monitor/i);
+    const fresh = await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { riderId: true } }));
+    expect(fresh.riderId).toBe(holder.rider.id);
+    const [kase] = await openCases(order.id);
+    expect(kase).toMatchObject({ state: 'TRANSFER_IN_PROGRESS', holderRiderId: holder.rider.id, transferAttempts: 0 });
   });
 });
