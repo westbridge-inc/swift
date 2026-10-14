@@ -200,7 +200,7 @@ function CatalogueCheckNote({ check }: { check: NonNullable<CatalogItem['catalog
   const reason = check.status === 'NOT_ALLOWED' && check.reason ? ` Reason: ${check.reason}` : '';
   return (
     <p role="status" className={`text-[13px] font-semibold ${check.status === 'NOT_ALLOWED' ? 'text-[var(--swift-red)]' : 'text-amber-700'}`}>
-      {check.message}{check.status === 'WAITING_FOR_CHECK' ? ' — customers see it once Swift has checked it.' : ''}{reason}
+      {check.message}{check.status === 'WAITING_FOR_CHECK' ? ' — hidden from customers until Swift checks it.' : ''}{reason}
     </p>
   );
 }

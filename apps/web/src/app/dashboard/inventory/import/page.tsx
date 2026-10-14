@@ -144,7 +144,7 @@ export default function ImportPage() {
           {(result.waitingForCheckCount ?? 0) > 0 && (
             <>
               <p className="mt-2 text-sm font-semibold text-amber-700">
-                {result.waitingForCheckCount} waiting for a quick check — customers see them once Swift has checked them:
+                {result.waitingForCheckCount} waiting for a quick check — hidden from customers until Swift checks them:
               </p>
               <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
                 {(result.waitingForCheck ?? []).map((w) => (

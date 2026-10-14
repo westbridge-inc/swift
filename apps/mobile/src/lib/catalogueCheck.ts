@@ -15,7 +15,7 @@ export type CatalogueCheck =
 export function catalogueCheckLine(check: CatalogueCheck | null | undefined): string | null {
   if (!check || typeof check.message !== 'string' || !check.message) return null;
   if (check.status === 'NOT_ALLOWED') return check.reason ? `${check.message} Reason: ${check.reason}` : check.message;
-  if (check.status === 'WAITING_FOR_CHECK') return `${check.message} — customers see it once Swift has checked it.`;
+  if (check.status === 'WAITING_FOR_CHECK') return `${check.message} — hidden from customers until Swift checks it.`;
   return null;
 }
 

@@ -13,7 +13,7 @@ const SRC = process.cwd().endsWith('apps/mobile')
 describe('the partner reads why Swift hides an item', () => {
   it('a held item says it is waiting, and what happens next', () => {
     expect(catalogueCheckLine({ status: 'WAITING_FOR_CHECK', message: 'Waiting for a quick check', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' }))
-      .toBe('Waiting for a quick check — customers see it once Swift has checked it.');
+      .toBe('Waiting for a quick check — hidden from customers until Swift checks it.');
   });
   it('an item Swift does not allow says so in the owner\'s words, with the reason when a person gave one', () => {
     expect(catalogueCheckLine({ status: 'NOT_ALLOWED', message: 'Swift doesn\'t allow this item: medicines.', reason: null }))

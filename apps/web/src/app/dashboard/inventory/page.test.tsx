@@ -80,7 +80,7 @@ describe('inventory count and phone column order', () => {
     });
     renderWithQuery(<InventoryPage />);
     const waiting = await screen.findByRole('article', { name: 'Rum cake' });
-    expect(within(waiting).getByRole('status').textContent).toBe('Waiting for a quick check — customers see it once Swift has checked it.');
+    expect(within(waiting).getByRole('status').textContent).toBe('Waiting for a quick check — hidden from customers until Swift checks it.');
     expect(within(screen.getByRole('article', { name: 'Cold relief' })).getByRole('status').textContent)
       .toBe('Swift doesn\'t allow this item: medicines. Reason: Sold as a cure for fever');
     expect(within(screen.getByRole('article', { name: 'Sugar' })).queryByRole('status')).toBeNull();

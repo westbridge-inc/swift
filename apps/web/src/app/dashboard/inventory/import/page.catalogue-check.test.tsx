@@ -24,7 +24,7 @@ describe('bulk import names the rows waiting for a quick check', () => {
     await user.upload(input, new File(['category,name,basePrice\nCakes,Rum cake,1200'], 'menu.csv', { type: 'text/csv' }));
     await user.click(await screen.findByRole('button', { name: 'Import 3 items' }));
     expect(await screen.findByText('✓ 3 items imported')).toBeTruthy();
-    expect(screen.getByText('2 waiting for a quick check — customers see them once Swift has checked them:')).toBeTruthy();
+    expect(screen.getByText('2 waiting for a quick check — hidden from customers until Swift checks them:')).toBeTruthy();
     expect(screen.getByText('Row 2: Rum cake')).toBeTruthy();
     expect(screen.getByText('Row 4: Cough syrup')).toBeTruthy();
   });
