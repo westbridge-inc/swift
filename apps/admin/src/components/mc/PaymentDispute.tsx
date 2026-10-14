@@ -30,6 +30,8 @@ export interface DisputeFacts {
   mmgClaimRevision?: number | null;
   mmgClaimResolution?: string | null;
   mmgClaimResolvedAt?: string | null;
+  /** The claim generation the latest decision produced; it covers the facts only while it equals mmgClaimRevision. */
+  mmgClaimResolvedRevision?: number | null;
   vendor?: { name?: string | null } | null;
 }
 
@@ -43,11 +45,16 @@ export function PaymentDispute({ order, actions }: { order: DisputeFacts; action
   const store = order.vendor?.name ?? 'The store';
   if (!order.mmgClaimMismatchAt) {
     if (!order.mmgClaimResolution || !order.mmgClaimResolvedAt) return null;
+    // A decision covers the claim facts only while its revision is the current one. Once a later
+    // statement moves the revision on, it is an earlier decision, not the current state [REVIEW-B #1699 S4-3].
+    const current = order.mmgClaimResolvedRevision != null && order.mmgClaimResolvedRevision === order.mmgClaimRevision;
+    const outcome = order.mmgClaimResolution === 'CUSTOMER_PAID' ? 'the customer paid.' : 'the customer did not pay.';
     return (
       <section aria-label="Payment dispute" className="mc-card mc-door mb-4">
-        <p className="mc-label">Payment dispute — decided</p>
+        <p className="mc-label">{current ? 'Payment dispute — decided' : 'Payment dispute — earlier decision'}</p>
         <p className="mc-muted">
-          {order.mmgClaimResolution === 'CUSTOMER_PAID' ? 'Decided: the customer paid.' : 'Decided: the customer did not pay.'} {when(order.mmgClaimResolvedAt)}.
+          {current ? `Decided: ${outcome}` : `Earlier decision: ${outcome}`} {when(order.mmgClaimResolvedAt)}.
+          {!current && ' The payment claims changed after it.'}
         </p>
       </section>
     );
@@ -68,10 +75,12 @@ export function PaymentDispute({ order, actions }: { order: DisputeFacts; action
       if (stale) throw Object.assign(new Error('Close this panel and review the refreshed payment evidence before deciding again.'), { status: 409, code: 'MMG_CLAIM_STALE' });
       try { return await resolvePaymentDispute(order.id, { resolution, expectedClaimRevision: revision }, reason); }
       catch (error) {
-        if (errorCode(error) === 'MMG_CLAIM_STALE') {
-          stale = true;
-          await qc.invalidateQueries({ queryKey: ['order', order.id] });
-        }
+        // Any refusal or unreadable answer can mean the facts on screen are gone (decided by
+        // someone else, no longer disputed, order closed): re-read the order so the panel stops
+        // offering decisions on them [REVIEW-B #1699 S4-2]. Only a stale revision also blocks a
+        // re-send from this panel.
+        if (errorCode(error) === 'MMG_CLAIM_STALE') stale = true;
+        await qc.invalidateQueries({ queryKey: ['order', order.id] });
         throw error;
       }
     },

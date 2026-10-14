@@ -51,9 +51,13 @@ export function HeldOrders() {
     confirmLabel: 'Deliver anyway',
     reason: false,
     submit: async () => {
-      const response = await releaseHeldOrder(o.id);
-      void qc.invalidateQueries({ queryKey: ['orders-held'] });
-      return response;
+      try {
+        return await releaseHeldOrder(o.id);
+      } finally {
+        // Re-read after every answer. A refusal (ORDER_NOT_HELD, ORDER_NOT_RELEASABLE) means
+        // the row on screen is out of date; its button must not stay live [REVIEW-B #1699 S4-2].
+        void qc.invalidateQueries({ queryKey: ['orders-held'] });
+      }
     },
     success: (response) => {
       // The release route returns the rider search's own answer: { offered } when a rider was

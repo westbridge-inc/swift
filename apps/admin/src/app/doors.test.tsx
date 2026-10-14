@@ -74,6 +74,29 @@ describe('[MC-AD4] held orders', () => {
     expect((await screen.findByRole('alert')).textContent).toContain("Couldn't load the held orders");
   });
 
+  // [REVIEW-B #1699 S4-2] A refusal means the row on screen is out of date (someone else released it,
+  // or a rider took it). The queue is re-read, so the stale "Deliver anyway" button goes away.
+  it.each([
+    ['ORDER_NOT_HELD', 'This order is not held for review.'],
+    ['ORDER_NOT_RELEASABLE', 'This order already has a rider or has left the waiting states; there is nothing to release.'],
+  ])('a release refused with %s re-reads the queue and stops offering the stale release', async (code, message) => {
+    let reads = 0;
+    mockApi((r) => {
+      if (r.method === 'GET' && r.url.pathname === '/api/v1/admin/orders/held') return { body: { success: true, data: ++reads === 1 ? [heldOrder] : [] } };
+      if (r.method === 'GET' && r.url.pathname === '/api/v1/admin/orders') return empty;
+      if (r.method === 'POST') return { status: 409, body: { success: false, error: { code, message } } };
+      throw new Error(`Unexpected request: ${r.method} ${r.url}`);
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: 'Deliver order SW-1001 anyway' }));
+    const dialog = screen.getByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Deliver anyway' }));
+    expect(await within(dialog).findByText(message)).toBeTruthy();
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Deliver order SW-1001 anyway' })).toBeNull());
+  });
+
   it('with nothing held there is no held section at all', async () => {
     serveOrders({ body: { success: true, data: [] } });
     renderWithQuery(<OrdersPage />);
@@ -127,16 +150,54 @@ describe('[MC-AD5] an MMG payment dispute', () => {
     expect(await within(dialog).findByText(/The payment claims changed since you reviewed them/)).toBeTruthy();
   });
 
+  // [REVIEW-B #1699 S4-2] Refusals other than a stale revision also mean the facts on screen are gone:
+  // decided by someone else, no longer disputed, or the order closed. The order is re-read, so the panel
+  // stops offering both decisions without a page refresh.
+  it.each([
+    ['MMG_CLAIM_ALREADY_RESOLVED', 'A different decision was already recorded for this dispute. Refresh and review the current state.', { mmgClaimMismatchAt: null, mmgClaimResolution: 'CUSTOMER_DID_NOT_PAY', mmgClaimResolvedAt: '2026-10-07T12:00:00.000Z', mmgClaimRevision: 5 }],
+    ['MMG_CLAIM_NOT_DISPUTED', 'There is no open payment disagreement on this order.', { mmgClaimMismatchAt: null }],
+    ['ORDER_CLOSED', 'This order is closed — its payment claims can no longer change. Contact support about a closed order.', { mmgClaimMismatchAt: null, status: 'CANCELLED' }],
+  ])('a decision refused with %s re-reads the order and stops offering decisions', async (code, message, after) => {
+    let reads = 0;
+    mockApi((r) => {
+      if (r.method === 'GET' && r.url.pathname === '/api/v1/admin/orders/ord-d-1') return { body: { success: true, data: ++reads === 1 ? orderOf() : orderOf(after) } };
+      if (r.method === 'POST') return { status: 409, body: { success: false, error: { code, message } } };
+      throw new Error(`Unexpected request: ${r.method} ${r.url}`);
+    });
+    const { user } = detail();
+    await user.click(within(await screen.findByRole('region', { name: 'Payment dispute' })).getByRole('button', { name: 'Customer paid…' }));
+    const dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Customer paid' }));
+    expect(await within(dialog).findByText(message)).toBeTruthy();
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Customer paid…' })).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Customer did not pay…' })).toBeNull();
+  });
+
   it('no dispute: no panel; a decided one says what was decided and offers nothing', async () => {
     serveOrder(orderOf({ mmgClaimMismatchAt: null, customerMmgClaim: 'UNRECORDED' }));
     const first = detail();
     await screen.findByRole('heading', { name: '#SW-2002' });
     expect(screen.queryByRole('region', { name: 'Payment dispute' })).toBeNull();
     first.unmount();
-    serveOrder(orderOf({ mmgClaimMismatchAt: null, mmgClaimResolution: 'CUSTOMER_PAID', mmgClaimResolvedAt: '2026-10-07T12:00:00.000Z', mmgClaimRevision: 5 }));
+    serveOrder(orderOf({ mmgClaimMismatchAt: null, mmgClaimResolution: 'CUSTOMER_PAID', mmgClaimResolvedAt: '2026-10-07T12:00:00.000Z', mmgClaimRevision: 5, mmgClaimResolvedRevision: 5 }));
     detail();
     const panel = await screen.findByRole('region', { name: 'Payment dispute' });
     expect(panel.textContent).toContain('Decided: the customer paid.');
+    expect(within(panel).queryByRole('button')).toBeNull();
+  });
+
+  // [REVIEW-B #1699 S4-3] A decision covers the claim facts only while its revision is the current one.
+  // After a later statement moves the revision on (with no new dispute), it is an earlier decision, not "decided".
+  it('a decision the claims have moved past is shown as an earlier decision, never as the current one', async () => {
+    serveOrder(orderOf({ mmgClaimMismatchAt: null, mmgClaimResolution: 'CUSTOMER_PAID', mmgClaimResolvedAt: '2026-10-07T12:00:00.000Z', mmgClaimRevision: 6, mmgClaimResolvedRevision: 5 }));
+    detail();
+    const panel = await screen.findByRole('region', { name: 'Payment dispute' });
+    expect(panel.textContent).toContain('Earlier decision: the customer paid.');
+    expect(panel.textContent).toMatch(/payment claims changed after it/);
+    expect(panel.textContent).not.toContain('Decided:');
     expect(within(panel).queryByRole('button')).toBeNull();
   });
 });
