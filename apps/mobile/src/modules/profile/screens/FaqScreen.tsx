@@ -24,8 +24,9 @@ const FAQS: { q: string; a: string }[] = [
     a: 'Open the order from Home or My Orders. You’ll see the live map, the rider’s position, and every stage from the kitchen to your gate.',
   },
   {
-    q: 'What is identity verification for?',
-    a: 'Bigger orders and taxi rides need a verified ID (a quick photo of your ID plus a selfie). It keeps both sides of every trip accountable.',
+    q: 'Why does Swift ask for my ID?',
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] on file at once, no selfie; a profile photo is taxi-only.
+    a: 'Bigger orders and taxi rides need your ID on file — a quick photo of your government ID, no selfie. It goes on file right away (sometimes a person checks it first). Taxi rides also need a profile photo, so your driver knows who they are picking up.',
   },
   {
     q: 'Can I cancel an order?',

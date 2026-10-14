@@ -19,7 +19,8 @@ const QUEUE = join(process.cwd(), 'src', 'jobs', 'queue.ts');
 /** Every job name queue.ts actually dispatches on. */
 function dispatchedNames(): string[] {
   const source = readFileSync(QUEUE, 'utf8');
-  const byEquality = [...source.matchAll(/job\.name\s*===?\s*'([^']+)'/g)].map((m) => m[1]!);
+  // `===` and the `!==` early-return guards (a worker that handles one name).
+  const byEquality = [...source.matchAll(/job\.name\s*(?:===?|!==?)\s*'([^']+)'/g)].map((m) => m[1]!);
   const bySwitch = [...source.matchAll(/case '([a-z0-9:_-]+)'/g)].map((m) => m[1]!);
   return [...new Set([...byEquality, ...bySwitch])].sort();
 }

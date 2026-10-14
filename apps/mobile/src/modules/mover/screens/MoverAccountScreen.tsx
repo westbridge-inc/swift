@@ -220,11 +220,8 @@ export function MoverAccountScreen({ navigation }: any) {
             // line renders exactly as before.
             sub={sub ? (sub.usdDisplay?.line ?? `${money(sub.customRate ?? sub.weeklyRate)}/week`) : 'Not active yet'}
             right={<TonePill label={subPill.label} tone={subPill.tone} />}
-          />
-          <SettingsRow
-            icon="hash"
-            label="Weekly fee"
-            sub="View your fee and recent payments"
+            // One row (owner, 11 Oct: it was listed twice): it also opens the
+            // fee screen with the checkout and recent payments.
             onPress={() => navigation?.navigate?.('WeeklyFee')}
           />
           <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData')} />

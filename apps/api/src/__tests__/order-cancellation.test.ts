@@ -238,6 +238,7 @@ afterAll(async () => {
   // OrderItem + OrderStatusLog both cascade on order delete (the latter is
   // append-only — an explicit delete would hit the immutability guard).
   await app.prisma.orderItem.deleteMany({ where: { orderId: { in: createdOrderIds } } });
+  await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: createdOrderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   if (createdUserIds.length) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
@@ -662,6 +663,21 @@ describe('Vendor-no-response auto-cancel [SWIFT-021]', () => {
     expect(statusLog.note).toBe('Auto-cancelled: vendor did not respond');
   });
 
+  it('[Item 63 · certification] a replay after a committed auto-cancel changes nothing and tells nobody twice', async () => {
+    // auto-cancel is certified SAFE_REPLAY because every effect sits behind the
+    // canonical PENDING→CANCELLED compare-and-set: a redelivery of the job
+    // (BullMQ's retry, a stalled job) finds the order no longer PENDING and
+    // returns before any notice or stock movement.
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+    expect(await autoCancelUnresponsiveOrder(ctx(), order.id)).toBe(true);
+    expect(await autoCancelUnresponsiveOrder(ctx(), order.id)).toBe(false);
+    expect(await app.prisma.notification.count({
+      where: { userId: customer.userId, type: 'ORDER_UPDATE', data: { path: ['orderId'], equals: order.id } },
+    })).toBe(1);
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'CANCELLED' } })).toBe(1);
+  });
+
   it('[E20] a PENDING booking is auto-cancelled with the provider/booking wording', async () => {
     const vendor = await makeVendor();
     const order = await app.prisma.order.create({
@@ -884,3 +900,152 @@ describe('Delivery-window auto-complete uses the canonical transaction', () => {
     expect(await app.prisma.orderStatusLog.count({ where: { orderId: order.id, status: 'COMPLETED' } })).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [Item 64 · owner ruling 5 Oct: "no rider → no fee + plain message"] When the
+// mover search for the order's CURRENT delivery generation has come back with
+// nobody, and still nobody holds the job, the customer cancels free and is told
+// why in plain words. The preview and the charge path read the same fact
+// through the one cancel-policy predicate, the charge path under the order lock.
+// ---------------------------------------------------------------------------
+describe('free cancellation when the mover search found nobody', () => {
+  const NO_MOVER_PREVIEW = 'No mover was found. You can cancel without a fee.';
+  const NO_MOVER_CANCELLED = 'Order cancelled — no mover was found, so there is no fee.';
+
+  /** A food order the store has prepared (well past the free window), out for
+   *  a platform rider in delivery generation `generation`, whose search came
+   *  back EXHAUSTED. */
+  async function exhaustedOrder(generation = 0, paymentMethod: 'CASH' | 'MOBILE_MONEY' = 'CASH') {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'READY_FOR_PICKUP', { placedAtMinutesAgo: 30 });
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { fulfillment: 'DELIVERY', fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: generation, paymentMethod },
+    });
+    const search = await app.prisma.dispatchSearch.create({
+      data: {
+        subjectId: order.id, subjectType: 'ORDER', vertical: 'DELIVERY', status: 'EXHAUSTED', radiusKm: 5,
+        deliveryAuthorityVersion: generation, exhaustedAt: new Date(),
+      },
+    });
+    return { order, search };
+  }
+
+  async function preview(id: string, who = customer) {
+    const res = await inject('GET', `/api/v1/customer/orders/${id}`, undefined, who.token);
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().data as { cancellationFee: number; freeCancellationWindow: boolean; freeCancellationExpiresAt: string | null; cancellationMessage?: string | null };
+  }
+
+  async function cancel(id: string, who = customer) {
+    const res = await inject('POST', `/api/v1/customer/orders/${id}/cancel`, { reason: 'No mover available' }, who.token);
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().data as { cancellationFee: number; message: string };
+  }
+
+  async function expectFree(id: string, who = customer) {
+    const shown = await preview(id, who);
+    expect(shown.cancellationFee).toBe(0);
+    expect(shown.freeCancellationWindow).toBe(true);
+    // Free until a mover takes it — there is no countdown to promise.
+    expect(shown.freeCancellationExpiresAt).toBeNull();
+    expect(shown.cancellationMessage).toBe(NO_MOVER_PREVIEW);
+    const done = await cancel(id, who);
+    expect(done.cancellationFee).toBe(0);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).lateCancelFeeDue).toBe(0);
+    return done;
+  }
+
+  async function expectCharged(id: string, who = customer) {
+    const shown = await preview(id, who);
+    expect(shown.cancellationFee).toBe(500);
+    expect(shown.freeCancellationWindow).toBe(false);
+    expect(shown.cancellationMessage ?? null).toBeNull();
+    const done = await cancel(id, who);
+    expect(done.cancellationFee).toBe(500);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).lateCancelFeeDue).toBe(500);
+    expect(done.message).not.toContain('no mover');
+  }
+
+  it.each([0, 2])('generation %s: an exhausted search makes the preview and the cancel free, in plain words', async (generation) => {
+    const { order } = await exhaustedOrder(generation);
+    const done = await expectFree(order.id);
+    expect(done.message).toBe(NO_MOVER_CANCELLED);
+  });
+
+  it('a legacy search with no generation recorded counts for generation zero', async () => {
+    const { order, search } = await exhaustedOrder(0);
+    await app.prisma.dispatchSearch.update({ where: { id: search.id }, data: { deliveryAuthorityVersion: null } });
+    await expectFree(order.id);
+  });
+
+  it('an exhaustion from an earlier delivery generation does not erase the fee for the current one', async () => {
+    const { order } = await exhaustedOrder(0);
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentModeVersion: 1 } });
+    await expectCharged(order.id);
+  });
+
+  it('a search that started again after coming back empty still found nobody: free', async () => {
+    const { order, search } = await exhaustedOrder(0);
+    await app.prisma.dispatchSearch.update({ where: { id: search.id }, data: { resolution: 'RETRIED' } });
+    await app.prisma.dispatchSearch.create({
+      data: { subjectId: order.id, subjectType: 'ORDER', vertical: 'DELIVERY', status: 'SEARCHING', radiusKm: 5, deliveryAuthorityVersion: 0 },
+    });
+    await expectFree(order.id);
+  });
+
+  it('a search that is still running and has not come back empty keeps the fee', async () => {
+    const { order, search } = await exhaustedOrder(0);
+    await app.prisma.dispatchSearch.update({ where: { id: search.id }, data: { status: 'SEARCHING', exhaustedAt: null } });
+    await expectCharged(order.id);
+  });
+
+  it.each(['PICKUP', 'VENDOR_DELIVERY'] as const)('%s does not borrow the platform-search exemption', async (mode) => {
+    const { order } = await exhaustedOrder(0);
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: mode, fulfillment: mode === 'PICKUP' ? 'PICKUP' : 'DELIVERY' } });
+    await expectCharged(order.id);
+  });
+
+  it('a rider assigned after the preview ends the exemption: the charge path reads the locked row', async () => {
+    const { order } = await exhaustedOrder(0);
+    expect((await preview(order.id)).cancellationFee).toBe(0);
+    const rider = await makeRider();
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rider.riderId } });
+    const done = await cancel(order.id);
+    expect(done.cancellationFee).toBe(500);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).lateCancelFeeDue).toBe(500);
+  });
+
+  it('an unattested MMG order is free too, and the message still says who refunds a payment already sent', async () => {
+    const { order } = await exhaustedOrder(0, 'MOBILE_MONEY');
+    const done = await expectFree(order.id);
+    expect(done.message).toBe(`${NO_MOVER_CANCELLED} If you already sent the MMG payment, the store refunds you directly.`);
+  });
+
+  it('a taxi whose driver search came back empty cancels free; one still searching keeps the fee', async () => {
+    // One open ride per passenger: each case rides with its own passenger.
+    const taxi = async (status: 'EXHAUSTED' | 'SEARCHING') => {
+      const rider = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      const order = await app.prisma.order.create({
+        data: {
+          orderNumber: `CX-TAXI-${nanoid(8)}`, orderType: 'TAXI', customerId: rider.userId, status: 'PENDING',
+          placedAt: new Date(Date.now() - 20 * 60_000),
+          pickupAddress: 'Taxi pickup', pickupLat: 6.8, pickupLng: -58.15, deliveryAddress: 'Taxi dropoff', deliveryLat: 6.81, deliveryLng: -58.16,
+          subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, taxiFareTotal: 1500, paymentMethod: 'CASH',
+        },
+      });
+      createdOrderIds.push(order.id);
+      await app.prisma.dispatchSearch.create({
+        data: { subjectId: order.id, subjectType: 'ORDER', vertical: 'TAXI', status, radiusKm: 5, ...(status === 'EXHAUSTED' ? { exhaustedAt: new Date() } : {}) },
+      });
+      return { order, rider };
+    };
+    const empty = await taxi('EXHAUSTED');
+    const done = await expectFree(empty.order.id, empty.rider);
+    // A ride is a ride in the customer's words, not an "order".
+    expect(done.message).toBe('Ride cancelled — no mover was found, so there is no fee.');
+    const searching = await taxi('SEARCHING');
+    await expectCharged(searching.order.id, searching.rider);
+  });
+});
+
