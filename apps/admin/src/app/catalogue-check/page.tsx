@@ -67,7 +67,7 @@ function Row({ item, onDone }: { item: WaitingItem; onDone: (_outcome: Outcome |
     title: `Remove ${item.name}?`,
     body: (
       <p>
-        It is banned for good as {CLASS_LABELS[removeAs]}: hidden everywhere, and the partner cannot edit it back. The
+        It is banned for good as {CLASS_LABELS[removeAs] ?? removeAs}: hidden everywhere, and the partner cannot edit it back. The
         partner reads your reason.
       </p>
     ),
@@ -82,7 +82,7 @@ function Row({ item, onDone }: { item: WaitingItem; onDone: (_outcome: Outcome |
       <p className="mc-label">{item.vendor.name}</p>
       <h2 className="text-base font-semibold">{item.name}</h2>
       <p className="text-sm">
-        Held as <strong>{CLASS_LABELS[item.prohibitedClass]}</strong>: the word &ldquo;{item.term}&rdquo; in the{' '}
+        Held as <strong>{CLASS_LABELS[item.prohibitedClass] ?? item.prohibitedClass}</strong>: the word &ldquo;{item.term}&rdquo; in the{' '}
         {FIELD_WORDS[item.field] ?? item.field}.
       </p>
       <dl className="mc-rows">
@@ -109,6 +109,7 @@ export default function CatalogueCheckPage() {
   const [result, setResult] = useState<Outcome | null>(null);
   const queue = useQuery({ queryKey: ['catalogue-review'], queryFn: () => fetchCatalogueReview() });
   const items: WaitingItem[] = queue.data?.data?.items ?? [];
+  const total: number = queue.data?.data?.total ?? items.length;
 
   const done = (outcome: Outcome | null) => {
     if (!outcome) return;
@@ -132,9 +133,14 @@ export default function CatalogueCheckPage() {
       ) : items.length === 0 ? (
         <div className="mc-card">Nothing waiting for a check.</div>
       ) : (
-        <ul className="space-y-3">
-          {items.map((item) => <Row key={item.itemId} item={item} onDone={done} />)}
-        </ul>
+        <>
+          {total > items.length ? (
+            <p className="mc-muted mb-3 text-sm">Showing the first {items.length} of {total} items waiting. Check these, then reload for the rest.</p>
+          ) : null}
+          <ul className="space-y-3">
+            {items.map((item) => <Row key={item.itemId} item={item} onDone={done} />)}
+          </ul>
+        </>
       )}
     </div>
   );

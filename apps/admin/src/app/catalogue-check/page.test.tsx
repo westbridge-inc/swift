@@ -121,6 +121,15 @@ describe('the catalogue check', () => {
     expect(String(requestsByMethod(fetchMock, 'POST')[0]![0])).toBe(`${API_ORIGIN}/api/v1/admin/catalogue-review/odd%2F..%2Fid/approve`);
   });
 
+  it('a long queue says how many are waiting beyond the ones shown', async () => {
+    mockApi((request) => {
+      if (request.url.pathname === '/api/v1/admin/catalogue-review') return { body: { success: true, data: { items: [waiting], total: 250 } } };
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    renderWithQuery(<CatalogueCheckPage />);
+    expect(await screen.findByText('Showing the first 1 of 250 items waiting. Check these, then reload for the rest.')).toBeTruthy();
+  });
+
   it('says so when nothing is waiting', async () => {
     mockApi(handler([]));
     renderWithQuery(<CatalogueCheckPage />);
