@@ -80,7 +80,8 @@ beforeAll(async () => {
   await adminApp.ready();
   const admin = await app.prisma.user.create({ data: {
     phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Doc', lastName: `Admin${RUN}`,
-    roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } } });
+    // [VERIFY-DOCS V3] This admin opens and decides documents, so it holds the explicit document reviewer grant.
+    roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } } } });
   const mover = await app.prisma.user.create({ data: {
     phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Doc', lastName: `Mover${RUN}`,
     roles: ['RIDER'], activeRole: 'RIDER', status: 'ACTIVE', isPhoneVerified: true, selfieCapturedAt: new Date() } });
@@ -150,7 +151,7 @@ describe('test_characterization_legacy_upload_paths', () => {
         const doc = await app.prisma.verificationDocument.create({ data: {
           userId: userIds[1]!, role: 'RIDER', docType: 'national_id', fileUrl: url, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'test-1' } });
         docIds.push(doc.id);
-        const { path } = mintRenderPath(doc.id, 60);
+        const { path } = mintRenderPath(doc.id, userIds[0]!, 60);
         const res = await app.inject({ method: 'GET', url: path });
         expect(res.statusCode, res.body.slice(0, 120)).toBe(200);
         expect(res.headers['cache-control']).toContain('no-store');

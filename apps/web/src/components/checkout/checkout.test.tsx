@@ -126,29 +126,36 @@ describe('[W4] one checkout', () => {
   it('a customer with no saved address adds one on Swift’s map, and the checkout then prices delivery to it', async () => {
     let saved = false;
     api = ({ url, method }) => {
-      if (url.pathname === '/api/v1/customer/addresses' && method === 'GET') return ok(saved ? [{ id: 'a2', label: 'Home', addressLine1: '12 Fixture Road, Georgetown', city: 'Georgetown', isDefault: true }] : []);
+      if (url.pathname === '/api/v1/customer/addresses' && method === 'GET') return ok(saved ? [{ id: 'a2', label: 'Home', addressLine1: 'Fixture Road, Georgetown', city: 'Georgetown', isDefault: true }] : []);
       if (url.pathname === '/api/v1/customer/addresses' && method === 'POST') { saved = true; return ok({ id: 'a2' }); }
       if (url.pathname === '/api/v1/places/autocomplete') return ok([{ placeId: 'p1', primary: 'Fixture Road', secondary: 'Georgetown' }]);
       if (url.pathname === '/api/v1/places/details') return ok({ lat: 6.8, lng: -58.1, label: '12 Fixture Road, Georgetown' });
+      if (url.pathname === '/api/v1/places/reverse') return ok({ address: null });
       return null;
     };
     at('/checkout', <CheckoutPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Add a delivery address' }));
-    const label = await screen.findByRole('textbox', { name: 'Address label' });
-    await waitFor(() => expect(document.activeElement).toBe(label));
-    fireEvent.change(label, { target: { value: 'Home' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search the delivery destination' }), { target: { value: 'Fixture Road' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Find this destination on the map' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Fixture Road — Georgetown' }));
-    expect(await screen.findByText('Mapped destination confirmed: 12 Fixture Road, Georgetown')).toBeTruthy();
-    fireEvent.change(screen.getByRole('textbox', { name: 'City or town' }), { target: { value: 'Georgetown' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Region' }), { target: { value: 'Demerara-Mahaica' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save mapped delivery address' }));
+    // [WEB-PIN] The form is a pin on Swift's map: search only moves the map,
+    // and the place the customer chose names the pin and fills the street.
+    const heading = await screen.findByRole('heading', { name: 'Pin your delivery address' });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search for a street or place' }), { target: { value: 'Fixture Road' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Find' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Fixture Road, Georgetown' }));
+    await waitFor(() => expect(calls('GET', '/api/v1/places/details')).toHaveLength(1));
+    screen.getByRole('application', { name: 'Delivery pin map' }).querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
+    expect(await screen.findByDisplayValue('Fixture Road, Georgetown')).toBeTruthy();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Save address' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
     expect(await screen.findByLabelText('Saved delivery address')).toBeTruthy();
     const posts = calls('POST', '/api/v1/customer/addresses') as Array<[unknown, RequestInit]>;
     expect(posts).toHaveLength(1);
-    expect(JSON.parse(String(posts[0]![1].body))).toEqual({ label: 'Home', addressLine1: '12 Fixture Road, Georgetown', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.1, isDefault: true });
-    expect(screen.queryByRole('textbox', { name: 'Search the delivery destination' })).toBeNull();
+    expect(JSON.parse(String(posts[0]![1].body))).toEqual({ label: 'Home', addressLine1: 'Fixture Road, Georgetown', city: 'Georgetown', latitude: 6.8, longitude: -58.1, isDefault: true });
+    // The checkout then prices delivery to THAT address.
+    const quotes = calls('PUT', '/api/v1/customer/cart/address') as Array<[unknown, RequestInit]>;
+    expect(quotes).toHaveLength(1);
+    expect(JSON.parse(String(quotes[0]![1].body))).toEqual({ addressId: 'a2' });
+    expect(screen.queryByRole('application', { name: 'Delivery pin map' })).toBeNull();
   });
 
   it('the cart page is the same checkout', async () => {
