@@ -97,6 +97,9 @@ body {
 .rc-skeleton { padding: 2rem; min-height: 14rem; border-radius: var(--admin-radius); background: repeating-linear-gradient(var(--panel) 0 54px, var(--ink) 54px 68px); color: var(--muted); }
 .rc-notice { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: .875rem 1rem; margin-bottom: 1rem; }
 .rc-error { color: #ffb4b8; line-height: 1.6; padding: .75rem 0; }
+.rc-selfie { margin-top: .75rem; display: grid; gap: .5rem; max-width: 18rem; }
+.rc-selfie img { width: 100%; border-radius: .5rem; border: 1px solid var(--border); }
+.rc-selfie figcaption { color: var(--muted); font-size: .8125rem; line-height: 1.5; }
 .rc-reviewers { border: 1px solid var(--border); border-radius: var(--admin-radius); background: var(--panel); padding: 1rem; margin-bottom: 1rem; }
 .rc-reviewers h2 { font-size: 1rem; font-weight: 600; margin-bottom: .5rem; display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
 .rc-reviewers ul { display: grid; gap: .5rem; margin-top: .75rem; }
@@ -128,6 +131,7 @@ body {
 .rc-document-heading { display: flex; gap: 1rem; align-items: center; margin-bottom: .75rem; }
 .rc-document-heading h3 { font-size: 1rem; font-weight: 600; }
 .rc-reviewer-hint { margin: -.25rem 0 .75rem; font-size: .875rem; color: var(--muted); }
+.rc-new-banner { display: flex; align-items: center; gap: .75rem; padding: .5rem .75rem; margin-bottom: .75rem; border: 1px solid var(--border); border-radius: var(--admin-radius); background: var(--accent-soft); }
 .rc-viewer { border: 1px solid var(--border); border-radius: var(--admin-radius); overflow: hidden; background: var(--panel); }
 .rc-viewer-heading, .rc-viewer-tools { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .5rem .75rem; border-bottom: 1px solid var(--border); }
 .rc-viewer-heading { justify-content: space-between; }
@@ -340,3 +344,18 @@ body {
 .admin-modal.mc-dialog button.mc-btn-primary { background: var(--mc-accent); border-color: var(--mc-accent); color: #fff; }
 .admin-modal.mc-dialog button.mc-btn-primary:hover:not(:disabled) { background: var(--mc-accent-deep); }
 @media (max-width: 480px) { .admin-modal.mc-dialog .mc-dialog-actions .mc-btn { flex: 1 1 auto; } }
+
+/* [MC-PR2] The activation checklist panel. */
+.mc-pip { width: 22px; height: 5px; border-radius: 2px; background: var(--mc-line-strong); }
+.mc-pip-good { background: var(--mc-good); }
+.mc-pip-warn { background: #D08B4C; }
+.mc-pip-bad { background: var(--mc-bad); }
+.mc-verdict { padding: .6rem .8rem; border-radius: var(--mc-radius-sm); background: var(--mc-surface); border: 1px solid var(--mc-line); font-weight: 600; }
+.mc-verdict-good { background: var(--mc-good-soft); color: var(--mc-good); border-color: transparent; }
+.mc-verdict-warn { background: var(--mc-warn-soft); color: var(--mc-warn); border-color: transparent; }
+.mc-verdict-bad { background: var(--mc-bad-soft); color: var(--mc-bad); border-color: transparent; }
+.mc-verdict-info { background: var(--mc-info-soft); color: var(--mc-info); border-color: transparent; }
+.mc-doc { display: flex; align-items: center; gap: .75rem; padding: .65rem .8rem; border-radius: var(--mc-radius-sm); border: 1px solid var(--mc-line); background: var(--mc-card); min-width: 0; }
+.mc-doc-bad { border-color: rgb(185 28 28 / 25%); }
+.mc-doc-warn { border-color: rgb(154 71 8 / 25%); }
+@media (max-width: 480px) { .mc-doc { flex-wrap: wrap; } }

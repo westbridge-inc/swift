@@ -58,7 +58,7 @@ async function dual(tenantId = 'swift-default') {
   return sys(async () => {
     const rider = await app.prisma.rider.create({ data: { userId: who.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
     const driver = await app.prisma.driver.create({ data: { userId: who.userId, vehicleType: 'CAR', documentsVerified: true,
-      vehicleMake: 'Test', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `FEE-${run}-${ids.length}`, driverLicenseUrl: 'storage://test/dl', vehicleInsuranceUrl: 'storage://test/insurance' } });
+      vehicleMake: 'Test', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `HFEE-${run}-${ids.length}` /* [owner 11 Oct] H-series taxi plate */, driverLicenseUrl: 'storage://test/dl', vehicleInsuranceUrl: 'storage://test/insurance' } });
     await app.prisma.verificationDocument.create({ data: { userId: who.userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: 'storage://test/insurance', status: 'APPROVED', coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true, consentAt: new Date(), privacyNoticeVersion: 'v1' } });
     await currentTaxiSplitDocuments(app.prisma, who.userId);
     return { ...who, riderId: rider.id, driverId: driver.id, tenantId };

@@ -13,6 +13,7 @@ import { partnerRateFor, type SubscriptionTiers } from '../modules/country/count
 import { PartnerService } from '../modules/partner/partner.service';
 import { lockMoverFeeAuthority, resolveMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
 import { cleanupBillingClocks, cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+// [Owner ruling 11 Oct 2026 — H-PLATE] A taxi (car / wagon car) plate is H-series where it is typed; fixture plates follow it. Buses keep B-series.
 
 // ---------------------------------------------------------------------------
 // The mover weekly fee follows the ROLE first, then the VEHICLE — never the
@@ -232,7 +233,7 @@ describe('mover fee band — what a mover is actually charged', () => {
   it.each(['taxi-first', 'delivery-first'] as const)('a driver who also delivers has one taxi subscription, in %s activation order', async (order) => {
     const userId = await makeMoverUser();
     const partners = new PartnerService(app.prisma);
-    const driver = await partners.becomePartner(userId, { role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Test', year: 2020, color: 'White', licensePlate: `DUAL-${seq}` } });
+    const driver = await partners.becomePartner(userId, { role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Test', year: 2020, color: 'White', licensePlate: `HDUAL-${seq}` } });
     const rider = await partners.becomePartner(userId, { role: 'MOVER', vehicleType: 'MOTORCYCLE' });
     expect(driver.kind).toBe('DRIVER');
     expect(rider.kind).toBe('RIDER');
@@ -441,7 +442,7 @@ describe('mover fee band — what a mover is actually charged', () => {
 
     for (const vehicleType of passenger) {
       seq += 1;
-      const vehicle = { make: 'Toyota', model: 'Noah', year: 2019, color: 'White', licensePlate: `PAX ${seq}` };
+      const vehicle = { make: 'Toyota', model: 'Noah', year: 2019, color: 'White', licensePlate: `HAX ${seq}` };
 
       const joiner = await makeMoverUser();
       const joined = await partners.becomePartner(joiner, { role: 'MOVER', vehicleType, vehicle });
@@ -452,7 +453,7 @@ describe('mover fee band — what a mover is actually charged', () => {
       expect((await partners.becomePartner(switcher, { role: 'MOVER', vehicleType: 'MOTORCYCLE' })).kind).toBe('RIDER');
       const { result } = await partners.changeVehicleWithAuthority(
         switcher,
-        { vehicleType, vehicle: { ...vehicle, licensePlate: `PAX ${seq} B` } },
+        { vehicleType, vehicle: { ...vehicle, licensePlate: `HAX ${seq} B` } },
         async () => null,
       );
       expect(result.kind, vehicleType).toBe('DRIVER');

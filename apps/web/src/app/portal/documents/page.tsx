@@ -13,11 +13,14 @@ import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } f
 // [Owner ruling 11 Oct 2026] plain names and, on a taxi checklist, what each document is.
 const pretty = documentLabel;
 
-function statusTone(s: string, expiresAt: string | null) {
-  const expiringSoon = expiresAt && new Date(expiresAt).getTime() - Date.now() < 30 * 24 * 3600 * 1000;
+const expiringSoonAt = (expiresAt: string | null) => !!expiresAt && new Date(expiresAt).getTime() - Date.now() < 30 * 24 * 3600 * 1000;
+
+function statusTone(s: string, expiresAt: string | null, replaced = false) {
+  const expiringSoon = expiringSoonAt(expiresAt);
   if (s === 'APPROVED' && expiringSoon) return { label: 'Expiring soon', cls: 'bg-amber-100 text-amber-700' };
   if (s === 'APPROVED') return { label: 'Approved', cls: 'bg-green-100 text-green-700' };
-  if (s === 'PENDING') return { label: 'In review', cls: 'bg-sky-100 text-sky-700' };
+  // [REPLACE-PENDING] a copy that replaced an earlier waiting one says so
+  if (s === 'PENDING') return { label: replaced ? 'Replaced — waiting for review' : 'In review', cls: 'bg-sky-100 text-sky-700' };
   if (s === 'EXPIRED') return { label: 'Expired', cls: 'bg-red-100 text-red-700' };
   return { label: 'Rejected', cls: 'bg-red-100 text-red-700' };
 }
@@ -98,7 +101,9 @@ export default function DocumentsPage() {
         )}
         {(d?.checklist ?? []).map((docType) => {
           const doc = latestByType.get(docType);
-          const tone = doc ? statusTone(doc.status, doc.expiresAt) : null;
+          const tone = doc ? statusTone(doc.status, doc.expiresAt, doc.replaced === true) : null;
+          // An approved document stays locked until its renewal window; a copy waiting for review can be replaced.
+          const locked = doc?.status === 'APPROVED' && !expiringSoonAt(doc.expiresAt);
           return (
             <div key={docType} className="sw-card p-5">
               <div className="flex flex-wrap items-center gap-3">
@@ -111,12 +116,14 @@ export default function DocumentsPage() {
                 {doc?.expiresAt && (
                   <span className="text-xs text-[var(--swift-muted)]">expires {new Date(doc.expiresAt).toLocaleDateString()}</span>
                 )}
-                <button
-                  onClick={() => { setUploadFor(uploadFor === docType ? null : docType); setConsent(false); setError(null); }}
-                  className="ml-auto rounded-lg border border-[var(--swift-border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--swift-subtle)]"
-                >
-                  {doc ? 'Upload renewal' : 'Upload'}
-                </button>
+                {!locked && (
+                  <button
+                    onClick={() => { setUploadFor(uploadFor === docType ? null : docType); setConsent(false); setError(null); }}
+                    className="ml-auto rounded-lg border border-[var(--swift-border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--swift-subtle)]"
+                  >
+                    {doc?.status === 'PENDING' ? 'Replace this document' : doc?.status === 'APPROVED' ? 'Upload renewal' : doc ? 'Upload again' : 'Upload'}
+                  </button>
+                )}
               </div>
               {taxiDocumentHint(docType, d?.checklist ?? []) && (
                 <p className="mt-1 text-xs text-[var(--swift-muted)]">{taxiDocumentHint(docType, d?.checklist ?? [])}</p>
