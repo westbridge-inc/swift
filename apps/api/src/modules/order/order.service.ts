@@ -23,6 +23,8 @@ import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { isFreeCancellation, freeBecauseNoMoverFound, readNoMoverFound, LATE_CANCEL_FEE } from './cancel-policy';
+import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -649,7 +651,7 @@ export class OrderService {
      *  SAME read dispatch uses, injected so this service stays dispatch-free.
      *  floatRequired mirrors dispatch's cash-float gate so the probe counts only
      *  riders that could actually take THIS order. */
-    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number) => Promise<{ level: string }>,
+    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number, packageSize?: string | null) => Promise<{ level: string }>,
     /** [DISPATCH 1/3 · B4] Where live offer cards are kept. A cancellation
      *  withdraws the card of the order it closes (withdrawLiveOffer). Every
      *  production construction passes it, which offer-withdrawal-census.test.ts
@@ -1053,6 +1055,29 @@ export class OrderService {
               'DELIVERY_NO_RIDERS',
               'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.',
             );
+          }
+          // [owner #20] Too big for a bike: the order is offered only to a
+          // vehicle that can carry it (a bulky line → a car or van), so the
+          // customer is told NOW, before anything is placed, when none such is
+          // near — never an order that silently finds nobody.
+          const requiredSize = requiredPackageSizeForOrder({
+            orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
+            courierPackageSize: null,
+            items: items.map((ci) => ({ quantity: ci.quantity, bulkUnits: ci.item.bulkUnits ?? null })),
+          }, DEFAULT_LOAD_BANDS);
+          // Only a size a bicycle cannot carry narrows the pool; anything smaller
+          // was already answered by the probe above.
+          if (supply && requiredSize && !vehicleTypesForPackageSize(requiredSize).includes('BICYCLE')) {
+            const fitting = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }, cashFloat, requiredSize).catch(() => null);
+            if (fitting?.level === 'NONE') {
+              throw new AppError(
+                409,
+                'DELIVERY_TOO_BIG',
+                requiredSize === 'EXTRA_LARGE'
+                  ? 'This order is too big for delivery by bike or motorbike, and no car or van is free nearby right now. Choose Pickup, or try delivery again later.'
+                  : 'This order is too big for delivery by bike, and no bigger vehicle is free nearby right now. Choose Pickup, or try delivery again later.',
+              );
+            }
           }
         }
       }

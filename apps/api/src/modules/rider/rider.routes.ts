@@ -44,7 +44,7 @@ import { handoverBlockCounter } from '../../plugins/observability';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
-import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { estimateLoad, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { log } from '../../utils/logger';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
@@ -1089,13 +1089,21 @@ export async function riderRoutes(app: FastifyInstance) {
             addressLine1: true, city: true,
           },
         },
-        items: { select: { name: true, quantity: true } },
+        // [owner #20] bulkUnits only to judge the vehicle below; never sent.
+        items: { select: { name: true, quantity: true, bulkUnits: true } },
       },
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
 
-    const orders = await safeBoardOrders(app.prisma, candidates, request.user.userId, 'RIDER');
+    // [owner #20 · G1] The board shows only work this rider's vehicle can
+    // carry — the same size rule dispatch and the grab enforce (a parcel's
+    // declared size; a goods order's bulk, a bulky line needing a car or van).
+    const carriable = candidates.filter((order) => {
+      const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
+      return !requiredSize || vehicleCanCarry(rider.vehicleType, requiredSize);
+    });
+    const orders = await safeBoardOrders(app.prisma, carriable, request.user.userId, 'RIDER');
 
     // §4d trust badge: WHO the rider would front cash for — trust level,
     // completed orders, strikes. One batch (3 queries), never per-row.
@@ -1139,7 +1147,7 @@ export async function riderRoutes(app: FastifyInstance) {
           pickupAddress: order.pickupAddress,
           deliveryAddress: order.deliveryAddress,
           deliveryInstructions: order.deliveryInstructions,
-          items: order.items,
+          items: order.items.map(({ name, quantity }) => ({ name, quantity })),
           itemCount: order.items.reduce((s, i) => s + i.quantity, 0),
           estLoad: estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0)),
           deliveryFee: Number(order.deliveryFee),
@@ -1295,9 +1303,9 @@ export async function riderRoutes(app: FastifyInstance) {
       where: { id },
       include: {
         vendor: { select: { id: true, name: true } },
-        // [G1 SHADOW] The lines, so the load gate can be measured against the
-        // vehicle that ACTUALLY took the job. One join on the accept path, not
-        // the dispatch hot loop.
+        // [owner #20 · G1] The lines, so the load gate can refuse a vehicle that
+        // cannot carry the order. One join on the accept path, not the
+        // dispatch hot loop.
         items: { select: { quantity: true, bulkUnits: true } },
       },
     });
@@ -1334,34 +1342,17 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', `A ${order.courierPackageSize.toLowerCase().replace(/_/g, ' ')} parcel needs a bigger vehicle than your ${rider.vehicleType.toLowerCase()}.`);
     }
 
-    // [G1 SHADOW] The gate that does NOT exist yet, measured against reality.
-    //
-    // The check above is COURIER-only — the same shape as the candidate SQL,
-    // and the same hole. Food and grocery orders reach this line with no
-    // capacity test at dispatch OR at accept, which is how a 40-item
-    // supermarket run can be taken by a bicycle.
-    //
-    // This REFUSES NOTHING. It records what a gate would have demanded and
-    // what vehicle actually took the job, because `wouldHaveExcluded: true` on
-    // a job that then completes fine is the single field that decides whether
-    // the bands are right. Enforcing first and measuring after would trade a
-    // visible failure for a silent one — an order nobody can take, and nobody
-    // is paged.
-    try {
+    // [owner #20 · G1 ENFORCED] The same gate for food and grocery: an order
+    // the rider's vehicle cannot carry — a bulky line needs a car or van; a
+    // big ordinary load is banded — is refused here exactly as dispatch never
+    // offers it. (A parcel was refused just above by its declared size.)
+    if (order.orderType !== 'COURIER') {
       const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
-      if (requiredSize && order.orderType !== 'COURIER') {
-        log().info({
-          orderId: order.id,
-          orderType: order.orderType,
-          requiredSize,
-          bulkUnits: totalBulkUnits(order.items),
-          acceptedByVehicle: rider.vehicleType,
-          wouldHaveExcluded: !vehicleCanCarry(rider.vehicleType, requiredSize),
-          bands: DEFAULT_LOAD_BANDS,
-        }, 'loadgate:accepted');
+      if (requiredSize && !vehicleCanCarry(rider.vehicleType, requiredSize)) {
+        throw new AppError(400, 'VEHICLE_TOO_SMALL', requiredSize === 'EXTRA_LARGE'
+          ? `This order needs a car or van — it is too big for your ${rider.vehicleType.toLowerCase()}.`
+          : `This order is too big for your ${rider.vehicleType.toLowerCase()}.`);
       }
-    } catch {
-      // A shadow may never refuse an accept. Silent by design.
     }
     // [REPORT-014 F-014-08] Service authorization, mirroring the candidate SQL
     // filter: a COURIER job needs a courier-serving rider, a food/grocery
