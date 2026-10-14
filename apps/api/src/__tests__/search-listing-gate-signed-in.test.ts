@@ -63,7 +63,7 @@ describe('a signed-in customer gets the same listing gate as a guest', () => {
     // a listing the index has not caught up with: only the top-up can find it
     h.items.push({ ...h.items[0]!, id: 'unindexed-item', name: 'Pepper unindexed' });
     engine.items.mockResolvedValue({
-      hits: [{ entityId: 'item-public', name: 'Pepper dish public', vendorId: 'public', vendorName: 'Pepper public' }],
+      hits: [{ entityId: 'item-public', name: 'Pepper dish public', vendorId: 'public' }],
       estimatedTotalHits: 1, processingTimeMs: 1,
     });
     engine.vendors.mockResolvedValue({ hits: [], estimatedTotalHits: 0, processingTimeMs: 1 });
