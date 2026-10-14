@@ -9,6 +9,7 @@ import { VerificationService } from '../modules/verification/verification.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { PartnerService } from '../modules/partner/partner.service';
 import { evaluateMoverDocuments } from '../modules/verification/mover-document-authority';
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
 
 // ---------------------------------------------------------------------------
@@ -71,11 +72,13 @@ const driverCar = (userId: string, licensePlate: string) => app.prisma.driver.cr
 
 describe('(1) the go-online taxi gate checks the plate class', () => {
   it('a car without an H-series plate is refused before any paper is weighed; an H plate goes on to the paper checks', async () => {
-    const privatePlate = await system(async () => { const u = await user(); await driverCar(u.id, plate('PAG')); return u; });
-    // Legacy grant on, no papers: the plate alone refuses it, as documents.
+    // [VERIFY-DOCS · ruling 8] Both drivers hold the two hire licences a taxi now needs (the legacy flag cannot
+    // supply them), so the plate and then the hire insurance are what decide.
+    const privatePlate = await system(async () => { const u = await user(); await driverCar(u.id, plate('PAG')); await currentTaxiSplitDocuments(app.prisma, u.id); return u; });
+    // Legacy grant on, the two licences on file: the plate alone refuses it, as documents.
     expect(await system(() => evaluateMoverDocuments(app.prisma, privatePlate.id, { kind: 'DRIVER', vehicleType: 'CAR', legacyVerified: true })))
       .toEqual({ allowed: false, reason: 'docs', validUntil: null });
-    const hirePlate = await system(async () => { const u = await user(); await driverCar(u.id, plate('HG')); return u; });
+    const hirePlate = await system(async () => { const u = await user(); await driverCar(u.id, plate('HG')); await currentTaxiSplitDocuments(app.prisma, u.id); return u; });
     // Same papers, H plate: the plate passes and the hire-insurance check is what refuses.
     expect(await system(() => evaluateMoverDocuments(app.prisma, hirePlate.id, { kind: 'DRIVER', vehicleType: 'CAR', legacyVerified: true })))
       .toEqual({ allowed: false, reason: 'insurance', validUntil: null });
