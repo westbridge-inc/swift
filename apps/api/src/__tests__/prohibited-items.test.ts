@@ -368,6 +368,38 @@ describe('[§8] a partner saving and editing items', () => {
     expect(renamed.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', term: 'rum' });
   });
 
+  // [Opus S3-1] The item editor never switches on an item still banned by its own words: the item AFTER the edit is
+  // judged, in the same transaction. Renamed out of the ban in the same request, it may be switched on; a restock
+  // never switches a banned item back on, and its stock count is still saved.
+  it('the item editor never switches on an item still banned by its words; a restock leaves it off', async () => {
+    const off = async (name: string, extra: Record<string, unknown> = {}) => {
+      const row = await item({ name });
+      // Ranked last, so the items this test switches on never crowd the Home rail the surface tests read.
+      return app.prisma.item.update({ where: { id: row.id }, data: { isAvailable: false, totalOrdered: 0, ...extra } });
+    };
+    const row = (id: string) => app.prisma.item.findUniqueOrThrow({ where: { id } });
+
+    const bottle = await off(`${RUN} Spare Rum`);
+    const on = await inject('PUT', `/api/v1/vendor/items/${bottle.id}`, vendor.token, { isAvailable: true, description: 'Cold' });
+    expect(on.statusCode).toBe(409);
+    expect(on.json().error).toMatchObject({ code: 'PROHIBITED_ITEM', message: 'Swift doesn\'t allow this item: alcohol.' });
+    expect(await row(bottle.id)).toMatchObject({ isAvailable: false, description: null });
+
+    const out = await inject('PUT', `/api/v1/vendor/items/${bottle.id}`, vendor.token, { name: `Coconut cake ${RUN}`, isAvailable: true });
+    expect(out.statusCode).toBe(200);
+    expect(await row(bottle.id)).toMatchObject({ isAvailable: true, name: `Coconut cake ${RUN}` });
+
+    const shelved = await off(`${RUN} Spare Vodka`, { autoHiddenAt: new Date(), stockQuantity: 0 });
+    const restock = await inject('PUT', `/api/v1/vendor/items/${shelved.id}`, vendor.token, { stockQuantity: 5 });
+    expect(restock.statusCode).toBe(200);
+    expect(await row(shelved.id)).toMatchObject({ isAvailable: false, stockQuantity: 5 });
+
+    // Control: an ordinary auto-hidden item comes back on with its restock.
+    const bread = await off(`Coconut bread ${RUN}`, { autoHiddenAt: new Date(), stockQuantity: 0 });
+    expect((await inject('PUT', `/api/v1/vendor/items/${bread.id}`, vendor.token, { stockQuantity: 5 })).statusCode).toBe(200);
+    expect(await row(bread.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 5 });
+  });
+
   it('a banned platform category is refused outright: tag, accepted suggestion, store category', async () => {
     const itemId = (await item({ name: `Plantain chips ${RUN}` })).id;
     const tag = await inject('POST', `/api/v1/vendor/items/${itemId}/categories`, vendor.token, { slug: 'pharmacy' });

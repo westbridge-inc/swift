@@ -2977,31 +2977,40 @@ export async function vendorRoutes(app: FastifyInstance) {
     // update, through the single writer.
     const stockTarget = body.stockQuantity;
 
-    const item = await app.prisma.item.update({
-      where: { id: request.params.id },
-      data: {
-        ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
-        ...(body.name !== undefined && { name: body.name.trim() }),
-        ...(body.description !== undefined && { description: body.description?.trim() }),
-        ...(body.imageUrl !== undefined && { imageUrl: body.imageUrl }),
-        ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
-        ...(body.sku !== undefined && { sku: body.sku }),
-        ...(body.unit !== undefined && { unit: body.unit }),
-        ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
-        ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
-        ...(unhide && { isAvailable: true, autoHiddenAt: null }),
-        ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null }),
-        ...(body.isPopular !== undefined && { isPopular: body.isPopular }),
-        ...(body.dietaryTags !== undefined && { dietaryTags: body.dietaryTags }),
-        ...(body.allergens !== undefined && { allergens: body.allergens }),
-        ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
-        ...(body.fulfillment !== undefined && { fulfillment: body.fulfillment }),
-        ...(body.bookingConfig !== undefined && { bookingConfig: body.bookingConfig as object }),
-      },
-      include: {
-        category: { select: { id: true, name: true } },
-        optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' } } }, orderBy: { sortOrder: 'asc' } },
-      },
+    const itemInclude = {
+      category: { select: { id: true, name: true } },
+      optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' as const } } }, orderBy: { sortOrder: 'asc' as const } },
+    };
+    // [GUARDRAILS §8 · Opus S3-1] Switched on only if the item AFTER this edit is not banned, judged in the same
+    // transaction: "Spare Rum" + {isAvailable: true} is refused (nothing of the request is written), "Spare Rum"
+    // renamed to "Coconut cake" may come on, and a restock never switches a banned item back on (its count is saved).
+    const item = await app.prisma.$transaction(async (tx) => {
+      const updated = await tx.item.update({
+        where: { id: request.params.id },
+        data: {
+          ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
+          ...(body.name !== undefined && { name: body.name.trim() }),
+          ...(body.description !== undefined && { description: body.description?.trim() }),
+          ...(body.imageUrl !== undefined && { imageUrl: body.imageUrl }),
+          ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
+          ...(body.sku !== undefined && { sku: body.sku }),
+          ...(body.unit !== undefined && { unit: body.unit }),
+          ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
+          ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
+          ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null }),
+          ...(body.isPopular !== undefined && { isPopular: body.isPopular }),
+          ...(body.dietaryTags !== undefined && { dietaryTags: body.dietaryTags }),
+          ...(body.allergens !== undefined && { allergens: body.allergens }),
+          ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
+          ...(body.fulfillment !== undefined && { fulfillment: body.fulfillment }),
+          ...(body.bookingConfig !== undefined && { bookingConfig: body.bookingConfig as object }),
+        },
+        include: itemInclude,
+      });
+      if (body.isAvailable === true) await assertNotBanned(tx, updated.id);
+      if (!unhide) return updated;
+      const banned = (await catalogueChecksFor(tx, [updated.id])).get(updated.id)?.state === 'BANNED';
+      return banned ? updated : tx.item.update({ where: { id: updated.id }, data: { isAvailable: true, autoHiddenAt: null }, include: itemInclude });
     });
 
     // [MKT-2] THE STOCK COUNT, through the single writer.
