@@ -1,7 +1,7 @@
 -- [OWNER #13 · Opus money review S2, 14 Oct 2026] When an account's email last
 -- changed.
 --
--- Solo approval (20261013200000_approval_solo_mode) warns the owner at the
+-- Solo approval (20261014110000_approval_solo_mode) warns the owner at the
 -- account's email, at the request and at the decision. A stolen session must
 -- never be able to point that address elsewhere and then go solo, so:
 -- solo approval stays off for seven days after any email change

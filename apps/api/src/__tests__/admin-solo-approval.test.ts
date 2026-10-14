@@ -685,7 +685,7 @@ describe('[Opus S2] every solo notice also goes by text to the phone on the acco
 
 describe('[Opus S3] the solo rollback guard cannot be blinded by row-level security', () => {
   it('switches row security off for its transaction before it looks for solo requests', () => {
-    const sql = readFileSync(path.join(__dirname, '../../prisma/migrations/20261013200000_approval_solo_mode/rollback.sql'), 'utf8');
+    const sql = readFileSync(path.join(__dirname, '../../prisma/migrations/20261014110000_approval_solo_mode/rollback.sql'), 'utf8');
     const begin = sql.indexOf('BEGIN;');
     const off = sql.indexOf('SET LOCAL row_security = off;');
     expect(begin).toBeGreaterThanOrEqual(0);

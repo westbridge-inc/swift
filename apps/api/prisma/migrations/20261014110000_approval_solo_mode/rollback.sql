@@ -21,5 +21,5 @@ ALTER TABLE "privileged_approvals"
   DROP COLUMN IF EXISTS "soloRequestedAt",
   DROP COLUMN IF EXISTS "soloEligibleAt",
   DROP COLUMN IF EXISTS "decidedSolo";
-DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261013200000_approval_solo_mode';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261014110000_approval_solo_mode';
 COMMIT;
