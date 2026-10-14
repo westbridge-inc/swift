@@ -6,6 +6,10 @@ LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW."riderId" IS DISTINCT FROM OLD."riderId" THEN
     NEW."riderAssignmentVersion" := OLD."riderAssignmentVersion" + 1;
+    -- A courier pickup photo issued to an earlier assignment never proves a
+    -- later one (released and given back included): the rider takes a new one.
+    NEW."courierPickupProofIssuedUrl" := NULL;
+    NEW."courierPickupProofIssuedRiderId" := NULL;
   ELSE
     NEW."riderAssignmentVersion" := OLD."riderAssignmentVersion";
   END IF;
