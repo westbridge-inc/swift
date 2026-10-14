@@ -19,6 +19,9 @@
 #     is the current checkout (the exact revision pilot-up.sh deployed);
 #   - the target database already carries its deployment_identity row;
 #   - SEED_ADMIN_PHONE (E.164) is set in the environment.
+#   - on production, the owner's admin email: typed at the script's hidden
+#     prompt (or SEED_ADMIN_EMAIL exported after `read -rs`); written on the
+#     first SUPER_ADMIN's account (the app's solo approval emails it).
 #
 # [PROD-PATH] PILOT_ENV is staging or production, and the database must say
 # the same thing: a production host seeds only a database whose
@@ -108,6 +111,27 @@ SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 # the ceremony refuses it. The phone value itself is never printed.
 [[ "$SEED_ADMIN_PHONE" != +592600* ]] ||
   die "SEED_ADMIN_PHONE must not start with +592600 — that range is the demo-seed/purge classification, never a real admin"
+# [OWNER EMAIL · Opus money review 14 Oct, S2-L] Solo approval in the apps
+# emails the owner (it refuses an admin with no email), and no shipped client
+# can add an admin email, so the production seed writes it with the first
+# SUPER_ADMIN. Personal data: typed at a hidden prompt (or exported after
+# `read -rs`), never an argument, never printed or logged. The signed request
+# shows it masked and binds its digest, so print and apply must get the same.
+if [ "$PILOT_ENV" = production ]; then
+  if [ -z "${SEED_ADMIN_EMAIL:-}" ] && [ -t 0 ]; then
+    printf "The owner's admin email (typed, not shown): " >&2
+    IFS= read -rs SEED_ADMIN_EMAIL
+    echo >&2
+  fi
+  [ -n "${SEED_ADMIN_EMAIL:-}" ] ||
+    die "the production seed needs the owner's admin email: type it at the prompt, or run read -rs SEED_ADMIN_EMAIL; export SEED_ADMIN_EMAIL first"
+  [[ "$SEED_ADMIN_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@.]+(\.[^[:space:]@.]+)+$ ]] ||
+    die "SEED_ADMIN_EMAIL is not an email address (it is not shown)"
+  export SEED_ADMIN_EMAIL
+else
+  SEED_ADMIN_EMAIL=""
+  export SEED_ADMIN_EMAIL
+fi
 for tool in git docker; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 if [ "$PILOT_ENV" = production ]; then
   [ "$(docker context show 2>/dev/null || true)" = default ] ||

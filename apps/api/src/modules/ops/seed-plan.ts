@@ -155,6 +155,11 @@ export async function buildSeedPlan(prisma: PrismaClient, databaseUrl: string, d
 export interface RequestContext {
   fxGydPerUsd?: number | null;
   adminPhone?: string | null;
+  /** [OWNER EMAIL · Opus money review 14 Oct, S2-L] The owner's email, written on
+   *  the first SUPER_ADMIN's account with the mint when it has none: the app's
+   *  solo approval emails the owner (SOLO_NO_EMAIL without one) and no shipped
+   *  client can add an admin email. Shown masked, bound by its digest. */
+  adminEmail?: string | null;
   /** [SOLO SEED] One pinned person approves, after a 12-hour cooling-off:
    *  only the production seed that mints the first SUPER_ADMIN (approver-signatures.ts). */
   solo?: boolean;
@@ -169,16 +174,24 @@ function shown(v: unknown): string {
 }
 const databaseLine = (t: TargetFingerprint) => `database: ${t.database} on ${t.host}, deployment ${t.deploymentId} (${t.environment})`;
 const phoneTail = (phone: string) => phone.slice(-4);
+/** An address the way people type them; users.email is unique and compared exactly. */
+const EMAIL = /^[^\s@]{1,64}@[^\s@.]+(\.[^\s@.]+)+$/;
+export const validAdminEmail = (email: string) => email.length <= 254 && EMAIL.test(email);
+/** First letter, the domain and a digest: enough to recognise, and the digest binds it. */
+const emailShown = (email: string) => `${email[0]}…@${email.slice(email.indexOf('@') + 1)} (sha256 ${sha256(email).slice(0, 16)})`;
 
 /** The words an approver reads for this plan, in order, every change listed. */
 export function planRequestFacts(plan: SeedPlan, ctx: RequestContext = {}): RequestFacts {
   if (ctx.adminPhone && !E164.test(ctx.adminPhone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
+  if (ctx.adminEmail != null && !validAdminEmail(ctx.adminEmail)) throw new SeedRefused('EMAIL_INVALID', 'the admin email is not an email address');
+  if (ctx.adminEmail && !ctx.adminPhone) throw new SeedRefused('EMAIL_WITHOUT_ADMIN', 'the admin email is written only on the first SUPER_ADMIN the plan mints; set the admin phone too');
   if (ctx.solo && !ctx.adminPhone) throw new SeedRefused('SOLO_NOT_ALLOWED', 'a solo approval covers only the seed that mints the first SUPER_ADMIN; set the admin phone, or use the two-person ceremony');
   const fx = ctx.fxGydPerUsd ?? null;
   const shows = [
     databaseLine(plan.target),
     `config: ${plan.configVersion} (${plan.configDigest.slice(0, 16)}), ${plan.changes.length} change${plan.changes.length === 1 ? '' : 's'}, FX ${fx === null ? 'not set' : `${fx} GYD per USD`}`,
     `admin phone: ${ctx.adminPhone ? `ending ${phoneTail(ctx.adminPhone)} becomes the first SUPER_ADMIN if there is none` : 'none'}`,
+    ...(ctx.adminEmail ? [`admin email: ${emailShown(ctx.adminEmail)} is set on that account if it has no email`] : []),
     ...(ctx.solo ? [SOLO_SHOW_LINE] : []),
     ...plan.changes.map((ch) => {
       const where = ch.table === 'countryConfig' ? `${ch.table} ${ch.key}.${ch.field}` : `${ch.table} ${ch.key}`;
@@ -276,6 +289,25 @@ async function upsertSuperAdmin(tx: Prisma.TransactionClient, phone: string): Pr
 }
 
 /**
+ * [OWNER EMAIL · Opus money review 14 Oct, S2-L] The owner's email on the first
+ * SUPER_ADMIN's account, inside the plan's transaction. Written only where the
+ * account has none; a different address already there is never overwritten,
+ * and an address another account uses is never taken. emailChangedAt is not
+ * written: this is the account's first address, not a change, so solo waits
+ * only its own 12 hours. A refusal rolls the whole seed back: nothing is
+ * written and no approval is spent.
+ */
+async function setFirstAdminEmail(tx: Prisma.TransactionClient, userId: string, email: string): Promise<void> {
+  if (!validAdminEmail(email)) throw new SeedRefused('EMAIL_INVALID', 'the admin email is not an email address');
+  const row = await tx.user.findUnique({ where: { id: userId }, select: { email: true } });
+  if (row?.email === email) return;
+  if (row?.email) throw new SeedRefused('ADMIN_EMAIL_DIFFERS', "the first admin's account already has a different email, and the seed never overwrites one; nothing was written. Check the address with the owner");
+  const taken = await tx.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' }, NOT: { id: userId } }, select: { id: true } });
+  if (taken) throw new SeedRefused('ADMIN_EMAIL_TAKEN', 'another account already uses that email; nothing was written');
+  await tx.user.update({ where: { id: userId }, data: { email } });
+}
+
+/**
  * [PROD-PATH] The first production SUPER_ADMIN, covered by the signed plan:
  * minted in the plan's transaction, after its approvals are consumed, only
  * when every approval names this phone and no SUPER_ADMIN exists yet.
@@ -287,10 +319,12 @@ async function mintSignedFirstAdmin(tx: Prisma.TransactionClient, plan: SeedPlan
   if (verified.some((v) => v.admin !== promotionSubject(phone))) return null;
   if ((await tx.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) > 0) return null;
   const u = await upsertSuperAdmin(tx, phone);
+  const email = opts.request?.adminEmail ?? null;
+  if (email) await setFirstAdminEmail(tx, u.id, email);
   await tx.privilegedChangeAudit.create({ data: {
     action: 'PROMOTE_SUPER_ADMIN', planDigest: sha256(canonical({ target: plan.target.digest, phone, mode: 'signed-plan' })), event: 'APPLIED',
     target: plan.target as unknown as Prisma.InputJsonValue,
-    detail: { mode: 'signed-plan', ...(solo ? { solo: true } : {}), plan: plan.digest, approvers: verified.map((v) => v.approver), userId: u.id } as Prisma.InputJsonValue,
+    detail: { mode: 'signed-plan', ...(solo ? { solo: true } : {}), ...(email ? { emailSet: true } : {}), plan: plan.digest, approvers: verified.map((v) => v.approver), userId: u.id } as Prisma.InputJsonValue,
     actor: opts.actor ?? null,
   } });
   return { userId: u.id };

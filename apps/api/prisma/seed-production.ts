@@ -79,6 +79,8 @@ async function main(): Promise<void> {
   const approvals = parseSignedApprovals(process.env['SEED_PLAN_APPROVALS'], 'SEED_PLAN_APPROVALS');
   const actor = process.env['SEED_ACTOR'] ?? 'seed-production';
   const adminPhone = process.env['SEED_ADMIN_PHONE'] || null;
+  // [OWNER EMAIL] Typed by the owner at seed-production.sh's hidden prompt; never printed.
+  const adminEmail = process.env['SEED_ADMIN_EMAIL']?.trim() || null;
   const solo = soloMode(process.env['SEED_SOLO']);
   try {
     console.warn('Seeding PRODUCTION spine (no demo data)…');
@@ -90,21 +92,21 @@ async function main(): Promise<void> {
         approvals,
         approverKeys,
         actor,
-        request: { adminPhone, solo },
+        request: { adminPhone, adminEmail, solo },
         onPlan: (plan) => { previewed = plan; printPlan(plan); },
         onApplied: (result) => { applied = result; },
       });
     } catch (err) {
       const code = (err as { code?: string }).code;
       if (code === 'APPROVALS_REQUIRED' && previewed && approvals.length === 0) {
-        if (solo) printSoloRequest(planApprovalRequest(previewed as SeedPlan, spineRequestContext(adminPhone, true)));
-        else printRequest('This target is production: two different people must approve this plan.', planApprovalRequest(previewed as SeedPlan, spineRequestContext(adminPhone)));
+        if (solo) printSoloRequest(planApprovalRequest(previewed as SeedPlan, spineRequestContext(adminPhone, true, adminEmail)));
+        else printRequest('This target is production: two different people must approve this plan.', planApprovalRequest(previewed as SeedPlan, spineRequestContext(adminPhone, false, adminEmail)));
         process.exit(2);
       }
       throw err;
     }
     if ((applied as ApplyResult | null)?.firstAdmin) {
-      console.warn(`SUPER_ADMIN minted by the signed plan for the given phone${solo ? ' (solo approval)' : ''}.`);
+      console.warn(`SUPER_ADMIN minted by the signed plan for the given phone${solo ? ' (solo approval)' : ''}.${adminEmail ? " The owner's email is on that account." : ''}`);
     } else if (adminPhone) {
       const promotionApprovals = parseSignedApprovals(process.env['SEED_PROMOTION_APPROVALS'], 'SEED_PROMOTION_APPROVALS');
       try {

@@ -43,6 +43,8 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/POSTGRES_PASSWORD
       # The first SUPER_ADMIN (E.164). Required by seed-production.sh.
       SEED_ADMIN_PHONE: ${SEED_ADMIN_PHONE:-}
+      # The owner's admin email (production; seed-production.sh's hidden prompt).
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
       SEED_ACTOR: ${SEED_ACTOR:-seed-production}
       # The two-person ceremony (runbook §6b, §12): the approvers' pinned
       # public keys arrive as a FILE from the encrypted store; the signed

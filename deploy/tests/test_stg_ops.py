@@ -295,6 +295,7 @@ class StgDWorkerProbe(unittest.TestCase):
 
 class SeedProductionScript(unittest.TestCase):
     SHA = "a" * 40
+    OWNER_EMAIL = "owner.seed@example.invalid"
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swift-seed-test-"))
@@ -321,6 +322,8 @@ class SeedProductionScript(unittest.TestCase):
             "CALL_LOG": str(self.log),
             "GIT_HEAD": self.SHA,
             "IDENTITY": "1",
+            # The production seed's owner email (typed at its hidden prompt on a terminal).
+            "SEED_ADMIN_EMAIL": self.OWNER_EMAIL,
         })
         env.update(extra)
         return subprocess.run(
@@ -445,7 +448,7 @@ class SeedSoloCeremony(SeedBreakGlassCeremony):
 
     def production(self):
         (self.deploy / ".env").write_text("PILOT_ENV=production\nNODE_ENV=production\n")
-        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in "context show") echo default;; *"exec -T postgres"*) echo "1:production"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV solo=[$SEED_SOLO] plan=[$SEED_PLAN_APPROVALS]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in "context show") echo default;; *"exec -T postgres"*) echo "1:production"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV solo=[$SEED_SOLO] plan=[$SEED_PLAN_APPROVALS] email=[$SEED_ADMIN_EMAIL]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
 
     def test_solo_reaches_the_seed_container_on_production(self):
         self.production()
@@ -474,6 +477,80 @@ class SeedSoloCeremony(SeedBreakGlassCeremony):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("SEED_SOLO must be exactly 1", result.stderr)
                 self.assertNotIn("run --rm", self.log.read_text())
+
+    # [OWNER EMAIL] Opus money review 14 Oct, S2-L: the app's solo approval
+    # emails the owner and no shipped client can add an admin email, so the
+    # production seed takes it (personal data: a hidden prompt, never an
+    # argument, never printed) and hands it to the seed through the environment.
+    def test_production_hands_the_owner_email_to_the_seed_and_never_prints_it(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text()
+        self.assertIn(f"email=[{self.OWNER_EMAIL}]", calls)   # the container's environment
+        argv = "\n".join(l for l in calls.splitlines() if l.startswith("docker "))
+        self.assertNotIn(self.OWNER_EMAIL, argv)                # never on a command line
+        self.assertNotIn(self.OWNER_EMAIL, result.stdout + result.stderr)
+
+    def test_production_without_the_owner_email_refuses_before_anything_runs(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the production seed needs the owner's admin email", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_a_value_that_is_not_an_email_is_refused_and_not_shown(self):
+        self.production()
+        for bad in ("owner", "owner@example", "own er@example.invalid", "@example.invalid"):
+            with self.subTest(bad=bad):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_ADMIN_EMAIL is not an email address (it is not shown)", result.stderr)
+                self.assertNotIn(bad, result.stdout + result.stderr)
+                self.assertNotIn("docker", self.log.read_text())
+
+    def test_on_a_terminal_the_email_is_typed_at_a_hidden_prompt(self):
+        import pty
+        self.production()
+        import threading
+        main, sub = pty.openpty()
+        self.addCleanup(os.close, main)
+        # `read -s` resets the terminal and may drop input typed before it, so
+        # the "owner" keeps typing the line until the script has finished.
+        done = threading.Event()
+        def type_it():
+            while not done.wait(0.3):
+                try:
+                    os.write(main, f"{self.OWNER_EMAIL}\n".encode())
+                except OSError:
+                    return
+        typist = threading.Thread(target=type_it, daemon=True)
+        typist.start()
+        self.addCleanup(done.set)
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
+                    "SEED_ADMIN_PHONE": "+5920400001", "SEED_FX_GYD_PER_USD": "209"})
+        env.pop("SEED_ADMIN_EMAIL", None)
+        try:
+            result = subprocess.run(["bash", str(self.deploy / "seed-production.sh"), self.SHA], env=env, stdin=sub,
+                                    text=True, capture_output=True, timeout=20)
+        finally:
+            os.close(sub)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("The owner's admin email (typed, not shown): ", result.stderr)
+        self.assertIn(f"email=[{self.OWNER_EMAIL}]", self.log.read_text())
+        self.assertNotIn(self.OWNER_EMAIL, result.stdout + result.stderr)
+
+    def test_staging_never_asks_and_hands_the_seed_no_email(self):
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) echo "1:staging";; *"run --rm --no-TTY seed"*) echo "ENV email=[$SEED_ADMIN_EMAIL]" >> "$CALL_LOG";; esac\nexit 0')
+        result = self.run_script(SEED_ADMIN_PHONE="+5925559001")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("admin email", result.stderr)
+        self.assertIn("ENV email=[]", self.log.read_text())
+
+    def test_the_compose_override_passes_the_owner_email_with_an_empty_default(self):
+        self.assertIn("SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
 
     def test_the_compose_override_passes_solo_with_an_empty_default(self):
         self.assertIn("SEED_SOLO: ${SEED_SOLO:-}", (DEPLOY / "docker-compose.seed.yml").read_text())

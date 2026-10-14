@@ -68,7 +68,7 @@ export interface RequestFacts { change: ApprovalKind; target: string; subject: s
 export interface ApprovalRequest extends RequestFacts { issued: string; expires: string; nonce: string }
 /** Each line an approver reads names its fact; nothing else may be signed,
  *  and no control character (one could hide a line on a terminal). */
-const SHOW_LINE = /^(database|config|admin phone|approval|change|promote): \P{Cc}+$/u;
+const SHOW_LINE = /^(database|config|admin phone|admin email|approval|change|promote): \P{Cc}+$/u;
 
 export interface PinnedApprover { name: string; keyBlob: Buffer; fingerprint: string }
 

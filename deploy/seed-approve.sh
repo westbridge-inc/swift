@@ -51,7 +51,7 @@ esac
 {
   echo "You are about to approve, as $NAME, this ${KIND} change:"
   echo
-  printf '%s\n' "$REQUEST" | grep -E '^(database|config|admin phone|approval|promote): ' | sed 's/^/    /'
+  printf '%s\n' "$REQUEST" | grep -E '^(database|config|admin phone|admin email|approval|promote): ' | sed 's/^/    /'
   if [ "$KIND" = plan ]; then
     echo "    changes:"
     printf '%s\n' "$REQUEST" | grep '^change: ' | sed 's/^change: /      /' || echo "      (none: the database already matches; your approval is still used up)"
