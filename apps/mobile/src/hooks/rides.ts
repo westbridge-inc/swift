@@ -142,10 +142,15 @@ export function useJoinQueue() {
       dropoffAddress: string;
       passengerCount?: number;
       rideClass?: RideClass;
+      expectedFare?: number;
     }) => unwrap<QueueStatus>(rideApi.queueJoin(data)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['rides', 'queue'] });
       track('ride_queue_joined', {});
+    },
+    // [PRICE-LOCK] The fare moved since the quote: fetch the new one to show.
+    onError: (error) => {
+      if (errorCodeOf(error) === 'FARE_CHANGED') void qc.invalidateQueries({ queryKey: ['rides', 'estimate'] });
     },
   });
 }

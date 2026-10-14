@@ -811,7 +811,9 @@ function TaxiBooking({ navigation }: any) {
                   // with stops is not silently queued without them.
                   if (payload && stops.length === 0) {
                     if (!pickupOverride && pickup) setPickupOverride(pickup);
-                    joinQueue.mutate(payload);
+                    // [PRICE-LOCK] The fare on screen travels with the join:
+                    // the queue books the ride only at it.
+                    joinQueue.mutate(selectedTier ? { ...payload, expectedFare: selectedTier.fare } : payload);
                   }
                 }}
               />
