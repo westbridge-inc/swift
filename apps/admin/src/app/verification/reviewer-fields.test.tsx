@@ -19,7 +19,7 @@ function fixture(docType: string, reviewerTypes: string[]) {
 }
 
 describe('reviewer fields required by the approval route', () => {
-  it.each(['national_id', 'owner_national_id', 'passport', 'identity_l2', 'drivers_licence'])('%s sends the number the reviewer read', async (docType) => {
+  it.each(['national_id', 'owner_national_id', 'passport', 'drivers_licence'])('%s sends the number the reviewer read', async (docType) => {
     const fetch = fixture(docType, ['documentNumber']);
     const { user } = renderWithQuery(<VerificationPage />);
     await user.click(await screen.findByRole('button', { name: 'Review' }));
@@ -34,6 +34,22 @@ describe('reviewer fields required by the approval route', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Confirm approval' }));
     await waitFor(() => expect(requestsByMethod(fetch, 'PUT')).toHaveLength(1));
     expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toMatchObject({ documentNumber: 'SYNTH-1234' });
+  });
+
+  // [Rule 11 Oct 2026: no ID-number duplicate check at launch] The server asks nothing typed for a customer's ID.
+  it('a customer ID (nothing asked by the server) shows no number field and sends no number', async () => {
+    const fetch = fixture('identity_l2', []);
+    const { user } = renderWithQuery(<VerificationPage />);
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(screen.getByRole('button', { name: 'View document' }));
+    fireEvent.load(await screen.findByRole('img'));
+    expect(screen.queryByLabelText('Document number')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    const dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByLabelText('Decision note'), 'Synthetic evidence checked');
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm approval' }));
+    await waitFor(() => expect(requestsByMethod(fetch, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body ?? '{}'))).not.toHaveProperty('documentNumber');
   });
 
   it('police clearance asks for its issue date rather than an invented expiry', async () => {
