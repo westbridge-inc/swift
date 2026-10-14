@@ -173,7 +173,8 @@ describe('[V3] the grant is explicit-only: `*`, a wildcard or a role default nev
     const doors = ['GET /verification/:id/document-url', 'PUT /verification/:id/approve', 'PUT /verification/:id/reject', 'PUT /verification/:id/revoke'];
     for (const door of doors) expect((authority.ADMIN_ROUTE_AUTHORITY[door] as { requires?: string } | undefined)?.requires, door).toBe(GRANT);
     const others = Object.entries(authority.ADMIN_ROUTE_AUTHORITY).filter(([k, a]) => !doors.includes(k) && (a as { requires?: string }).requires);
-    expect(others.map(([k]) => k)).toEqual([]);
+    // [GUARDRAILS §8 · Opus S3-9] The one other explicit-only door: showing a held catalogue item, under its OWN grant.
+    expect(others.map(([k, a]) => [k, (a as { requires?: string }).requires])).toEqual([['POST /catalogue-review/:id/approve', 'catalogue.approve']]);
     expect(authority.decideCapability({ role: 'SUPER_ADMIN', permissions: ['*'] }, 'GET', '/verification/:id/document-url').allowed).toBe(false);
     expect(authority.decideCapability({ role: 'SUPER_ADMIN', permissions: ['*', GRANT] }, 'GET', '/verification/:id/document-url').allowed).toBe(true);
   });

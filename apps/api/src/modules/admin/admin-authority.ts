@@ -151,15 +151,24 @@ const c = (cls: AdminActionClass, capability: string, entity?: AdminRouteEntity)
  */
 export const DOCUMENT_REVIEWER_CAPABILITY = 'documents.review';
 
+/**
+ * [GUARDRAILS §8 · Opus S3-9] THE CATALOGUE APPROVER GRANT. Approving an item a
+ * banned word is holding shows it to customers — a criminal-liability decision
+ * when the word was right — so it needs this exact grant, never `*` or a role
+ * default. See catalogue-approver.ts.
+ */
+export const CATALOGUE_APPROVER_CAPABILITY = 'catalogue.approve';
+
 /** Capabilities that `*`, a prefix wildcard and a role default never confer. */
-export const EXPLICIT_ONLY_CAPABILITIES: readonly string[] = [DOCUMENT_REVIEWER_CAPABILITY];
+export const EXPLICIT_ONLY_CAPABILITIES: readonly string[] = [DOCUMENT_REVIEWER_CAPABILITY, CATALOGUE_APPROVER_CAPABILITY];
 
 export function isExplicitOnly(capability: string): boolean {
   return EXPLICIT_ONLY_CAPABILITIES.includes(capability);
 }
 
-/** A route that opens or decides a document: its capability AND the reviewer grant. */
-const reviewed = (authority: AdminRouteAuthority): AdminRouteAuthority => ({ ...authority, requires: DOCUMENT_REVIEWER_CAPABILITY });
+/** A route that opens or decides a document: its capability AND the reviewer grant. [GUARDRAILS §8 · Opus S3-9]
+ *  The same wrapper names the catalogue approver grant on the one route that shows a held item. */
+const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIEWER_CAPABILITY): AdminRouteAuthority => ({ ...authority, requires: grant });
 
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
@@ -305,7 +314,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // an item for the exact words seen; removing bans it for good. Both touch a
   // partner's livelihood, so a reason is owed (C3).
   'GET /catalogue-review': c('C1', 'moderation.read'),
-  'POST /catalogue-review/:id/approve': c('C3', 'moderation.decide', E.item),
+  'POST /catalogue-review/:id/approve': reviewed(c('C3', 'moderation.decide', E.item), CATALOGUE_APPROVER_CAPABILITY),
   'POST /catalogue-review/:id/remove': c('C3', 'moderation.decide', E.item),
 
   // ── National pricing (founder + default tenant) ─────────────────────────
@@ -504,6 +513,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // SUPER_ADMIN only (founderGuard on the route). The list names staff only.
   'GET /staff/document-reviewers': c('C1', 'staff.read'),
   'PUT /staff/:userId/document-reviewer': c('C3', 'staff.reviewer.grant', E.adminGrant),
+  // [GUARDRAILS §8 · Opus S3-9] Granting the catalogue approver: the same founder door, reason and record.
+  'PUT /staff/:userId/catalogue-approver': c('C3', 'staff.reviewer.grant', E.adminGrant),
 
   // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),
