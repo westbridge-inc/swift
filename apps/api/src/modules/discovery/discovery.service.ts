@@ -3,6 +3,8 @@ import { Prisma } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CAT_MAX_ITEM_TAGS, suggestCategories, type MatchableCategory } from './matcher';
 import { reconcileVendorDerived } from './derivation';
+import { assertCategoryAllowed } from '../compliance/prohibited-gate';
+import { classifyCategory } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Discovery service (#17) — vendor picks, item tags, suggestions, requests.
@@ -27,10 +29,12 @@ export class DiscoveryService {
 
   /** ACTIVE taxonomy for a tenant (matcher shape included). */
   async taxonomy(tenantId = 'swift-default') {
-    return this.prisma.discoveryCategory.findMany({
+    const categories = await this.prisma.discoveryCategory.findMany({
       where: { tenantId, status: 'ACTIVE' },
       orderBy: [{ vertical: 'asc' }, { sortWeight: 'asc' }],
     });
+    // [GUARDRAILS §8] A banned category is never suggested to a partner.
+    return categories.filter((c) => classifyCategory(c) === null);
   }
 
   private async requireActiveCategory(slug: string, tenantId = 'swift-default') {
@@ -76,6 +80,8 @@ export class DiscoveryService {
     const primary = await this.requireActiveCategory(primarySlug, tenantId);
     const secondaries: Array<Awaited<ReturnType<DiscoveryService['requireActiveCategory']>>> = [];
     for (const slug of secondarySlugs) secondaries.push(await this.requireActiveCategory(slug, tenantId));
+    // [GUARDRAILS §8] A store is never filed under a banned category.
+    for (const category of [primary, ...secondaries]) assertCategoryAllowed(category, 'store');
 
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -106,6 +112,8 @@ export class DiscoveryService {
 
   async addItemTag(itemId: string, slug: string, source: 'VENDOR' | 'ADMIN', tenantId = 'swift-default') {
     const category = await this.requireActiveCategory(slug, tenantId);
+    // [GUARDRAILS §8] Banned goods first: no licence makes them listable, ever.
+    assertCategoryAllowed(category);
     // [DOC-1 §18.3] Documents control what can be sold: a gated category needs the
     // vendor's licence VALID before the tag lands — a human tag by an admin too.
     const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { vendorId: true } });
@@ -242,6 +250,9 @@ export class DiscoveryService {
       });
       return;
     }
+    // [GUARDRAILS §8] Accepting is tagging: the same refusal as addItemTag.
+    const suggested = await this.prisma.discoveryCategory.findUnique({ where: { id: suggestion.categoryId }, select: { slug: true, name: true } });
+    if (suggested) assertCategoryAllowed(suggested);
     await this.prisma.$transaction(async (tx) => {
       const count = await tx.itemDiscoveryCategory.count({ where: { itemId } });
       if (count >= CAT_MAX_ITEM_TAGS) {
