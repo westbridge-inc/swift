@@ -49,6 +49,7 @@ import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { searchTiers } from '../search/forgiving-text';
+import { launchMarketWhere } from '../auth/launch-market';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
@@ -1398,13 +1399,19 @@ export async function customerRoutes(app: FastifyInstance) {
       // (search/forgiving-text.ts), strictest first: the page uses the first
       // tier that finds anything, so a correctly typed name never shares its
       // page with slip matches, and the total and pages stay one tier's.
+      //
+      // [Review S3-PRE] A search keeps to the launch market, the rule #1563 put
+      // on every /search rail: a store pinned outside it is never found. It is
+      // part of the query (the market is a box), so the tier chosen, the page
+      // and the total all respect it.
+      where['AND'] = [launchMarketWhere()];
       const tiers = searchTiers(search, BROWSE_SEARCH_COLUMNS);
       let chosen: Record<string, unknown> = { id: { in: [] } }; // no searchable word: nothing matches
       for (const { where: tierWhere } of tiers) {
         chosen = tierWhere;
         if (await app.prisma.vendor.count({ where: { AND: [where, tierWhere] } }) > 0) break;
       }
-      where['AND'] = [chosen];
+      where['AND'] = [launchMarketWhere(), chosen];
     }
 
     const orderBy: Record<string, string>[] = [];
