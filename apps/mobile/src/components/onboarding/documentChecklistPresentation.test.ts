@@ -59,3 +59,10 @@ describe('[VERIFY-DOCS] optional documents follow the server', () => {
     for (const t of ['police_clearance', 'national_id', 'anything']) expect(optionalDocHint(t)).not.toMatch(/required|must/i);
   });
 });
+
+describe('[TRADES · 13 Oct 2026] what a service provider may add, in their words', () => {
+  it('says when the shop certificate and the drone authorisation apply', () => {
+    expect(optionalDocHint('town_clerk_shop_certificate')).toBe('Add it if you work from your own shop. The shop needs this certificate each year.');
+    expect(optionalDocHint('drone_authorisation')).toBe('Needed before you offer drone or aerial work.');
+  });
+});

@@ -47,5 +47,8 @@ export function optionalDocHint(docType: string): string {
   // [VERIFY-DOCS] Say what really happens: no screen shows a Police-cleared badge yet, so promise none.
   if (docType === 'police_clearance') return 'Optional. If Swift approves a current one, your account is recorded as police-cleared.';
   if (docType === 'national_id') return 'Optional. Your driver’s licence already proves who you are.';
+  // [TRADES · 13 Oct 2026] documents a service provider may add for their trade
+  if (docType === 'town_clerk_shop_certificate') return 'Add it if you work from your own shop. The shop needs this certificate each year.';
+  if (docType === 'drone_authorisation') return 'Needed before you offer drone or aerial work.';
   return 'Optional. Not needed to start working.';
 }

@@ -41,3 +41,19 @@ describe('[owner ruling 2026-10-01] the exterior photo asks for the plate, never
     }
   });
 });
+
+describe('[TRADES · 13 Oct 2026] service-trade documents read in plain words, never as a raw code', () => {
+  it.each([
+    ['pest_control_operator_licence', /Pest-Control Operator Licence/],
+    ['pesticide_applicator_certificate', /Applicator Certificate/],
+    ['chartered_accountant_practising_certificate', /ICAG/],
+    ['gra_practice_certificate', /GRA Practice Certificate/],
+    ['eating_house_registration', /Eating-House Registration/],
+    ['town_clerk_registration', /Town Clerk Registration/],
+    ['town_clerk_shop_certificate', /Town Clerk Shop Certificate/],
+    ['drone_authorisation', /GCAA Drone Authorisation/],
+    ['gei_electrical_licence', /GEI Electrical Licence/],
+  ])('%s', (docType, label) => {
+    expect(docLabels()[docType]).toMatch(label);
+  });
+});
