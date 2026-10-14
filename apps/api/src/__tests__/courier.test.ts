@@ -142,6 +142,51 @@ describe('Courier — quote', () => {
   });
 });
 
+// [PRICE-LOCK · owner: "the price shown is the price charged"] The courier
+// job is re-quoted at /order and the server's fee is stored. When the app sends
+// the fee it showed (expectedFee), the job is created only at that fee; a fee
+// that moved since the quote is refused with the fee now and nothing written.
+// An app from before the lock sends none and books exactly as before.
+describe('Courier — the fee shown is the fee charged', () => {
+  async function quotedFee(token: string) {
+    const res = await inject('POST', '/api/v1/courier/estimate', {
+      pickup: ORDER_BODY.pickup, dropoff: ORDER_BODY.dropoff, packageSize: ORDER_BODY.packageSize, speed: ORDER_BODY.speed,
+    }, token);
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().data.totalFee as number;
+  }
+  const ordersOf = (userId: string) => app.prisma.order.count({ where: { customerId: userId } });
+
+  it('the shown fee matches: created at it — the answer, the stored fee and the total are that number', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const fee = await quotedFee(sender.token);
+    const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, expectedFee: fee }, sender.token);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data.fee).toBe(fee);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: res.json().data.orderId } });
+    expect([Number(order.deliveryFee), Number(order.totalAmount)]).toEqual([fee, fee]);
+  });
+
+  it('the shown fee differs: 409 PRICE_CHANGED naming the fee now, and nothing is written', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const fee = await quotedFee(sender.token);
+    for (const expectedFee of [fee - 100, fee + 1, 0]) {
+      const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, expectedFee }, sender.token);
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toMatchObject({ code: 'PRICE_CHANGED', details: { expectedFee, fee, currencyCode: 'GYD' } });
+    }
+    expect(await ordersOf(sender.userId)).toBe(0);
+  });
+
+  it('an app from before the lock sends no fee: created as today, at the server fee', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const fee = await quotedFee(sender.token);
+    const res = await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data.fee).toBe(fee);
+  });
+});
+
 describe('Courier — create, track, deliver', () => {
   it('creates a courier job (pickup != dropoff) and returns a tracking link', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
