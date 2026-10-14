@@ -1074,6 +1074,16 @@ export class OrderService {
       });
       let distanceKm = plan.distanceKm;
       let distanceSource: RouteSource | null = plan.distanceSource;
+      // [owner #18] Road routing was down, so this delivery was priced from
+      // the straight-line estimate (never below the base fee). Orders keep
+      // flowing; this line, the frozen `billableKmSource` and the routing
+      // fallback counter (and its alarm) say it happened.
+      if (fulfillment === 'DELIVERY' && plan.distanceSource === 'haversine' && (process.env['MAPS_PROVIDER'] ?? 'haversine') !== 'haversine') {
+        log().warn({
+          vendorId: vendor.id, km: plan.distanceKm, source: plan.distanceSource,
+          deliveryFee: plan.standardDeliveryFee, baseFee: deliveryRates.baseFee,
+        }, 'delivery:fee-fallback');
+      }
       if (fulfillment === 'DELIVERY' && distanceKm > vendor.deliveryRadius) {
         throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
       }
