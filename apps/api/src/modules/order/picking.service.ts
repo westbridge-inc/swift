@@ -368,6 +368,11 @@ export class PickingService {
       if (!fresh || fresh.subStatus !== 'PENDING') {
         throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
       }
+      // [GUARDRAILS §8 · DS1106 S2] The substitute is judged again at the customer's yes, under the
+      // order lock: a person may have removed it, or its words changed, since the store proposed it.
+      if (fresh.substituteItemId && (await hiddenAmong(tx, [fresh.substituteItemId])).size > 0) {
+        throw new AppError(409, 'SUBSTITUTE_UNAVAILABLE', 'That substitute isn\'t available on Swift');
+      }
 
       const substitutePrice = Number(fresh.substitutePrice ?? 0);
       const newLineTotal = substitutePrice * fresh.quantity;

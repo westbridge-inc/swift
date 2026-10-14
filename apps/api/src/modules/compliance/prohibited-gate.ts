@@ -235,8 +235,16 @@ export function movesTowardCustomer(source: OrderStatus, target: OrderStatus): b
  *     paused, nothing about the goods (409 JOB_UNAVAILABLE).
  */
 export async function assertOrderMayProceed(db: Db, orderId: string, audience: 'store' | 'mover'): Promise<void> {
-  const lines = await db.orderItem.findMany({ where: { orderId }, select: { itemId: true, name: true } });
-  if (lines.length === 0) return;
+  // A line the store refunded, or a substitution the customer rejected, is no longer on the order. [DS1106 S3]
+  const rows = await db.orderItem.findMany({
+    where: { orderId, subStatus: { notIn: ['REFUNDED', 'REJECTED'] } },
+    select: { itemId: true, name: true, subStatus: true, substituteItemId: true, substituteName: true },
+  });
+  if (rows.length === 0) return;
+  // The goods on a line: the substitute once the customer approved it, the ordered item otherwise. [DS1106 S2]
+  const lines = rows.map((r) => (r.subStatus === 'APPROVED' && r.substituteItemId
+    ? { itemId: r.substituteItemId, name: r.substituteName ?? r.name }
+    : { itemId: r.itemId, name: r.name }));
   const checks = await catalogueChecksFor(db, lines.map((l) => l.itemId));
   for (const line of lines) {
     const live = checks.get(line.itemId);
@@ -251,6 +259,13 @@ export async function assertOrderMayProceed(db: Db, orderId: string, audience: '
       : `This order can't go ahead: ${line.name} isn't allowed on Swift. Reject the order, or ask Swift support to cancel it — the customer is told.`;
     throw new AppError(409, 'PROHIBITED_ITEM', message, { itemId: line.itemId, reason: 'PROHIBITED' });
   }
+}
+
+/** Who reads a refusal at the canonical seam: a move INTO a mover's state (heading to the store,
+ *  arriving, collecting) is the rider's own tap and reads the rider's words. [DS1106 S4] */
+export function refusalAudience(target: OrderStatus): 'store' | 'mover' {
+  const custody = custodyOf(target);
+  return custody === 'ASSIGNED_NOT_HOLDING' || custody === 'MOVER_HOLDING' ? 'mover' : 'store';
 }
 
 /** What a partner reads about one of their items: null when there is nothing to say. */

@@ -563,6 +563,13 @@ describe('[§8] an order already placed with a line Swift no longer allows never
     return o;
   };
   const statusOf = async (id: string) => (await app.prisma.order.findUniqueOrThrow({ where: { id } })).status;
+  const rider = async () => {
+    const user = await userWithSession(['RIDER'], 'RIDER');
+    const session = await app.prisma.session.findFirstOrThrow({ where: { userId: user.id } });
+    const row = await app.prisma.rider.create({ data: { userId: user.id, isOnline: true, isAvailable: true, documentsVerified: true, locationSessionId: session.id,
+      currentLat: 6.801, currentLng: -58.156, lastLocationUpdate: new Date(), riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', floatLimit: 100_000 } });
+    return { userId: user.id, riderId: row.id };
+  };
 
   it('which moves are held back: only those taking the goods toward the customer while they are still at the store', () => {
     for (const [from, to] of [['PENDING', 'ACCEPTED'], ['ACCEPTED', 'PREPARING'], ['PREPARING', 'READY_FOR_PICKUP'], ['READY_FOR_PICKUP', 'RIDER_ASSIGNED'],
@@ -621,13 +628,6 @@ describe('[§8] an order already placed with a line Swift no longer allows never
     const redis = new Proxy({}, { get: () => vi.fn(async () => null) });
     const io = { to: () => ({ emit: vi.fn() }), emit: vi.fn() };
     const dispatch = new DispatchService(app.prisma, redis as never, io as never, new HaversineMapsProvider());
-    const rider = async () => {
-      const user = await userWithSession(['RIDER'], 'RIDER');
-      const session = await app.prisma.session.findFirstOrThrow({ where: { userId: user.id } });
-      const row = await app.prisma.rider.create({ data: { userId: user.id, isOnline: true, isAvailable: true, documentsVerified: true, locationSessionId: session.id,
-        currentLat: 6.801, currentLng: -58.156, lastLocationUpdate: new Date(), riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', floatLimit: 100_000 } });
-      return { userId: user.id, riderId: row.id };
-    };
     const offerRider = await rider();
     const boardRider = await rider();
     const board = (orderId: string, r: { userId: string; riderId: string }) => app.prisma.$transaction(async (tx) => {
@@ -645,5 +645,67 @@ describe('[§8] an order already placed with a line Swift no longer allows never
     const ordinaryBoard = await placed('READY_FOR_PICKUP', [control], 'DELIVERY');
     await board(ordinaryBoard.id, boardRider);
     expect(await app.prisma.order.findUniqueOrThrow({ where: { id: ordinaryBoard.id } })).toMatchObject({ status: 'RIDER_ASSIGNED', riderId: boardRider.riderId });
+  });
+
+  // [DS1106 S2] The goods on a line are the substitute once the customer approved it.
+  it('a substitute is judged again when the customer approves it, and an approved substitute is what the order carries', async () => {
+    const clean = await item({ name: `Plain Bread ${RUN}` });
+    const pending = async (substitute: { id: string; name: string }) => {
+      const o = await placed('ACCEPTED', [control]);
+      const line = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: o.id } });
+      await app.prisma.orderItem.update({ where: { id: line.id }, data: { subStatus: 'PENDING', substituteItemId: substitute.id, substituteName: substitute.name, substitutePrice: 1500 } });
+      return { orderId: o.id, lineId: line.id };
+    };
+    // Proposed while it was clean; a person removed it before the customer said yes.
+    const removedSince = await pending(legacy.removed);
+    await expect(runWithTenant(TENANT, () => picking.decideSubstitution(removedSince.orderId, removedSince.lineId, customer.id, true)))
+      .rejects.toMatchObject({ code: 'SUBSTITUTE_UNAVAILABLE', message: 'That substitute isn\'t available on Swift' });
+    expect((await app.prisma.orderItem.findUniqueOrThrow({ where: { id: removedSince.lineId } })).subStatus).toBe('PENDING');
+    const ok = await pending({ id: clean.id, name: clean.name });
+    await runWithTenant(TENANT, () => picking.decideSubstitution(ok.orderId, ok.lineId, customer.id, true));
+    expect((await app.prisma.orderItem.findUniqueOrThrow({ where: { id: ok.lineId } })).subStatus).toBe('APPROVED');
+    expect((await inject('PUT', `/api/v1/vendor/orders/${ok.orderId}/preparing`, vendor.token, {})).statusCode).toBe(200);
+    // A clean substitute for an approved word: the line reads "Plain Bread (sub for … Rum …)", and the goods are the bread.
+    const forRum = await placed('ACCEPTED', [legacy.rum]);
+    const rumLine = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: forRum.id } });
+    await app.prisma.orderItem.update({ where: { id: rumLine.id }, data: { subStatus: 'PENDING', substituteItemId: clean.id, substituteName: clean.name, substitutePrice: 1500 } });
+    await runWithTenant(TENANT, () => picking.decideSubstitution(forRum.id, rumLine.id, customer.id, true));
+    expect((await app.prisma.orderItem.findUniqueOrThrow({ where: { id: rumLine.id } })).name).toContain('sub for');
+    expect((await inject('PUT', `/api/v1/vendor/orders/${forRum.id}/preparing`, vendor.token, {})).statusCode).toBe(200);
+
+    // An order already carrying an approved substitute that is now banned does not move — even when the
+    // original it replaced is an approved word (whose name the line still carries).
+    for (const original of [control, legacy.rum]) {
+      const o = await placed('ACCEPTED', [original]);
+      const line = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: o.id } });
+      await app.prisma.orderItem.update({ where: { id: line.id }, data: {
+        subStatus: 'APPROVED', substituteItemId: legacy.removed.id, substituteName: legacy.removed.name, substitutePrice: 1500,
+        name: `${legacy.removed.name} (sub for ${original.name})`,
+      } });
+      const res = await inject('PUT', `/api/v1/vendor/orders/${o.id}/preparing`, vendor.token, {});
+      expect(res.statusCode, original.name).toBe(409);
+      expect(res.json().error).toMatchObject({ code: 'PROHIBITED_ITEM', details: { itemId: legacy.removed.id } });
+    }
+  });
+
+  // [DS1106 S3] A line the store refunded, or a substitution the customer rejected, is no longer on the order.
+  it('a refunded or rejected line no longer holds the order back', async () => {
+    for (const subStatus of ['REFUNDED', 'REJECTED'] as const) {
+      const o = await placed('ACCEPTED', [control, legacy.removed]);
+      await app.prisma.orderItem.updateMany({ where: { orderId: o.id, itemId: legacy.removed.id }, data: { subStatus } });
+      expect((await inject('PUT', `/api/v1/vendor/orders/${o.id}/preparing`, vendor.token, {})).statusCode, subStatus).toBe(200);
+    }
+    const still = await placed('ACCEPTED', [control, legacy.removed]);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${still.id}/preparing`, vendor.token, {})).statusCode).toBe(409);
+  });
+
+  // [DS1106 S4] A rider's own legs read the rider's words, never the goods or the store's instructions.
+  it('a rider leg on an order already assigned is refused in the rider\'s words', async () => {
+    const r = await rider();
+    const o = await placed('READY_FOR_PICKUP', [control, legacy.removed], 'DELIVERY');
+    await app.prisma.order.update({ where: { id: o.id }, data: { status: 'RIDER_ASSIGNED', riderId: r.riderId } });
+    await expect(orders.updateStatus(o.id, 'RIDER_EN_ROUTE_PICKUP', r.userId, 'Rider heading to the store'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'JOB_UNAVAILABLE', message: 'This job isn\'t available — Swift has paused it. Take another job.' });
+    expect(await statusOf(o.id)).toBe('RIDER_ASSIGNED');
   });
 });
