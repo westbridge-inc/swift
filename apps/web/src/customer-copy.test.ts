@@ -32,24 +32,25 @@ describe('customer words', () => {
   // [owner #67] The one sentence that names the goods only to refuse them, beside the parcel tick. It is exempt only
   // as the WHOLE text of an element (">…<"), exactly as written: a sentence that goes on ("…, but our partners
   // deliver beer"), is negated or quoted, or differs by a word is checked like any other line.
-  const REFUSALS = ['Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.'];
+  const REFUSAL = 'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.';
+  const REFUSALS: readonly string[] = [REFUSAL];
   /** The lines of a page's source that name the goods, after removing only exact, whole-element refusals. */
   const promisingLines = (text: string): string[] => withoutComments(text).split('\n')
     .filter((line) => banned.test(REFUSALS.reduce((rest, sentence) => rest.split(`>${sentence}<`).join('><'), line)));
 
   it('a refusal is exempt only as the exact, whole sentence; a promise is still caught', () => {
-    const refusal = `<span id="x">${REFUSALS[0]}</span>`;
+    const refusal = `<span id="x">${REFUSAL}</span>`;
     expect(promisingLines(refusal)).toEqual([]);
     for (const promise of [
       '<p>Markets & pharmacies</p>',
       '<p>Cold beer and wine delivered</p>',
       '<p>Swift never sells alcohol, but our partners deliver beer</p>',
-      `<span>${REFUSALS[0]} Cold beer delivered.</span>`,
-      `<span>${REFUSALS[0].replace('.', ', but partners deliver beer.')}</span>`,
-      `<span>It is not true that ${REFUSALS[0]}</span>`,
-      `<span>"${REFUSALS[0]}"</span>`,
-      `<span>${REFUSALS[0].replace('never', 'now')}</span>`,
-      `<span>${REFUSALS[0].replace('alcohol, ', '')}</span>`,
+      `<span>${REFUSAL} Cold beer delivered.</span>`,
+      `<span>${REFUSAL.replace('.', ', but partners deliver beer.')}</span>`,
+      `<span>It is not true that ${REFUSAL}</span>`,
+      `<span>"${REFUSAL}"</span>`,
+      `<span>${REFUSAL.replace('never', 'now')}</span>`,
+      `<span>${REFUSAL.replace('alcohol, ', '')}</span>`,
     ]) expect(promisingLines(promise), promise).toEqual([promise]);
     // The refusal on a page that promises the goods elsewhere: the promise is still found.
     expect(promisingLines(`${refusal}\n<p>Rum and wine to your door</p>`)).toEqual(['<p>Rum and wine to your door</p>']);
