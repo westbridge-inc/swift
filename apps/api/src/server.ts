@@ -8,7 +8,9 @@ import './boot/secret-files';
 import { buildApp } from './app';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
 import { attestTenantWallAtBoot } from './boot/tenant-wall';
+import { attestSystemLoginAtBoot } from './boot/system-login';
 import { isProduction } from './utils/runtime-mode';
+import { runAsSystem } from './plugins/tenant-context';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
@@ -25,7 +27,11 @@ async function start() {
     // carry a tenant policy; under an owner/BYPASSRLS role none of them bind,
     // and until now nothing measured which of those two worlds was running.
     // [MASTER-075] The same attestation the standalone worker runs.
+    // [L04 · R1] Under the enforced wall, sign-in reads accounts through the
+    // system login, so it must be reachable and a bypass member too. Both,
+    // always, in this order (system-login-boot.test.ts gates it).
     await attestTenantWallAtBoot(app.prisma, app.log);
+    await attestSystemLoginAtBoot(app.prisma, app.log);
 
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
@@ -49,7 +55,10 @@ async function start() {
     // extensions reach existing tenants without trampling admin additions.
     // Failure is logged, never fatal — a missing taxonomy degrades the rail,
     // it must not take the API down.
-    void (async () => {
+    // [L01 · tenant wall] Boot seeding writes platform registries and the
+    // default tenant's taxonomy (each names its tenant explicitly): named
+    // system work, never an unbound composition root.
+    void runAsSystem('boot:seed-registries', async () => {
       try {
         const { seedDiscoveryTaxonomy } = await import('./modules/discovery/taxonomy.seed');
         const { created, aliasUpdated } = await seedDiscoveryTaxonomy(app.prisma);
@@ -85,7 +94,7 @@ async function start() {
       } catch (err) {
         app.log.warn({ err }, 'discovery: taxonomy seed failed — the category rail will be empty (or the document registry seed failed); readiness stays 503');
       }
-    })();
+    });
   } catch (err) {
     console.error('Failed to start server:', err);
     process.exit(1);
