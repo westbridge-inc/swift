@@ -48,7 +48,8 @@ export function optionalDocHint(docType: string): string {
   if (docType === 'police_clearance') return 'Optional. If Swift approves a current one, your account is recorded as police-cleared.';
   if (docType === 'national_id') return 'Optional. Your driver’s licence already proves who you are.';
   // [TRADES · 13 Oct 2026] documents a service provider may add for their trade
-  if (docType === 'town_clerk_shop_certificate') return 'Add it if you work from your own shop. The shop needs this certificate each year.';
-  if (docType === 'drone_authorisation') return 'Needed before you offer drone or aerial work.';
+  if (docType === 'town_clerk_shop_certificate') return 'Optional. Add it if you work from your own shop; the Town Clerk issues it for each year.';
+  // The server asks for it as soon as the profile offers drone or aerial work (it then joins the checklist).
+  if (docType === 'drone_authorisation') return 'Optional. If your profile offers drone or aerial work, Swift asks for it before you go live.';
   return 'Optional. Not needed to start working.';
 }

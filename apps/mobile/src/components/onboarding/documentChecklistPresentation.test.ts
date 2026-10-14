@@ -62,7 +62,14 @@ describe('[VERIFY-DOCS] optional documents follow the server', () => {
 
 describe('[TRADES · 13 Oct 2026] what a service provider may add, in their words', () => {
   it('says when the shop certificate and the drone authorisation apply', () => {
-    expect(optionalDocHint('town_clerk_shop_certificate')).toBe('Add it if you work from your own shop. The shop needs this certificate each year.');
-    expect(optionalDocHint('drone_authorisation')).toBe('Needed before you offer drone or aerial work.');
+    expect(optionalDocHint('town_clerk_shop_certificate')).toBe('Optional. Add it if you work from your own shop; the Town Clerk issues it for each year.');
+    expect(optionalDocHint('drone_authorisation')).toBe('Optional. If your profile offers drone or aerial work, Swift asks for it before you go live.');
+  });
+
+  it('keeps the optional-hint grammar: starts "Optional." and never says required or must', () => {
+    for (const t of ['town_clerk_shop_certificate', 'drone_authorisation']) {
+      expect(optionalDocHint(t), t).toMatch(/^Optional\. /);
+      expect(optionalDocHint(t), t).not.toMatch(/required|must|needed/i);
+    }
   });
 });
