@@ -18,11 +18,15 @@ stdin and exits non-zero, naming the first violation, unless:
     the runner holds no secret (LIVETEST_* settings only) and
     targets http://api-journeys:<port>; the Caddyfile never routes to either.
 
+With --forbid-journeys (production: pilot-up.sh never renders the override
+there) it refuses instead any model that holds either journey service, and any
+Caddyfile that routes to one, after the same public checks.
+
 It prints variable NAMES only, never values: the rendered model inlines
 deploy/.env. Used by deploy/pilot-up.sh (verify_private_ports) and
 deploy/journeys-run.sh. Service-free tests: deploy/tests/test_journeys_isolation.py.
 
-Usage: docker compose ... config --format json | verify-journeys-isolation.py CADDYFILE [--require-journeys]
+Usage: docker compose ... config --format json | verify-journeys-isolation.py CADDYFILE [--require-journeys | --forbid-journeys]
 """
 
 import json
@@ -85,7 +89,7 @@ def check_private_attachment(model, name, service):
             raise Refused(f"{name} mounts the Docker socket")
 
 
-def verify(model, caddyfile_text, require_journeys=False):
+def verify(model, caddyfile_text, require_journeys=False, forbid_journeys=False):
     services = model.get("services") or {}
 
     # 1. Only the proxy is reachable from outside the host.
@@ -106,6 +110,14 @@ def verify(model, caddyfile_text, require_journeys=False):
                 raise Refused(f"{name} carries {switch}; only the private {PRIVATE} may (remove it from deploy/.env)")
 
     present = PRIVATE in services or RUNNER in services
+    if forbid_journeys:
+        # Production: no journey service and no route to one, ever.
+        for name in (PRIVATE, RUNNER):
+            if name in services:
+                raise Refused(f"{name} is in this configuration; production never hosts journeys")
+        if re.search(r"\b(api-)?journeys\b", caddyfile_text):
+            raise Refused("the Caddyfile routes to a journey service; production never hosts journeys")
+        return "no journey service or route; public isolation holds"
     if not (present or require_journeys):
         return "no journey services in this model; public isolation holds"
     for name in (PRIVATE, RUNNER):
@@ -159,7 +171,11 @@ def main(argv):
         with open(args[0], encoding="utf-8") as fh:
             caddyfile = fh.read()
         model = json.load(sys.stdin)
-        print(verify(model, caddyfile, require_journeys="--require-journeys" in argv))
+        require, forbid = "--require-journeys" in argv, "--forbid-journeys" in argv
+        if require and forbid:
+            print("refusing journeys configuration: --require-journeys and --forbid-journeys exclude each other", file=sys.stderr)
+            return 2
+        print(verify(model, caddyfile, require_journeys=require, forbid_journeys=forbid))
         return 0
     except Refused as refusal:
         print(f"refusing journeys configuration: {refusal}", file=sys.stderr)

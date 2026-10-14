@@ -327,7 +327,8 @@ describe('[MMG-RECV] a payment saved RECEIVED whose delivery died is finished, n
 
   it('the repair pass finishes webhook and manual payments stranded RECEIVED, each once and with a system audit row, and leaves a settlement-file row and a payment still in its delivery alone', async () => {
     const { sub, san } = await makeVendorSub();
-    const webhook = await strandedWebhook(san);
+    // [owner #62] The two payments finished together are within one week's fee (GY$2,100).
+    const webhook = await strandedWebhook(san, 1000);
     const receipt = receiptNo();
     const manual = await strandedBy(manualPayment(receipt, san, 'admin-keyer', 1000), adminAudit('admin-keyer'));
     const young = await strandedWebhook(san, 700);
@@ -471,6 +472,9 @@ describe('[MMG-RECV · fenced] of every finisher, one decides; the others write 
 describe('[MMG-RECV · database clock] the stranded age is the database clock, stamped by the INSERT', () => {
   it('this server 10 minutes AHEAD still leaves a payment saved just now to its delivery; 10 minutes BEHIND, it still finishes a stranded one', async () => {
     const { sub, san } = await makeVendorSub();
+    // [owner #62] A week part-way through: with the server clock moved 10 minutes back, a week that
+    // began this very second would not have started yet and would count as one week ahead.
+    await prisma.subscription.update({ where: { id: sub.id }, data: { nextBillingDate: new Date(Date.now() + 3 * 86_400_000), currentPeriodEnd: new Date(Date.now() + 3 * 86_400_000) } });
     const young = await strandedWebhook(san);
     const old = await strandedWebhook(san, 1000);
     await savedAgo(old.id, STRANDED_AFTER_MS + 60_000);
