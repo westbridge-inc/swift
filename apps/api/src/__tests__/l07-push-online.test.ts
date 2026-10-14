@@ -47,7 +47,7 @@ async function fixture(pool: 'driver' | 'rider', push: 'active' | 'absent' | 'in
     selfieCapturedAt: new Date(), notificationPrefs: { push: push !== 'muted' },
     ...(pool === 'driver' ? { driver: { create: {
       vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White',
-      licensePlate: `L07-GO-${seq}`, driverLicenseUrl: 'storage://synthetic/dl', vehicleInsuranceUrl: 'storage://synthetic/insurance',
+      licensePlate: `HL07-GO-${seq}`, driverLicenseUrl: 'storage://synthetic/dl', vehicleInsuranceUrl: 'storage://synthetic/insurance',
       documentsVerified: true,
     } } } : { rider: { create: { riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } } }),
   }, include: { driver: true, rider: true } });
