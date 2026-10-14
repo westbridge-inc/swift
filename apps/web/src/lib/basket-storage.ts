@@ -1,3 +1,4 @@
+import { STORE_SLUG_RE } from './store-slug';
 export const KEY = 'swift_guest_basket_v1';
 export const EVENT = 'swift-guest-basket';
 export interface GuestLine {
@@ -12,8 +13,9 @@ export interface GuestBasket {
 }
 export const empty = (): GuestBasket => ({ version: 1, lines: [] });
 export const validId = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 128;
+export { STORE_SLUG_RE } from './store-slug';
 export function validLine(line: GuestLine): boolean {
-  return Boolean(line && validId(line.clientLineId) && validId(line.vendorId) && validId(line.itemId) && validId(line.storeSlug) && /^[a-z0-9][a-z0-9-]{0,79}$/.test(line.storeSlug)
+  return Boolean(line && validId(line.clientLineId) && validId(line.vendorId) && validId(line.itemId) && validId(line.storeSlug) && STORE_SLUG_RE.test(line.storeSlug)
     && (line.returnPath === undefined || typeof line.returnPath === 'string' && line.returnPath.length <= 2048
       && (line.returnPath === `/store/${line.storeSlug}` || line.returnPath.startsWith(`/store/${line.storeSlug}?`))
       && !/[\\\r\n#]/.test(line.returnPath) && !line.returnPath.includes('..'))
