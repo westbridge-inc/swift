@@ -72,6 +72,12 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
     sys.exit(0)
 if argv[:1] == ["run"] and any("photon:2322" in a for a in argv) and os.environ.get("PHOTON_DOWN") == "1":
     sys.exit(1)
+if argv[:1] == ["compose"] and "exec" in argv and "postgres" in argv:
+    # [S3-L1] the database's deployment_identity, as psql -tA prints it
+    # ("<count>:<environment>"); unset = a database not set up yet.
+    if os.environ.get("DB_IDENTITY"):
+        print(os.environ["DB_IDENTITY"])
+    sys.exit(0)
 if argv[:1] == ["compose"] and "ps" in argv and "-q" in argv:
     if os.environ.get("PS_FAIL") == "1":
         sys.exit(1)
@@ -162,6 +168,8 @@ const PRODUCTION = {
   API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://example.org',
   // Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
+  // No card payment in production until an attorney signs off (owner ruling, 13 Oct).
+  PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1',
   // Address search (the API refuses production without it once #1563 lands;
   // osm or google is the owner's choice).
   PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon:2322',
@@ -350,6 +358,108 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
     expect(staging.stderr).not.toContain('refuses the agent-cash webhook');
+  });
+
+  // [LAUNCH-LOCK] Owner ruling, 13 Oct: until an attorney signs off,
+  // production takes no card payment and runs no ads. The API's boot guard
+  // refuses the same settings (boot-config.test.ts); turning either on is a
+  // reviewed code change in both places, never an .env edit.
+  const everyMode = [[SHA], ['--data-only', SHA], ['--no-public', SHA]];
+  const modeEnv = (args: string[]): Record<string, string> => (args.length > 1 ? { DNS_MAP: '' } : {});
+  it('production refuses any card provider but disabled, and no kill switch, in every mode, before anything changes', () => {
+    const cases: Array<[Record<string, string | undefined>, string]> = [
+      [{ PAYMENT_PROVIDER: undefined }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'stripe' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'powertranz' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'Disabled' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ CARD_RAIL_KILL: undefined }, 'needs CARD_RAIL_KILL=1'],
+      [{ CARD_RAIL_KILL: '0' }, 'needs CARD_RAIL_KILL=1'],
+      [{ CARD_RAIL_KILL: 'yes' }, 'needs CARD_RAIL_KILL=1'],
+    ];
+    for (const args of everyMode) {
+      for (const [over, refusal] of cases) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, ...over }, { args, env: modeEnv(args) });
+        expect(r.status, `${args.join(' ')} ${JSON.stringify(over)}`).not.toBe(0);
+        expect(r.stderr).toContain(`PILOT_ENV=production ${refusal}`);
+        expect(r.stderr).toContain('until an attorney signs off');
+        expect(changedNothing(r.calls)).toEqual([]);
+      }
+    }
+  });
+
+  it.each(['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'])('production refuses %s unless it is unset or 0, in every mode, before anything changes', (name) => {
+    for (const args of everyMode) {
+      for (const value of ['1', 'true', 'on']) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, [name]: value }, { args, env: modeEnv(args) });
+        expect(r.status, `${args.join(' ')} ${name}=${value}`).not.toBe(0);
+        expect(r.stderr).toContain(`PILOT_ENV=production refuses ${name} unless it is unset or 0`);
+        expect(changedNothing(r.calls)).toEqual([]);
+      }
+    }
+    for (const off of ['', '0']) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, [name]: off });
+      expect(r.status, `${name}=${JSON.stringify(off)}: ${r.stderr}`).toBe(0);
+    }
+  });
+
+  it('staging is not asked: its card and ad switches deploy exactly as before', () => {
+    const r = runPilot({ ...STAGING, PAYMENT_PROVIDER: 'sandbox', CARD_RAIL_KILL: '0', CARD_RAIL_V2: '1', CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_ENROLL: '1', ADS_ENABLED: '1' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`STAGING READY at exact SHA ${SHA}`);
+  });
+});
+
+// [S3-L1] A host deploys only onto a database of its own kind: pilot-up reads
+// the database's deployment_identity once Postgres is up, before anything is
+// stopped or migrated (the API and worker refuse to start on a mismatch too).
+describe('[S3-L1] pilot-up.sh: a host deploys only onto a database of its own kind', () => {
+  const PROD_MODES: Array<{ args: string[]; env: Record<string, string> }> = [
+    { args: [SHA], env: {} },
+    { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1' } },
+    { args: ['--no-public', SHA], env: { DNS_MAP: '', CADDY_STOPPED: '1' } },
+  ];
+  const stoppedOrMigrated = (calls: string[]) => calls.filter((l) => /stop api worker|force-recreate migrate|force-recreate api worker|force-recreate caddy/.test(l));
+  const readsIdentity = (calls: string[]) => indexOf(calls, 'exec -T postgres');
+
+  it('staging refuses a database whose identity says production, after Postgres is up and before anything is stopped or migrated', () => {
+    for (const args of [[SHA], ['--data-only', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot(STAGING, { args, env: { DB_IDENTITY: '1:production', API_STOPPED: args.length > 1 ? '1' : '' } });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain("PILOT_ENV=staging, but this database's deployment_identity says production: a staging host never deploys onto the production database. Nothing was stopped or migrated");
+      expect(readsIdentity(r.calls)).toBeGreaterThan(indexOf(r.calls, 'up -d --wait postgres redis meilisearch'));
+      expect(indexOf(r.calls, 'up -d --wait postgres redis meilisearch')).toBeGreaterThan(-1);
+      expect(stoppedOrMigrated(r.calls), args.join(' ')).toEqual([]);
+    }
+  });
+
+  it.each(['1:staging', '0: ', ''])('staging deploys on a database that says %j (its own, or not set up yet)', (identity) => {
+    const r = runPilot(STAGING, { env: { DB_IDENTITY: identity } });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readsIdentity(r.calls)).toBeGreaterThan(-1);
+    expect(readsIdentity(r.calls)).toBeLessThan(indexOf(r.calls, 'stop api worker'));
+  });
+
+  it.each(['1:staging', '1:development', '1:test', '1:Production'])('production refuses a database that says %j, in every mode, before anything is stopped or migrated', (identity) => {
+    for (const mode of PROD_MODES) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args: mode.args, env: { ...mode.env, DB_IDENTITY: identity } });
+      expect(r.status, mode.args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain("PILOT_ENV=production, but this database's deployment_identity is not production: a production host never deploys onto another deployment's database. Nothing was stopped or migrated");
+      expect(stoppedOrMigrated(r.calls), mode.args.join(' ')).toEqual([]);
+    }
+  });
+
+  it.each(['1:production', '0: ', ''])('production goes on with a database that says %j (its own, or not set up yet: the first --data-only run)', (identity) => {
+    for (const mode of PROD_MODES) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args: mode.args, env: { ...mode.env, DB_IDENTITY: identity } });
+      expect(r.status, `${mode.args.join(' ')}: ${r.stderr}`).toBe(0);
+      expect(readsIdentity(r.calls)).toBeGreaterThan(-1);
+    }
   });
 });
 

@@ -22,7 +22,7 @@ export function ratingText(v: Pick<Vendor, 'displayRating'>): string {
 }
 
 /** "25 min · 1.2 km", from what the server sent — nothing invented. */
-export function storeMeta(v: Pick<Vendor, 'estimatedPrepTime' | 'etaMin' | 'distanceKm'>): string {
+export function storeMeta(v: { estimatedPrepTime?: number | null; etaMin?: number | null; distanceKm?: number | null }): string {
   const parts: string[] = [];
   const minutes = v.etaMin ?? v.estimatedPrepTime;
   if (minutes != null && Number.isFinite(Number(minutes))) parts.push(`${minutes} min`);
@@ -75,7 +75,11 @@ const ROW_META = 'flex flex-wrap items-center gap-1.5 text-[13px] leading-[18px]
 const SQUARE_COPY = 'flex min-w-0 flex-col gap-1 pt-2';
 
 /** The list card ("Nearby", search, browse): photo, name, rating · time. */
-export function VendorCard({ v }: { v: Vendor }) {
+/** What a store row reads — a browse `Vendor` and a search hit both carry it. */
+export type VendorCardData = Pick<Vendor, 'id' | 'name' | 'vendorType' | 'coverImageUrl' | 'isCurrentlyOpen' | 'displayRating'>
+  & { slug?: string | null; estimatedPrepTime?: number | null; etaMin?: number | null; distanceKm?: number | null };
+
+export function VendorCard({ v }: { v: VendorCardData }) {
   const closed = !v.isCurrentlyOpen;
   const meta = storeMeta(v);
   return (
