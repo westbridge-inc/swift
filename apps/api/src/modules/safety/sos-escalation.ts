@@ -2,10 +2,11 @@ import type { PrismaClient, SosEscalationChannel } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService, isReviewTenantId } from '../notification/notification.service';
-import { openOpsAlert } from './ops-alert';
+import { openOpsAlert, type OpsSms } from './ops-alert';
 import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { isOwnNumber } from './emergency-contact.service';
 import { log } from '../../utils/logger';
+import { maskPii } from '../rating/review-scrub';
 import { sosEscalationCounter, sosEscalationGauge } from '../../plugins/observability';
 
 /**
@@ -217,7 +218,9 @@ export async function drainSosEscalations(
       if (result.status === 'SENT') { delivered += 1; sosEscalationCounter.labels('sent').inc(); } else { skipped += 1; }
     } catch (err) {
       failed += 1;
-      const message = (err instanceof Error ? err.message : String(err)).slice(0, 2_000);
+      // [AUD-L4-016] A provider's refusal can quote the destination: neither
+      // the row nor the log may carry a contact's phone number.
+      const message = redactDeliveryError(err);
       const exhausted = row.attempts >= row.maxAttempts;
       const backoffMs = Math.min(5 * 60_000, 5_000 * 2 ** Math.min(row.attempts, 6));
       // The claim compares availableAt with the database clock, so the backoff
@@ -230,7 +233,7 @@ export async function drainSosEscalations(
         WHERE "id" = ${row.id}`).catch((e) => log().error({ err: e, id: row.id }, '[S-01] could not record the failed attempt'));
       sosEscalationCounter.labels(exhausted ? 'dead_letter' : 'failed').inc();
       if (exhausted) deadLettered += 1;
-      log().error({ err, sosAlertId: row.sosAlertId, channel: row.channel, targetKey: row.targetKey, attempts: row.attempts, exhausted }, '[S-01] SOS escalation delivery failed — will retry');
+      log().error({ error: message, sosAlertId: row.sosAlertId, channel: row.channel, targetKey: row.targetKey, attempts: row.attempts, exhausted }, '[S-01] SOS escalation delivery failed — will retry');
     }
   }
   for (const id of touched) await refreshReceipts(prisma, id);
@@ -282,4 +285,116 @@ export async function backfillSosEscalations(prisma: PrismaClient): Promise<{ ba
     if (res.staged > 0) { backfilled.push(id); sosEscalationCounter.labels('backfilled').inc(); }
   }
   return { backfilled };
+}
+
+/** [AUD-L4-016] An error's words, safe for a log line or a row: every
+ *  phone-like run of digits (and any e-mail or link) removed — the one PII
+ *  mask the platform already uses — and bounded. */
+export function redactDeliveryError(err: unknown): string {
+  return maskPii(err instanceof Error ? err.message : String(err)).slice(0, 2_000);
+}
+
+/** How long a failure-page claim holds before another tick may take it over
+ *  (a process that died between the claim and the page). */
+export const FAILURE_PAGE_LEASE_SECONDS = 120;
+
+/** The plain words of each failure page. Ids only — never a name, a number or
+ *  a position: the title and body are pushed to lock screens and texted to the
+ *  on-call phones verbatim. */
+const FAILURE_PAGE_WORDS: Record<SosEscalationChannel, { title: string; body: (sosAlertId: string) => string }> = {
+  CONTACT_SMS: {
+    title: '🚨 SOS contact text failed — call the person now',
+    body: (id) => `The emergency text to the contact of the person who raised SOS alert ${id} did not go through (number hidden). Call the person who raised it now.`,
+  },
+  OPS_PAGE: {
+    title: '🚨 SOS page failed — open the war room now',
+    body: (id) => `The page for SOS alert ${id} did not go through. Open the war room and respond now.`,
+  },
+  WAR_ROOM: {
+    title: '🚨 SOS live board update failed — open the war room now',
+    body: (id) => `The live war-room update for SOS alert ${id} did not go through. Open the alert and respond now.`,
+  },
+  EVIDENCE: {
+    title: 'SOS evidence record failed — check the alert',
+    body: (id) => `The evidence record for SOS alert ${id} could not be opened. Check the alert now.`,
+  },
+};
+
+/**
+ * [AUD-L4-016 · S1] ANY failed delivery of a live, real SOS pages on-call
+ * operations — once per failed row.
+ *
+ * A failed row retries for over an hour (20 attempts, the backoff capped at
+ * five minutes), and the watchdog looked only at the ops page: an emergency
+ * contact's text that failed — once or for good — was a log line, while the
+ * person believed their contact had been told. Now a row that has failed at
+ * least once (still retrying, or exhausted) on an ACTIVE or ACKNOWLEDGED alert
+ * opens an ops alert of its own: every SUPER_ADMIN (and the alert tenant's
+ * ADMINs) in-app and by push, every OPS_ONCALL_PHONES number by text, and the
+ * ops-alert ladder re-pages until a human acknowledges it or the emergency
+ * ends. The row itself keeps retrying on its own policy.
+ *
+ * Exactly once per failed row: a claim (a lease, so a page that died half-way
+ * is claimed again once it lapses) and then the covering ops alert's id
+ * written back as done. A page that throws releases its claim for the next
+ * tick. The store-review fiction is never paged about. No title, body, log or
+ * receipt carries a phone number.
+ */
+export async function pageFailedSosEscalations(
+  prisma: PrismaClient,
+  notifications: NotificationService,
+  options: { now?: Date; limit?: number; alertIds?: string[]; sms?: OpsSms | null; oncallPhones?: string[] } = {},
+): Promise<{ paged: string[]; review: string[] }> {
+  const now = options.now ?? new Date();
+  const lapsed = new Date(now.getTime() - FAILURE_PAGE_LEASE_SECONDS * 1000);
+  const claimable: Prisma.SosEscalationWhereInput = {
+    failurePageOpsAlertId: null,
+    OR: [{ failurePageClaimedAt: null }, { failurePageClaimedAt: { lt: lapsed } }],
+  };
+  const rows = await prisma.sosEscalation.findMany({
+    where: {
+      ...claimable,
+      AND: [{ OR: [{ status: 'FAILED' }, { status: 'PENDING', lastError: { not: null } }] }],
+      sosAlert: { status: { in: ['ACTIVE', 'ACKNOWLEDGED'] } },
+      ...(options.alertIds?.length ? { sosAlertId: { in: options.alertIds } } : {}),
+    },
+    orderBy: { createdAt: 'asc' },
+    take: Math.max(1, options.limit ?? 50),
+    select: { id: true, channel: true, status: true, attempts: true, sosAlert: { select: { id: true, tenantId: true, orderId: true, serviceJobId: true } } },
+  });
+  const paged: string[] = []; const review: string[] = [];
+  for (const row of rows) {
+    const alert = row.sosAlert;
+    // [GUARDRAILS §3] The store-review fiction's SOS never pages real operations.
+    if (alert.tenantId && await isReviewTenantId(prisma, alert.tenantId)) { review.push(row.id); continue; }
+    const claim = await prisma.sosEscalation.updateMany({ where: { id: row.id, ...claimable }, data: { failurePageClaimedAt: now } });
+    if (claim.count !== 1) continue; // another tick holds it, or it is already covered
+    const words = FAILURE_PAGE_WORDS[row.channel];
+    const retrying = row.status === 'FAILED' ? ` Swift stopped retrying after ${row.attempts} attempts.` : ' Swift keeps retrying.';
+    try {
+      const page = await openOpsAlert(prisma, notifications, {
+        kind: 'SOS', tenantId: alert.tenantId, sosAlertId: alert.id,
+        title: words.title, body: `${words.body(alert.id)}${retrying}`,
+        data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId, failedDelivery: row.channel },
+        now,
+        ...(options.sms !== undefined ? { sms: options.sms } : {}),
+        ...(options.oncallPhones ? { oncallPhones: options.oncallPhones } : {}),
+      });
+      if (!page.opsAlertId) {
+        // Suppressed as the fiction's after all: nothing was paged, nothing is marked done.
+        await prisma.sosEscalation.updateMany({ where: { id: row.id, failurePageOpsAlertId: null }, data: { failurePageClaimedAt: null } });
+        review.push(row.id);
+        continue;
+      }
+      await prisma.sosEscalation.update({ where: { id: row.id }, data: { failurePageOpsAlertId: page.opsAlertId } });
+      paged.push(row.id);
+      sosEscalationCounter.labels('failure_paged').inc();
+      log().error({ sosAlertId: alert.id, escalationId: row.id, channel: row.channel, rowStatus: row.status, opsAlertId: page.opsAlertId, recipients: page.recipients, oncallTexted: page.oncallTexted }, '[AUD-L4-016] an SOS delivery failed — on-call operations paged');
+    } catch (err) {
+      await prisma.sosEscalation.updateMany({ where: { id: row.id, failurePageOpsAlertId: null }, data: { failurePageClaimedAt: null } }).catch(() => {});
+      sosEscalationCounter.labels('failure_page_failed').inc();
+      log().error({ error: redactDeliveryError(err), sosAlertId: alert.id, escalationId: row.id, channel: row.channel }, '[AUD-L4-016] could not page operations about a failed SOS delivery — the next tick retries');
+    }
+  }
+  return { paged, review };
 }

@@ -1490,6 +1490,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const drained = await drainSosEscalations(ctx.prisma, ctx.io, { limit: 200 }).catch(() => null);
           if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-01] SOS escalation deliveries failed this tick');
         }
+        // [AUD-L4-016] A failed delivery is a page, never only a log line: ANY
+        // failed row of a live, real SOS (a contact's text, the ops page, the
+        // war room, the evidence) pages on-call operations once; the row keeps
+        // retrying. An alarm, not a delivery: it runs under the worker kill too.
+        {
+          const { pageFailedSosEscalations } = await import('../modules/safety/sos-escalation');
+          const { NotificationService: FailureNS } = await import('../modules/notification/notification.service');
+          await pageFailedSosEscalations(ctx.prisma, new FailureNS(ctx.prisma, ctx.io))
+            .catch((err) => ctx.log.error({ errName: err instanceof Error ? err.name : typeof err }, '[AUD-L4-016] the failed-delivery pager could not run this tick'));
+        }
         const watchdog = await scanSosEscalations(ctx.prisma).catch(() => null);
         if (watchdog && watchdog.activeWithoutPage.length > 0) {
           const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
