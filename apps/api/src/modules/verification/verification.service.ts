@@ -3,6 +3,7 @@ import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, ty
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
+import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
@@ -53,7 +54,7 @@ export const IDENTITY_DOC_TYPE = 'identity_l2';
  *  merely OCR-checked: the portrait is face-matched against the operator's
  *  camera-captured signup selfie (master plan §3 — "face-matched to profile
  *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
-const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
+export const IDENTITY_FACE_MATCH_DOCS: ReadonlySet<string> = new Set(['national_id', 'owner_national_id']);
 
 /**
  * [DOC-1 §0.5 · FD-D5] The face-match leg of a document submission: an
@@ -425,7 +426,7 @@ export class VerificationService {
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      const doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      let doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
       // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
       // created on another account's subject — the impostor's link never survives a rejection,
       // and a later resubmission starts a fresh pending assignment.
@@ -434,6 +435,11 @@ export class VerificationService {
           where: { accountId: data.userId, subjectId: subject.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
           data: { validTo: new Date() },
         });
+      }
+      // [REPLACE-PENDING] A newer copy (not rejected outright) replaces any copy still waiting for review.
+      // Two uploads racing: if a newer copy already waits, this older one is the one replaced (no case for it).
+      if (doc.status !== 'REJECTED' && (await supersedeAwaitingCopies(tx, doc)).selfReplaced) {
+        doc = await tx.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
       }
       // [DOC-1 P4-5] A document waiting on a human has ONE open case, with the
       // SLA clock started here — in the same transaction, so a pending document
@@ -1236,9 +1242,12 @@ export class VerificationService {
       if (won.count !== 1) {
         const current = await tx.verificationDocument.findUnique({
           where: { id: docId },
-          select: { status: true },
+          select: { status: true, state: true, reviewNote: true },
         });
         if (!current) throw new NotFoundError('VerificationDocument', docId);
+        // [REPLACE-PENDING] The applicant replaced this copy: nothing to decide here — say so plainly.
+        // (A copy superseded for another reason — a vehicle change, say — keeps the ordinary answer.)
+        if (current.state === 'SUPERSEDED' && isReplacedNote(current.reviewNote)) return { kind: 'REPLACED' as const, status: current.status };
         // [REPORT-007 / STRAND-2] A terminal retry is a repair opportunity for
         // stale derived state (the duplicate-submission path already repairs
         // before ALREADY_APPROVED). RETURN instead of throwing inside the
@@ -1318,6 +1327,9 @@ export class VerificationService {
       await this.projectVendorActivation(tx, updated.userId);
       return { kind: 'UPDATED' as const, document: updated };
     });
+    if (outcome.kind === 'REPLACED') {
+      throw new AppError(409, DOCUMENT_REPLACED, 'The applicant replaced this document with a newer copy. Open the newer copy in the queue.');
+    }
     if (outcome.kind === 'NOT_PENDING') {
       throw new AppError(400, 'NOT_PENDING', `Document is ${outcome.status}, only PENDING documents can be reviewed`);
     }
@@ -1470,8 +1482,10 @@ export class VerificationService {
       where: { id: { in: breachedCases.map((c) => c.id) } },
       data: { priority: 10 },
     });
+    // [DS1055 · DOC-1 §24.2] Compare-and-set: only a case that is STILL in STANDARD at the write goes to ESCALATED.
+    // A reviewer's escalation that committed after the read above has moved it to SECOND_REVIEW, and must keep it.
     await this.prisma.reviewCase.updateMany({
-      where: { id: { in: breachedCases.filter((c) => c.queue === 'STANDARD').map((c) => c.id) } },
+      where: { id: { in: breachedCases.filter((c) => c.queue === 'STANDARD').map((c) => c.id) }, queue: 'STANDARD' },
       data: { queue: 'ESCALATED' },
     });
     const oldest = breachedCases.reduce((a, c) => (c.createdAt < a ? c.createdAt : a), breachedCases[0]!.createdAt);
@@ -1582,10 +1596,16 @@ export class VerificationService {
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
     // out here, or the checklist would show an approval GO no longer counts.
-    const documents = (await this.prisma.verificationDocument.findMany({
+    const rows = await this.prisma.verificationDocument.findMany({
       where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
       orderBy: { createdAt: 'desc' },
-    })).filter((d) => d.state !== 'SUPERSEDED')
+    });
+    // [REPLACE-PENDING] A copy waiting for review that replaced an earlier waiting copy says so
+    // ("Replaced — waiting for review"). Additive field; older apps ignore it.
+    // "Replaced" belongs to the copy that did the replacing (named in the replaced copy's note), never to a later copy.
+    const replacedNotes = new Set(rows.filter((d) => d.state === 'SUPERSEDED' && d.reviewNote).map((d) => d.reviewNote));
+    const documents = rows.filter((d) => d.state !== 'SUPERSEDED')
+      .map((d) => (d.status === 'PENDING' && replacedNotes.has(replacedNoteFor(d.id)) ? { ...d, replaced: true } : d))
       // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a withdrawn customer ID shows a neutral line; the
       // reviewer's reason ("REVOKED: …") stays in the staff record. Matched on the note as well as
       // the state: once the customer erases a withdrawn ID (or retention purges it) the row is

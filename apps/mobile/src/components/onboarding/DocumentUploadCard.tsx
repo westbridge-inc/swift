@@ -11,6 +11,7 @@ import {
   requireAuthSessionSnapshot,
 } from '../../stores/authStore';
 import type { AuthSessionSnapshot } from '../../lib/authSession';
+import { pendingDocumentLabel } from './documentChecklistPresentation';
 
 function humanize(docType: string) {
   return docType.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -64,6 +65,7 @@ export function DocumentUploadCard({
   submittedAt,
   reviewNote,
   isNext,
+  replaced = false,
   faceMatched = false,
   optionalHint,
 }: {
@@ -74,6 +76,8 @@ export function DocumentUploadCard({
   submittedAt?: string | null;
   reviewNote?: string | null;
   isNext?: boolean;
+  /** [REPLACE-PENDING] This copy replaced an earlier one that was still waiting for review. */
+  replaced?: boolean;
   /** The server says it compares this document with the profile selfie (documentChecklistPresentation). */
   faceMatched?: boolean;
   /** [VERIFY-DOCS] Set for a document the person MAY add: what it is for. Never a gate, so no
@@ -89,6 +93,9 @@ export function DocumentUploadCard({
   const expiringSoon = status === 'APPROVED' && daysLeft != null && daysLeft <= RENEWAL_WINDOW_DAYS;
   // An approved doc inside its renewal window re-opens for upload.
   const approved = status === 'APPROVED' && !expiringSoon;
+  // [REPLACE-PENDING · owner request 8 Oct] A copy waiting for review can be replaced (sent the wrong one);
+  // the server keeps the old copy for audit and the reviewer sees only the newest.
+  const pendingLabel = pendingDocumentLabel(replaced, submittedAt);
 
   const send = (a: ImagePicker.ImagePickerAsset, authSession: AuthSessionSnapshot) =>
     upload.mutate({
@@ -173,6 +180,11 @@ function explainPermissionDenied(
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
     ]);
+  const confirmReplace = () =>
+    Alert.alert('Replace this document?', 'Your new upload replaces the one waiting for review. We keep the old one on record, and the reviewer sees only the new one.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Replace', onPress: pick },
+    ]);
 
   // The server's rejection reason is the fix instruction — surface it verbatim.
   const uploadErr = upload.isError
@@ -192,9 +204,7 @@ function explainPermissionDenied(
             ? 'Expired — optional, upload a new one any time'
             : 'Expired — upload the renewal to keep operating'
           : pending
-            ? submittedAt
-              ? `Submitted ${new Date(submittedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} — in review`
-              : 'In review'
+            ? pendingLabel
             : rejected
               ? reviewNote
                 ? `Rejected: ${reviewNote} — tap to re-upload`
@@ -206,7 +216,7 @@ function explainPermissionDenied(
                   : 'Get started';
 
   return (
-    <Pressable disabled={approved || pending || upload.isPending} onPress={pick}>
+    <Pressable disabled={approved || upload.isPending} onPress={pending ? confirmReplace : pick}>
       <Card
         style={[
           { marginBottom: space.sm, flexDirection: 'row', alignItems: 'center' },
