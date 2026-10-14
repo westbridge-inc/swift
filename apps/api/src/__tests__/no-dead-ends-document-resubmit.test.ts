@@ -222,6 +222,14 @@ describe('a store owner re-submits one rejected document without restarting the 
   });
 
   it('approving it completes the checklist and the store goes live — the same store, no restart', async () => {
+    // [owner #51, 14 Oct] A first go-live also needs a published contact phone: the owner adds it on the
+    // waiting store's screen (it changes nothing else while the checklist is still open).
+    const phoneSaved = await app.inject({
+      method: 'PUT', url: '/api/v1/vendor/profile', payload: { publicPhone: '+592 600 9876' },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerToken}`, 'x-vendor-id': vendorId },
+    });
+    expect(phoneSaved.statusCode, phoneSaved.body).toBe(200);
+    expect(phoneSaved.json().data).toMatchObject({ status: 'PENDING_APPROVAL' });
     // [VERIFY-DOCS · reviewer-typed fields — a DELIBERATE change] the reviewer types what the type needs (an
     // owner's national ID: its number), exactly as the console's approve panel asks.
     const approved = await admin('PUT', `/api/v1/admin/verification/${resubmittedDocId}/approve`, reviewerTyped(rejectedDocType, resubmittedDocId));

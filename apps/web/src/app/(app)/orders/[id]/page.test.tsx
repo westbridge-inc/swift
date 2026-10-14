@@ -217,3 +217,47 @@ describe('order page polish (owner screenshots 13 Oct)', () => {
     expect(base).toMatch(/\.detailGrid\s*\{[^}]*display:\s*grid;[^}]*gap:\s*16px;/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [owner #46/#50/#52, 13–14 Oct] No cancellation fee is ever shown. A cancel is
+// free or refused: when the server refuses it, the page says why in the
+// server's words and offers the store's published number instead.
+// ---------------------------------------------------------------------------
+describe('[owner #46/#50] cancel: free, or contact the store — never a fee', () => {
+  const cashOrder = { ...ORDER, paymentMethod: 'CASH', paymentAction: null, cancellationFee: 0 };
+
+  it('an accepted order offers no Cancel: the server’s reason and the store’s number instead', async () => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...cashOrder, status: 'ACCEPTED', canCancel: false,
+      cancelUnavailable: { code: 'STORE_ACCEPTED', message: 'The store has accepted your order, so it can no longer be cancelled in the app. Contact the store to change or cancel it.', contactPhone: '+5926001234' },
+    } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(/can no longer be cancelled in the app/)).toBeTruthy();
+    const call = screen.getByRole('link', { name: 'Call +5926001234' });
+    expect(call.getAttribute('href')).toBe('tel:+5926001234');
+    expect(screen.queryByRole('button', { name: 'Review cancellation' })).toBeNull();
+    expect(document.body.textContent).not.toMatch(/cancellation fee|late-cancellation/i);
+  });
+
+  it('a free cancel says it is free in the server’s words — no fee wording anywhere', async () => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...cashOrder, status: 'PENDING', canCancel: true, cancelUnavailable: null,
+      cancellationMessage: 'You can cancel for free until the store accepts your order.',
+    } as never);
+    render(<OrderDetailPage />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Review cancellation' }));
+    expect(screen.getByText(/You can cancel for free until the store accepts your order\./)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/fee was recorded|cancellation fee|late-cancellation/i);
+  });
+
+  it('[DS1141 S1] with no server message (an older server) the page never authors "free" itself', async () => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...cashOrder, status: 'DRIVER_ASSIGNED', canCancel: true, cancellationFee: 500,
+    } as never);
+    render(<OrderDetailPage />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Review cancellation' }));
+    const quote = document.getElementById('cancellation-quote');
+    expect(quote?.textContent).toMatch(/shows the final result/);
+    expect(quote?.textContent?.toLowerCase()).not.toContain('free');
+  });
+});
