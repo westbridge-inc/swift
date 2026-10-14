@@ -64,6 +64,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Cash rail', href: '/cash', icon: Banknote },
       // Support finds a partner's MMG weekly-fee payment by either id or their phone.
       { label: 'MMG payments', href: '/mmg-payments', icon: Receipt },
+      { label: 'Payment confirmations', href: '/payment-confirmations', icon: ShieldCheck },
       { label: 'Claims', href: '/claims', icon: ShieldAlert },
       { label: 'Promos', href: '/promos', icon: Tag },
     ],
