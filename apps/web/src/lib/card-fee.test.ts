@@ -74,7 +74,8 @@ describe('card words', () => {
   ] as const)('a Pay now %s (returned %s) has truthful words', (status, returned, words) => expect(cardSessionWords(session(status), returned)).toBe(words));
   it('says paid or added only on SUCCEEDED', () => {
     expect(cardSessionWords(session('SUCCEEDED', { settlement: 'advanced' }))).toBe('Paid: GY$1,200 received.');
-    expect(cardSessionWords(session('SUCCEEDED', { settlement: 'banked' }))).toBe('Payment received and added to your balance.');
+    // [OWNER RULING 8 Oct, NO "WALLET" · owner #62] a payment that did not move the week is kept for the next weekly fee, never a balance or "paid ahead".
+    expect(cardSessionWords(session('SUCCEEDED', { settlement: 'banked' }))).toBe('Payment received. It is kept for your next weekly fee.');
     expect(cardSessionWords(session('SUCCEEDED', { purpose: 'ENROLL', card: VISA }))).toBe('Card added: Visa •••• 4242.');
     expect(cardSessionWords(session('FAILED', { purpose: 'ENROLL' }))).toBe('The card was not added: the bank declined it, or the card has expired.');
     expect(cardSessionWords(session('EXPIRED', { purpose: 'ENROLL' }))).toBe('This card page expired. You can start again.');

@@ -48,14 +48,16 @@ describe('the allowlist', () => {
       // key sealed inside every request token.
       'MMG_CHECKOUT_PUBLIC_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_SECRET_KEY',
       'PAYMENT_GATEWAY_KEY', 'PAYMENT_GATEWAY_SECRET',
+      // [PT-4] The real card provider's credentials (its guide, sec. 4).
+      'POWERTRANZ_ID', 'POWERTRANZ_PASSWORD', 'POWERTRANZ_GATEWAY_KEY',
       'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
       // [R2 C1] Every other secret the API reads; each could otherwise only
       // arrive through the plaintext env file the owner ruled out.
       'TEST_CONTROL_SECRET', 'METRICS_TOKEN', 'HEALTH_DETAIL_TOKEN',
       'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET', 'ADS_EVENT_SECRET',
       'AGENT_CASH_WEBHOOK_SECRET', 'SWIFT_BOOTSTRAP_PASSWORD', 'GOOGLE_MAPS_API_KEY_BACKEND',
-      // The seed ceremony's approval key: from the store, never the env file.
-      'SEED_PLAN_SECRET',
+      // The seed ceremony's pinned approver keys: from the store, never the env file.
+      'SEED_APPROVER_KEYS',
       'ATTRIB_SALT', 'IDENTITY_SALT', 'SCAN_IP_SALT', 'SENTRY_DSN',
       // [R3 R2-A] URLs that carry a credential: the RLS-bypass login's URL
       // (the most privileged database credential), a Redis URL (may carry a

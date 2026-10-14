@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 import { engine, guestSearchApp } from './helpers/guest-search';
+import { ENGINE_OVERFETCH } from '../modules/search/search.routes';
 
 const apps: Awaited<ReturnType<typeof guestSearchApp>>[] = [];
 async function setup(max?: number) { const h = await guestSearchApp(max); apps.push(h); return h; }
@@ -20,7 +21,8 @@ describe('guest catalogue search through real HTTP routes', () => {
       expect(data.vendors.map((v: { id: string }) => v.id)).toEqual(['public']);
       expect(data.items.map((v: { id: string }) => v.id)).toEqual(['item-public']);
     } else if (url.includes('suggestions')) {
-      expect(data).toEqual([{ text: 'Pepper public', type: 'vendor' }, { text: 'Pepper dish public', type: 'item' }]);
+      // [owner 13 Oct] each suggestion says whether its store is open now (additive)
+      expect(data).toEqual([{ text: 'Pepper public', type: 'vendor', isCurrentlyOpen: true }, { text: 'Pepper dish public', type: 'item', isCurrentlyOpen: true }]);
     } else expect(data.map((v: { id: string }) => v.id)).toEqual([url.includes('nearby') ? 'public' : 'item-public']);
   });
   it('does not trust a ready index for guest eligibility or projection', async () => {
@@ -75,7 +77,10 @@ describe('guest catalogue search through real HTTP routes', () => {
     item['id'] = 'indexed-item'; item['vendorId'] = 'indexed-vendor';
     const res = await app.inject({ url: '/api/v1/search?q=Pepper&type=RESTAURANT&cuisine=Creole&limit=3', headers: { authorization: `Bearer ${token()}` } });
     expect(res.statusCode).toBe(200); expect(res.json().data.items[0].id).toBe('indexed-item');
-    expect(engine.vendors).toHaveBeenCalledWith('other', 'Pepper', { type: 'RESTAURANT', cuisine: 'Creole', openOnly: true, limit: 3 });
+    // [SEARCH 13 Oct] The index is asked for ENGINE_OVERFETCH x the page (the live gates run after it,
+    // so asking for exactly the page left it short), and open-now is the live gate's, not the
+    // index copy's (a store that opened since its last sync was invisible).
+    expect(engine.vendors).toHaveBeenCalledWith('other', 'Pepper', { type: 'RESTAURANT', cuisine: 'Creole', limit: 3 * ENGINE_OVERFETCH });
   });
   it('preserves cookie-authenticated scope and revoked-session refusals', async () => {
     const { app, token, sessions } = await setup();

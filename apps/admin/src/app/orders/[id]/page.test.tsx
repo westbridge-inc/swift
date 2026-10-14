@@ -305,3 +305,41 @@ describe('[A-14] an unsettled refund obligation', () => {
     expect(screen.queryByText('Refund owed — not yet settled')).toBeNull();
   });
 });
+
+describe('[TAXI waiting charge] a ride charged for waiting', () => {
+  const ride = {
+    ...order,
+    orderType: 'TAXI',
+    status: 'DELIVERED',
+    paymentStatus: 'CAPTURED',
+    vendor: null,
+    taxiFareTotal: 2800,
+    totalAmount: 3300,
+    deliveryFee: 0,
+  };
+
+  it('shows the frozen line read-only: trip fare, waiting with its minutes, and the total they make', async () => {
+    mockApi(orderHandler(() => {
+      throw new Error('no mutation expected');
+    }, { ...ride, fareBreakdown: { routeFare: 2800, waitingMinutes: 13, waitingCharge: 500, total: 3300, currencyCode: 'GYD' } }));
+
+    renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+
+    const waiting = await screen.findByText('Waiting (13 min)');
+    expect(waiting.nextElementSibling?.textContent).toBe('$500');
+    expect(screen.getByText('Trip fare').nextElementSibling?.textContent).toBe('$2,800');
+    expect(screen.getByText('Total').nextElementSibling?.textContent).toBe('$3,300');
+  });
+
+  it('a ride without a breakdown keeps today\'s money section: the route fare as its total, no waiting line', async () => {
+    mockApi(orderHandler(() => {
+      throw new Error('no mutation expected');
+    }, { ...ride, totalAmount: 2800 }));
+
+    renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+
+    expect((await screen.findByText('Total')).nextElementSibling?.textContent).toBe('$2,800');
+    expect(screen.queryByText(/^Waiting/)).toBeNull();
+    expect(screen.queryByText('Trip fare')).toBeNull();
+  });
+});
