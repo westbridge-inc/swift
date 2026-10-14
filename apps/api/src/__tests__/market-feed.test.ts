@@ -431,8 +431,10 @@ describe('the response is the EXISTING item shape', () => {
     // first crack in that. A client that renders a search result renders this.
     const res = await get(`/items?category=${SLUG}&limit=1`);
     const item = res.json().data.items[0];
+    // [owner 13 Oct] `vendorIsCurrentlyOpen` joined the ONE shape (search marks a
+    // closed store's dish); the market card receives the same field, never a fork.
     expect(Object.keys(item).sort()).toEqual(
-      ['basePrice', 'categoryName', 'id', 'imageUrl', 'isNew', 'name', 'vendorId', 'vendorName'].sort(),
+      ['basePrice', 'categoryName', 'id', 'imageUrl', 'isNew', 'name', 'vendorId', 'vendorIsCurrentlyOpen', 'vendorName'].sort(),
     );
     expect(typeof item.basePrice, 'price is a number, never a Decimal string').toBe('number');
   });
@@ -445,7 +447,7 @@ describe('the response is the EXISTING item shape', () => {
     const row = {
       id: 'i1', name: 'Claw Hammer', basePrice: 2500, imageUrl: null,
       createdAt: new Date(), vendorId: 'v1',
-      vendor: { name: 'City Hardware' }, category: { name: 'Power Tools' },
+      vendor: { name: 'City Hardware', isCurrentlyOpen: true }, category: { name: 'Power Tools' },
     };
     const res = await get(`/items?category=${SLUG}&limit=1`);
     expect(Object.keys(res.json().data.items[0]).sort()).toEqual(Object.keys(toItemHit(row)).sort());

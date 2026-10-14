@@ -7,6 +7,7 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { HOME_RAIL_WINDOW, MARKET_WINDOW } from './listPerformance';
 import { retryRead } from './appQueryPolicy';
+import { profileIdRowSub } from './customerIdCopy';
 
 // Execute the real TSX control flow with inert native leaves. This is a Node
 // render/descriptor contract, not a native renderer, FPS or device benchmark.
@@ -109,6 +110,7 @@ describe('actual tab render contracts', () => {
       '../../../hooks/customer': { useProfile: () => ({ data: hasData ? { firstName: 'Fixture', lastName: 'Account' } : undefined, isLoading: false, isError, error: status ? { response: { status } } : new Error('Network Error'), refetch: () => { retries++; } }), useMyRating: () => ({}), useLiveOrders: () => ({}) },
       '../../../stores/authStore': { useAuthStore: () => ({ isAuthenticated: authenticated, user: { id: 'fixture' } }) },
       '../../../lib/appQueryPolicy': { retryRead },
+      '../../../lib/customerIdCopy': { profileIdRowSub },
       '../../../kit': kit, '../../../kit/controls': { BrandSwitch: 'BrandSwitch' },
       'react-native-reanimated': { default: { View: 'AnimatedView' }, __esModule: true, FadeInDown: fluent, ReduceMotion: { System: 'system' } },
       '../../../components/RoleSwitcherSheet': { RoleSwitcherSheet: 'RoleSwitcherSheet' },

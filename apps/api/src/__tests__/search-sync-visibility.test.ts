@@ -1,3 +1,4 @@
+import { feePausePredicate } from '../modules/billing/mmg-pause';
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -50,35 +51,35 @@ const VISIBLE = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }
 
 describe('isVendorVisible — what "visible" means, in one place', () => {
   it('admits a store that is active, verified, and whose operator is live', () => {
-    expect(isVendorVisible(VISIBLE)).toBe(true);
+    expect(isVendorVisible(VISIBLE, feePausePredicate(false))).toBe(true);
   });
 
   it('refuses a store whose papers were never approved', () => {
-    expect(isVendorVisible({ ...VISIBLE, isVerified: false })).toBe(false);
+    expect(isVendorVisible({ ...VISIBLE, isVerified: false }, feePausePredicate(false))).toBe(false);
   });
 
   it('refuses a suspended store', () => {
-    expect(isVendorVisible({ ...VISIBLE, status: 'SUSPENDED' })).toBe(false);
-    expect(isVendorVisible({ ...VISIBLE, status: 'PENDING_APPROVAL' })).toBe(false);
+    expect(isVendorVisible({ ...VISIBLE, status: 'SUSPENDED' }, feePausePredicate(false))).toBe(false);
+    expect(isVendorVisible({ ...VISIBLE, status: 'PENDING_APPROVAL' }, feePausePredicate(false))).toBe(false);
   });
 
   it('refuses a store whose OPERATOR has been switched off', () => {
     // The clause that is load-bearing for guests: a guest request carries no
     // tenant context, so the Prisma extension leaves it unscoped and this
     // relational check is the only wall.
-    expect(isVendorVisible({ ...VISIBLE, tenant: { isActive: false } })).toBe(false);
+    expect(isVendorVisible({ ...VISIBLE, tenant: { isActive: false } }, feePausePredicate(false))).toBe(false);
   });
 
   it('fails closed when subscription eligibility was not selected', () => {
-    expect(isVendorVisible({ ...VISIBLE, subscription: undefined })).toBe(false);
+    expect(isVendorVisible({ ...VISIBLE, subscription: undefined }, feePausePredicate(false))).toBe(false);
   });
 
   it('FAILS CLOSED when the tenant was not selected at all', () => {
     // A caller that forgets the include must get "not visible", never a
     // silently permissive answer — otherwise the missing clause is invisible
     // at the call site, which is exactly how this defect happened.
-    expect(isVendorVisible({ ...VISIBLE, tenant: null })).toBe(false);
-    expect(isVendorVisible({ status: 'ACTIVE', isVerified: true })).toBe(false);
+    expect(isVendorVisible({ ...VISIBLE, tenant: null }, feePausePredicate(false))).toBe(false);
+    expect(isVendorVisible({ status: 'ACTIVE', isVerified: true }, feePausePredicate(false))).toBe(false);
   });
 });
 
@@ -88,15 +89,15 @@ describe('the two forms of the predicate cannot disagree', () => {
     // VISIBLE_VENDOR's own fields, so the two can never disagree about WHAT
     // each clause requires.
     const src = readFileSync(join(process.cwd(), 'src/modules/vendor/vendor-visibility.ts'), 'utf8');
-    expect(src).toMatch(/vendor\.status === VISIBLE_VENDOR\.status/);
-    expect(src).toMatch(/vendor\.isVerified === VISIBLE_VENDOR\.isVerified/);
-    expect(src).toMatch(/vendor\.tenant\?\.isActive === VISIBLE_VENDOR\.tenant\.isActive/);
+    expect(src).toMatch(/vendor\.status === VENDOR_FACTS\.status/);
+    expect(src).toMatch(/vendor\.isVerified === VENDOR_FACTS\.isVerified/);
+    expect(src).toMatch(/vendor\.tenant\?\.isActive === VENDOR_FACTS\.tenant\.isActive/);
   });
 
   it('constrains exactly the same set of fields', () => {
     // The remaining way they could drift is SHAPE: a clause added to the DB
     // predicate and not to the in-memory one. This fails when that happens.
-    const dbKeys = Object.keys(VISIBLE_VENDOR).sort();
+    const dbKeys = Object.keys(VISIBLE_VENDOR(feePausePredicate(false))).sort();
     const selectKeys = Object.keys(VISIBLE_VENDOR_SELECT).sort();
     expect(selectKeys).toEqual(dbKeys);
   });
@@ -122,11 +123,11 @@ describe('the sync doors use the shared predicate', () => {
   });
 
   it('decides the per-vendor sync with isVendorVisible', () => {
-    expect(service).toMatch(/if \(isVendorVisible\(vendor\)\)/);
+    expect(service).toMatch(/if \(isVendorVisible\(vendor, await readFeePause\(this\.prisma\)\)\)/);
   });
 
   it('decides the per-item sync with isVendorVisible', () => {
-    expect(service).toMatch(/isVendorVisible\(i\.vendor\)/);
+    expect(service).toMatch(/isVendorVisible\(i\.vendor, feePause\)/);
   });
 
   it('selects the tenant on both sync paths, or the check cannot decide', () => {
@@ -147,7 +148,7 @@ describe('the sync doors use the shared predicate', () => {
 
   it('keeps the full re-index on the shared DB predicate too', () => {
     // The one path that was already right stays right.
-    expect(service).toMatch(/where: VISIBLE_VENDOR,/);
+    expect(service).toMatch(/where: VISIBLE_VENDOR\(await readFeePause\(this\.prisma\)\),/);
     expect(service).toMatch(/vendor: VISIBLE_VENDOR_REL/);
   });
 });

@@ -27,7 +27,9 @@ const API_SOURCE = readFileSync(join(process.cwd(), 'src', 'lib', 'api.ts'), 'ut
 
 /** The C3/C4/C5 mutating routes, exactly as the server's gate derives them. */
 function routesRequiringReason(): Set<string> {
-  const rows = [...AUTHORITY_SOURCE.matchAll(/^\s*'([^']+)':\s*c\('(C[0-5])'/gm)];
+  // A reviewer-only row keeps the same class inside reviewed(c(...)). The
+  // explicit grant adds a requirement; it never removes the stated reason.
+  const rows = [...AUTHORITY_SOURCE.matchAll(/^\s*'([^']+)':\s*(?:reviewed\(\s*)?c\('(C[0-5])'/gm)];
   return new Set(
     rows
       .filter(([, , cls]) => cls === 'C3' || cls === 'C4' || cls === 'C5')
@@ -51,6 +53,14 @@ function consoleCalls(route: string): boolean {
 const REASON = 'Reviewed the request against the bank statement and the price book';
 
 describe('[DS110-14] the reason census', () => {
+  it('document approval, rejection and revocation still demand a stated reason beside the reviewer grant', () => {
+    const required = routesRequiringReason();
+    for (const action of ['approve', 'reject', 'revoke']) {
+      const route = `PUT /verification/:id/${action}`;
+      expect(required.has(route), `${route} must still require a reason`).toBe(true);
+    }
+  });
+
   it('names the server routes that demand a reason — the census is graded against the gate itself', () => {
     const required = routesRequiringReason();
     expect(required.size).toBeGreaterThan(60);

@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { cashMathForOffer } from '../modules/dispatch/dispatch.service';
 
 /**
@@ -156,5 +158,59 @@ describe('it is a CASH-only concept', () => {
 
   it('returns null for any other method', () => {
     expect(cashMathForOffer({ ...base, paymentMethod: 'CARD' })).toBeNull();
+  });
+});
+
+describe('a taxi ride has no store — the driver collects the fare and keeps all of it', () => {
+  // A ride is booked with subtotalBase = subtotalCustomer = totalAmount =
+  // taxiFareTotal and deliveryFee 0 (rides.service createRideRequest). Read as a
+  // store order, that told the driver "Pay the store 2,000 · you keep 0" on
+  // every cash ride. The driver's earning is the whole fare (createEarnings
+  // TAXI_FARE = taxiFareTotal, plus any tip), and there is no store to pay.
+  const ride = {
+    orderType: 'TAXI',
+    paymentMethod: 'CASH',
+    totalAmount: 2000,
+    subtotalBase: 2000,
+    deliveryFee: 0,
+    taxiFareTotal: 2000,
+    serviceFee: 0,
+    taxAmount: 0,
+    tipAmount: 0,
+    discount: 0,
+  };
+
+  it('collect the fare, pay no store, keep the fare', () => {
+    expect(cashMathForOffer(ride)).toEqual({ collectFromCustomer: 2000, payToVendor: 0, youKeep: 2000 });
+  });
+
+  it('a tip on a ride is the driver’s too', () => {
+    expect(cashMathForOffer({ ...ride, tipAmount: 300, totalAmount: 2300 })).toEqual({ collectFromCustomer: 2300, payToVendor: 0, youKeep: 2300 });
+  });
+
+  it('Decimal-shaped columns read the same', () => {
+    const dec = (v: string) => ({ toString: () => v, valueOf: () => Number(v) });
+    expect(cashMathForOffer({ ...ride, totalAmount: dec('2000.00'), subtotalBase: dec('2000.00'), taxiFareTotal: dec('2000.00') })).toEqual({ collectFromCustomer: 2000, payToVendor: 0, youKeep: 2000 });
+  });
+
+  it('refuses a ride whose total does not match its fare, or that has no fare', () => {
+    expect(cashMathForOffer({ ...ride, totalAmount: 2500 })).toBeNull();
+    expect(cashMathForOffer({ ...ride, taxiFareTotal: null })).toBeNull();
+    expect(cashMathForOffer({ ...ride, serviceFee: 100, totalAmount: 2100 })).toBeNull();
+  });
+
+  it('a store order is unchanged — the store still gets its goods money', () => {
+    expect(cashMathForOffer({ ...base, orderType: 'FOOD_DELIVERY', taxiFareTotal: null })).toEqual({ collectFromCustomer: 900, payToVendor: 400, youKeep: 500 });
+  });
+
+  it('every select that feeds the offer card reads the order type and the fare', () => {
+    const src = readFileSync(join(__dirname, '..', 'modules', 'dispatch', 'dispatch.service.ts'), 'utf8');
+    const calls = [...src.matchAll(/cashMath: cashMathForOffer\(order\)/g)].map((m) => m.index!);
+    expect(calls.length).toBe(2);
+    for (const at of calls) {
+      const select = src.slice(src.lastIndexOf('this.prisma.order.findUnique', at), at);
+      expect(select, 'the order select before a cashMathForOffer call').toMatch(/orderType: true/);
+      expect(select, 'the order select before a cashMathForOffer call').toMatch(/taxiFareTotal: true/);
+    }
   });
 });

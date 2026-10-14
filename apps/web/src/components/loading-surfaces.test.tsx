@@ -14,14 +14,14 @@ import OrdersPage from '@/app/(app)/orders/page';
 import CartPage from '@/app/(app)/cart/page';
 import OrderPage from '@/app/(app)/orders/[id]/page';
 
-const person = vi.hoisted(() => ({ scope: 'guest', epoch: 0 }));
+const person = vi.hoisted(() => ({ scope: 'guest', epoch: 0, status: 'guest' }));
 
 vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'v1' }), useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({ push: vi.fn() }),
 }));
 vi.mock('./customer-session', () => ({ useOptionalCustomerSession: () => null, useCustomerSession: () => ({
-  status: 'guest', ...person, nearPoint: null, setNearPoint: vi.fn(), ensureSignedIn: vi.fn(),
+  ...person, nearPoint: null, setNearPoint: vi.fn(), ensureSignedIn: vi.fn(),
 }) }));
 
 function pending<T>() {
@@ -97,7 +97,8 @@ describe('loading surfaces become content in the reserved layout', () => {
     expect(view.container.querySelector('.swift-order-row')).toBeTruthy();
   });
 
-  it('the cart retains its actual two-column CSS layout when data arrives', async () => {
+  it('the signed-in cart retains its actual two-column CSS layout when data arrives', async () => {
+    person.status = 'signed-in';
     const response = pending<api.Cart>();
     vi.spyOn(api, 'getCart').mockReturnValue(response.promise);
     vi.spyOn(api, 'getAddresses').mockResolvedValue([]);
@@ -108,6 +109,7 @@ describe('loading surfaces become content in the reserved layout', () => {
     await response.finish({ items: [{ id: 'l1', itemId: 'i1', name: 'Lunch box', quantity: 1, customerPrice: 500, isAvailable: true }], vendor: { id: 'v1', name: 'Local store' }, subtotalCustomer: 500 } as api.Cart);
     expect(await screen.findByText('Lunch box')).toBeTruthy();
     expect(view.container.firstElementChild?.className).toBe(layout);
+    person.status = 'guest';
   });
 
   it('tracking retains its page, hero and progress CSS layout when the order arrives', async () => {
@@ -124,16 +126,17 @@ describe('loading surfaces become content in the reserved layout', () => {
 });
 
 it('search shows store-shaped placeholders during debounce and ignores a late answer after clearing', async () => {
-  const response = pending<api.Vendor[]>();
-  vi.spyOn(api, 'searchVendors').mockReturnValue(response.promise);
+  // [SEARCH 13 Oct] the page asks the search engine (stores and dishes), not the store list
+  const response = pending<api.CatalogueResults>();
+  vi.spyOn(api, 'searchCatalogue').mockReturnValue(response.promise);
   mount(<SearchPage />);
   fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Lunch' } });
   expect(screen.getByLabelText('Searching').querySelector('[data-store-part="copy"]')).toBeTruthy();
   expect(screen.getByRole('status').textContent).toBe('Searching…');
   await new Promise((resolve) => setTimeout(resolve, 320));
-  expect(api.searchVendors).toHaveBeenCalledWith('Lunch');
+  expect(api.searchCatalogue).toHaveBeenCalledWith('Lunch');
   fireEvent.change(screen.getByRole('textbox'), { target: { value: '' } });
-  await response.finish([vendor]);
+  await response.finish({ stores: [vendor as unknown as api.SearchStore], items: [] });
   expect(screen.queryByLabelText('Searching')).toBeNull();
   expect(screen.queryByText('Local store')).toBeNull();
 });
