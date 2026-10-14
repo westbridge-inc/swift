@@ -32,6 +32,7 @@ import { custodyOf, ORDER_TRANSITIONS, STORE_REJECTABLE_STATUSES } from '../orde
 import {
   certainGoods,
   checkItem,
+  checkStore,
   classifyCategory,
   classifyText,
   isHidden,
@@ -39,10 +40,17 @@ import {
   orderRefusalMessage,
   PROHIBITED_CLASS_LABELS,
   storeCategoryReason,
+  storeWordHit,
+  STORE_WAITING_FOR_CHECK,
+  STORE_WAITING_MESSAGE,
   WAITING_FOR_CHECK,
   type CatalogueCheck,
   type ItemWords,
   type ProhibitedClass,
+  type StoreCheck,
+  type StoreField,
+  type StoreWordHit,
+  type StoreWords,
 } from './prohibited-items';
 import { prefilterCandidateIds } from './prohibited-scan.service';
 import { trackBackgroundRead } from '../../lib/background-reads';
@@ -100,6 +108,69 @@ export async function assertStoreAllowed(db: Db, vendorId: string): Promise<void
   if (banned) throw new AppError(409, 'PROHIBITED_ITEM', storeCategoryReason(banned.name), { prohibitedClass: banned.prohibitedClass, categorySlug: banned.slug });
 }
 
+// ── Store names (owner, 14 Oct 2026: "HOLD them for a person automatically") ─
+
+/** The columns a store's own words, and the approval of them, are read from. */
+export const STORE_WORDS_SELECT = { name: true, description: true, tags: true, cuisineTypes: true, nameReviewApprovedHash: true } as const;
+type StoreRow = StoreWords & { nameReviewApprovedHash: string | null };
+
+/**
+ * A store's words judged once per process for the same words: the classifier is a pure function of them, and a list
+ * scan reads every store of a tenant each minute. Only the word hit is remembered — the approval is compared on every
+ * read — so a rename (new words, new key) is judged afresh at once. Bounded: cleared when it grows past the cap.
+ */
+const STORE_HIT_MEMO_CAP = 20_000;
+const storeHitMemo = new Map<string, StoreWordHit | null>();
+function storeHitOf(store: StoreWords): StoreWordHit | null {
+  const key = JSON.stringify([store.name, store.description ?? null, store.tags ?? [], store.cuisineTypes ?? []]);
+  const known = storeHitMemo.get(key);
+  if (known !== undefined) return known;
+  const hit = storeWordHit(store);
+  if (storeHitMemo.size >= STORE_HIT_MEMO_CAP) storeHitMemo.clear();
+  storeHitMemo.set(key, hit);
+  return hit;
+}
+/** The verdict on one store's own words, read from its row. */
+export function storeCheckOf(row: StoreRow): StoreCheck {
+  return checkStore({ ...row, approvedHash: row.nameReviewApprovedHash }, storeHitOf(row));
+}
+
+/** The verdict on these stores' own words, read now. Stores that do not exist are absent. */
+export async function storeChecksFor(db: Db, vendorIds: readonly string[]): Promise<Map<string, StoreCheck>> {
+  const ids = [...new Set(vendorIds)];
+  if (ids.length === 0) return new Map();
+  const rows = await db.vendor.findMany({ where: { id: { in: ids } }, select: { id: true, ...STORE_WORDS_SELECT } });
+  return new Map(rows.map((row) => [row.id, storeCheckOf(row)]));
+}
+
+/** Let other requests run between chunks of a long scan (the classifier is synchronous). */
+const yieldToRequests = () => new Promise<void>((resolve) => { setImmediate(resolve); });
+
+/** A store whose own words are waiting for a person: what was found, and where. */
+export type HeldStore = { state: 'WAITING'; prohibitedClass: ProhibitedClass; field: StoreField; term: string };
+
+/** Every store of a tenant (or, for a guest, of every tenant) whose own words are waiting for a person, with its verdict. */
+export async function storesHeldInTenant(db: Db, tenantId: string | null): Promise<Map<string, HeldStore>> {
+  const rows = await db.vendor.findMany({ where: tenantId ? { tenantId } : {}, select: { id: true, ...STORE_WORDS_SELECT }, orderBy: { createdAt: 'asc' } });
+  const held = new Map<string, HeldStore>();
+  for (let k = 0; k < rows.length; k += 1) {
+    if (k > 0 && k % 200 === 0) await yieldToRequests();
+    const check = storeCheckOf(rows[k]!);
+    if (check.state === 'WAITING') held.set(rows[k]!.id, { state: 'WAITING', prohibitedClass: check.prohibitedClass, field: check.field, term: check.term });
+  }
+  return held;
+}
+
+/**
+ * Exactly, for one store a customer opens by a direct link (its storefront, its reviews, its website page): hidden
+ * when it is filed under a banned category (#54) or its own words are waiting for a person. The lists use
+ * `prohibitedStoreIds`, which may be a minute old.
+ */
+export async function storeHiddenFromCustomers(db: Db, vendorId: string): Promise<boolean> {
+  if (await prohibitedStoreCategory(db, vendorId)) return true;
+  return (await storeChecksFor(db, [vendorId])).get(vendorId)?.state === 'WAITING';
+}
+
 /** Platform categories each item is filed under (the join table has no Prisma relation). */
 async function categoriesByItem(db: Db, itemIds: readonly string[]): Promise<Map<string, Array<{ slug: string; name: string }>>> {
   const out = new Map<string, Array<{ slug: string; name: string }>>();
@@ -148,11 +219,17 @@ export async function catalogueChecksFor(db: Db, itemIds: readonly string[]): Pr
         prohibitedAt: true, prohibitedClass: true, prohibitedReason: true, reviewApprovedHash: true,
         category: { select: { name: true } },
         optionGroups: { select: { name: true, options: { select: { name: true } } } },
+        // [owner 14 Oct, store names] the store's own words: a store held for a person holds its items
+        vendor: { select: STORE_WORDS_SELECT },
       },
     }),
     categoriesByItem(db, ids),
   ]);
   const storeCategories = await storeCategoriesByVendor(db, [...new Set(items.map((i) => i.vendorId))]);
+  const stores = new Map<string, StoreCheck>();
+  for (const item of items) {
+    if (!stores.has(item.vendorId)) stores.set(item.vendorId, storeCheckOf(item.vendor));
+  }
   for (const item of items) {
     out.set(item.id, checkItem({
       name: item.name,
@@ -165,6 +242,7 @@ export async function catalogueChecksFor(db: Db, itemIds: readonly string[]): Pr
       prohibitedClass: item.prohibitedClass,
       prohibitedReason: item.prohibitedReason,
       reviewApprovedHash: item.reviewApprovedHash,
+      store: stores.get(item.vendorId),
     }));
   }
   return out;
@@ -182,15 +260,16 @@ export async function prohibitedCategoryIds(db: Db, tenantId: string | null): Pr
   return categories.filter((c) => classifyCategory(c) !== null).map((c) => c.id);
 }
 
-/** The stores filed under a banned category (chosen, not derived), read now. [#54] */
+/** The stores no customer list shows, read now: filed under a banned category (chosen, not derived) [#54], or whose
+ *  own words are waiting for a person [owner 14 Oct, store names]. */
 async function readProhibitedStoreIds(db: Db, tenantId: string | null): Promise<string[]> {
   const banned = await prohibitedCategoryIds(db, tenantId);
-  if (banned.length === 0) return [];
-  const rows = await db.vendorDiscoveryCategory.findMany({
+  const filed = banned.length === 0 ? [] : await db.vendorDiscoveryCategory.findMany({
     where: { categoryId: { in: banned }, source: { in: [...CHOSEN_STORE_SOURCES] }, ...(tenantId ? { tenantId } : {}) },
     select: { vendorId: true }, distinct: ['vendorId'],
   });
-  return rows.map((r) => r.vendorId);
+  const held = await storesHeldInTenant(db, tenantId);
+  return [...new Set([...filed.map((r) => r.vendorId), ...held.keys()])];
 }
 
 /**
@@ -206,7 +285,7 @@ export async function flaggedItemsInTenant(db: Db, tenantId: string): Promise<Ma
   const tagged = banned.length === 0 ? [] : await db.itemDiscoveryCategory.findMany({
     where: { tenantId, categoryId: { in: banned } }, select: { itemId: true }, distinct: ['itemId'],
   });
-  // [#54] Every item of a store filed under a banned category, whatever its words.
+  // [#54] Every item of a store filed under a banned category, or whose own words wait for a person, whatever its words.
   const stores = await readProhibitedStoreIds(db, tenantId);
   const stocked = stores.length === 0 ? [] : await db.item.findMany({ where: { vendorId: { in: stores } }, select: { id: true } });
   const checks = await catalogueChecksFor(db, [...candidates, ...tagged.map((t) => t.itemId), ...stocked.map((i) => i.id)]);
@@ -262,9 +341,10 @@ export function hiddenItemIds(db: Db, tenantId: string, now = Date.now()): Promi
 }
 
 /**
- * The stores no customer list shows: filed under a banned category (#54). A
- * tenant's list (or, for a guest, every tenant's) is reused the same way. A
- * storefront opened directly is judged exactly (`prohibitedStoreCategory`).
+ * The stores no customer list shows: filed under a banned category (#54), or
+ * held for a person by their own words (owner, 14 Oct). A tenant's list (or,
+ * for a guest, every tenant's) is reused the same way. A storefront opened
+ * directly is judged exactly (`storeHiddenFromCustomers`).
  */
 export function prohibitedStoreIds(db: Db, tenantId: string | null, now = Date.now()): Promise<string[]> {
   return staleWhileRevalidate(prohibitedStoresCache, tenantId ?? '*', () => readProhibitedStoreIds(db, tenantId), now);
@@ -308,10 +388,18 @@ export async function assertNotBanned(db: Db, itemId: string, options: { wordBan
  * DS1266 S3, the rule of Opus S3-1]
  */
 export async function unhideRestocked(db: Db, itemId: string): Promise<void> {
-  const restocked = { id: itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } };
-  if (!(await db.item.findFirst({ where: restocked, select: { id: true } }))) return;
-  if ((await catalogueChecksFor(db, [itemId])).get(itemId)?.state === 'BANNED') return;
-  await db.item.updateMany({ where: restocked, data: { isAvailable: true, autoHiddenAt: null } });
+  // ONE transaction, the item's row locked before it is judged: an edit of this item waits until the verdict and the
+  // switch-on have committed together, so nothing can ban the item between the check and the write. A caller already
+  // in a transaction (the stock adjust route, a cancelled order, a picking restock) is joined, not left. [DS1267 S4]
+  const judgeAndWrite = async (tx: Prisma.TransactionClient): Promise<void> => {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "items" WHERE id = ${itemId} AND "autoHiddenAt" IS NOT NULL AND "stockQuantity" > 0 FOR UPDATE`;
+    if (locked.length === 0) return;
+    if ((await catalogueChecksFor(tx, [itemId])).get(itemId)?.state === 'BANNED') return;
+    await tx.item.updateMany({ where: { id: itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } }, data: { isAvailable: true, autoHiddenAt: null } });
+  };
+  // A transaction's own client has no $transaction; the root client opens one.
+  if ('$transaction' in db) await db.$transaction(judgeAndWrite);
+  else await judgeAndWrite(db);
 }
 
 /**
@@ -433,5 +521,13 @@ export type CatalogueCheckView =
 export function partnerView(check: CatalogueCheck | undefined): CatalogueCheckView {
   if (!check || check.state === 'CLEAR' || check.state === 'APPROVED') return null;
   if (check.state === 'BANNED') return { status: 'NOT_ALLOWED', message: notAllowedMessage(check.prohibitedClass), prohibitedClass: check.prohibitedClass, reason: check.reason };
-  return { status: 'WAITING_FOR_CHECK', message: WAITING_FOR_CHECK, prohibitedClass: check.prohibitedClass, field: check.field, term: check.term };
+  const message = check.field === 'store' ? STORE_WAITING_FOR_CHECK : WAITING_FOR_CHECK;
+  return { status: 'WAITING_FOR_CHECK', message, prohibitedClass: check.prohibitedClass, field: check.field, term: check.term };
+}
+
+/** What a partner reads about the STORE itself: null when its words are clear or approved. */
+export type StoreCheckView = null | { status: 'WAITING_FOR_CHECK'; message: string; prohibitedClass: ProhibitedClass; field: StoreField; term: string };
+export function partnerStoreView(check: StoreCheck): StoreCheckView {
+  if (check.state !== 'WAITING') return null;
+  return { status: 'WAITING_FOR_CHECK', message: STORE_WAITING_MESSAGE, prohibitedClass: check.prohibitedClass, field: check.field, term: check.term };
 }
