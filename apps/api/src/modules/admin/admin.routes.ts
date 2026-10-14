@@ -1383,7 +1383,8 @@ export async function adminRoutes(app: FastifyInstance) {
           },
         },
         subscription: true,
-        _count: { select: { items: true, orders: true } },
+        // [Item 62] "Menu items" counts the live menu, not archived history.
+        _count: { select: { items: { where: { archivedAt: null } }, orders: true } },
       },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
