@@ -42,6 +42,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -62,6 +63,7 @@ DB_HOST, DB_PORT = 'postgres', 5432
 DEFAULT_STORE = '/etc/credstore.encrypted/swift'
 DEFAULT_RUN = '/run/swift-secrets'  # production's live secrets, mounted into its containers
 PRODUCTION_COMPOSE = ('docker-compose.yml', 'docker-compose.wall.yml')
+PROJECT_NAME = re.compile('[a-z0-9][a-z0-9_-]*')  # what Compose accepts as a project name
 DEFAULT_LOCK = '/run/lock/swift-rls-logins.lock'
 SCRAM_ITERATIONS = 4096
 TIMEOUT = 120
@@ -361,6 +363,20 @@ def _same_or_inside(path, base):
     return path == base or path.startswith(base.rstrip('/') + '/')
 
 
+def production_project(deploy):
+    """The Compose project production runs under: the top-level `name:` of
+    deploy/docker-compose.yml (what Compose picks without -p), or None."""
+    try:
+        text = (Path(deploy) / PRODUCTION_COMPOSE[0]).read_text(encoding='utf-8')
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = re.fullmatch(r"""name:\s*["']?([a-z0-9][a-z0-9_-]*)["']?\s*(?:#.*)?""", line)
+        if match:
+            return match.group(1)
+    return None
+
+
 def store_env_for(args, deploy):
     """Pair the store with the stack, before anything is touched.
 
@@ -368,9 +384,11 @@ def store_env_for(args, deploy):
     the deploy directory, its docker-compose.yml first and at most the wall
     overlay beside it); it uses production's store and only that. Any other
     stack (a rehearsal) names a store of its own, both locations, neither of
-    them production's store or its live secrets. So a rehearsal can never
-    journal or publish into production, and production never journals into
-    a store its containers do not read.
+    them production's store or its live secrets, AND a Compose project of its
+    own: never production's (the base file's `name:`), the directory default,
+    or none at all (the base file first would pick production's). So a
+    rehearsal can never journal or publish into production, and a rehearsal
+    store never receives credentials for production's database.
     """
     files = [os.path.realpath(path) for path in args.compose_file]
     production_stack = (args.project_name is None
@@ -383,6 +401,10 @@ def store_env_for(args, deploy):
         return []
     require(args.run_dir is not None and not _same_or_inside(args.store_dir, DEFAULT_STORE)
             and not _same_or_inside(args.run_dir, DEFAULT_RUN), 'REHEARSAL_STACK_NEEDS_ITS_OWN_STORE')
+    production = production_project(deploy)
+    require(production is not None and type(args.project_name) is str
+            and PROJECT_NAME.fullmatch(args.project_name) is not None
+            and args.project_name not in (production, Path(deploy).name), 'REHEARSAL_STACK_NEEDS_ITS_OWN_PROJECT')
     return ['env', f'SWIFT_SECRETS_STORE_DIR={args.store_dir}', f'SWIFT_SECRETS_RUN_DIR={args.run_dir}']
 
 

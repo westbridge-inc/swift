@@ -457,6 +457,21 @@ class OperatorEndToEnd(unittest.TestCase):
             with self.subTest(stack=stack):
                 self.assertEqual(self.host.run('apply', stack=stack)[1],
                                  {'status': 'hold', 'reason': 'PRODUCTION_STACK_NEEDS_PRODUCTION_STORE'})
+        # A rehearsal names its own compose project, never production's: the
+        # base file's `name:` (swift), the directory default, or none at all
+        # (with the base file first, Compose would pick production's).
+        for stack in (['--project-name', 'swift', *own_store],
+                      ['--project-name', 'swift', '--compose-file', base, '--compose-file', other, *own_store],
+                      ['--compose-file', base, '--compose-file', other, *own_store],
+                      ['--compose-file', other, *own_store],
+                      ['--project-directory', str(self.host.tmp), *own_store],
+                      ['--project-name', 'deploy', *own_store],
+                      ['--project-name', 'Swift', *own_store],
+                      ['--project-name', ' swift', *own_store],
+                      ['--project-name', '', *own_store]):
+            with self.subTest(project=stack):
+                self.assertEqual(self.host.run('apply', stack=stack)[1],
+                                 {'status': 'hold', 'reason': 'REHEARSAL_STACK_NEEDS_ITS_OWN_PROJECT'})
         self.assertEqual(self.host.call_records(), [])
         self.assertFalse(self.host.lock.exists())
         # The two allowed pairs get past the check (fingerprint reads no store).
@@ -464,6 +479,24 @@ class OperatorEndToEnd(unittest.TestCase):
                       ['--project-directory', str(DEPLOY) + '/'], rehearsal + own_store):
             with self.subTest(allowed=stack):
                 self.assertEqual(self.host.run('fingerprint', stack=stack)[1]['status'], 'fingerprint')
+
+    def test_production_s_project_name_is_read_from_its_compose_file(self):
+        self.assertEqual(operator.production_project(DEPLOY), 'swift')
+        bare = Path(tempfile.mkdtemp(prefix='swift-rls-noname-'))
+        self.addCleanup(shutil.rmtree, bare, True)
+        (bare / 'docker-compose.yml').write_text('services: {}\n')
+        self.assertIsNone(operator.production_project(bare))
+        # Production's name unknown: no rehearsal project can be told apart from it.
+        import argparse
+        args = argparse.Namespace(project_name='rehearsal', project_directory=str(bare),
+                                  compose_file=[str(bare / 'rehearsal.yml')], store_dir=str(bare / 'store'),
+                                  run_dir=str(bare / 'run'))
+        with self.assertRaises(operator.Refusal) as refused:
+            operator.store_env_for(args, bare)
+        self.assertEqual(str(refused.exception), 'REHEARSAL_STACK_NEEDS_ITS_OWN_PROJECT')
+        (bare / 'docker-compose.yml').write_text('# x\nname: "prod-x"  # production\nservices: {}\n')
+        self.assertEqual(operator.production_project(bare), 'prod-x')
+        self.assertEqual(operator.store_env_for(args, bare)[0], 'env')
 
     def test_a_rehearsal_store_names_both_locations_production_names_neither(self):
         ports = operator.HostPorts(['docker', 'compose'], operator.DEFAULT_STORE, [], {'database': 'swift'})

@@ -1207,5 +1207,5 @@ them on the host that runs the stack, as the deploy user, with Postgres up:
   with no `--project-name` or extra compose file) uses production's store
   and nothing else. Any other project (the Phase C rehearsal) must name a
   store of its own with both `--store-dir` and `--run-dir`, neither of them
-  production's; the tool refuses any other pairing before it touches
-  anything.
+  production's, and its own `--project-name` (never production's `swift`);
+  the tool refuses any other pairing before it touches anything.
