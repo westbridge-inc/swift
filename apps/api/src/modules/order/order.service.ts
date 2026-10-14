@@ -71,7 +71,7 @@ import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
-import { assertOrderableNow, assertOrderMayProceed, hiddenAmong, movesTowardCustomer, refusalAudience } from '../compliance/prohibited-gate';
+import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
 
 interface CheckoutInput {
   userId: string;
@@ -1928,10 +1928,7 @@ export class OrderService {
         note: 'Order cancelled before pickup',
       });
       if (restock.applied) {
-        await db.item.updateMany({
-          where: { id: restockItemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-          data: { isAvailable: true, autoHiddenAt: null },
-        });
+        await unhideRestocked(db, restockItemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
       }
     }
   }
@@ -2107,7 +2104,9 @@ export class OrderService {
     // [GUARDRAILS §8] An order holding a line Swift no longer allows does not
     // move toward the customer from this seam either (accept, prepare, ready,
     // rider legs before pickup, the store's own handover). Cancelling is never refused.
-    if (movesTowardCustomer(source.status, input.target)) await assertOrderMayProceed(tx, source.id, refusalAudience(input.target));
+    if (heldAtSeam(source, input.target)) {
+      await assertOrderMayProceed(tx, source.id, refusalAudience(input.target), { storeMayReject: storeMayReject(source, MMG_MONEY_MOVED) });
+    }
     // [TAXI multi-stop 3/8] A ride is over only when every stop the passenger
     // asked for is done: arrived at and left, or skipped with a reason the
     // passenger is told. Every way to DELIVERED passes this seam (the fare

@@ -63,6 +63,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /verification/:id/approve', helper: 'approveDoc', args: ['doc_1', undefined] },
   { route: 'PUT /verification/:id/reject', helper: 'rejectDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /staff/:userId/document-reviewer', helper: 'setDocumentReviewer', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
+  { route: 'PUT /staff/:userId/catalogue-approver', helper: 'setCatalogueApprover', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
 
   // ── Compliance ─────────────────────────────────────────────────────────
   { route: 'POST /compliance/reviews/:id/decide', helper: 'decideComplianceReview', args: ['cre_1', true, undefined], requiredBodyKeys: ['pass'] },
