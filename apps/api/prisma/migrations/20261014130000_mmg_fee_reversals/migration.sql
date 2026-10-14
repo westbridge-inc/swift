@@ -83,12 +83,15 @@ ALTER TABLE "mmg_fee_reversals"
   ADD CONSTRAINT "mmg_fee_reversals_failed_check"
     CHECK ("state" <> 'FAILED' OR "failedAt" IS NOT NULL),
   -- A person's resolution of a HELD return is named, signed and evidenced, and
-  -- only ever closes it: NOT_RETURNED -> FAILED, RETURNED_BY_REFERENCE -> REVERSED.
+  -- only ever closes it: NOT_RETURNED -> FAILED, RETURNED_BY_REFERENCE -> REVERSED,
+  -- RETURNED_NOT_BOOKED (MMG returned money that had already paid for a week:
+  -- nothing deducted, the refund procedure settles it) -> FAILED.
   ADD CONSTRAINT "mmg_fee_reversals_resolution_check"
     CHECK ("resolution" IS NULL OR (
       "resolvedBy" IS NOT NULL AND "resolutionNote" IS NOT NULL AND (
         ("resolution" = 'NOT_RETURNED' AND "state" = 'FAILED')
         OR ("resolution" = 'RETURNED_BY_REFERENCE' AND "state" IN ('HELD', 'REVERSED'))
+        OR ("resolution" = 'RETURNED_NOT_BOOKED' AND "state" = 'FAILED')
       )));
 
 -- Forward only. What is being reversed (payer, payment, transaction, amount,

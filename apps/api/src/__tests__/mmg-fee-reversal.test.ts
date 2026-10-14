@@ -598,6 +598,96 @@ describe('[DS1112] a HELD return always has a way out — on MMG\'s evidence, ne
   });
 });
 
+const resolveAs = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED', mmgReference: string, service = reversals) => runWithTenant('swift-default', () =>
+  service.resolveHeld({ tenantId: 'swift-default', reversalId, outcome, mmgReference, actorId: admin.userId }, async () => {}));
+const reversalRow = (id: string) => app.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
+
+describe('[DS1115] a person\'s answer is bound to THIS payment, and every held return can be closed', () => {
+  it('S2: a reference that names a payment Swift knows (this payment\'s own MMG ledger line, or another payment) is refused, even when MMG shows it approved for the amount', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    expect(held.state).toBe('HELD');
+    const own = await app.prisma.providerPayment.findMany({ where: { creditedPaymentId: `mco:${p.checkoutId}` }, select: { providerTxnId: true } });
+    const ledger = own.map((r) => r.providerTxnId).find((n) => n.toUpperCase() !== p.txn.toUpperCase());
+    expect(ledger, 'the checkout recorded MMG\'s ledger number too').toBeTruthy();
+    // MMG's lookup of the original's own statement line: approved, the very same amount — a payment, not a return
+    sandboxAddHistory({ transactionId: ledger!, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    await expect(resolveAs(held.id, 'RETURNED', ledger!)).rejects.toMatchObject({ code: 'NOT_A_REVERSAL' });
+    await expect(resolveAs(held.id, 'RETURNED', ` ${ledger!.toLowerCase()} `)).rejects.toMatchObject({ code: 'NOT_A_REVERSAL' });
+    const other = await paidCheckout();
+    await expect(resolveAs(held.id, 'RETURNED', other.txn)).rejects.toMatchObject({ code: 'NOT_A_REVERSAL' });
+    expect((await reversalRow(held.id)).state).toBe('HELD');
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+  });
+
+  it('S3: MMG returned it but the money already paid for a week — "returned" is refused; "returned, not booked" closes it on MMG\'s proof, frees billing and is never asked again', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const sent = await ask(p.checkoutId, p.amount);
+    expect(sent.state).toBe('SENT');
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } }); // the money paid for a week meanwhile
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const held = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    expect(held).toMatchObject({ state: 'HELD', heldReason: 'WALLET_NO_LONGER_HOLDS_IT' });
+    await expect(resolveAs(held.id, 'RETURNED', `STMT${RUN}A`)).rejects.toMatchObject({ code: 'RETURN_NOT_BOOKABLE' });
+    expect((await reversalRow(held.id)).resolution).toBeNull();
+    const closed = await resolveAs(held.id, 'RETURNED_NOT_BOOKED', `STMT${RUN}B`);
+    expect(closed).toMatchObject({ state: 'FAILED', resolution: 'RETURNED_NOT_BOOKED', resolvedBy: admin.userId, resolutionNote: `STMT${RUN}B` });
+    expect(await walletOf(p.subId)).toBe(0);
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+    expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(false);
+    await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'ALREADY_REVERSED' });
+    // only a return MMG proved after the money was used is closed this way
+    const q = await paidCheckout();
+    sandboxScriptReversal(q.txn, 'error');
+    const noAnswer = await ask(q.checkoutId, q.amount);
+    await expect(resolveAs(noAnswer.id, 'RETURNED_NOT_BOOKED', `STMT${RUN}C`)).rejects.toMatchObject({ code: 'NOT_SHORT' });
+  });
+
+  it('S3: closed as "not returned", then MMG returns it after all — the sweep notices within a week and pages once', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    expect((await resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}D`)).state).toBe('FAILED');
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const pages = async () => (await app.prisma.notification.findMany({ where: { data: { path: ['alert'], equals: 'mmg-fee-reversal-returned-after-close' } } }))
+      .filter((n) => (n.data as Record<string, unknown>)['reversalId'] === held.id);
+    const later = new Date(Date.now() + 60 * 60_000);
+    await reversals.sweep(later);
+    const first = await pages();
+    expect(first.length).toBeGreaterThan(0);
+    expect((await reversalRow(held.id)).lookupStatus).toBe('RETURNED_AFTER_CLOSE');
+    await reversals.sweep(new Date(later.getTime() + 60 * 60_000));
+    expect(await pages()).toHaveLength(first.length);
+  });
+
+  it('S4: MMG cannot be asked right now — a clean refusal, nothing changed', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    const down = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => ({ ...reversalClient, transactionLookupDetail: async () => { throw new Error('connection reset'); } }) });
+    await expect(resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}E`, down)).rejects.toMatchObject({ code: 'MMG_LOOKUP_UNAVAILABLE' });
+    await expect(resolveAs(held.id, 'RETURNED', `STMT${RUN}F`, down)).rejects.toMatchObject({ code: 'MMG_LOOKUP_UNAVAILABLE' });
+    expect((await reversalRow(held.id))).toMatchObject({ state: 'HELD', resolution: null });
+  });
+
+  it('S4: the database keeps a resolution written once, and binds each outcome to its state', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    await resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}G`);
+    await expect(app.prisma.mmgFeeReversal.update({ where: { id: held.id }, data: { resolution: 'RETURNED_BY_REFERENCE' } })).rejects.toThrow();
+    await expect(app.prisma.mmgFeeReversal.update({ where: { id: held.id }, data: { resolutionNote: 'rewritten' } })).rejects.toThrow();
+    const q = await paidCheckout();
+    sandboxScriptReversal(q.txn, 'error');
+    const held2 = await ask(q.checkoutId, q.amount);
+    await expect(app.prisma.mmgFeeReversal.update({ where: { id: held2.id }, data: { resolution: 'NOT_RETURNED', resolvedBy: 'x', resolutionNote: 'y' } })).rejects.toThrow();
+    await expect(app.prisma.mmgFeeReversal.update({ where: { id: held2.id }, data: { resolution: 'RETURNED_NOT_BOOKED', resolvedBy: 'x', resolutionNote: 'y' } })).rejects.toThrow();
+  });
+});
+
 describe('[MMG REVERSAL] the record only moves forward', () => {
   it('the database refuses a backwards state, a rewritten amount, and a second wallet debit', async () => {
     const p = await paidCheckout();

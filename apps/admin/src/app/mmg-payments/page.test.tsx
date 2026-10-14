@@ -316,5 +316,27 @@ describe('[DS1112] a held return is resolved from the MMG statement, by two peop
     expect(await within(form).findByText(/Sent for a second admin's approval/)).toBeTruthy();
     const post = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/rev_1/resolve') && init?.method === 'POST');
     expect(JSON.parse(String(post![1]!.body))).toEqual({ outcome: 'NOT_RETURNED', mmgReference: 'MMG-STMT-0001', reason: 'The MMG statement shows no reversal for this payment' });
+    // [DS1115] the third way out is offered only where it applies
+    expect(within(form).queryByLabelText(/already paid for a week/)).toBeNull();
+  });
+
+  it('[DS1115] MMG returned money that had already paid for a week: it can be closed as returned, not booked', async () => {
+    const { fetchMock, user } = await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) {
+        return reversalView({ canReverse: false, refusal: { code: 'ALREADY_REVERSING', message: 'in progress' }, reversals: [{ ...heldReversal, heldReason: 'WALLET_NO_LONGER_HOLDS_IT' }] });
+      }
+      if (request.method === 'POST' && request.url.pathname.endsWith('/rev_1/resolve')) {
+        return { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this', details: { approvalId: 'ap_8' } } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const form = await screen.findByRole('form', { name: 'Resolve the held return' });
+    await user.click(within(form).getByLabelText(/already paid for a week/));
+    await user.type(within(form).getByLabelText('MMG reference'), 'MMG-STMT-0009');
+    await user.type(within(form).getByLabelText('Why'), 'The statement shows the reversal; the money paid a week first');
+    await user.click(within(form).getByRole('button', { name: 'Send for approval' }));
+    expect(await within(form).findByText(/Sent for a second admin's approval/)).toBeTruthy();
+    const post = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/rev_1/resolve') && init?.method === 'POST');
+    expect(JSON.parse(String(post![1]!.body))).toMatchObject({ outcome: 'RETURNED_NOT_BOOKED', mmgReference: 'MMG-STMT-0009' });
   });
 });

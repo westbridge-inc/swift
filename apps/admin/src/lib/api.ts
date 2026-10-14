@@ -947,7 +947,7 @@ export const reverseMmgFeePayment = (checkoutId: string, amountGyd: number, reas
     reason,
   });
 // [DS1112] Resolve a HELD return on MMG's evidence (money: a reason and a second admin).
-export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED', mmgReference: string, reason: string) =>
+export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED', mmgReference: string, reason: string) =>
   apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/resolve`, {
     method: 'POST',
     body: JSON.stringify({ outcome, mmgReference, reason }),

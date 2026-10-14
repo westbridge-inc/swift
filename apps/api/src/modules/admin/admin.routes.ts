@@ -5033,7 +5033,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const tenantId = requireTenantId();
     const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
     const body = z.object({
-      outcome: z.enum(['NOT_RETURNED', 'RETURNED']),
+      outcome: z.enum(['NOT_RETURNED', 'RETURNED', 'RETURNED_NOT_BOOKED']),
       // The MMG statement line or the MMG reversal reference the person read.
       mmgReference: z.string().trim().min(3).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/#-]*$/, 'Use the reference exactly as MMG shows it'),
       reason: z.string().trim().max(500).optional(),

@@ -362,7 +362,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
         </div>
       ))}
       {check.error ? <MutationError error={check.error} label="MMG could not be checked" /> : null}
-      {v.reversals.filter((r) => r.state === 'HELD').map((r) => <ResolveHeld key={`resolve-${r.id}`} reversalId={r.id} onDone={refresh} />)}
+      {v.reversals.filter((r) => r.state === 'HELD').map((r) => <ResolveHeld key={`resolve-${r.id}`} reversalId={r.id} heldReason={r.heldReason} onDone={refresh} />)}
       {!v.switchedOn ? (
         <p className="text-xs text-[var(--muted)]">Returning payments is switched off on this server until MMG&apos;s answers are proven in testing.</p>
       ) : !v.canReverse ? (
@@ -418,6 +418,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
 const RESOLUTION_WORDS: Record<string, string> = {
   NOT_RETURNED: 'Closed by a person: MMG shows the payment was not returned.',
   RETURNED_BY_REFERENCE: "Closed by a person: MMG's records showed the return they named.",
+  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after the money had already paid for a week. Nothing was deducted; the refund procedure settles it.',
 };
 
 /**
@@ -425,8 +426,10 @@ const RESOLUTION_WORDS: Record<string, string> = {
  * the first answer is a second admin's approval. The server reads MMG's records
  * again and refuses anything they do not show.
  */
-function ResolveHeld({ reversalId, onDone }: { reversalId: string; onDone: () => void }) {
-  const [outcome, setOutcome] = useState<'NOT_RETURNED' | 'RETURNED'>('NOT_RETURNED');
+function ResolveHeld({ reversalId, heldReason, onDone }: { reversalId: string; heldReason: string | null; onDone: () => void }) {
+  const [outcome, setOutcome] = useState<'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED'>('NOT_RETURNED');
+  // [DS1115] Only where MMG returned money that had already paid for a week.
+  const moneyUsed = (heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT');
   const [reference, setReference] = useState('');
   const [reason, setReason] = useState('');
   const resolve = useMutation({ mutationFn: () => resolveMmgFeeReversal(reversalId, outcome, reference.trim(), reason.trim()), onSettled: onDone });
@@ -447,11 +450,17 @@ function ResolveHeld({ reversalId, onDone }: { reversalId: string; onDone: () =>
         <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED'} onChange={() => setOutcome('RETURNED')} />
         MMG shows it was returned (enter MMG&apos;s reversal reference)
       </label>
+      {moneyUsed ? (
+        <label className="flex items-center gap-2 text-xs">
+          <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
+          MMG returned it, but the money had already paid for a week (close it; the refund procedure settles it)
+        </label>
+      ) : null}
       <input
         value={reference}
         onChange={(e) => setReference(e.target.value)}
         aria-label="MMG reference"
-        placeholder={outcome === 'RETURNED' ? "MMG's reversal reference" : 'The MMG statement line or reference'}
+        placeholder={outcome === 'NOT_RETURNED' ? 'The MMG statement line or reference' : "MMG's reversal reference"}
         className="block w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
       />
       <textarea
