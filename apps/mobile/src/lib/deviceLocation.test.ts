@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BOOT_LOCATION_MODE,
   GEORGETOWN,
@@ -23,6 +23,10 @@ function locationApi(status: 'granted' | 'denied' | 'undetermined'): DeviceLocat
     getCurrentPositionAsync: vi.fn().mockResolvedValue({
       coords: { latitude: 6.81234, longitude: -58.14321 },
     }),
+    // [GO-LOC-1] The fallbacks fail unless a test says otherwise, so a failed
+    // Balanced fix still means "unavailable" wherever that is what is tested.
+    getLastKnownPositionAsync: vi.fn().mockResolvedValue(null),
+    getHighAccuracyPositionAsync: vi.fn().mockRejectedValue(new Error('no GPS fix in this fake')),
     reverseGeocodeAsync: vi.fn().mockResolvedValue([
       { name: 'Regent Street', city: 'Georgetown' },
     ]),
@@ -379,5 +383,70 @@ describe('pickupLocationContext', () => {
       showPrimer: false,
       manualPinAvailable: true,
     });
+  });
+});
+
+// [GO-LOC-1] On Android a Balanced request is served from Wi-Fi and cell. With
+// no network location (weak signal out of town, Google Location Accuracy off,
+// no SIM or Wi-Fi) it never answers: GO spun, then said it couldn't get the
+// location, and the shared status sat at "resolving" — no pickup and no SOS
+// position — for as long as the request hung.
+describe('[GO-LOC-1] no network location never hangs the location resolver', () => {
+  const GPS_FIX = { coords: { latitude: 6.4012, longitude: -58.6202, accuracy: 8 }, timestamp: Date.now() };
+  const never = <T,>() => new Promise<T>(() => {});
+  /** The promise's state without awaiting it: a hung resolver must fail the test, not stall it. */
+  function track<T>(promise: Promise<T>) {
+    const box: { state: 'pending' | 'resolved' | 'rejected'; value?: T } = { state: 'pending' };
+    promise.then((value) => { box.state = 'resolved'; box.value = value; }, () => { box.state = 'rejected'; });
+    return box;
+  }
+  const HALF_A_MINUTE = 30_000;
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('GO: a Balanced request that never answers falls back to the GPS fix', async () => {
+    const api = locationApi('granted');
+    vi.mocked(api.getCurrentPositionAsync).mockImplementation(never);
+    vi.mocked(api.getHighAccuracyPositionAsync).mockResolvedValue(GPS_FIX);
+    const result = track(resolveDeviceLocation('request', api));
+    await vi.advanceTimersByTimeAsync(HALF_A_MINUTE);
+    expect(result.state, 'GO still waits on a Balanced fix that will never come').toBe('resolved');
+    expect(result.value).toEqual({ status: 'granted', latitude: 6.4012, longitude: -58.6202, address: 'Regent Street, Georgetown' });
+    expect(api.getHighAccuracyPositionAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('a Balanced refusal uses a fresh, accurate cached fix without waking the GPS', async () => {
+    const api = locationApi('granted');
+    vi.mocked(api.getCurrentPositionAsync).mockRejectedValue(new Error('Location provider is unavailable'));
+    vi.mocked(api.getLastKnownPositionAsync).mockResolvedValue({ coords: { latitude: 6.7991, longitude: -58.1602, accuracy: 30 }, timestamp: Date.now() - 20_000 });
+    const result = track(resolveDeviceLocation('request', api));
+    await vi.advanceTimersByTimeAsync(HALF_A_MINUTE);
+    expect(result.value).toMatchObject({ status: 'granted', latitude: 6.7991, longitude: -58.1602 });
+    expect(api.getHighAccuracyPositionAsync).not.toHaveBeenCalled();
+  });
+
+  it('nothing answers: the shared status ends "unavailable" (the existing retry path), never stuck at "resolving"', async () => {
+    const api = locationApi('granted');
+    vi.mocked(api.getCurrentPositionAsync).mockImplementation(never);
+    vi.mocked(api.getLastKnownPositionAsync).mockImplementation(never);
+    vi.mocked(api.getHighAccuracyPositionAsync).mockImplementation(never);
+    let status: LocationStatus = 'unknown';
+    const writer: DeviceLocationWriter = { setLocation: vi.fn(() => { status = 'granted'; }), setStatus: vi.fn((next) => { status = next; }) };
+    const result = track(resolveCoordinatedDeviceLocation('request', api, writer));
+    expect(status).toBe('resolving');
+    await vi.advanceTimersByTimeAsync(HALF_A_MINUTE);
+    expect(result.state, 'the resolver hung').toBe('resolved');
+    expect(result.value).toEqual({ status: 'unavailable' });
+    expect(status).toBe('unavailable');
+    expect(writer.setLocation).not.toHaveBeenCalled();
+  });
+
+  it('a denied permission still asks for no position at all', async () => {
+    const api = locationApi('denied');
+    await expect(resolveDeviceLocation('request', api)).resolves.toEqual({ status: 'denied' });
+    expect(api.getCurrentPositionAsync).not.toHaveBeenCalled();
+    expect(api.getLastKnownPositionAsync).not.toHaveBeenCalled();
+    expect(api.getHighAccuracyPositionAsync).not.toHaveBeenCalled();
   });
 });
