@@ -562,6 +562,18 @@ class OperatorUnits(unittest.TestCase):
         self.assertIn("c.relkind IN ('r', 'p')", tenant)
         self.assertIn("c.relkind IN ('r', 'p')", census[census.index('tenant AS ('):census.index('qr_grants AS (')])
 
+    def test_the_login_probe_sees_every_owner_kind(self):
+        """An owner member can drop what it owns: a schema owner any table in it,
+        a function owner the append-only trigger behind it. The login's own
+        probe counts the owners of the walled schemas themselves and of their
+        relations, functions and types."""
+        owners = operator.FACTS_SQL[operator.FACTS_SQL.index('owners AS ('):operator.FACTS_SQL.index(' f AS (')]
+        for kind in ('SELECT c.relowner AS owner FROM pg_class c', 'SELECT p.proowner FROM pg_proc p',
+                     'SELECT n.nspowner FROM pg_namespace n', 'SELECT t.typowner FROM pg_type t'):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, owners)
+        self.assertEqual(owners.count("IN ('public', 'swift_qr')"), 4)
+
     def test_published_urls_parse_back_and_others_do_not(self):
         url = operator.published_url(APP, 'swift', 'a-b_c')
         self.assertEqual(operator.parse_published(url), (APP, 'a-b_c', 'postgres', 5432, 'swift'))

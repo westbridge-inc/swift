@@ -85,8 +85,9 @@ PGPASSFILE="$f" psql "host=postgres port=5432 dbname=$POSTGRES_DB user=$1 sslmod
 # What the login itself sees on its own connection. The verdicts mirror
 # apps/api/src/lib/rls-attestation.ts (superuser, BYPASSRLS, swift_bypass_rls
 # membership, RLS disabled, owned and not forced), plus one it cannot see from
-# flags alone: membership of a role that owns a table or function in the
-# walled schemas (an owner member can switch the wall off).
+# flags alone: membership of a role that owns a walled schema or a table,
+# function or type in one (an owner member can switch the wall off, or drop
+# the append-only trigger a function carries).
 FACTS_SQL = ' '.join('''
 WITH me AS (SELECT r.rolsuper, r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user),
 bypass AS (SELECT coalesce((SELECT pg_has_role(current_user, b.oid, 'MEMBER') FROM pg_roles b
@@ -98,6 +99,9 @@ tenant AS (SELECT c.relrowsecurity, c.relforcerowsecurity, c.relowner FROM pg_cl
 owners AS (SELECT c.relowner AS owner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname IN ('public', 'swift_qr')
            UNION SELECT p.proowner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname IN ('public', 'swift_qr')
+           UNION SELECT n.nspowner FROM pg_namespace n WHERE n.nspname IN ('public', 'swift_qr')
+           UNION SELECT t.typowner FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
             WHERE n.nspname IN ('public', 'swift_qr')),
 f AS (SELECT (SELECT count(*) FROM me) = 1 AS resolved,
              coalesce((SELECT rolsuper FROM me), true) AS super,
