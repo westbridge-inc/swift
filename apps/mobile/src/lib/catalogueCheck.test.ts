@@ -3,6 +3,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { catalogueCheckLine, importCheckSummary } from './catalogueCheck';
 
+const SRC = process.cwd().endsWith('apps/mobile')
+  ? join(process.cwd(), 'src')
+  : join(process.cwd(), 'apps', 'mobile', 'src');
+
 // [GUARDRAILS §8] Owner ruling (13 Oct): the partner sees "Waiting for a quick check"
 // on an item a banned word is holding, and the owner's own words on an item Swift
 // does not allow. Mobile has no render tests, so the screens are guarded by source.
@@ -27,10 +31,11 @@ describe('the partner reads why Swift hides an item', () => {
     expect(importCheckSummary({})).toBe('');
   });
   it('the menu and the bulk import screens both show it', () => {
-    const menu = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorMenuScreen.tsx'), 'utf8');
+    const menu = readFileSync(join(SRC, 'modules/vendor/screens/VendorMenuScreen.tsx'), 'utf8');
     // The line is rendered when there is one — not merely computed.
     expect(menu).toMatch(/\{catalogueCheckLine\(item\.catalogueCheck\) \? \(\s*<T[^>]*>\s*\{catalogueCheckLine\(item\.catalogueCheck\)\}/);
-    const bulk = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorBulkImportScreen.tsx'), 'utf8');
-    expect(bulk).toMatch(/importCheckSummary\(result\)/);
+    const bulk = readFileSync(join(SRC, 'modules/vendor/screens/VendorBulkImportScreen.tsx'), 'utf8');
+    // Rendered inside the summary line, not merely called.
+    expect(bulk).toMatch(/\{failedCount \? [^\n]*\}\s*\{importCheckSummary\(result\)\}\.\s*<\/T>/);
   });
 });

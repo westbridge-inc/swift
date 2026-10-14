@@ -150,6 +150,9 @@ export default function ImportPage() {
                 {(result.waitingForCheck ?? []).map((w) => (
                   <li key={w.row}>Row {w.row}: {w.name}</li>
                 ))}
+                {(result.waitingForCheckCount ?? 0) > (result.waitingForCheck ?? []).length && (
+                  <li>…and {(result.waitingForCheckCount ?? 0) - (result.waitingForCheck ?? []).length} more</li>
+                )}
               </ul>
             </>
           )}

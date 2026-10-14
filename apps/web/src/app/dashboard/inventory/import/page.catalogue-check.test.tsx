@@ -29,6 +29,20 @@ describe('bulk import names the rows waiting for a quick check', () => {
     expect(screen.getByText('Row 4: Cough syrup')).toBeTruthy();
   });
 
+  it('says how many more are held beyond the rows the server listed', async () => {
+    mockApi(({ url }) => {
+      if (url.pathname === '/api/v1/vendor/items/import/automap') return { body: { data: preview } };
+      if (url.pathname === '/api/v1/vendor/items/import') return { body: { data: {
+        imported: 3, failedCount: 0, failures: [], waitingForCheck: [{ row: 2, name: 'Rum cake' }], waitingForCheckCount: 120,
+      } } };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const { user, container } = renderWithQuery(<ImportPage />);
+    await user.upload(container.querySelector('input[type="file"]') as HTMLInputElement, new File(['x'], 'menu.csv', { type: 'text/csv' }));
+    await user.click(await screen.findByRole('button', { name: 'Import 3 items' }));
+    expect(await screen.findByText('…and 119 more')).toBeTruthy();
+  });
+
   it('says nothing about a check when no row is held (and an older server sends no such field)', async () => {
     mockApi(({ url }) => {
       if (url.pathname === '/api/v1/vendor/items/import/automap') return { body: { data: preview } };
