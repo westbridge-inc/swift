@@ -378,10 +378,13 @@ describe('F04 — the cancel result names a booking and its provider; the fee an
     });
   });
 
-  it('the tracking screen shows the server’s result first and never discards its money outcome for copy', () => {
+  // [owner #46/#50, 13–14 Oct] There is no money outcome to show any more: a
+  // cancel is free or refused. The screen still shows the server's result
+  // first, and never words a fee.
+  it('the tracking screen shows the server’s result first and never words a cancellation fee', () => {
     const screen = readFileSync(resolve(__dirname, '../../../mobile/src/modules/orders/screens/DeliveryScreen.tsx'), 'utf8');
     expect(screen).toContain('setCancelMessage(payload.message)');
-    expect(screen).toMatch(/setCancelFee\(typeof payload\.cancellationFee === 'number' \? payload\.cancellationFee : null\)/);
+    expect(screen).not.toMatch(/setCancelFee|late-cancellation|cancellation fee/i);
     expect(screen).toMatch(/: cancelMessage\s*\?\?/);
   });
 });
