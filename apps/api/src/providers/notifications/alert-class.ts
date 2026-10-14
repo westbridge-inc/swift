@@ -65,6 +65,9 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_unattested_cancellation', 'supply_returned',
     // Rides
     'ride_queue_matched', 'ride_queue_expired', 'ride_released_no_drivers',
+    // [VERIFY-DOCS · owner ruling 9] A queued ride whose class is no longer offered
+    // (Group, while buses are hidden): told once, like a timed-out queue entry.
+    'ride_queue_unavailable',
     // Bookings and service jobs, other than the two that ring or need action now
     'booking_confirmed', 'booking_slot_declined', 'booking_completed', 'booking_cancelled',
     'booking_reminder', 'booking_rescheduled',
