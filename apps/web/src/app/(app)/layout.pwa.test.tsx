@@ -125,14 +125,15 @@ describe('[PWA-1] the customer shell, installed', () => {
     vi.spyOn(api, 'getAddresses').mockResolvedValue([]);
     render(<AppLayout><CartPage /></AppLayout>);
     fireEvent.click(await screen.findByRole('button', { name: 'Add a delivery address' }));
-    const address = screen.getByRole('textbox', { name: 'Search the delivery destination' }) as HTMLInputElement;
+    // The address form (a pin on the map, then its fields) loads on demand.
+    const address = await screen.findByRole('textbox', { name: 'Street address' }) as HTMLInputElement;
     fireEvent.change(address, { target: { value: 'Test destination, Georgetown' } });
     act(() => { window.dispatchEvent(new Event('offline')); });
     expect(screen.getByText('You’re offline.')).toBeTruthy();
     act(() => { window.dispatchEvent(new Event('online')); });
     expect(reload).not.toHaveBeenCalled();
     expect(screen.queryByText('You’re offline.')).toBeNull();
-    expect(screen.getByRole('textbox', { name: 'Search the delivery destination' })).toBe(address);
+    expect(screen.getByRole('textbox', { name: 'Street address' })).toBe(address);
     expect(address.value).toBe('Test destination, Georgetown');
   });
 });

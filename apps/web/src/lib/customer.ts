@@ -133,6 +133,8 @@ export interface Cart {
   };
   meetsMinimum?: boolean;
   minimumOrderAmount?: number;
+  /** [E01] One row per future order: each store's fulfilment, fee and total, as checkout writes it. */
+  vendors?: Array<{ vendorId: string; name: string; fulfillment: string; subtotal?: number; deliveryFee: number; totalAmount?: number; meetsMinimum?: boolean }>;
   paymentCapabilities?: {
     /** Changes when the vendor set or the validated MMG destination changes. */
     scope?: string;
@@ -395,7 +397,8 @@ export function clearCheckoutAttempt(): void {
 export async function getAddresses(options?: { redirectOnExpired?: boolean }): Promise<any[]> {
   return (await apiFetch('/api/v1/customer/addresses', undefined, options)).data as any[];
 }
-export async function addAddress(body: { label: string; addressLine1: string; city: string; region: string; latitude: number; longitude: number; isDefault?: boolean }) {
+/** POST /customer/addresses — the server's own fields (region is optional there, and the phone never sends it). */
+export async function addAddress(body: { label: string; addressLine1: string; addressLine2?: string; city: string; region?: string; latitude: number; longitude: number; instructions?: string; isDefault?: boolean }) {
   return (await apiFetch('/api/v1/customer/addresses', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 

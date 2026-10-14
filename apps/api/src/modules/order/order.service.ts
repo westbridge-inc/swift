@@ -1,3 +1,5 @@
+import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
+import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
@@ -368,7 +370,7 @@ export function assertMmgFulfilmentAllowed(
   // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
   if (order.mmgClaimMismatchAt) {
     // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
-    throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim, so this order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don\'t hand anything over until then.');
+    throw new AppError(409, 'MMG_CLAIM_MISMATCH', "The store's and the customer's MMG payment reports don't match. This order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don't hand anything over until then.");
   }
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
@@ -688,9 +690,10 @@ export class OrderService {
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const paymentGate = await tx.order.findUnique({
       where: { id: input.orderId },
-      select: { paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
+      select: { customerId: true, paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
     });
     if (paymentGate) {
+      await assertDispatchPairEligible(tx, paymentGate.customerId, input.moverUserId, 'RIDER');
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
       if (withheldAwaitingReadiness(paymentGate)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
       if (!dispatchHoldExpired(paymentGate)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
@@ -2518,6 +2521,8 @@ export class OrderService {
             },
           });
 
+          await persistRiderCancellationNotice(tx, order);
+
           if (order.riderId) {
             await new FloatService(tx).release(tx, order.riderId, riderFloatForOrder(order));
             await this.stageRiderRelease(tx, order.riderId, orderId, false, true);
@@ -2573,6 +2578,9 @@ export class OrderService {
     if (order.vendorId && !heldNow) {
       this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
     }
+    // [L07] The rider's notice committed with the cancel; this is only its
+    // first delivery attempt, started after the emits and never awaited.
+    void this.drainRiderCancelNoticeNow(orderId);
     // [REPORT-007-v4 F-02 / REPORT-008 F-02] The store must LEARN a
     // possibly-paid MMG order was cancelled — it holds the only rail that can
     // make the customer whole. HELD orders are NOT exempt: the pay link went
@@ -2609,6 +2617,18 @@ export class OrderService {
       };
     }
     return { message: cancelled ?? (freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`), cancellationFee };
+  }
+
+  /** [L07 · Opus S3] The first delivery attempt of a committed rider
+   *  cancellation notice. The cancel request never awaits it: a hung push
+   *  provider (an 8 s timeout, three tries and backoff, about 34 s) would hold
+   *  the customer's cancel past the phone's 10 s timeout, and they would read
+   *  a failed cancel that went through. The checkout-outbox sweep (every 10 s)
+   *  is the durability guarantee. Never rejects. */
+  drainRiderCancelNoticeNow(orderId: string): Promise<void> {
+    return drainRiderCancellationNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId })
+      .then(() => undefined)
+      .catch((err) => log().warn({ err, orderId }, 'rider cancellation notice awaits retry'));
   }
 
   async updateStatus(

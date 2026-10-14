@@ -1,3 +1,4 @@
+import { assertRoadTripInMarket } from '../rides/road-trip-market';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
@@ -160,6 +161,7 @@ async function quote(
   speed: DeliverySpeed,
   rates?: CourierRates,
 ) {
+  assertRoadTripInMarket({ pickup, dropoff });
   // Real road km when OSRM is configured; deterministic estimate otherwise.
   const route = await courierMaps.routeKm(pickup, dropoff);
   assertRoadQuoteAvailable(route);
