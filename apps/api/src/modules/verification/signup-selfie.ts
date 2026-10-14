@@ -11,7 +11,7 @@
  * captured — shows nothing rather than a stand-in face.
  */
 import { resolveAvatarUrl } from '../../utils/avatar-url';
-import { IDENTITY_FACE_MATCH_DOCS } from './verification.service';
+import { SELFIE_COMPARE_DOC_TYPES } from './doc-registry';
 
 export interface SignupSelfie { url: string; capturedAt: string }
 
@@ -26,12 +26,12 @@ export function isOwnSelfiePointer(userId: string, avatar: string | null | undef
     && SAFE_NAME.test(parts[2]!) && !parts[2]!.includes('..');
 }
 
-/** The selfie to show beside this document, or null. Only identity documents carry one. */
+/** The selfie to show beside this document, or null. Only a photo ID carries one (national ID, passport or licence). */
 export async function signupSelfieFor(
   docType: string,
   user: { id: string; avatar: string | null; selfieCapturedAt: Date | null } | null,
 ): Promise<SignupSelfie | null> {
-  if (!user || !IDENTITY_FACE_MATCH_DOCS.has(docType)) return null;
+  if (!user || !SELFIE_COMPARE_DOC_TYPES.has(docType)) return null;
   if (!user.selfieCapturedAt || !isOwnSelfiePointer(user.id, user.avatar)) return null;
   const url = await resolveAvatarUrl(user.avatar);
   return url ? { url, capturedAt: user.selfieCapturedAt.toISOString() } : null;

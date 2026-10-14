@@ -215,4 +215,24 @@ describe('[Item 98] the signup selfie accompanies a granted identity-document vi
     });
     expect((await call(reviewer.token, 'GET', `/verification/${business.id}/document-url`)).json().data.signupSelfie).toBeNull();
   });
+
+  // [Owner ruling 13 Oct 2026, row 30] The selfie goes beside WHICHEVER photo ID was sent: a national ID, a
+  // passport or a driver's licence (a motorised mover's licence is their photo ID). A vehicle paper is not one.
+  it('a passport or a driver\'s licence carries the selfie too; a vehicle paper does not', async () => {
+    const capturedAt = new Date('2026-10-08T00:00:00.000Z');
+    await system(() => app.prisma.user.update({ where: { id: subjectId }, data: { avatar: `/uploads/avatars/${subjectId}/synthetic-selfie.jpg`, selfieCapturedAt: capturedAt } }));
+    const reviewer = await admin([...DOC_REVIEWER_CAPABILITIES, 'documents.review']);
+    const docOf = (docType: string) => system(async () => {
+      const fileUrl = await ownedVerificationFixture(app.prisma, subjectId);
+      return app.prisma.verificationDocument.create({ data: { userId: subjectId, role: 'MOVER', docType, fileUrl, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1' } });
+    });
+    for (const docType of ['passport', 'drivers_licence', 'national_id']) {
+      const viewed = await call(reviewer.token, 'GET', `/verification/${(await docOf(docType)).id}/document-url`);
+      expect(viewed.statusCode, viewed.body).toBe(200);
+      expect(viewed.json().data.signupSelfie, docType).toEqual({ url: `/uploads/avatars/${subjectId}/synthetic-selfie.jpg`, capturedAt: capturedAt.toISOString() });
+    }
+    const paper = await call(reviewer.token, 'GET', `/verification/${(await docOf('vehicle_registration')).id}/document-url`);
+    expect(paper.statusCode, paper.body).toBe(200);
+    expect(paper.json().data.signupSelfie).toBeNull();
+  });
 });

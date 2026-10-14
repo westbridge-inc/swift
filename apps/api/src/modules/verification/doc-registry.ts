@@ -625,6 +625,10 @@ export async function registryChecklist(prisma: PrismaClient, countryCode: strin
 
 /** [DOC-1 Part XIX · P19] The identity types whose VALID record lets a proprietor's verified name stand in for a business name ("trading as"). Registry text (DOC-INV-2). */
 export const IDENTITY_DOC_TYPES: readonly string[] = ['owner_national_id', 'national_id', 'passport'];
+/** [Item 98 · owner ruling 13 Oct 2026, row 30] The photo IDs a reviewer compares with the applicant's signup selfie, by
+ *  eye and never by a machine: whichever was sent, a national ID, an owner's national ID, a passport or a driver's
+ *  licence (a motorised mover's licence is their photo ID). Registry text (DOC-INV-2). */
+export const SELFIE_COMPARE_DOC_TYPES: ReadonlySet<string> = new Set([...IDENTITY_DOC_TYPES, 'drivers_licence']);
 /** [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] The licence whose NUMBER a reviewer types at approval (kept only as a
  *  blind index, for the duplicate-account check — verification/identity-signal-policy.ts). Registry text (DOC-INV-2). */
 export const LICENCE_NUMBER_DOC_TYPES: ReadonlySet<string> = new Set(['drivers_licence']);
