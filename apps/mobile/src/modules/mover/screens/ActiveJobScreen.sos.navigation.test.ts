@@ -360,6 +360,48 @@ describe('a delivery rider’s SOS: the same ceremony, /safety/sos with the orde
     await click(buttonNamed('Call 911'));
     expect(dialed('911')).toBe(2); // the press itself, then the explicit call
   });
+
+  it('a refused raise, seen and closed, does not come back: the next open is the fresh question on the same order [DS1157]', async () => {
+    fx.routes['post /safety/sos'] = () => refuse(500, 'INTERNAL');
+    await render('RIDER', ORDER);
+    await openSos();
+    await click(buttonNamed('Yes — get help now'));
+    expect(dialogText()).toContain('Swift was NOT alerted — the request failed.');
+    await click(buttonNamed('Close'));
+    await openSos();
+    expect(dialogText(), 'the old failure came back with the fresh question').not.toContain('NOT alerted');
+    await tapOutside();
+    expect(dialog(), 'the fresh question could not be waved away by a tap outside').toBeNull();
+    fx.routes['post /safety/sos'] = () => ok(PAGED);
+    await openSos();
+    await click(buttonNamed('Yes — get help now'));
+    expect(sent('post /safety/sos')).toHaveLength(2);
+    expect(dialogText()).toContain("Swift's safety team has been paged");
+  });
+
+  // [DS1157] Close forgets only a ceremony with nothing in flight and no alert
+  // held. A saved alert whose cancel never reached Swift is still saved: the
+  // popup opens again on it, with the warning, never as a fresh question.
+  it('a held alert survives Close: reopening shows it with the cancel that could not be confirmed', async () => {
+    const SAVED = { id: 'sos-alert-2', status: 'TRIGGER_PENDING', graceEndsAt: new Date(Date.now() + 60_000).toISOString() };
+    fx.routes['post /safety/sos'] = () => ok(SAVED);
+    fx.routes[`post /safety/sos/${SAVED.id}/cancel`] = () => ({ status: 0, network: true });
+    await render('RIDER', ORDER);
+    await openSos();
+    await click(buttonNamed('Yes — get help now'));
+    expect(dialogText()).toContain('Alert saved');
+    await click(buttonNamed("I'm OK — cancel the alert"));
+    expect(sent(`post /safety/sos/${SAVED.id}/cancel`)).toHaveLength(1);
+    expect(dialogText()).toContain('You appear to be offline — Swift could not be reached.');
+    await click(buttonNamed('Close'));
+    expect(dialog()).toBeNull();
+
+    await openSos();
+    expect(dialogText()).toContain('Alert saved');
+    expect(dialogText(), 'Close forgot that the cancel never reached Swift').toContain('You appear to be offline — Swift could not be reached.');
+    await tapOutside();
+    expect(dialog()).not.toBeNull();
+  });
 });
 
 describe('a context that names no record never raises with an undefined id, and is never silent', () => {
