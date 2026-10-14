@@ -4,8 +4,14 @@
 -- PREPAID_REVERSAL stays in "BillingEventType" (inert while no event uses it);
 -- this refuses if any event does, because the previous application's client
 -- could not read it.
+-- mmg_fee_reversals forces row-level security, so a role that sees only some
+-- rows could find no reversal and pass the guard. Row security is switched off
+-- for this transaction: a role that does not bypass it is refused with an
+-- error instead. Run this as a role that bypasses row-level security (a
+-- superuser or BYPASSRLS).
 BEGIN;
 SET LOCAL lock_timeout = '10s';
+SET LOCAL row_security = off;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM "mmg_fee_reversals") THEN
@@ -18,5 +24,5 @@ END $$;
 DROP TRIGGER IF EXISTS mmg_fee_reversals_forward ON "mmg_fee_reversals";
 DROP FUNCTION IF EXISTS mmg_fee_reversals_forward();
 DROP TABLE IF EXISTS "mmg_fee_reversals";
-DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261013210000_mmg_fee_reversals';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261014130000_mmg_fee_reversals';
 COMMIT;

@@ -619,3 +619,16 @@ describe('[MMG REVERSAL] the record only moves forward', () => {
     } })).rejects.toMatchObject({ code: 'P2002' });
   });
 });
+
+describe('[MMG REVERSAL · Opus S3 pattern] the rollback guard cannot be blinded by row-level security', () => {
+  it('switches row security off for its transaction before it looks for reversal rows', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const sql = readFileSync(join(__dirname, '../../prisma/migrations/20261014130000_mmg_fee_reversals/rollback.sql'), 'utf8');
+    const begin = sql.indexOf('BEGIN;');
+    const off = sql.indexOf('SET LOCAL row_security = off;');
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(off, 'mmg_fee_reversals forces row security: a non-bypass role must get an error, never an empty table').toBeGreaterThan(begin);
+    expect(off).toBeLessThan(sql.indexOf('IF EXISTS'));
+  });
+});
