@@ -300,7 +300,7 @@ export interface ActivationChecklistItem {
   /** Approved, and a newer submission of the same type is waiting for review. */
   renewalPending: boolean;
 }
-export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'NEEDS_PHONE' | 'CAN_LIFT_TO_WAITING' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
 export interface VendorActivationChecklist {
   vendorId: string;
   /** The owner's user id: the Review Center's applicant. */
@@ -633,6 +633,10 @@ export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: 
   apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
 export const removeCatalogueItem = (itemId: string, prohibitedClass: ProhibitedClass, reason: string) =>
   apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/remove`, { method: 'POST', body: JSON.stringify({ prohibitedClass }), reason });
+// [GUARDRAILS §8 · owner 14 Oct] A store whose own words (name, description, tags) mention banned goods is held with
+// its items; approve shows it for exactly the words seen. Needs the catalogue-approver grant, like an item.
+export const approveCatalogueStore = (vendorId: string, wordsHash: string, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/stores/${encodeURIComponent(vendorId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
 export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss', reason: string) =>
   apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }), reason });
 // [ADM-006] `category` says which rule was broken; `reason` is what the

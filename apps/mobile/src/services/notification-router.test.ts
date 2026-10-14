@@ -390,6 +390,7 @@ const CENSUS: Case[] = [
   { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'GAP: admin only — the reserve line is below its floor' },
   { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'GAP: admin only — the monthly provisioning notice' },
   { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6)' },
+  { k: 'vendor_needs_public_phone', d: { vendorId: 'v1' }, to: { screen: 'Main' }, why: 'vendor owner — [owner #51] documents done, the store goes live once it publishes a number customers can call; the waiting store\'s own screen asks for it' },
   { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps' },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web

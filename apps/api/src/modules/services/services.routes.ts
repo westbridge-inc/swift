@@ -18,6 +18,7 @@ import {
   tradeRiskTier,
 } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
@@ -554,14 +555,25 @@ export async function servicesRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const job = await jobForUser(id, request.user.userId);
     if (['COMPLETED', 'CANCELLED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', 'This job is already closed');
-    const updated = await app.prisma.serviceJob.update({ where: { id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+    const cancelledByCustomer = job.customerId === request.user.userId;
+    // [owner #50 · coordinator ruling 14 Oct (Opus S3-3)] The one cancellation
+    // rule decides the customer's cancel: free until the provider starts the
+    // job, refused once it is in progress (contact the provider). Never a fee.
+    if (cancelledByCustomer) {
+      const verdict = serviceJobCancelVerdict(job);
+      if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+    }
+    // Compare-and-set on the stage the decision read: a job the provider
+    // starts (or closes) meanwhile is never cancelled under them.
+    const won = await app.prisma.serviceJob.updateMany({ where: { id, status: job.status }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+    if (won.count === 0) throw new AppError(409, 'JOB_CHANGED', 'This job changed while you were cancelling it. Refresh and try again.');
+    const updated = await app.prisma.serviceJob.findUniqueOrThrow({ where: { id } });
     if (job.chatRoomId) await deactivateRoom(app.prisma, job.chatRoomId); // [R048-004] compare-and-set: closed exactly once
     // [S0] Cancellation used to be SILENT. A provider who confirmed Tuesday
     // 09:00 and blocked their whole day was never told the customer had gone —
     // they showed up. The other side is always told, and the message states the
     // slot only when one was actually held (a job cancelled at REQUESTED/QUOTED
     // never had a time; inventing one would be the UI lying).
-    const cancelledByCustomer = job.customerId === request.user.userId;
     const when = job.scheduledFor ? slotLabel(job.scheduledFor) : null;
     await notifications.send({
       userId: cancelledByCustomer ? job.provider.userId : job.customerId,

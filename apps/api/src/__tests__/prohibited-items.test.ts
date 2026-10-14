@@ -33,12 +33,14 @@ import { searchRoutes } from '../modules/search/search.routes';
 import { publicRoutes } from '../modules/public/public.routes';
 import { discoveryRoutes, resetDiscoveryCacheForTests, CATEGORY_DISCOVERY_FLAG } from '../modules/discovery/discovery.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
+import { partnerRoutes } from '../modules/partner/partner.routes';
+import ts from 'typescript';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { OrderService } from '../modules/order/order.service';
 import { PickingService } from '../modules/order/picking.service';
 import { mergeGuestCart } from '../modules/user/cart-merge.service';
 import { catalogueChecksFor, HIDDEN_IDS_CACHE_MS, hiddenItemIds, movesTowardCustomer, resetHiddenItemIdsCacheForTests, settleProhibitedCachesForTests, unhideRestocked, wordsFor } from '../modules/compliance/prohibited-gate';
-import { judgedWordsHash } from '../modules/compliance/prohibited-items';
+import { judgedWordsHash, STORE_WAITING_FOR_CHECK, STORE_WAITING_MESSAGE } from '../modules/compliance/prohibited-items';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { lockUserRoleAuthority } from '../modules/mover-authority';
@@ -122,6 +124,33 @@ function inject(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token?: 
   });
 }
 
+/** [DS1267 S4] Every object literal that switches an item on AND clears its auto-hide, named by the statement it is
+ *  written in (and its enclosing function, when it has a name). */
+function unhideWrites(fileName: string, code: string): string[] {
+  const source = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const keyOf = (p: ts.ObjectLiteralElementLike) => (ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : null);
+  const out: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isObjectLiteralExpression(node)) {
+      const prop = (name: string) => node.properties.find((p) => keyOf(p) === name);
+      const on = prop('isAvailable');
+      const cleared = prop('autoHiddenAt');
+      if (on && cleared && ts.isPropertyAssignment(on) && ts.isPropertyAssignment(cleared)
+        && on.initializer.kind === ts.SyntaxKind.TrueKeyword && cleared.initializer.kind === ts.SyntaxKind.NullKeyword) {
+        let statement: ts.Node = node;
+        while (statement.parent && !ts.isBlock(statement.parent) && !ts.isSourceFile(statement.parent)) statement = statement.parent;
+        let fn: ts.Node | undefined = node.parent;
+        while (fn && !ts.isFunctionDeclaration(fn)) fn = fn.parent;
+        const name = fn && ts.isFunctionDeclaration(fn) && fn.name ? `${fn.name.text}: ` : '';
+        out.push(`${name}${statement.getText(source).replace(/\s+/g, ' ').slice(0, 90)}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return out;
+}
+
 const ids = (rows: Array<{ id: string }>) => rows.map((r) => r.id);
 const hiddenIds = () => Object.values(legacy).map((l) => l.id);
 const visibleOn = async (read: () => Promise<string[]>, show: string[], hide: string[]) => {
@@ -174,6 +203,7 @@ beforeAll(async () => {
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
   await app.register(discoveryRoutes, { prefix: '/api/v1/discovery' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
+  await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
   await app.ready();
   const io = { to: () => ({ emit: () => {} }), emit: () => {} } as unknown as Server;
   orders = new OrderService(app.prisma, io);
@@ -426,18 +456,30 @@ describe('[§8] a partner saving and editing items', () => {
     expect(await row(roll.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null });
   });
 
+  // [DS1267 S4] Read as code, not as one way of formatting it: any object that sets `isAvailable: true` AND
+  // `autoHiddenAt: null` — in either order, across lines, quoted or not, with other fields between — is a site.
   it('no code un-hides a restocked item except through the guard (or the item editor, which judges the item first)', () => {
     const root = join(__dirname, '..', 'modules');
     const files = (function walk(dir: string): string[] {
       return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.ts') && !e.name.includes('.test.') ? [join(dir, e.name)] : []));
     })(root);
-    const sites = files.flatMap((file) => readFileSync(file, 'utf8').split('\n')
-      .filter((line) => /isAvailable: true, autoHiddenAt: null/.test(line))
-      .map((line) => `${relative(root, file)}: ${line.trim().slice(0, 90)}`));
+    expect(files.length).toBeGreaterThan(300);
+    const sites = files.flatMap((file) => unhideWrites(file, readFileSync(file, 'utf8')).map((at) => `${relative(root, file)}: ${at}`));
     expect(sites).toEqual([
-      expect.stringMatching(/^compliance\/prohibited-gate\.ts: /),
-      expect.stringMatching(/^vendor\/vendor\.routes\.ts: return banned \? updated : tx\.item\.update/),
+      expect.stringMatching(/^compliance\/prohibited-gate\.ts: unhideRestocked: await tx\.item\.updateMany/),
+      expect.stringMatching(/^vendor\/vendor\.routes\.ts: vendorRoutes: return banned \? updated : tx\.item\.update/),
     ]);
+  });
+
+  it('the census reads every way of writing it (in-test cases)', () => {
+    const found = (code: string) => unhideWrites('case.ts', code).length;
+    expect(found('db.item.update({ data: {\n  autoHiddenAt: null,\n  isAvailable: true,\n} });')).toBe(1); // reordered, across lines
+    expect(found('db.item.update({ data: { "isAvailable": true, \'autoHiddenAt\': null } });')).toBe(1); // quoted keys
+    expect(found('db.item.update({ data: { isAvailable: true, stockQuantity: 5, autoHiddenAt: null } });')).toBe(1); // a field between
+    expect(found('function f() { return { autoHiddenAt: null, isAvailable: true }; }')).toBe(1);
+    expect(found('db.item.update({ data: { isAvailable: false, autoHiddenAt: null } });')).toBe(0);
+    expect(found('db.item.update({ data: { isAvailable: true } });')).toBe(0);
+    expect(found('db.item.update({ data: { autoHiddenAt: null } });')).toBe(0);
   });
 
   it('a banned platform category is refused outright: tag, accepted suggestion, store category', async () => {
@@ -493,7 +535,7 @@ describe('[§8] nobody sees a hidden item', () => {
     // Prime every tenant's list as if nothing were hidden, then read every browse surface.
     const { hiddenItemIds } = await import('../modules/compliance/prohibited-gate');
     resetHiddenItemIdsCacheForTests();
-    const nothingHidden = { item: { findMany: async () => [] }, itemDiscoveryCategory: { findMany: async () => [] }, discoveryCategory: { findMany: async () => [] }, $queryRaw: async () => [] };
+    const nothingHidden = { item: { findMany: async () => [] }, itemDiscoveryCategory: { findMany: async () => [] }, discoveryCategory: { findMany: async () => [] }, vendor: { findMany: async () => [] }, $queryRaw: async () => [] };
     expect(await hiddenItemIds(nothingHidden as never, TENANT)).toEqual([]);
     try {
       await visibleOn(marketItemIds, [control.id], hiddenIds());
@@ -527,7 +569,7 @@ describe('[§8] nobody sees a hidden item', () => {
       await visibleOn(topUpIds, [control.id], hiddenIds());
       // A stale list: only the exact last pass inside the top-up stands between a hidden row and the page.
       resetHiddenItemIdsCacheForTests();
-      const nothingHidden = { item: { findMany: async () => [] }, itemDiscoveryCategory: { findMany: async () => [] }, discoveryCategory: { findMany: async () => [] }, $queryRaw: async () => [] };
+      const nothingHidden = { item: { findMany: async () => [] }, itemDiscoveryCategory: { findMany: async () => [] }, discoveryCategory: { findMany: async () => [] }, vendor: { findMany: async () => [] }, $queryRaw: async () => [] };
       expect(await hiddenItemIds(nothingHidden as never, TENANT)).toEqual([]);
       await visibleOn(topUpIds, [control.id], hiddenIds());
     } finally {
@@ -1054,5 +1096,244 @@ describe('[§8] the browse exclusion lists are rebuilt behind the request', () =
     expect(stale).not.toContain(added.id);
     await settleProhibitedCachesForTests();
     expect(await runWithTenant(TENANT, () => hiddenItemIds(app.prisma, TENANT))).toContain(added.id);
+  });
+});
+
+// ── Follow-ups, 14 Oct 2026 (after #1678) ─────────────────────────────────────
+
+// [owner 14 Oct] Store names about banned goods ("X Liquor Store", "Rum Shop", a pharmacy name) are HELD for a person
+// automatically — not left to vendor approval. Held = hidden from every list, search and storefront with every item it
+// sells, until someone holding the catalogue-approver grant approves exactly those words. Never a ban by words.
+describe('[§8 · store names] a store whose own words mention banned goods is held for a person', () => {
+  const storeAt = async (name: string, lat: number, lng: number, extra: Record<string, unknown> = {}) => {
+    const owner = await userWithSession(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const vendorOwner = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
+    seq += 1;
+    const v = await app.prisma.vendor.create({ data: {
+      ownerId: vendorOwner.id, name, slug: `prohibited-held-${RUN}-${seq}`, vendorType: 'STORE', phone: `+59267${NUM}${String(seq).padStart(2, '0')}`,
+      addressLine1: '3 Rule Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: lat, longitude: lng,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, minOrderAmount: 0, averageRating: 5, ...extra,
+    } });
+    vendorIds.push(v.id);
+    const shelf = await app.prisma.category.create({ data: { vendorId: v.id, name: 'Bakery', sortOrder: 0 } });
+    const bread = await app.prisma.item.create({ data: { vendorId: v.id, categoryId: shelf.id, name: `Coconut bread ${RUN} ${seq}`, basePrice: 800, totalOrdered: TOP } });
+    return { id: v.id, slug: v.slug, name: v.name, token: owner.token, shelfId: shelf.id, breadId: bread.id };
+  };
+  const surfacesFor = (store: { id: string; name: string }, lat: number, lng: number) => {
+    let homeCall = 0;
+    const read: Record<string, () => Promise<string[]>> = {
+      home: async () => {
+        homeCall += 1;
+        const res = await inject('GET', `/api/v1/customer/home?lat=${lat}&lng=${lng + homeCall / 100_000}`, customer.token);
+        expect(res.statusCode).toBe(200);
+        const data = res.json().data as { openVendors: Array<{ id: string }>; closedVendors: Array<{ id: string }> };
+        return ids([...data.openVendors, ...data.closedVendors]);
+      },
+      browse: async () => ids((await inject('GET', `/api/v1/customer/vendors?search=${RUN}&limit=50`, customer.token)).json().data),
+      favourites: async () => ids((await inject('GET', '/api/v1/customer/favorites', customer.token)).json().data),
+      website: async () => ids((await inject('GET', `/api/v1/public/storefronts?q=${RUN}`)).json().data),
+      searchIndex: async () => { engine.fail = false; return ids((await inject('GET', `/api/v1/search?q=${RUN}&limit=50`, customer.token)).json().data.vendors); },
+      searchDatabase: async () => { engine.fail = true; try { return ids((await inject('GET', `/api/v1/search?q=${RUN}&limit=50`, customer.token)).json().data.vendors); } finally { engine.fail = false; } },
+      nearby: async () => ids((await inject('GET', `/api/v1/search/nearby?lat=${lat}&lng=${lng}&radius=2`, customer.token)).json().data),
+      suggestions: async () => ((await inject('GET', `/api/v1/search/suggestions?q=${RUN}`, customer.token)).json().data as Array<{ text: string; type: string }>)
+        .filter((sg) => sg.type === 'vendor' && sg.text === store.name).map(() => store.id),
+    };
+    return read;
+  };
+  const pages = async (store: { id: string; slug: string }) => [
+    (await inject('GET', `/api/v1/customer/vendors/${store.id}`, customer.token)).statusCode,
+    (await inject('GET', `/api/v1/customer/vendors/${store.id}/reviews`, customer.token)).statusCode,
+    (await inject('GET', `/api/v1/public/storefronts/${store.slug}`)).statusCode,
+  ];
+  const queueStores = async () => {
+    const res = await inject('GET', '/api/v1/admin/catalogue-review', admin.token);
+    expect(res.statusCode).toBe(200);
+    return res.json().data.stores as Array<{ vendorId: string; name: string; field: string; term: string; prohibitedClass: string; state: string; wordsHash: string }>;
+  };
+  const approveStore = (token: string, vendorId: string, wordsHash: string, reason: string | null = REASON) =>
+    inject('POST', `/api/v1/admin/catalogue-review/stores/${vendorId}/approve`, token, { wordsHash }, reason ? { 'x-swift-reason': reason } : {});
+  const approvedHashOf = async (vendorId: string) => (await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { nameReviewApprovedHash: true } })).nameReviewApprovedHash;
+
+  it('an existing store named for banned goods is hidden with its items everywhere until a person with the grant approves its exact words; a rename brings the check back', async () => {
+    const lat = Number(`6.82${NUM}`);
+    const lng = -58.14;
+    const held = await storeAt(`Rum Shop ${RUN}`, lat, lng);
+    await app.prisma.customer.update({ where: { userId: customer.id }, data: { favoriteVendors: { connect: [{ id: held.id }] } } });
+    engine.fail = false;
+    engine.vendorHits = [vendor, held].map((v) => ({ entityId: v.id, id: `${TENANT}:${v.id}`, name: `x ${RUN}`, vendorType: 'STORE', latitude: lat, longitude: lng, isCurrentlyOpen: true }));
+    resetHiddenItemIdsCacheForTests();
+    const surfaces = surfacesFor(held, lat, lng);
+
+    // Held: no list, search or page shows it; an ordinary store still shows.
+    for (const [surface, read] of Object.entries(surfaces)) {
+      const seen = await read();
+      expect(seen, `${surface} hides the held store`).not.toContain(held.id);
+      if (!['favourites', 'nearby', 'suggestions'].includes(surface)) expect(seen, `${surface} still shows an ordinary store`).toContain(vendor.id);
+    }
+    expect(await pages(held)).toEqual([404, 404, 404]);
+    expect((await inject('GET', `/api/v1/customer/vendors/${vendor.id}`, customer.token)).statusCode).toBe(200);
+    // …and so is every item it sells, whatever the item's words.
+    expect((await catalogueChecksFor(app.prisma, [held.breadId])).get(held.breadId)).toEqual({ state: 'WAITING', prohibitedClass: 'ALCOHOL', field: 'store', term: 'rum' });
+    const cart = await inject('POST', '/api/v1/customer/cart/items', customer.token, { vendorId: held.id, itemId: held.breadId, quantity: 1 });
+    expect(cart.json().error).toMatchObject({ code: 'ITEM_UNAVAILABLE', details: { reason: 'PROHIBITED' } });
+    // The partner reads why, and can still work: a hold, not a ban.
+    const own = (await inject('GET', '/api/v1/vendor/items', held.token)).json().data as Array<{ id: string; catalogueCheck: { status: string; message: string } | null }>;
+    expect(own.find((i) => i.id === held.breadId)?.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', message: STORE_WAITING_FOR_CHECK });
+    const profile = (await inject('GET', '/api/v1/vendor/profile', held.token)).json().data.vendors as Array<{ id: string; storeCheck: unknown; nameReviewApprovedHash?: unknown }>;
+    expect(profile.find((v) => v.id === held.id)?.storeCheck).toEqual({ status: 'WAITING_FOR_CHECK', message: STORE_WAITING_MESSAGE, prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' });
+    expect(profile.find((v) => v.id === held.id)?.nameReviewApprovedHash).toBeUndefined();
+    expect((await inject('POST', '/api/v1/vendor/items', held.token, { categoryId: held.shelfId, basePrice: 500, name: `Cassava pone ${RUN}` })).statusCode).toBe(200);
+
+    // The catalogue check lists the store (not its items one by one); an item of it cannot be approved alone.
+    const listed = (await queueStores()).find((q) => q.vendorId === held.id)!;
+    expect(listed).toMatchObject({ name: held.name, state: 'WAITING', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' });
+    expect((await queue()).map((q) => q.itemId)).not.toContain(held.breadId);
+    const alone = await approve(held.breadId, '0'.repeat(64));
+    expect(alone.statusCode).toBe(409);
+    expect(alone.json().error).toMatchObject({ code: 'STORE_WAITING', message: 'This item\'s store is waiting for a check. Check the store first.' });
+
+    // A changed word is refused; the words seen are approved, with the record in the same step.
+    expect((await approveStore(admin.token, held.id, '0'.repeat(64))).json().error.code).toBe('STORE_CHANGED');
+    expect(await approvedHashOf(held.id)).toBeNull();
+    expect((await approveStore(admin.token, held.id, listed.wordsHash)).statusCode).toBe(200);
+    const records = await system(() => app.prisma.auditLog.findMany({ where: { entityId: held.id, userId: admin.id } }));
+    expect(records.filter((r) => (r.changes as { approvedWordsHash?: string } | null)?.approvedWordsHash === listed.wordsHash)).toHaveLength(1);
+
+    // Approved: shown everywhere again (the positive control for every surface above), its items judged by their own words.
+    resetHiddenItemIdsCacheForTests();
+    for (const [surface, read] of Object.entries(surfaces)) expect(await read(), `${surface} shows the approved store`).toContain(held.id);
+    expect(await pages(held)).toEqual([200, 200, 200]);
+    expect((await catalogueChecksFor(app.prisma, [held.breadId])).get(held.breadId)).toEqual({ state: 'CLEAR' });
+    expect((await queueStores()).map((q) => q.vendorId)).not.toContain(held.id);
+
+    // A rename by the partner is judged at once: held again, the old approval no longer matches.
+    const renamed = await inject('PUT', '/api/v1/vendor/profile', held.token, { name: `Gin Corner ${RUN}` });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json().data.storeCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', term: 'gin' });
+    expect(await pages(held)).toEqual([404, 404, 404]);
+    expect((await queueStores()).find((q) => q.vendorId === held.id)?.wordsHash).not.toBe(listed.wordsHash);
+    // Renamed out of the word: nothing left to check.
+    const out = await inject('PUT', '/api/v1/vendor/profile', held.token, { name: `Coconut Corner ${RUN}` });
+    expect(out.json().data.storeCheck).toBeNull();
+    expect(await pages(held)).toEqual([200, 200, 200]);
+  });
+
+  // [Opus S3-9, coordinator 14 Oct] Showing a held store is the same criminal-liability decision as showing a held item:
+  // the explicit catalogue-approver grant (never `*`, a wildcard or a role default), a stated reason, the record in
+  // the same transaction. Holding or suspending a store — the strict direction — stays open to moderators.
+  it('approving a store needs the catalogue-approver grant and a reason; a moderator without it can still suspend the store', async () => {
+    const held = await storeAt(`Bourda Pharmacy ${RUN}`, Number(`6.83${NUM}`), -58.13);
+    const row = (await queueStores()).find((q) => q.vendorId === held.id)!;
+    expect(row).toMatchObject({ prohibitedClass: 'MEDICINE', term: 'pharmacy' });
+
+    const superStar = await userWithSession(['SUPER_ADMIN'], 'SUPER_ADMIN'); // the role default, `*`
+    const starRow = await userWithSession(['ADMIN'], 'ADMIN');
+    await app.prisma.admin.create({ data: { userId: starRow.id, permissions: ['*'] } });
+    const moderator = await userWithSession(['ADMIN'], 'ADMIN');
+    await app.prisma.admin.create({ data: { userId: moderator.id, permissions: ['moderation.read', 'moderation.decide', 'vendor.suspend'] } });
+    for (const who of [superStar, starRow, moderator]) {
+      const refused = await approveStore(who.token, held.id, row.wordsHash);
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error.code).toBe('CATALOGUE_APPROVER_REQUIRED');
+    }
+    expect(await approvedHashOf(held.id)).toBeNull();
+    // With the grant, a reason is still owed.
+    expect((await approveStore(admin.token, held.id, row.wordsHash, null)).statusCode).toBe(400);
+    expect(await approvedHashOf(held.id)).toBeNull();
+    expect(await pages(held)).toEqual([404, 404, 404]);
+
+    // The strict direction needs no grant: the moderator suspends the store.
+    const suspended = await inject('PUT', `/api/v1/admin/vendors/${held.id}/suspend`, moderator.token, { reason: 'Sells medicines' }, { 'x-swift-reason': 'Sells medicines' });
+    expect(suspended.statusCode).toBe(200);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: held.id }, select: { status: true } })).status).toBe('SUSPENDED');
+
+    // A store filed under a banned category is a ban: approving its words never lifts it.
+    const filed = await storeAt(`Wine Cellar ${RUN}`, Number(`6.84${NUM}`), -58.12);
+    await app.prisma.vendorDiscoveryCategory.create({ data: { tenantId: TENANT, vendorId: filed.id, categoryId: pharmacyCategory.id, role: 'PRIMARY', source: 'ADMIN' } });
+    const filedRow = (await queueStores()).find((q) => q.vendorId === filed.id)!;
+    const ban = await approveStore(admin.token, filed.id, filedRow.wordsHash);
+    expect(ban.statusCode).toBe(409);
+    expect(ban.json().error.message).toBe('Approval never lifts a ban. Swift doesn\'t allow this category: medicines.');
+    expect(await approvedHashOf(filed.id)).toBeNull();
+  });
+
+  it('a store opened through the real sign-up is judged from the start; a personal name is held, never banned', async () => {
+    const opened: Array<{ id: string; token: string }> = [];
+    for (const name of [`Ron's Liquor Store ${RUN}`, `Ron's Variety ${RUN}`]) {
+      const owner = await userWithSession(['CUSTOMER'], 'CUSTOMER');
+      const res = await inject('POST', '/api/v1/partner/become', owner.token, { acceptAgreement: true, role: 'VENDOR', business: {
+        name, vendorType: 'STORE', phone: `+59267${NUM}9${opened.length}`, addressLine1: '4 Rule Street', city: 'Georgetown', latitude: 6.8013, longitude: -58.1551,
+      } });
+      expect(res.statusCode, res.body).toBe(201);
+      const v = await app.prisma.vendor.findFirstOrThrow({ where: { owner: { userId: owner.id } }, select: { id: true, slug: true } });
+      vendorIds.push(v.id);
+      // Approved as a business the way the console does (documents checked): its NAME is still held.
+      await app.prisma.vendor.update({ where: { id: v.id }, data: { status: 'ACTIVE', isVerified: true, acceptingOrders: true, isCurrentlyOpen: true } });
+      expect(await pages(v)).toEqual([404, 404, 404]);
+      opened.push({ id: v.id, token: owner.token });
+    }
+    const [liquor, variety] = opened as [{ id: string; token: string }, { id: string; token: string }];
+    const terms = Object.fromEntries((await queueStores()).filter((q) => opened.some((o) => o.id === q.vendorId)).map((q) => [q.vendorId, q.term]));
+    expect(terms).toEqual({ [liquor.id]: 'liquor', [variety.id]: 'ron' });
+    // A hold, not a ban: the owner of "Ron's Variety" adds and edits items; each waits with the store, none is banned.
+    const shelf = await app.prisma.category.create({ data: { vendorId: variety.id, name: 'Shelf', sortOrder: 0 } });
+    const created = await inject('POST', '/api/v1/vendor/items', variety.token, { categoryId: shelf.id, basePrice: 500, name: `Plantain chips ${RUN}` });
+    expect(created.statusCode).toBe(200);
+    const itemId = created.json().data.id as string;
+    expect((await inject('PUT', `/api/v1/vendor/items/${itemId}`, variety.token, { basePrice: 600 })).statusCode).toBe(200);
+    expect((await catalogueChecksFor(app.prisma, [itemId])).get(itemId)).toMatchObject({ state: 'WAITING', field: 'store', term: 'ron' });
+  });
+});
+
+// [DS1265 S4 · joined spellings] The database pre-filter reads words written together apart, exactly where the
+// classifier does, so such an item reaches the catalogue check (or the browse exclusion list) instead of waiting unseen.
+describe('[§8 · DS1265 S4] joined spellings reach the catalogue check', () => {
+  it('"Camel20s" and "RumCake" are queued; "Rum750ml" is on the exclusion list', async () => {
+    const camel = await item({ name: `Camel20s gift ${RUN}` });
+    const cake = await item({ name: `RumCake slice ${RUN}` });
+    const bottle = await item({ name: `${RUN} Rum750ml` });
+    const queued = await queue();
+    expect(queued.find((r) => r.itemId === camel.id), 'Camel20s').toMatchObject({ state: 'WAITING', term: 'camel' });
+    expect(queued.find((r) => r.itemId === cake.id), 'RumCake').toMatchObject({ state: 'WAITING', term: 'rum' });
+    expect((await catalogueChecksFor(app.prisma, [bottle.id])).get(bottle.id)).toMatchObject({ state: 'BANNED', source: 'word' });
+    resetHiddenItemIdsCacheForTests();
+    expect(await runWithTenant(TENANT, () => hiddenItemIds(app.prisma, TENANT))).toEqual(expect.arrayContaining([camel.id, cake.id, bottle.id]));
+    await visibleOn(storefrontItemIds, [control.id], [camel.id, cake.id, bottle.id]);
+  });
+});
+
+// [DS1267 S4] The restock un-hide judges and writes as one step, under the item's row lock: an edit that bans the item
+// while the un-hide runs is waited for, and the item stays off.
+describe('[§8 · DS1267 S4] stock coming back is judged under the item\'s lock', () => {
+  it('a ban committed while the un-hide runs is seen; the item stays off', async () => {
+    const created = await item({ name: `Coconut drops ${RUN}` });
+    await app.prisma.item.update({ where: { id: created.id }, data: { isAvailable: false, autoHiddenAt: new Date(), stockQuantity: 4, totalOrdered: 0 } });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let renamed!: () => void;
+    const isRenamed = new Promise<void>((resolve) => { renamed = resolve; });
+    // An edit that makes the item banned goods, holding the row until it commits.
+    const edit = app.prisma.$transaction(async (tx) => {
+      await tx.item.update({ where: { id: created.id }, data: { name: `${RUN} Spare Rum` } });
+      renamed();
+      await released;
+    }, { timeout: 15_000 });
+    await isRenamed;
+    const unhide = unhideRestocked(app.prisma, created.id);
+    await new Promise((resolve) => setTimeout(resolve, 750)); // the un-hide is now waiting on the row (or, unlocked, has judged the old name)
+    release();
+    await edit;
+    await unhide;
+    expect(await app.prisma.item.findUniqueOrThrow({ where: { id: created.id }, select: { isAvailable: true, autoHiddenAt: true } }))
+      .toMatchObject({ isAvailable: false });
+    expect((await catalogueChecksFor(app.prisma, [created.id])).get(created.id)).toMatchObject({ state: 'BANNED' });
+  });
+
+  it('the stock adjust route moves the stock and un-hides it in one transaction', () => {
+    const source = readFileSync(join(__dirname, '..', 'modules', 'vendor', 'vendor.routes.ts'), 'utf8');
+    const route = source.slice(source.indexOf("app.post<{ Params: IdParam }>('/items/:id/adjust'"));
+    const body = route.slice(0, route.indexOf('\n  });\n'));
+    expect(body).toMatch(/\$transaction\(async \(tx\) => \{[\s\S]*applyStockMovement\(tx,[\s\S]*unhideRestocked\(tx, item\.id\);[\s\S]*\}\)\.catch/);
+    expect(body).not.toMatch(/unhideRestocked\(app\.prisma/);
   });
 });

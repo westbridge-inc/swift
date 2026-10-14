@@ -130,6 +130,82 @@ describe('the catalogue check', () => {
     expect(await screen.findByText('Showing the first 1 of 250 items waiting. Check these, then reload for the rest.')).toBeTruthy();
   });
 
+  // [owner 14 Oct] A store whose own words mention banned goods is held with its items: the page shows the store, the
+  // word and where it was found; approve sends exactly the words seen; suspend is the strict way out.
+  const heldStore = {
+    vendorId: 'vendor-rum', name: 'Rum Shop', description: 'Cakes and pastries', tags: ['Bakery'], status: 'ACTIVE',
+    state: 'WAITING', prohibitedClass: 'ALCOHOL', label: 'alcohol', field: 'name', term: 'rum', wordsHash: HASH,
+  };
+  const withStores = (stores: unknown[], extra?: (_r: ApiRequest) => { status?: number; body: unknown } | undefined) => (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/catalogue-review') {
+      return { body: { success: true, data: { items: [], total: 0, stores, storesTotal: stores.length } } };
+    }
+    const handled = extra?.(request);
+    if (handled) return handled;
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  };
+
+  it('shows each held store, the word that held it and where, and says its items are hidden with it', async () => {
+    mockApi(withStores([heldStore]));
+    renderWithQuery(<CatalogueCheckPage />);
+    const row = await screen.findByRole('listitem', { name: 'Rum Shop' });
+    expect(row.textContent).toContain('Held as alcohol: the word “rum” in the store name. Its items are hidden with it.');
+    expect(row.textContent).toContain('Cakes and pastries');
+    expect(row.textContent).toContain('Bakery');
+    expect(screen.queryByText('Nothing waiting for a check.')).toBeNull();
+  });
+
+  it('approves exactly the store words seen, with the reviewer’s own reason', async () => {
+    const fetchMock = mockApi(withStores([heldStore], (request) => (
+      request.method === 'POST' && request.url.pathname === '/api/v1/admin/catalogue-review/stores/vendor-rum/approve'
+        ? { body: { success: true, data: { vendorId: 'vendor-rum', state: 'APPROVED' } } }
+        : undefined
+    )));
+    const { user } = renderWithQuery(<CatalogueCheckPage />);
+    await user.click(await screen.findByRole('button', { name: 'Approve store…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Approve Rum Shop?' });
+    expect(dialog.textContent).toContain('it comes back to this check');
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Approve store' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/catalogue-review/stores/vendor-rum/approve`);
+    expect(JSON.parse(String(init?.body))).toEqual({ wordsHash: HASH });
+    expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe(REASON);
+    expect(await screen.findByText('Rum Shop is approved and visible.')).toBeTruthy();
+  });
+
+  it('suspends a store that sells banned goods, with the reason its owner reads; a suspended store is not offered it again', async () => {
+    const fetchMock = mockApi(withStores([heldStore, { ...heldStore, vendorId: 'vendor-gin', name: 'Gin Corner', status: 'SUSPENDED' }], (request) => (
+      request.method === 'PUT' && request.url.pathname === '/api/v1/admin/vendors/vendor-rum/suspend'
+        ? { body: { success: true, data: {} } }
+        : undefined
+    )));
+    const { user } = renderWithQuery(<CatalogueCheckPage />);
+    expect(within(await screen.findByRole('listitem', { name: 'Gin Corner' })).queryByRole('button', { name: 'Suspend store…' })).toBeNull();
+    await user.click(within(screen.getByRole('listitem', { name: 'Rum Shop' })).getByRole('button', { name: 'Suspend store…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Suspend Rum Shop?' });
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Sells rum by the bottle');
+    await user.click(within(dialog).getByRole('button', { name: 'Suspend store' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    const [, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
+    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Sells rum by the bottle' });
+    expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe('Sells rum by the bottle');
+  });
+
+  it('a store id is sent as one path segment, never as more path', async () => {
+    const fetchMock = mockApi(withStores([{ ...heldStore, vendorId: 'odd/../id' }], (request) => (
+      request.method === 'POST' ? { body: { success: true, data: {} } } : undefined
+    )));
+    const { user } = renderWithQuery(<CatalogueCheckPage />);
+    await user.click(await screen.findByRole('button', { name: 'Approve store…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Approve Rum Shop?' });
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Approve store' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    expect(String(requestsByMethod(fetchMock, 'POST')[0]![0])).toBe(`${API_ORIGIN}/api/v1/admin/catalogue-review/stores/odd%2F..%2Fid/approve`);
+  });
+
   it('says so when nothing is waiting', async () => {
     mockApi(handler([]));
     renderWithQuery(<CatalogueCheckPage />);

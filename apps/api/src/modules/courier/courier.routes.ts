@@ -441,6 +441,11 @@ export default async function courierRoutes(app: FastifyInstance) {
       cancellation: { by: request.user.userId, reason },
       releaseStaleMoverPointer: true,
       invalidStatus: courierNotCancellable,
+      // [owner #50] The sender's cancel follows the one cancellation rule on
+      // the locked row: free while no rider has taken the parcel, inside the
+      // five-minute window, or when the rider is very late — otherwise refused
+      // (contact the rider). Never a fee.
+      customerCancel: true,
     });
 
     try {
