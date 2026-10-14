@@ -24,7 +24,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates curl openssh-client openssh-server ufw unattended-upgrades \
-  postgresql-client git openssl libdigest-sha-perl python3
+  postgresql-client git openssl libdigest-sha-perl python3 gpg
+# gpg: production backups are encrypted on the host to the owner's PUBLIC
+# key (deploy/backup.sh); the host never holds the private key.
 # No host AWS CLI. Ubuntu 24.04's only awscli package is a snap, and snaps
 # start through setuid snap-confine — which the hardened backup unit
 # (NoNewPrivileges=true, and that hardening is not weakened) forbids. The

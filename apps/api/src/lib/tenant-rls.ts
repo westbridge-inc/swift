@@ -98,7 +98,7 @@ export const TENANT_TABLES = [
   'ads_settings', 'advertisers', 'attribution_claims', 'batch_evaluations',
   'batching_settings', 'booking_exceptions',
   // [M-11] The checkout command's durable result and tail.
-  'checkout_receipts',
+  'checkout_receipts', 'cart_merge_receipts',
   'delivery_runs',
   // [M-22] Immutable bank deposit confirmations and their adjustments.
   'deposit_confirmations',
@@ -121,6 +121,8 @@ export const TENANT_TABLES = [
   'taxi_trip_stops',
   // [AF-MOB-006] A custody recovery case, walled like the order it recovers.
   'custody_recovery_cases',
+  // [TAXI waiting charge] One ride's waiting terms and frozen charge, walled like the ride.
+  'taxi_ride_waiting',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -139,6 +141,10 @@ export const TENANT_TABLES = [
   'user_blocks',
   'users',
   'vendor_discovery_categories', 'vendors',
+  // [DB-05 EXPAND] Formerly PENDING_EXPAND: reachable only through loose
+  // owner strings. Walled on the row, the tenant derived from the owners
+  // (quarantined, NULL, when they disagree or are gone; never defaulted).
+  'return_requests', 'content_reports', 'collection_contacts',
 ] as const;
 
 export const TENANT_POLICY_NAME = 'tenant_isolation';
@@ -232,6 +238,11 @@ export interface TenantLineageRule {
   parentTenantSql?: string;
   /** Columns whose UPDATE re-checks lineage (the fk by default). */
   watch?: readonly string[];
+  /** [DB-05] The column is NULLABLE: NULL means "unstamped" (derived from the
+   *  parent), and a backfilled row whose owners disagree or are gone stays NULL
+   *  — quarantined for adjudication, invisible to every tenant — instead of
+   *  being defaulted into the production tenant. */
+  nullable?: true;
   /** QR lineage never exempts an UPDATE whose non-null parent is missing or RLS-hidden. */
   requiredParent?: boolean;
 }
@@ -299,6 +310,8 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'taxi_trip_stops', trigger: 'taxi_trip_stops_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [AF-MOB-006] one hop: a custody recovery case inherits the tenant of the order it recovers
   { table: 'custody_recovery_cases', trigger: 'custody_recovery_cases_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [TAXI waiting charge] one hop: a ride's waiting row inherits the tenant of its ride (the same shape)
+  { table: 'taxi_ride_waiting', trigger: 'taxi_ride_waiting_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
   // card and a hosted session belong to the person who pays the fee
   { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },
@@ -308,9 +321,36 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'card_observations', trigger: 'card_observations_tenant_matches_owner', parent: 'card_sessions', fk: 'sessionId',
     watch: ['sessionId', 'instrumentId'],
     parentTenantSql: `SELECT COALESCE((SELECT s."tenantId" FROM card_sessions s WHERE s.id = NEW."sessionId"), (SELECT i."tenantId" FROM payment_instruments i WHERE i.id = NEW."instrumentId"))` },
+  // [DB-05 EXPAND] A return belongs to its order AND to the customer who asked: both legs must
+  // name the same tenant, or the row has no owner (refused new, quarantined in the backfill).
+  { table: 'return_requests', trigger: 'return_requests_tenant_matches_order', parent: 'orders', fk: 'orderId', nullable: true,
+    watch: ['orderId', 'customerId'],
+    parentTenantSql: `SELECT o."tenantId" FROM orders o JOIN users u ON u.id = NEW."customerId" WHERE o.id = NEW."orderId" AND u."tenantId" = o."tenantId"` },
+  // [DB-05 EXPAND] A report belongs to its reporter (its target is polymorphic and is
+  // checked by its own authority resolver, never by an invented foreign key).
+  { table: 'content_reports', trigger: 'content_reports_tenant_matches_reporter', parent: 'users', fk: 'reporterId', nullable: true },
+  // [DB-05 EXPAND] A collection contact belongs to its subscription's owner (vendor, or the
+  // rider or driver person); owners in more than one tenant are no owner at all.
+  { table: 'collection_contacts', trigger: 'collection_contacts_tenant_matches_owner', parent: 'subscriptions', fk: 'subscriptionId', nullable: true,
+    parentTenantSql: `SELECT CASE WHEN count(DISTINCT owners.t) = 1 THEN min(owners.t) END FROM (SELECT v."tenantId" AS t FROM subscriptions s JOIN vendors v ON v.id = s."vendorId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN riders r ON r.id = s."riderId" JOIN users u ON u.id = r."userId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN drivers d ON d.id = s."driverId" JOIN users u ON u.id = d."userId" WHERE s.id = NEW."subscriptionId") owners` },
 ];
+
+/** The SQL that yields a lineage rule's parent tenant for the row `NEW`. */
+function parentTenantOf(rule: TenantLineageRule): string {
+  return rule.parentTenantSql ?? `SELECT "tenantId" FROM ${rule.parent} WHERE id = NEW."${rule.fk}"`;
+}
+
+/** [DB-05] The EXPAND backfill for a nullable lineage table: every unstamped
+ *  row takes the tenant its owners agree on — the SAME derivation the trigger
+ *  runs — and a row whose owners disagree or are gone stays NULL (quarantined).
+ *  Mirrored verbatim by the migration that introduced the column. */
+export function lineageBackfillSql(table: string): string {
+  const rule = TENANT_LINEAGE_TABLES.find((r) => r.table === table);
+  if (!rule?.nullable) throw new Error(`${table} is not a nullable lineage table`);
+  return `UPDATE ${table} AS lineage_row SET "tenantId" = (${parentTenantOf(rule).replace(/NEW\./g, 'lineage_row.')}) WHERE lineage_row."tenantId" IS NULL`;
+}
 export function tenantLineageDdl(): string[] {
-  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch, requiredParent }) => [
+  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch, nullable, requiredParent }) => [
     `CREATE OR REPLACE FUNCTION ${trigger}() RETURNS trigger AS $$
       DECLARE parent_tenant TEXT;
       BEGIN
@@ -323,7 +363,7 @@ export function tenantLineageDdl(): string[] {
             NEW.id, NEW."${fk}" USING ERRCODE = 'check_violation';
         END IF;
         -- The default means "unstamped": derive the truth from the parent.
-        IF NEW."tenantId" = 'swift-default' AND parent_tenant <> 'swift-default' THEN
+        IF ${nullable ? 'NEW."tenantId" IS NULL OR (' : ''}NEW."tenantId" = 'swift-default' AND parent_tenant <> 'swift-default'${nullable ? ')' : ''} THEN
           NEW."tenantId" := parent_tenant;
         ELSIF parent_tenant <> NEW."tenantId" THEN
           RAISE EXCEPTION '${table} row % names tenant % but its ${parent} row % is in tenant % [STA-1 lineage]',
@@ -380,6 +420,23 @@ export function allRlsDdl(): string[] {
   return TENANT_TABLES.flatMap((t) => rlsDdlFor(t));
 }
 
+/** Table privileges later migrations take back from swift_app after the broad
+ *  grant (billing facts the app may add but never change or remove; provider
+ *  aliases it may only look up; the QR identity table it never touches). The
+ *  heal below grants every table again, so it must re-apply these right after,
+ *  or a healed database lets the app role write rows production refuses — and
+ *  any suite proving that refusal goes red depending on which file ran first.
+ *  app-role-revocations.test.ts pins this list to the migrations both ways. */
+const APP_ROLE_MIGRATION_REVOCATIONS: ReadonlyArray<{ readonly table: string; readonly privileges: string }> = [
+  { table: 'public.provider_payment_aliases', privileges: 'INSERT, UPDATE, DELETE' }, // 20260930140000
+  { table: 'public.billing_dunning_clocks', privileges: 'DELETE' }, // 20260930180000
+  { table: 'public.payment_confirmation_holds', privileges: 'DELETE' },
+  { table: 'public.billing_fee_notices', privileges: 'DELETE' },
+  { table: 'public.billing_notice_handoffs', privileges: 'DELETE' },
+  { table: 'public.billing_obligation_transitions', privileges: 'UPDATE, DELETE' },
+  { table: 'swift_qr.token_identities', privileges: 'ALL' }, // 20261005210300
+];
+
 /** [W-201b] The future app role + grants, idempotent (mirrors migration
  *  20260819150000; the test installer heals db-push environments). NOLOGIN —
  *  no credentials in a public repo; deploy provisions LOGIN out-of-band. */
@@ -397,6 +454,9 @@ export function appRoleDdl(): string[] {
     END $$`,
     `GRANT USAGE ON SCHEMA public TO swift_app`,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_app`,
+    // Guarded: a db-push database has no raw-SQL-only tables.
+    ...APP_ROLE_MIGRATION_REVOCATIONS.map(({ table, privileges }) =>
+      `DO $$ BEGIN IF to_regclass('${table}') IS NOT NULL THEN REVOKE ${privileges} ON TABLE ${table} FROM swift_app; END IF; END $$`),
     `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_app`,
     // Purge functions are operator-only. Never re-grant them when healing an
     // app-role environment, even if creation defaults previously granted them.

@@ -74,6 +74,8 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
     items: [
       { label: 'Tickets', href: '/support', icon: LifeBuoy },
       { label: 'Moderation', href: '/moderation', icon: Flag },
+      // [GUARDRAILS §8] Items a banned word is holding hidden until a person checks them.
+      { label: 'Catalogue check', href: '/catalogue-check', icon: ShieldAlert },
       { label: 'Integrity', href: '/integrity', icon: Fingerprint },
       { label: 'Discovery', href: '/discovery', icon: Compass },
       { label: 'Ads review', href: '/ads', icon: AdsIcon },
