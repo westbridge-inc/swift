@@ -166,7 +166,7 @@ async function providerHost(rows: Row[]) {
     subscription: { findFirst: async () => null },
     alertDelivery: { updateMany: async () => ({ count: 0 }) },
     notification: { updateMany: async () => ({ count: 0 }) },
-    platformConfig: { findUnique: async () => null },
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
   });
   const host = await hostRoutes(vendorRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
   return { ...host, store, prisma };
@@ -282,8 +282,19 @@ describe('OrderService.updateStatus → ACCEPTED — the customer is told a book
     const prisma = prismaDouble(store, {
       algoConfig: { findFirst: async () => null },
       user: { findUnique: async () => ({ countryCode: 'GY' }) },
+      // [L05] The order-room gate re-reads the audience and re-gates the order's chat rooms.
+      chatRoom: { findMany: async () => [] },
     });
-    const io = recordingIo();
+    // [L05] Order-room events reach the order's CURRENT people only: the
+    // customer's socket is seated in the order room and addressed by its id.
+    const customerSocket = {
+      id: 'customer-socket',
+      data: { userId: row['customerId'], tenantId: row['tenantId'], authorizationExpiresAtMs: Date.now() + HOUR },
+      leave: async () => {},
+    };
+    const io = Object.assign(recordingIo(), {
+      in: (room: string) => ({ fetchSockets: async () => (room === `order:${String(row['id'])}` ? [customerSocket] : []) }),
+    });
     const svc = new OrderService(prisma, io);
     vi.spyOn(OrderService.prototype, 'transitionOrderAtomically').mockResolvedValue({ order: row as never, sourceStatus: 'PENDING', cancelledSearches: 0, earningNotices: [] });
     const accepted = vi.spyOn(NotificationService.prototype, 'orderAccepted').mockResolvedValue(undefined);
@@ -298,7 +309,9 @@ describe('OrderService.updateStatus → ACCEPTED — the customer is told a book
     await h.svc.updateStatus('bk-1', 'ACCEPTED', 'user-provider', 'Accepted by vendor');
     expect(confirmed).toHaveBeenCalledWith('user-customer', 'ORD-BK-1', 'Kim’s Barbershop', 'bk-1');
     expect(h.accepted).not.toHaveBeenCalled();
-    expect(h.io.emits.map((e) => e.room)).toEqual(['order:bk-1', 'vendor:vendor-svc']);
+    // The customer's socket in order:bk-1 hears the confirmation (addressed by id), then the provider's room.
+    expect(h.io.emits.map((e) => e.room)).toEqual([['customer-socket'], 'vendor:vendor-svc']);
+    expect(h.io.emits[0]).toMatchObject({ event: 'order:status_changed', payload: { orderId: 'bk-1' } });
   });
 
   it('the booking confirmation copy carries no kitchen words and keeps the order-screen routing data', async () => {

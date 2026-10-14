@@ -214,7 +214,12 @@ describe('[R048-006] the server and the container say it', () => {
     expect(seedBlock).toContain('app.markBootContractsComplete();');
     // and the failure is still caught, never fatal
     expect(start).toContain('taxonomy seed failed — the category rail will be empty');
-    expect(start.slice(seedAt, start.indexOf('})();', seedAt))).not.toMatch(/process\.exit/);
+    // The window is the seed's OWN block: it ends where the statement that wraps
+    // the seed closes at its own indentation (named system work `});`, or an
+    // IIFE `})();`), before `start()`'s catch, where exiting is correct.
+    const seedEnd = start.slice(seedAt).search(/\n {4}\}\)(?:\(\))?;/);
+    expect(seedEnd, 'the seed block closes before start() ends').toBeGreaterThan(0);
+    expect(start.slice(seedAt, seedAt + seedEnd)).not.toMatch(/process\.exit/);
   });
 
   it('the scheduler page goes through the durable outbox, and the page is closed when the condition clears', () => {

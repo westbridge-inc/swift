@@ -118,7 +118,7 @@ async function makeDriver(at = SPOT): Promise<DriverActor> {
     data: {
       userId: u.userId,
       vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020, vehicleColor: 'Silver',
-      licensePlate: `RACE-${seq}`, driverLicenseUrl: 'storage://race/dl.jpg', vehicleInsuranceUrl: 'storage://race/ins.jpg',
+      licensePlate: `HRACE-${seq}`, /* [owner 11 Oct] a taxi plate is H-series */ driverLicenseUrl: 'storage://race/dl.jpg', vehicleInsuranceUrl: 'storage://race/ins.jpg',
       documentsVerified: true,
       isOnline: true, isAvailable: true, locationSessionId: u.sessionId,
       currentLat: at.lat, currentLng: at.lng, lastLocationUpdate: new Date(),
@@ -161,7 +161,7 @@ function makeTaxi(customer: Actor, at = SPOT) {
 }
 
 /** A cash food order ready at the kitchen, waiting for a rider. */
-function makeDelivery(customer: Actor, dropOffset = 0) {
+function makeDelivery(customer: Actor, dropOffset = 0, over: { promisedAt?: Date } = {}) {
   return sys(() => app.prisma.order.create({
     data: {
       orderNumber: `RACE-D-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
@@ -170,9 +170,15 @@ function makeDelivery(customer: Actor, dropOffset = 0) {
       deliveryAddress: 'Lethem homes', deliveryLat: SPOT.lat + 0.004 + dropOffset, deliveryLng: SPOT.lng + 0.004,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500,
       serviceFee: 0, taxAmount: 0, tipAmount: 0, discount: 0, paymentMethod: 'CASH',
+      ...over,
     },
   }));
 }
+
+/** [owner #46/#52, 13–14 Oct] A store order the store accepted is the
+ *  customer's to cancel only when it is very late — 30 minutes past its
+ *  promised time — so the customer-cancel cases below run on one. */
+const PAST_PROMISE = () => ({ promisedAt: new Date(Date.now() - 31 * 60_000) });
 
 /** A sender's parcel waiting at the pickup for a courier rider. */
 function makeCourier(sender: Actor) {
@@ -842,7 +848,7 @@ describe('[DISPATCH 1/3] accept against the clock and against the customer', () 
   it('[B4] delivery: a customer order cancel withdraws the live card the same way', async () => {
     const customer = await makeCustomer();
     const carded = await makeRider(SPOT);
-    const order = await makeDelivery(customer);
+    const order = await makeDelivery(customer, 0, PAST_PROMISE()); // [owner #46/#52, 13–14 Oct]
     const card = await offer(order.id, (await dispatch.dispatchOrder(order.id)).offered!);
     expect(card.moverId).toBe(carded.riderId);
 
@@ -971,7 +977,7 @@ describe('[DISPATCH 1/3 · AX299 F2] a withdrawn card leaves the screen, and nev
     const rideCard = await offer(ride.id, (await dispatch.dispatchOrder(ride.id)).offered!);
     const shopper = await makeCustomer();
     const rider = await makeRider(SPOT);
-    const order = await makeDelivery(shopper);
+    const order = await makeDelivery(shopper, 0, PAST_PROMISE()); // [owner #46/#52, 13–14 Oct]
     const orderCard = await offer(order.id, (await dispatch.dispatchOrder(order.id)).offered!);
     expect([rideCard.moverId, orderCard.moverId]).toEqual([driver.driverId, rider.riderId]);
 

@@ -1,6 +1,6 @@
 import type { Vendor } from '@prisma/client';
 import { safeMmgPayUrl } from './mmg-pay-url';
-import { safePublicPhone } from './vendor-public-phone';
+import { publishedStorePhone } from './vendor-public-phone';
 
 // ---------------------------------------------------------------------------
 // THE public vendor card — ONE projection, every discovery surface.
@@ -75,7 +75,6 @@ export interface VendorCardView {
 }
 
 export function vendorCardView(vendor: VendorCardSource): VendorCardView {
-  const advertisesContact = vendor.status !== 'SUSPENDED' && vendor.status !== 'PENDING_APPROVAL';
   return {
     id: vendor.id,
     name: vendor.name,
@@ -101,7 +100,7 @@ export function vendorCardView(vendor: VendorCardSource): VendorCardView {
     totalOrders: vendor.totalOrders,
     cuisineTypes: vendor.cuisineTypes,
     tags: vendor.tags,
-    publicPhone: advertisesContact ? safePublicPhone(vendor.publicPhone) : null,
+    publicPhone: publishedStorePhone(vendor),
     mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
   };
 }

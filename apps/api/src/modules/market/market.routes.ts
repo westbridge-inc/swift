@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
@@ -6,6 +7,7 @@ import { bindBrowseTenant, decodeScopedCursor, encodeScopedCursor, requireReques
 import { ITEM_HIT_SELECT, toItemHit, type ItemHit } from '../search/item-hit';
 import { AppError } from '../../utils/errors';
 import { marketGate, thresholdsFrom } from './launch-depth';
+import { hiddenItemIds, withoutHidden } from '../compliance/prohibited-gate';
 
 // ---------------------------------------------------------------------------
 // THE MARKET FEED [MKT G1] — items across every store, by category.
@@ -114,10 +116,11 @@ export async function marketRoutes(app: FastifyInstance) {
     // [S2-1] The same hidden-only exclusion the feed applies, so the depth
     // gate counts the catalogue a shopper can actually see — never raw rows.
     const { hiddenOnlyItemIds } = await import('../verification/category-gate');
-    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
+    // [GUARDRAILS §8] Prohibited items are left out the same way.
+    const hiddenOnly = [...(await hiddenOnlyItemIds(app.prisma, tenantId)), ...(await hiddenItemIds(app.prisma, tenantId))];
     const where = {
       isAvailable: true,
-      vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), vendorType: VERTICAL_VENDOR_TYPE.RETAIL },
+      vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)), vendorType: VERTICAL_VENDOR_TYPE.RETAIL },
       ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
     };
     const [items, sellers, config] = await Promise.all([
@@ -184,7 +187,8 @@ export async function marketRoutes(app: FastifyInstance) {
     // defensive second pass, and the page-fill loop after it means that pass
     // can never be the reason a page comes back short.
     const { listableItemsForVendors, hiddenOnlyItemIds } = await import('../verification/category-gate');
-    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
+    // [GUARDRAILS §8] Prohibited items leave the page budget alone too: excluded here, before the cap.
+    const hiddenOnly = [...(await hiddenOnlyItemIds(app.prisma, tenantId)), ...(await hiddenItemIds(app.prisma, tenantId))];
     // One `id` key for both filters: a second spread would silently overwrite
     // the category membership with the hidden exclusion (or vice versa).
     const idFilter = {
@@ -198,7 +202,7 @@ export async function marketRoutes(app: FastifyInstance) {
         // ([R048-003]: the relation filter is not reached by the scoping
         // extension, so the tenant is named here). Re-expressing it would be
         // its seventh copy, and the copies already disagree.
-        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
+        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)),
         // THE MARKET IS GOODS. Without this the feed returned every item from
         // every vendor type, so the goods tab filled with restaurant dishes —
         // Dhal Puri, Pork Chops, Margherita — and service listings. `vertical`
@@ -245,7 +249,8 @@ export async function marketRoutes(app: FastifyInstance) {
       }
       hasMoreRaw = rows.length > q.limit;
       rawCursorId = rows[rows.length - 1]!.id;
-      listable.push(...(await listableItemsForVendors(app.prisma, tenantId, rows)));
+      // [GUARDRAILS §8] The exact last pass: a prohibited row never reaches the page, and the fill loop refills.
+      listable.push(...(await withoutHidden(app.prisma, await listableItemsForVendors(app.prisma, tenantId, rows))));
       if (!hasMoreRaw || listable.length >= q.limit + 1) { capExhausted = false; break; }
     }
     // [DS233 F5] Whenever the cap, not the population, ended the fill, the page

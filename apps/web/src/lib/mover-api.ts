@@ -80,7 +80,8 @@ export const cancelPendingMmgPayUrl = () =>
 // ── Documents (verification) ────────────────────────────────────────────────
 export interface DocStatus {
   checklist: string[];
-  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string }>;
+  // [REPLACE-PENDING] `replaced`: this copy replaced an earlier one that was still waiting for review.
+  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string; replaced?: boolean }>;
   missing: string[];
   vehicleType?: string | null;
   roleVerified: boolean;

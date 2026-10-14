@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import type { PrismaClient } from '@prisma/client';
 import type { Redis } from 'ioredis';
 import type { Server } from 'socket.io';
@@ -211,7 +212,7 @@ export async function revisePromise(
     },
   });
   await deps.notifications.orderRunningLate(order.customerId, order.orderNumber, order.id, minutesLate, w, order.status);
-  deps.io.to(`order:${order.id}`).emit('order:promise_revised', {
+  await emitToOrderRoom(deps.prisma, deps.io, order.id, 'order:promise_revised', {
     orderId: order.id, promisedAt: input.newPromisedAt.toISOString(), windowStart: w.start.toISOString(), windowEnd: w.end.toISOString(),
     reason: input.reason, minutesLate,
   });

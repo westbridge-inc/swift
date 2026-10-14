@@ -7,6 +7,9 @@ import { ArrowLeft } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { MutationError } from '@/components/MutationError';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { PaymentDispute } from '@/components/mc/PaymentDispute';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 import { askReason } from '@/lib/ask-reason';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
@@ -44,7 +47,7 @@ function Party({ label, name, phone, href }: { label: string; name?: string | nu
 export default function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const queryClient = useQueryClient();
-  const { data, isLoading, isError } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['order', id], queryFn: () => fetchOrderDetail(id) });
   const cancelMutation = useMutation({
     // [ADM-006] the operator's words, not a template
     mutationFn: ({ refund, reason }: { refund: boolean; reason: string }) => cancelOrder(id, { refund }, reason),
@@ -64,7 +67,14 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     },
   });
 
+  const actions = useActionRunner(() => {
+    void queryClient.invalidateQueries({ queryKey: ['order', id] });
+    void queryClient.invalidateQueries({ queryKey: ['orders'] });
+  });
   const o: any = data?.data;
+  // [TAXI waiting charge] The ride's frozen breakdown, when the server sends one.
+  const waiting: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null =
+    o?.fareBreakdown && typeof o.fareBreakdown.total === 'number' ? o.fareBreakdown : null;
 
   if (isLoading) {
     return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
@@ -75,7 +85,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
         <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
           <ArrowLeft size={16} /> Orders
         </Link>
-        <p className="text-[var(--muted)]">Order not found.</p>
+        <QueryFailed error={error ?? new Error('The order response was empty.')} what="this order" onRetry={() => void refetch()} retrying={isFetching} />
       </div>
     );
   }
@@ -92,6 +102,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
         <ArrowLeft size={16} /> Orders
       </Link>
+
+      {actions.banner}
+      <PaymentDispute order={o} actions={actions} />
 
       {/* Header — identity + the actions an operator actually has */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
@@ -309,12 +322,25 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   <span>-{gyd(o.discount)}</span>
                 </div>
               )}
+              {/* [TAXI waiting charge] A ride charged for waiting: the frozen line, read-only. */}
+              {waiting && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--muted)]">Trip fare</span>
+                    <span>{gyd(waiting.routeFare)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--muted)]">Waiting ({waiting.waitingMinutes} min)</span>
+                    <span>{gyd(waiting.waitingCharge)}</span>
+                  </div>
+                </>
+              )}
               <div className="flex justify-between pt-2 mt-1 border-t border-[var(--border)] font-semibold">
                 <span>Total</span>
-                <span>{gyd(isRide ? (o.taxiFareTotal ?? o.totalAmount) : o.totalAmount)}</span>
+                <span>{gyd(waiting ? waiting.total : isRide ? (o.taxiFareTotal ?? o.totalAmount) : o.totalAmount)}</span>
               </div>
               <p className="text-xs text-[var(--muted)] pt-1">
-                {isMmg ? 'Paid to the vendor’s MMG wallet — Swift moves no money.' : 'Cash at handover — Swift moves no money.'}
+                {isMmg ? 'Paid to the vendor’s MMG account — Swift moves no money.' : 'Cash at handover — Swift moves no money.'}
               </p>
             </div>
           </Section>

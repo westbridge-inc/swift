@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -48,7 +49,7 @@ async function makeMover(opts: { docStatus?: 'APPROVED' | 'EXPIRED' | 'REJECTED'
       data: {
         userId: user.id,
         vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
-        licensePlate: `P${marker}${seq}`,
+        licensePlate: `HP${marker}${seq}`, // [owner 11 Oct] a taxi plate is H-series
         driverLicenseUrl: `/uploads/test/${marker}-dl.jpg`,
         vehicleInsuranceUrl: `/uploads/test/${marker}-ins.jpg`,
         isOnline: opts.online ?? true,
@@ -56,6 +57,7 @@ async function makeMover(opts: { docStatus?: 'APPROVED' | 'EXPIRED' | 'REJECTED'
         documentsVerified: true, // legacy grandfathered
       },
     });
+    await currentTaxiSplitDocuments(app.prisma, user.id);
     return user;
   }
 
