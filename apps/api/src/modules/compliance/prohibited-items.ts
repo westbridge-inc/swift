@@ -46,7 +46,8 @@ import { createHash } from 'node:crypto';
 import { normalize } from '../discovery/matcher';
 
 export type ProhibitedClass = 'ALCOHOL' | 'TOBACCO' | 'VAPES' | 'DRUGS' | 'MEDICINE' | 'AGE_RESTRICTED' | 'LPG' | 'FUEL';
-export type JudgedField = 'name' | 'description' | 'section' | 'option';
+/** Where a word was found: the item's own text, or ('store') its STORE's own words, which hold every item it sells. */
+export type JudgedField = 'name' | 'description' | 'section' | 'option' | 'store';
 
 export const PROHIBITED_CLASSES: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
 
@@ -548,22 +549,60 @@ function leetSpellings(text: string): string[] {
 const singular = (normalized: string): string =>
   normalized.split(' ').map((w) => (w.length > 4 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w)).join(' ');
 
+/**
+ * Words written together, read apart too [joined spellings]:
+ *   · a word joined to the next one where the case changes ("HennessyVS", "RumBottle", "XMRum", "750mlRum") —
+ *     PROHIBITED_CAMEL_PATTERNS mark the places, in the undisguised text while it still has its capitals;
+ *   · a word joined to the number after it ("Rum750ml", "Marlboro20s", "Panadol500mg") — at
+ *     PROHIBITED_DIGITS_APART_PATTERN, in the normalized text.
+ * The classifier reads a run apart only when EVERY part is a word (three letters or more), an acronym or a measure —
+ * so a code or a random reference ("rXLsF64O", "Rx4ypN") is never carved into a banned fragment. Judged beside the
+ * text as written, never instead of it, so "6pack", "20lb" and "7up" keep their meaning. The database pre-filter splits
+ * at every such place, whatever the parts (a superset), so it keeps every row these readings can hit.
+ */
+export const PROHIBITED_CAMEL_PATTERNS: readonly (readonly [string, string])[] = [['([a-z0-9])([A-Z])', '$1 $2'], ['([A-Z])([A-Z][a-z])', '$1 $2']];
+export const PROHIBITED_DIGITS_APART_PATTERN = '([a-z])([0-9])';
+const CAMEL = PROHIBITED_CAMEL_PATTERNS.map(([pattern, to]) => [new RegExp(pattern, 'g'), to] as const);
+/** A number written with its unit ("750ml", "1L", "20s", "500mg", "12yr", "5000puffs"), or a bare number. */
+const JOINED_MEASURE = /^\d+([.,]\d+)?(ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|fl|s|pk|pack|packs|ct|pc|pcs|mg|mcg|g|gm|kg|lb|lbs|gal|yr|yrs|yo|y|puff|puffs|tab|tabs|cap|caps|x)?$/i;
+/** A word (three letters or more, capitalized or not) or an acronym ("VS", "XM"). */
+const CAMEL_PART = /^([A-Z][a-z]{2,}|[a-z]{3,}|[A-Z]{2,})$/;
+const camelApart = (text: string): string => text.split(/([^A-Za-z0-9]+)/).map((run) => {
+  const parts = CAMEL.reduce((t, [pattern, to]) => t.replace(pattern, to), run).split(' ');
+  return parts.length > 1 && parts.every((part) => CAMEL_PART.test(part) || JOINED_MEASURE.test(part)) ? parts.join(' ') : run;
+}).join('');
+const DIGITS_APART = new RegExp(PROHIBITED_DIGITS_APART_PATTERN);
+const digitsApart = (normalized: string): string => normalized.split(' ').map((word) => {
+  const at = word.search(DIGITS_APART);
+  if (at < 0) return word;
+  const [letters, measure] = [word.slice(0, at + 1), word.slice(at + 1)];
+  // the letter o read as a zero inside the number, as numberLeet does ("2os" for "20s")
+  const asMeasure = measure.replace(/^\d[\do]*/, (digits) => digits.replace(/o/g, '0'));
+  return /^[a-z]{2,}$/.test(letters) && JOINED_MEASURE.test(asMeasure) ? `${letters} ${measure}` : word;
+}).join(' ');
+
 /** Every reading of a text that is judged: as written and in its l33t spellings, each label spelling, normalized,
- *  with spelled-out letters joined and plurals dropped, exemptions cut. The text is undisguised once, here. */
+ *  with spelled-out letters joined and plurals dropped, exemptions cut — and with joined words read apart. The text
+ *  is undisguised once, here. */
 function readings(text: string, noSoftDrinks: boolean): string[] {
   const out = new Set<string>();
   const plain = undisguise(text);
   // "R0sé" reads "Rosé" only once its l33t is read, so "rosé" is spelled out again after it. [DS1112 S3-1]
-  for (const base of [plain, ...leetSpellings(plain).map((t) => t.replace(ROSE, 'rosewine'))]) {
+  const spelled = [plain, ...leetSpellings(plain).map((t) => t.replace(ROSE, 'rosewine'))];
+  // [joined spellings] Each, with its words apart where the case changes, is a base of its own ("H3nn3ssyVS").
+  for (const base of new Set(spelled.flatMap((b) => [b, camelApart(b)]))) {
     for (const spelling of labelSpellings(base)) {
       const n = normalize(spelling);
-      for (const variant of [n, joinSingleLetters(n)]) {
+      for (const variant of [n, joinSingleLetters(n), digitsApart(n)]) {
         const judged = stripExempt(variant, noSoftDrinks);
         if (judged) out.add(judged);
       }
-      // the plural dropped AFTER the exemptions are cut ("diesel jeans" stays exempt)
-      const dropped = singular(stripExempt(n, noSoftDrinks));
-      if (dropped) out.add(dropped);
+      // the plural dropped AFTER the exemptions are cut ("diesel jeans" stays exempt) — joined words apart too
+      // ("Heinekens6pack")
+      for (const variant of new Set([n, digitsApart(n)])) {
+        const dropped = singular(stripExempt(variant, noSoftDrinks));
+        if (dropped) out.add(dropped);
+      }
     }
   }
   return [...out];
@@ -675,9 +714,9 @@ function headGoods(words: readonly string[]): string | null {
 
 /** Counts written before a brand-first word ("1 Camel 20s", "Two Newport 20s", "2x Stag"): a quantity, not another
  *  product, so the brand is still the first word. [DS1261] */
-const LEADING_COUNT = /^(\d+x?|x\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|hundred|dozen)$/;
-/** A count, in digits or spelled out ("20", "twenty"). [DS1264 S3] */
-const COUNT = /^(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|dozen)$/;
+const LEADING_COUNT = /^(\d+x?|x\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|dozen)$/;
+/** A count, in digits or spelled out ("20", "twenty", "fifteen"). [DS1264 S3, DS1265 S4] */
+const COUNT = /^(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|dozen)$/;
 function afterLeadingCount(words: readonly string[]): readonly string[] {
   let start = 0;
   while (start < words.length - 1 && LEADING_COUNT.test(words[start]!)) start += 1;
@@ -869,6 +908,8 @@ export interface CatalogueFacts extends ItemWords {
   prohibitedReason?: string | null;
   /** The hash of the judged words a person approved, if any. */
   reviewApprovedHash?: string | null;
+  /** The verdict on the item's STORE's own words (`checkStore`): a store held for a person holds every item it sells. */
+  store?: StoreCheck;
 }
 
 export type BanSource = 'category' | 'store' | 'removed' | 'word';
@@ -946,9 +987,74 @@ export function checkItem(item: CatalogueFacts): CatalogueCheck {
     if (hit) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'store', term: hit.term, reason: storeCategoryReason(category.name) };
   }
   const hit = wordHit(item);
+  if (hit?.certain) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'word', term: hit.term, reason: null, field: hit.field };
+  // [owner 14 Oct, store names] A store whose own words are held for a person holds every item it sells, whatever the
+  // item's words — an approval of the item's words does not show it while its store waits.
+  if (item.store?.state === 'WAITING') return { state: 'WAITING', prohibitedClass: item.store.prohibitedClass, field: 'store', term: item.store.term };
   if (!hit) return { state: 'CLEAR' };
-  if (hit.certain) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'word', term: hit.term, reason: null, field: hit.field };
   const approved = item.reviewApprovedHash != null && item.reviewApprovedHash === judgedWordsHash(item);
+  return { state: approved ? 'APPROVED' : 'WAITING', prohibitedClass: hit.prohibitedClass, field: hit.field, term: hit.term };
+}
+
+// ── Store names (owner, 14 Oct 2026) ─────────────────────────────────────────
+
+/**
+ * A store's own words — its name, its description, its tags and cuisine labels: what a customer reads about the store
+ * itself ("X Liquor Store", "Rum Shop", "Bourda Pharmacy"). The web address is not judged: it is made from the name
+ * when the store is created (and judged then, through the name), and its random ending would hold stores by chance.
+ */
+export interface StoreWords {
+  name: string;
+  description?: string | null;
+  tags?: ReadonlyArray<string | null | undefined>;
+  cuisineTypes?: ReadonlyArray<string | null | undefined>;
+}
+/** Where in a store's own words a banned word was found ('tags': a tag or a cuisine label). */
+export type StoreField = 'name' | 'description' | 'tags';
+export type StoreWordHit = { prohibitedClass: ProhibitedClass; field: StoreField; term: string };
+export type StoreCheck =
+  | { state: 'WAITING' | 'APPROVED'; prohibitedClass: ProhibitedClass; field: StoreField; term: string }
+  | { state: 'CLEAR' };
+
+/**
+ * The store's words judged as an item's are: the name like an item name (a brand as its first word counts:
+ * "Ron's Variety", "Banks Hardware"), the description and the labels like prose, a phrase written across them
+ * read together. A store is never BANNED by its words, only HELD for a person — a surname or a place is a brand
+ * as often as not ("Jameson's Hardware", "Carib Glassworks"), and a person tells the two apart. Banning a store
+ * stays Swift's: filing it under a banned category (#54) or suspending it.
+ */
+export function storeWordHit(store: StoreWords): StoreWordHit | null {
+  const labels = [...(store.tags ?? []), ...(store.cuisineTypes ?? [])];
+  const fields: Array<[StoreField, string | null | undefined, boolean]> = [
+    ['name', store.name, true],
+    ['description', store.description, false],
+    ...labels.map((label): [StoreField, string | null | undefined, boolean] => ['tags', label, false]),
+  ];
+  const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
+  for (const [field, text, brandFirst] of fields) {
+    const hit = classifyText(text, { noSoftDrinks, brandFirst });
+    if (hit) return { ...hit, field };
+  }
+  const together = fields.map(([, text]) => text).filter(Boolean).join(' . ');
+  const hit = classifyText(together, { noSoftDrinks, brandFirst: false, splitWords: false });
+  return hit ? { ...hit, field: 'name' } : null;
+}
+
+/** The fingerprint of a store's words a person approved: any change to them brings the check back. */
+export function storeWordsHash(store: StoreWords): string {
+  const canonical = JSON.stringify([
+    normalize(store.name),
+    normalize(store.description ?? ''),
+    [...(store.tags ?? []), ...(store.cuisineTypes ?? [])].map((t) => normalize(t ?? '')).sort(),
+  ]);
+  return createHash('sha256').update(`store:${canonical}`).digest('hex');
+}
+
+/** The verdict on a store's own words: held until a person approves exactly these words. `hit` may be passed in when
+ *  the caller already judged the same words. */
+export function checkStore(store: StoreWords & { approvedHash?: string | null }, hit: StoreWordHit | null = storeWordHit(store)): StoreCheck {
+  if (!hit) return { state: 'CLEAR' };
+  const approved = store.approvedHash != null && store.approvedHash === storeWordsHash(store);
   return { state: approved ? 'APPROVED' : 'WAITING', prohibitedClass: hit.prohibitedClass, field: hit.field, term: hit.term };
 }
 
@@ -962,6 +1068,10 @@ export function notAllowedMessage(prohibitedClass: ProhibitedClass): string {
 
 /** What the partner reads on an item a word hit is holding. */
 export const WAITING_FOR_CHECK = 'Waiting for a quick check';
+/** …and on an item held because its STORE's own words are waiting for a person. */
+export const STORE_WAITING_FOR_CHECK = 'Waiting for a quick check of your store';
+/** What the partner reads about the store itself while its own words wait for a person. */
+export const STORE_WAITING_MESSAGE = 'Your store is waiting for a quick check by Swift: its name, description or tags mention goods Swift doesn\'t carry. Customers can\'t see your store until Swift checks it. If you rename it, the check starts again.';
 
 /** The customer's message when a cart line or an order line is refused. */
 export function orderRefusalMessage(itemName: string): string {

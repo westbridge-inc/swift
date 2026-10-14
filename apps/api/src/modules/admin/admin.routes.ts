@@ -85,8 +85,8 @@ import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY
 import { readFeePause } from '../billing/mmg-pause';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
-import { catalogueChecksFor, flaggedItemsInTenant, wordsFor } from '../compliance/prohibited-gate';
-import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, type CatalogueCheck } from '../compliance/prohibited-items';
+import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
+import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1409,6 +1409,8 @@ export async function adminRoutes(app: FastifyInstance) {
         vatRegistrationNumber: undefined,
         recentOrders: recentOrders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
         prohibitedItems,
+        // [owner 14 Oct, store names] Whether the store's own words are held for a person (or were approved).
+        storeCheck: storeCheckOf(vendor),
       },
     };
   });
@@ -1427,7 +1429,8 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/catalogue-review', { preHandler: [adminGuard] }, async () => {
     const tenantId = requireTenantId();
-    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING');
+    // An item held only because its STORE waits is checked through its store (below), not one by one.
+    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING' && check.field !== 'store');
     // A bounded page: the first CATALOGUE_REVIEW_PAGE held items, and how many are held in all.
     const flagged = waiting.slice(0, CATALOGUE_REVIEW_PAGE);
     const words = await wordsFor(app.prisma, flagged.map(([id]) => id));
@@ -1442,7 +1445,24 @@ export async function adminRoutes(app: FastifyInstance) {
         wordsHash: judgedWordsHash(w),
       }];
     });
-    return { success: true, data: { items, total: waiting.length } };
+    // [owner 14 Oct, store names] Stores whose own words are held: approve shows the store (and lets its items be
+    // judged by their own words again) for exactly the words on screen.
+    const heldStores = [...(await storesHeldInTenant(app.prisma, tenantId))];
+    const storeRows = await app.prisma.vendor.findMany({
+      where: { id: { in: heldStores.slice(0, CATALOGUE_REVIEW_PAGE).map(([id]) => id) } },
+      select: { id: true, status: true, ...STORE_WORDS_SELECT },
+    });
+    const byId = new Map(storeRows.map((r) => [r.id, r]));
+    const stores = heldStores.slice(0, CATALOGUE_REVIEW_PAGE).flatMap(([id, check]) => {
+      const row = byId.get(id);
+      if (!row) return [];
+      return [{
+        vendorId: id, name: row.name, description: row.description ?? null, tags: [...row.tags, ...row.cuisineTypes], status: row.status,
+        state: check.state, prohibitedClass: check.prohibitedClass, label: PROHIBITED_CLASS_LABELS[check.prohibitedClass], field: check.field, term: check.term,
+        wordsHash: storeWordsHash(row),
+      }];
+    });
+    return { success: true, data: { items, total: waiting.length, stores, storesTotal: heldStores.length } };
   });
 
   const approveCatalogueItemSchema = z.object({ wordsHash: z.string().regex(/^[0-9a-f]{64}$/), reason: z.string().optional() });
@@ -1462,6 +1482,10 @@ export async function adminRoutes(app: FastifyInstance) {
         throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. ${notAllowedMessage(check.prohibitedClass)}`, { prohibitedClass: check.prohibitedClass });
       }
       if (!check || check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This item has nothing waiting for a check.');
+      // Its store's own words hold it: approving the item would show nothing, so the store is checked first.
+      if (check.state === 'WAITING' && check.field === 'store') {
+        throw new AppError(409, 'STORE_WAITING', 'This item\'s store is waiting for a check. Check the store first.');
+      }
       const words = (await wordsFor(tx, [id])).get(id);
       if (!words || judgedWordsHash(words) !== body.wordsHash) {
         throw new AppError(409, 'ITEM_CHANGED', 'This item changed — review it again.');
@@ -1471,6 +1495,36 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { approvedWordsHash: body.wordsHash } });
     });
     return { success: true, data: { itemId: id, state: 'APPROVED' } };
+  });
+
+  // [GUARDRAILS §8 · owner 14 Oct 2026: store names about banned goods are HELD for a person automatically]
+  // Approve shows the store for exactly the words the reviewer saw — the same explicit catalogue-approver grant,
+  // reason and record as an item. A store that sells banned goods is not approved: it is suspended (Stores) or filed
+  // under a banned category, which approval never lifts.
+  const approveCatalogueStoreSchema = z.object({ wordsHash: z.string().regex(/^[0-9a-f]{64}$/), reason: z.string().optional() });
+  app.post('/catalogue-review/stores/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = approveCatalogueStoreSchema.parse(request.body ?? {});
+    const tenantId = requireTenantId();
+    const store = await tenantPrisma.vendor.findUnique({ where: { id }, select: { id: true } });
+    if (!store) throw new NotFoundError('Vendor', id);
+    await app.prisma.$transaction(async (tx) => {
+      // Judged and written under the store's row lock: a rename after the reviewer read the words is never approved.
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE`;
+      const filed = await prohibitedStoreCategory(tx, id);
+      if (filed) {
+        throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. Swift doesn't allow this category: ${PROHIBITED_CLASS_LABELS[filed.prohibitedClass]}.`, { prohibitedClass: filed.prohibitedClass });
+      }
+      const row = await tx.vendor.findUnique({ where: { id }, select: STORE_WORDS_SELECT });
+      if (!row) throw new NotFoundError('Vendor', id);
+      const check = storeCheckOf(row);
+      if (check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This store has nothing waiting for a check.');
+      if (storeWordsHash(row) !== body.wordsHash) throw new AppError(409, 'STORE_CHANGED', 'This store changed — review it again.');
+      await tx.vendor.update({ where: { id }, data: { nameReviewApprovedHash: body.wordsHash, nameReviewApprovedAt: new Date() } });
+      // The record is written in the same transaction as the approval: no approval without its record.
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { approvedWordsHash: body.wordsHash } });
+    });
+    return { success: true, data: { vendorId: id, state: 'APPROVED' } };
   });
 
   const removeCatalogueItemSchema = z.object({ prohibitedClass: z.enum(PROHIBITED_CLASSES as [string, ...string[]]), reason: z.string().optional() });

@@ -167,7 +167,7 @@ export function isExplicitOnly(capability: string): boolean {
 }
 
 /** A route that opens or decides a document: its capability AND the reviewer grant. [GUARDRAILS §8 · Opus S3-9]
- *  The same wrapper names the catalogue approver grant on the one route that shows a held item. */
+ *  The same wrapper names the catalogue approver grant on the two routes that show a held item or a held store. */
 const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIEWER_CAPABILITY): AdminRouteAuthority => ({ ...authority, requires: grant });
 
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
@@ -220,6 +220,8 @@ const E = {
   ratingReport: { model: 'ratingReport', fields: ['status'] },
   // [GUARDRAILS §8] A catalogue item a person checked: approved for the words seen, or removed as prohibited.
   item: { model: 'item', fields: ['prohibitedAt', 'prohibitedClass', 'prohibitedReason', 'reviewApprovedHash', 'reviewApprovedAt', 'isAvailable'] },
+  // [GUARDRAILS §8 · owner 14 Oct] A store whose own words a person checked: approved for the words seen.
+  storeWords: { model: 'vendor', fields: ['nameReviewApprovedHash', 'nameReviewApprovedAt', 'status'] },
   // [OWNER #13] …and the solo wait and how it was decided.
   approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt', 'soloEligibleAt', 'decidedSolo', 'expiresAt'] },
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
@@ -318,6 +320,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /catalogue-review': c('C1', 'moderation.read'),
   'POST /catalogue-review/:id/approve': reviewed(c('C3', 'moderation.decide', E.item), CATALOGUE_APPROVER_CAPABILITY),
   'POST /catalogue-review/:id/remove': c('C3', 'moderation.decide', E.item),
+  // [GUARDRAILS §8 · owner 14 Oct] Showing a store its own words held: the same explicit grant as showing an item.
+  'POST /catalogue-review/stores/:id/approve': reviewed(c('C3', 'moderation.decide', E.storeWords), CATALOGUE_APPROVER_CAPABILITY),
 
   // ── National pricing (founder + default tenant) ─────────────────────────
   'GET /countries': c('C0', 'platform.pricing.read'),
