@@ -362,7 +362,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
         </div>
       ))}
       {check.error ? <MutationError error={check.error} label="MMG could not be checked" /> : null}
-      {v.reversals.filter((r) => r.state === 'HELD').map((r) => <ResolveHeld key={`resolve-${r.id}`} reversalId={r.id} heldReason={r.heldReason} onDone={refresh} />)}
+      {v.reversals.filter((r) => r.state === 'HELD').map((r) => <ResolveHeld key={`resolve-${r.id}`} reversalId={r.id} heldReason={r.heldReason} lookupStatus={r.lookupStatus} onDone={refresh} />)}
       {!v.switchedOn ? (
         <p className="text-xs text-[var(--muted)]">Returning payments is switched off on this server until MMG&apos;s answers are proven in testing.</p>
       ) : !v.canReverse ? (
@@ -426,10 +426,13 @@ const RESOLUTION_WORDS: Record<string, string> = {
  * the first answer is a second admin's approval. The server reads MMG's records
  * again and refuses anything they do not show.
  */
-function ResolveHeld({ reversalId, heldReason, onDone }: { reversalId: string; heldReason: string | null; onDone: () => void }) {
+function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversalId: string; heldReason: string | null; lookupStatus?: string | null; onDone: () => void }) {
   const [outcome, setOutcome] = useState<'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED'>('NOT_RETURNED');
   // [DS1115] Only where MMG returned money that had already paid for a week.
   const moneyUsed = (heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT');
+  // [Opus delta S3-N1] MMG's records no longer find the payment: no return can be booked, and it
+  // cannot be "not returned" either; a person closes it on MMG's reversal reference.
+  const paymentNotFound = !moneyUsed && lookupStatus === 'PAYMENT_NOT_FOUND';
   const [reference, setReference] = useState('');
   const [reason, setReason] = useState('');
   const resolve = useMutation({ mutationFn: () => resolveMmgFeeReversal(reversalId, outcome, reference.trim(), reason.trim()), onSettled: onDone });
@@ -454,6 +457,11 @@ function ResolveHeld({ reversalId, heldReason, onDone }: { reversalId: string; h
         <label className="flex items-center gap-2 text-xs">
           <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
           MMG returned it, but the money had already paid for a week (close it; that week&apos;s fee is then owed again and finance collects it)
+        </label>
+      ) : paymentNotFound ? (
+        <label className="flex items-center gap-2 text-xs">
+          <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
+          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: nothing is deducted and that week&apos;s fee is owed again)
         </label>
       ) : null}
       <input

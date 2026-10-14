@@ -259,6 +259,24 @@ describe('[MMG REVERSAL] returning a whole payment', () => {
     expect(new Headers(post![1]!.headers).get('x-swift-reason')).toBe('The partner paid this week twice by mistake');
   });
 
+  it('[Opus delta S3-N1] MMG no longer finds the payment: the held return offers the "returned, not booked" close; otherwise it does not', async () => {
+    await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return reversalView({ canReverse: false, reversals: [{ ...heldReversal, lookupStatus: 'PAYMENT_NOT_FOUND', heldReason: 'NOT_PROVEN_IN_TIME' }] });
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const form = await screen.findByRole('form', { name: 'Resolve the held return' });
+    expect(within(form).getByText(/no longer find this payment, but its statement shows it returned/)).toBeTruthy();
+  });
+
+  it('[Opus delta S3-N1] a held return MMG still finds offers no "returned, not booked" close', async () => {
+    await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return reversalView({ canReverse: false, reversals: [heldReversal] });
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const form = await screen.findByRole('form', { name: 'Resolve the held return' });
+    expect(within(form).queryByText(/no longer find this payment/)).toBeNull();
+  });
+
   it('switched off: says so, and offers no way to ask', async () => {
     await openConfirmed((request) => {
       if (request.url.pathname === REVERSAL_PATH) return reversalView({ switchedOn: false });

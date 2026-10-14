@@ -10,7 +10,7 @@ import { hasConfirmationInTx, lockBillingAuthority } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import type { BillingService } from './billing.service';
 import { postLedger, returnedNotBookedPostings } from './ledger';
-import { amountMinorOf, decideAfterLookup, lookupProof, REVERSAL_SENDING_STALE_MS, type ReversalProof } from './mmg-reversal-proof';
+import { amountMinorOf, decideAfterLookup, returnedWhilePaymentNotFound, lookupProof, REVERSAL_SENDING_STALE_MS, type ReversalProof } from './mmg-reversal-proof';
 export { lookupProof, REVERSAL_PROOF_WINDOW_MS, REVERSAL_SENDING_STALE_MS } from './mmg-reversal-proof';
 
 // ---------------------------------------------------------------------------
@@ -162,7 +162,8 @@ export function shapeProviderText(text: string | null | undefined): string | nul
 
 export type ResolveRefusal =
   | 'NOT_HELD' | 'MMG_SHOWS_RETURNED' | 'PAYMENT_NOT_STANDING' | 'NO_PROOF'
-  | 'NOT_A_REVERSAL' | 'RETURN_NOT_BOOKABLE' | 'NOT_SHORT' | 'MMG_LOOKUP_UNAVAILABLE' | 'RETURN_NOW_BOOKABLE' | 'MMG_RETURN_IN_FLIGHT';
+  | 'NOT_A_REVERSAL' | 'RETURN_NOT_BOOKABLE' | 'NOT_SHORT' | 'MMG_LOOKUP_UNAVAILABLE' | 'RETURN_NOW_BOOKABLE' | 'MMG_RETURN_IN_FLIGHT'
+  | 'PAYMENT_NOT_FOUND';
 const RESOLVE_COPY: Record<ResolveRefusal, string> = {
   NOT_HELD: 'Only a return that is held for a person is resolved here.',
   MMG_SHOWS_RETURNED: "MMG's records show this payment returned. Use \"Check with MMG\" instead; nothing changed.",
@@ -170,7 +171,8 @@ const RESOLVE_COPY: Record<ResolveRefusal, string> = {
   NO_PROOF: "MMG's records do not show that return for this payment and amount. Nothing changed.",
   NOT_A_REVERSAL: "That MMG reference is a payment Swift has on record (this payment's own statement line, or another payment), not a return. Enter the reference of MMG's reversal transaction. Nothing changed.",
   RETURN_NOT_BOOKABLE: "MMG returned this payment, but it cannot be booked against the partner's weekly-fee payments as they stand now. If the money already paid for a week, close it as \"Returned, not booked\" (that week's fee is then owed again and finance collects it); otherwise put the books right and use \"Check with MMG\". Nothing changed.",
-  NOT_SHORT: 'Only a return MMG made after the money had already paid for a week is closed this way. Nothing changed.',
+  NOT_SHORT: 'Only a return MMG made after the money had already paid for a week, or one whose payment MMG\'s records no longer find, is closed this way. Nothing changed.',
+  PAYMENT_NOT_FOUND: "MMG's records no longer find this payment, so it can be neither booked as returned nor closed as not returned. If the MMG statement shows it returned, close it as \"Returned, not booked\" with MMG's reversal reference: nothing is deducted and that week's fee is owed again. Nothing changed.",
   RETURN_NOW_BOOKABLE: "The partner's weekly-fee payments hold this amount again, so the return can be booked: use \"Check with MMG\". Nothing changed.",
   MMG_LOOKUP_UNAVAILABLE: 'MMG could not be asked just now. Nothing changed; try again in a few minutes.',
   MMG_RETURN_IN_FLIGHT: "MMG named a return for this payment that it has not finished (or that cannot be read now). While MMG may still return the money (up to a week after the request) it cannot be closed as not returned: use \"Check with MMG\" later. Nothing changed.",
@@ -568,6 +570,7 @@ export class MmgFeeReversalService {
     if (input.outcome === 'NOT_RETURNED') {
       const proof = await proofOf(row);
       if (proof.proven) throw new AppError(409, 'MMG_SHOWS_RETURNED', RESOLVE_COPY.MMG_SHOWS_RETURNED);
+      if (proof.paymentNotFound) throw new AppError(409, 'PAYMENT_NOT_FOUND', RESOLVE_COPY.PAYMENT_NOT_FOUND);
       if (proof.unreadable) throw unavailable();
       if (!proof.standing) throw new AppError(409, 'PAYMENT_NOT_STANDING', RESOLVE_COPY.PAYMENT_NOT_STANDING);
       // [review S3-2] Closing it would free the payment for a second reversal while MMG's first may complete.
@@ -596,13 +599,46 @@ export class MmgFeeReversalService {
       throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
     }
     if (input.outcome === 'RETURNED_NOT_BOOKED') {
-      if (!(row.heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT')) throw new AppError(409, 'NOT_SHORT', RESOLVE_COPY.NOT_SHORT);
-      const proof = await proofOf({ ...row, providerReference: row.providerReference ?? reference });
-      if (!proof.proven) throw proof.unreadable ? unavailable() : new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
-      // [review S2-2] Proven through the reversal MMG named: that reference is checked too.
-      if (proof.how === 'REVERSAL_COMPLETED' && row.providerReference
-        && await this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, row.id, row.providerReference!))) {
-        throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
+      // Two bases, both closing with NOTHING deducted and the week's fee owed again:
+      //  (1) MMG proved the return, but the money had already paid for a week;
+      //  (2) [Opus delta S3-N1] MMG's lookup definitively no longer finds the payment itself, so no
+      //      return can ever be proven (or booked) automatically; a person closes it on a reversal
+      //      reference MMG's lookup finds completed for this exact amount (the reason and the audit
+      //      row are the C4 approval's). An error or a timeout is never this basis: it stays closed.
+      const walletShort = (row.heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT');
+      let how: string;
+      let proofRef: string;
+      let mmgNamedProof: boolean;
+      let proving: boolean;
+      if (walletShort) {
+        const proof = await proofOf({ ...row, providerReference: row.providerReference ?? reference });
+        if (!proof.proven) throw proof.unreadable ? unavailable() : new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
+        // [review S2-2] Proven through the reversal MMG named: that reference is checked too.
+        if (proof.how === 'REVERSAL_COMPLETED' && row.providerReference
+          && await this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, row.id, row.providerReference!))) {
+          throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
+        }
+        how = proof.how;
+        proofRef = row.providerReference ?? reference;
+        mmgNamedProof = proof.how === 'REVERSAL_COMPLETED' && row.providerReference !== null;
+        proving = proof.how === 'REVERSAL_COMPLETED';
+      } else {
+        const census = typed ? knownPayment : (ref: string) => this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, row.id, ref));
+        let verdict: Awaited<ReturnType<typeof returnedWhilePaymentNotFound>>;
+        try {
+          verdict = await returnedWhilePaymentNotFound(this.client(), row, reference, census);
+        } catch (err) {
+          log().warn({ err, reversalId: row.id }, '[MMG reversal] MMG lookup failed while a person closed a return whose payment MMG no longer finds');
+          throw unavailable();
+        }
+        if (verdict === 'payment-found') throw new AppError(409, 'NOT_SHORT', RESOLVE_COPY.NOT_SHORT);
+        if (verdict === 'unreadable') throw unavailable();
+        if (verdict === 'known-payment') throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
+        if (verdict === 'no-proof') throw new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
+        how = 'PAYMENT_NOT_FOUND';
+        proofRef = reference;
+        mmgNamedProof = !typed;
+        proving = true;
       }
       const closed = await this.deps.prisma.$transaction(async (tx) => {
         // [security review R1] Decided on the books as they are NOW (an approval can be
@@ -612,9 +648,7 @@ export class MmgFeeReversalService {
         // [security review: sibling-path parity] The same reference gate as a booking: a
         // reference that proves this return (or is written as its note) is locked and checked
         // again here, so two closes at once can never both cite one reversal.
-        const proofRef = row.providerReference ?? reference;
-        const mmgNamedProof = proof.how === 'REVERSAL_COMPLETED' && row.providerReference !== null;
-        const gated = [...new Set([...(typed ? [reference] : []), ...(proof.how === 'REVERSAL_COMPLETED' ? [proofRef] : [])])]
+        const gated = [...new Set([...(typed ? [reference] : []), ...(proving ? [proofRef] : [])])]
           .sort((a, b) => a.trim().toUpperCase().localeCompare(b.trim().toUpperCase()));
         for (const ref of gated) await lockReversalReference(tx, ref);
         for (const ref of gated) {
@@ -624,13 +658,15 @@ export class MmgFeeReversalService {
               : await namesAKnownPayment(tx, row.id, ref);
           if (known) throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
         }
-        const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: row.subscriptionId }, select: { balance: true, currencyCode: true } });
-        if (wallet && wallet.currencyCode === row.currencyCode && amountMinorOf(wallet.balance) >= amountMinorOf(row.amount)) {
-          throw new AppError(409, 'RETURN_NOW_BOOKABLE', RESOLVE_COPY.RETURN_NOW_BOOKABLE);
+        if (walletShort) {
+          const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: row.subscriptionId }, select: { balance: true, currencyCode: true } });
+          if (wallet && wallet.currencyCode === row.currencyCode && amountMinorOf(wallet.balance) >= amountMinorOf(row.amount)) {
+            throw new AppError(409, 'RETURN_NOW_BOOKABLE', RESOLVE_COPY.RETURN_NOW_BOOKABLE);
+          }
         }
         const moved = await tx.mmgFeeReversal.updateMany({
-          where: { id: row.id, state: 'HELD', resolution: null, heldReason: { startsWith: 'WALLET_NO_LONGER_HOLDS_IT' } },
-          data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: proof.how, resolution: 'RETURNED_NOT_BOOKED', resolvedBy: input.actorId, resolutionNote: reference },
+          where: { id: row.id, state: 'HELD', resolution: null, ...(walletShort ? { heldReason: { startsWith: 'WALLET_NO_LONGER_HOLDS_IT' } } : {}) },
+          data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: how, resolution: 'RETURNED_NOT_BOOKED', resolvedBy: input.actorId, resolutionNote: reference },
         });
         if (moved.count !== 1) throw new AppError(409, 'NOT_HELD', RESOLVE_COPY.NOT_HELD);
         // [owner Q-1654-BOOKS A] The partner owes that week's fee again; MMG clearing holds less.
@@ -639,7 +675,7 @@ export class MmgFeeReversalService {
           description: `MMG returned payment ${row.mmgTransactionId} after it had paid for a week: that week's fee is owed again`,
           entries: returnedNotBookedPostings(row.subscriptionId, Number(row.amount)),
         });
-        await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'RETURNED_NOT_BOOKED', mmgReference: reference });
+        await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'RETURNED_NOT_BOOKED', mmgReference: reference, basis: walletShort ? 'MONEY_ALREADY_USED' : 'PAYMENT_NOT_FOUND' });
         return tx.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } });
       });
       mmgFeeReversalsCounter.labels('resolved_returned_not_booked').inc();
@@ -656,7 +692,10 @@ export class MmgFeeReversalService {
       return closed;
     }
     const proof = await proofOf({ ...row, providerReference: reference });
-    if (!proof.proven) throw proof.unreadable ? unavailable() : new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
+    if (!proof.proven) {
+      throw proof.paymentNotFound ? new AppError(409, 'PAYMENT_NOT_FOUND', RESOLVE_COPY.PAYMENT_NOT_FOUND)
+        : proof.unreadable ? unavailable() : new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
+    }
     if (proof.how === 'REVERSAL_COMPLETED' && !typed && await this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, row.id, reference))) {
       throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
     }

@@ -27,7 +27,10 @@ export type ReversalProof =
   /** `namedInFlight`: the reversal MMG's own answer named is still pending at
    *  MMG, or could not be read [review S3-2]. `namedKnownPayment`: MMG named a
    *  reference Swift has on record as a payment (never a return) [DS1124 S2]. */
-  | { proven: false; standing: boolean; unreadable: boolean; namedInFlight?: boolean; namedKnownPayment?: boolean };
+  | { proven: false; standing: boolean; unreadable: boolean; namedInFlight?: boolean; namedKnownPayment?: boolean;
+      /** [Opus delta S3-N1] MMG answered, and definitively does not find the payment itself
+       *  ("not found" — never an error or a timeout, which stay "MMG unavailable"). */
+      paymentNotFound?: boolean };
 
 /** mmg_txn_canon in TypeScript: an MMG transaction id trimmed and upper-cased. */
 const canon = (id: string): string => id.trim().toUpperCase();
@@ -92,7 +95,31 @@ export async function lookupProof(
     unreadable: original.outcome !== 'found',
     ...(namedInFlight ? { namedInFlight: true } : {}),
     ...(namedKnownPayment ? { namedKnownPayment: true } : {}),
+    ...(original.outcome === 'not_found' ? { paymentNotFound: true } : {}),
   };
+}
+
+/**
+ * [Opus delta S3-N1] MMG's lookup definitively does not find the payment
+ * itself, so nothing can prove the payment was returned and no return is ever
+ * booked against the partner's weekly-fee money automatically. A person may
+ * still CLOSE it as returned, not booked (fee owed again, nothing deducted)
+ * when MMG's lookup finds the reversal reference they read on the MMG
+ * statement completed for exactly this amount, and Swift does not hold that
+ * reference as a payment. An error or a timeout is never "not found".
+ */
+export type NotFoundCloseVerdict = 'yes' | 'payment-found' | 'unreadable' | 'known-payment' | 'no-proof';
+export async function returnedWhilePaymentNotFound(
+  client: MmgLookupClient, row: ProofSubject, reference: string, isKnownPayment: (reference: string) => Promise<boolean>,
+): Promise<NotFoundCloseVerdict> {
+  const original = await client.transactionLookupDetail(row.mmgTransactionId);
+  if (original.outcome === 'error') return 'unreadable';
+  if (original.outcome === 'found') return 'payment-found';
+  if (canon(reference) === '' || canon(reference) === canon(row.mmgTransactionId)) return 'no-proof';
+  if (await isKnownPayment(reference)) return 'known-payment';
+  const reversal = await client.transactionLookupDetail(reference);
+  if (reversal.outcome === 'error') return 'unreadable';
+  return reversal.outcome === 'found' && reversal.status === 'approved' && matchesAmount(reversal, row) ? 'yes' : 'no-proof';
 }
 
 /** MMG said "already reversed" (a duplicate): an answer that contradicts a standing payment. */
@@ -125,7 +152,7 @@ export type SettleDecision =
 export function decideAfterLookup(proof: ReversalProof, row: OpenReversal, opts: { now: Date; afterAnswer: boolean }): SettleDecision {
   if (proof.proven) return { action: 'apply', how: proof.how };
   if (row.providerStatus === 'declined' && !saysDuplicate(row.providerReason) && proof.standing) return { action: 'fail' };
-  const lookupStatus = proof.unreadable ? 'UNREADABLE' : proof.standing ? 'STANDING' : 'NOT_PROVEN';
+  const lookupStatus = !proof.proven && proof.paymentNotFound ? 'PAYMENT_NOT_FOUND' : proof.unreadable ? 'UNREADABLE' : proof.standing ? 'STANDING' : 'NOT_PROVEN';
   if (row.state === 'SENT' && row.providerStatus !== 'declined' && opts.now.getTime() - row.sentAt.getTime() < REVERSAL_PROOF_WINDOW_MS) {
     return { action: 'wait', lookupStatus };
   }

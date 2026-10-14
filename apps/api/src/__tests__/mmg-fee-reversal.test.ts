@@ -1039,6 +1039,47 @@ describe('[security review: csv-formula-injection] the cash journal never hands 
   });
 });
 
+describe('[Opus delta S3-N1] MMG no longer finds a payment it returned: a person can close it, an error never can', () => {
+  /** MMG answers the reversal "pending" naming `reversal`; its lookup no longer finds the payment itself
+   *  (`original: 'not_found'`) or cannot be read (`'error'`). */
+  const missingClient = (txn: string, reversal: string, original: 'not_found' | 'error'): MmgReversalClient => ({
+    reverseTransaction: async (req) => { reversalCalls.push(req.transactionId); return { status: 'pending', transactionId: reversal }; },
+    transactionLookupDetail: async (id) => (id === txn ? (original === 'not_found' ? { outcome: 'not_found' as const } : { outcome: 'error' as const, reason: 'timeout' }) : mmg.transactionLookupDetail(id)),
+  });
+  const heldMissing = async (original: 'not_found' | 'error') => {
+    const p = await paidCheckout();
+    const reversal = `RVNF${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    sandboxAddHistory({ transactionId: reversal, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    const service = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => missingClient(p.txn, reversal, original) });
+    const sent = await runWithTenant('swift-default', () => service.requestReversal({ tenantId: 'swift-default', checkoutId: p.checkoutId, amountGyd: p.amount, reason: REASON, actorId: admin.userId, approvalId: null }, async () => {}));
+    const held = await runWithTenant('swift-default', () => service.settle(sent.id, { now: new Date(Date.now() + 25 * 3_600_000) }));
+    expect(held.state).toBe('HELD');
+    return { p, reversal, service, held };
+  };
+
+  it('a definite "not found": "returned" and "not returned" say so plainly, and "returned, not booked" closes it (nothing deducted, fee owed, billing unblocked)', async () => {
+    const { p, reversal, service, held } = await heldMissing('not_found');
+    expect(held.lookupStatus).toBe('PAYMENT_NOT_FOUND');
+    const before = await walletOf(p.subId);
+    await expect(resolveAs(held.id, 'RETURNED', reversal, service)).rejects.toMatchObject({ code: 'PAYMENT_NOT_FOUND' });
+    await expect(resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}NF`, service)).rejects.toMatchObject({ code: 'PAYMENT_NOT_FOUND' });
+    const closed = await resolveAs(held.id, 'RETURNED_NOT_BOOKED', reversal, service);
+    expect(closed).toMatchObject({ state: 'FAILED', resolution: 'RETURNED_NOT_BOOKED', lookupStatus: 'PAYMENT_NOT_FOUND' });
+    expect(await walletOf(p.subId)).toBe(before);
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+    const owed = await app.prisma.ledgerEntry.findMany({ where: { transaction: { idempotencyKey: `ledger:mmg-reversal-not-booked:${held.id}` } } });
+    expect(owed.find((e) => e.accountCode === 'FEE_RECEIVABLE')).toMatchObject({ subledgerId: p.subId });
+    expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(false);
+  });
+
+  it('an error or a timeout is never "not found": the close is refused as "MMG unavailable" and the return stays held', async () => {
+    const { reversal, service, held } = await heldMissing('error');
+    expect(held.lookupStatus).toBe('UNREADABLE');
+    await expect(resolveAs(held.id, 'RETURNED_NOT_BOOKED', reversal, service)).rejects.toMatchObject({ code: 'MMG_LOOKUP_UNAVAILABLE' });
+    expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+  });
+});
+
 describe('[review #1654] what MMG names is checked, one reference books once, nothing closes under a return in flight', () => {
   /** MMG answers the reversal "pending", naming `named(txn)`; the lookup is the sandbox's, with the
    *  payment's own ledger number set when `ledger` is given. */
@@ -1205,6 +1246,41 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     const later = new Date(Date.now() + 60 * 60_000);
     await failing.sweep(later);
     expect((await reversalRow(closed.id)).lastCheckedAt?.getTime()).toBe(later.getTime());
+  });
+
+  it('[Opus delta S4-1] deterministic: a "returned" close waits on the reference lock, then sees the payout written meanwhile and is refused', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    const reference = `RVLK${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    sandboxAddHistory({ transactionId: reference, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    // Another transaction holds the reference's lock while it records a payout under that same reference.
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    let locked!: () => void;
+    const holding = new Promise<void>((resolve) => { locked = resolve; });
+    let payoutId = '';
+    const holder = app.prisma.$transaction(async (db) => {
+      await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('mmg-reversal-ref:' || mmg_txn_canon(${reference}), 0))`;
+      payoutId = (await db.payoutRequest.create({ data: { userId: admin.userId, amount: p.amount, netAmount: p.amount, method: 'MOBILE_MONEY', destination: {}, externalRef: reference } })).id;
+      locked();
+      await done;
+    }, { timeout: 20_000 });
+    await holding;
+    let settled = false;
+    const closing = resolveAs(held.id, 'RETURNED', reference).then((r) => { settled = true; return r; }, (e: unknown) => { settled = true; throw e; });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const waited = !settled;
+    finish();
+    await holder;
+    try {
+      await expect(closing).rejects.toMatchObject({ code: 'NOT_A_REVERSAL' });
+      expect(waited, 'the close waited for the reference lock').toBe(true);
+      expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+      expect(await reversalEvents(p.subId)).toHaveLength(0);
+    } finally {
+      await app.prisma.payoutRequest.delete({ where: { id: payoutId } });
+    }
   });
 
   it('S3-2: a reversal MMG named is still pending — "not returned" is refused, so MMG is never asked a second time', async () => {

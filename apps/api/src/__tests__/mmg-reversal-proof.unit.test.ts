@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { MmgLookupClient, MmgLookupDetail } from '../providers/mmg/mmg-provider';
-import { decideAfterLookup, lookupProof, verdictOf, REVERSAL_PROOF_WINDOW_MS, REVERSAL_SENDING_STALE_MS, type ReversalProof } from '../modules/billing/mmg-reversal-proof';
+import { decideAfterLookup, lookupProof, returnedWhilePaymentNotFound, verdictOf, REVERSAL_PROOF_WINDOW_MS, REVERSAL_SENDING_STALE_MS, type ReversalProof } from '../modules/billing/mmg-reversal-proof';
 
 // ---------------------------------------------------------------------------
 // [MMG REVERSAL · owner #11] THE rule for what MMG's answers prove, shared by
@@ -72,7 +72,25 @@ describe('[MMG REVERSAL] what MMG\'s lookup proves', () => {
     expect(await lookupProof(unreadable, row({ providerReference: 'REV1' }))).toEqual({ proven: false, standing: false, unreadable: true });
     // [DS1127 S2] "not found" is no better: the payment's own ledger number cannot be ruled out.
     const unknown: MmgLookupClient = { transactionLookupDetail: async (id) => (id === 'TX1' ? { outcome: 'not_found' } : found('approved')) };
-    expect(await lookupProof(unknown, row({ providerReference: 'REV1' }))).toEqual({ proven: false, standing: false, unreadable: true });
+    expect(await lookupProof(unknown, row({ providerReference: 'REV1' }))).toEqual({ proven: false, standing: false, unreadable: true, paymentNotFound: true });
+  });
+
+  it('[Opus delta S3-N1] a definite "not found" for the payment is told apart from an error, and a person may close it on a completed reversal', async () => {
+    const r = row();
+    const notFound: MmgLookupClient = { transactionLookupDetail: async (id) => (id === 'TX1' ? { outcome: 'not_found' } : id === 'REV1' ? found('approved') : { outcome: 'not_found' }) };
+    const failing: MmgLookupClient = { transactionLookupDetail: async (id) => (id === 'TX1' ? { outcome: 'error', reason: 'timeout' } : found('approved')) };
+    const never = async () => false;
+    expect(await returnedWhilePaymentNotFound(notFound, r, 'REV1', never)).toBe('yes');
+    expect(await returnedWhilePaymentNotFound(notFound, r, 'REV1', async () => true)).toBe('known-payment');
+    expect(await returnedWhilePaymentNotFound(notFound, r, ' tx1 ', never)).toBe('no-proof');
+    expect(await returnedWhilePaymentNotFound(notFound, r, 'NOPE', never)).toBe('no-proof');
+    expect(await returnedWhilePaymentNotFound(failing, r, 'REV1', never)).toBe('unreadable');
+    expect(await returnedWhilePaymentNotFound(client({ TX1: found('approved'), REV1: found('approved') }), r, 'REV1', never)).toBe('payment-found');
+    expect(await returnedWhilePaymentNotFound({ transactionLookupDetail: async (id) => (id === 'TX1' ? { outcome: 'not_found' } : found('approved', 100)) }, r, 'REV1', never)).toBe('no-proof');
+    // and the held row says so, so the console can offer the close
+    const proof = await lookupProof(notFound, row({ providerReference: 'REV1' }));
+    const decision = decideAfterLookup(proof, { state: 'SENT', providerStatus: 'pending', providerReason: null, sentAt: new Date(0) }, { now: new Date(), afterAnswer: false });
+    expect(decision).toMatchObject({ action: 'hold', lookupStatus: 'PAYMENT_NOT_FOUND' });
   });
 
   it('[DS1124 S2] a reference MMG named that Swift has on record as a payment is neither proof nor in flight', async () => {
@@ -84,7 +102,7 @@ describe('[MMG REVERSAL] what MMG\'s lookup proves', () => {
   it('standing = MMG still shows the payment successful for the amount; unreadable = MMG does not know it', async () => {
     expect(await lookupProof(client({ TX1: found('approved') }), row())).toEqual({ proven: false, standing: true, unreadable: false });
     expect(await lookupProof(client({ TX1: found('approved', 1) }), row())).toEqual({ proven: false, standing: false, unreadable: false });
-    expect(await lookupProof(client({}), row())).toEqual({ proven: false, standing: false, unreadable: true });
+    expect(await lookupProof(client({}), row())).toEqual({ proven: false, standing: false, unreadable: true, paymentNotFound: true });
   });
 });
 
