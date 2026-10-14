@@ -128,7 +128,7 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'juul', 'elf bar', 'elfbar', 'geek bar', 'puff bar', 'lost mary', 'smok', 'dab pen', 'vaporizer', 'vaporiser', 'vuse', 'relx', 'njoy', 'uwell', 'caliburn', 'voopoo',
   ],
   DRUGS: [
-    'ganja', 'marijuana', 'marihuana', 'cannabis', 'kush', 'weed', 'cbd', 'thc', 'bong', 'bongs',
+    'ganja', 'marijuana', 'marihuana', 'cannabis', 'kush', 'weed', 'cbd', 'thc', 'bong', 'bongs', 'pre roll', 'pre rolls', 'preroll', 'prerolls',
   ],
   MEDICINE: [
     'medicine', 'medicines', 'medication', 'medications', 'medicinal', 'pharmacy', 'pharmaceutical', 'pharmaceuticals',
@@ -210,27 +210,28 @@ const BRAND_FIRST: Readonly<Record<string, { prohibitedClass: ProhibitedClass; c
   corona: { prohibitedClass: 'ALCOHOL', certain: false },
   tiger: { prohibitedClass: 'ALCOHOL', certain: false },
   malibu: { prohibitedClass: 'ALCOHOL', certain: false },
-  camel: { prohibitedClass: 'TOBACCO', certain: false, measure: 'tobacco' },
-  bristol: { prohibitedClass: 'TOBACCO', certain: false, measure: 'tobacco' },
+  camel: { prohibitedClass: 'TOBACCO', certain: false },
+  bristol: { prohibitedClass: 'TOBACCO', certain: false },
   halls: { prohibitedClass: 'MEDICINE', certain: false, measure: 'none' },
-  bayer: { prohibitedClass: 'MEDICINE', certain: false, measure: 'none' },
+  bayer: { prohibitedClass: 'MEDICINE', certain: false },
   // [DS1109] Stella (Artois), Velo (nicotine pouches), B&H (read "b h" → "bh")
   stella: { prohibitedClass: 'ALCOHOL', certain: false },
-  velo: { prohibitedClass: 'TOBACCO', certain: false, measure: 'tobacco' },
-  bh: { prohibitedClass: 'TOBACCO', certain: false, measure: 'tobacco' },
+  velo: { prohibitedClass: 'TOBACCO', certain: false },
+  bh: { prohibitedClass: 'TOBACCO', certain: false },
   // [DS1110] Mead (also notebooks), Ricard (also a surname), Newport, Kool, Winston (also places and words)
-  mead: { prohibitedClass: 'ALCOHOL', certain: false, measure: 'liquid' },
-  ricard: { prohibitedClass: 'ALCOHOL', certain: false, measure: 'liquid' },
-  newport: { prohibitedClass: 'TOBACCO', certain: false, measure: 'tobacco' },
-  kool: { prohibitedClass: 'TOBACCO', certain: false, measure: 'tobacco' },
-  winston: { prohibitedClass: 'TOBACCO', certain: false, measure: 'tobacco' },
+  mead: { prohibitedClass: 'ALCOHOL', certain: false },
+  ricard: { prohibitedClass: 'ALCOHOL', certain: false },
+  newport: { prohibitedClass: 'TOBACCO', certain: false },
+  kool: { prohibitedClass: 'TOBACCO', certain: false },
+  winston: { prohibitedClass: 'TOBACCO', certain: false },
   // [evasion] "ron" is Spanish for rum (and a first name)
-  ron: { prohibitedClass: 'ALCOHOL', certain: false, measure: 'liquid' },
-  // [DS1111] also a candy, a gin-and-restaurant name, chocolate and paper towels, a fragrance: certain only with the
-  // drink's or the cigarette's own measure ("Bounty 750ml", "Davidoff 20s"; never "Bounty 2 pack", "Davidoff 125ml")
+  ron: { prohibitedClass: 'ALCOHOL', certain: false },
+  // [DS1111] Any measure makes a brand-first word the goods (coordinator, 14 Oct: "a brand with ANY measure is
+  // refused"), except three words that name an everyday product as often: Bounty (paper towels, chocolate) and Fireball
+  // (candy) need a liquid's measure; Davidoff (a fragrance) a cigarette pack. Halls is never refused (#58 lozenges).
   fireball: { prohibitedClass: 'ALCOHOL', certain: false, measure: 'liquid' },
-  patron: { prohibitedClass: 'ALCOHOL', certain: false, measure: 'liquid' },
-  beefeater: { prohibitedClass: 'ALCOHOL', certain: false, measure: 'liquid' },
+  patron: { prohibitedClass: 'ALCOHOL', certain: false },
+  beefeater: { prohibitedClass: 'ALCOHOL', certain: false },
   bounty: { prohibitedClass: 'ALCOHOL', certain: false, measure: 'liquid' },
   piton: { prohibitedClass: 'ALCOHOL', certain: false },
   davidoff: { prohibitedClass: 'TOBACCO', certain: false, measure: 'tobacco' },
@@ -273,7 +274,7 @@ export const PROHIBITED_NEVER_APPROVABLE: readonly string[] = [
   'e cig', 'e cigs', 'ecig', 'ecigs', 'e cigarette', 'e cigarettes', 'e liquid', 'e liquids', 'eliquid',
   'vape juice', 'vape pen', 'vape coil', 'vape coils', 'vape pod', 'vape pods',
   // cannabis — an edible IS the drug, so no dish rescues these
-  'ganja', 'marijuana', 'marihuana', 'cannabis', 'kush', 'thc', 'cbd',
+  'ganja', 'marijuana', 'marihuana', 'cannabis', 'kush', 'thc', 'cbd', 'pre roll', 'pre rolls', 'preroll', 'prerolls',
   // medicines by name (lozenges are held, #58)
   'paracetamol', 'acetaminophen', 'panadol', 'tylenol', 'ibuprofen', 'advil', 'motrin', 'nurofen', 'aspirin', 'disprin',
   'diclofenac', 'naproxen', 'aleve', 'codeine', 'tramadol', 'morphine', 'oxycodone', 'diazepam', 'valium', 'xanax', 'alprazolam',
@@ -335,7 +336,9 @@ const SIZED_ONLY: ReadonlySet<string> = new Set(['cider', 'ciders', 'madeira', '
 const ALONE_ONLY: ReadonlySet<string> = new Set(['vibrator', 'vibrators']);
 /** Cannabis is sold by the gram or the ounce ("Weed 3.5g"); a "weed killer" is not. [DS1110 S3-2] */
 const GRAMS_ONLY: ReadonlySet<string> = new Set(['weed']);
-const CANNABIS_MEASURE = /^(\d+(g|gram|grams|oz)|g|gram|grams|oz|ounce|ounces|eighth|quarter)$/;
+const CANNABIS_MEASURE = /^(\d+(g|gram|grams|oz)|g|gram|grams|oz|ounce|ounces|eighth|quarter|joint|joints|blunt|blunts|spliff|spliffs)$/;
+/** An age statement ("12 year old", "5 yr", "7 años"): a spirit's measure as surely as its volume. [regression guard] */
+const AGE_STATEMENT = /^(year|years|yr|yrs|yo|anos|ano|\d+(yr|yrs|yo|y))$/;
 /** A liquid's own measure, and a cigarette or pouch pack's: what makes a brand-first word the goods for a brand that
  *  also names other things. [DS1111] */
 const LIQUID_MEASURE = /^(\d+(ml|cl|dl|l|lt|ltr|ltrs|oz|floz)|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|bottle|bottles|btl|nip|nips|pint|pints|magnum|flask|flasks)$/;
@@ -374,7 +377,7 @@ const isDish = (words: readonly string[]) => {
 const GOODS_LONGEST_FIRST = [...PROHIBITED_GOODS_NOUNS].sort((a, b) => b.split(' ').length - a.split(' ').length).map((p) => p.split(' '));
 
 /** Words that follow a goods noun without changing what it is: sizes, packs, strengths, ages, styles. */
-const TRAILING_SIZE = /^(\d+[a-z]{0,6}(\d+[a-z]{0,6})?|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|fl|lb|lbs|kg|g|gm|mg|mcg|gal|gallon|gallons|pint|pints|quart|quarts|pk|pack|packs|ct|count|pc|pcs|piece|pieces|x|s|case|cases|carton|cartons|crate|crates|bottle|bottles|btl|can|cans|tin|tins|nip|nips|flask|flasks|mini|minis|miniature|magnum|jumbo|single|singles|each|puff|puffs|pouch|pouches|refill|refills|no|number|year|years|yr|yrs|yo|old|aged|proof|abv|percent|pct|vol|alc|zero|free|non|alcoholic|alcohol|by|per|the|a|an|of|in|only)$/;
+const TRAILING_SIZE = /^(\d+[a-z]{0,6}(\d+[a-z]{0,6})?|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|fl|lb|lbs|kg|g|gm|mg|mcg|gal|gallon|gallons|pint|pints|quart|quarts|pk|pack|packs|ct|count|pc|pcs|piece|pieces|x|s|case|cases|carton|cartons|crate|crates|bottle|bottles|btl|can|cans|tin|tins|nip|nips|flask|flasks|mini|minis|miniature|magnum|jumbo|single|singles|each|puff|puffs|pouch|pouches|refill|refills|no|number|anos|ano|year|years|yr|yrs|yo|old|aged|proof|abv|percent|pct|vol|alc|zero|free|non|alcoholic|alcohol|by|per|the|a|an|of|in|only)$/;
 const TRAILING_STYLE: ReadonlySet<string> = new Set([
   'gold', 'golden', 'white', 'dark', 'black', 'amber', 'silver', 'red', 'blush', 'spiced', 'overproof', 'premium', 'reserve',
   'special', 'extra', 'original', 'classic', 'select', 'superior', 'dry', 'sweet', 'brut', 'blanc', 'blanco', 'reposado',
@@ -604,12 +607,13 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
 /** The goods noun heading one part of a name or option, if any ("red wine 750ml" → "wine"). */
 /** The words left once the size, pack, strength and style words after them are stripped, and whether one of those
  *  was a drink measure. */
-function stripTrailing(words: readonly string[]): { core: readonly string[]; measured: boolean; grams: boolean; liquid: boolean; tobacco: boolean } {
+function stripTrailing(words: readonly string[]): { core: readonly string[]; measured: boolean; grams: boolean; liquid: boolean; tobacco: boolean; aged: boolean } {
   let end = words.length;
   let measured = false;
   let grams = false;
   let liquid = false;
   let tobacco = false;
+  let aged = false;
   while (end > 0) {
     const w = words[end - 1]!;
     if (!(TRAILING_SIZE.test(w) || TRAILING_STYLE.has(w) || DRINK_MEASURE.test(w) || CANNABIS_MEASURE.test(w))) break;
@@ -617,9 +621,10 @@ function stripTrailing(words: readonly string[]): { core: readonly string[]; mea
     if (CANNABIS_MEASURE.test(w)) grams = true;
     if (LIQUID_MEASURE.test(w)) liquid = true;
     if (TOBACCO_MEASURE.test(w)) tobacco = true;
+    if (AGE_STATEMENT.test(w)) aged = true;
     end -= 1;
   }
-  return { core: words.slice(0, end), measured, grams, liquid, tobacco };
+  return { core: words.slice(0, end), measured, grams, liquid, tobacco, aged };
 }
 
 /** The goods noun heading one part of a name or option, if any ("red wine 750ml" → "wine"). */
@@ -653,9 +658,11 @@ function headGoods(words: readonly string[]): string | null {
 function brandPack(words: readonly string[]): { prohibitedClass: ProhibitedClass; term: string } | null {
   const brand = BRAND_FIRST[words[0] ?? ''];
   if (!brand || words.includes('empty')) return null;
-  const { core, measured, liquid, tobacco } = stripTrailing(words.slice(1));
+  const { core, measured, liquid, tobacco, aged } = stripTrailing(words.slice(1));
   const kind = brand.measure ?? 'any';
-  const ofItsKind = kind === 'any' ? measured : kind === 'liquid' ? liquid : kind === 'tobacco' ? tobacco : false;
+  // An alcohol brand's age statement is its measure too ("Bounty 12 year old").
+  const spiritAge = brand.prohibitedClass === 'ALCOHOL' && aged;
+  const ofItsKind = kind === 'any' ? measured || spiritAge : kind === 'liquid' ? liquid || spiritAge : kind === 'tobacco' ? tobacco : false;
   if (brand.certain || (core.length === 0 && ofItsKind)) return { prohibitedClass: brand.prohibitedClass, term: words[0]! };
   return null;
 }
@@ -844,7 +851,7 @@ const ORDINARY_WORDS: ReadonlySet<string> = new Set([
   'after', 'and', 'of', 'the', 'only', 'hard', 'high', 'light', 'red', 'white', 'grey', 'royal', 'extra', 'reserve', 'king',
   'jack', 'captain', 'mount', 'lucky', 'pain', 'cold', 'morning', 'sleeping', 'eye', 'ear', 'deep', 'hot', 'oral', 'milk',
   'water', 'bar', 'tea', 'oil', 'juice', 'pen', 'coil', 'coils', 'pod', 'pods', 'toy', 'toys', 'ticket', 'tickets', 'liver',
-  'paper', 'papers', 'throat', 'lemonade', 'mall', 'e',
+  'paper', 'papers', 'throat', 'lemonade', 'mall', 'e', 'roll', 'rolls',
   'black', 'martin', 'old', 'lost', 'tablets', 'pills', 'relief', 'reducer', 'refill', 'cylinder', 'lighter', 'sapphire',
   'friend', 'crown', 'famous', 'balm',
 ]);

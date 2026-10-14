@@ -310,10 +310,30 @@ describe('[§8 launch · DS1111] the third review', () => {
     expect(verdict(name)).toMatchObject({ state: 'BANNED' });
   });
 
-  it.each(['Lotto', 'Lotto sneakers', 'Mead 3 pack', 'Mead five star notebook', 'Fireball candy', 'Bounty chocolate bar', 'Bounty 2 pack', 'Davidoff Cool Water',
+  it.each(['Lotto', 'Lotto sneakers', 'Mead five star notebook', 'Fireball candy', 'Bounty chocolate bar', 'Bounty 2 pack', 'Davidoff Cool Water',
     'Davidoff Cool Water 125ml', 'Halls 9 pack' /* #58: lozenges are held, never refused */])(
     '%s is not refused', (name) => {
       expect(verdict(name).state, name).not.toBe('BANNED');
     },
   );
+});
+
+// [Coordinator, 14 Oct: second commit security review "control regression" on af551644] What must stay REFUSED, as a
+// name and as an option: a banned brand with ANY measure (volume, count, pack, age statement), and cannabis by any
+// measure. (A lozenge pack is held by owner #58; a stationery or paper-towel pack named like a drink is held.)
+describe('[§8 launch · regression guard] sold-as-such stays refused, in a name or an option', () => {
+  const MUST_REFUSE = [
+    'Hennessy 750ml', 'Hennessy VS', 'Banks 6 pack', 'Banks beer 12oz', 'Marlboro 20s', 'Marlboro Gold', 'Bristol cigarettes',
+    'El Dorado 12 year', 'XM rum 5 yr', 'Smirnoff 1L', 'Guinness 6 pack', 'vape pen', 'juul pods', 'Panadol 24 tabs',
+    'cough syrup 100ml', 'gas cylinder 20lb', 'LPG refill',
+    'Weed 3.5g', 'Weed 1oz', 'Weed 3.5 grams', 'Weed ounce', 'Weed quarter', 'Ganja 1g', 'Kush 7g', 'Weed 2 joints', 'Weed pre-roll',
+    'Pre-rolls 5 pack', 'Bounty 12 year old', 'Mead 10 years', 'Ron 7 años', 'Mead 3 pack', 'Ricard 6 pack', 'Ron 6 pack',
+    'Camel 330ml', 'Newport 1L', 'Kool 12oz', 'Bayer 100ml', 'Velo 1L', 'Banks 330ml', 'Stag 6 pack', 'Corona 330ml', 'Bristol 20 pack',
+  ];
+  it.each(MUST_REFUSE)('%s is refused as a name', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED' });
+  });
+  it.each(MUST_REFUSE)('%s is refused as an option', (name) => {
+    expect(verdict('Party combo', { optionNames: ['Add', name] })).toMatchObject({ state: 'BANNED', field: 'option' });
+  });
 });
