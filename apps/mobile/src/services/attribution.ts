@@ -3,6 +3,7 @@ import { MMKV } from 'react-native-mmkv';
 import * as Crypto from 'expo-crypto';
 import { api } from './api';
 import { safeNavigate } from '../navigation/navigationRef';
+import { STORE_SLUG_RE } from '../lib/deepLinkParse';
 
 // First-launch install attribution [qr spec Part 6.4]. On the TRUE first
 // launch the app claims its install: iOS matches the server-side fingerprint
@@ -29,12 +30,18 @@ function installId(): string {
   return id;
 }
 
+/** "/store/<address>" → the address, by the same rule as app links; else null. */
+export function storeSlugFromPath(path: string): string | null {
+  const m = /^\/store\/([^/]+)$/.exec(path);
+  return m && STORE_SLUG_RE.test(m[1]!) ? m[1]! : null;
+}
+
 async function goToStorePath(path: string): Promise<boolean> {
   // destination is always "/store/{slug}" (the ONLY thing claims return).
-  const slug = /^\/store\/([a-z0-9-]{1,80})$/.exec(path)?.[1];
+  const slug = storeSlugFromPath(path);
   if (!slug) return true; // unknown shape — treat as delivered (Home)
   try {
-    const res = await api.get(`/public/storefronts/${slug}`);
+    const res = await api.get(`/public/storefronts/${encodeURIComponent(slug)}`);
     const vendorId = (res.data?.data as { id?: string } | undefined)?.id;
     if (!vendorId) return true; // store gone — Home is correct
     return safeNavigate('Restaurant', { vendorId });
