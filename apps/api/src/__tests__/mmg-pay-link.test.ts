@@ -233,8 +233,10 @@ describe('[High #9 · DS109] a plate change needs step-up and closes the driver\
     const session = await app.prisma.session.findUniqueOrThrow({ where: { token: driver.token }, select: { id: true } });
     await app.redis.del(stepUpKey(session.id));
 
+    let oldVehicleId = '';
     await runWithoutTenant(async () => {
       const subject = await app.prisma.subject.create({ data: { kind: 'VEHICLE', countryCode: 'GY', createdById: driver.userId } });
+      oldVehicleId = subject.id;
       await app.prisma.vehicleProfile.create({
         data: { subjectId: subject.id, registrationMark: currentPlate.toUpperCase().replace(/[\s-]+/g, ''), countryCode: 'GY', vehicleKind: 'CAR', registeredById: driver.userId },
       });
@@ -270,12 +272,17 @@ describe('[High #9 · DS109] a plate change needs step-up and closes the driver\
     expect(after.locationSessionId).toBeNull();
     expect(after.documentsVerified).toBe(false);
 
-    // The old vehicle links close: the old vehicle's evidence stops counting at GO.
+    // The old vehicle links close: the old vehicle's evidence stops counting at GO. The new plate may now
+    // carry its own PENDING link (a fresh review is required), so the old vehicle's link is asked for by
+    // name, and no approved link stays open.
     const link = await runWithoutTenant(() => app.prisma.subjectLink.findFirst({
-      where: { accountId: driver.userId, relation: 'ASSIGNED_DRIVER' },
+      where: { accountId: driver.userId, relation: 'ASSIGNED_DRIVER', subjectId: oldVehicleId },
     }), 'mmg-plate-change-test');
     expect(link).not.toBeNull();
     expect(link!.validTo).not.toBeNull();
+    expect(await runWithoutTenant(() => app.prisma.subjectLink.count({
+      where: { accountId: driver.userId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: { not: null } },
+    }), 'mmg-plate-change-test')).toBe(0);
   });
 });
 
