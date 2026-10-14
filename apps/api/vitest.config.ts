@@ -76,6 +76,8 @@ export default defineConfig({
       // [TAXI multi-stop] Off unless a test switches it on per case.
       TAXI_MAX_STOPS: '',
       ADS_ENABLED: '',
+      // [TAXI waiting charge] Off unless a test switches it on per case.
+      TAXI_WAITING_CHARGE: '',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)

@@ -4,10 +4,17 @@ import { formatMoney } from '../../utils/currency-amount';
 import { weeklyFeeAmount, type Priced } from './subscription-fee';
 
 // ---------------------------------------------------------------------------
-// [OWNER RULING 8 Oct, NO "WALLET" (2)] Weekly fees can be paid at most FOUR
-// WEEKS ahead. Swift holds no money for anyone: a fee paid ahead is Swift's own
-// fee paid early, spent only on the weekly fee, never withdrawn or sent on. The
-// cap keeps it that way. One rule for every way money reaches a weekly fee:
+// [OWNER #62 · 14 Oct 2026, NO PAYING AHEAD] "shouldn't they just pay the
+// weekly fee, no paying ahead": partners pay only the current week's fee. At
+// most ONE week is held beyond the week that is running: while a week runs,
+// the coming week may be paid; never a second one. (Was four weeks, owner
+// ruling 8 Oct.) Swift holds no money for anyone: money received for the
+// coming week is Swift's own fee paid early, spent only on that weekly fee,
+// never withdrawn or sent on. Weeks paid ahead before this change (staging
+// only) are honoured: they are spent week by week, and the unstarted ones are
+// refunded at closing. A fixed rule in code, not a setting: raising it is a
+// legal question (GUARDRAILS §8, F1), never a dial. One rule for every way
+// money reaches a weekly fee:
 //
 //   - a door the partner opens (the MMG checkout, a card Pay now) refuses a
 //     payment that would go past the cap, with plain words, BEFORE money moves;
@@ -27,7 +34,7 @@ import { weeklyFeeAmount, type Priced } from './subscription-fee';
 // allowed on top of the cap.
 // ---------------------------------------------------------------------------
 
-export const PAY_AHEAD_MAX_WEEKS = 4;
+export const PAY_AHEAD_MAX_WEEKS = 1;
 const WEEK_MS = 7 * 86_400_000;
 /** The same "due now" as the card Pay now quote (billing.service quoteCardPayNow). */
 const DUE_STATUSES: ReadonlySet<string> = new Set(['PAST_DUE', 'SUSPENDED', 'CHURNED']);
@@ -99,8 +106,8 @@ export async function readPayAhead(db: PayAheadDb, subscriptionId: string, now: 
 }
 
 export const PAY_AHEAD_LIMIT = 'PAY_AHEAD_LIMIT';
-/** Where an operator reads how the refund is made. */
-const PROCEDURE = 'finance procedure: weekly fees paid ahead';
+/** Where an operator reads how the refund is made (PAY-AHEAD-AND-REFUNDS.md). */
+const PROCEDURE = 'finance procedure: weekly fee refunds';
 
 /** The refusal, in words for the person in front of it. */
 export function payAheadRefusal(position: PayAheadPosition, audience: 'partner' | 'admin' | 'attach'): AppError {
@@ -108,15 +115,28 @@ export function payAheadRefusal(position: PayAheadPosition, audience: 'partner' 
   if (audience === 'attach') {
     // An agent payment is attached whole or not at all: refunding it is the only action.
     return new AppError(409, PAY_AHEAD_LIMIT,
-      `Attaching this agent payment would put more than ${PAY_AHEAD_MAX_WEEKS} weeks of weekly fees paid ahead on this account. It is attached whole or not at all: refund it to the partner instead (${PROCEDURE}).`, details);
+      `Attaching this agent payment would pay more than one week ahead on this account. It is attached whole or not at all: refund it to the partner instead (${PROCEDURE}).`, details);
   }
   if (audience === 'partner') {
-    return new AppError(409, PAY_AHEAD_LIMIT,
-      `Your weekly fee is already paid ahead as far as Swift allows (${PAY_AHEAD_MAX_WEEKS} weeks). You can pay again once a week has been used.`, details);
+    // [DS1114 S2] True in every case: part of the coming week held (a card Pay
+    // now quotes a whole week) names what is paid and the most payable now.
+    return new AppError(409, PAY_AHEAD_LIMIT, position.room > 0
+      ? `Swift takes the weekly fee one week at a time. ${formatMoney(position.heldAhead, position.currencyCode)} is already paid toward weeks that have not started, so you can pay at most ${formatMoney(position.room, position.currencyCode)} now.`
+      : 'Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.', details);
   }
   return new AppError(409, PAY_AHEAD_LIMIT, position.room > 0
-    ? `This would put more than ${PAY_AHEAD_MAX_WEEKS} weeks of weekly fees paid ahead on this account. Record at most ${formatMoney(position.room, position.currencyCode)} now and refund the rest to the partner (${PROCEDURE}).`
-    : `This account already has ${PAY_AHEAD_MAX_WEEKS} weeks of weekly fees paid ahead, the most Swift takes. Record nothing more: refund this payment to the partner (${PROCEDURE}).`, details);
+    ? `This would pay more than one week ahead on this account. Record at most ${formatMoney(position.room, position.currencyCode)} now and refund the rest to the partner (${PROCEDURE}).`
+    : `The next weekly fee on this account is already paid, and Swift takes one week at a time. Record nothing more: refund this payment to the partner (${PROCEDURE}).`, details);
+}
+
+/**
+ * [DS1114 S3] Would a payment of `amount` fit now? A pay button is shown only
+ * when it does: at the cap the door could only refuse, so there is no button
+ * (one week at a time). A read, never a lock: the door checks again under it.
+ */
+export async function payAheadAllows(db: PayAheadDb, subscriptionId: string, amount: number, now: Date): Promise<boolean> {
+  const position = await readPayAhead(db, subscriptionId, now);
+  return !position || cents(amount) <= position.room;
 }
 
 /** Refuse a payment that would take the money held ahead past the cap. Call it
