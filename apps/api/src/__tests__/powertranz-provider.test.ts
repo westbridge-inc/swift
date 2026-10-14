@@ -547,11 +547,34 @@ describe('reading the completion (sec. 6, Appendix 1): booked only on full proof
   });
   it('[3DS] approved 00 is booked only on PowerTranz\'s OWN 3-D Secure proof (sec. 6, 8.3, 8.4): Y or A, never N / U / R / absent / a failed ECI — those are voided', () => {
     expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'A', Eci: '06' } } }, held).status).toBe('succeeded');
-    expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y' } } }, held).status).toBe('succeeded');
     for (const tds of [{ AuthenticationStatus: 'N' }, { AuthenticationStatus: 'U' }, { AuthenticationStatus: 'R' }, {}, { AuthenticationStatus: 'Y', Eci: '07' }, { AuthenticationStatus: 'Y', Eci: '00' }]) {
       expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: tds } }, held), JSON.stringify(tds)).toMatchObject({ status: 'unbookable', reason: expect.stringMatching(/^APPROVED_UNAUTHENTICATED_/) });
     }
     expect(unbookable({ ...approved, RiskManagement: undefined })).toBe('unbookable');
+  });
+  it('[Opus S4-c · sec. 8.4, 5] the ECI is an ALLOW-list: only a success or attempt value (Visa/Amex 05, 06; Mastercard 02, 01) proves 3-D Secure; a Y or A without an ECI is held, never booked', () => {
+    const tds = (fields: Record<string, unknown>, brand?: string) => ({ ...approved, ...(brand === undefined ? {} : { CardBrand: brand }), RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', ...fields } } });
+    // No brand in the answer: the documented success and attempt values of every brand (they do not collide).
+    for (const eci of ['05', '06', '02', '01']) expect(readCompletion(tds({ Eci: eci }), held).status, eci).toBe('succeeded');
+    expect(readCompletion({ ...tds({ Eci: '01' }), RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'A', Eci: '01' } } }, held).status).toBe('succeeded');
+    // Failed or not 3-D Secure (07, 00), a non-payment authentication (N2, N0), anything undocumented, or no ECI at all: voided or held.
+    for (const fields of [{}, { Eci: '' }, { Eci: '07' }, { Eci: '00' }, { Eci: 'N2' }, { Eci: 'N0' }, { Eci: '03' }, { Eci: '99' }, { Eci: 'Y' }, { Eci: null }, { Eci: 2.5 }]) {
+      expect(readCompletion(tds(fields), held), JSON.stringify(fields)).toMatchObject({ status: 'unbookable', reason: expect.stringMatching(/^APPROVED_UNAUTHENTICATED_SERVER_ECI_/) });
+    }
+    // The answer names the brand: only that brand's own values count.
+    expect(readCompletion(tds({ Eci: '05' }, 'Visa'), held).status).toBe('succeeded');
+    expect(readCompletion(tds({ Eci: '06' }, 'American Express'), held).status).toBe('succeeded');
+    expect(readCompletion(tds({ Eci: '02' }, 'MasterCard'), held).status).toBe('succeeded');
+    expect(readCompletion(tds({ Eci: '01' }, 'Mastercard'), held).status).toBe('succeeded');
+    expect(readCompletion(tds({ Eci: '02' }, 'Visa'), held).status).toBe('unbookable');
+    expect(readCompletion(tds({ Eci: '05' }, 'Mastercard'), held).status).toBe('unbookable');
+    expect(readCompletion(tds({ Eci: '01' }, 'AMEX'), held).status).toBe('unbookable');
+    // An unrecognised brand name falls back to the every-brand values, never to "anything".
+    expect(readCompletion(tds({ Eci: '05' }, 'Discover'), held).status).toBe('succeeded');
+    expect(readCompletion(tds({ Eci: '07' }, 'Discover'), held).status).toBe('unbookable');
+    // The stored proof always carries its ECI.
+    const ok = readCompletion(tds({ Eci: 2 }, 'Mastercard'), held);
+    expect(ok).toMatchObject({ status: 'succeeded', completionEvidence: { RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', Eci: '02' } } } });
   });
   it('[review S4] a numeric ECI is read like its text: 5 is authenticated, 7 is not', () => {
     expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', Eci: 5 } } }, held).status).toBe('succeeded');
