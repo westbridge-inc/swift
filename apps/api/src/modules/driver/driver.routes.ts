@@ -62,7 +62,8 @@ import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
-import { normalizeRegistrationMark } from '../verification/subjects';
+import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 
@@ -187,13 +188,12 @@ export async function driverRoutes(app: FastifyInstance) {
     if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') {
       throw new ReviewDemoMoneyRefusedError();
     }
-    // [High #9 · DS109] Changing the plate re-identifies the vehicle the driver operates.
+    // [High #9 · DS109] Changing the plate, make, model, year or colour re-identifies the vehicle the driver operates.
     // Step-up first (the same proof as a money surface), and the old vehicle links close so
     // GO re-checks the EXACT new vehicle — a retyped plate never carries another subject's
     // approved documents, and the old vehicle's evidence stops counting.
-    const plateChanged = body.licensePlate !== undefined
-      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(me.licensePlate ?? '');
-    if (plateChanged) {
+    const identityChanged = vehicleIdentityChanged(me, body);
+    if (identityChanged) {
       await requireStepUp(app, request);
     }
     const mmgPayUrl = body.mmgPayUrl === undefined
@@ -212,6 +212,7 @@ export async function driverRoutes(app: FastifyInstance) {
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
+      if (identityChanged && me.currentRideId) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active ride before changing your vehicle.');
       const driver = await tx.driver.update({
         where: { userId: request.user.userId },
         data: {
@@ -230,10 +231,10 @@ export async function driverRoutes(app: FastifyInstance) {
           ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
           ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
           ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
-          // [High #9 · DS109] A real plate change re-identifies the vehicle: retire live supply
+          // [High #9 · DS109] A real vehicle identity change re-identifies the vehicle: retire live supply
           // NOW (same atomic shape as the admin reject path) and clear the legacy verification
           // flag, so the new vehicle must be verified before this driver is dispatchable again.
-          ...(plateChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
+          ...(identityChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
         },
         include: {
           user: {
@@ -250,14 +251,8 @@ export async function driverRoutes(app: FastifyInstance) {
           },
         },
       });
-      if (plateChanged) {
-        // A plate change never inherits another subject's approved documents: every open
-        // vehicle link closes. New submissions for the new plate create a PENDING assignment
-        // that an admin must approve before its evidence propagates.
-        await tx.subjectLink.updateMany({
-          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-          data: { validTo: new Date() },
-        });
+      if (identityChanged) {
+        await requireFreshVehicleReview(tx, request.user.userId, me.licensePlate, { ...driver, kind: 'DRIVER' });
       }
 
       return driver;
