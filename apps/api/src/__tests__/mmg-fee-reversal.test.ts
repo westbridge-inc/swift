@@ -378,7 +378,8 @@ describe('[MMG REVERSAL] only a payment Swift credited on MMG\'s proof, whole an
     const both = await Promise.allSettled([ask(p.checkoutId, p.amount), ask(p.checkoutId, p.amount)]);
     expect(both.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const refused = both.find((r) => r.status === 'rejected') as PromiseRejectedResult;
-    expect(['ALREADY_REVERSING', 'ALREADY_REVERSED', 'P2002']).toContain(refused.reason.code);
+    // [DS1112 S4] the payer's billing lock serialises them: a clean refusal, never a raw unique violation
+    expect(['ALREADY_REVERSING', 'ALREADY_REVERSED']).toContain(refused.reason.code);
     expect(reversalCalls).toEqual([p.txn]);
     expect(await rowsFor(p.checkoutId)).toHaveLength(1);
     expect(await reversalEvents(p.subId)).toHaveLength(1);
@@ -481,6 +482,119 @@ describe('[MMG REVERSAL] only MMG\'s lookup decides — a lost answer is never g
     expect(after).toMatchObject({ state: 'HELD', heldReason: 'WALLET_NO_LONGER_HOLDS_IT' });
     expect(await reversalEvents(p.subId)).toHaveLength(0);
     expect(await walletOf(p.subId)).toBe(0);
+  });
+});
+
+const resolve = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED', mmgReference: string) => runWithTenant('swift-default', () =>
+  reversals.resolveHeld({ tenantId: 'swift-default', reversalId, outcome, mmgReference, actorId: admin.userId }, async () => {}));
+
+describe('[DS1112] a HELD return always has a way out — on MMG\'s evidence, never a guess', () => {
+  it('"MMG shows nothing was returned" (two people): FAILED with the MMG reference, billing resumes, and it can be asked again', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    expect(held.state).toBe('HELD');
+    // MMG's words are kept shaped, never raw
+    expect(held.providerReason).toBe('MMG reversal unreachable (sandbox) timeout');
+    const resolveRoute = {
+      method: 'POST' as const, url: `/api/v1/admin/billing/mmg-fee-reversals/${held.id}/resolve`,
+      headers: { authorization: `Bearer ${admin.token}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
+      payload: { outcome: 'NOT_RETURNED', mmgReference: 'MMG-STMT-0001', reason: REASON },
+    };
+    // a money decision: a second person first
+    const asked = await app.inject(resolveRoute);
+    expect(asked.statusCode, asked.body).toBe(202);
+    expect((await app.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id: held.id } })).state).toBe('HELD');
+    const res = await injectWithApproval(app, resolveRoute);
+    expect(res.statusCode, res.body).toBe(200);
+    const row = await app.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id: held.id } });
+    expect(row).toMatchObject({ state: 'FAILED', resolution: 'NOT_RETURNED', resolvedBy: admin.userId, resolutionNote: 'MMG-STMT-0001' });
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(false);
+    const audit = await app.prisma.auditLog.findFirst({ where: { entityId: held.id, action: { contains: '/resolve' } } });
+    expect(audit).toBeTruthy();
+    sandboxScriptReversal(p.txn, 'reversed');
+    expect((await ask(p.checkoutId, p.amount)).state).toBe('REVERSED');
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('"nothing was returned" is refused when MMG shows the return, and when the return is not held', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    sandboxSetTxStatus(p.txn, 'reversed'); // MMG's records now show it returned
+    await expect(resolve(held.id, 'NOT_RETURNED', 'MMG-STMT-0002')).rejects.toMatchObject({ code: 'MMG_SHOWS_RETURNED' });
+    expect((await app.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id: held.id } })).state).toBe('HELD');
+    const p2 = await paidCheckout();
+    sandboxScriptReversal(p2.txn, 'pending');
+    const sent = await ask(p2.checkoutId, p2.amount);
+    expect(sent.state).toBe('SENT');
+    await expect(resolve(sent.id, 'NOT_RETURNED', 'MMG-STMT-0003')).rejects.toMatchObject({ code: 'NOT_HELD' });
+    // MMG's records show neither the return nor the payment standing (still processing): not closed
+    const p3 = await paidCheckout();
+    sandboxScriptReversal(p3.txn, 'error');
+    const held3 = await ask(p3.checkoutId, p3.amount);
+    sandboxSetTxStatus(p3.txn, 'pending');
+    await expect(resolve(held3.id, 'NOT_RETURNED', 'MMG-STMT-0004')).rejects.toMatchObject({ code: 'PAYMENT_NOT_STANDING' });
+    expect((await app.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id: held3.id } })).state).toBe('HELD');
+  });
+
+  it('"returned, here is MMG\'s reference": booked only if MMG\'s lookup proves that reversal, exactly once', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error'); // no answer, and MMG's lookup of the original keeps showing it successful
+    const held = await ask(p.checkoutId, p.amount);
+    await expect(resolve(held.id, 'RETURNED', `NOPE${RUN}`)).rejects.toMatchObject({ code: 'NO_PROOF' });
+    expect((await app.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id: held.id } })).state).toBe('HELD');
+    // the statement shows MMG's reversal transaction for this payment
+    const reversalRef = `REV${seq}${RUN}`;
+    sandboxAddHistory({ transactionId: reversalRef, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    const done = await resolve(held.id, 'RETURNED', reversalRef);
+    expect(done).toMatchObject({ state: 'REVERSED', resolution: 'RETURNED_BY_REFERENCE', lookupStatus: 'REVERSAL_COMPLETED' });
+    expect(await walletOf(p.subId)).toBe(0);
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('MMG proves the return but booking it fails: HELD and paged, never retried silently', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const row = await ask(p.checkoutId, p.amount);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { currencyCode: 'USD' } });
+    try {
+      sandboxSetTxStatus(p.txn, 'reversed');
+      const after = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id }));
+      expect(after.state).toBe('HELD');
+      expect(after.heldReason).toMatch(/^APPLY_FAILED/);
+      expect(await reversalEvents(p.subId)).toHaveLength(0);
+      const paged = await app.prisma.notification.findMany({ where: { userId: admin.userId, data: { path: ['reversalId'], equals: row.id } } });
+      expect(paged.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { currencyCode: 'GYD' } });
+    }
+    // once the books are right, "Check with MMG" books it
+    const fixed = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id }));
+    expect(fixed.state).toBe('REVERSED');
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('two checks at once after MMG proves it: both answer REVERSED, the balance is debited once', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const row = await ask(p.checkoutId, p.amount);
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const both = await Promise.all([
+      runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id })),
+      runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id })),
+    ]);
+    expect(both.map((r) => r.state)).toEqual(['REVERSED', 'REVERSED']);
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+    expect(await walletOf(p.subId)).toBe(0);
+  });
+
+  it('MMG\'s raw words are shaped before they are kept', async () => {
+    const { shapeProviderText } = await import('../modules/billing/mmg-fee-reversal');
+    expect(shapeProviderText('MMG reversal HTTP 503: {"message":"<b>busy</b>"}')).toBe('MMG reversal HTTP 503: message:bbusy/b');
+    expect(shapeProviderText('x'.repeat(500))!.length).toBe(120);
+    expect(shapeProviderText('')).toBeNull();
   });
 });
 

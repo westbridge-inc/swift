@@ -222,7 +222,7 @@ const heldReversal = {
   lastCheckedAt: '2026-10-13T20:00:05.000Z', reversedAt: null, failedAt: null,
 };
 
-async function openConfirmed(handler: (request: ApiRequest) => { status?: number; body: unknown }) {
+async function openConfirmed(handler: (_request: ApiRequest) => { status?: number; body: unknown }) {
   const fetchMock = mockApi((request: ApiRequest) => {
     if (request.url.pathname === `${PATH}/${confirmed.id}`) return { body: { success: true, data: confirmedDetail } };
     if (request.url.pathname === PATH) return page([confirmed]);
@@ -272,12 +272,12 @@ describe('[MMG REVERSAL] returning a whole payment', () => {
   it('cannot be returned: shows the server\'s reason in its words', async () => {
     await openConfirmed((request) => {
       if (request.url.pathname === REVERSAL_PATH) {
-        return reversalView({ canReverse: false, refusal: { code: 'MONEY_ALREADY_USED', message: "The partner's fee balance no longer holds this whole payment." } });
+        return reversalView({ canReverse: false, refusal: { code: 'MONEY_ALREADY_USED', message: 'This payment has already paid for a week of the partner\'s fee.' } });
       }
       throw new Error(`Unexpected request: ${request.method} ${request.url}`);
     });
     const panel = await screen.findByRole('region', { name: 'Return this payment' });
-    expect(within(panel).getByText("The partner's fee balance no longer holds this whole payment.")).toBeTruthy();
+    expect(within(panel).getByText('This payment has already paid for a week of the partner\'s fee.')).toBeTruthy();
     expect(within(panel).queryByRole('button', { name: 'Return this payment' })).toBeNull();
   });
 
@@ -295,5 +295,26 @@ describe('[MMG REVERSAL] returning a whole payment', () => {
     expect(within(panel).queryByText('in progress'), 'an open return is shown, not a refusal').toBeNull();
     await user.click(within(panel).getByRole('button', { name: 'Check with MMG' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/rev_1/check') && init?.method === 'POST')).toBe(true));
+  });
+});
+
+describe('[DS1112] a held return is resolved from the MMG statement, by two people', () => {
+  it('sends the outcome, the MMG reference and the reason; the first answer is a second admin\'s approval', async () => {
+    const { fetchMock, user } = await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return reversalView({ canReverse: false, refusal: { code: 'ALREADY_REVERSING', message: 'in progress' }, reversals: [heldReversal] });
+      if (request.method === 'POST' && request.url.pathname.endsWith('/rev_1/resolve')) {
+        return { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this', details: { approvalId: 'ap_7' } } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const form = await screen.findByRole('form', { name: 'Resolve the held return' });
+    const send = within(form).getByRole('button', { name: 'Send for approval' }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    await user.type(within(form).getByLabelText('MMG reference'), 'MMG-STMT-0001');
+    await user.type(within(form).getByLabelText('Why'), 'The MMG statement shows no reversal for this payment');
+    await user.click(send);
+    expect(await within(form).findByText(/Sent for a second admin's approval/)).toBeTruthy();
+    const post = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/rev_1/resolve') && init?.method === 'POST');
+    expect(JSON.parse(String(post![1]!.body))).toEqual({ outcome: 'NOT_RETURNED', mmgReference: 'MMG-STMT-0001', reason: 'The MMG statement shows no reversal for this payment' });
   });
 });

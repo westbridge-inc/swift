@@ -67,7 +67,7 @@ const REFUSAL_COPY: Record<ReversalRefusal, string> = {
   AMOUNT_MISMATCH: 'MMG returns a payment in full only. Enter the whole amount of this payment to confirm.',
   ALREADY_REVERSING: 'A return of this payment is already in progress or waiting for a person.',
   ALREADY_REVERSED: 'This payment has already been returned to the partner.',
-  MONEY_ALREADY_USED: "The partner's fee balance no longer holds this whole payment (it has paid for a week). It is not returned here; follow the refund procedure.",
+  MONEY_ALREADY_USED: 'This payment has already paid, in whole or in part, for a week of the partner\'s fee. It is not returned here; follow the refund procedure.',
   PAYMENT_CONFIRMING: 'Another payment for this fee is being confirmed or reviewed. Try again once it is settled.',
 };
 
@@ -145,6 +145,21 @@ export async function reversalEligibilityInTx(
   return { ok: true };
 }
 
+/** What Swift keeps of MMG's words: letters, digits and plain punctuation, short. */
+export function shapeProviderText(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const shaped = text.replace(/[^A-Za-z0-9 _:.,()/-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return shaped || null;
+}
+
+export type ResolveRefusal = 'NOT_HELD' | 'MMG_SHOWS_RETURNED' | 'PAYMENT_NOT_STANDING' | 'NO_PROOF';
+const RESOLVE_COPY: Record<ResolveRefusal, string> = {
+  NOT_HELD: 'Only a return that is held for a person is resolved here.',
+  MMG_SHOWS_RETURNED: "MMG's records show this payment returned. Use \"Check with MMG\" instead; nothing changed.",
+  PAYMENT_NOT_STANDING: "MMG's records do not show this payment still standing, so it cannot be closed as not returned. Nothing changed.",
+  NO_PROOF: "MMG's records do not show that return for this payment and amount. Nothing changed.",
+};
+
 export class MmgFeeReversalService {
   constructor(private readonly deps: ReversalDeps) {}
 
@@ -201,7 +216,8 @@ export class MmgFeeReversalService {
       where: { id, state: 'SENDING' },
       data: {
         providerStatus: answer.status,
-        providerReason: answer.reason?.slice(0, 500) ?? null,
+        // [DS1112 S4] A status word or MMG's error code, never a raw provider body.
+        providerReason: shapeProviderText(answer.reason),
         providerReference: accepted ? reference : null,
         answeredAt: answer.status === 'error' ? null : at,
         // An answer MMG gave moves it on; "no answer" leaves the claim for the lookup.
@@ -270,7 +286,8 @@ export class MmgFeeReversalService {
         tenantId: row.tenantId,
         title: 'MMG fee return needs a person',
         body: `Returning payment ${row.checkoutId} (${formatMoney(Number(row.amount), row.currencyCode, { whole: true })}) is held: ${heldReason}. `
-          + "Nothing was taken from the partner's fee balance. Check the MMG portal, then use \"Check with MMG\" on the payment.",
+          + 'Nothing was deducted from what the partner has paid toward weekly fees. Check the MMG statement, then on the payment either "Check with MMG" '
+          + 'or resolve it with the MMG statement line (two people).',
         data: { kind: 'billing_invariants', alert: 'mmg-fee-reversal-held', reversalId: row.id, checkoutId: row.checkoutId, reason: heldReason },
       }).catch((err) => log().error({ err, reversalId: row.id }, '[MMG reversal] the held page failed; the row is still HELD and listed'));
     } else {
@@ -280,7 +297,35 @@ export class MmgFeeReversalService {
 
   /** (5) On MMG's proof: debit the wallet exactly once, in one transaction with the row. */
   private async applyProof(id: string, how: 'ORIGINAL_REVERSED' | 'REVERSAL_COMPLETED', now: Date): Promise<MmgFeeReversal> {
-    const result = await this.deps.prisma.$transaction(async (tx) => {
+    let result: { row: MmgFeeReversal; applied: boolean; short: boolean };
+    try {
+      result = await this.applyProofInTx(id, how, now);
+    } catch (err) {
+      // [DS1112 S3] MMG proved the return but Swift could not book it (a
+      // currency mismatch, a ledger refusal, a conflict): never retried
+      // silently — a person looks, and is paged.
+      log().error({ err, reversalId: id }, '[MMG reversal] MMG proved the return; booking it failed — held for a person');
+      const row = await this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
+      if (row.state === 'REVERSED') return row;
+      const code = (err as { code?: unknown }).code;
+      await this.hold(row, `APPLY_FAILED${typeof code === 'string' ? `:${code}`.slice(0, 60) : ''}`, how, now);
+      return this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
+    }
+    if (result.short) {
+      // MMG returned the money and the wallet no longer holds it: a person decides.
+      await this.hold(result.row, 'WALLET_NO_LONGER_HOLDS_IT', how, now);
+      return this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
+    }
+    if (result.applied) {
+      mmgFeeReversalsCounter.labels('reversed').inc();
+      log().warn({ reversalId: id, checkoutId: result.row.checkoutId, how }, '[MMG reversal] MMG proved the return; the fee balance was debited once');
+      await this.tellPartner(result.row);
+    }
+    return result.row;
+  }
+
+  private async applyProofInTx(id: string, how: 'ORIGINAL_REVERSED' | 'REVERSAL_COMPLETED', now: Date): Promise<{ row: MmgFeeReversal; applied: boolean; short: boolean }> {
+    return this.deps.prisma.$transaction(async (tx) => {
       const before = await tx.mmgFeeReversal.findUniqueOrThrow({ where: { id }, select: { subscriptionId: true } });
       await lockBillingAuthority(tx, before.subscriptionId);
       await tx.$queryRaw`SELECT "id" FROM "mmg_fee_reversals" WHERE "id" = ${id} FOR UPDATE`;
@@ -299,17 +344,59 @@ export class MmgFeeReversalService {
       } });
       return { row: updated, applied: true, short: false };
     });
-    if (result.short) {
-      // MMG returned the money and the wallet no longer holds it: a person decides.
-      await this.hold(result.row, 'WALLET_NO_LONGER_HOLDS_IT', how, now);
-      return this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
+  }
+
+  /**
+   * [DS1112 S2] A person resolves a HELD return (the C4 action: a stated
+   * reason and a second person, or the owner's solo approval). Never a guess —
+   * MMG's lookup is read again, now:
+   *   NOT_RETURNED  only while MMG shows the payment still STANDING (exact
+   *                 amount) and nothing proves a return -> FAILED, nothing
+   *                 changed; billing resumes and the payment may be asked again.
+   *   RETURNED      the MMG reversal reference the person read on the MMG
+   *                 statement; Swift looks it up itself and books the return
+   *                 ONLY on that proof, exactly as a check would.
+   * The resolution, who made it and the MMG reference are written once.
+   */
+  async resolveHeld(
+    input: { tenantId: string; reversalId: string; outcome: 'NOT_RETURNED' | 'RETURNED'; mmgReference: string; actorId: string },
+    onAudit: OnAudit, now: Date = new Date(),
+  ): Promise<MmgFeeReversal> {
+    const row = await this.deps.prisma.mmgFeeReversal.findFirst({ where: { id: input.reversalId, tenantId: input.tenantId } });
+    if (!row) throw new NotFoundError('MMG fee reversal', input.reversalId);
+    if (row.state !== 'HELD') throw new AppError(409, 'NOT_HELD', RESOLVE_COPY.NOT_HELD);
+    const reference = input.mmgReference.trim();
+    if (input.outcome === 'NOT_RETURNED') {
+      const proof = await lookupProof(this.client(), row);
+      if (proof.proven) throw new AppError(409, 'MMG_SHOWS_RETURNED', RESOLVE_COPY.MMG_SHOWS_RETURNED);
+      if (!proof.standing) throw new AppError(409, 'PAYMENT_NOT_STANDING', RESOLVE_COPY.PAYMENT_NOT_STANDING);
+      return this.deps.prisma.$transaction(async (tx) => {
+        await lockBillingAuthority(tx, row.subscriptionId);
+        const moved = await tx.mmgFeeReversal.updateMany({
+          where: { id: row.id, state: 'HELD', resolution: null },
+          data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: 'STANDING', resolution: 'NOT_RETURNED', resolvedBy: input.actorId, resolutionNote: reference },
+        });
+        if (moved.count !== 1) throw new AppError(409, 'NOT_HELD', RESOLVE_COPY.NOT_HELD);
+        await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'NOT_RETURNED', mmgReference: reference });
+        mmgFeeReversalsCounter.labels('resolved_not_returned').inc();
+        return tx.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } });
+      });
     }
-    if (result.applied) {
-      mmgFeeReversalsCounter.labels('reversed').inc();
-      log().warn({ reversalId: id, checkoutId: result.row.checkoutId, how }, '[MMG reversal] MMG proved the return; the fee balance was debited once');
-      await this.tellPartner(result.row);
-    }
-    return result.row;
+    const proof = await lookupProof(this.client(), { ...row, providerReference: reference });
+    if (!proof.proven) throw new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
+    await this.deps.prisma.$transaction(async (tx) => {
+      const marked = await tx.mmgFeeReversal.updateMany({
+        where: { id: row.id, state: 'HELD', resolution: null },
+        data: {
+          resolution: 'RETURNED_BY_REFERENCE', resolvedBy: input.actorId, resolutionNote: reference,
+          ...(row.providerReference ? {} : { providerReference: reference }),
+        },
+      });
+      if (marked.count !== 1) throw new AppError(409, 'NOT_HELD', RESOLVE_COPY.NOT_HELD);
+      await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'RETURNED_BY_REFERENCE', mmgReference: reference });
+    });
+    mmgFeeReversalsCounter.labels('resolved_returned').inc();
+    return this.applyProof(row.id, proof.how, now);
   }
 
   /** "Your payment of GYD X on <date> was returned to your MMG account." */
@@ -382,6 +469,7 @@ export class MmgFeeReversalService {
       select: {
         id: true, state: true, amount: true, currencyCode: true, reason: true, requestedBy: true, providerStatus: true,
         lookupStatus: true, heldReason: true, sentAt: true, answeredAt: true, lastCheckedAt: true, reversedAt: true, failedAt: true,
+        resolution: true, resolvedBy: true,
       },
     });
     return {

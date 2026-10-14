@@ -912,6 +912,8 @@ export interface MmgFeeReversalRow {
   lastCheckedAt: string | null;
   reversedAt: string | null;
   failedAt: string | null;
+  resolution?: string | null;
+  resolvedBy?: string | null;
 }
 export interface MmgFeeReversalView {
   checkoutId: string;
@@ -927,6 +929,13 @@ export const reverseMmgFeePayment = (checkoutId: string, amountGyd: number, reas
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reverse`, {
     method: 'POST',
     body: JSON.stringify({ amountGyd, reason }),
+    reason,
+  });
+// [DS1112] Resolve a HELD return on MMG's evidence (money: a reason and a second admin).
+export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED', mmgReference: string, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ outcome, mmgReference, reason }),
     reason,
   });
 export const checkMmgFeeReversal = (reversalId: string) =>

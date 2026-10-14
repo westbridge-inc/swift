@@ -109,7 +109,7 @@ export function verdictOf(proof: ReversalProof, answer: MmgTxResult, now = new D
     sentAt: now,
   }, { now, afterAnswer: true });
   switch (decision.action) {
-    case 'apply': return { state: 'REVERSED — the fee balance would be debited once', detail: decision.how };
+    case 'apply': return { state: 'REVERSED — the payment would be deducted from the partner\'s weekly fees once', detail: decision.how };
     case 'fail': return { state: 'FAILED — MMG refused and the payment still stands; nothing changes', detail: null };
     case 'wait': return { state: "SENT — waiting for MMG's lookup to show the return", detail: `${accepted ? 'MMG accepted' : 'MMG answered'}; lookup ${decision.lookupStatus}` };
     case 'hold': return { state: 'HELD — a person must look', detail: `${decision.heldReason}; lookup ${decision.lookupStatus}` };

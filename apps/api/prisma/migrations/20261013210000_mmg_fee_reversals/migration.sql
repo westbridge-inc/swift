@@ -15,7 +15,7 @@
 SET lock_timeout = '10s';
 
 -- AlterEnum (the new value is not used in this migration)
-ALTER TYPE "BillingEventType" ADD VALUE 'PREPAID_REVERSAL';
+ALTER TYPE "BillingEventType" ADD VALUE IF NOT EXISTS 'PREPAID_REVERSAL';
 
 -- CreateTable
 CREATE TABLE "mmg_fee_reversals" (
@@ -43,6 +43,9 @@ CREATE TABLE "mmg_fee_reversals" (
     "walletDebitedAt" TIMESTAMP(3),
     "billingEventId" TEXT,
     "failedAt" TIMESTAMP(3),
+    "resolution" TEXT,
+    "resolvedBy" TEXT,
+    "resolutionNote" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -78,7 +81,15 @@ ALTER TABLE "mmg_fee_reversals"
   ADD CONSTRAINT "mmg_fee_reversals_debit_only_reversed_check"
     CHECK (("walletDebitedAt" IS NULL AND "billingEventId" IS NULL) OR "state" = 'REVERSED'),
   ADD CONSTRAINT "mmg_fee_reversals_failed_check"
-    CHECK ("state" <> 'FAILED' OR "failedAt" IS NOT NULL);
+    CHECK ("state" <> 'FAILED' OR "failedAt" IS NOT NULL),
+  -- A person's resolution of a HELD return is named, signed and evidenced, and
+  -- only ever closes it: NOT_RETURNED -> FAILED, RETURNED_BY_REFERENCE -> REVERSED.
+  ADD CONSTRAINT "mmg_fee_reversals_resolution_check"
+    CHECK ("resolution" IS NULL OR (
+      "resolvedBy" IS NOT NULL AND "resolutionNote" IS NOT NULL AND (
+        ("resolution" = 'NOT_RETURNED' AND "state" = 'FAILED')
+        OR ("resolution" = 'RETURNED_BY_REFERENCE' AND "state" IN ('HELD', 'REVERSED'))
+      )));
 
 -- Forward only. What is being reversed (payer, payment, transaction, amount,
 -- reason, who asked, when it was sent) is written once; a state moves
@@ -98,6 +109,10 @@ BEGIN
      OR NEW."approvalId" IS DISTINCT FROM OLD."approvalId"
      OR NEW."sentAt" IS DISTINCT FROM OLD."sentAt" THEN
     RAISE EXCEPTION 'mmg_fee_reversals row %: what is being reversed is written once [MMG REVERSAL]', OLD.id USING ERRCODE = 'check_violation';
+  END IF;
+  IF (OLD."resolution" IS NOT NULL AND (NEW."resolution" IS DISTINCT FROM OLD."resolution"
+        OR NEW."resolvedBy" IS DISTINCT FROM OLD."resolvedBy" OR NEW."resolutionNote" IS DISTINCT FROM OLD."resolutionNote")) THEN
+    RAISE EXCEPTION 'mmg_fee_reversals row %: a resolution is written once [MMG REVERSAL]', OLD.id USING ERRCODE = 'check_violation';
   END IF;
   IF (OLD."walletDebitedAt" IS NOT NULL AND NEW."walletDebitedAt" IS DISTINCT FROM OLD."walletDebitedAt")
      OR (OLD."billingEventId" IS NOT NULL AND NEW."billingEventId" IS DISTINCT FROM OLD."billingEventId")

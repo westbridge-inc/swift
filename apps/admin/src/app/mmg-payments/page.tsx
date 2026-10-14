@@ -13,7 +13,7 @@ import type {
   MmgCheckoutTimelineEntry,
 } from '@swift/types';
 import {
-  checkMmgFeeReversal, fetchMmgCheckout, fetchMmgCheckouts, fetchMmgFeeReversal, reverseMmgFeePayment,
+  checkMmgFeeReversal, fetchMmgCheckout, fetchMmgCheckouts, fetchMmgFeeReversal, resolveMmgFeeReversal, reverseMmgFeePayment,
   type MmgFeeReversalRow, type MmgFeeReversalView,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
@@ -315,7 +315,7 @@ const HELD_WORDS: Record<string, string> = {
   MMG_SAYS_ALREADY_REVERSED: 'MMG says it was already returned, but its records still show the payment',
   MMG_REFUSED_LOOKUP_UNCLEAR: "MMG refused, and its records could not be read clearly",
   NOT_PROVEN_IN_TIME: 'MMG accepted, but has not confirmed the return within a day',
-  WALLET_NO_LONGER_HOLDS_IT: "MMG returned it, but the partner's fee balance no longer holds the amount",
+  WALLET_NO_LONGER_HOLDS_IT: 'MMG returned it, but this payment has already paid for a week of the partner\'s fee',
 };
 
 /**
@@ -347,7 +347,8 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
         <div key={r.id} className="rounded-md bg-[var(--bg)] p-3 space-y-1">
           <p className="font-semibold">{RETURN_STATE_WORDS[r.state]}</p>
           <p className="text-xs text-[var(--muted)]">{gyd(r.amount)} {r.currencyCode} · asked {when(r.sentAt)}{r.reversedAt ? ` · returned ${when(r.reversedAt)}` : ''}</p>
-          {r.heldReason ? <p className="text-xs text-amber-400">{HELD_WORDS[r.heldReason] ?? r.heldReason}. Check the MMG portal before anything else.</p> : null}
+          {r.heldReason ? <p className="text-xs text-amber-400">{HELD_WORDS[r.heldReason] ?? r.heldReason}. Check the MMG statement before anything else.</p> : null}
+          {r.resolution ? <p className="text-xs text-[var(--muted)]">{RESOLUTION_WORDS[r.resolution] ?? r.resolution}</p> : null}
           {r.state === 'SENT' || r.state === 'HELD' || r.state === 'SENDING' ? (
             <button
               type="button"
@@ -361,8 +362,9 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
         </div>
       ))}
       {check.error ? <MutationError error={check.error} label="MMG could not be checked" /> : null}
+      {v.reversals.filter((r) => r.state === 'HELD').map((r) => <ResolveHeld key={`resolve-${r.id}`} reversalId={r.id} onDone={refresh} />)}
       {!v.switchedOn ? (
-        <p className="text-xs text-[var(--muted)]">Returning payments is switched off on this server until MMG's answers are proven in testing.</p>
+        <p className="text-xs text-[var(--muted)]">Returning payments is switched off on this server until MMG&apos;s answers are proven in testing.</p>
       ) : !v.canReverse ? (
         v.refusal && !v.reversals.some((r) => r.state === 'REVERSED' || r.state === 'SENT' || r.state === 'HELD' || r.state === 'SENDING')
           ? <p className="text-xs text-[var(--muted)]">{v.refusal.message}</p>
@@ -373,8 +375,8 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
           onSubmit={(e) => { e.preventDefault(); if (amountOk && reasonOk) ask.mutate(); }}
         >
           <p className="text-xs text-[var(--muted)]">
-            MMG returns the whole payment ({gyd(amount)} {currencyCode}) to the partner&apos;s MMG account and Swift takes it off their
-            fee balance once MMG confirms. A second admin must approve it first.
+            MMG returns the whole payment ({gyd(amount)} {currencyCode}) to the partner&apos;s MMG account, and Swift deducts it from
+            what the partner has paid toward weekly fees once MMG confirms. A second admin must approve it first.
           </p>
           <textarea
             value={reason}
@@ -410,5 +412,62 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
         </form>
       )}
     </section>
+  );
+}
+
+const RESOLUTION_WORDS: Record<string, string> = {
+  NOT_RETURNED: 'Closed by a person: MMG shows the payment was not returned.',
+  RETURNED_BY_REFERENCE: "Closed by a person: MMG's records showed the return they named.",
+};
+
+/**
+ * [DS1112] A HELD return, closed by a person on MMG's evidence. A money action:
+ * the first answer is a second admin's approval. The server reads MMG's records
+ * again and refuses anything they do not show.
+ */
+function ResolveHeld({ reversalId, onDone }: { reversalId: string; onDone: () => void }) {
+  const [outcome, setOutcome] = useState<'NOT_RETURNED' | 'RETURNED'>('NOT_RETURNED');
+  const [reference, setReference] = useState('');
+  const [reason, setReason] = useState('');
+  const resolve = useMutation({ mutationFn: () => resolveMmgFeeReversal(reversalId, outcome, reference.trim(), reason.trim()), onSettled: onDone });
+  const ok = reference.trim().length >= 3 && reason.trim().length >= REASON_MIN;
+  const queued = (resolve.error as { code?: string } | null)?.code === 'APPROVAL_REQUIRED';
+  return (
+    <form
+      aria-label="Resolve the held return"
+      className="space-y-2 rounded-md border border-[var(--border)] p-3"
+      onSubmit={(e) => { e.preventDefault(); if (ok) resolve.mutate(); }}
+    >
+      <p className="text-xs font-semibold">Resolve it from the MMG statement</p>
+      <label className="flex items-center gap-2 text-xs">
+        <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'NOT_RETURNED'} onChange={() => setOutcome('NOT_RETURNED')} />
+        MMG shows the payment was not returned
+      </label>
+      <label className="flex items-center gap-2 text-xs">
+        <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED'} onChange={() => setOutcome('RETURNED')} />
+        MMG shows it was returned (enter MMG&apos;s reversal reference)
+      </label>
+      <input
+        value={reference}
+        onChange={(e) => setReference(e.target.value)}
+        aria-label="MMG reference"
+        placeholder={outcome === 'RETURNED' ? "MMG's reversal reference" : 'The MMG statement line or reference'}
+        className="block w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+      />
+      <textarea
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        rows={2}
+        aria-label="Why"
+        placeholder="What you checked. Required."
+        className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+      />
+      <button type="submit" disabled={resolve.isPending || !ok} className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs disabled:opacity-40">
+        {resolve.isPending ? 'Sending…' : 'Send for approval'}
+      </button>
+      {queued ? (
+        <p role="status" className="text-xs text-[var(--muted)]">Sent for a second admin&apos;s approval. Nothing has changed yet.</p>
+      ) : resolve.error ? <MutationError error={resolve.error} label="The return was not resolved" /> : null}
+    </form>
   );
 }

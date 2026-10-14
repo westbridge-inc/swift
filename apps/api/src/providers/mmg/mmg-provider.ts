@@ -287,7 +287,7 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
     if (scripted === 'declined' || current !== 'approved') {
       return { status: 'declined', transactionId: id, reason: 'MMG refused the reversal (sandbox)' };
     }
-    if (scripted === 'error') return { status: 'error', transactionId: id, reason: 'MMG reversal unreachable (sandbox)' };
+    if (scripted === 'error') return { status: 'error', transactionId: id, reason: 'MMG reversal unreachable (sandbox) <timeout>' };
     if (scripted === 'pending') return { status: 'pending', transactionId: id };
     txStatusOverrides.set(id, 'reversed');
     if (scripted === 'lost') return { status: 'error', transactionId: id, reason: 'MMG reversal unreachable (sandbox)' };

@@ -196,6 +196,8 @@ const E = {
   // [PT-4] A held card payment's resolution: what finance decided and the provider actions it took.
   cardSession: { model: 'cardSession', fields: ['status', 'failureCode', 'providerTransactionRef', 'providerVoidState', 'providerRefundState', 'bookClaimedAt', 'resolution', 'resolvedBy', 'resolvedAt'] },
   agentPayment: { model: 'mmgAgentPayment', fields: ['status', 'amount', 'subscriptionId'] },
+  // [MMG REVERSAL] A return of a weekly-fee payment: where it stands and how a person resolved it.
+  feeReversal: { model: 'mmgFeeReversal', fields: ['state', 'heldReason', 'resolution', 'resolvedBy', 'failedAt', 'reversedAt', 'walletDebitedAt'] },
   settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
   // [ADM-002] `resolvedAt` does not exist on ReturnRequest (`reviewedAt` does).
@@ -392,6 +394,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/mmg-checkouts/:id/reversal': c('C0', 'billing.read'),
   'POST /billing/mmg-checkouts/:id/reverse': c('C4', 'billing.mmg.reverse'),
   'POST /billing/mmg-fee-reversals/:id/check': c('C2', 'billing.mmg.reverse.check'),
+  // [DS1112] A person closes a HELD return on MMG's evidence: money (C4).
+  'POST /billing/mmg-fee-reversals/:id/resolve': c('C4', 'billing.mmg.reverse.resolve', E.feeReversal),
   'GET /billing/collections': c('C0', 'billing.read'),
   'GET /billing/mover-fees': c('C0', 'billing.read'),
   'GET /billing/mover-fees/:userId': c('C0', 'billing.read'),

@@ -4901,7 +4901,7 @@ export async function adminRoutes(app: FastifyInstance) {
   const reversalOut = (row: { amount: unknown } & Record<string, unknown>) => ({
     id: row['id'], checkoutId: row['checkoutId'], state: row['state'], amount: Number(row.amount), currencyCode: row['currencyCode'],
     providerStatus: row['providerStatus'], lookupStatus: row['lookupStatus'], heldReason: row['heldReason'],
-    sentAt: row['sentAt'], reversedAt: row['reversedAt'], failedAt: row['failedAt'],
+    sentAt: row['sentAt'], reversedAt: row['reversedAt'], failedAt: row['failedAt'], resolution: row['resolution'],
   });
 
   app.get('/billing/mmg-checkouts/:id/reversal', { preHandler: [adminGuard] }, async (request) => {
@@ -4923,6 +4923,26 @@ export async function adminRoutes(app: FastifyInstance) {
     const row = await feeReversals.requestReversal(
       { tenantId, checkoutId: id, amountGyd: body.amountGyd, reason, actorId: request.user.userId,
         approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // [DS1112] A person resolves a HELD return (C4: a reason and a second
+  // person, or solo): "MMG shows nothing was returned" (only while MMG's
+  // lookup shows the payment standing) or "returned, here is MMG's reference"
+  // (booked only if MMG's lookup proves it). Never a guess.
+  app.post('/billing/mmg-fee-reversals/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      outcome: z.enum(['NOT_RETURNED', 'RETURNED']),
+      // The MMG statement line or the MMG reversal reference the person read.
+      mmgReference: z.string().trim().min(3).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/#-]*$/, 'Use the reference exactly as MMG shows it'),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const row = await feeReversals.resolveHeld(
+      { tenantId, reversalId: id, outcome: body.outcome, mmgReference: body.mmgReference, actorId: request.user.userId },
       (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
     );
     return { success: true, data: reversalOut(row as never) };

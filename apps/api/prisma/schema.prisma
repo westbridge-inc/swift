@@ -3529,6 +3529,13 @@ model MmgFeeReversal {
   /// The PREPAID_REVERSAL event that debited the wallet (once).
   billingEventId    String?           @unique
   failedAt          DateTime?
+  /// [DS1112] A person's resolution of a HELD return (C4, two people or solo):
+  /// NOT_RETURNED (MMG's lookup showed the payment still standing) or
+  /// RETURNED_BY_REFERENCE (MMG's lookup proved the reversal they named).
+  resolution        String?
+  resolvedBy        String?
+  /// The MMG statement line or reversal reference the person gave.
+  resolutionNote    String?
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
