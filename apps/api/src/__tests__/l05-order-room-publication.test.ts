@@ -8,7 +8,7 @@ import ts from 'typescript';
 // Execute the production location publication expression with the real
 // Socket.IO in-memory adapter. The engine and database boundaries are explicit
 // fixtures; HTTP/GPS persistence and Redis transport are tested separately.
-async function scenario(lateJoin = false, unavailable = false, lifecycle = false, expired = false) {
+async function scenario(lateJoin = false, unavailable = false, lifecycle = false, expired = false, reassigned = false) {
   const io = new Server(); const namespace = io.of('/');
   const captured = new Map<string, string[]>();
   const makeSocket = (userId: string, tenantId = 'fixture-tenant') => {
@@ -27,6 +27,11 @@ async function scenario(lateJoin = false, unavailable = false, lifecycle = false
   const replacement = makeSocket('fixture-replacement'); const foreign = makeSocket('fixture-foreign', 'foreign-tenant');
   // Even a matching user ID cannot cross the socket's proven tenant boundary.
   foreign.data.userId = 'fixture-customer';
+  // A second device of the CURRENT customer that joins during the authority
+  // read: authorized, but not in the snapshot, so not addressed this time.
+  // It pins the order "snapshot sockets, then read the audience".
+  const lateDevice = makeSocket('fixture-customer-late-device');
+  lateDevice.data.userId = 'fixture-customer';
   if (expired) replacement.data.authorizationExpiresAtMs = Date.now() - 1;
   const room = 'order:fixture-order';
   customer.join(room); replacement.join(room); foreign.join(room);
@@ -34,9 +39,11 @@ async function scenario(lateJoin = false, unavailable = false, lifecycle = false
   // The delayed join happens INSIDE the authority read, after fetchSockets
   // took its snapshot. Recipient IDs must exclude that socket even though it
   // is now present in the room at the exact enqueue boundary.
-  const row = { id: 'fixture-order', tenantId: 'fixture-tenant', customerId: 'fixture-customer', rider: null, driver: { userId: 'fixture-replacement' }, vendor: null, holdExpiresAt: null, cancelledAt: null, paymentMethod: 'CASH' };
+  // `reassigned`: the ride now belongs to another driver profile, so a sample
+  // the publishing driver's ping authorized just before must not go out.
+  const row = { id: 'fixture-order', tenantId: 'fixture-tenant', customerId: 'fixture-customer', rider: null, driver: { id: reassigned ? 'fixture-other-profile' : 'fixture-profile', userId: 'fixture-replacement' }, vendor: null, holdExpiresAt: null, cancelledAt: null, paymentMethod: 'CASH' };
   former.join('chat:fixture-chat'); customer.join('chat:fixture-chat');
-  const prisma = { chatRoom: { findMany: async () => [{ id: 'fixture-chat' }] }, order: { findUnique: async () => { if (unavailable) throw new Error('fixture read unavailable'); if (lateJoin) former.join(room); return row; } } };
+  const prisma = { chatRoom: { findMany: async () => [{ id: 'fixture-chat' }] }, order: { findUnique: async () => { if (unavailable) throw new Error('fixture read unavailable'); if (lateJoin) { former.join(room); lateDevice.join(room); } return row; } } };
   const file = join(__dirname, '../modules/driver/driver.routes.ts');
   const source = readFileSync(file, 'utf8'); const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   const selected: ts.CallExpression[] = [];
@@ -62,16 +69,18 @@ async function scenario(lateJoin = false, unavailable = false, lifecycle = false
   const context = { app: { io, prisma }, emitToOrderRoom: gate, authorized: { currentRideId: 'fixture-order' }, driver: { id: 'fixture-profile' }, latitude: 6.812345, longitude: -58.123456, heading: 15, etaMinutes: 4, Date, publish: undefined as unknown as () => Promise<void> };
   runInNewContext(js, context); await context.publish();
   const received = (userId: string) => captured.get(userId)!.filter((p) => p.includes(lifecycle ? 'order:status_changed' : 'driver:location'));
-  expect(received('fixture-customer')).toHaveLength(unavailable ? 0 : 1);
-  expect(received('fixture-replacement')).toHaveLength(unavailable || expired ? 0 : 1);
+  expect(received('fixture-customer')).toHaveLength(unavailable || reassigned ? 0 : 1);
+  expect(received('fixture-replacement')).toHaveLength(unavailable || expired || reassigned ? 0 : 1);
   expect(received('fixture-former')).toHaveLength(0);
   expect(received('fixture-foreign')).toHaveLength(0);
   if (!unavailable && !lateJoin) expect(former.rooms.has(room)).toBe(false);
   if (expired) expect(replacement.rooms.has(room)).toBe(false);
   if (lateJoin) {
+    expect(received('fixture-customer-late-device'), 'joined after the snapshot').toHaveLength(0);
     // The next publication evicts a join that arrived after the first snapshot.
     await context.publish();
     expect(received('fixture-customer')).toHaveLength(2);
+    expect(received('fixture-customer-late-device'), 'in the next snapshot and authorized').toHaveLength(1);
     expect(received('fixture-former')).toHaveLength(0);
     expect(former.rooms.has(room)).toBe(false);
   }
@@ -89,4 +98,5 @@ describe('order location uses current authority at publication', () => {
   it('an unavailable authority store emits no private event', () => scenario(false, true));
   it('a lifecycle publication immediately evicts the former mover from order and chat rooms', () => scenario(false, false, true));
   it('expired transport authorization receives no private location', () => scenario(false, false, false, true));
+  it('a sample from a driver who is no longer on the ride reaches no one (publication runs after the authority commit)', () => scenario(false, false, false, false, true));
 });

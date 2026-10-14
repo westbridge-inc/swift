@@ -626,9 +626,13 @@ export async function driverRoutes(app: FastifyInstance) {
         : await cachedLegEta(app, authorized.currentRideId);
 
       // ETA work yields long enough for a second device to rotate GO. Take a
-      // short shared row lock only around the final authority check +
-      // synchronous socket publication. Concurrent pings do not block one
-      // another, but no old-generation sample can emit after a GO commits.
+      // short shared row lock only around the final authority check.
+      // Concurrent pings do not block one another; a GO that commits first
+      // refuses this sample. The publish runs after commit, never under the
+      // lock: the audience gate reads the room's sockets across nodes and takes
+      // its own DB connection. A sample authorized here goes out only while
+      // this driver is still the ride's driver, and the device's next ping is
+      // refused.
       const publication = await app.prisma.$transaction(async (tx) => {
         const users = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT "id"
@@ -668,21 +672,22 @@ export async function driverRoutes(app: FastifyInstance) {
           };
         }
 
-        if (authorized.currentRideId !== null && current.currentRideId === authorized.currentRideId) {
-          await emitToOrderRoom(app.prisma, app.io, authorized.currentRideId, 'driver:location', {
-            driverId: driver.id,
-            orderId: authorized.currentRideId,
-            latitude,
-            longitude,
-            heading: heading || null,
-            etaMinutes,
-            timestamp: new Date().toISOString(),
-          });
-        }
-        return { accepted: true as const };
+        return { accepted: true as const, stillOnRide: current.currentRideId === authorized.currentRideId };
       });
       if (!publication.accepted) {
         return { success: true, data: publication };
+      }
+      // Published after the commit, never under the lock (see above).
+      if (publication.stillOnRide) {
+        await emitToOrderRoom(app.prisma, app.io, authorized.currentRideId, 'driver:location', {
+          driverId: driver.id,
+          orderId: authorized.currentRideId,
+          latitude,
+          longitude,
+          heading: heading || null,
+          etaMinutes,
+          timestamp: new Date().toISOString(),
+        }, { fromMover: { driverId: driver.id } });
       }
     }
 

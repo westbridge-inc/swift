@@ -3,7 +3,7 @@ import type { Server } from 'socket.io';
 import { resolveRoomAuthority } from '../chat/chat-authority';
 import { cancelledWhileHeld } from './hold-visibility';
 
-type Audience = { tenantId: string; users: Set<string>; senderAllowed?: boolean };
+type Audience = { tenantId: string; users: Set<string>; senderAllowed?: boolean; publisherAllowed?: boolean };
 
 /** Membership is a subscription cache, never authorization. Snapshot sockets
  * before reading the current audience and address the proven socket IDs only:
@@ -28,7 +28,8 @@ async function publishToAudience(
       if (!allowed) await socket.leave(room);
       else if (socket.id !== opts.excludeSocketId) recipients.push(socket.id);
     }
-    if (!audience || (opts.senderId && (!audience.users.has(opts.senderId) || audience.senderAllowed === false))) return false;
+    if (!audience || audience.publisherAllowed === false
+      || (opts.senderId && (!audience.users.has(opts.senderId) || audience.senderAllowed === false))) return false;
     if (event && recipients.length) io.to(recipients).emit(event, payload);
     return true;
   } catch {
@@ -38,17 +39,22 @@ async function publishToAudience(
 
 /** All order publishers, including background jobs, use the same live audience
  * as the subscription door: customer, current movers, and the visible store's
- * owner. No admin/staff audience is introduced here. */
+ * owner. No admin/staff audience is introduced here.
+ * `fromMover` names the rider/driver whose own sample this is (a GPS ping): it
+ * is published only while that mover is still the order's current one, read in
+ * the same snapshot as the audience, so a sample authorized just before a
+ * reassignment never reaches the customer after it. */
 export async function emitToOrderRoom(
   db: Pick<PrismaClient, 'order' | 'chatRoom'>, io: Server,
   orderId: string, event: string, payload: unknown,
+  opts: { fromMover?: { riderId: string } | { driverId: string } } = {},
 ): Promise<boolean> {
   return publishToAudience(io, `order:${orderId}`, async () => {
     const order = await db.order.findUnique({
       where: { id: orderId },
       select: {
         tenantId: true, customerId: true,
-        rider: { select: { userId: true } }, driver: { select: { userId: true } },
+        rider: { select: { id: true, userId: true } }, driver: { select: { id: true, userId: true } },
         vendor: { select: { owner: { select: { userId: true } } } },
         holdExpiresAt: true, cancelledAt: true, paymentMethod: true,
       },
@@ -69,7 +75,10 @@ export async function emitToOrderRoom(
     if (order.vendor && (!order.holdExpiresAt || order.holdExpiresAt <= new Date()) && !cancelledWhileHeld(order)) {
       users.add(order.vendor.owner.userId);
     }
-    return { tenantId: order.tenantId, users };
+    const mover = opts.fromMover;
+    const publisherAllowed = !mover
+      || ('riderId' in mover ? order.rider?.id === mover.riderId : order.driver?.id === mover.driverId);
+    return { tenantId: order.tenantId, users, publisherAllowed };
   }, event, payload);
 }
 

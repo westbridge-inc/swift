@@ -79,6 +79,33 @@ describe('subscribed sockets lose sensitive chat when assignment changes', () =>
     expect(await stopped).toEqual({ userId: f.newMover.userId });
   });
 
+  it('one socket relays typing at most once per second per room; stop-typing has its own window', async () => {
+    // Every relay re-proves authority (a socket snapshot and two reads), so a
+    // burst must not turn one keystroke stream into that many database reads.
+    await f.reset();
+    const current = await client(f.oldMover.token); const customer = await client(f.customer.token);
+    current.emit('chat:join', { roomId: f.room.id }); customer.emit('chat:join', { roomId: f.room.id });
+    await expect.poll(async () => (await f.app.io.in(`chat:${f.room.id}`).fetchSockets()).filter((s) => [current.id, customer.id].includes(s.id)).length).toBe(2);
+    const typing: unknown[] = []; current.on('chat:typing', (m: unknown) => typing.push(m));
+    const stopped = new Promise<unknown>((resolve) => current.once('chat:stop-typing', resolve));
+    for (let i = 0; i < 5; i++) customer.emit('chat:typing', { roomId: f.room.id });
+    customer.emit('chat:stop-typing', { roomId: f.room.id });
+    expect(await stopped).toEqual({ userId: f.customer.userId });
+    // Packets from one client are handled in order: every typing handler ran
+    // before the stop-typing relay. A server marker then flushes the stream.
+    const drained = new Promise<void>((resolve) => current.once('test:drained', resolve));
+    f.app.io.to(current.id!).emit('test:drained'); await drained;
+    expect(typing).toEqual([{ userId: f.customer.userId }]);
+    // The window passes: the next typing hint relays again.
+    const realNow = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 1_500);
+    try {
+      const again = new Promise<unknown>((resolve) => current.once('chat:typing', resolve));
+      customer.emit('chat:typing', { roomId: f.room.id });
+      expect(await again).toEqual({ userId: f.customer.userId });
+    } finally { clock.mockRestore(); }
+  });
+
   it('push recipients are refreshed when assignment changes after the send authorization read', async () => {
     await f.reset();
     const send = vi.mocked(NotificationService.prototype.send); send.mockClear();
@@ -93,5 +120,32 @@ describe('subscribed sockets lose sensitive chat when assignment changes', () =>
       expect(recipients).toContain(f.newMover.userId);
       expect(recipients).not.toContain(f.oldMover.userId);
     } finally { spy.mockRestore(); }
+  });
+
+  it('a mover assigned after the message commits gets no push: the push audience is the set contact-checked under the lock', async () => {
+    // A push is a new contact. The in-lock write cleared the sender against
+    // the people current THEN; someone assigned after the commit never was
+    // (they may have blocked the sender), so they read it in the conversation
+    // instead of on their lock screen.
+    await f.reset();
+    const send = vi.mocked(NotificationService.prototype.send); send.mockClear();
+    const originalIn = f.app.io.in.bind(f.app.io);
+    const spy = vi.spyOn(f.app.io, 'in').mockImplementation(((target: string | string[]) => {
+      const operator = originalIn(target);
+      if (target === `chat:${f.room.id}`) {
+        const fetchSockets = operator.fetchSockets.bind(operator);
+        // The socket publication runs after the commit: reassign there.
+        Object.assign(operator, { fetchSockets: async () => { await f.revoke(); return fetchSockets(); } });
+      }
+      return operator;
+    }) as never);
+    try {
+      const res = await f.inject('POST', `/rooms/${f.room.id}/messages`, f.customer.token, { message: 'after commit reassignment fixture' });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(spy).toHaveBeenCalledWith(`chat:${f.room.id}`);
+      const recipients = send.mock.calls.map(([params]) => params.userId);
+      expect(recipients, 'never contact-checked with this message').not.toContain(f.newMover.userId);
+      expect(recipients, 'no longer current').not.toContain(f.oldMover.userId);
+    } finally { spy.mockRestore(); await f.reset(); }
   });
 });

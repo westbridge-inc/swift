@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import { Socket, type Server } from 'socket.io';
 
 /** Real namespace/adapter recipient, with only the engine transport replaced.
@@ -28,4 +29,32 @@ export function orderSocketFixture(
   namespace.sockets.set(socket.id, socket);
   socket.join([socket.id, room]);
   return () => { namespace.adapter.delAll(socket.id); namespace.sockets.delete(socket.id); socket.connected = false; };
+}
+
+/** Records, at the moment the audience gate snapshots `room` (its first step),
+ * whether the mover's profile row is still row-locked by an open transaction.
+ * A plain FOR UPDATE NOWAIT probe (autocommit, released at once) fails only
+ * while another transaction holds a lock on that row. */
+export function rowLockAtPublish(
+  io: Server, prisma: { $queryRawUnsafe: (query: string, ...values: unknown[]) => Promise<unknown> },
+  room: string, table: 'riders' | 'drivers', id: string,
+  beforeSnapshot?: () => Promise<unknown>,
+): { locked: boolean[]; restore: () => void } {
+  const locked: boolean[] = [];
+  const originalIn = io.in.bind(io);
+  const spy = vi.spyOn(io, 'in').mockImplementation(((target: string | string[]) => {
+    const operator = originalIn(target);
+    if (target === room) {
+      const fetchSockets = operator.fetchSockets.bind(operator);
+      Object.assign(operator, {
+        fetchSockets: async () => {
+          locked.push(await prisma.$queryRawUnsafe(`SELECT "id" FROM "${table}" WHERE "id" = $1 FOR UPDATE NOWAIT`, id).then(() => false, () => true));
+          await beforeSnapshot?.();
+          return fetchSockets();
+        },
+      });
+    }
+    return operator;
+  }) as never);
+  return { locked, restore: () => spy.mockRestore() };
 }

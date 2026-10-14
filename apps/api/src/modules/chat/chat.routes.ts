@@ -285,9 +285,12 @@ export async function chatRoutes(app: FastifyInstance) {
     // is live), respects the recipient's prefs, and lands in the failure
     // metrics. The old code wrote a row + a socket emit only, so a backgrounded
     // app never learned about the message.
+    // A push is a new contact: only people who are STILL current AND were
+    // contact-checked under the lock with the write (a mover assigned after
+    // the commit was never checked against the sender's blocks).
     const publicationAuthority = await resolveRoomAuthority(app.prisma, roomId).catch(() => null);
     const publicationRecipients = [...(publicationAuthority?.participants.keys() ?? [])]
-      .filter((userId) => userId !== request.user.userId);
+      .filter((userId) => userId !== request.user.userId && persisted.recipients.includes(userId));
     for (const userId of publicationRecipients) {
       // An earlier notification may yield. Re-prove this recipient immediately
       // before enqueueing, and suppress delivery if authority is unavailable.

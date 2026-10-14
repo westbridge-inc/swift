@@ -1,4 +1,4 @@
-import { orderSocketFixture } from './helpers/order-socket-fixture';
+import { orderSocketFixture, rowLockAtPublish } from './helpers/order-socket-fixture';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -250,5 +250,39 @@ describe('one ping, every customer', () => {
     const rooms = spy.emits.filter((e) => e.event === 'rider:location').map((e) => e.room);
     expect(rooms).toContain(`order:${live.id}`);
     expect(rooms, 'a leg that completed mid-ping must not be published to').not.toContain(`order:${done.id}`);
+  });
+
+  it('[L05] the sample is published after the authority transaction commits: no row lock is held while the gate reads sockets', async () => {
+    // The gate reads the room's sockets across nodes and takes its own DB
+    // connection. Under the FOR SHARE checkpoint that starves the pool and
+    // lets logout/GO writers queue behind GPS pings.
+    const r = await makeRider();
+    const only = await makeLeg(r.riderId, 'EN_ROUTE_DELIVERY', { lat: PICKUP.lat + 0.01, lng: PICKUP.lng + 0.01 }, new Date());
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { currentOrderId: only.id } });
+    const probe = rowLockAtPublish(app.io, app.prisma, `order:${only.id}`, 'riders', r.riderId);
+    const spy = spyEmits();
+    try {
+      const res = await ping(r.token, r.riderId);
+      expect(res.statusCode).toBe(200);
+    } finally { spy.restore(); probe.restore(); }
+    expect(probe.locked, 'the gate ran once, with the rider row free').toEqual([false]);
+    expect(spy.emits.filter((e) => e.event === 'rider:location').map((e) => e.room)).toEqual([`order:${only.id}`]);
+  });
+
+  it('[L05] a leg reassigned after the checkpoint commits gets no sample from the former rider', async () => {
+    const r = await makeRider();
+    const other = await makeRider();
+    const leg = await makeLeg(r.riderId, 'EN_ROUTE_DELIVERY', { lat: PICKUP.lat + 0.01, lng: PICKUP.lng + 0.01 }, new Date());
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { currentOrderId: leg.id } });
+    // The reassignment lands at the gate's first step, after authority committed.
+    const probe = rowLockAtPublish(app.io, app.prisma, `order:${leg.id}`, 'riders', r.riderId,
+      () => app.prisma.order.update({ where: { id: leg.id }, data: { riderId: other.riderId } }));
+    const spy = spyEmits();
+    try {
+      const res = await ping(r.token, r.riderId);
+      expect(res.statusCode).toBe(200);
+    } finally { spy.restore(); probe.restore(); }
+    expect(probe.locked).toHaveLength(1);
+    expect(spy.emits.filter((e) => e.event === 'rider:location'), "the customer's map gets no sample from a rider who left").toEqual([]);
   });
 });
