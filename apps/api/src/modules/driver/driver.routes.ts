@@ -65,6 +65,7 @@ import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
+import { assertHirePlateChange } from '../verification/hire-plate';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 
 const updateDriverProfileSchema = z.object({
@@ -182,6 +183,8 @@ export async function driverRoutes(app: FastifyInstance) {
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const me = await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    // [Owner ruling 11 Oct 2026 — H-PLATE] A new taxi plate is H-series, said before step-up or any write.
+    assertHirePlateChange(me.vehicleType, body.licensePlate, me.licensePlate);
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: its taxi
     // driver has no MMG pay link to set or clear. Refused before any step-up,
     // money-surface command or owner notice (whose SMS would reach a fictional number).

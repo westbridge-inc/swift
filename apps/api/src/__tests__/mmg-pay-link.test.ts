@@ -14,6 +14,7 @@ import { stepUpKey } from '../modules/auth/step-up';
 import { applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { syntheticLocationOwner } from './helpers/online-mover';
+// [Owner ruling 11 Oct 2026 — H-PLATE] A taxi (car / wagon car) plate is H-series where it is typed; fixture plates follow it. Buses keep B-series.
 
 // [W-25] A store's attestation now carries the provider reference from its own
 // wallet message — a bare tap is refused (REFERENCE_REQUIRED), and one reference
@@ -63,7 +64,7 @@ async function makeDriver(userId: string) {
   const driver = await app.prisma.driver.create({
     data: {
       userId, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2018, vehicleColor: 'Silver',
-      licensePlate: `PMG${seq}`, driverLicenseUrl: '/uploads/x.jpg', vehicleInsuranceUrl: '/uploads/y.jpg',
+      licensePlate: `HMG${seq}`, driverLicenseUrl: '/uploads/x.jpg', vehicleInsuranceUrl: '/uploads/y.jpg',
     },
   });
   return driver.id;
@@ -225,7 +226,7 @@ describe('[High #9 · DS109] a plate change needs step-up and closes the driver\
     const before = await app.prisma.driver.findUniqueOrThrow({ where: { userId: driver.userId } });
     const currentPlate = before.licensePlate ?? 'PLATE-DEFAULT';
     const formatted = currentPlate.replace(/(\D)(\d)/, '$1 $2'); // same plate, different spacing
-    const nextPlate = `PMG${String(Date.now()).slice(-6)}`;
+    const nextPlate = `HMG${String(Date.now()).slice(-6)}`;
     // The MMG link tests above stepped this session up (grantStepUp). Start without a live
     // step-up, so the refusal below is the plate rule itself, not a stale grant, and the
     // formatting-only edit proves it needs none.
