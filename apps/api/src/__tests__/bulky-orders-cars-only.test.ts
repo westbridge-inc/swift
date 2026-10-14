@@ -12,6 +12,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { makeDispatchService, type DispatchService } from '../modules/dispatch/dispatch.service';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { requiredPackageSizeForOrder } from '../utils/load';
+import { stackVerdict } from '../modules/dispatch/stack-eligibility';
 
 // ---------------------------------------------------------------------------
 // Owner decision 20 (13 Oct 2026, E18): bulky items are ENFORCED — an order
@@ -227,6 +228,21 @@ describe('[owner #20] dispatch, the board and the grab all follow it', () => {
     expect(grab.statusCode, grab.body).toBe(400);
     expect(grab.json().error).toMatchObject({ code: 'VEHICLE_TOO_SMALL', message: 'This order needs a car or van — it is too big for your motorcycle.' });
     expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: bulky.id } }))).riderId).toBeNull();
+  });
+});
+
+describe('[owner #20 · DS1323 S3] stacking weighs a bulky order by the same rule', () => {
+  it('a bulky order is never stacked onto a car already carrying a leg (XL never batches); an ordinary one is not refused for size', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const car = await makeRider('CAR', 100);
+    const first = await makeReadyOrder(customer.userId, false);
+    // The car already holds one live leg (the gate counts the rider's live orders).
+    await sys(() => app.prisma.order.update({ where: { id: first.id }, data: { riderId: car.riderId, acceptedAt: new Date() } }));
+    const bulky = await makeReadyOrder(customer.userId, true);
+    expect(await sys(() => stackVerdict(app.prisma, car.riderId, bulky.id, 2))).toMatchObject({ eligible: false, rule: 'R3' });
+    const plain = await makeReadyOrder(customer.userId, false);
+    const v = await sys(() => stackVerdict(app.prisma, car.riderId, plain.id, 2));
+    expect(v.eligible || v.rule !== 'R3').toBe(true);
   });
 });
 
