@@ -136,6 +136,13 @@ function stagesFor(order: OrderDetail): Stage[] {
   return deliveryStages;
 }
 
+/** The order's first step is named like the status card above it ("Placed",
+ *  "Booked", "Requested"), never the raw PENDING; later steps keep their own words. */
+function timelineLabel(status: string, order: OrderDetail): string {
+  if (status === 'PENDING') return stagesFor(order)[0]!.label;
+  return status.replaceAll('_', ' ').toLowerCase();
+}
+
 function stageIndex(status: string, stages: Stage[]): number {
   const exact = stages.findIndex((stage) => stage.statuses.includes(status));
   return exact >= 0 ? exact : 0;
@@ -627,7 +634,7 @@ export default function OrderDetailPage() {
                   <li key={`${event.status}-${event.timestamp}-${index}`}>
                     <span className={styles.timelineDot} aria-hidden="true" />
                     <div>
-                      <strong>{event.status.replaceAll('_', ' ').toLowerCase()}</strong>
+                      <strong>{timelineLabel(event.status, order)}</strong>
                       <time dateTime={event.timestamp}>{formatEventTime(event.timestamp)}</time>
                       {event.note ? <p>{event.note}</p> : null}
                     </div>
@@ -652,7 +659,11 @@ export default function OrderDetailPage() {
           <div className={styles.breakdown}>
             {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? <div className={styles.line}><span>Appointment</span><strong>{formatAppointmentSlot(order.appointmentSlot)}</strong></div> : null}
             {typeof order.subtotalCustomer === 'number' ? <div className={styles.line}><span>{isTaxi ? 'Fare' : 'Items'}</span><strong>{money(order.subtotalCustomer)}</strong></div> : null}
-            {!isTaxi && typeof order.deliveryFee === 'number' ? <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div> : null}
+            {!isTaxi && typeof order.deliveryFee === 'number'
+              ? order.fulfillment === 'PICKUP' && order.deliveryFee === 0
+                ? <div className={styles.line}><span>Pickup</span><strong>No delivery fee</strong></div>
+                : <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div>
+              : null}
             {Number(order.discount ?? 0) > 0 ? <div className={styles.line}><span>Discount</span><strong>−{money(Number(order.discount))}</strong></div> : null}
             {Number(order.tipAmount ?? 0) > 0 ? <div className={styles.line}><span>{isTaxi ? 'Driver tip' : 'Rider tip'}</span><strong>{money(Number(order.tipAmount))}</strong></div> : null}
             <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total)}</strong></div>
