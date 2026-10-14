@@ -137,6 +137,8 @@ vi.mock('../../../kit', async () => {
     // Typable, so the courier form can be filled (TaxiScreen draws none).
     LabeledInput: (p: any) => h('input', { value: p.value ?? '', placeholder: p.placeholder, onChange: (e: any) => p.onChangeText?.(e.target.value) }),
     TonePill: (p: any) => h('span', null, p.label),
+    // [owner #67] The courier form's "This parcel has no prohibited items" tick.
+    BrandCheckbox: (p: any) => h('button', { type: 'button', role: 'checkbox', 'aria-label': p.label, 'aria-checked': !!p.checked, onClick: p.onToggle }),
     Money: (p: any) => h('span', null, money(p.amount)),
     CircleChip: (p: any) => h('button', { type: 'button', 'aria-label': p.label, onClick: p.onPress }, ''),
     StatePill: (p: any) => h('span', { 'data-pill': '', style: { borderWidth: 1, borderStyle: 'solid', borderColor: color.border.subtle, borderRadius: 99, padding: '2px 8px', fontSize: 11 } }, p.label),
@@ -642,6 +644,11 @@ describe('the price on screen is the price booked', () => {
     await type(host.querySelector('input[placeholder="Recipient phone"]'), '+5926001234');
     const sendButton = () => Array.from(host.querySelectorAll('button')).find((b) => /^Send parcel/.test(b.textContent ?? '')) as HTMLElement | undefined;
     expect(sendButton()?.textContent).toMatch(/1.?160$/);
+    // [owner #67] Nothing is sent until the sender ticks "This parcel has no prohibited items".
+    expect(sendButton()?.hasAttribute('disabled')).toBe(true);
+    expect(text()).toContain('Tick “This parcel has no prohibited items” to continue.');
+    await click(byLabel('This parcel has no prohibited items'));
+    expect(sendButton()?.hasAttribute('disabled')).toBe(false);
     fee = 1280;
     const quotesBefore = sent('post /courier/estimate').length;
     await click(sendButton() ?? null);
@@ -650,6 +657,7 @@ describe('the price on screen is the price booked', () => {
     expect(sendButton()?.textContent).toMatch(/1.?280$/);
     await click(sendButton() ?? null);
     expect(sent('post /courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
+    expect(sent('post /courier/order').map((c) => bodyOf(c).declaresNoProhibitedItems)).toEqual([true, true]);
   });
 });
 
