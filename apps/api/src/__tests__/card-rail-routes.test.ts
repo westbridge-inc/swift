@@ -760,6 +760,22 @@ describe('payActions CARD: the server alone decides, per platform, whether the P
     }
   });
 
+  it('[owner #62] one week at a time: no card button once the coming week is paid, or while part of it is held (a whole week would be too much)', async () => {
+    railOverride = realProvider({ savesCards: false });
+    const paidByCard = await makeStore({ due: new Date(Date.now() + 10 * DAY) });
+    expect(await cardActionOf(paidByCard)).toEqual({ id: 'CARD', state: 'off' });
+    const part = await makeStore();
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: part.subId }, data: { balance: 600 } });
+    expect(await cardActionOf(part)).toEqual({ id: 'CARD', state: 'off' });
+    // and the door says so truthfully, never "already paid"
+    const res = await startSession(part, 'PAY_NOW');
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
+    expect(res.json().error.message).toBe('Swift takes the weekly fee one week at a time. GY$600 is already paid toward weeks that have not started, so you can pay at most GY$1,500 now.');
+    // nothing held while a week runs: the coming week can be paid by card
+    expect((await cardActionOf(await makeStore()))['state']).toBe('live');
+  });
+
   it('[staging] CARD_RAIL_SIMULATOR_LIVE: the simulator shows the card choice, labelled as a test — never to the store-review demo', async () => {
     const p = await makeStore();
     expect(await cardActionOf(p)).toEqual({ id: 'CARD', state: 'off' });
@@ -856,7 +872,9 @@ describe('payActions CARD: the server alone decides, per platform, whether the P
     expect(await cardActionOf(unmapped)).toEqual({ id: 'CARD', state: 'off' });
     expect(await app.prisma.billingDunningClock.count({ where: { subscriptionId: unmapped.subId } })).toBe(0);
 
-    const p = await makeRider();
+    // [owner #62] The week is due, so the payment settles the owed week and the button can come back:
+    // one paid for the COMING week would leave nothing more to pay (one week at a time).
+    const p = await makeRider({ due: new Date(Date.now() - 60 * 60_000) });
     expect((await cardActionOf(p))['state']).toBe('live');
     const opened = (await startSession(p, 'PAY_NOW')).json().data;
     // A card page is open for this fee: no second way to pay is offered until it is settled.
