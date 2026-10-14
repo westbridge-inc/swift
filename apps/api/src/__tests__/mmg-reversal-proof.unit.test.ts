@@ -43,6 +43,27 @@ describe('[MMG REVERSAL] what MMG\'s lookup proves', () => {
     expect((await lookupProof(client({ TX1: found('approved') }), row({ providerReference: 'TX1' }))).proven).toBe(false);
   });
 
+  it('[review S2-2] a reference MMG named that is the PAYMENT itself (its id in any spelling, or its ledger number) is never proof', async () => {
+    // MMG's lookup reads ids in any spelling; the payment answers "successful" for the same amount.
+    const anySpelling = (answers: Record<string, MmgLookupDetail>): MmgLookupClient => ({
+      transactionLookupDetail: async (id) => answers[id.trim().toUpperCase()] ?? { outcome: 'not_found' },
+    });
+    const payment = found('approved');
+    expect(await lookupProof(anySpelling({ TX1: payment }), row({ providerReference: ' tx1 ' })))
+      .toEqual({ proven: false, standing: true, unreadable: false });
+    const withLedger = { ...payment, ledgerReference: 'LEDGER7' } as MmgLookupDetail;
+    expect(await lookupProof(anySpelling({ TX1: withLedger, LEDGER7: payment }), row({ providerReference: 'ledger7' })))
+      .toEqual({ proven: false, standing: true, unreadable: false });
+  });
+
+  it('[review S3-2] a reversal MMG named that is still pending (or unreadable) is reported in flight', async () => {
+    const r = row({ providerReference: 'REV1' });
+    expect(await lookupProof(client({ TX1: found('approved'), REV1: found('pending') }), r))
+      .toEqual({ proven: false, standing: true, unreadable: false, namedInFlight: true });
+    expect(await lookupProof(client({ TX1: found('approved'), REV1: found('declined') }), r))
+      .toEqual({ proven: false, standing: true, unreadable: false });
+  });
+
   it('standing = MMG still shows the payment successful for the amount; unreadable = MMG does not know it', async () => {
     expect(await lookupProof(client({ TX1: found('approved') }), row())).toEqual({ proven: false, standing: true, unreadable: false });
     expect(await lookupProof(client({ TX1: found('approved', 1) }), row())).toEqual({ proven: false, standing: false, unreadable: false });

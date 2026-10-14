@@ -2,9 +2,8 @@
  * [MMG REVERSAL · owner decision #11] The owner's UAT check of a whole-payment
  * reversal, run against MMG's TEST system only (no real money).
  *
- * The owner runs it through ~/swift-coordination/owner/mmg-reversal-uat-test.command,
- * which makes a small UAT checkout payment first and asks for MMG's merchant
- * credentials at hidden prompts. This script then uses EXACTLY the code the
+ * The owner runs it from a local command that makes a small UAT checkout
+ * payment first and asks for MMG's merchant credentials at hidden prompts. This script then uses EXACTLY the code the
  * production reversal uses — the live MMG adapter's reverseTransaction and
  * transactionLookupDetail, and the same lookup-proof rule (mmg-reversal-proof.ts)
  * — and prints what MMG answered and what Swift would record.

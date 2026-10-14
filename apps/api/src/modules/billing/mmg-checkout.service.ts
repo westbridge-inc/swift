@@ -793,11 +793,10 @@ export class MmgCheckoutService {
       }
       // [MMG REVERSAL] Every open fee reversal is read again from MMG's lookup
       // (bounded): a proof settles it, a refusal closes it, nothing is guessed.
+      // [review S2-1] Always run (bounded, two indexed reads when idle): a return
+      // closed as "not returned" is watched for a week even when nothing is open.
       try {
-        const open = await this.prisma.mmgFeeReversal.count({ where: { state: { in: ['SENDING', 'SENT', 'HELD'] } } });
-        if (open > 0) {
-          await new MmgFeeReversalService({ prisma: this.prisma, billing: this.billing, notifications: this.notifications, ...(this.reversal ? { client: this.reversal } : {}) }).sweep(now);
-        }
+        await new MmgFeeReversalService({ prisma: this.prisma, billing: this.billing, notifications: this.notifications, ...(this.reversal ? { client: this.reversal } : {}) }).sweep(now);
       } catch (err) {
         log().error({ err }, '[MMG checkout] the fee-reversal sweep failed; it is retried on the next poll');
       }

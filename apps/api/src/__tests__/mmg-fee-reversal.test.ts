@@ -278,7 +278,8 @@ describe('[MMG REVERSAL] the admin action: two people, then MMG, then MMG\'s pro
     // The partner, in plain words.
     const told = await app.prisma.notification.findMany({ where: { userId: p.userId, data: { path: ['status'], equals: 'REVERSED' } } });
     expect(told).toHaveLength(1);
-    expect(told[0]!.body).toMatch(/^Your payment of .*2,?100.* on .+ was returned to your MMG account\.$/);
+    // [review S4] MMG returns the money to the account that paid, which may not be the partner's own.
+    expect(told[0]!.body).toMatch(/^Your payment of .*2,?100.* on .+ was returned to the MMG account it was paid from\.$/);
     expect(await mmgSays(p.txn)).toBe('reversed');
 
     // A second ask is refused before anything is claimed or sent.
@@ -671,20 +672,23 @@ describe('[DS1115] a person\'s answer is bound to THIS payment, and every held r
     await expect(resolveAs(noAnswer.id, 'RETURNED_NOT_BOOKED', `STMT${RUN}C`)).rejects.toMatchObject({ code: 'NOT_SHORT' });
   });
 
-  it('S3: closed as "not returned", then MMG returns it after all — the sweep notices within a week and pages once', async () => {
+  it('S3: closed as "not returned", then MMG returns it after all — the checkout poll notices within a week and pages once, even with nothing else open', async () => {
     const p = await paidCheckout();
     sandboxScriptReversal(p.txn, 'error');
     const held = await ask(p.checkoutId, p.amount);
     expect((await resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}D`)).state).toBe('FAILED');
+    // [review S2-1] The production path: the poll, with no other return open anywhere.
+    await app.prisma.mmgFeeReversal.updateMany({ where: { state: { in: ['SENDING', 'SENT', 'HELD'] } }, data: { state: 'FAILED', failedAt: new Date(), lookupStatus: 'STANDING' } });
+    expect(await app.prisma.mmgFeeReversal.count({ where: { state: { in: ['SENDING', 'SENT', 'HELD'] } } })).toBe(0);
     sandboxSetTxStatus(p.txn, 'reversed');
     const pages = async () => (await app.prisma.notification.findMany({ where: { data: { path: ['alert'], equals: 'mmg-fee-reversal-returned-after-close' } } }))
       .filter((n) => (n.data as Record<string, unknown>)['reversalId'] === held.id);
     const later = new Date(Date.now() + 60 * 60_000);
-    await reversals.sweep(later);
+    await checkoutService.pollIntents(later);
     const first = await pages();
     expect(first.length).toBeGreaterThan(0);
     expect((await reversalRow(held.id)).lookupStatus).toBe('RETURNED_AFTER_CLOSE');
-    await reversals.sweep(new Date(later.getTime() + 60 * 60_000));
+    await checkoutService.pollIntents(new Date(later.getTime() + 60 * 60_000));
     expect(await pages()).toHaveLength(first.length);
   });
 
@@ -930,5 +934,82 @@ describe('[MMG REVERSAL · Opus S3 pattern] the rollback guard cannot be blinded
     expect(begin).toBeGreaterThanOrEqual(0);
     expect(off, 'mmg_fee_reversals forces row security: a non-bypass role must get an error, never an empty table').toBeGreaterThan(begin);
     expect(off).toBeLessThan(sql.indexOf('IF EXISTS'));
+  });
+});
+
+describe('[review #1654] what MMG names is checked, one reference books once, nothing closes under a return in flight', () => {
+  /** MMG answers the reversal "pending", naming `named(txn)`; the lookup is the sandbox's, with the
+   *  payment's own ledger number set when `ledger` is given. */
+  const namingClient = (named: (txn: string) => string, ledger?: { txn: string; ledgerRef: string }): MmgReversalClient => ({
+    reverseTransaction: async (req) => { reversalCalls.push(req.transactionId); return { status: 'pending', transactionId: named(req.transactionId) }; },
+    transactionLookupDetail: async (id) => {
+      const detail = await mmg.transactionLookupDetail(id);
+      return ledger && id === ledger.txn && detail.outcome === 'found' ? { ...detail, ledgerReference: ledger.ledgerRef } : detail;
+    },
+  });
+  const serviceWith = (client: MmgReversalClient) => new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => client });
+  const askWith = (service: MmgFeeReversalService, checkoutId: string, amountGyd: number) => runWithTenant('swift-default', () =>
+    service.requestReversal({ tenantId: 'swift-default', checkoutId, amountGyd, reason: REASON, actorId: admin.userId, approvalId: null }, async () => {}));
+
+  it('S2-2: MMG\'s reply names the payment\'s own ledger number — never proof: nothing deducted, nothing booked', async () => {
+    const p = await paidCheckout();
+    const ledgerRef = `LG${p.txn}`;
+    // MMG's lookup of the payment's ledger number answers the payment itself: successful, same amount.
+    sandboxAddHistory({ transactionId: ledgerRef, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    const before = await walletOf(p.subId);
+    const row = await askWith(serviceWith(namingClient(() => ledgerRef, { txn: p.txn, ledgerRef })), p.checkoutId, p.amount);
+    expect(row.state).not.toBe('REVERSED');
+    expect(await walletOf(p.subId)).toBe(before);
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+  });
+
+  it('S2-2: MMG\'s reply names another payment Swift has on record — held for a person, nothing deducted', async () => {
+    const p = await paidCheckout();
+    const q = await paidCheckout();
+    const before = await walletOf(p.subId);
+    const row = await askWith(serviceWith(namingClient(() => q.txn)), p.checkoutId, p.amount);
+    expect(row).toMatchObject({ state: 'HELD', heldReason: 'MMG_NAMED_A_PAYMENT' });
+    expect(await walletOf(p.subId)).toBe(before);
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+  });
+
+  it('S3-1: two held returns closed "returned" at once with ONE reversal reference — exactly one books', async () => {
+    const p1 = await paidCheckout();
+    const p2 = await paidCheckout();
+    sandboxScriptReversal(p1.txn, 'error');
+    sandboxScriptReversal(p2.txn, 'error');
+    const h1 = await ask(p1.checkoutId, p1.amount);
+    const h2 = await ask(p2.checkoutId, p2.amount);
+    const reference = `RVSL${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    sandboxAddHistory({ transactionId: reference, status: 'approved', amountMinor: p1.amount * 100, currencyCode: 'GYD' });
+    const results = await Promise.allSettled([resolveAs(h1.id, 'RETURNED', reference), resolveAs(h2.id, 'RETURNED', reference)]);
+    const states = [(await reversalRow(h1.id)).state, (await reversalRow(h2.id)).state];
+    expect(states.filter((state) => state === 'REVERSED')).toHaveLength(1);
+    const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.reason).toMatchObject({ code: 'NOT_A_REVERSAL' });
+    expect((await reversalEvents(p1.subId)).length + (await reversalEvents(p2.subId)).length).toBe(1);
+  });
+
+  it('S4: a server that cannot build MMG\'s client refuses before anything is written; a payer\'s number never lands in MMG\'s stored words', async () => {
+    const p = await paidCheckout();
+    const broken = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => { throw new Error('Unknown MMG_DRIVER: typo'); } });
+    await expect(askWith(broken, p.checkoutId, p.amount)).rejects.toThrow(/Unknown MMG_DRIVER/);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(0);
+    const { shapeProviderText } = await import('../modules/billing/mmg-fee-reversal');
+    expect(shapeProviderText('Refused: payer 5926001234 has no funds')).toBe('Refused: payer (number) has no funds');
+  });
+
+  it('S3-2: a reversal MMG named is still pending — "not returned" is refused, so MMG is never asked a second time', async () => {
+    const p = await paidCheckout();
+    const pendingReversal = `PEND${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    sandboxAddHistory({ transactionId: pendingReversal, status: 'pending', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    const service = serviceWith(namingClient(() => pendingReversal));
+    const sent = await askWith(service, p.checkoutId, p.amount);
+    expect(sent.state).toBe('SENT');
+    const held = await runWithTenant('swift-default', () => service.settle(sent.id, { now: new Date(Date.now() + 25 * 3_600_000) }));
+    expect(held).toMatchObject({ state: 'HELD', heldReason: 'NOT_PROVEN_IN_TIME' });
+    await expect(resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}P`, service)).rejects.toMatchObject({ code: 'MMG_RETURN_IN_FLIGHT' });
+    expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
   });
 });

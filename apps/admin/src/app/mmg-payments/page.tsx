@@ -306,7 +306,7 @@ function Timeline({ entries, truncated }: { entries: MmgCheckoutTimelineEntry[];
 const RETURN_STATE_WORDS: Record<MmgFeeReversalRow['state'], string> = {
   SENDING: 'Asking MMG to return it',
   SENT: "MMG accepted; waiting for MMG's confirmation",
-  REVERSED: 'Returned to the partner',
+  REVERSED: 'Returned through MMG to the account it was paid from',
   FAILED: 'MMG refused; nothing changed',
   HELD: 'Held for a person',
 };
@@ -418,7 +418,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
 const RESOLUTION_WORDS: Record<string, string> = {
   NOT_RETURNED: 'Closed by a person: MMG shows the payment was not returned.',
   RETURNED_BY_REFERENCE: "Closed by a person: MMG's records showed the return they named.",
-  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after the money had already paid for a week. Nothing was deducted; the refund procedure settles it.',
+  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after the money had already paid for a week. Nothing was deducted; that week is now unpaid and finance settles it with the partner.',
 };
 
 /**
@@ -453,7 +453,7 @@ function ResolveHeld({ reversalId, heldReason, onDone }: { reversalId: string; h
       {moneyUsed ? (
         <label className="flex items-center gap-2 text-xs">
           <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
-          MMG returned it, but the money had already paid for a week (close it; the refund procedure settles it)
+          MMG returned it, but the money had already paid for a week (close it; that week is then unpaid and finance settles it with the partner)
         </label>
       ) : null}
       <input

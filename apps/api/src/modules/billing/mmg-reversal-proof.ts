@@ -24,7 +24,26 @@ export interface ProofSubject {
 
 export type ReversalProof =
   | { proven: true; how: 'ORIGINAL_REVERSED' | 'REVERSAL_COMPLETED' }
-  | { proven: false; standing: boolean; unreadable: boolean };
+  /** `namedInFlight`: the reversal MMG's own answer named is still pending at
+   *  MMG, or shown done for another amount, or could not be read [review S3-2]. */
+  | { proven: false; standing: boolean; unreadable: boolean; namedInFlight?: boolean };
+
+/** mmg_txn_canon in TypeScript: an MMG transaction id trimmed and upper-cased. */
+const canon = (id: string): string => id.trim().toUpperCase();
+
+/**
+ * [review S2-2] The reversal transaction MMG's answer named, or null when it
+ * named none or named the PAYMENT itself (its transaction id or its ledger
+ * number, in any spelling): a lookup of the payment answers "successful" for
+ * the same amount and would read as a completed reversal.
+ */
+export function namedReversalOf(row: ProofSubject, original: MmgLookupDetail): string | null {
+  if (!row.providerReference) return null;
+  const named = canon(row.providerReference);
+  if (named === '' || named === canon(row.mmgTransactionId)) return null;
+  if (original.outcome === 'found' && original.ledgerReference && named === canon(original.ledgerReference)) return null;
+  return row.providerReference;
+}
 
 function matchesAmount(detail: Extract<MmgLookupDetail, { outcome: 'found' }>, row: ProofSubject): boolean {
   return detail.amountMinor !== null && detail.amountMinor === amountMinorOf(row.amount) && detail.currencyCode === row.currencyCode;
@@ -42,16 +61,21 @@ export async function lookupProof(client: MmgLookupClient, row: ProofSubject): P
   if (original.outcome === 'found' && original.status === 'reversed' && matchesAmount(original, row)) {
     return { proven: true, how: 'ORIGINAL_REVERSED' };
   }
-  if (row.providerReference && row.providerReference !== row.mmgTransactionId) {
-    const reversal = await client.transactionLookupDetail(row.providerReference);
+  const named = namedReversalOf(row, original);
+  let namedInFlight = false;
+  if (named) {
+    const reversal = await client.transactionLookupDetail(named);
     if (reversal.outcome === 'found' && reversal.status === 'approved' && matchesAmount(reversal, row)) {
       return { proven: true, how: 'REVERSAL_COMPLETED' };
     }
+    namedInFlight = reversal.outcome === 'error'
+      || (reversal.outcome === 'found' && (reversal.status === 'pending' || reversal.status === 'approved' || reversal.status === 'reversed'));
   }
   return {
     proven: false,
     standing: original.outcome === 'found' && original.status === 'approved' && matchesAmount(original, row),
     unreadable: original.outcome !== 'found',
+    ...(namedInFlight ? { namedInFlight: true } : {}),
   };
 }
 
