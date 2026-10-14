@@ -28,6 +28,8 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  */
 
 /** Bump when any value below changes; recorded with every apply.
+ *  2026-10-07.1: Guyana's police, fire and ambulance numbers verified by
+ *  the owner on 5 October; preserve that confirmation on every seed run.
  *  2026-10-01.1 (main): the owner's Georgetown fares — Guyana's taxiRates, and
  *  the delivery columns a fresh Georgetown Central zone is created with.
  *  2026-10-01.2 (main) [ZONE-FARES]: the CJIA and Ogle airport zones with their
@@ -46,8 +48,15 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  franchiseMinLocations / franchiseDiscountPct, so each store pays its own
  *  tier by its own catalogue. On top of 2026-10-06.1. Never reuse
  *  2026-10-07.1, 2026-10-07.2, 2026-10-13.1 or 2026-10-13.2: open branches
- *  carry those for other values. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-13.3';
+ *  carry those for other values.
+ *  2026-10-14.3: all of 2026-10-13.3 plus 2026-10-13.1 (this lane's earlier
+ *  version: Guyana's police, fire and ambulance numbers verified by the
+ *  owner on 5 October, preserved on every seed run, and the Market tab
+ *  always shown at launch — owner, 13 Oct: MARKET_MIN_ITEMS and
+ *  MARKET_MIN_VENDORS at 0), as merged. No earlier version describes these
+ *  values together, so none is reused; 2026-10-14.1 and 2026-10-14.2 are
+ *  claimed by other open branches for other values. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-14.3';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -198,13 +207,12 @@ export function desiredPlatformConfig(): DesiredConfig {
     l3MinAccountAgeDays: 30,
     outlierMultiplier: 3,
   };
-  // [MOB-018] Per-market emergency numbers with a verification record. Only
-  // the number the launch market actually verified is marked verified; the
-  // rest are carried but flagged, so the SOS ceremony can say so.
+  // [MOB-018] All three Guyana numbers were verified by the owner on 5 Oct
+  // 2026. Keep the seed aligned with the emergency-policy confirmation.
   const guyanaEmergency = {
-    police: { number: '911', verified: true, verifiedAt: '2026-09-02T00:00:00.000Z', verifiedBy: 'launch-market' },
-    fire: { number: '912', verified: false },
-    ambulance: { number: '913', verified: false },
+    police: { number: '911', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+    fire: { number: '912', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+    ambulance: { number: '913', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
   };
   const guyanaRegion = {
     taxiCredentialName: 'Hire Car Licence',
@@ -310,6 +318,11 @@ export function desiredPlatformConfig(): DesiredConfig {
     platformConfig: [
       { key: 'order_auto_reject_minutes', value: 5 },
       { key: 'delivery_base_fee', value: 500 },
+      // Owner ruling, 13 Oct: the Market tab ALWAYS shows at launch. The tab's
+      // depth gate (market/launch-depth.ts) reads these two; 0 is the explicit
+      // operator choice it honours ("open it, it is thin").
+      { key: 'MARKET_MIN_ITEMS', value: 0 },
+      { key: 'MARKET_MIN_VENDORS', value: 0 },
     ],
     countries: [
       {
