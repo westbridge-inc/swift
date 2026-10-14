@@ -66,6 +66,63 @@ function consoleSession() {
 const notPaidButton = () => screen.getByRole('button', { name: `Close as NOT PAID ${row.swiftReference}` }) as HTMLButtonElement;
 
 describe('weekly-fee payment confirmations', () => {
+  // [owner 13 Oct · #1645] While the owner is the only admin who can approve, they approve their own
+  // request on Approvals after the solo waiting period. The page must not promise a second admin.
+  it('says how a request is approved, including solo approval, and never promises a second admin', async () => {
+    const fetch = serve(() => queued);
+    const { user } = renderWithQuery(<Page />);
+    await screen.findByRole('table', { name: 'Payment confirmations' });
+    expect(document.body.textContent).toMatch(/solo approval/i);
+    expect(document.body.textContent).not.toMatch(/needs a second admin/i);
+    const form = await open(user);
+    expect(form.textContent).not.toMatch(/second admin/i);
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
+    const waiting = await screen.findByText(/Waiting for approval/);
+    expect(waiting.textContent).toMatch(/solo approval/i);
+    expect(waiting.textContent).toMatch(/Nothing has changed yet/);
+    expect(bodiesOf(fetch)).toHaveLength(1);
+  });
+
+  it('an approved request says it waits to be applied, without naming who approved it', async () => {
+    serve(undefined, [row], []);
+    mockApi((r) => {
+      if (r.url.pathname.endsWith('/confirmations')) return { body: { success: true, data: [row] } };
+      return { body: { success: true, data: r.url.searchParams.get('status') === 'APPROVED' ? [{ ...pending, status: 'APPROVED' }] : [], pagination: { page: 1, pages: 1 } } };
+    });
+    renderWithQuery(<Page />);
+    const status = await screen.findByText(/Approved; waiting for the requester to apply it/);
+    expect(status.textContent).not.toMatch(/second admin/i);
+  });
+
+  // [Opus S4-1, worse with solo approval's waiting period] A hold whose PAID decision is already being
+  // applied offers no request: NOT PAID is refused at apply and PAID again changes nothing, so either
+  // would only spend an approval (and, for a solo owner, its wait).
+  it('a payment whose PAID decision is being applied offers no decision and says so', async () => {
+    const fetch = serve(undefined, [{ ...row, status: 'SETTLEMENT_APPLY_PENDING', reason: 'SETTLEMENT_APPLY_PENDING', settlementPayments: credited }]);
+    renderWithQuery(<Page />);
+    const table = await screen.findByRole('table', { name: 'Payment confirmations' });
+    await waitFor(() => expect(within(table).getByText(/being applied/i)).toBeTruthy());
+    expect(within(table).queryByRole('button', { name: `Mark PAID ${row.swiftReference}` })).toBeNull();
+    expect(within(table).queryByRole('button', { name: `Close as NOT PAID ${row.swiftReference}` })).toBeNull();
+    expect(table.textContent).not.toContain('SETTLEMENT_APPLY_PENDING');
+    expect(requestsByMethod(fetch, 'POST')).toHaveLength(0);
+  });
+
+  // The review column says why a payment is held in words, never as an internal code.
+  it('shows why each payment is held in words, never as a raw review code', async () => {
+    serve(undefined, [
+      { ...row, id: 'r1', reason: 'MMG_CHECKOUT_PENDING' },
+      { ...row, id: 'r2', reason: 'NO_REPLY', swiftReference: '222333444555666777' },
+      { ...row, id: 'r3', reason: 'VERIFIED_POSITIVE_CORRECTION', status: 'SETTLEMENT_APPLY_PENDING', swiftReference: '333444555666777888', settlementPayments: credited },
+    ]);
+    renderWithQuery(<Page />);
+    const table = await screen.findByRole('table', { name: 'Payment confirmations' });
+    await waitFor(() => expect(within(table).getByText('MMG checkout pending')).toBeTruthy());
+    expect(within(table).getByText('No reply')).toBeTruthy();
+    expect(within(table).getByText(/MMG confirmed this payment after it was closed as not paid/)).toBeTruthy();
+    for (const code of ['MMG_CHECKOUT_PENDING', 'NO_REPLY', 'VERIFIED_POSITIVE_CORRECTION', 'SETTLEMENT_APPLY_PENDING']) expect(table.textContent).not.toContain(code);
+  });
+
   it('renders overdue first, remaining grace, source, reference, partner and the timeline link; legacy obligations are read-only', async () => {
     serve(undefined, [{ ...row, id: 'future', swiftReference: '999888777666555444', overdue: false }, row, { ...row, id: 'legacy', source: 'OBLIGATION', sourceId: 'old-sub', resolvable: false, swiftReference: null as unknown as string, settlementPayments: [] }]);
     renderWithQuery(<Page />);
@@ -87,8 +144,8 @@ describe('weekly-fee payment confirmations', () => {
       expect(form.textContent).toContain("Mark PAID: only with MMG's transaction id; credits once");
       await user.selectOptions(within(form).getByLabelText('MMG transaction ID'), 'provider-row-one');
     } else expect(form.textContent).toContain("Close as NOT PAID: the checkout becomes NOT_PAID, the store's billing clock resumes with its remaining grace; nothing is credited");
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
-    expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     const writes = requestsByMethod(fetch, 'POST');expect(writes).toHaveLength(1);
     const [url, init] = writes[0]!;expect(String(url)).toMatch(/\/billing\/confirmations\/hold-one\/resolve$/);
     expect(JSON.parse(String(init?.body))).toEqual({ sourceId: row.sourceId, epoch: 3, clockVersion: 9, decision, evidenceReference: 'review:case-001', reason: REASON, ...(decision === 'PAID' ? { providerPaymentId: 'provider-row-one' } : {}) });
@@ -107,8 +164,8 @@ describe('weekly-fee payment confirmations', () => {
     });
     const { user, show } = consoleSession();
     let form = await open(user);
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
-    expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     state.approvals = state.approvals.map((a) => ({ ...a, status: 'APPROVED' })); // a second admin approves
     show('approvals');
     await user.click(await screen.findByRole('button', { name: 'Approved' }));
@@ -116,8 +173,8 @@ describe('weekly-fee payment confirmations', () => {
     expect(await screen.findByText(/Reload the payment confirmation before resolving it/)).toBeTruthy();
     show('confirmations');
     form = await open(user);
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
-    expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     const resolves = bodiesOf(fetch).filter((body) => 'decision' in body);
     expect(resolves.map(({ epoch, clockVersion }) => [epoch, clockVersion])).toEqual([[3, 9], [4, 10]]);
   });
@@ -126,13 +183,13 @@ describe('weekly-fee payment confirmations', () => {
     const { fetch } = liveServer((s) => { s.approvals.push({ ...pending }); return queued; });
     const { user, show } = consoleSession();
     const form = await open(user);
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
-    expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     show('approvals');
     expect(await screen.findByText(/you cannot sign for yourself/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     show('confirmations');
-    expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: `Close as NOT PAID ${row.swiftReference}` })).toBeNull();
     expect(requestsByMethod(fetch, 'POST')).toHaveLength(1);
   });
@@ -140,7 +197,7 @@ describe('weekly-fee payment confirmations', () => {
     const { fetch } = liveServer(() => ({ status: 500, body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'Reply unavailable' } } }));
     const { user, show } = consoleSession();
     const form = await open(user);
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
     await within(form).findByRole('alert');
     await user.click(within(form).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Reload confirmations' }) as HTMLButtonElement).disabled).toBe(false));
@@ -161,7 +218,7 @@ describe('weekly-fee payment confirmations', () => {
     const { fetch } = liveServer((s) => new Promise((resolve) => { finish = () => { s.approvals.push({ ...pending }); resolve(queued); }; }));
     const { user, show } = consoleSession();
     const form = await open(user);
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
     const before = [readsOf(fetch, '/confirmations'), readsOf(fetch, '/approvals')] as const;
     show('elsewhere');
     show('confirmations');
@@ -173,15 +230,15 @@ describe('weekly-fee payment confirmations', () => {
     expect(notPaidButton().disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Reload confirmations' }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => { finish(); });
-    expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     expect(requestsByMethod(fetch, 'POST')).toHaveLength(1);
   });
   it('a refusal before anything is queued (missing permission) shows the server words and leaves the row available', async () => {
     const fetch = serve(() => ({ status: 403, body: { success: false, error: { code: 'FORBIDDEN', message: 'This admin action requires the billing.payment.attach capability' } } }));
     const { user } = renderWithQuery(<Page />);const form = await open(user);
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
     expect(await screen.findByText(/requires the billing.payment.attach capability/)).toBeTruthy();
-    expect((within(form).getByRole('button', { name: 'Request second-admin approval' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((within(form).getByRole('button', { name: 'Request approval' }) as HTMLButtonElement).disabled).toBe(false);
     await user.click(within(form).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(notPaidButton().disabled).toBe(false));
     expect(screen.queryByText('Reload confirmations before another request.')).toBeNull();
@@ -190,8 +247,8 @@ describe('weekly-fee payment confirmations', () => {
   it('after a request both lists are read again without pressing Reload', async () => {
     const fetch = serve();const { user } = renderWithQuery(<Page />);const form = await open(user);
     const before = [readsOf(fetch, '/confirmations'), readsOf(fetch, '/approvals')] as const;
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
-    expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     await waitFor(() => expect(readsOf(fetch, '/confirmations')).toBeGreaterThan(before[0]));
     await waitFor(() => expect(readsOf(fetch, '/approvals')).toBeGreaterThan(before[1]));
   });
@@ -203,35 +260,35 @@ describe('weekly-fee payment confirmations', () => {
     await user.click(notPaidButton());
     expect(screen.queryByRole('form')).toBeNull();
     const form = await open(user, 'Mark PAID');
-    await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
+    await user.click(within(form).getByRole('button', { name: 'Request approval' }));
     expect((await within(form).findByRole('alert')).textContent).toContain('Select a recorded MMG transaction');
     expect(within(form).getByRole('option', { name: '123456789012' })).toBeTruthy();
     expect(requestsByMethod(fetch, 'POST')).toHaveLength(0);
   });
   it('keeps pending approval after remount instead of filing a duplicate', async () => {
     const fetch=serve(undefined,[row],[pending]);renderWithQuery(<Page />);
-    expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     expect(screen.queryByRole('button',{name:`Close as NOT PAID ${row.swiftReference}`})).toBeNull();
     expect(requestsByMethod(fetch,'POST')).toHaveLength(0);
   });
   it('rejects invalid evidence before creating an approval', async () => {
     const fetch=serve();const {user}=renderWithQuery(<Page />);const form=await open(user);
     const input=within(form).getByLabelText('Evidence reference');await user.clear(input);await user.type(input,'bad ref');
-    await user.click(within(form).getByRole('button',{name:'Request second-admin approval'}));
+    await user.click(within(form).getByRole('button',{name:'Request approval'}));
     expect(await within(form).findByText(/8–128 characters/)).toBeTruthy();expect(requestsByMethod(fetch,'POST')).toHaveLength(0);
   });
   it('PAID cannot be requested without a recorded MMG transaction', async () => {
     const fetch=serve(undefined,[{...row,settlementPayments:[]}]);const {user}=renderWithQuery(<Page />);const form=await open(user,'Mark PAID');
-    await user.click(within(form).getByRole('button',{name:'Request second-admin approval'}));
+    await user.click(within(form).getByRole('button',{name:'Request approval'}));
     expect((await within(form).findByRole('alert')).textContent).toContain('Select a recorded MMG transaction');expect(requestsByMethod(fetch,'POST')).toHaveLength(0);
   });
   it('a same-tick double submit creates one approval', async () => {
     let finish: (_r: ApiReply)=>void=()=>{};const fetch=serve(()=>new Promise((r)=>{finish=r;}));const {user}=renderWithQuery(<Page />);const form=await open(user);
-    const button=within(form).getByRole('button',{name:'Request second-admin approval'});
+    const button=within(form).getByRole('button',{name:'Request approval'});
     await act(async()=>{button.click();button.click();});expect(requestsByMethod(fetch,'POST')).toHaveLength(1);
     expect((screen.getByRole('button',{name:`Close as NOT PAID ${row.swiftReference}`}) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button',{name:'Reload confirmations'}) as HTMLButtonElement).disabled).toBe(true);
-    await act(async()=>{finish(queued);});expect(await screen.findByText(/Waiting for a second admin/)).toBeTruthy();
+    await act(async()=>{finish(queued);});expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
   });
   it('read failure is not an empty queue and has retry',async()=>{
     mockApi(()=>({status:500,body:{success:false,error:{code:'INTERNAL_ERROR',message:'Read unavailable'}}}));renderWithQuery(<Page />);
@@ -244,9 +301,9 @@ describe('weekly-fee payment confirmations', () => {
 it('an uncertain acknowledgement requires checking the queue before another request', async () => {
   const fetch = serve(() => ({ status: 500, body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'Reply unavailable' } } }));
   const { user } = renderWithQuery(<Page />); const form = await open(user);
-  await user.click(within(form).getByRole('button', { name: 'Request second-admin approval' }));
+  await user.click(within(form).getByRole('button', { name: 'Request approval' }));
   await within(form).findByRole('alert');
-  expect((within(form).getByRole('button', { name: 'Request second-admin approval' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((within(form).getByRole('button', { name: 'Request approval' }) as HTMLButtonElement).disabled).toBe(true);
   expect(requestsByMethod(fetch, 'POST')).toHaveLength(1);
   await user.click(within(form).getByRole('button', { name: 'Close' }));
   expect((screen.getByRole('button', { name: `Close as NOT PAID ${row.swiftReference}` }) as HTMLButtonElement).disabled).toBe(true);
