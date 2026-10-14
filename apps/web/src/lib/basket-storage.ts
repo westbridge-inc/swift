@@ -1,3 +1,4 @@
+import { STORE_SLUG_RE } from './store-slug';
 export const KEY = 'swift_guest_basket_v1';
 export const EVENT = 'swift-guest-basket';
 export interface GuestLine {
@@ -12,10 +13,7 @@ export interface GuestBasket {
 }
 export const empty = (): GuestBasket => ({ version: 1, lines: [] });
 export const validId = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 128;
-/** A store's web address as the server mints it: the name plus a nanoid code
- *  (partner.service.ts — `slugify(name)-${nanoid(6)}`), so capitals, digits,
- *  `-` and `_`. No dots, slashes or anything that could leave /store/<slug>. */
-export const STORE_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
+export { STORE_SLUG_RE } from './store-slug';
 export function validLine(line: GuestLine): boolean {
   return Boolean(line && validId(line.clientLineId) && validId(line.vendorId) && validId(line.itemId) && validId(line.storeSlug) && STORE_SLUG_RE.test(line.storeSlug)
     && (line.returnPath === undefined || typeof line.returnPath === 'string' && line.returnPath.length <= 2048

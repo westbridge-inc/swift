@@ -17,7 +17,7 @@ export type LinkDestination =
 
 // A store address as the server mints it: the name plus a nanoid code
 // (capitals, digits, `-`, `_`). The same rule as the website's STORE_SLUG_RE.
-const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
+export const STORE_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const CODE_RE = /^[23456789bcdfghjkmnpqrstvwxyz]{10}$/i;
 
 // ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ export function destinationForUrl(url: string, linkPolicy: LinkPolicy = defaultL
     return null;
   }
   const [head, tail] = parts as [string, string];
-  if (head === 'store' && SLUG_RE.test(tail)) {
+  if (head === 'store' && STORE_SLUG_RE.test(tail)) {
     const c = query.get('c');
     report({ kind: 'accepted', origin, host });
     return { kind: 'store', slug: tail, code: c && CODE_RE.test(c) ? c.toUpperCase() : null };

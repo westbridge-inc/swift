@@ -1,4 +1,4 @@
-import { STORE_SLUG_RE } from './basket-storage';
+import { STORE_SLUG_RE } from './store-slug';
 // A tab-scoped Add intent, never a cart or a source of prices. The live menu
 // supplies every name, price and available choice when this is reopened.
 const KEY = 'swift_storefront_add';
