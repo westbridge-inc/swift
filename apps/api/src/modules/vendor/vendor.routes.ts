@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { confirmReturn } from '../custody/custody-recovery';
@@ -1800,7 +1801,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:prep_update', evt);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:prep_update', evt);
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
     // The rider on the FRESH row is the one who needs "it's ready" — never the
     // rider the stale screen read. Re-check after commit and push only while
@@ -2215,7 +2216,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
     });
@@ -2414,7 +2415,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', rejectEvent);
     if (order.vendorId) {
       app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
     }
