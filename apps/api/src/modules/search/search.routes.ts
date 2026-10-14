@@ -250,7 +250,7 @@ export async function searchRoutes(app: FastifyInstance) {
       // relation filter is not reached by the tenant-scoping extension: the
       // tenant is named here.
       vendor: { ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode), ...(ctx.publicMode && { isCurrentlyOpen: true }) },
-      // [S2-1] Guest surfaces exclude hidden-only items IN the query, before
+      // [S2-1] Every surface excludes hidden-only items IN the query, before
       // the window is capped; the listing gate below stays a defensive pass.
       ...(ctx.hiddenOnly.length > 0 ? { id: { notIn: ctx.hiddenOnly } } : {}),
     };
@@ -266,7 +266,8 @@ export async function searchRoutes(app: FastifyInstance) {
       }),
       keep: async (found) => {
         const marketItems = found.filter((item) => inLaunchMarket(item.vendor));
-        return ctx.publicMode ? listableItemsForVendors(app.prisma, ctx.tenantId, marketItems) : marketItems;
+        // [§8 · review S2-PRE] the shared listing gate, for EVERY caller (it was guests only)
+        return listableItemsForVendors(app.prisma, ctx.tenantId, marketItems);
       },
       rank: nameFirst(ctx.q),
       limit: ctx.limit,
@@ -287,8 +288,9 @@ export async function searchRoutes(app: FastifyInstance) {
       return { success: true, data: { vendors: [], items: [] } };
     }
 
-    // [S2-1] Hidden-only items never occupy a guest's window: excluded in the query.
-    const hiddenOnly = publicMode ? await hiddenOnlyItemIds(app.prisma, tenantId) : [];
+    // [S2-1] Hidden-only items never occupy the window: excluded in the query,
+    // for every caller (§8 · review S2-PRE: this was guests only).
+    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
 
     // Public discovery reads live browse eligibility. An index hit alone is
     // not authority to publish a listing whose visibility may have changed.
@@ -343,7 +345,10 @@ export async function searchRoutes(app: FastifyInstance) {
           }),
         ]);
         const vendorIds = new Set(liveVendors.filter(inLaunchMarket).map((v) => v.id));
-        const itemIds = new Set(liveItems.filter((i) => inLaunchMarket(i.vendor)).map((i) => i.id));
+        // [§8 · review S2-PRE] the index holds what the listing gate refuses (hidden-only
+        // tags, a lapsed licence): the same shared gate the Market feed and guests get
+        const listedLive = await listableItemsForVendors(app.prisma, tenantId, liveItems.filter((i) => inLaunchMarket(i.vendor)));
+        const itemIds = new Set(listedLive.map((i) => i.id));
         // open NOW, as the database says — the hit's copy may predate the opening
         const visibleVendors = vendorHits.filter((v) => vendorIds.has(v.id)).slice(0, parsedLimit).map((v) => ({ ...v, isCurrentlyOpen: true }));
         const visibleItems = itemHits.filter((i) => itemIds.has(i.id)).slice(0, parsedLimit);
@@ -408,8 +413,8 @@ export async function searchRoutes(app: FastifyInstance) {
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
     const publicMode = Boolean(request.publicTenantId);
     // [S2-1] Hidden-only items never occupy the fixed five-item window: they
-    // are excluded here, before the take, not after it.
-    const hiddenOnly = publicMode ? await hiddenOnlyItemIds(app.prisma, tenantId) : [];
+    // are excluded here, before the take, not after it — for every caller.
+    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
     const tiers = searchTiers(q, NAME_COLUMNS);
     const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode), ...(publicMode && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }) };
     const itemBase = {
@@ -445,7 +450,7 @@ export async function searchRoutes(app: FastifyInstance) {
         }),
         keep: async (found) => {
           const marketItems = found.filter((i) => inLaunchMarket(i.vendor));
-          return publicMode ? listableItemsForVendors(app.prisma, tenantId, marketItems) : marketItems;
+          return listableItemsForVendors(app.prisma, tenantId, marketItems);
         },
         limit: 5,
       }),
@@ -469,10 +474,8 @@ export async function searchRoutes(app: FastifyInstance) {
   app.get('/search/trending', { preHandler: [browseSearch] }, async (request) => {
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
     // [S2-1] Same rule, before the fixed take — a hidden-only tag must not
-    // crowd a trending row out of the rail's window.
-    const hiddenOnly = request.publicTenantId
-      ? await hiddenOnlyItemIds(app.prisma, tenantId)
-      : [];
+    // crowd a trending row out of the rail's window. Every caller (§8).
+    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
     const items = await app.prisma.item.findMany({
       where: {
         isAvailable: true,
@@ -490,9 +493,8 @@ export async function searchRoutes(app: FastifyInstance) {
 
     // [DS982] A dish from a store outside the launch market never trends.
     const marketItems = items.filter((i) => inLaunchMarket(i.vendor));
-    const listable = request.publicTenantId
-      ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
-      : marketItems;
+    // [§8 · review S2-PRE] the shared listing gate for every caller, as the Market feed
+    const listable = await listableItemsForVendors(app.prisma, tenantId, marketItems);
     return {
       success: true,
       // ItemHit plus the one field that makes it *trending* — a superset, never
