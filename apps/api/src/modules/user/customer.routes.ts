@@ -19,7 +19,7 @@ import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { customerCancelView, readNoMoverFound } from '../order/cancel-policy';
+import { customerCancelView, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { ORDER_TRANSITIONS } from '../order/order-status';
 import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
@@ -2666,9 +2666,10 @@ export async function customerRoutes(app: FastifyInstance) {
     // with its passenger aboard — read from there, never a hand-kept list, so
     // a FAILED or in-progress order is never promised a free cancel the
     // server then refuses.
-    const cancellableState = ORDER_TRANSITIONS.CANCELLED.includes(order.status)
-      && !(order.orderType === 'TAXI' && hasTaxiPassengerCustody(order))
-      && !(order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus));
+    const mmgPaidToStore = order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus);
+    const cancellableStage = ORDER_TRANSITIONS.CANCELLED.includes(order.status)
+      && !(order.orderType === 'TAXI' && hasTaxiPassengerCustody(order));
+    const cancellableState = cancellableStage && !mmgPaidToStore;
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the outcome shown here and the one the locked cancel commits can never
@@ -2689,9 +2690,18 @@ export async function customerRoutes(app: FastifyInstance) {
     // Every allowed cancel is free: there is no fee.
     const cancelView = cancellableState ? customerCancelView(policyOrder, previewNow) : null;
     const canCancel = cancelView?.canCancel === true;
-    const cancelUnavailable = cancelView?.cancelUnavailable
+    // [owner #46 · Opus S3-1] An MMG order already paid to the store is the
+    // store's to cancel and refund (the locked path refuses it with
+    // MMG_CANCEL_UNAVAILABLE) — and every accepted MMG order is paid (the
+    // payment-first gate). The customer still gets the store's contact, the
+    // one rail where it matters most.
+    const refusal = cancelView?.cancelUnavailable
+      ?? (cancellableStage && mmgPaidToStore && order.vendorId
+        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: MMG_PAID_STORE_CANCELS_MESSAGE }
+        : null);
+    const cancelUnavailable = refusal
       ? {
-          ...cancelView.cancelUnavailable,
+          ...refusal,
           // The store's (or the booked provider's) contact: only the number
           // the business chose to PUBLISH, by the storefront's own rule —
           // never `vendor.phone` (the account/OTP line). A ride or a parcel

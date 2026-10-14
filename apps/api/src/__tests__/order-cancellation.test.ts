@@ -983,13 +983,13 @@ describe('free cancellation when the mover search found nobody', () => {
     return res.json().data as { cancellationFee: number; message: string };
   }
 
-  async function expectFree(id: string, who = customer) {
+  async function expectFree(id: string, who = customer, message = NO_MOVER_PREVIEW) {
     const shown = await preview(id, who);
     expect(shown.cancellationFee).toBe(0);
     expect(shown.freeCancellationWindow).toBe(true);
     // Free until a mover takes it — there is no countdown to promise.
     expect(shown.freeCancellationExpiresAt).toBeNull();
-    expect(shown.cancellationMessage).toBe(NO_MOVER_PREVIEW);
+    expect(shown.cancellationMessage).toBe(message);
     const done = await cancel(id, who);
     expect(done.cancellationFee).toBe(0);
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).lateCancelFeeDue).toBe(0);
@@ -1078,7 +1078,9 @@ describe('free cancellation when the mover search found nobody', () => {
 
   it('an unattested MMG order is free too, and the message still says who refunds a payment already sent', async () => {
     const { order } = await exhaustedOrder(0, 'MOBILE_MONEY');
-    const done = await expectFree(order.id);
+    // [Opus S3-2, 14 Oct] An MMG order may already be paid to the store: the preview never says "free" for it
+    // and names who refunds, like the cancel result below.
+    const done = await expectFree(order.id, customer, 'No mover was found. You can cancel. If you already sent the MMG payment, the store refunds you directly.');
     expect(done.message).toBe(`${NO_MOVER_CANCELLED} If you already sent the MMG payment, the store refunds you directly.`);
   });
 

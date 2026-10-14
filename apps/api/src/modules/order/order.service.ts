@@ -23,7 +23,7 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { cancellationVerdict, readNoMoverFound } from './cancel-policy';
+import { cancellationVerdict, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
@@ -2513,11 +2513,8 @@ export class OrderService {
           // money landed unattested, the capture path's closed-order refusal
           // directs the store to refund directly.
           if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
-            throw new AppError(
-              409,
-              'MMG_CANCEL_UNAVAILABLE',
-              'This order is already paid by MMG to the store. The store cancels and refunds you directly — Swift never holds the money.',
-            );
+            // [owner #46 · Opus S3-1] The same words the order screen shows beside the store's number.
+            throw new AppError(409, 'MMG_CANCEL_UNAVAILABLE', MMG_PAID_STORE_CANCELS_MESSAGE);
           }
 
           const now = new Date();

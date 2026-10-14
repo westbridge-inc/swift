@@ -76,6 +76,10 @@ export type CancellationSnapshot = {
    *  Read by the caller with `readTooLateToDeliver` (dispatch/rescue) and
    *  passed in, like `noMoverFound`. Absent means "not known to be true". */
   tooLateToDeliver?: boolean;
+  /** [Opus S3-2] How the customer pays. An MMG order may already be paid to the
+   *  store outside Swift, so its words never promise "free". Optional: a
+   *  caller without it reads as not-MMG. */
+  paymentMethod?: string | null;
 };
 
 /** [Item 64] What the preview tells the customer when no mover was found. */
@@ -89,6 +93,13 @@ export const CANCEL_WINDOW_CLOSED_CODE = 'CANCEL_WINDOW_CLOSED';
 /** [owner #46] Why a store order is free right now, in plain words. */
 export const AWAITING_STORE_FREE_CANCEL_MESSAGE = 'You can cancel for free until the store accepts your order.';
 export const TOO_LATE_FREE_CANCEL_MESSAGE = 'Your order is running very late. You can cancel it for free.';
+/** [Opus S3-2 · REPORT-008 F-01] An MMG order may already be paid to the store outside Swift: no cancel surface
+ *  promises "free" for it, and the customer is told where any money comes back from. */
+export const MMG_STORE_REFUNDS_SENTENCE = 'If you already sent the MMG payment, the store refunds you directly.';
+/** [owner #46 · Opus S3-1] An MMG store order whose payment already reached the store: the store cancels and
+ *  refunds (Swift never holds the money), so the customer is pointed at the store, with its published number. */
+export const MMG_PAID_STORE_CANCELS_CODE = 'MMG_PAID_STORE_CANCELS';
+export const MMG_PAID_STORE_CANCELS_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money.';
 
 /** Why a cancel is free right now. */
 export type FreeCancelReason =
@@ -104,7 +115,7 @@ export type CancellationVerdict =
   | {
       allowed: false;
       free: false;
-      code: typeof STORE_ACCEPTED_CANCEL_CODE | typeof CANCEL_WINDOW_CLOSED_CODE;
+      code: typeof STORE_ACCEPTED_CANCEL_CODE | typeof CANCEL_WINDOW_CLOSED_CODE | typeof SERVICE_JOB_STARTED_CODE;
       message: string;
     };
 
@@ -346,6 +357,31 @@ export type CustomerCancelView = {
   cancelUnavailable: { code: string; message: string } | null;
 };
 
+/** [Opus S3-2] The same words for an MMG order, never promising "free" (Swift charges nothing, but the customer
+ *  may already have paid the store), plus where the money comes back from. */
+function mmgAwareMessage(message: string): string {
+  return `${message.replace(/ for free/g, '')} ${MMG_STORE_REFUNDS_SENTENCE}`;
+}
+
+// ---------------------------------------------------------------------------
+// [owner #50 · coordinator ruling 14 Oct 2026 (Opus S3-3)] A SERVICE JOB (a
+// quote-based local pro: request → quote → schedule → start → complete) joins
+// the one rule. The customer cancels free until the provider starts the work;
+// once it is IN PROGRESS the provider is in the customer's home or on the job,
+// so the app no longer cancels it — the customer contacts the provider (or
+// Swift support). The same principle as custody. There is never a fee.
+// ---------------------------------------------------------------------------
+
+export const SERVICE_JOB_STARTED_CODE = 'SERVICE_JOB_STARTED';
+export const SERVICE_JOB_STARTED_MESSAGE = 'Your provider has started this job, so it can no longer be cancelled in the app. Contact your provider, or Swift support, to change or stop it.';
+
+/** The customer's cancel of a service job: free until the provider starts it, refused once it is in progress.
+ *  Closed jobs (COMPLETED / CANCELLED) are the route's own "already closed" answer, before this is asked. */
+export function serviceJobCancelVerdict(job: { status: string }): CancellationVerdict {
+  if (job.status === 'IN_PROGRESS') return { allowed: false, free: false, code: SERVICE_JOB_STARTED_CODE, message: SERVICE_JOB_STARTED_MESSAGE };
+  return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
+}
+
 /** [owner #46/#50/#52] The verdict in the words the apps show. */
 export function customerCancelView(order: CancellationSnapshot, now: Date = new Date()): CustomerCancelView {
   const verdict = cancellationVerdict(order, now);
@@ -360,7 +396,9 @@ export function customerCancelView(order: CancellationSnapshot, now: Date = new 
   return {
     canCancel: true,
     freeCancellationExpiresAt: freeCancellationExpiresAt(order, now)?.toISOString() ?? null,
-    cancellationMessage,
+    cancellationMessage: cancellationMessage != null && order.paymentMethod === 'MOBILE_MONEY'
+      ? mmgAwareMessage(cancellationMessage)
+      : cancellationMessage,
     cancelUnavailable: null,
   };
 }

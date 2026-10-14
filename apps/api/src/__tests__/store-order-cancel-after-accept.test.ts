@@ -35,6 +35,7 @@ const DAY = 24 * 60 * 60 * 1000;
 const PUBLISHED = '+5926001234';
 const REFUSED_MESSAGE = 'The store has accepted your order, so it can no longer be cancelled in the app. Contact the store to change or cancel it.';
 const AWAITING_STORE_MESSAGE = 'You can cancel for free until the store accepts your order.';
+const MMG_PAID_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money.';
 const TOO_LATE_MESSAGE = 'Your order is running very late. You can cancel it for free.';
 
 let app: FastifyInstance;
@@ -238,16 +239,41 @@ describe('[owner #46] a store order cancels free only while it waits for the sto
     },
   );
 
-  it('an accepted MMG order whose payment is not yet confirmed is refused the same way (MMG is a store order too)', async () => {
-    const { vendorId } = await makeVendor();
-    const order = await makeStoreOrder(customer.userId, vendorId, 'ACCEPTED', { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' });
+  // [Opus S3-1] The payment-first gate means an accepted MMG store order is always already paid to the store
+  // (CAPTURED, or CLAIMED by the store). That is the real state: the store cancels and refunds, and the customer
+  // is pointed at the store with its published number — on time or very late.
+  it.each(['CAPTURED', 'CLAIMED'] as const)(
+    'an accepted MMG order already paid to the store (%s): no Cancel; the store\'s published number and "the store refunds you"',
+    async (paymentStatus) => {
+      const { vendorId, accountLine } = await makeVendor();
+      const order = await makeStoreOrder(customer.userId, vendorId, 'ACCEPTED', {
+        paymentMethod: 'MOBILE_MONEY', paymentStatus,
+        // 45 minutes past its promise: very late changes nothing while the store holds the money.
+        promisedAt: new Date(Date.now() - 45 * 60_000),
+      });
 
+      const { data, body } = await preview(order.id, customer.token);
+      expect(data).toMatchObject({
+        canCancel: false, cancellationFee: 0,
+        cancelUnavailable: { code: 'MMG_PAID_STORE_CANCELS', message: MMG_PAID_MESSAGE, contactPhone: PUBLISHED },
+      });
+      expect(body).not.toContain(accountLine);
+      const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toMatchObject({ code: 'MMG_CANCEL_UNAVAILABLE', message: MMG_PAID_MESSAGE });
+      expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
+    },
+  );
+
+  it('[Opus S3-2] an MMG order waiting for the store may be cancelled, but is never promised "free" — the customer may have paid the store', async () => {
+    const { vendorId } = await makeVendor();
+    const order = await makeStoreOrder(customer.userId, vendorId, 'PENDING', { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' });
     const { data } = await preview(order.id, customer.token);
-    expect(data).toMatchObject({ canCancel: false, cancellationFee: 0, cancelUnavailable: { code: 'STORE_ACCEPTED' } });
-    const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
-    expect(res.statusCode, res.body).toBe(409);
-    expect(res.json().error.code).toBe('STORE_ACCEPTED');
-    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
+    expect(data).toMatchObject({
+      canCancel: true, cancellationFee: 0,
+      cancellationMessage: 'You can cancel until the store accepts your order. If you already sent the MMG payment, the store refunds you directly.',
+    });
+    expect(data.cancellationMessage).not.toMatch(/free/i);
   });
 
   it('the contact is only the number the store PUBLISHED — none when it published none, none for a suspended store', async () => {
