@@ -695,6 +695,11 @@ describe('tenant-qualified admin access', () => {
     expect(riders.json().data.map((row: { id: string }) => row.id)).not.toContain(TENANT_B_RIDER_ID);
     expect(drivers.json().meta.total).toBe(expected.drivers);
     expect(drivers.json().data.map((row: { id: string }) => row.id)).not.toContain(TENANT_B_DRIVER_ID);
+    // [Owner report 8 Oct] every mover row carries the live document verdict GO uses (or null if it could not be read).
+    for (const row of [...riders.json().data, ...drivers.json().data] as Array<{ documentsLive?: { allowed: unknown } | null }>) {
+      expect(row).toHaveProperty('documentsLive');
+      if (row.documentsLive) expect(typeof row.documentsLive.allowed).toBe('boolean');
+    }
     expect(subscriptions.json().meta.total).toBe(expected.subscriptions);
     expect(subscriptions.json().data.map((row: { id: string }) => row.id)).not.toContain(TENANT_B_SUBSCRIPTION_ID);
     expect(settlements.json().meta.total).toBe(expected.settlements);
@@ -711,6 +716,12 @@ describe('tenant-qualified admin access', () => {
       await adminRequest('GET', `/api/v1/admin/finance/cash-settlements?riderId=${TENANT_B_RIDER_ID}`),
     ];
     for (const response of responses) expectNotFound(response);
+  });
+
+  it('[MC-PR2] returns 404 instead of reading the activation checklist of a store or mover in another tenant', async () => {
+    expectNotFound(await adminRequest('GET', `/api/v1/admin/vendors/${tenantBVendorId}/activation-checklist`));
+    expectNotFound(await adminRequest('GET', `/api/v1/admin/riders/${TENANT_B_RIDER_ID}/activation-checklist`));
+    expectNotFound(await adminRequest('GET', `/api/v1/admin/drivers/${TENANT_B_DRIVER_ID}/activation-checklist`));
   });
 
   it('returns 404 instead of reading a rider or driver from another tenant', async () => {
