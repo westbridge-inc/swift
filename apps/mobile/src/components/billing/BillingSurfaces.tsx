@@ -156,8 +156,8 @@ export function BillingStatusBlock({
   // amber CTA instead of a link buried under two lines of copy.
   if (isBehind(sub)) return <FeeReminderBanner sub={sub} onPay={onPay} style={style} />;
 
-  // Healthy — weekly fees paid ahead, as reassurance (owner ruling 8 Oct:
-  // "Fee paid ahead — covers N weeks"; the action is "Pay weekly fee").
+  // Healthy — the next weekly fee already paid, as reassurance (owner #62:
+  // one week at a time, never "paid ahead"; the action is "Pay weekly fee").
   const paidAhead = feePaidAheadLine(Number(sub.walletBalanceGyd ?? 0), weeklyFeeGyd(sub));
   if (paidAhead) {
     return (

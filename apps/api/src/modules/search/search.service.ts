@@ -26,6 +26,21 @@ export interface SearchClientLike {
 /** One reconcile page: Meilisearch's getDocuments cap is 1000 per call. */
 const RECONCILE_PAGE = 1000;
 
+/**
+ * How forgiving the index is — written out, not left to the engine's
+ * defaults, so a settings edit (or an engine upgrade with other defaults)
+ * cannot quietly make customer search exact (owner, 13 Oct: search must find
+ * "similar words or words that are part of the item"). One slip from five
+ * letters, two from nine: the floors the database path (forgiving-text.ts
+ * MIN_TYPO_LENGTH) mirrors, so both engines forgive the same slips. Applied on
+ * every start by `initialize()` — updateSettings is idempotent and needs no
+ * migration of an existing index.
+ */
+export const TYPO_TOLERANCE = {
+  enabled: true,
+  minWordSizeForTypos: { oneTypo: 5, twoTypos: 9 },
+} as const;
+
 export class SearchService {
   private client: SearchClientLike;
 
@@ -64,6 +79,7 @@ export class SearchService {
       filterableAttributes: ['tenantId', 'entityId', 'vendorType', 'status', 'isCurrentlyOpen', 'cuisineTypes', 'averageRating', 'city', 'store_categories', 'derived_categories', 'top_rated'],
       sortableAttributes: ['averageRating', 'totalOrders', 'name', 'display_rating', 'rating_count'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
+      typoTolerance: TYPO_TOLERANCE,
     });
 
     const itemIndex = this.client.index(ITEM_INDEX);
@@ -72,6 +88,7 @@ export class SearchService {
       filterableAttributes: ['tenantId', 'entityId', 'vendorId', 'isAvailable', 'isPopular', 'dietaryTags', 'basePrice', 'categories'],
       sortableAttributes: ['basePrice', 'totalOrdered', 'name'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
+      typoTolerance: TYPO_TOLERANCE,
     });
   }
 
@@ -173,7 +190,7 @@ export class SearchService {
       // unverified or dead-tenant operator's dishes into the index.
       where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL },
       include: {
-        vendor: { select: { name: true, status: true, tenantId: true } },
+        vendor: { select: { name: true, status: true, tenantId: true, isCurrentlyOpen: true } },
         category: { select: { name: true } },
       },
     });
@@ -364,7 +381,7 @@ export class SearchService {
         // switched-off operator's DISHES stay searchable — the exact shape of
         // the #790 defect, where a deactivated operator's dish sat above the
         // fold while their store was already hidden.
-        vendor: { select: { name: true, tenantId: true, ...VISIBLE_VENDOR_SELECT } },
+        vendor: { select: { name: true, tenantId: true, isCurrentlyOpen: true, ...VISIBLE_VENDOR_SELECT } },
         category: { select: { name: true } },
       },
     });

@@ -191,7 +191,8 @@ describe('[SX394] original stored aliases survive the exact migration', () => {
       await applyMigration(tx);
       const first = ` \tFILE-${nanoid(10)}-straße\t `;
       const second = mode === 'distinct' ? first.toUpperCase() : `\t${first}\t`;
-      const report = await importSettlementCsv(db, svc, `transaction_id,account_number,amount,paid_at\n${first},${san},2100,2026-09-01T10:00:00Z\n${second},${san},2100,2026-09-01T10:00:00Z\nTOTAL,4200`, { source: 'sx394-alias-test' });
+      // [owner #62] The two rows together are one week's fee (GY$2,100): one week at a time.
+      const report = await importSettlementCsv(db, svc, `transaction_id,account_number,amount,paid_at\n${first},${san},1050,2026-09-01T10:00:00Z\n${second},${san},1050,2026-09-01T10:00:00Z\nTOTAL,2100`, { source: 'sx394-alias-test' });
       expect(report.status).toBe(mode === 'distinct' ? 'PUBLISHED' : 'REJECTED');
       const staged = await db.settlementImport.findUniqueOrThrow({ where: { id: report.importId } });
       expect((staged.rows as Array<{ txnId: string }>).map((r) => r.txnId)).toEqual([first, second]);
