@@ -574,3 +574,45 @@ describe("Courier — a closed parcel does not keep the courier's phone", () => 
     expect(closed.json().data.rider.currentLat).toBeNull();
   });
 });
+
+// [GUARDRAILS §8 · owner #67] Swift never DELIVERS banned goods either: a parcel's description is screened against
+// the same prohibited-items list as the catalogue, and refused in plain words; the sender's declaration that the
+// parcel holds nothing prohibited is recorded on the order's own trail (the apps send it from build 11).
+describe('[§8 · #67] a parcel is screened against the prohibited-items list', () => {
+  const parcelsOf = (userId: string) => app.prisma.order.count({ where: { customerId: userId, orderType: 'COURIER' } });
+
+  it('a description naming banned goods is refused before anything is written; an ordinary parcel books', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    for (const [packageDescription, label] of [
+      ['2 bottles of El Dorado', 'alcohol'], ['20lb gas cylinder', 'cooking gas (LPG)'], ['Pack of cigarettes', 'tobacco and cigarettes'],
+      ['R​um for the party', 'alcohol'], ['Panadol for my mother', 'medicines'], ['Ganja', 'cannabis and illegal drugs'],
+    ] as const) {
+      const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription }, sender.token);
+      expect(res.statusCode, packageDescription).toBe(409);
+      expect(res.json().error).toMatchObject({
+        code: 'PROHIBITED_PARCEL',
+        message: `Swift can't carry this parcel: Swift never delivers ${label}. If it's something else, describe it in other words.`,
+      });
+    }
+    expect(await parcelsOf(sender.userId)).toBe(0);
+    const ok = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'School books and a lunch kit' }, sender.token);
+    expect(ok.statusCode, ok.body).toBe(201);
+  });
+
+  it('the sender\'s declaration is recorded on the order\'s trail; a parcel declared as holding a prohibited item books nothing', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const declined = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, declaresNoProhibitedItems: false }, sender.token);
+    expect(declined.statusCode).toBe(409);
+    expect(declined.json().error).toMatchObject({ code: 'PROHIBITED_PARCEL', message: 'Swift can\'t carry a parcel with a prohibited item in it.' });
+    expect(await parcelsOf(sender.userId)).toBe(0);
+
+    const declared = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, declaresNoProhibitedItems: true }, sender.token);
+    expect(declared.statusCode, declared.body).toBe(201);
+    const trail = await app.prisma.orderStatusLog.findFirstOrThrow({ where: { orderId: declared.json().data.orderId } });
+    expect(trail.note).toContain('The sender declared the parcel holds no prohibited items.');
+    // Apps before build 11 send no declaration: the booking still stands, and the trail does not claim one.
+    const older = await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token);
+    expect(older.statusCode, older.body).toBe(201);
+    expect((await app.prisma.orderStatusLog.findFirstOrThrow({ where: { orderId: older.json().data.orderId } })).note).not.toContain('declared');
+  });
+});

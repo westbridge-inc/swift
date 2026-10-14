@@ -73,7 +73,7 @@ const inFlightOrderIds: string[] = [];
 
 let vendor: { id: string; slug: string; token: string; ownerUserId: string; shelfId: string; legacySectionId: string };
 let customer: { id: string; token: string };
-let admin: { token: string };
+let admin: { id: string; token: string };
 let control: { id: string; name: string };
 type Legacy = 'rum' | 'cake' | 'combo' | 'bottle' | 'relief' | 'removed' | 'accent';
 const legacy = {} as Record<Legacy, { id: string; name: string }>;
@@ -194,6 +194,9 @@ beforeAll(async () => {
   customer = await userWithSession(['CUSTOMER'], 'CUSTOMER');
   await app.prisma.address.create({ data: { userId: customer.id, label: 'Home', addressLine1: '9 Rule Close', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, isDefault: true } });
   admin = await userWithSession(['SUPER_ADMIN'], 'SUPER_ADMIN');
+  // [Opus S3-9] Showing a held item needs the explicit catalogue-approver grant; this admin is given it on the record.
+  const granted = await inject('PUT', `/api/v1/admin/staff/${admin.id}/catalogue-approver`, admin.token, { grant: true }, { 'x-swift-reason': 'Runs the prohibited-items check' });
+  if (granted.statusCode !== 200) throw new Error(`catalogue-approver grant failed: ${granted.body}`);
 
   pharmacyCategory = await discoveryCategory('pharmacy', 'RETAIL');
   snacksCategory = await discoveryCategory('snacks', 'AISLE');
@@ -245,6 +248,7 @@ afterAll(async () => {
     await app.prisma.address.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.admin.deleteMany({ where: { userId: { in: users } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: users } } }).catch(() => {});
     await app.prisma.user.deleteMany({ where: { id: { in: users } } }).catch(() => {});
   });
@@ -517,6 +521,30 @@ describe('[§8] the admin catalogue check', () => {
     expect((await queue()).map((r) => r.itemId)).not.toContain(legacy.cake.id);
   });
 
+  // [Opus S3-9] Showing a held item is a criminal-liability decision: it needs an explicit grant that `*` and the
+  // role defaults never imply, and its record is written in the same transaction as the approval.
+  it('approving needs the catalogue-approver grant; the record is written with the approval', async () => {
+    const toffee = (await createItem({ name: `Rum toffee ${RUN}` })).json().data.id as string;
+    const row = (await queue()).find((q) => q.itemId === toffee)!;
+    const second = await userWithSession(['SUPER_ADMIN'], 'SUPER_ADMIN');
+    const refused = await inject('POST', `/api/v1/admin/catalogue-review/${toffee}/approve`, second.token, { wordsHash: row.wordsHash }, { 'x-swift-reason': REASON });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json().error).toMatchObject({ code: 'CATALOGUE_APPROVER_REQUIRED', message: 'You need the catalogue-approver permission to show a held item. A super-admin grants it under Staff. You can still remove an item.' });
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: toffee }, select: { reviewApprovedHash: true } })).reviewApprovedHash).toBeNull();
+    // Without the grant a moderator still REMOVES (the strict direction).
+    const scratch = await item({ name: `Rum glaze ${RUN}` });
+    expect((await inject('POST', `/api/v1/admin/catalogue-review/${scratch.id}/remove`, second.token, { prohibitedClass: 'ALCOHOL' }, { 'x-swift-reason': REASON })).statusCode).toBe(200);
+
+    expect((await inject('PUT', `/api/v1/admin/staff/${second.id}/catalogue-approver`, admin.token, { grant: true })).statusCode).toBe(400); // a reason is owed
+    expect((await inject('PUT', `/api/v1/admin/staff/${second.id}/catalogue-approver`, admin.token, { grant: true }, { 'x-swift-reason': 'Joins the catalogue check' })).statusCode).toBe(200);
+    const staff = (await inject('GET', '/api/v1/admin/staff/document-reviewers', admin.token)).json().data as Array<{ userId: string; catalogueApprover: boolean; documentReviewer: boolean }>;
+    expect(staff.find((u) => u.userId === second.id)).toMatchObject({ catalogueApprover: true, documentReviewer: false });
+    const ok = await inject('POST', `/api/v1/admin/catalogue-review/${toffee}/approve`, second.token, { wordsHash: row.wordsHash }, { 'x-swift-reason': REASON });
+    expect(ok.statusCode).toBe(200);
+    const records = await system(() => app.prisma.auditLog.findMany({ where: { entityId: toffee, userId: second.id } }));
+    expect(records.filter((r) => (r.changes as { approvedWordsHash?: string } | null)?.approvedWordsHash === row.wordsHash)).toHaveLength(1);
+  });
+
   // [Opus S3-10] A disguised word reaches a person: the database pre-filter reads each column as the
   // classifier does (format characters, look-alikes, fullwidth, spelled-out letters, "rosé").
   it('a disguised word reaches the queue', async () => {
@@ -759,6 +787,31 @@ describe('[§8] an order already placed with a line Swift no longer allows never
       expect(res.statusCode, original.name).toBe(409);
       expect(res.json().error).toMatchObject({ code: 'PROHIBITED_ITEM', details: { itemId: legacy.removed.id } });
     }
+  });
+
+  // [Opus S3-6/S3-7] The store's own courier already has the goods: "delivered" is never held. And once the store
+  // cannot reject (ready, or MMG money already moved), a refusal never tells it to.
+  it('a store-delivered order can always be marked delivered; a refusal never says "Reject" when the store cannot', async () => {
+    const own = await placed('READY_FOR_PICKUP', [control, legacy.removed], 'DELIVERY');
+    await app.prisma.order.update({ where: { id: own.id }, data: { fulfillmentMode: 'VENDOR_DELIVERY' } });
+    const delivered = await inject('PUT', `/api/v1/vendor/orders/${own.id}/delivered`, vendor.token, {});
+    expect(delivered.statusCode).toBe(200);
+    expect(await statusOf(own.id)).toBe('DELIVERED');
+
+    const counter = await placed('READY_FOR_PICKUP', [legacy.removed]);
+    await expect(runWithTenant(TENANT, () => orders.updateStatus(counter.id, 'COMPLETED', vendor.ownerUserId, 'Collected at the counter')))
+      .rejects.toMatchObject({ code: 'PROHIBITED_ITEM', message: `This order can't go ahead: ${legacy.removed.name} isn't allowed on Swift. Ask Swift support to cancel it — the customer is told.` });
+    expect(await statusOf(counter.id)).toBe('READY_FOR_PICKUP');
+
+    const mmg = await placed('ACCEPTED', [legacy.bottle]);
+    await app.prisma.order.update({ where: { id: mmg.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' } });
+    const held = await inject('PUT', `/api/v1/vendor/orders/${mmg.id}/preparing`, vendor.token, {});
+    expect(held.statusCode).toBe(409);
+    expect(held.json().error.message).toBe(`This order can't go ahead yet: ${legacy.bottle.name} is waiting for a quick check by Swift. Wait for the check, or ask Swift support to cancel the order — the customer is told.`);
+    // Where the store CAN reject, it is told so.
+    const cash = await placed('ACCEPTED', [legacy.bottle]);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${cash.id}/preparing`, vendor.token, {})).json().error.message)
+      .toBe(`This order can't go ahead yet: ${legacy.bottle.name} is waiting for a quick check by Swift. Reject the order, or wait for the check.`);
   });
 
   // [DS1106 S3] A line the store refunded, or a substitution the customer rejected, is no longer on the order.

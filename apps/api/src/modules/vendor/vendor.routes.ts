@@ -6,6 +6,7 @@ import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
 import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, releaseLapsedHoldInTransaction } from '../order/order.service';
+import { STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
@@ -2344,7 +2345,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // every recipient. [Q10] After the ownership check, never before it.
     const { acknowledgeAlert } = await import('../notification/notification.service');
     await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
-    const rejectableStatuses = ['PENDING', 'ACCEPTED', 'PREPARING'];
+    const rejectableStatuses: readonly string[] = STORE_REJECTABLE_STATUSES;
     if (!rejectableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot reject order in ${order.status} status`);
     }

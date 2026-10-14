@@ -28,7 +28,7 @@
  */
 import { Prisma, type OrderStatus, type PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
-import { custodyOf, ORDER_TRANSITIONS } from '../order/order-status';
+import { custodyOf, ORDER_TRANSITIONS, STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import {
   certainGoods,
   checkItem,
@@ -338,6 +338,24 @@ export function movesTowardCustomer(source: OrderStatus, target: OrderStatus): b
 }
 
 /**
+ * Is THIS move held back at the canonical seam? `movesTowardCustomer`, except
+ * the store marking its OWN delivery done: a store-delivered order waits at
+ * READY_FOR_PICKUP while the store's courier is already out with the goods, so
+ * refusing "delivered" records nothing true and strands the order. [Opus S3-6]
+ */
+export function heldAtSeam(source: { status: OrderStatus; fulfillmentMode?: string | null }, target: OrderStatus): boolean {
+  if (target === 'DELIVERED' && source.fulfillmentMode === 'VENDOR_DELIVERY') return false;
+  return movesTowardCustomer(source.status, target);
+}
+
+/** Can the store still reject this order itself? Only before it is ready, and never on MMG money already moved
+ *  (the cancel paths refuse that). Otherwise only Swift support cancels — and the refusal must say so. [Opus S3-6/S3-7] */
+export function storeMayReject(order: { status: OrderStatus; paymentMethod?: string | null; paymentStatus?: string | null }, mmgMoneyMoved: ReadonlySet<string>): boolean {
+  if (!(STORE_REJECTABLE_STATUSES as readonly string[]).includes(order.status)) return false;
+  return !(order.paymentMethod === 'MOBILE_MONEY' && mmgMoneyMoved.has(order.paymentStatus ?? ''));
+}
+
+/**
  * An order placed before this rule — or whose item a person removed, or whose
  * words changed, after it was placed — does not go ahead while a line is
  * hidden. Each line is judged by its item's verdict today AND by its own
@@ -351,7 +369,7 @@ export function movesTowardCustomer(source: OrderStatus, target: OrderStatus): b
  *   · 'mover' — an offer card or a board grab: the rider is told the job is
  *     paused, nothing about the goods (409 JOB_UNAVAILABLE).
  */
-export async function assertOrderMayProceed(db: Db, orderId: string, audience: 'store' | 'mover'): Promise<void> {
+export async function assertOrderMayProceed(db: Db, orderId: string, audience: 'store' | 'mover', options: { storeMayReject?: boolean } = {}): Promise<void> {
   // A line the store refunded, or a substitution the customer rejected, is no longer on the order. [DS1106 S3]
   const rows = await db.orderItem.findMany({
     where: { orderId, subStatus: { notIn: ['REFUNDED', 'REJECTED'] } },
@@ -371,9 +389,15 @@ export async function assertOrderMayProceed(db: Db, orderId: string, audience: '
     if (audience === 'mover') {
       throw new AppError(409, 'JOB_UNAVAILABLE', 'This job isn\'t available — Swift has paused it. Take another job.', { reason: 'PROHIBITED' });
     }
+    // Never "Reject the order" when the store cannot: once ready, or on MMG money already moved. [Opus S3-6/S3-7]
+    const canReject = options.storeMayReject !== false;
     const message = live?.state === 'WAITING'
-      ? `This order can't go ahead yet: ${line.name} is waiting for a quick check by Swift. Reject the order, or wait for the check.`
-      : `This order can't go ahead: ${line.name} isn't allowed on Swift. Reject the order, or ask Swift support to cancel it — the customer is told.`;
+      ? (canReject
+        ? `This order can't go ahead yet: ${line.name} is waiting for a quick check by Swift. Reject the order, or wait for the check.`
+        : `This order can't go ahead yet: ${line.name} is waiting for a quick check by Swift. Wait for the check, or ask Swift support to cancel the order — the customer is told.`)
+      : (canReject
+        ? `This order can't go ahead: ${line.name} isn't allowed on Swift. Reject the order, or ask Swift support to cancel it — the customer is told.`
+        : `This order can't go ahead: ${line.name} isn't allowed on Swift. Ask Swift support to cancel it — the customer is told.`);
     throw new AppError(409, 'PROHIBITED_ITEM', message, { itemId: line.itemId, reason: 'PROHIBITED' });
   }
 }
