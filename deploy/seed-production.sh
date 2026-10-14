@@ -125,7 +125,13 @@ if [ "$PILOT_ENV" = production ]; then
   fi
   [ -n "${SEED_ADMIN_EMAIL:-}" ] ||
     die "the production seed needs the owner's admin email: type it at the prompt, or run read -rs SEED_ADMIN_EMAIL; export SEED_ADMIN_EMAIL first"
-  [[ "$SEED_ADMIN_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@.]+(\.[^[:space:]@.]+)+$ ]] ||
+  # Plain ASCII letters, digits and . _ % + - only, one line, as seed-plan.ts
+  # requires: the approver reads the domain exactly, so nothing invisible,
+  # right-to-left or look-alike may pass. The value goes through a pipe (printf
+  # is a builtin), never an argument; grep runs in the C locale (bytes).
+  case "$SEED_ADMIN_EMAIL" in *$'\n'* | *$'\r'*) die "SEED_ADMIN_EMAIL is not an email address (it is not shown)" ;; esac
+  [ "${#SEED_ADMIN_EMAIL}" -le 254 ] && printf '%s\n' "$SEED_ADMIN_EMAIL" |
+    LC_ALL=C grep -Eq '^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+$' ||
     die "SEED_ADMIN_EMAIL is not an email address (it is not shown)"
   export SEED_ADMIN_EMAIL
 else

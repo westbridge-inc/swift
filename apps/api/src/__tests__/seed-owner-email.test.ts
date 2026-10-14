@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,8 +38,13 @@ const makeKey = (name: string) => {
 const OWNER_ONLY = `owner ${makeKey('owner')}\n`;
 const APPROVE = join(process.cwd(), '../../deploy/seed-approve.sh');
 const yesFor = (request: string) => ({ SEED_APPROVE_YES: /^nonce: ([0-9a-f]+)$/m.exec(request)?.[1] ?? 'missing-nonce' });
+/** seed-approve.sh as the owner, confirming `typed` as the admin email he expects
+ *  (SEED_APPROVE_EMAIL stands in for his hidden prompt without a terminal). */
+const approve = (request: string, typed: string | null = EMAIL) => spawnSync('bash', [APPROVE, 'owner', join(KEYDIR, 'owner')], {
+  input: request, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...yesFor(request), ...(typed === null ? {} : { SEED_APPROVE_EMAIL: typed }) },
+});
 function sign(request: string): SignedApproval {
-  const r = spawnSync('bash', [APPROVE, 'owner', join(KEYDIR, 'owner')], { input: request, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...yesFor(request) } });
+  const r = approve(request);
   expect(r.status, r.stderr).toBe(0);
   return JSON.parse(r.stdout.trim()) as SignedApproval;
 }
@@ -102,7 +108,9 @@ describe('[OWNER EMAIL] the approver reads the owner email, masked, and signs it
   it('the request shows the first letter, the domain and a digest, never the whole address', async () => {
     const { request } = await emailCase(1, EMAIL);
     const line = request.split('\n').find((l) => l.startsWith('admin email: '));
-    expect(line).toMatch(new RegExp(`^admin email: o…@example\\.invalid \\(sha256 [0-9a-f]{16}\\) is set on that account if it has no email$`));
+    // [SECREVIEW 14 Oct] The whole address is bound by its FULL sha256 (not a
+    // 64-bit prefix), so no other address can be signed in its place.
+    expect(line).toBe(`admin email: o…@example.invalid (sha256 ${createHash('sha256').update(EMAIL).digest('hex')}) is set on that account if it has no email`);
     expect(request).not.toContain(EMAIL);
     // Without an email the words are exactly as before: no email line at all.
     expect((await emailCase(1, null)).request).not.toContain('admin email:');
@@ -130,6 +138,50 @@ describe('[OWNER EMAIL] the approver reads the owner email, masked, and signs it
     } finally {
       await cleanUp();
     }
+  });
+});
+
+describe('[SECREVIEW 14 Oct] what the approver reads is the address the seed writes', () => {
+  it('an address with a character outside plain ASCII is refused: nothing invisible, right-to-left or look-alike can show as another domain', async () => {
+    const plan = await buildSeedPlan(prisma, URL_, desiredFor(8));
+    for (const bad of [
+      'owner@exa\u200bmple.invalid',   // zero-width space: shows as example.invalid
+      'owner@\u202ednalavni.elpmaxe',  // right-to-left override: shows reversed
+      'owner@ex\u0430mple.invalid',    // Cyrillic a: looks like example.invalid
+      'own\u00e9r@example.invalid',    // a non-ASCII letter in the hidden local part
+      'owner@example.invalid\u2060',   // word joiner at the end
+    ]) {
+      expect(() => planRequestFacts(plan, { fxGydPerUsd: 209, adminPhone: PHONE, adminEmail: bad, solo: true }), JSON.stringify(bad)).toThrow(/EMAIL_INVALID/);
+    }
+    // Plain addresses still pass.
+    for (const good of [EMAIL, 'o.brien+swift_1%x@mail-1.example.invalid', 'O.Wner@Example.Invalid']) {
+      expect(planRequestFacts(plan, { fxGydPerUsd: 209, adminPhone: PHONE, adminEmail: good, solo: true }).shows.some((l) => l.startsWith('admin email: '))).toBe(true);
+    }
+  });
+
+  it('deploy/seed-approve.sh signs only when the approver types the same address (hidden), and never prints it', async () => {
+    const { request } = await emailCase(9, EMAIL);
+    const wrong = approve(request, `other.${RUN}@example.invalid`);
+    expect(wrong.status).not.toBe(0);
+    expect(wrong.stderr).toContain('the admin email in this request is not the address you typed; nothing signed');
+    expect(wrong.stdout).toBe('');
+    expect(wrong.stderr).not.toContain(`other.${RUN}`);
+    // Same first letter and domain, so the masked words alone could not tell them apart.
+    expect(approve(request, `o.${RUN}@example.invalid`).status).not.toBe(0);
+    expect(approve(request, EMAIL.toUpperCase()).status).not.toBe(0);
+    const right = approve(request, EMAIL);
+    expect(right.status, right.stderr).toBe(0);
+    expect(right.stdout.trim()).toMatch(/^\{"approver":"owner","request":"[A-Za-z0-9+/=]+","signature":"[A-Za-z0-9+/=]+"\}$/);
+    expect(right.stdout + right.stderr).not.toContain(EMAIL);
+  });
+
+  it('deploy/seed-approve.sh refuses an admin email line that does not carry the full digest', async () => {
+    const { request } = await emailCase(10, EMAIL);
+    const cut = request.replace(/\(sha256 ([0-9a-f]{16})[0-9a-f]*\)/, '(sha256 $1)');
+    expect(cut).not.toBe(request);
+    const r = approve(cut, EMAIL);
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toBe('');
   });
 });
 

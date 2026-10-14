@@ -510,6 +510,19 @@ class SeedSoloCeremony(SeedBreakGlassCeremony):
                 self.assertNotIn(bad, result.stdout + result.stderr)
                 self.assertNotIn("docker", self.log.read_text())
 
+    def test_an_address_outside_plain_ascii_is_refused_and_not_shown(self):
+        # [SECREVIEW 14 Oct] The approver reads the domain exactly: nothing
+        # invisible, right-to-left or look-alike may pass, and no second line.
+        self.production()
+        for bad in ("owner@exa\u200bmple.invalid", "owner@\u202ednalavni.elpmaxe", "owner@ex\u0430mple.invalid",
+                    "own\u00e9r@example.invalid", "owner@example.invalid\nx@example.invalid"):
+            with self.subTest(bad=bad):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_ADMIN_EMAIL is not an email address (it is not shown)", result.stderr)
+                self.assertNotIn("docker", self.log.read_text())
+
     def test_on_a_terminal_the_email_is_typed_at_a_hidden_prompt(self):
         import pty
         self.production()

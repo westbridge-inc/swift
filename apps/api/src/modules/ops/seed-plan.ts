@@ -174,11 +174,16 @@ function shown(v: unknown): string {
 }
 const databaseLine = (t: TargetFingerprint) => `database: ${t.database} on ${t.host}, deployment ${t.deploymentId} (${t.environment})`;
 const phoneTail = (phone: string) => phone.slice(-4);
-/** An address the way people type them; users.email is unique and compared exactly. */
-const EMAIL = /^[^\s@]{1,64}@[^\s@.]+(\.[^\s@.]+)+$/;
+/** An address as people type them, in plain ASCII letters, digits and . _ % + - ([SECREVIEW 14 Oct]:
+ *  the approver reads its domain exactly, so no invisible, right-to-left or
+ *  look-alike character can make it show as another); users.email is unique
+ *  and compared exactly. */
+const EMAIL = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
 export const validAdminEmail = (email: string) => email.length <= 254 && EMAIL.test(email);
-/** First letter, the domain and a digest: enough to recognise, and the digest binds it. */
-const emailShown = (email: string) => `${email[0]}…@${email.slice(email.indexOf('@') + 1)} (sha256 ${sha256(email).slice(0, 16)})`;
+/** First letter, the domain and the FULL sha256: enough to recognise without
+ *  spreading the address, and the digest binds all of it. seed-approve.sh has
+ *  the approver type the address he expects and compares this digest. */
+const emailShown = (email: string) => `${email[0]}…@${email.slice(email.indexOf('@') + 1)} (sha256 ${sha256(email)})`;
 
 /** The words an approver reads for this plan, in order, every change listed. */
 export function planRequestFacts(plan: SeedPlan, ctx: RequestContext = {}): RequestFacts {

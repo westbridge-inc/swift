@@ -1032,6 +1032,16 @@ SEED_APPROVER_KEYS may then pin just the one approver's key.
       SUPER_ADMIN appears before it runs, nothing lands and the approval is
       not used up.
 
+   The owner's admin email (production): solo approval in the apps emails
+   the owner, so the seed writes his email on the first SUPER_ADMIN's account
+   (only if it has none; never over a different one, never one another
+   account uses). It is personal data: at a and c the script asks for it at a
+   hidden prompt on the terminal (or run `read -rs SEED_ADMIN_EMAIL; export
+   SEED_ADMIN_EMAIL` first), and the same address must be used both times.
+   Plain ASCII letters, digits and . _ % + - only. The request shows it
+   masked, with its full sha256; at b, seed-approve.sh asks the approver to
+   type the address he expects (hidden) and signs only if it has that digest.
+
 4. SEED_PLAN_SECRET is no longer used (approvals are the approvers' own
    signatures). If the production store still holds it, from 5 Oct, remove
    it, then confirm the list no longer names it:
