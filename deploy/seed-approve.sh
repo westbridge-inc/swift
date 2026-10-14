@@ -47,20 +47,24 @@ REQUEST="$(tr -d '\r' | awk 'NF { started = 1 } started { print }')"
 [ "$(printf '%s\n' "$REQUEST" | tail -1)" = end ] || die "the request is cut short or has something after it: its last line must be: end"
 [ "$(printf '%s\n' "$REQUEST" | wc -l | tr -d ' ')" -le 4000 ] || die "the request is too long to be one the server printed"
 # Nothing hidden from you: no control characters (they can hide a line on a terminal).
-if printf '%s\n' "$REQUEST" | LC_ALL=C grep -q '[[:cntrl:]]'; then die "the request contains control characters; ask the operator for the request exactly as the server printed it"; fi
-# Nor invisible or direction-changing ones (Unicode format characters, as
-# UTF-8 bytes): right-to-left overrides and isolates, zero-width marks, the
-# byte-order mark, a soft hyphen, tags. They can reorder or hide text on your
-# screen. The server never prints them (approvalRequest) [SECREVIEW S4].
-FORMAT_BYTES=$'\xc2\xad|\xd8[\x80-\x85\x9c]|\xe1\xa0\x8e|\xe2\x80[\x8b-\x8f\xaa-\xae]|\xe2\x81[\xa0-\xaf]|\xef\xbb\xbf|\xef\xbf[\xb9-\xbb]|\xf3\xa0[\x80\x81]'
-if printf '%s\n' "$REQUEST" | LC_ALL=C grep -Eq "$FORMAT_BYTES"; then die "the request contains invisible or direction-changing characters; ask the operator for the request exactly as the server printed it"; fi
+# Every grep -q here reads a here-string, never a pipe: under pipefail, grep
+# stopping at its first match can kill a still-writing printf (SIGPIPE) on a
+# long request, which would turn a refusal off or refuse a good request.
+if LC_ALL=C grep -q '[[:cntrl:]]' <<< "$REQUEST"; then die "the request contains control characters; ask the operator for the request exactly as the server printed it"; fi
+# Nor invisible or direction-changing ones: every Unicode format character
+# (category Cf, all 170 in Unicode 16), as UTF-8 bytes: right-to-left
+# overrides and isolates, zero-width marks, the byte-order mark, a soft hyphen,
+# tags and the rest. They can reorder or hide text on your screen. The server
+# never prints them (approvalRequest) [SECREVIEW S4].
+FORMAT_BYTES=$'\xc2\xad|\xd8[\x80-\x85\x9c]|\xdb\x9d|\xdc\x8f|\xe0\xa2[\x90\x91]|\xe0\xa3\xa2|\xe1\xa0\x8e|\xe2\x80[\x8b-\x8f\xaa-\xae]|\xe2\x81[\xa0-\xaf]|\xef\xbb\xbf|\xef\xbf[\xb9-\xbb]|\xf0\x91\x82\xbd|\xf0\x91\x83\x8d|\xf0\x93\x90[\xb0-\xbf]|\xf0\x9b\xb2[\xa0-\xa3]|\xf0\x9d\x85[\xb3-\xba]|\xf3\xa0[\x80\x81]'
+if LC_ALL=C grep -Eq "$FORMAT_BYTES" <<< "$REQUEST"; then die "the request contains invisible or direction-changing characters; ask the operator for the request exactly as the server printed it"; fi
 # It must say what it approves, in words: the database, and the configuration
 # with its FX rate (a plan) or the promotion (a break-glass promotion).
-printf '%s\n' "$REQUEST" | grep -q '^database: ' || die "the request does not name the database; ask the operator for the full request"
+grep -q '^database: ' <<< "$REQUEST" || die "the request does not name the database; ask the operator for the full request"
 KIND="$(printf '%s\n' "$REQUEST" | sed -n 's/^kind: //p' | head -1)"
 case "$KIND" in
-  plan) printf '%s\n' "$REQUEST" | grep -q '^config: ' || die "this plan request does not show its configuration and FX rate; ask the operator for the full request" ;;
-  promote) printf '%s\n' "$REQUEST" | grep -q '^promote: ' || die "this promotion request does not say who is promoted; ask the operator for the full request" ;;
+  plan) grep -q '^config: ' <<< "$REQUEST" || die "this plan request does not show its configuration and FX rate; ask the operator for the full request" ;;
+  promote) grep -q '^promote: ' <<< "$REQUEST" || die "this promotion request does not say who is promoted; ask the operator for the full request" ;;
   *) die "the request kind must be plan or promote" ;;
 esac
 
