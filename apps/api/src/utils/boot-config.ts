@@ -9,6 +9,7 @@ import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
+import { smtpConfigFromEnv } from '../providers/notifications/smtp-email';
 import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
 /**
@@ -83,6 +84,34 @@ export function assertCardSimulatorNotPublic(env: Record<string, string | undefi
 export function assertNoLiveCardsOffProduction(env: Record<string, string | undefined>): void {
   if (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] === 'live') {
     throw new Error('FATAL: CARD_RAIL_ENVIRONMENT=live (real cards) outside production — a test server never charges real cards. Use sandbox here. Refusing to start.');
+  }
+}
+
+/**
+ * [LAUNCH-LOCK · owner ruling 13 Oct, #34] Until an attorney signs off,
+ * production takes no card payment and runs no ads (GUARDRAILS §8). Both are
+ * already off by default; this makes "off" a refusal to boot rather than a
+ * setting someone can flip: turning either on in production is a reviewed
+ * change to this function (and to pilot-up.sh's matching refusal), never a
+ * deploy/.env edit.
+ *   Cards: no card instruction (PAYMENT_PROVIDER exactly disabled; the
+ *   card-rail contract, checked earlier, then also requires CARD_RAIL_KILL=1),
+ *   and none of card rail v2's switches (CARD_RAIL_V2, its drain, saving
+ *   cards) set to anything but 0. With v2 off the weekly fee never offers a
+ *   CARD pay action.
+ *   Ads: ADS_ENABLED unset or 0 (only exactly 1 opens the ads routes).
+ * Called only in production. Each refusal names its setting, never a value.
+ */
+function assertProductionLaunchLocks(env: Record<string, string | undefined>): void {
+  if (env['PAYMENT_PROVIDER'] !== 'disabled') {
+    throw new Error('FATAL: PAYMENT_PROVIDER must be exactly disabled in production — no card payment until an attorney signs off (owner ruling, 13 Oct); turning cards on is a reviewed code change, not a setting. Refusing to start.');
+  }
+  for (const name of ['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'] as const) {
+    const value = env[name];
+    if (value !== undefined && value !== '' && value !== '0') {
+      const what = name === 'ADS_ENABLED' ? 'ads stay off' : 'no card payment';
+      throw new Error(`FATAL: ${name} must be unset or 0 in production — ${what} until an attorney signs off (owner ruling, 13 Oct); turning it on is a reviewed code change, not a setting. Refusing to start.`);
+    }
   }
 }
 
@@ -244,18 +273,28 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // MMG subscription collection has a deterministic sandbox lookup that can
   // report approval. Require the live driver, every credential, and a URL that
   // is not the published UAT host before workers are allowed to run.
-  if (env['MMG_DRIVER'] !== 'live') {
-    throw new Error('FATAL: MMG_DRIVER must be live in production; sandbox/unset can settle synthetic subscription payments. Refusing to start.');
+  // [PROD-PATH] Owner ruling, 4 Oct 2026: production may instead run with MMG
+  // fully OFF until the live merchant keys arrive — but only by the exact,
+  // explicit MMG_DRIVER=disabled. Then nothing reaches MMG: the billing rail
+  // defers instead of charging, the poller leaves every row as it is, and
+  // every provider call refuses with MMG_DISABLED (providers/mmg). The hosted
+  // checkout must be off with it (assertMmgCheckoutConfig, above, refuses it
+  // on). Unset, sandbox or a near miss ('off', 'Disabled') is still refused.
+  const mmgDriver = env['MMG_DRIVER'];
+  if (mmgDriver !== 'live' && mmgDriver !== 'disabled') {
+    throw new Error('FATAL: MMG_DRIVER must be live (or exactly disabled, MMG fully off) in production; sandbox/unset can settle synthetic subscription payments. Refusing to start.');
   }
-  for (const name of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'] as const) {
-    if (!env[name]) throw new Error(`FATAL: ${name} is required when MMG_DRIVER=live. Refusing to start.`);
-  }
-  if (env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
-    throw new Error('FATAL: MMG_REFERENCE_ROUNDTRIP_VERIFIED must be exactly 1 after sandbox UAT proves the merchant reference in lookup and history. Refusing to start.');
-  }
-  const mmgUrl = env['MMG_API_URL'];
-  if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
-    throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
+  if (mmgDriver === 'live') {
+    for (const name of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'] as const) {
+      if (!env[name]) throw new Error(`FATAL: ${name} is required when MMG_DRIVER=live. Refusing to start.`);
+    }
+    if (env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
+      throw new Error('FATAL: MMG_REFERENCE_ROUNDTRIP_VERIFIED must be exactly 1 after sandbox UAT proves the merchant reference in lookup and history. Refusing to start.');
+    }
+    const mmgUrl = env['MMG_API_URL'];
+    if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
+      throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
+    }
   }
 
   // SWIFT-012: the 'dev' notification provider logs OTP SMS to the console
@@ -284,6 +323,50 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   const pusher = env['PUSH_PROVIDER'] ?? 'dev';
   if (pusher === 'dev') {
     throw new Error('FATAL: PUSH_PROVIDER is dev (in-memory) in production — every push would be silently swallowed while reporting success: no new-order alerts, no dispatch offers, no safety pings. Set PUSH_PROVIDER=expo. Refusing to start.');
+  }
+
+  // [PROD-PATH] An unacknowledged SOS escalates to the on-call tree by SMS
+  // (modules/safety/ops-alert.ts). onCallPhones() keeps only E.164 entries
+  // and drops the rest without a word, so an empty or mistyped list means an
+  // escalation that pages nobody while every metric reads healthy. Refuse it.
+  // The refusal names the setting, never a number in it.
+  const onCall = (env['OPS_ONCALL_PHONES'] ?? '').split(',').map((p) => p.trim());
+  const onCallListed = onCall.filter((p) => p !== '');
+  if (onCallListed.length === 0) {
+    throw new Error('FATAL: OPS_ONCALL_PHONES is empty in production — an unacknowledged SOS escalates to the on-call phones by SMS, and with none it pages nobody. Set one or more E.164 numbers, comma-separated (+592…). Refusing to start.');
+  }
+  if (onCallListed.length !== onCall.length || onCallListed.some((p) => !/^\+[1-9]\d{6,14}$/.test(p))) {
+    throw new Error('FATAL: OPS_ONCALL_PHONES has an entry that is not an E.164 number (+ then 7–15 digits, comma-separated) — it would be dropped silently and never paged. Refusing to start.');
+  }
+
+  // [PROD-PATH · owner ruling 8 Oct] Production launches with admin top-ups ON
+  // HOLD: admin.routes.ts refuses every manual credit of fee paid ahead exactly
+  // when BILLING_TOPUP_HOLD is '1'. pilot-up.sh refuses a production deploy
+  // without it; this holds it however the API is started.
+  if (env['BILLING_TOPUP_HOLD'] !== '1') {
+    throw new Error('FATAL: BILLING_TOPUP_HOLD must be exactly 1 in production — admin top-ups stay on hold (owner ruling, 8 Oct). Set BILLING_TOPUP_HOLD=1 in deploy/.env. Refusing to start.');
+  }
+  // Partners pay the weekly fee only on the MMG checkout page, never through an
+  // agent or a Swift Number. The agent-cash webhook answers 503 while its
+  // secret is unset; production never sets it. Named, never echoed.
+  if ((env['AGENT_CASH_WEBHOOK_SECRET'] ?? '') !== '') {
+    throw new Error('FATAL: AGENT_CASH_WEBHOOK_SECRET is set in production — partners pay the weekly fee only on the MMG checkout page, never through an agent or a Swift Number. Remove it (and its _FILE line). Refusing to start.');
+  }
+  assertProductionLaunchLocks(env);
+
+  // [PROD-PATH] Email: receipts, expiry warnings, data-export links. The dev
+  // sender refuses only at the FIRST send in production (channels.ts), so a
+  // missing sender stayed invisible until a customer was owed an email. The
+  // launch sender is SMTP; its whole configuration is checked here, by the
+  // same reader the sender uses (it names missing settings, never values).
+  const emailProvider = env['EMAIL_PROVIDER'];
+  if (emailProvider !== 'smtp') {
+    throw new Error('FATAL: EMAIL_PROVIDER must be smtp in production — unset or dev sends no receipt, notice or export link. Set EMAIL_PROVIDER=smtp with SMTP_HOST, SMTP_PORT, SMTP_USER, EMAIL_FROM and the SMTP_PASS secret. Refusing to start.');
+  }
+  try {
+    smtpConfigFromEnv(env);
+  } catch (error) {
+    throw new Error(`FATAL: ${error instanceof Error ? error.message : String(error)}. Refusing to start.`);
   }
 
   // Verification documents are envelope-encrypted at rest ONLY when MASTER_KEK

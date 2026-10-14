@@ -6,7 +6,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
-import { hiddenAmong } from '../compliance/prohibited-gate';
+import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -568,10 +568,7 @@ export class PickingService {
       note: `picking: ${note}`,
     });
     if (restock.applied) {
-      await db.item.updateMany({
-        where: { id: line.itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-        data: { isAvailable: true, autoHiddenAt: null },
-      });
+      await unhideRestocked(db, line.itemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
       await db.stockAdjustment.create({
         data: { itemId: line.itemId, delta: line.quantity, reason: 'RETURN', note: `picking: ${note}` },
       });

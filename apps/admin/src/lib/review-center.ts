@@ -24,11 +24,14 @@ const LABELS: Record<string, string> = {
   business_registration: 'Business registration', police_clearance: 'Police clearance',
   fitness_cert: 'Vehicle fitness certificate', vehicle_insurance: 'Vehicle insurance',
   hire_car_permit: 'Hire car permit', road_service_licence: 'Road service licence',
+  hire_car_driver_licence: "Hire Car Driver's Licence", hire_car_vehicle_licence: "Car's hire licence (yearly)",
   food_handler_cert: 'Food handler certificate', vehicle_registration: 'Vehicle registration',
   liquor_licence: 'Liquor licence', sanitary_certificate: 'Sanitary certificate',
   trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
   self_declaration_unregistered: 'Unregistered business declaration',
+  // [MC-PR2] checklist photo types the queue and the activation checklist both name
+  storefront_photo: 'Storefront photo', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
   VENDOR_OWNER: 'Business owner', MOVER: 'Rider/Driver', CUSTOMER: 'Customer',
   RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
   CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',
@@ -46,6 +49,19 @@ const LABELS: Record<string, string> = {
   V_MRZ_CHECKSUM: 'Machine-readable information check', V_VEHICLE_COLOUR: 'Vehicle colour check',
 };
 export const docLabel = (type: string) => LABELS[type] ?? 'Document';
+/**
+ * [Owner rulings 11 Oct 2026 — HIRE LICENCE and H-PLATE] What the reviewer checks on a taxi's papers,
+ * in plain words beside the document. The ordinary licence is NOT judged for an "H" or hire class any
+ * more: the right to drive a hire car is the separate Hire Car Driver's Licence (its own document).
+ * Supersedes the 8 Oct "licence must include the hire-car class" wording.
+ */
+const REVIEWER_HINTS: Record<string, string> = {
+  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
+  hire_car_driver_licence: "Hire Car Driver's Licence (GRA, its own document): same name as the driver's licence, and a current date (usually 3 years).",
+  hire_car_vehicle_licence: "The car's yearly hire licence: the plate matches the registration, and the date is current.",
+  vehicle_registration: 'For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234) and match the plate the driver gave.',
+};
+export const reviewerHint = (type: string): string | undefined => REVIEWER_HINTS[type];
 export const roleLabel = (role: string) => LABELS[role] ?? 'Applicant';
 export const vehicleLabel = (type: string) => LABELS[type] ?? 'Vehicle';
 const OUTCOMES: Record<string, string> = { APPROVED: 'Approved', REJECTED: 'Rejected', PENDING: 'Awaiting review', EXPIRED: 'Expired', APPROVE: 'Approved', REJECT: 'Rejected', REQUEST_INFO: 'More information requested', ESCALATE: 'Sent for another review', SECOND_REVIEW: 'Awaiting a second reviewer', ACTIVE: 'Active', REVOKED: 'Revoked' };
@@ -165,6 +181,23 @@ export const applicantId = (doc: ReviewDocument) => doc.userId || doc.user?.id |
 export const maskedPhone = (phone?: string) => phone ? `••• ••• ${phone.slice(-4)}` : 'No phone on file';
 
 /** Follow the server's page metadata. No partial success if a later page fails. */
+/**
+ * [Owner report 8 Oct 2026] New uploads did not appear in an open Review Center until a reload. The counts are
+ * polled lightly; when the server holds more documents in this lane than the page loaded, the page says how many
+ * are new and offers a refresh — the list a reviewer is working through never shifts under them.
+ */
+export function newSinceLoaded(
+  counts: { byStatus?: Record<string, number>; byLane?: Record<string, { customer: number; operator: number }> } | undefined,
+  status: ReviewStatus, lane: ReviewLane, loaded: number,
+): number {
+  if (!counts) return 0;
+  const onServer = lane === 'customer' ? counts.byLane?.[status]?.customer
+    : lane === 'operator' ? counts.byLane?.[status]?.operator
+      : counts.byStatus?.[status];
+  return typeof onServer === 'number' && onServer > loaded ? onServer - loaded : 0;
+}
+/** How often the lane counts are re-read while the Review Center is open (cheap: one grouped count). */
+export const REVIEW_COUNTS_POLL_MS = 30_000;
 export async function loadReviewQueue(status: ReviewStatus, lane: ReviewLane): Promise<ReviewDocument[]> {
   const docs = new Map<string, ReviewDocument>();
   for (let page = 1; ; page++) {

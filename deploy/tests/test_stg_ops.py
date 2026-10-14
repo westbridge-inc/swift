@@ -10,6 +10,7 @@ test files. Nothing here needs root, a network, Docker or systemd.
 """
 
 import base64
+import inspect
 import json
 import os
 import re
@@ -295,6 +296,7 @@ class StgDWorkerProbe(unittest.TestCase):
 
 class SeedProductionScript(unittest.TestCase):
     SHA = "a" * 40
+    OWNER_EMAIL = "owner.seed@example.invalid"
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swift-seed-test-"))
@@ -302,6 +304,9 @@ class SeedProductionScript(unittest.TestCase):
         self.deploy = self.tmp / "deploy"
         self.deploy.mkdir()
         shutil.copy(DEPLOY / "seed-production.sh", self.deploy / "seed-production.sh")
+        # [PROD-PATH] the script reads the Compose files it runs (the shell-override guard).
+        shutil.copy(DEPLOY / "docker-compose.yml", self.deploy / "docker-compose.yml")
+        shutil.copy(DEPLOY / "docker-compose.seed.yml", self.deploy / "docker-compose.seed.yml")
         (self.deploy / ".env").write_text("PILOT_ENV=staging\n")
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
@@ -309,7 +314,7 @@ class SeedProductionScript(unittest.TestCase):
         self.log.write_text("")
         sh_shim(self.bin, "id", 'if [ "$1" = "-u" ]; then echo 1000; else exec /usr/bin/id "$@"; fi')
         sh_shim(self.bin, "git", 'echo "git $*" >> "$CALL_LOG"\ncase "$*" in *"rev-parse HEAD"*) echo "$GIT_HEAD";; esac\nexit 0')
-        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1"; exit "${POSTGRES_FAIL:-0}";; *config*) exit "${CONFIG_FAIL:-0}";; *build*) exit "${BUILD_FAIL:-0}";; *"run --rm --no-TTY seed"*) exit "${RUN_FAIL:-0}";; *) exit 0;; esac')
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1:staging"; exit "${POSTGRES_FAIL:-0}";; *config*) exit "${CONFIG_FAIL:-0}";; *build*) exit "${BUILD_FAIL:-0}";; *"run --rm --no-TTY seed"*) exit "${RUN_FAIL:-0}";; *) exit 0;; esac')
 
     def run_script(self, argv=None, **extra):
         env = os.environ.copy()
@@ -318,6 +323,8 @@ class SeedProductionScript(unittest.TestCase):
             "CALL_LOG": str(self.log),
             "GIT_HEAD": self.SHA,
             "IDENTITY": "1",
+            # The production seed's owner email (typed at its hidden prompt on a terminal).
+            "SEED_ADMIN_EMAIL": self.OWNER_EMAIL,
         })
         env.update(extra)
         return subprocess.run(
@@ -376,64 +383,48 @@ class SeedProductionScript(unittest.TestCase):
 
 
 class SeedBreakGlassCeremony(SeedProductionScript):
-    """The two-person promotion (runbook §6): SEED_SIGN_APPROVER signs one
-    approver's half and seeds nothing; SEED_PROMOTION_APPROVALS carries both
-    halves. Either needs SEED_PLAN_SECRET in the encrypted store, and the key
-    reaches the one-off container only as a FILE path — never as a value."""
+    """The two-person ceremony (runbook §6b): approvals are signatures by the
+    approvers' OWN keys; the server only pins their public keys
+    (SEED_APPROVER_KEYS), which reach the one-off container only as a FILE.
+    [PROD-PATH] There is no server-side signing mode and no shared key."""
 
     def setUp(self):
         super().setUp()
-        # The store lists names only; sudo -n runs the named tool; systemctl is logged.
         sh_shim(self.bin, "swift-secrets", 'echo "swift-secrets $*" >> "$CALL_LOG"\n[ "$1" = list ] && echo "$STORE_NAMES"\nexit 0')
         sh_shim(self.bin, "sudo", '[ "$1" = -n ] && shift\nexec "$@"')
         sh_shim(self.bin, "systemctl", 'echo "systemctl $*" >> "$CALL_LOG"\nexit 0')
-        # The container run records which ceremony variables reached it.
-        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV file=[$SEED_PLAN_SECRET_FILE] signer=[$SEED_SIGN_APPROVER] approvals=[$SEED_PROMOTION_APPROVALS]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1:staging"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV keys=[$SEED_APPROVER_KEYS_FILE] promotion=[$SEED_PROMOTION_APPROVALS] plan=[$SEED_PLAN_APPROVALS]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
 
-    def test_sign_mode_refuses_without_the_key_in_the_store(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="owner", STORE_NAMES="JWT_SECRET OTP_HASH_SECRET")
+    def test_approvals_refuse_without_the_pinned_keys_in_the_store(self):
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS="[]", STORE_NAMES="JWT_SECRET OTP_HASH_SECRET")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SEED_PLAN_SECRET", result.stderr)
+        self.assertIn("SEED_APPROVER_KEYS", result.stderr)
         self.assertNotIn("run --rm", self.log.read_text())
 
-    def test_sign_mode_refuses_a_malformed_approver_name(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="Owner Name", STORE_NAMES="SEED_PLAN_SECRET")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SEED_SIGN_APPROVER", result.stderr)
-        self.assertNotIn("run --rm", self.log.read_text())
-
-    def test_sign_mode_passes_the_key_only_as_a_file_and_materializes_the_store(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="owner", STORE_NAMES="JWT_SECRET SEED_PLAN_SECRET")
+    def test_the_promotion_carries_both_lines_and_the_keys_file(self):
+        approvals = '[{"approver":"owner","request":"cg==","signature":"ab"},{"approver":"coordinator","request":"cg==","signature":"cd"}]'
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS=approvals, STORE_NAMES="SEED_APPROVER_KEYS")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
         self.assertIn("systemctl restart swift-secrets.service", calls)
-        self.assertIn("ENV file=[/run/secrets/SEED_PLAN_SECRET] signer=[owner]", calls)
-        self.assertEqual(calls.count("run --rm --no-TTY seed"), 1)
-
-    def test_the_promotion_carries_both_halves_and_the_key_file(self):
-        approvals = '[{"approver":"owner","signature":"ab"},{"approver":"coordinator","signature":"cd"}]'
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS=approvals, STORE_NAMES="SEED_PLAN_SECRET")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        calls = self.log.read_text()
-        self.assertIn("ENV file=[/run/secrets/SEED_PLAN_SECRET] signer=[]", calls)
+        self.assertIn("ENV keys=[/run/secrets/SEED_APPROVER_KEYS]", calls)
         self.assertIn('"approver":"coordinator"', calls)
 
     def test_an_ordinary_seed_leaves_the_ceremony_off(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", STORE_NAMES="SEED_PLAN_SECRET")
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", STORE_NAMES="SEED_APPROVER_KEYS")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
-        self.assertIn("ENV file=[] signer=[] approvals=[]", calls)
+        self.assertIn("ENV keys=[] promotion=[] plan=[]", calls)
         self.assertNotIn("swift-secrets", calls)
         self.assertNotIn("systemctl", calls)
 
     def test_the_compose_override_wires_the_ceremony_with_empty_defaults(self):
         override = (DEPLOY / "docker-compose.seed.yml").read_text()
-        for line in ("SEED_PLAN_SECRET_FILE: ${SEED_PLAN_SECRET_FILE:-}",
+        for line in ("SEED_APPROVER_KEYS_FILE: ${SEED_APPROVER_KEYS_FILE:-}",
                      "SEED_PROMOTION_APPROVALS: ${SEED_PROMOTION_APPROVALS:-}",
-                     "SEED_SIGN_APPROVER: ${SEED_SIGN_APPROVER:-}"):
+                     "SEED_PLAN_APPROVALS: ${SEED_PLAN_APPROVALS:-}"):
             self.assertIn(line, override)
-        # The key is never a plain value anywhere in the ceremony's files.
-        self.assertIsNone(re.search(r"(?m)^\s*SEED_PLAN_SECRET\s*[:=]", override))
+        self.assertIsNone(re.search(r"SEED_PLAN_SECRET|SEED_SIGN_", override))
 
     def test_the_seed_runs_in_the_stacks_posture_never_an_unset_one(self):
         # The promotion calls isProduction() (seedFxRate); runtime-mode refuses
@@ -446,7 +437,137 @@ class SeedBreakGlassCeremony(SeedProductionScript):
         self.assertIn("NODE_ENV: ${NODE_ENV:?", stack)
         self.assertNotIn("${NODE_ENV:-", override)
         self.assertIn("SEED_FX_GYD_PER_USD: ${SEED_FX_GYD_PER_USD:-}", override)
-        self.assertNotIn("SEED_PLAN_SECRET=", (DEPLOY / "seed-production.sh").read_text())
+        self.assertNotIn("SEED_APPROVER_KEYS=", (DEPLOY / "seed-production.sh").read_text())
+
+
+class SeedSoloCeremony(SeedBreakGlassCeremony):
+    """[SOLO SEED] Owner ruling 13 Oct: while there is no second admin, the
+    production seed that mints the first SUPER_ADMIN may be approved by ONE
+    pinned person after a 12-hour cooling-off (enforced by the seed itself,
+    seed-solo.test.ts). The script passes SEED_SOLO through, exactly 1 or
+    unset, and only on the production host."""
+
+    def production(self):
+        (self.deploy / ".env").write_text("PILOT_ENV=production\nNODE_ENV=production\n")
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in "context show") echo default;; *"exec -T postgres"*) echo "1:production"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV solo=[$SEED_SOLO] plan=[$SEED_PLAN_APPROVALS] email=[$SEED_ADMIN_EMAIL]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
+
+    def test_solo_reaches_the_seed_container_on_production(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV solo=[1] plan=[]", self.log.read_text())
+
+    def test_without_solo_the_container_sees_none(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV solo=[] plan=[]", self.log.read_text())
+
+    def test_solo_is_the_production_ceremony_only(self):
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SOLO="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_SOLO is for the production seed ceremony only", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_solo_is_exactly_1_or_unset(self):
+        self.production()
+        for value in ("yes", "true", "0", " 1", "2"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_SOLO must be exactly 1", result.stderr)
+                self.assertNotIn("run --rm", self.log.read_text())
+
+    # [OWNER EMAIL] Opus money review 14 Oct, S2-L: the app's solo approval
+    # emails the owner and no shipped client can add an admin email, so the
+    # production seed takes it (personal data: a hidden prompt, never an
+    # argument, never printed) and hands it to the seed through the environment.
+    def test_production_hands_the_owner_email_to_the_seed_and_never_prints_it(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text()
+        self.assertIn(f"email=[{self.OWNER_EMAIL}]", calls)   # the container's environment
+        argv = "\n".join(l for l in calls.splitlines() if l.startswith("docker "))
+        self.assertNotIn(self.OWNER_EMAIL, argv)                # never on a command line
+        self.assertNotIn(self.OWNER_EMAIL, result.stdout + result.stderr)
+
+    def test_production_without_the_owner_email_refuses_before_anything_runs(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the production seed needs the owner's admin email", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_a_value_that_is_not_an_email_is_refused_and_not_shown(self):
+        self.production()
+        for bad in ("owner", "owner@example", "own er@example.invalid", "@example.invalid"):
+            with self.subTest(bad=bad):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_ADMIN_EMAIL is not an email address (it is not shown)", result.stderr)
+                self.assertNotIn(bad, result.stdout + result.stderr)
+                self.assertNotIn("docker", self.log.read_text())
+
+    def test_an_address_outside_plain_ascii_is_refused_and_not_shown(self):
+        # [SECREVIEW 14 Oct] The approver reads the domain exactly: nothing
+        # invisible, right-to-left or look-alike may pass, and no second line.
+        self.production()
+        for bad in ("owner@exa\u200bmple.invalid", "owner@\u202ednalavni.elpmaxe", "owner@ex\u0430mple.invalid",
+                    "own\u00e9r@example.invalid", "owner@example.invalid\nx@example.invalid"):
+            with self.subTest(bad=bad):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_ADMIN_EMAIL is not an email address (it is not shown)", result.stderr)
+                self.assertNotIn("docker", self.log.read_text())
+
+    def test_on_a_terminal_the_email_is_typed_at_a_hidden_prompt(self):
+        import pty
+        self.production()
+        import threading
+        main, sub = pty.openpty()
+        self.addCleanup(os.close, main)
+        # `read -s` resets the terminal and may drop input typed before it, so
+        # the "owner" keeps typing the line until the script has finished.
+        done = threading.Event()
+        def type_it():
+            while not done.wait(0.3):
+                try:
+                    os.write(main, f"{self.OWNER_EMAIL}\n".encode())
+                except OSError:
+                    return
+        typist = threading.Thread(target=type_it, daemon=True)
+        typist.start()
+        self.addCleanup(done.set)
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
+                    "SEED_ADMIN_PHONE": "+5920400001", "SEED_FX_GYD_PER_USD": "209"})
+        env.pop("SEED_ADMIN_EMAIL", None)
+        try:
+            result = subprocess.run(["bash", str(self.deploy / "seed-production.sh"), self.SHA], env=env, stdin=sub,
+                                    text=True, capture_output=True, timeout=20)
+        finally:
+            os.close(sub)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("The owner's admin email (typed, not shown): ", result.stderr)
+        self.assertIn(f"email=[{self.OWNER_EMAIL}]", self.log.read_text())
+        self.assertNotIn(self.OWNER_EMAIL, result.stdout + result.stderr)
+
+    def test_staging_never_asks_and_hands_the_seed_no_email(self):
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) echo "1:staging";; *"run --rm --no-TTY seed"*) echo "ENV email=[$SEED_ADMIN_EMAIL]" >> "$CALL_LOG";; esac\nexit 0')
+        result = self.run_script(SEED_ADMIN_PHONE="+5925559001")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("admin email", result.stderr)
+        self.assertIn("ENV email=[]", self.log.read_text())
+
+    def test_the_compose_override_passes_the_owner_email_with_an_empty_default(self):
+        self.assertIn("SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
+
+    def test_the_compose_override_passes_solo_with_an_empty_default(self):
+        self.assertIn("SEED_SOLO: ${SEED_SOLO:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
 
 
 
@@ -508,6 +629,86 @@ def dockerfile_stages(path: Path) -> dict:
     return stages
 
 
+class SeedApproveTypedEmail(unittest.TestCase):
+    """[SECREVIEW S4 · 14 Oct] deploy/seed-approve.sh on the approver's own
+    terminal: the admin email he types decides. SEED_APPROVE_EMAIL (the test
+    suites' stand-in) never overrides what is typed on a terminal."""
+
+    EMAIL = "owner.seed@example.invalid"
+
+    def setUp(self):
+        if shutil.which("ssh-keygen") is None:
+            self.skipTest("ssh-keygen is needed to sign")
+        self.tmp = Path(tempfile.mkdtemp(prefix="swift-approve-tty-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.key = self.tmp / "owner"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key), "-C", "owner"], check=True)
+        digest = __import__("hashlib").sha256(self.EMAIL.encode()).hexdigest()
+        self.request = "\n".join([
+            "swift-seed-approval v2", "kind: plan", "target: " + "a" * 64, "subject: " + "b" * 64,
+            "admin: phone-sha256:" + "c" * 64, "issued: 2026-10-14T00:00:00.000Z", "expires: 2026-10-16T00:00:00.000Z",
+            "nonce: " + "d" * 32, "database: swift on postgres, deployment dep-x (production)",
+            "config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD",
+            "admin phone: ending 0001 becomes the first SUPER_ADMIN if there is none",
+            f"admin email: o\u2026@example.invalid (sha256 {digest}) is set on that account if it has no email",
+            "end"]) + "\n"
+
+    def approve_on_a_terminal(self, typed_email, **env_extra):
+        import fcntl, pty, select, signal
+        req = self.tmp / "request.txt"
+        req.write_text(self.request)
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.tmp), **env_extra}
+        pid, fd = pty.fork()
+        if pid == 0:  # the approver's shell: the request on stdin, the terminal for typing
+            os.execvpe("bash", ["bash", "-c", 'exec bash "$0" owner "$1" < "$2"', str(DEPLOY / "seed-approve.sh"), str(self.key), str(req)], env)
+        fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NONBLOCK)  # never block on a full terminal
+        out, said_yes, typed, next_type, deadline = b"", False, 0, 0.0, time.monotonic() + 30
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.3)
+            if ready:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            try:
+                if not said_yes and b"Type yes to sign: " in out:
+                    os.write(fd, b"yes\n")
+                    said_yes = True
+                elif b"Type the admin email" in out and typed < 5 and time.monotonic() >= next_type:
+                    # read -s may drop what was typed before it switched echo
+                    # off: type a moment after the prompt, and again if unread.
+                    if typed or next_type:
+                        os.write(fd, typed_email.encode() + b"\n")
+                        typed += 1
+                    next_type = time.monotonic() + (2.0 if typed else 0.5)
+            except OSError:
+                pass
+        for _ in range(50):
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        return os.waitstatus_to_exitcode(status), out.decode("utf-8", "replace")
+
+    def test_the_typed_address_decides_even_with_the_stand_in_set(self):
+        code, out = self.approve_on_a_terminal("other.person@example.invalid", SEED_APPROVE_EMAIL=self.EMAIL)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("not the address you typed; nothing signed", out)
+        self.assertNotIn('{"approver":', out)
+
+    def test_the_right_address_typed_on_the_terminal_signs(self):
+        code, out = self.approve_on_a_terminal(self.EMAIL)
+        self.assertEqual(code, 0, out)
+        self.assertIn('{"approver":"owner"', out)
+
+
 class Q11WebsiteCompose(unittest.TestCase):
     def web(self) -> str:
         return service_block(DEPLOY / "docker-compose.yml", "web")
@@ -529,7 +730,7 @@ class Q11WebsiteCompose(unittest.TestCase):
         self.assertIn("dockerfile: apps/web/Dockerfile", web)
         self.assertIn("image: swift-web:${SWIFT_TAG:-local}", web)
         self.assertIn("NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}", web)
-        self.assertIn("SWIFT_WEB_CHANNEL: staging", web)
+        self.assertIn("SWIFT_WEB_CHANNEL: ${SWIFT_WEB_CHANNEL:-staging}", web)
         # Unfilled company details stay refused unless the operator says otherwise.
         self.assertIn("NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}", web)
 
@@ -690,6 +891,106 @@ def caddy_image_present() -> bool:
         return False
     probe = subprocess.run(["docker", "image", "inspect", "caddy:2.10"], capture_output=True, timeout=30)
     return probe.returncode == 0
+
+
+# How long a live test waits for its Caddy to answer. On a cold CI runner,
+# starting the container and issuing the local certificates for every site name
+# once took longer than the old fixed 60 x 0.5 s poll (main CI, 14 Oct: "the test
+# Caddy never answered" after ~34 s, then green on a re-run). The bound is wall
+# time, not a count of attempts, so a slow probe cannot shorten it.
+CADDY_READY_SECONDS = 120
+
+
+def container_state(name: str) -> str:
+    """'running exit=0', 'exited exit=1', ... or '' when Docker cannot say."""
+    probe = subprocess.run(["docker", "inspect", "-f", "{{.State.Status}} exit={{.State.ExitCode}}", name],
+                           text=True, capture_output=True, timeout=30)
+    return probe.stdout.strip() if probe.returncode == 0 else ""
+
+
+def container_log_tail(name: str) -> str:
+    """The end of the test Caddy's own log (it holds no secret: the test hashes
+    are of throwaway passwords), so a failure says why it did not answer."""
+    out = subprocess.run(["docker", "logs", "--tail", "30", name], text=True, capture_output=True, timeout=30)
+    return (out.stdout + out.stderr)[-3000:]
+
+
+def wait_for_test_caddy(case: unittest.TestCase, name: str, ready, *, deadline_s: float = CADDY_READY_SECONDS,
+                        clock=time.monotonic, sleep=time.sleep, state=container_state, logs=container_log_tail) -> None:
+    """Poll ready() until it says the test Caddy answers. What "answers" means is
+    the caller's own unchanged check (the API's /metrics refusing with 403); this
+    only decides how long to wait. A container that has stopped is reported at
+    once with its exit code and log; one that never answers is reported at the
+    deadline with the same detail."""
+    end = clock() + deadline_s
+    while True:
+        if ready():
+            return
+        status = state(name)
+        if status.split(" ", 1)[0] in ("exited", "dead"):
+            case.fail(f"the test Caddy stopped before it answered ({status})\n{logs(name)}")
+        if clock() >= end:
+            case.fail(f"the test Caddy never answered within {deadline_s:g} s ({status or 'state unknown'})\n{logs(name)}")
+        sleep(0.5)
+
+
+class LiveCaddyReadinessWait(unittest.TestCase):
+    """The live tests' readiness wait, with a fake clock (no Docker needed)."""
+
+    class Clock:
+        def __init__(self):
+            self.now = 1000.0
+            self.sleeps = 0
+
+        def __call__(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.sleeps += 1
+            self.now += seconds
+
+    def wait(self, ready, state=lambda name: "running exit=0", **kw):
+        clock = self.Clock()
+        wait_for_test_caddy(self, "caddy-x", ready, clock=clock, sleep=clock.sleep, state=state,
+                            logs=lambda name: f"log of {name}", **kw)
+        return clock
+
+    def test_a_caddy_that_needs_40_seconds_on_a_cold_runner_is_waited_for(self):
+        clock = self.Clock()
+        ready_at = clock.now + 40          # longer than the old fixed ~30 s poll
+        wait_for_test_caddy(self, "caddy-x", lambda: clock.now >= ready_at, clock=clock, sleep=clock.sleep,
+                            state=lambda name: "running exit=0", logs=lambda name: "")
+        self.assertGreaterEqual(clock.now, ready_at)
+        self.assertEqual(clock.sleeps, 80)
+
+    def test_a_ready_caddy_is_not_waited_on(self):
+        self.assertEqual(self.wait(lambda: True).sleeps, 0)
+
+    def test_one_that_never_answers_fails_at_the_deadline_with_its_state_and_log(self):
+        with self.assertRaises(AssertionError) as caught:
+            self.wait(lambda: False)
+        message = str(caught.exception)
+        self.assertIn("the test Caddy never answered within 120 s (running exit=0)", message)
+        self.assertIn("log of caddy-x", message)
+
+    def test_a_stopped_container_fails_at_once_with_its_exit_code_and_log(self):
+        for status in ("exited exit=1", "dead exit=137"):
+            with self.subTest(status=status):
+                clock = self.Clock()
+                with self.assertRaises(AssertionError) as caught:
+                    wait_for_test_caddy(self, "caddy-x", lambda: False, clock=clock, sleep=clock.sleep,
+                                        state=lambda name: status, logs=lambda name: "Error: loading config")
+                self.assertIn(f"the test Caddy stopped before it answered ({status})", str(caught.exception))
+                self.assertIn("Error: loading config", str(caught.exception))
+                self.assertEqual(clock.sleeps, 0)
+
+    def test_every_live_serve_waits_through_it_and_keeps_its_own_readiness_check(self):
+        # This class names the strings it counts, so it is cut out of the text first.
+        source = Path(__file__).read_text().replace(inspect.getsource(LiveCaddyReadinessWait), "")
+        self.assertNotIn("for _ in range(60):", source)
+        self.assertEqual(source.count("wait_for_test_caddy(self, name, "), 3)
+        self.assertEqual(source.count('lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403'), 2)
+        self.assertEqual(source.count('raw_https(port, API_HOST, "/metrics")[0] == 403'), 1)
 
 
 @unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
@@ -1411,11 +1712,8 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
         started = subprocess.run(args, text=True, capture_output=True, timeout=60)
         self.assertEqual(started.returncode, 0, started.stderr[-400:])
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
-        for _ in range(60):
-            if self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403:
-                return name
-            time.sleep(0.5)
-        self.fail("the test Caddy never answered")
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        return name
 
     @staticmethod
     def fetch(name, url, credential=None):
@@ -1757,7 +2055,10 @@ class AdminConsoleDocs(unittest.TestCase):
 
     def test_the_runbook_says_how_the_owner_becomes_an_admin_without_skipping_the_two_person_rule(self):
         section = self.section()
-        for needle in ("6b", "SEED_SIGN_APPROVER", "SEED_PROMOTION_APPROVALS", "two different people"):
+        # Each approver signs the printed request with their own key on their
+        # own machine (deploy/seed-approve.sh); no private key reaches the server.
+        for needle in ("6b", "deploy/seed-approve.sh", "with their own key", "SEED_PROMOTION_APPROVALS",
+                       "two different people", "no private key"):
             self.assertIn(needle, section)
 
     def test_the_example_settings_document_both_and_leave_them_empty(self):
@@ -2169,11 +2470,8 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         started = subprocess.run(args, text=True, capture_output=True, timeout=60)
         self.assertEqual(started.returncode, 0, started.stderr[-400:])
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
-        for _ in range(60):
-            if self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403:
-                return name
-            time.sleep(0.5)
-        self.fail("the test Caddy never answered")
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        return name
 
     def reached_website(self, out, path, host=WEB_HOST, authorization=""):
         self.assertIn(f"authorization=[{authorization}] uri=[{path}] host=[{host}]", out)
@@ -2331,14 +2629,13 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
         mapped = subprocess.run(["docker", "port", name, "443/tcp"], text=True, capture_output=True, timeout=30)
         port = int(mapped.stdout.split()[0].rsplit(":", 1)[1])
-        for _ in range(60):
+        def answers() -> bool:
             try:
-                if raw_https(port, API_HOST, "/metrics")[0] == 403:
-                    return port
+                return raw_https(port, API_HOST, "/metrics")[0] == 403
             except OSError:
-                pass
-            time.sleep(0.5)
-        self.fail("the test Caddy never answered")
+                return False
+        wait_for_test_caddy(self, name, answers)
+        return port
 
     def test_live_a_refusal_keeps_the_password_box_and_says_what_to_do(self):
         port = self.serve_on_a_local_port(self.env())

@@ -764,6 +764,8 @@ export const courierApi = {
     dropoffAddress: string;
     packageSize: CourierSize;
     packageDescription?: string;
+    /** [owner #67] The sender's tick: "This parcel has no prohibited items". */
+    declaresNoProhibitedItems?: boolean;
     speed: CourierSpeed;
     recipientName: string;
     recipientPhone: string;

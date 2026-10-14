@@ -203,8 +203,26 @@ export async function getPublicStorefront(slug: string): Promise<StorefrontDetai
   }
   return json.data as StorefrontDetail;
 }
-export async function searchVendors(q: string): Promise<Vendor[]> {
-  return (await apiFetch(`/api/v1/customer/vendors?search=${encodeURIComponent(q)}`)).data as Vendor[];
+/** A store as GET /search returns it — one wire shape whichever engine answered. */
+export interface SearchStore {
+  id: string; name: string; slug: string | null; vendorType: string;
+  logoUrl: string | null; coverImageUrl: string | null; cuisineTypes: string[];
+  city: string | null; estimatedPrepTime: number | null; isCurrentlyOpen: boolean;
+  displayRating: number | null; ratingCount: number; topRated: boolean;
+}
+export interface CatalogueResults { stores: SearchStore[]; items: MarketItem[] }
+/** How many stores and how many dishes one search shows. */
+export const SEARCH_PAGE = 30;
+/**
+ * [SEARCH 13 Oct] The search engine the phone app's Search tab uses: stores
+ * AND the dishes and products inside them, forgiving of a misspelling, a
+ * plural or the words in another order. The website searched store names and
+ * descriptions only (the store list's `?search=`), so "pepperpot" never found
+ * the stores that sell it.
+ */
+export async function searchCatalogue(q: string): Promise<CatalogueResults> {
+  const data = (await apiFetch(`/api/v1/search?q=${encodeURIComponent(q)}&limit=${SEARCH_PAGE}`)).data as { vendors?: SearchStore[]; items?: MarketItem[] } | undefined;
+  return { stores: data?.vendors ?? [], items: data?.items ?? [] };
 }
 
 // ── Market (goods across stores — the phone app's Market tab) ──────────────
@@ -214,6 +232,9 @@ export interface MarketDepth { visible: boolean; items: number; vendors: number 
 export interface MarketItem {
   id: string; name: string; basePrice: number; imageUrl: string | null;
   vendorId: string; vendorName: string; categoryName: string | null; isNew: boolean;
+  /** Is the item's store open now? Search shows closed stores' dishes too, marked
+   *  (owner, 13 Oct). Absent from an older server: read as open, as before. */
+  vendorIsCurrentlyOpen?: boolean;
 }
 export interface MarketCategory { slug: string; name: string; vertical: string }
 
@@ -433,8 +454,9 @@ export async function watchRide(body: { lat: number; lng: number }) {
 export async function courierEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; packageSize: string }) {
   return (await apiFetch('/api/v1/courier/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
 }
-/** POST /courier/order — the server's own fields: the recipient is required and what is inside is `packageDescription` (there is no `notes`). */
-export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName: string; recipientPhone: string; packageDescription?: string; expectedFee?: number }) {
+/** POST /courier/order — the server's own fields: the recipient is required and what is inside is `packageDescription` (there is no `notes`).
+ *  `declaresNoProhibitedItems` is the sender's tick "This parcel has no prohibited items" [owner #67]. */
+export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName: string; recipientPhone: string; packageDescription?: string; expectedFee?: number; declaresNoProhibitedItems?: boolean }) {
   return (await apiFetch('/api/v1/courier/order', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 
