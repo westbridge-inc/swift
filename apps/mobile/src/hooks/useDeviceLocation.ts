@@ -2,6 +2,7 @@ import { useCallback, useEffect } from 'react';
 import { AppState } from 'react-native';
 import * as Location from 'expo-location';
 import { useLocationStore } from '../stores/locationStore';
+import { expoPositionSource } from '../services/devicePosition';
 import {
   BOOT_LOCATION_MODE,
   resolveCoordinatedDeviceLocation,
@@ -12,10 +13,14 @@ import {
 
 export { GEORGETOWN } from '../lib/deviceLocation';
 
+// [GO-LOC-1] Balanced, then a fresh cached fix, then GPS — each bounded
+// (services/devicePosition.ts): no network location never hangs GO again.
 const deviceLocationApi: DeviceLocationApi = {
   getForegroundPermissionsAsync: Location.getForegroundPermissionsAsync,
   requestForegroundPermissionsAsync: Location.requestForegroundPermissionsAsync,
-  getCurrentPositionAsync: () => Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+  getCurrentPositionAsync: expoPositionSource.balanced,
+  getLastKnownPositionAsync: expoPositionSource.lastKnown,
+  getHighAccuracyPositionAsync: expoPositionSource.gps,
   reverseGeocodeAsync: Location.reverseGeocodeAsync,
 };
 
