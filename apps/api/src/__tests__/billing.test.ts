@@ -852,9 +852,10 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     expect(res.statusCode, res.payload).toBe(200);
     return reference;
   };
-  async function storeWithCredit(credit: number) {
-    // Due in five days: the top-up only accumulates, nothing is billed.
-    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() + 5 * DAY) });
+  async function storeWithCredit(credit: number, rate = 20000) {
+    // Due in five days: the top-up only accumulates, nothing is billed. [owner #62]
+    // At most one week is paid ahead, so the rate must cover the credit.
+    const fx = await makeVendorWithSub({ rate, prepaid: 0, due: new Date(Date.now() + 5 * DAY) });
     const creditRef = credit > 0 ? await topUp(fx.subId, credit) : null;
     return { ...fx, creditRef };
   }
@@ -1090,7 +1091,7 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
   });
 
   it('[Sol S2] any balance a wallet can hold can be refunded whole (a GY$15,000,000 top-up is refundable); a third decimal place is refused', async () => {
-    const fx = await storeWithCredit(15_000_000);
+    const fx = await storeWithCredit(15_000_000, 15_000_000);
     const res = await setAside(fx.subId, 15_000_000);
     expect(res.statusCode, res.payload).toBe(200);
     expect(res.json().data).toMatchObject({ amount: 15_000_000, refundSetAside: 15_000_000 });

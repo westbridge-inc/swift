@@ -260,7 +260,7 @@ export async function releaseCreditRefund(prisma: PrismaClient, input: {
       where: { subscriptionId: input.subscriptionId, currencyCode: open.currencyCode },
       data: { balance: { increment: open.amount } },
     });
-    if (returned.count !== 1) throw new AppError(409, 'WALLET_CURRENCY_CONFLICT', 'The wallet now holds another currency. Nothing was released: this needs finance review.');
+    if (returned.count !== 1) throw new AppError(409, 'WALLET_CURRENCY_CONFLICT', 'The fee paid ahead is now held in another currency. Nothing was released: this needs finance review.');
     const event = await tx.billingEvent.create({ data: {
       subscriptionId: input.subscriptionId, type: 'PREPAID_REFUND_RELEASED', amount: open.amount, currencyCode: open.currencyCode,
       idempotencyKey: eventKey,
