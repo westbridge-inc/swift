@@ -298,3 +298,22 @@ describe('[§8 launch · evasion] spellings that try to slip past the list', () 
     expect(verdict(name)).toEqual({ state: 'CLEAR' });
   });
 });
+
+// [DS1111, same round] Cannabis measures spelled out; a stationery pack and a sportswear brand are not banned goods;
+// the high-volume shelf names the third review found.
+describe('[§8 launch · DS1111] the third review', () => {
+  it.each([
+    'Weed 3.5 grams', 'Weed 1 gram', 'Weed ounce', 'Weed quarter', 'Weed eighth',
+    'Fireball 750ml', 'Southern Comfort', 'Drambuie', 'Patrón 750ml', 'Beefeater 1L', 'Piton 6 pack', 'Kubuli 6 pack',
+    'Bounty 750ml', 'Lambert & Butler', 'Davidoff 20s', 'Uwell Caliburn', 'Voopoo pods', 'Augmentin', 'Coartem', 'Otrivin',
+  ])('%s is refused outright', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED' });
+  });
+
+  it.each(['Lotto', 'Lotto sneakers', 'Mead 3 pack', 'Mead five star notebook', 'Fireball candy', 'Bounty chocolate bar', 'Bounty 2 pack', 'Davidoff Cool Water',
+    'Davidoff Cool Water 125ml', 'Halls 9 pack' /* #58: lozenges are held, never refused */])(
+    '%s is not refused', (name) => {
+      expect(verdict(name).state, name).not.toBe('BANNED');
+    },
+  );
+});
