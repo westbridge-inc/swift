@@ -899,6 +899,20 @@ export const decideApproval = (id: string, approve: boolean, note: string) =>
 // always what the approver read.
 export const applyApproval = (id: string) =>
   apiFetch(`/api/v1/admin/approvals/${id}/apply`, { method: 'POST', body: '{}' });
+// [OWNER #13] SOLO MODE — while the owner is the only admin who could approve
+// their own request. Starting the wait emails the owner; the decision itself is
+// `decideApproval` after the wait, with a fresh sign-in code (step-up below).
+export const startSoloApproval = (id: string) =>
+  apiFetch(`/api/v1/admin/approvals/${id}/solo`, { method: 'POST', body: '{}' });
+// The admin who asked withdraws their own pending request (stops a solo wait too).
+export const cancelApproval = (id: string) =>
+  apiFetch(`/api/v1/admin/approvals/${id}/cancel`, { method: 'POST', body: '{}' });
+// [ALG-34] The account's existing step-up: a code texted to the phone on the
+// admin account, good for one protected decision on THIS session.
+export const sendStepUpCode = () =>
+  apiFetch('/api/v1/auth/step-up', { method: 'POST', body: '{}' });
+export const verifyStepUpCode = (code: string) =>
+  apiFetch('/api/v1/auth/step-up/verify', { method: 'POST', body: JSON.stringify({ code }) });
 
 // ── The agent-cash rail [SAN spec Part 4] ────────────────────────────────────
 // Partners pay their weekly fee in CASH at an MMG agent, quoting their SAN.
