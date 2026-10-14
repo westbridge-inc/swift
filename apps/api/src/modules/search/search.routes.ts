@@ -78,9 +78,10 @@ const ITEM_HIT_PIN_SELECT = {
 
 /**
  * How many index hits /search asks for per hit it will return. The live gates
- * (open now, still visible, inside the launch market) run AFTER the index
- * answers, so asking for exactly `limit` left the page short — or empty —
- * whenever closed or out-of-market hits filled the window ahead of a live one.
+ * (still visible, inside the launch market) run AFTER the index answers, so
+ * asking for exactly `limit` left the page short — or empty — whenever
+ * out-of-market or no-longer-visible hits filled the window ahead of a live
+ * one. (Closed stores are kept and listed after the open ones, owner 13 Oct.)
  */
 export const ENGINE_OVERFETCH = 3;
 /** The most index hits one /search reads, whatever the limit. */
@@ -119,6 +120,20 @@ function nameFirst(q: string) {
     return [...rows].sort((a, b) => Number(inName(b.name)) - Number(inName(a.name)));
   };
 }
+
+/**
+ * [Owner ruling 13 Oct] Search SHOWS closed stores — and the dishes of closed
+ * stores — marked closed: a customer who searches a store by name after hours
+ * finds it, can open it to see the menu and hours, and cannot order until it
+ * opens (checkout refuses VENDOR_CLOSED, unchanged). They are listed AFTER
+ * every open match, so a closed store never pushes an open one down the page;
+ * each group keeps the search's own order.
+ */
+export function openFirst<T>(rows: readonly T[], isOpen: (row: T) => boolean): T[] {
+  return [...rows.filter(isOpen), ...rows.filter((r) => !isOpen(r))];
+}
+const storeOpen = (v: { isCurrentlyOpen: boolean }) => v.isCurrentlyOpen;
+const itemStoreOpen = (i: { vendorIsCurrentlyOpen: boolean }) => i.vendorIsCurrentlyOpen;
 
 export async function searchRoutes(app: FastifyInstance) {
   let searchService: SearchService | null = null;
@@ -170,7 +185,7 @@ export async function searchRoutes(app: FastifyInstance) {
   /** The database search of stores: the tiers of forgiving-text.ts, strictest
    *  first, every live gate applied before a row counts toward the page. */
   async function dbVendors(ctx: {
-    q: string; tenantId: string; publicMode: boolean; openOnly: boolean;
+    q: string; tenantId: string; publicMode: boolean;
     type?: 'RESTAURANT' | 'SUPERMARKET'; cuisine?: string; limit: number; exclude?: Iterable<string>;
     near?: { lat: number; lng: number };
     /** false: the exact-spelling tiers only (see TOP_UP_TIERS). */
@@ -183,8 +198,8 @@ export async function searchRoutes(app: FastifyInstance) {
       ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode),
       // [GUARDRAILS §8 · #54] A store filed under a banned category: never in the database fallback or the top-up.
       ...notProhibitedStore(await prohibitedStoreIds(app.prisma, ctx.tenantId)),
+      // Empty stores stay out; CLOSED ones are found, marked closed (owner, 13 Oct).
       ...(ctx.publicMode && { items: { some: { isAvailable: true } } }),
-      ...(ctx.openOnly && { isCurrentlyOpen: true }),
       ...(ctx.type && { vendorType: ctx.type }),
       ...(ctx.cuisine && { cuisineTypes: { has: ctx.cuisine } }),
     };
@@ -198,7 +213,8 @@ export async function searchRoutes(app: FastifyInstance) {
           cuisineTypes: true, isCurrentlyOpen: true, estimatedPrepTime: true, latitude: true, longitude: true, city: true,
         },
         take,
-        orderBy: [{ averageRating: 'desc' }, { id: 'asc' }],
+        // open stores enter the window first, so a closed one never takes an open one's place on the page
+        orderBy: [{ isCurrentlyOpen: 'desc' }, { averageRating: 'desc' }, { id: 'asc' }],
       }),
       // [DS982] A store whose committed pin lies outside the launch market is never found.
       keep: (found) => found.filter(inLaunchMarket),
@@ -207,12 +223,12 @@ export async function searchRoutes(app: FastifyInstance) {
       // claim a distance, never with an invented position); without it, the
       // stores whose NAME matches first.
       rank: (found, tier) => {
-        if (!ctx.near) return byName(found, tier);
+        if (!ctx.near) return openFirst(byName(found, tier), storeOpen);
         const locatable = found.filter((v): v is typeof v & { latitude: number; longitude: number } => v.latitude != null && v.longitude != null);
         const unlocatable = found.filter((v) => v.latitude == null || v.longitude == null);
         const order = sortByDistance(locatable, ctx.near.lat, ctx.near.lng).map((v) => v.id);
         const byId = new Map(locatable.map((v) => [v.id, v]));
-        return [...order.map((id) => byId.get(id)!), ...unlocatable];
+        return openFirst([...order.map((id) => byId.get(id)!), ...unlocatable], storeOpen);
       },
       limit: ctx.limit,
       exclude: ctx.exclude,
@@ -220,7 +236,7 @@ export async function searchRoutes(app: FastifyInstance) {
     // R8: the star surface rides the ONE mapper on this path too, so both
     // engines speak the same displayRating/topRated contract.
     const surfaces = await ratingSurfaces(app.prisma, 'VENDOR', rows.map((v) => v.id));
-    return rows.map((v) => ({
+    return openFirst(rows, storeOpen).map((v) => ({
       id: v.id,
       name: v.name,
       slug: v.slug,
@@ -258,9 +274,11 @@ export async function searchRoutes(app: FastifyInstance) {
       // let an unverified or shut-off operator's dishes answer searches. The
       // relation filter is not reached by the tenant-scoping extension: the
       // tenant is named here.
-      vendor: { ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode), ...(ctx.publicMode && { isCurrentlyOpen: true }) },
+      // A closed store's dishes are found too, marked by its closed state (owner, 13 Oct).
+      vendor: catalogueVendorInTenant(ctx.tenantId, ctx.publicMode),
       ...(excluded.length > 0 ? { id: { notIn: excluded } } : {}),
     };
+    const byName = nameFirst(ctx.q);
     const rows = await fillFromTiers({
       tiers: tiersFor(ctx.q, ITEM_COLUMNS, ctx.slips),
       fetch: (where, take) => app.prisma.item.findMany({
@@ -269,7 +287,7 @@ export async function searchRoutes(app: FastifyInstance) {
         // than the index path and make the engine visible to the client.
         select: ITEM_HIT_PIN_SELECT,
         take,
-        orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
+        orderBy: [{ vendor: { isCurrentlyOpen: 'desc' } }, { totalOrdered: 'desc' }, { id: 'asc' }],
       }),
       keep: async (found) => {
         const marketItems = found.filter((item) => inLaunchMarket(item.vendor));
@@ -277,11 +295,11 @@ export async function searchRoutes(app: FastifyInstance) {
         // page: a prohibited row is never returned, whatever the cached list said.
         return withoutHidden(app.prisma, ctx.publicMode ? await listableItemsForVendors(app.prisma, ctx.tenantId, marketItems) : marketItems);
       },
-      rank: nameFirst(ctx.q),
+      rank: (found, tier) => openFirst(byName(found, tier), (i) => i.vendor.isCurrentlyOpen),
       limit: ctx.limit,
       exclude: ctx.exclude,
     });
-    return rows.map(toItemHit);
+    return openFirst(rows.map(toItemHit), itemStoreOpen);
   }
 
   // Universal search — searches vendors AND items
@@ -307,9 +325,9 @@ export async function searchRoutes(app: FastifyInstance) {
       try {
         const want = Math.min(parsedLimit * ENGINE_OVERFETCH, ENGINE_MAX_HITS);
         const [vendorResults, itemResults] = await Promise.all([
-          // No `openOnly` here: the index's open flag is the copy from its last
-          // sync, so a store that opened since was invisible. The live gate
-          // below reads open-now from the database.
+          // No `openOnly` here: closed stores are shown (owner, 13 Oct), and the
+          // index's open flag is only the copy from its last sync — the live
+          // gate below reads open-now from the database.
           searchService.searchVendors(tenantId, q, { type, cuisine, limit: want }),
           searchService.searchItems(tenantId, q, { limit: want }),
         ]);
@@ -346,20 +364,27 @@ export async function searchRoutes(app: FastifyInstance) {
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
             // [GUARDRAILS §8 · #54] Nor to publish a store filed under a banned category.
-            where: { ...catalogueVendorInTenant(tenantId, false), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), id: { in: vendorHits.map((v) => v.id) }, isCurrentlyOpen: true },
-            select: { id: true, latitude: true, longitude: true },
+            where: { ...catalogueVendorInTenant(tenantId, false), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), id: { in: vendorHits.map((v) => v.id) } },
+            select: { id: true, latitude: true, longitude: true, isCurrentlyOpen: true },
           }),
           app.prisma.item.findMany({
             where: { id: { in: itemHits.map((i) => i.id), ...(prohibited.length > 0 ? { notIn: prohibited } : {}) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, false) },
-            select: { id: true, vendorId: true, vendor: { select: { latitude: true, longitude: true } } },
+            select: { id: true, vendorId: true, vendor: { select: { latitude: true, longitude: true, isCurrentlyOpen: true } } },
           }),
         ]);
-        const vendorIds = new Set(liveVendors.filter(inLaunchMarket).map((v) => v.id));
-        const itemIds = new Set(liveItems.filter((i) => inLaunchMarket(i.vendor)).map((i) => i.id));
-        // open NOW, as the database says — the hit's copy may predate the opening
-        const visibleVendors = vendorHits.filter((v) => vendorIds.has(v.id)).slice(0, parsedLimit).map((v) => ({ ...v, isCurrentlyOpen: true }));
+        // open-now as the DATABASE says, for stores and for each dish's store —
+        // the hit's copy may predate an opening or a closing
+        const vendorOpen = new Map(liveVendors.filter(inLaunchMarket).map((v) => [v.id, v.isCurrentlyOpen]));
+        const itemStoreOpenNow = new Map(liveItems.filter((i) => inLaunchMarket(i.vendor)).map((i) => [i.id, i.vendor.isCurrentlyOpen]));
+        const visibleVendors = openFirst(
+          vendorHits.filter((v) => vendorOpen.has(v.id)).map((v) => ({ ...v, isCurrentlyOpen: vendorOpen.get(v.id)! })),
+          storeOpen,
+        ).slice(0, parsedLimit);
         // [GUARDRAILS §8] The exact last pass on index hits too, before the page is cut.
-        const visibleItems = (await withoutHidden(app.prisma, itemHits.filter((i) => itemIds.has(i.id)))).slice(0, parsedLimit);
+        const visibleItems = openFirst(
+          (await withoutHidden(app.prisma, itemHits.filter((i) => itemStoreOpenNow.has(i.id)))).map((i) => ({ ...i, vendorIsCurrentlyOpen: itemStoreOpenNow.get(i.id)! })),
+          itemStoreOpen,
+        ).slice(0, parsedLimit);
 
         // A short index answer is topped up from the database, below the
         // index's own ranking: the index matches whole words and word starts,
@@ -367,14 +392,14 @@ export async function searchRoutes(app: FastifyInstance) {
         // and a listing the index has not caught up with yet.
         const [moreVendors, moreItems] = await Promise.all([
           visibleVendors.length < parsedLimit
-            ? dbVendors({ q, tenantId, publicMode: false, openOnly: true, type, cuisine, limit: parsedLimit - visibleVendors.length, exclude: vendorHits.map((v) => v.id), slips: TOP_UP_TIERS.slips })
+            ? dbVendors({ q, tenantId, publicMode: false, type, cuisine, limit: parsedLimit - visibleVendors.length, exclude: vendorHits.map((v) => v.id), slips: TOP_UP_TIERS.slips })
             : Promise.resolve([]),
           visibleItems.length < parsedLimit
             ? dbItems({ q, tenantId, publicMode: false, hiddenOnly, limit: parsedLimit - visibleItems.length, exclude: itemHits.map((i) => i.id), slips: TOP_UP_TIERS.slips })
             : Promise.resolve([]),
         ]);
-        const vendors = [...visibleVendors, ...moreVendors];
-        const items = [...visibleItems, ...moreItems];
+        const vendors = openFirst([...visibleVendors, ...moreVendors], storeOpen);
+        const items = openFirst([...visibleItems, ...moreItems], itemStoreOpen);
         return {
           success: true,
           data: {
@@ -397,7 +422,7 @@ export async function searchRoutes(app: FastifyInstance) {
     // DB path (every guest; a signed-in caller while the index is absent or failing)
     const [vendors, items] = await Promise.all([
       dbVendors({
-        q, tenantId, publicMode, openOnly: publicMode, type, cuisine, limit: parsedLimit,
+        q, tenantId, publicMode, type, cuisine, limit: parsedLimit,
         near: lat != null && lng != null ? { lat, lng } : undefined,
       }),
       dbItems({ q, tenantId, publicMode, hiddenOnly, limit: parsedLimit }),
@@ -428,13 +453,14 @@ export async function searchRoutes(app: FastifyInstance) {
       ...(await hiddenItemIds(app.prisma, tenantId)),
     ];
     const tiers = searchTiers(q, NAME_COLUMNS);
+    // Closed stores and their dishes are suggested too, marked closed (owner, 13 Oct).
     // [GUARDRAILS §8 · #54] Nor does a store filed under a banned category autocomplete.
-    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), ...(publicMode && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }) };
+    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), ...(publicMode && { items: { some: { isAvailable: true } } }) };
     const itemBase = {
       isAvailable: true,
       // [B2] This query had NO vendor predicate at all — a banned store's
       // dish names kept autocompleting for every customer who typed.
-      vendor: { ...catalogueVendorInTenant(tenantId, publicMode), ...(publicMode && { isCurrentlyOpen: true }) },
+      vendor: catalogueVendorInTenant(tenantId, publicMode),
       ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
     };
 
@@ -443,8 +469,8 @@ export async function searchRoutes(app: FastifyInstance) {
         tiers,
         fetch: (where, take) => app.prisma.vendor.findMany({
           where: { AND: [vendorBase, where] },
-          select: { id: true, name: true, vendorType: true, latitude: true, longitude: true },
-          orderBy: [{ averageRating: 'desc' }, { id: 'asc' }],
+          select: { id: true, name: true, vendorType: true, latitude: true, longitude: true, isCurrentlyOpen: true },
+          orderBy: [{ isCurrentlyOpen: 'desc' }, { averageRating: 'desc' }, { id: 'asc' }],
           take,
         }),
         // [DS982] A store outside the launch market never autocompletes, nor do its dishes.
@@ -455,10 +481,10 @@ export async function searchRoutes(app: FastifyInstance) {
         tiers,
         fetch: (where, take) => app.prisma.item.findMany({
           where: { AND: [itemBase, where] },
-          select: { id: true, vendorId: true, name: true, vendor: { select: { latitude: true, longitude: true } } },
-          // [DS233 F8] A stable window: the most-ordered matches first, never
-          // whatever order the heap scan happens to return.
-          orderBy: [{ totalOrdered: 'desc' }, { id: 'asc' }],
+          select: { id: true, vendorId: true, name: true, vendor: { select: { latitude: true, longitude: true, isCurrentlyOpen: true } } },
+          // [DS233 F8] A stable window: open stores' dishes, then the most-ordered
+          // matches first, never whatever order the heap scan happens to return.
+          orderBy: [{ vendor: { isCurrentlyOpen: 'desc' } }, { totalOrdered: 'desc' }, { id: 'asc' }],
           take,
         }),
         keep: async (found) => {
@@ -471,9 +497,10 @@ export async function searchRoutes(app: FastifyInstance) {
       }),
     ]);
 
+    // `isCurrentlyOpen` (additive): the suggested store's — or the dish's store's — open state now.
     const suggestions = [
-      ...vendors.map((v) => ({ text: v.name, type: 'vendor' as const })),
-      ...items.map((i) => ({ text: i.name, type: 'item' as const })),
+      ...openFirst(vendors, storeOpen).map((v) => ({ text: v.name, type: 'vendor' as const, isCurrentlyOpen: v.isCurrentlyOpen })),
+      ...openFirst(items, (i) => i.vendor.isCurrentlyOpen).map((i) => ({ text: i.name, type: 'item' as const, isCurrentlyOpen: i.vendor.isCurrentlyOpen })),
     ];
 
     return { success: true, data: suggestions };
