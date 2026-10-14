@@ -126,16 +126,17 @@ describe('loading surfaces become content in the reserved layout', () => {
 });
 
 it('search shows store-shaped placeholders during debounce and ignores a late answer after clearing', async () => {
-  const response = pending<api.Vendor[]>();
-  vi.spyOn(api, 'searchVendors').mockReturnValue(response.promise);
+  // [SEARCH 13 Oct] the page asks the search engine (stores and dishes), not the store list
+  const response = pending<api.CatalogueResults>();
+  vi.spyOn(api, 'searchCatalogue').mockReturnValue(response.promise);
   mount(<SearchPage />);
   fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Lunch' } });
   expect(screen.getByLabelText('Searching').querySelector('[data-store-part="copy"]')).toBeTruthy();
   expect(screen.getByRole('status').textContent).toBe('Searching…');
   await new Promise((resolve) => setTimeout(resolve, 320));
-  expect(api.searchVendors).toHaveBeenCalledWith('Lunch');
+  expect(api.searchCatalogue).toHaveBeenCalledWith('Lunch');
   fireEvent.change(screen.getByRole('textbox'), { target: { value: '' } });
-  await response.finish([vendor]);
+  await response.finish({ stores: [vendor as unknown as api.SearchStore], items: [] });
   expect(screen.queryByLabelText('Searching')).toBeNull();
   expect(screen.queryByText('Local store')).toBeNull();
 });
