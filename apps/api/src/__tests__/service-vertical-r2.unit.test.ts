@@ -24,6 +24,14 @@ import {
   serviceBooking,
   type Row,
 } from './helpers/service-vertical-doubles';
+// [GUARDRAILS §8 · #54] The store-level ban's reads are proven against a real database (prohibited-items.test.ts);
+// this seam models none of the category tables, and no fixture store is filed under a banned category.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
+}));
+
 
 // ---------------------------------------------------------------------------
 // R2 — THE FOUR API FINDINGS OF THE AUTHOR-SEPARATED REVIEW, RED FIRST.

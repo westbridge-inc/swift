@@ -6,8 +6,11 @@
 # The request is what seed-production.sh printed between the ----- lines (a
 # production spine apply, or a break-glass SUPER_ADMIN promotion). This script
 # shows you what it changes — the database, the configuration and FX rate, the
-# first admin's phone (last four digits) and every change — asks you to type
-# yes, signs it with `ssh-keygen -Y sign` (your key's passphrase is asked by
+# first admin's phone (last four digits), whether it is a one-person (solo)
+# approval with its 12-hour cooling-off, and every change — asks you to type
+# yes, asks you to type the admin email you expect when the request sets one
+# (hidden; it shows only that email's first letter, domain and sha256, and
+# signs only if the address you type has that digest), signs it with `ssh-keygen -Y sign` (your key's passphrase is asked by
 # ssh-keygen itself), and prints ONE line to hand to the operator. The server
 # rebuilds those words when it applies and refuses an approval whose words
 # differ from the change it is about to make. The line is not a secret; your private key never leaves this file
@@ -21,6 +24,12 @@ set -euo pipefail
 umask 077
 
 die() { echo "seed-approve: $*" >&2; exit 1; }
+# sha256 of stdin as 64 hex characters (Linux sha256sum, macOS shasum, or openssl).
+sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{ print $1 }'
+  else openssl dgst -sha256 -r | awk '{ print $1 }'; fi
+}
 NAME="${1:-}"
 KEY="${2:-}"
 [[ "$NAME" =~ ^[a-z][a-z0-9-]{1,31}$ ]] || die "your name must be 2-32 lowercase letters, digits or hyphens (as pinned on the server)"
@@ -50,7 +59,7 @@ esac
 {
   echo "You are about to approve, as $NAME, this ${KIND} change:"
   echo
-  printf '%s\n' "$REQUEST" | grep -E '^(database|config|admin phone|promote): ' | sed 's/^/    /'
+  printf '%s\n' "$REQUEST" | grep -E '^(database|config|admin phone|admin email|approval|promote): ' | sed 's/^/    /'
   if [ "$KIND" = plan ]; then
     echo "    changes:"
     printf '%s\n' "$REQUEST" | grep '^change: ' | sed 's/^change: /      /' || echo "      (none: the database already matches; your approval is still used up)"
@@ -74,6 +83,30 @@ else
   printf 'Type yes to sign: ' >&2
   read -r answer < /dev/tty
   [ "$answer" = yes ] || die "not signed"
+fi
+
+# [OWNER EMAIL · SECREVIEW 14 Oct] The request shows the admin email masked
+# (first letter and domain) with its FULL sha256, so you could not tell two
+# addresses at the same domain apart by reading. Type the address you expect
+# (not shown, not kept): it is hashed here and must have exactly that digest,
+# or nothing is signed. Without a terminal (the test suites), SEED_APPROVE_EMAIL
+# stands in for the typing.
+EMAIL_LINES="$(printf '%s\n' "$REQUEST" | grep -c '^admin email: ' || true)"
+if [ "$EMAIL_LINES" != 0 ]; then
+  [ "$EMAIL_LINES" = 1 ] || die "the request has more than one admin email line; ask the operator for the request exactly as the server printed it"
+  WANT="$(printf '%s\n' "$REQUEST" | sed -n 's/^admin email: [^ ]* (sha256 \([0-9a-f]\{64\}\)) is set on that account if it has no email$/\1/p')"
+  [[ "$WANT" =~ ^[0-9a-f]{64}$ ]] || die "the request's admin email line does not carry the address's full digest; ask the operator for the request exactly as the server printed it"
+  if [ -n "${SEED_APPROVE_EMAIL+set}" ]; then
+    typed_email="$SEED_APPROVE_EMAIL"
+  else
+    [ -r /dev/tty ] || die "no terminal to confirm the admin email on; run this in your own terminal"
+    printf 'Type the admin email you expect this request to set (not shown): ' >&2
+    IFS= read -rs typed_email < /dev/tty
+    echo >&2
+  fi
+  GOT="$(printf '%s' "$typed_email" | sha256_hex)"
+  unset typed_email
+  [ "$GOT" = "$WANT" ] || die "the admin email in this request is not the address you typed; nothing signed"
 fi
 
 SIG="$(printf '%s\n' "$REQUEST" | ssh-keygen -q -Y sign -f "$KEY" -n swift-seed-approval)" || die "ssh-keygen could not sign (wrong key or passphrase?)"

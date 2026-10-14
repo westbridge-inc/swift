@@ -697,12 +697,18 @@ export interface DocumentReviewerRow {
   role: 'ADMIN' | 'SUPER_ADMIN';
   active: boolean;
   documentReviewer: boolean;
+  /** [GUARDRAILS §8 · Opus S3-9] May show an item a banned word is holding (catalogue check). */
+  catalogueApprover?: boolean;
   you: boolean;
 }
 export const fetchDocumentReviewers = (): Promise<{ data: DocumentReviewerRow[] }> =>
   apiFetch('/api/v1/admin/staff/document-reviewers');
 export const setDocumentReviewer = (userId: string, grant: boolean, reason: string) =>
   apiFetch(`/api/v1/admin/staff/${encodeURIComponent(userId)}/document-reviewer`, { method: 'PUT', body: JSON.stringify({ grant }), reason });
+// [GUARDRAILS §8 · Opus S3-9] The catalogue approver grant: showing a held item needs it; `*` never implies it.
+// The same team list and the same founder door, reason and record as the document reviewer grant.
+export const setCatalogueApprover = (userId: string, grant: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/staff/${encodeURIComponent(userId)}/catalogue-approver`, { method: 'PUT', body: JSON.stringify({ grant }), reason });
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been

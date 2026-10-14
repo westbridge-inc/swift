@@ -14,10 +14,11 @@ import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { pickupLocationContext } from '../../../lib/deviceLocation';
 import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
-import { PinGlyph, Card, CircleChip, LabeledInput, Pictogram, PillButton, T, TonePill, cardShadow } from '../../../kit';
+import { BrandCheckbox, PinGlyph, Card, CircleChip, LabeledInput, Pictogram, PillButton, T, TonePill, cardShadow } from '../../../kit';
 import { JourneyRail } from '../../../kit/journey-rail';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
+import { PARCEL_BANNED_GOODS, PARCEL_DECLARATION, courierWaitingCaption } from '../parcelDeclaration';
 
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type Speed = 'STANDARD' | 'EXPRESS' | 'RUSH';
@@ -156,6 +157,8 @@ export function CourierScreen({ navigation }: any) {
   const [recipientName, setRecipientName] = useState('');
   const [recipientPhone, setRecipientPhone] = useState('');
   const [description, setDescription] = useState('');
+  // [GUARDRAILS §8 · owner #67] The sender's tick: "This parcel has no prohibited items".
+  const [declared, setDeclared] = useState(false);
 
   const livePickup = locationContext.devicePickup
     ? {
@@ -172,9 +175,10 @@ export function CourierScreen({ navigation }: any) {
   const routingUnavailable = (estimateError as any)?.response?.data?.error?.code === 'ROUTE_UNAVAILABLE';
   const estimate = routingUnavailable ? undefined : quotedEstimate;
 
-  const valid =
-    !!pickupPoint && !!dropoffPoint && recipientName.trim().length >= 2 && recipientPhone.trim().length >= 5 && !!estimate;
+  const recipientReady = recipientName.trim().length >= 2 && recipientPhone.trim().length >= 5;
+  const valid = !!pickupPoint && !!dropoffPoint && recipientReady && !!estimate && declared;
   const errMsg = (send.error as any)?.response?.data?.error?.message;
+  const waitingCaption = courierWaitingCaption({ estimateFailed, hasEstimate: !!estimate, recipientReady, declared });
 
   const openSearch = (onSelect: (p: PickedPlace) => void, title: string) =>
     navigation?.navigate?.('DestinationSearch', { onSelect, title });
@@ -192,7 +196,7 @@ export function CourierScreen({ navigation }: any) {
         };
 
   const onSend = () => {
-    if (!pickupPoint || !dropoffPoint || !dropoff || !pickup) return;
+    if (!pickupPoint || !dropoffPoint || !dropoff || !pickup || !declared) return;
     send.mutate(
       {
         pickup: pickupPoint,
@@ -204,6 +208,8 @@ export function CourierScreen({ navigation }: any) {
         recipientName: recipientName.trim(),
         recipientPhone: recipientPhone.trim(),
         packageDescription: description.trim() || undefined,
+        // [owner #67] Recorded on the order's own trail.
+        declaresNoProhibitedItems: true,
         payer: 'SENDER',
         // [PRICE-LOCK] The fee on the button: the server sends the parcel only at it.
         ...(typeof estimate?.totalFee === 'number' ? { expectedFee: estimate.totalFee } : {}),
@@ -363,6 +369,19 @@ export function CourierScreen({ navigation }: any) {
             <LabeledInput icon="user" placeholder="Recipient name" value={recipientName} onChangeText={setRecipientName} />
             <LabeledInput icon="phone" placeholder="Recipient phone" keyboardType="phone-pad" value={recipientPhone} onChangeText={setRecipientPhone} />
             <LabeledInput icon="box" placeholder="What's inside? (optional)" value={description} onChangeText={setDescription} />
+            {/* [GUARDRAILS §8 · owner #67] The server also screens what is written above against the same
+                list, and refuses a banned parcel in plain words (shown as the error line below). */}
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md, marginTop: space.xs }}>
+              <BrandCheckbox checked={declared} onToggle={() => setDeclared((d) => !d)} label={PARCEL_DECLARATION} />
+              <Pressable style={{ flex: 1 }} onPress={() => setDeclared((d) => !d)} accessible={false}>
+                <T variant="label" weight="semibold">
+                  {PARCEL_DECLARATION}
+                </T>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  {PARCEL_BANNED_GOODS}
+                </T>
+              </Pressable>
+            </View>
           </View>
 
           {/* Price */}
@@ -433,11 +452,9 @@ export function CourierScreen({ navigation }: any) {
             disabled={!valid}
             onPress={onSend}
           />
-          {!valid && dropoffPoint ? (
+          {!valid && dropoffPoint && waitingCaption ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              {estimateFailed && !estimate
-                ? 'Waiting on the price — retry the quote above.'
-                : "Add the recipient's name and phone to continue."}
+              {waitingCaption}
             </T>
           ) : null}
 

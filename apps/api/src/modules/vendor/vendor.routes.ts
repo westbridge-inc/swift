@@ -7,6 +7,7 @@ import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
 import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, releaseLapsedHoldInTransaction } from '../order/order.service';
+import { STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
@@ -50,7 +51,8 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
-import { assertNotBanned, catalogueChecksFor, partnerView } from '../compliance/prohibited-gate';
+import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerView, unhideRestocked } from '../compliance/prohibited-gate';
+import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { QrService } from '../qr/qr.service';
@@ -64,6 +66,7 @@ import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 import { assertStorePinInMarket } from './store-pin';
@@ -103,6 +106,9 @@ const updateVendorProfileSchema = z.object({
   // down. Shape is enforced by publicPhoneForWrite, not here, so the write
   // and read boundaries cannot drift apart on what a valid number is.
   publicPhone: z.string().trim().max(32).nullable().optional(),
+  // [VERIFY-DOCS · ruling 7] OPTIONAL VAT registration number, owner only; null/'' takes it off.
+  // Shape is enforced by vatNumberForWrite (utils/vendor-vat-number).
+  vatRegistrationNumber: z.string().trim().max(40).nullable().optional(),
 })
   // [Q8] A store pin is one point. Half of one would move the store along a
   // single axis to a spot nobody chose, so the two travel together or not at all.
@@ -1027,7 +1033,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
-      : safeVendors.map((v) => ({ ...v, subscription: undefined }));
+      : safeVendors.map((v) => ({ ...v, subscription: undefined, vatRegistrationNumber: undefined }));
     return {
       success: true,
       data: { id: access.ownerId, userId: request.user.userId, vendors: visible, myRole: access.role },
@@ -1259,6 +1265,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     const publicPhone = body.publicPhone === undefined
       ? undefined
       : publicPhoneForWrite(body.publicPhone);
+    // [VERIFY-DOCS · ruling 7] The business's tax registration is the owner's to give.
+    const vatRegistrationNumber = body.vatRegistrationNumber === undefined
+      ? undefined
+      : vatNumberForWrite(body.vatRegistrationNumber);
+    if (vatRegistrationNumber !== undefined) requireRole(access, 'OWNER');
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
@@ -1288,6 +1299,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.selfDeliveryEnabled !== undefined && { selfDeliveryEnabled: body.selfDeliveryEnabled }),
           ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
           ...(publicPhone !== undefined && { publicPhone }),
+          ...(vatRegistrationNumber !== undefined && { vatRegistrationNumber }),
         },
         include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
       });
@@ -1319,6 +1331,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...vendor,
+        ...(access.role !== 'OWNER' ? { vatRegistrationNumber: undefined } : {}),
         ...link,
         mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
         mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),
@@ -2012,10 +2025,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
       data: { isAvailable: false, autoHiddenAt: new Date() },
     });
-    await app.prisma.item.updateMany({
-      where: { id: item.id, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-      data: { isAvailable: true, autoHiddenAt: null },
-    });
+    await unhideRestocked(app.prisma, item.id); // never a banned item [GUARDRAILS §8 · DS1266 S3]
 
     const adjustment = await app.prisma.stockAdjustment.create({
       data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
@@ -2344,7 +2354,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // every recipient. [Q10] After the ownership check, never before it.
     const { acknowledgeAlert } = await import('../notification/notification.service');
     await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
-    const rejectableStatuses = ['PENDING', 'ACCEPTED', 'PREPARING'];
+    const rejectableStatuses: readonly string[] = STORE_REJECTABLE_STATUSES;
     if (!rejectableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot reject order in ${order.status} status`);
     }
@@ -2510,6 +2520,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Verify category belongs to this vendor
     const category = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
     if (!category || category.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
+    // [GUARDRAILS §8 · #55] A name or an option that IS banned goods is refused, never held.
+    assertNotBannedGoods([body.name, ...(body.optionGroups ?? []).flatMap((g) => [g.name, ...g.options.map((o) => o.name)])]);
+    // [#54] A store filed under a banned category lists nothing new: every item it carries is banned.
+    await assertStoreAllowed(app.prisma, vendorId);
 
     // Auto-assign sortOrder
     let sortOrder = body.sortOrder;
@@ -2804,6 +2818,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     await requireListingAllowed(app, verification, vendorId);
 
     const { csv } = importCsvSchema.parse(request.body);
+    // [GUARDRAILS §8 · #54] Nor imports anything.
+    await assertStoreAllowed(app.prisma, vendorId);
     const rows = parseCsvWithHeader(csv);
 
     if (rows.length === 0) {
@@ -2835,6 +2851,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     let imported = 0;
     const importedIds: Array<{ id: string; row: number; name: string }> = [];
     for (const { rowNumber, data } of valid) {
+      // [GUARDRAILS §8 · #55] A row whose name IS banned goods is refused and listed; the rest import.
+      const bannedGoods = certainGoods(data.name);
+      if (bannedGoods) {
+        failures.push({ row: rowNumber, errors: [notAllowedMessage(bannedGoods.prohibitedClass)] });
+        continue;
+      }
       const key = data.category.toLowerCase();
       let categoryId = categoryIds.get(key);
       if (!categoryId) {
@@ -2932,10 +2954,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
-    // [GUARDRAILS §8] An item Swift does not allow is never edited back to life.
-    await assertNotBanned(app.prisma, existing.id);
+    // [GUARDRAILS §8] An item Swift does not allow is never edited back to life (one banned only by
+    // its own words may be renamed out of them — the new name is judged before it is written).
+    await assertNotBanned(app.prisma, existing.id, { wordBanEditable: true });
 
     const body = updateItemSchema.parse(request.body);
+    if (body.name !== undefined) assertNotBannedGoods([body.name]);
 
     // If moving to a different category, verify ownership
     if (body.categoryId && body.categoryId !== existing.categoryId) {
@@ -2961,31 +2985,40 @@ export async function vendorRoutes(app: FastifyInstance) {
     // update, through the single writer.
     const stockTarget = body.stockQuantity;
 
-    const item = await app.prisma.item.update({
-      where: { id: request.params.id },
-      data: {
-        ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
-        ...(body.name !== undefined && { name: body.name.trim() }),
-        ...(body.description !== undefined && { description: body.description?.trim() }),
-        ...(body.imageUrl !== undefined && { imageUrl: body.imageUrl }),
-        ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
-        ...(body.sku !== undefined && { sku: body.sku }),
-        ...(body.unit !== undefined && { unit: body.unit }),
-        ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
-        ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
-        ...(unhide && { isAvailable: true, autoHiddenAt: null }),
-        ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null }),
-        ...(body.isPopular !== undefined && { isPopular: body.isPopular }),
-        ...(body.dietaryTags !== undefined && { dietaryTags: body.dietaryTags }),
-        ...(body.allergens !== undefined && { allergens: body.allergens }),
-        ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
-        ...(body.fulfillment !== undefined && { fulfillment: body.fulfillment }),
-        ...(body.bookingConfig !== undefined && { bookingConfig: body.bookingConfig as object }),
-      },
-      include: {
-        category: { select: { id: true, name: true } },
-        optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' } } }, orderBy: { sortOrder: 'asc' } },
-      },
+    const itemInclude = {
+      category: { select: { id: true, name: true } },
+      optionGroups: { include: { options: { orderBy: { sortOrder: 'asc' as const } } }, orderBy: { sortOrder: 'asc' as const } },
+    };
+    // [GUARDRAILS §8 · Opus S3-1] Switched on only if the item AFTER this edit is not banned, judged in the same
+    // transaction: "Spare Rum" + {isAvailable: true} is refused (nothing of the request is written), "Spare Rum"
+    // renamed to "Coconut cake" may come on, and a restock never switches a banned item back on (its count is saved).
+    const item = await app.prisma.$transaction(async (tx) => {
+      const updated = await tx.item.update({
+        where: { id: request.params.id },
+        data: {
+          ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
+          ...(body.name !== undefined && { name: body.name.trim() }),
+          ...(body.description !== undefined && { description: body.description?.trim() }),
+          ...(body.imageUrl !== undefined && { imageUrl: body.imageUrl }),
+          ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
+          ...(body.sku !== undefined && { sku: body.sku }),
+          ...(body.unit !== undefined && { unit: body.unit }),
+          ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),
+          ...(body.lowStockThreshold !== undefined && { lowStockThreshold: body.lowStockThreshold }),
+          ...(body.isAvailable !== undefined && { isAvailable: body.isAvailable, autoHiddenAt: null }),
+          ...(body.isPopular !== undefined && { isPopular: body.isPopular }),
+          ...(body.dietaryTags !== undefined && { dietaryTags: body.dietaryTags }),
+          ...(body.allergens !== undefined && { allergens: body.allergens }),
+          ...(body.sortOrder !== undefined && { sortOrder: body.sortOrder }),
+          ...(body.fulfillment !== undefined && { fulfillment: body.fulfillment }),
+          ...(body.bookingConfig !== undefined && { bookingConfig: body.bookingConfig as object }),
+        },
+        include: itemInclude,
+      });
+      if (body.isAvailable === true) await assertNotBanned(tx, updated.id);
+      if (!unhide) return updated;
+      const banned = (await catalogueChecksFor(tx, [updated.id])).get(updated.id)?.state === 'BANNED';
+      return banned ? updated : tx.item.update({ where: { id: updated.id }, data: { isAvailable: true, autoHiddenAt: null }, include: itemInclude });
     });
 
     // [MKT-2] THE STOCK COUNT, through the single writer.
@@ -3082,8 +3115,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!item) throw new NotFoundError('Item', request.params.itemId);
 
     const body = addOptionGroupSchema.parse(request.body);
-    // [GUARDRAILS §8] Options of an item Swift does not allow are not edited either.
-    await assertNotBanned(app.prisma, item.id);
+    // [GUARDRAILS §8] Options of an item Swift does not allow are not edited either, and an
+    // option that IS banned goods ("Carib Lager") is refused. [#55]
+    await assertNotBanned(app.prisma, item.id, { wordBanEditable: true });
+    assertNotBannedGoods([body.name, ...(body.options ?? []).map((o) => o.name)]);
 
     let sortOrder = body.sortOrder;
     if (sortOrder === undefined) {
@@ -3128,9 +3163,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: { item: { select: { vendorId: true } } },
     });
     if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
-    await assertNotBanned(app.prisma, existing.itemId);
+    await assertNotBanned(app.prisma, existing.itemId, { wordBanEditable: true });
 
     const body = updateOptionGroupSchema.parse(request.body);
+    if (body.name !== undefined) assertNotBannedGoods([body.name]);
 
     const group = await app.prisma.optionGroup.update({
       where: { id: request.params.id },
@@ -3174,9 +3210,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: { item: { select: { vendorId: true } } },
     });
     if (!group || group.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.groupId);
-    await assertNotBanned(app.prisma, group.itemId);
+    await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
 
     const body = addOptionSchema.parse(request.body);
+    assertNotBannedGoods([body.name]);
 
     let sortOrder = body.sortOrder;
     if (sortOrder === undefined) {
@@ -3210,9 +3247,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
     });
     if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
-    await assertNotBanned(app.prisma, existing.optionGroup.itemId);
+    await assertNotBanned(app.prisma, existing.optionGroup.itemId, { wordBanEditable: true });
 
     const body = updateOptionSchema.parse(request.body);
+    if (body.name !== undefined) assertNotBannedGoods([body.name]);
 
     const option = await app.prisma.option.update({
       where: { id: request.params.id },

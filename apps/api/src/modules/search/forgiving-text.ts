@@ -262,13 +262,19 @@ export function nameMatcher(q: string, typos: boolean): (text: string | null | u
  * never `take` a window and filter it afterwards, which left pages short or
  * empty while live matches sat just past the window.
  *
- * `fetch(where, take)` must AND `where` with the caller's own visibility
- * predicate. Rows already seen (returned by an earlier tier, rejected by a
- * gate, or passed in `exclude`) are never fetched again.
+ * `fetch(where, take, deadline)` must AND `where` with the caller's own
+ * visibility predicate. Rows already seen (returned by an earlier tier,
+ * rejected by a gate, or passed in `exclude`) are never fetched again.
+ *
+ * [Review S2-1 · time bound] With `budgetMs`, the whole fill has that much
+ * wall-clock time: `fetch` is handed the deadline (to tell the database to
+ * stop the read there, search-budget.ts), and a read that fails with an error
+ * `outOfTime` accepts — or a deadline reached between reads — ends the fill
+ * with what the stricter tiers already found. Any other error is thrown.
  */
 export async function fillFromTiers<Row extends { id: string }>(opts: {
   tiers: Array<{ tier: Tier; where: Where }>;
-  fetch: (where: Where, take: number) => Promise<Row[]>;
+  fetch: (where: Where, take: number, deadline: number) => Promise<Row[]>;
   keep: (rows: Row[]) => Promise<Row[]> | Row[];
   limit: number;
   exclude?: Iterable<string>;
@@ -276,15 +282,27 @@ export async function fillFromTiers<Row extends { id: string }>(opts: {
   rank?: (rows: Row[], tier: Tier) => Row[];
   window?: number;
   maxFetchesPerTier?: number;
+  budgetMs?: number;
+  outOfTime?: (err: unknown) => boolean;
+  /** Called once when the fill ends for time (a log line, never the query). */
+  onOutOfTime?: () => void;
 }): Promise<Row[]> {
   const out: Row[] = [];
   const seen = new Set(opts.exclude ?? []);
   const window = opts.window ?? Math.min(Math.max(opts.limit * 3, 30), 150);
   const maxFetches = opts.maxFetchesPerTier ?? 3;
+  const deadline = opts.budgetMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + opts.budgetMs;
   for (const { tier, where } of opts.tiers) {
     for (let fetchNo = 0; fetchNo < maxFetches && out.length < opts.limit; fetchNo += 1) {
+      if (Date.now() >= deadline) { opts.onOutOfTime?.(); return out; }
       const scoped = seen.size > 0 ? { AND: [where, { id: { notIn: [...seen] } }] } : where;
-      const rows = await opts.fetch(scoped, window);
+      let rows: Row[];
+      try {
+        rows = await opts.fetch(scoped, window, deadline);
+      } catch (err) {
+        if (opts.outOfTime?.(err)) { opts.onOutOfTime?.(); return out; }
+        throw err;
+      }
       for (const r of rows) seen.add(r.id);
       const ranked = opts.rank ? opts.rank(rows, tier) : rows;
       for (const r of await opts.keep(ranked)) {

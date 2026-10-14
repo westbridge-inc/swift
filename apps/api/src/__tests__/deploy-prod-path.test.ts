@@ -125,7 +125,8 @@ function baseShims() {
   shim('id', 'if [ "$1" = "-u" ]; then echo 1000; else echo "uid=1000"; fi');
   shim('sudo', 'echo "sudo $*" >> "$CALL_LOG"\n[ "$1" = -n ] && shift\nexec "$@"');
   shim('swift-secrets', '[ "$1" = list ] && printf "%s\\n" $STORE_NAMES\nexit 0');
-  shim('systemctl', 'echo "systemctl $*" >> "$CALL_LOG"\nexit 0');
+  // BACKUP_TIMER_OFF=is-enabled|is-active makes that read-only query of the hourly backup timer say no.
+  shim('systemctl', 'echo "systemctl $*" >> "$CALL_LOG"\n[ -n "$BACKUP_TIMER_OFF" ] && [ "$1" = "$BACKUP_TIMER_OFF" ] && exit 1\nexit 0');
   shim('hostname', '[ "$1" = "-I" ] && echo "$HOST_IPS"\nexit 0');
   shim('sleep', 'exit 0');
 }
@@ -150,6 +151,11 @@ function preparePilot() {
   for (const f of ['pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'Caddyfile', 'docker-compose.yml', 'docker-compose.routing.yml']) {
     copyFileSync(join(DEPLOY, f), join(here, f));
   }
+  // backup.sh --check-key (the owner-key proof, run with real GnuPG in deploy/tests/test_backup_encryption.py)
+  // stands in here: it logs its call and refuses with BACKUP_KEY_REFUSE's reason.
+  writeFileSync(join(here, 'backup.sh'), '#!/bin/sh\necho "backup.sh $*" >> "$CALL_LOG"\n'
+    + 'if [ "$1" = --check-key ] && [ -n "${BACKUP_KEY_REFUSE:-}" ]; then echo "FATAL: $BACKUP_KEY_REFUSE" >&2; exit 1; fi\nexit 0\n');
+  chmodSync(join(here, 'backup.sh'), 0o755);
   mkdirSync(join(tmp, 'repo', 'apps', 'api', 'src', 'utils'), { recursive: true });
   copyFileSync(join(DEPLOY, '../apps/api/src/utils/secret-files.ts'), join(tmp, 'repo', 'apps', 'api', 'src', 'utils', 'secret-files.ts'));
   return here;
@@ -167,6 +173,10 @@ const PRODUCTION = {
   // Address search (the API refuses production without it once #1563 lands;
   // osm or google is the owner's choice).
   PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon:2322',
+  // Production backups are encrypted to the owner's public key (owner ruling, 13 Oct).
+  BACKUP_GPG_FINGERPRINT: '0123456789ABCDEF0123456789ABCDEF01234567', BACKUP_GPG_RECIPIENT_FILE: '/etc/swift/backup-recipient.asc',
+  // The backup freshness alarm matches the hourly backups (Opus review 14 Oct, S3-2).
+  BACKUP_MAX_AGE_HOURS: '3',
 };
 const STAGING = { ...PRODUCTION, PILOT_ENV: 'staging', NODE_ENV: 'development', API_HOST: 'api-staging.example.org', STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' };
 
@@ -186,15 +196,19 @@ function runPilot(settings: Record<string, string | undefined>, opts: { args?: s
   return { ...res, calls: calls() };
 }
 /** Every call that changes the stack: a compose up, stop or build, or a systemctl. */
-const changedNothing = (lines: string[]) => lines.filter((l) => /^docker compose .* (up|stop|build)( |$)/.test(l) || l.startsWith('systemctl '));
+const changedNothing = (lines: string[]) => lines.filter((l) => /^docker compose .* (up|stop|build)( |$)/.test(l)
+  || (l.startsWith('systemctl ') && !/^systemctl (is-enabled|is-active) /.test(l)));
 
 describe('[PROD-PATH] the test helper that finds stack-changing calls', () => {
-  it('finds a compose up, stop or build and a systemctl, and nothing else (positive control)', () => {
+  it('finds a compose up, stop or build and a systemctl that acts, and nothing else (positive control)', () => {
     expect(changedNothing([
       'docker compose --project-directory /x -f /x/docker-compose.yml build api',
       'docker compose --project-directory /x -f /x/docker-compose.yml up -d --wait postgres redis meilisearch',
       'docker compose --project-directory /x -f /x/docker-compose.yml stop api worker',
       'systemctl restart swift-secrets.service',
+      // Read-only questions change nothing: whether the hourly backup timer is on.
+      'systemctl is-enabled --quiet swift-backup-hourly.timer',
+      'systemctl is-active --quiet swift-backup-hourly.timer',
       'docker compose --project-directory /x -f /x/docker-compose.yml config --quiet',
       'docker compose --project-directory /x -f /x/docker-compose.yml ps -q api',
       'docker network inspect swift-pilot-private',
@@ -446,6 +460,87 @@ describe('[S3-L1] pilot-up.sh: a host deploys only onto a database of its own ki
       expect(r.status, `${mode.args.join(' ')}: ${r.stderr}`).toBe(0);
       expect(readsIdentity(r.calls)).toBeGreaterThan(-1);
     }
+  });
+});
+
+// [BACKUP-ENC] Owner ruling, 13 Oct: production backups leave the host only
+// encrypted to the owner's public key. pilot-up refuses a production host
+// whose settings do not pin that key (backup.sh proves the file itself).
+describe('[BACKUP-ENC] pilot-up.sh: production pins the owner\'s backup key', () => {
+  const modes = [[SHA], ['--data-only', SHA], ['--no-public', SHA]];
+  it.each([
+    [{ BACKUP_GPG_FINGERPRINT: undefined }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123456789abcdef0123456789abcdef01234567' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123456789ABCDEF0123456789ABCDEF0123456' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123 4567 89AB CDEF 0123 4567 89AB CDEF 0123 4567' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_RECIPIENT_FILE: undefined }, 'BACKUP_GPG_RECIPIENT_FILE'],
+    [{ BACKUP_GPG_RECIPIENT_FILE: 'backup-recipient.asc' }, 'BACKUP_GPG_RECIPIENT_FILE'],
+  ])('refuses %j in every production mode, before anything changes', (over, named) => {
+    for (const args of modes) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, ...over }, { args, env: args.length > 1 ? { DNS_MAP: '' } : {} });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain(`PILOT_ENV=production needs ${named}`);
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  it('refuses a key file inside the checkout (the seed and the deploy refuse untracked files there)', () => {
+    const here = preparePilot();
+    const inside = join(here, '..', 'backup-recipient.asc');
+    const r = runPilot({ ...PRODUCTION, BACKUP_GPG_RECIPIENT_FILE: inside });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('PILOT_ENV=production needs BACKUP_GPG_RECIPIENT_FILE');
+  });
+
+  it('staging is not asked', () => {
+    const r = runPilot({ ...STAGING, BACKUP_GPG_FINGERPRINT: undefined, BACKUP_GPG_RECIPIENT_FILE: undefined, BACKUP_MAX_AGE_HOURS: undefined }, { env: { BACKUP_KEY_REFUSE: 'not asked', BACKUP_TIMER_OFF: 'is-enabled' } });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.calls.filter((l) => l.startsWith('backup.sh') || /^systemctl is-/.test(l))).toEqual([]);
+  });
+
+  // Opus review 14 Oct, S3-3: the pin was checked for its shape only; a missing file, another key or a private
+  // key deployed green and every hourly backup then failed. backup.sh's own proof runs first, in every mode.
+  it('proves the key file with backup.sh --check-key in every production mode, and stops before anything changes when it refuses', () => {
+    for (const args of modes) {
+      writeFileSync(log, '');
+      const ok = runPilot(PRODUCTION, { args, env: args.length > 1 ? { DNS_MAP: '' } : {} });
+      expect(ok.calls, args.join(' ')).toContain('backup.sh --check-key');
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args, env: { ...(args.length > 1 ? { DNS_MAP: '' } : {}), BACKUP_KEY_REFUSE: 'the key in BACKUP_GPG_RECIPIENT_FILE is not the pinned owner key' } });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain('FATAL: the key in BACKUP_GPG_RECIPIENT_FILE is not the pinned owner key');
+      expect(r.stderr).toContain('PILOT_ENV=production: the backup key file is not the owner\'s pinned public key');
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  // S3-2: the freshness alarm defaulted to 26 hours, a nightly cadence, on an hourly production.
+  it.each([[undefined], ['26'], ['0'], ['4'], ['x']])('refuses BACKUP_MAX_AGE_HOURS=%s in every production mode, before anything changes', (hours) => {
+    for (const args of modes) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, BACKUP_MAX_AGE_HOURS: hours }, { args, env: args.length > 1 ? { DNS_MAP: '' } : {} });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain('PILOT_ENV=production needs BACKUP_MAX_AGE_HOURS=1, 2 or 3');
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  // S3-2: the hourly timer was installed by hand only, and nothing checked it.
+  it.each([['is-enabled'], ['is-active']])('a stage that starts the API refuses while the hourly backup timer fails %s, before anything changes', (off) => {
+    for (const args of [[SHA], ['--no-public', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args, env: { ...(args.length > 1 ? { DNS_MAP: '' } : {}), BACKUP_TIMER_OFF: off } });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain('PILOT_ENV=production needs the hourly backup timer enabled and active');
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  it('the database-only stage, which comes before the timer is installed, does not ask for it', () => {
+    const r = runPilot(PRODUCTION, { args: ['--data-only', SHA], env: { DNS_MAP: '', BACKUP_TIMER_OFF: 'is-enabled' } });
+    expect(r.stderr).not.toContain('hourly backup timer');
+    expect(r.calls.filter((l) => /^systemctl is-/.test(l))).toEqual([]);
   });
 });
 
@@ -929,6 +1024,8 @@ function runSeed(settings: Record<string, string>, env: Record<string, string> =
       PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`,
       CALL_LOG: log, GIT_HEAD: SHA, STORE_NAMES: 'POSTGRES_PASSWORD SEED_APPROVER_KEYS',
       SEED_ADMIN_PHONE: '+5920400000', IDENTITY_ROW: '1:production', SEED_FX_GYD_PER_USD: '209.5',
+      // The owner's admin email (production: seed-production.sh's hidden prompt on a terminal).
+      SEED_ADMIN_EMAIL: 'owner.seed@example.invalid',
       ...env,
     },
   });

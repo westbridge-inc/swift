@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -132,6 +133,7 @@ async function makeDriver(opts: { lat?: number; lng?: number; currentInsurance?:
     fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
     coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
   } });
+  await currentTaxiSplitDocuments(app.prisma, u.userId);
   return { ...u, driverId: driver.id };
 }
 

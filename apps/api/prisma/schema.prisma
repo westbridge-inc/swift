@@ -1572,6 +1572,10 @@ model Vendor {
   /// read, exactly as mmgPayUrl is, because a stored row is untrusted until the
   /// boundary that hands it to a customer's dialler.
   publicPhone String?
+  /// [VERIFY-DOCS · owner ruling 7, 6 Oct 2026] OPTIONAL: the store's VAT registration number, typed by the
+  /// owner only if the business is VAT-registered — for VAT tax invoices (VAT Act s.28, Sch. III). Digits
+  /// only, format-checked, never looked up; no TIN certificate image is ever asked for. Never public.
+  vatRegistrationNumber String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1586,6 +1590,8 @@ model Vendor {
   @@index([tenantId])
   @@index([isSynthetic])
   @@index([mmgPayUrlApplyAt])
+  /// [SEARCH] Trigram GIN index on the store name (pg_trgm), see Item.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "vendors_name_trgm_idx")
   @@map("vendors")
 }
 
@@ -1744,6 +1750,11 @@ model Item {
   @@index([isAvailable, createdAt])
   @@index([isAvailable, basePrice])
   @@index([tenantId])
+  /// [SEARCH] Trigram GIN indexes (pg_trgm, owner decision 26, 13 Oct): customer
+  /// search matches pieces of a name or description (ILIKE '%..%' and the
+  /// one-slip patterns); without them every search reads every item.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "items_name_trgm_idx")
+  @@index([description(ops: raw("gin_trgm_ops"))], type: Gin, map: "items_description_trgm_idx")
   @@map("items")
 }
 
