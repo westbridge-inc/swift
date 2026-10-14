@@ -140,6 +140,18 @@ const PUBLISHED: Record<
     driver_agreement: '5976fc9c5508c29325449db48b7b821ac658a58775d12bf1b3703e9e7f00ff9d',
     vendor_agreement: '0bd3f6dc34d89b10a3fcad7bbd00e4332b722b993caa180176de47b80dfaca62',
   },
+  // [OWNER #62 · 14 Oct, NO PAYING AHEAD] The Mover and Business Agreements'
+  // fee paragraph: one week at a time (while a week runs the coming week may be
+  // paid, and no further), money beyond that returned, a fee paid before its
+  // week starts used only for that fee and refunded at closing if its week has
+  // not started. Proven the only change: putting the 12 Oct sentence and date
+  // back reproduces all four 2026-10-12 hashes exactly. The date re-pins all four.
+  '2026-10-14': {
+    terms: '82ec39e1ee46cab2196511b2520b7368581d67cf92cde55989589ea26a3346ee',
+    privacy: '0d7b3a0c47dfa346e2683ae83d7212a29e56b7a8fe9377e7add841fe2192ebb6',
+    driver_agreement: 'f959e105f3de8af19cbeab972144e6448a7f37700a46609bf61b13697343dce7',
+    vendor_agreement: '7330d551da8398684b065ca70010821e77a425d1add14136e7cb93f9bf73431f',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -155,10 +167,11 @@ describe('legal version binding [F-035-08]', () => {
   it.each([
     ['Mover Agreement', DRIVER_AGREEMENT],
     ['Business Agreement', VENDOR_AGREEMENT],
-  ])('%s states the four-week pay-ahead limit and the refund of unused weeks at closing [owner ruling 8 Oct]', (_name, agreement) => {
+  ])('%s states one week at a time (no paying ahead) and the refund of an unstarted week at closing [owner #62, 14 Oct]', (_name, agreement) => {
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
-    expect(feeParagraph).toContain('You may pay the weekly fee up to four weeks ahead, and no further. Money received above that limit is returned to you.');
-    expect(feeParagraph).toContain('If you close your account, Swift refunds to you the weeks you paid ahead that have not started, records the refund, and then deletes the account; a week that has started is not refunded.');
+    expect(feeParagraph).toContain('You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you.');
+    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, records the refund, and then deletes the account; a week that has started is not refunded.');
+    expect(feeParagraph, 'the four-week limit is gone [owner #62]').not.toMatch(/four weeks|paid ahead|pay ahead/i);
   });
 
   it('the served version is a version this file has pinned', () => {
