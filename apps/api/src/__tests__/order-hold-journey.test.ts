@@ -12,7 +12,6 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { holdReleaseObserver } from '../modules/order/order.service';
-import { LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
 import { escalateVendorAlert } from '../modules/notification/notification.service';
 import { autoCancelUnresponsiveOrder, enqueueVendorAlertFollowup, releaseHeldOrdersJob } from '../jobs/queue';
 import { drainCheckoutOutbox, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
@@ -486,14 +485,16 @@ describe.each([
       dashboard: DASHBOARD_EMPTY,
     });
 
-    // The customer's own screen offers the cancel as free, counting down to
-    // the same server instant.
+    // The customer's own screen offers the cancel as free. [owner #46, 13 Oct]
+    // A store order stays free until the store accepts — past the hold too —
+    // so there is no countdown to promise; the hold itself is still shown.
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, buyer.token);
     expect(mine.statusCode, mine.body).toBe(200);
     expect(mine.json().data).toMatchObject({
       canCancel: true, freeCancellationWindow: true, cancellationFee: 0,
       holdExpiresAt: row.holdExpiresAt!.toISOString(),
-      freeCancellationExpiresAt: row.holdExpiresAt!.toISOString(),
+      freeCancellationExpiresAt: null,
+      cancellationMessage: 'You can cancel for free until the store accepts your order.',
     });
   });
 
@@ -660,9 +661,9 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
       delete holdReleaseObserver.afterRelease;
     }
     expect(cancelled?.statusCode, cancelled?.body).toBe(200);
-    // The release had committed, so the cancel took the ordinary post-window
-    // rules — the late-cancel marker the app previews.
-    expect(cancelled!.json().data).toEqual({ message: 'Order cancelled', cancellationFee: LATE_CANCEL_FEE });
+    // The release had committed, so the cancel took the ordinary post-hold
+    // rules — [owner #46, 13 Oct] free: the store had not accepted it.
+    expect(cancelled!.json().data).toEqual({ message: 'Order cancelled — no charge', cancellationFee: 0 });
     const row = await orderRow(order.id);
     expect(row.status).toBe('CANCELLED');
     expect(row.releasedToVendorAt).not.toBeNull();
@@ -692,14 +693,15 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     const alerted = await storeHeard(store, order);
     expect(alerted.pushes).toEqual(['New Order!']);
 
-    // The window has closed: the cancel is still honoured, with the recorded
-    // (never collected) late-cancel marker the app previews.
+    // The hold has closed: the cancel is still honoured — [owner #46, 13 Oct]
+    // free, because the store has not accepted it (it used to carry the
+    // never-collected G$500 marker here).
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, buyer.token);
-    expect(mine.json().data).toMatchObject({ canCancel: true, freeCancellationWindow: false, cancellationFee: LATE_CANCEL_FEE });
+    expect(mine.json().data).toMatchObject({ canCancel: true, freeCancellationWindow: true, cancellationFee: 0 });
     const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, buyer.token, { reason: 'Too slow' });
     expect(res.statusCode, res.body).toBe(200);
-    expect(res.json().data).toEqual({ message: 'Order cancelled', cancellationFee: LATE_CANCEL_FEE });
-    expect((await orderRow(order.id)).lateCancelFeeDue).toBe(LATE_CANCEL_FEE);
+    expect(res.json().data).toEqual({ message: 'Order cancelled — no charge', cancellationFee: 0 });
+    expect((await orderRow(order.id)).lateCancelFeeDue).toBe(0);
 
     // The store that saw it is told it died (its board refreshes)…
     const told = await storeHeard(store, order);

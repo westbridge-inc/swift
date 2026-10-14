@@ -90,7 +90,7 @@ let rider: { userId: string; token: string };
 let riderId: string;
 let customer: { userId: string; token: string };
 
-async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: PaymentStatus; fee?: number; tip?: number; withRider?: boolean } = {}) {
+async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: PaymentStatus; fee?: number; tip?: number; withRider?: boolean; promisedAt?: Date } = {}) {
   const fee = opts.fee ?? 300;
   const tip = opts.tip ?? 200;
   const order = await app.prisma.order.create({
@@ -102,10 +102,15 @@ async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: Payment
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: fee, tipAmount: tip, totalAmount: 1000 + fee + tip,
       paymentMethod: 'MOBILE_MONEY', paymentStatus: opts.paymentStatus ?? 'PENDING',
+      ...(opts.promisedAt ? { promisedAt: opts.promisedAt } : {}),
     },
   });
   return order;
 }
+
+/** [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
+ *  cancel only when it is very late — 30 minutes past its promise. */
+const PAST_PROMISE = () => new Date(Date.now() - 31 * 60_000);
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, token: string, payload?: unknown, vendor?: string) {
   return app.inject({
@@ -268,7 +273,7 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
   });
 
   it('cancelling unattested MMG says the truth and tells the STORE a refund may be owed [REPORT-007-v4 F-02]', async () => {
-    const order = await makeMmgOrder('ACCEPTED', { withRider: false }); // payment PENDING
+    const order = await makeMmgOrder('ACCEPTED', { withRider: false, promisedAt: PAST_PROMISE() }); // payment PENDING; [owner #46/#52, 13–14 Oct]
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'changed my mind' });
     expect(res.statusCode).toBe(200);
     // Customer copy never asserts "no charge" on MMG — the platform cannot know.
@@ -829,7 +834,7 @@ describe('[F-106-05] claim vs cancel, each COMMIT order forced (sequential, not 
   });
 
   it('CANCEL commits first: the claim is refused and no money state is minted', async () => {
-    const order = await makeMmgOrder('ACCEPTED', { withRider: false });
+    const order = await makeMmgOrder('ACCEPTED', { withRider: false, promisedAt: PAST_PROMISE() }); // [owner #46/#52, 13–14 Oct]
     const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'forced-cancel-first' });
     expect(cancel.statusCode, cancel.body).toBe(200);
     const claim = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);

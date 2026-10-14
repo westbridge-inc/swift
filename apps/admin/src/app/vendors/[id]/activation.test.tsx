@@ -93,6 +93,13 @@ describe('[MC-PR2] a store waiting for documents', () => {
     expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
   });
 
+  it('[owner #51] documents complete but no published phone: says the owner adds it and the store goes live by itself, offers nothing to press', async () => {
+    serve('PENDING_APPROVAL', checklistOf('NEEDS_PHONE', { ready: true }));
+    page();
+    expect(await screen.findByText(/no published phone number customers can call. Swift makes Target Store live by itself once the owner adds one/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate|Lift)/ })).toBeNull();
+  });
+
   it('a checklist that fails to load says so, with a Retry — and offers no activation on a guess', async () => {
     serve('PENDING_APPROVAL', new Error('down'));
     page();
@@ -114,6 +121,21 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(String(url)).toMatch(/\/api\/v1\/admin\/vendors\/vendor-target\/approve$/);
     expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe(REASON);
+  });
+
+  it('[owner #51 · DS1145 S3] a store suspended before it was ever live, with no phone, is lifted back to waiting — the page says so, never "live"', async () => {
+    const fetchMock = serve('SUSPENDED', checklistOf('CAN_LIFT_TO_WAITING', { storeStatus: 'SUSPENDED', suspensionSource: 'ADMIN' }), () => ({ body: { success: true, data: { ...storeOf('PENDING_APPROVAL') } } }));
+    const { user } = page();
+    expect(await screen.findByText(/Suspended before it was ever live/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Reinstate…' })).toBeNull();
+    await user.click(await screen.findByRole('button', { name: 'Lift suspension…' }));
+    const dialog = screen.getByRole('dialog', { name: "Lift Target Store's suspension?" });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Lift suspension' }));
+    const said = (await screen.findByRole('status')).textContent ?? '';
+    expect(said).toContain('Target Store is waiting for its phone number and goes live once the owner adds it.');
+    expect(said).not.toMatch(/is live/);
+    expect(String(requestsByMethod(fetchMock, 'PUT')[0]![0])).toMatch(/\/api\/v1\/admin\/vendors\/vendor-target\/approve$/);
   });
 
   it('an admin-suspended store with current documents can be reinstated', async () => {

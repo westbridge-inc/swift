@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { getTenantId } from '../../plugins/tenant-context';
 import { haversineDistance } from '../../utils/distance';
+import { coarsePoint } from './board-privacy';
 
 /**
  * Earner-facing demand reads (dashboard plan Phase A) — the availability
@@ -15,8 +16,6 @@ import { haversineDistance } from '../../utils/distance';
  *  available-rides board both use it, so they can never disagree on what's
  *  "live" [SWIFT-064]. Env-tunable for market conditions. */
 export const TAXI_DEMAND_WINDOW_MIN = Number(process.env['TAXI_DEMAND_WINDOW_MIN'] ?? 15);
-/** ~300 m snap: coarse enough to hide a doorstep, fine enough to drive toward. */
-const POINT_SNAP_DEG = 0.003;
 /** ~1.3 km cluster cells for the "N waiting near here" badges. */
 const CLUSTER_CELL_DEG = 0.012;
 
@@ -76,7 +75,10 @@ export async function driverDemand(
   const near = (lat: number, lng: number) => haversineDistance(at.lat, at.lng, lat, lng) <= radiusKm;
   const points = requests
     .filter((r) => near(Number(r.pickupLat), Number(r.pickupLng)))
-    .map((r) => ({ lat: snap(Number(r.pickupLat), POINT_SNAP_DEG), lng: snap(Number(r.pickupLng), POINT_SNAP_DEG) }));
+    .flatMap((r) => {
+      const point = coarsePoint(r.pickupLat, r.pickupLng);
+      return point ? [point] : [];
+    });
   const watchers = watches.filter((w) => near(w.lat, w.lng)).length;
 
   return { waiting: points.length, watchers, points, clusters: clusterPoints(points) };
