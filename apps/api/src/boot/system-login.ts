@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import { attestationOf, readRlsFacts, type RlsFacts } from '../lib/rls-attestation';
+import { attestationOf, readDatabaseIdentity, readRlsFacts, type DatabaseIdentity, type RlsFacts } from '../lib/rls-attestation';
 import { runtimeMode } from '../utils/runtime-mode';
 
 type EnvLike = Record<string, string | undefined>;
@@ -7,17 +7,6 @@ type RawDb = Pick<PrismaClient, '$queryRaw'>;
 interface BootLog {
   info(obj: object, msg: string): void;
   warn(obj: object, msg: string): void;
-}
-
-/** Which database, on which running server, a connection reached. Roles are
- *  server-wide, so a bypass member is one on EVERY database of the server:
- *  membership alone cannot tell that system work would read the wrong one. */
-interface DatabaseIdentity { database: string; serverStartedAt: string }
-
-async function readDatabaseIdentity(db: RawDb): Promise<DatabaseIdentity | null> {
-  const [row] = await db.$queryRaw<Array<{ database: string; started: string }>>`
-    SELECT current_database()::text AS database, pg_postmaster_start_time()::text AS started`;
-  return row ? { database: row.database, serverStartedAt: row.started } : null;
 }
 
 interface SystemLoginProbe { facts: RlsFacts; identity: DatabaseIdentity | null }
