@@ -85,7 +85,10 @@ type OrderDetail = {
   freeCancellationExpiresAt?: string | null;
   appointmentSlot?: string | null;
   canCancel?: boolean;
-  cancellationFee?: number;
+  /** [owner #46/#50/#52] Why a cancel is free right now, in the server's words. */
+  cancellationMessage?: string | null;
+  /** [owner #46/#50] Why there is no Cancel, and who to contact instead. */
+  cancelUnavailable?: { code: string; message: string; contactPhone?: string | null } | null;
   cancellationReason?: string | null;
 };
 
@@ -196,14 +199,11 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }
 
-function cancellationPayload(value: unknown): { message: string | null; fee: number | null } {
+function cancellationPayload(value: unknown): { message: string | null } {
   const root = record(value);
   const first = record(root?.['data']) ?? root;
   const payload = record(first?.['data']) ?? first;
-  return {
-    message: typeof payload?.['message'] === 'string' ? payload['message'] : null,
-    fee: typeof payload?.['cancellationFee'] === 'number' ? payload['cancellationFee'] : null,
-  };
+  return { message: typeof payload?.['message'] === 'string' ? payload['message'] : null };
 }
 
 function verifiedMmgAction(order: OrderDetail): NonNullable<OrderDetail['paymentAction']> | null {
@@ -229,7 +229,6 @@ export default function OrderDetailPage() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cancelResult, setCancelResult] = useState<string | null>(null);
-  const [cancelFee, setCancelFee] = useState<number | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [openingPayment, setOpeningPayment] = useState(false);
@@ -288,7 +287,6 @@ export default function OrderDetailPage() {
     setLastUpdatedAt(null);
     setError(null);
     setCancelResult(null);
-    setCancelFee(null);
     setConfirmingCancel(false);
     setCancelling(false);
     setOpeningPayment(false);
@@ -366,7 +364,6 @@ export default function OrderDetailPage() {
   const vehicle = [order.rider?.vehicleColor, order.rider?.vehicleMake, order.rider?.vehicleModel, order.rider?.vehicleType]
     .filter(Boolean)
     .join(' ');
-  const effectiveCancelFee = cancelFee ?? Number(order.cancellationFee ?? 0);
   const paymentCaptured = order.paymentStatus === 'CAPTURED';
   const paymentRefunded = order.paymentStatus === 'REFUNDED';
   const paymentFailed = order.paymentStatus === 'FAILED';
@@ -435,7 +432,6 @@ export default function OrderDetailPage() {
     setError(null);
     try {
       const latest = (await getOrder(id)) as OrderDetail;
-      const latestFee = Number(latest.cancellationFee ?? 0);
       setOrder({ ...latest, rider: latest.rider ?? order.rider });
       setLastUpdatedAt(new Date());
       const latestTaxiCancellationUnknown = latest.orderType === 'TAXI'
@@ -446,15 +442,8 @@ export default function OrderDetailPage() {
         window.requestAnimationFrame(() => statusHeadingRef.current?.focus());
         return;
       }
-      if (latestFee !== effectiveCancelFee) {
-        setCancelFee(latestFee);
-        setError(`The possible cancellation fee changed to ${money(latestFee)}. Check the new amount, then confirm again if you still want to cancel.`);
-        window.requestAnimationFrame(() => cancelConfirmButton.current?.focus());
-        return;
-      }
       const result = cancellationPayload(await cancelOrder(id, 'changed my mind'));
       setCancelResult(result.message);
-      setCancelFee(result.fee);
       setConfirmingCancel(false);
       await load();
       window.requestAnimationFrame(() => statusHeadingRef.current?.focus());
@@ -508,11 +497,8 @@ export default function OrderDetailPage() {
       ) : null}
 
       {cancelResult ? (
-        <div className={`${styles.cancelOutcome} ${Number(cancelFee ?? 0) > 0 ? styles.cancelWarning : ''}`} role="status">
+        <div className={styles.cancelOutcome} role="status">
           <strong>{cancelResult}</strong>
-          {typeof cancelFee === 'number' ? (
-            <span>{cancelFee > 0 ? `A ${money(cancelFee)} late-cancellation fee was recorded. Swift does not collect it.` : 'No cancellation fee was recorded.'}</span>
-          ) : null}
         </div>
       ) : null}
 
@@ -734,6 +720,19 @@ export default function OrderDetailPage() {
 
           {error ? <p className={styles.alert} role="alert">{error}</p> : null}
 
+          {/* [owner #46/#50] The server's reason there is no Cancel, and who to
+              contact instead — the store's (or provider's) published number. */}
+          {!stopped && !order.canCancel && order.cancelUnavailable ? (
+            <div className={styles.cancelConfirm} role="note">
+              <p>{order.cancelUnavailable.message}</p>
+              {order.cancelUnavailable.contactPhone ? (
+                <a className={styles.secondaryButton} href={`tel:${order.cancelUnavailable.contactPhone}`}>
+                  Call {order.cancelUnavailable.contactPhone}
+                </a>
+              ) : null}
+            </div>
+          ) : null}
+
           {canOfferCancellation && !confirmingCancel ? (
             <button
               type="button"
@@ -749,11 +748,9 @@ export default function OrderDetailPage() {
           ) : null}
 
           {confirmingCancel && canOfferCancellation ? (
-            <div className={`${styles.cancelConfirm} ${effectiveCancelFee > 0 ? styles.cancelWarning : ''}`}>
+            <div className={styles.cancelConfirm}>
               <p id="cancellation-quote">
-                {effectiveCancelFee > 0
-                  ? `The last check showed a possible ${money(effectiveCancelFee)} late-cancellation fee. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift does not collect it. We check the amount again when you confirm.`
-                  : `The last check showed no cancellation fee${order.freeCancellationExpiresAt ? ` through ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift checks again before cancelling and does not collect the fee.`}
+                {`${order.cancellationMessage ?? 'Cancelling is free.'}${order.freeCancellationExpiresAt ? ` You can cancel until ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}.` : ''} ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift checks again before cancelling.`}
               </p>
               <div className={styles.confirmActions}>
                 <button ref={cancelConfirmButton} type="button" className={styles.primaryButton} aria-describedby="cancellation-quote" disabled={cancelling} onClick={() => void confirmCancellation()}>
