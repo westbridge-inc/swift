@@ -12,7 +12,7 @@ function sources(dir: string): string[] {
 }
 
 describe('sensitive room publication census', () => {
-  it('all 43 existing order publishers call the current-audience gate; no direct order or chat broadcast remains', () => {
+  it('all 44 existing order publishers call the current-audience gate; no direct order or chat broadcast remains', () => {
     const bypasses: string[] = []; let orderPublishers = 0;
     for (const file of sources(join(__dirname, '..'))) {
       const text = readFileSync(file, 'utf8');
@@ -20,6 +20,12 @@ describe('sensitive room publication census', () => {
       const visit = (n: ts.Node) => {
         if (ts.isCallExpression(n)) {
           if (n.expression.getText(ast) === 'emitToOrderRoom') orderPublishers++;
+          // A helper that takes the room as an argument (e.g. roomEmit(`order:…`)) is the same bypass.
+          const callee = ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : n.expression.getText(ast);
+          if (/emit/i.test(callee) && !['emit', 'emitToOrderRoom', 'emitToChatRoom'].includes(callee)
+            && n.arguments.some((arg) => /^[`'"](?:order|chat):/.test(arg.getText(ast)))) {
+            bypasses.push(file + ':' + (ast.getLineAndCharacterOfPosition(n.getStart(ast)).line + 1));
+          }
           if (ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === 'emit'
             && ts.isCallExpression(n.expression.expression)
             && ts.isPropertyAccessExpression(n.expression.expression.expression)
@@ -33,6 +39,7 @@ describe('sensitive room publication census', () => {
       visit(ast);
     }
     expect(bypasses).toEqual([]);
-    expect(orderPublishers).toBe(43);
+    // 43 + the guardian check-in hint (it used a roomEmit(`order:…`) helper the first census missed).
+    expect(orderPublishers).toBe(44);
   });
 });
