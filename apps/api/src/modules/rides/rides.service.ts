@@ -329,13 +329,15 @@ export async function createRideRequest(
       { capacity: tier.capacity, passengerCount: body.passengerCount });
   }
 
-  // [TAXI multi-stop] The passenger books the route fare they were shown, or
-  // nothing: a fare that moved since the quote (rates, the road, the tier) is
-  // shown to them again before anything is written. The order always stores
-  // the SERVER's fare; the passenger's number is only ever compared. A caller
-  // that sent no quoted fare at all (the route refuses that first, 400
-  // EXPECTED_FARE_REQUIRED) is refused here too: nothing is booked unseen.
-  if (stops.length > 0 && body.expectedFare !== tier.fare) {
+  // [TAXI multi-stop · PRICE-LOCK] The passenger books the fare they were
+  // shown, or nothing: a fare that moved since the quote (rates, the zone
+  // table, the road, the tier) is shown to them again before anything is
+  // written. The order always stores the SERVER's fare; the passenger's number
+  // is only ever compared. A ride with stops must carry it (the route refuses
+  // a missing one first, 400 EXPECTED_FARE_REQUIRED); a ride without stops is
+  // compared whenever the app sent it, and an app from before the lock (no
+  // fare) books at the server fare as it always did.
+  if ((stops.length > 0 || body.expectedFare !== undefined) && body.expectedFare !== tier.fare) {
     throw fareChanged(body.expectedFare, tier.fare, body.rideClass, tiered.currencyCode);
   }
 
