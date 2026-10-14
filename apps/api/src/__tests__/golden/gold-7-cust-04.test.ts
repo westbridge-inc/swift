@@ -1,3 +1,4 @@
+import { publicVendorReviewId } from '../../modules/rating/vendor-review-visibility';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { nanoid } from 'nanoid';
 import { createGolden } from './gold-7-helpers';
@@ -70,13 +71,19 @@ describe('GOLD-7 · CUST-04 — rate, report and tip refusal', () => {
     expect(repeatRating.json().error.code).toBe('ALREADY_RATED');
     const unchangedRatings = await h.sys(() => h.app.prisma.rating.findMany({ where: { orderId: id } }));
     expect(unchangedRatings.map((r) => [r.id, r.score])).toEqual([[rating.id, 5]]);
+    const publicId = publicVendorReviewId(rating.id);
     const report = await h.call('POST', `/api/v1/customer/ratings/${rating.id}/report`, reporter.token,
       { reason: 'FALSE_CLAIM', note: 'Please review this claim' });
     expect(report.statusCode, report.json().error?.code).toBe(200);
-    expect(report.json().data).toMatchObject({ ratingId: rating.id, reporterId: reporter.userId, status: 'PENDING', reason: 'FALSE_CLAIM' });
-    const reportAgain = await h.call('POST', `/api/v1/customer/ratings/${rating.id}/report`, reporter.token, { reason: 'FALSE_CLAIM' });
+    expect(report.json().data).toMatchObject({ ratingId: publicId, reporterId: reporter.userId, status: 'PENDING', reason: 'FALSE_CLAIM' });
+    expect(report.body).not.toContain(rating.id);
+    const reportAgain = await h.call('POST', `/api/v1/customer/ratings/${publicId}/report`, reporter.token, { reason: 'FALSE_CLAIM' });
     expect(reportAgain.statusCode).toBe(200);
     expect(reportAgain.json().data.id).toBe(report.json().data.id);
+    expect(reportAgain.json().data.ratingId).toBe(publicId);
+    expect(reportAgain.body).not.toContain(rating.id);
+    expect(await h.sys(() => h.app.prisma.ratingReport.findUniqueOrThrow({ where: { id: report.json().data.id } })))
+      .toMatchObject({ ratingId: rating.id, reporterId: reporter.userId, status: 'PENDING', reason: 'FALSE_CLAIM' });
     expect(await h.sys(() => h.app.prisma.ratingReport.count({ where: { ratingId: rating.id } }))).toBe(1);
     const before = await h.sys(() => h.app.prisma.order.findUniqueOrThrow({ where: { id } }));
     const earningsBefore = await h.sys(() => h.app.prisma.earning.findMany({ where: { orderId: id }, select: { id: true, type: true, amount: true } }));
