@@ -9,7 +9,8 @@
 --   tenantTables/disabledTables/unforcedTables
 --     the wall itself (tables with a "tenantId" column, ENABLE and FORCE);
 --   qrSchemaPresent/qrUnsafeGrants
---     the private QR registry: no privilege for PUBLIC, the app roles or the logins;
+--     the private QR registry: no privilege for PUBLIC, the app roles or the logins
+--     (schema, relations, columns, functions);
 --   obsoleteExecutable
 --     the dropped vendor-move functions, if any came back, executable by them;
 --   parentUpdateMissing
@@ -19,8 +20,10 @@
 --     and TRUNCATE (which skips the append-only row triggers) for any of them;
 --   defaultGrantCount
 --     default privileges beyond the three swift_app grants the migrations make;
---   groupUnsafeAttributes/groupUnexpectedParents
---     swift_app and swift_bypass_rls stay NOLOGIN groups that belong to nothing;
+--   groupUnsafeAttributes/groupUnexpectedParents/groupOwnedObjects
+--     swift_app and swift_bypass_rls stay NOLOGIN groups that belong to nothing
+--     and own nothing (pg_shdepend, the whole cluster): a login that inherits
+--     an owner's rights can switch the wall off;
 --   roles
 --     the two runtime logins, when they exist: attributes, memberships,
 --     ownership and grants (pg_shdepend, the whole cluster), settings by NAME.
@@ -63,6 +66,11 @@ qr_grants AS (
   SELECT x.grantee
     FROM pg_class c JOIN schemas s ON s.oid = c.relnamespace AND s.nspname = 'swift_qr',
          aclexplode(coalesce(c.relacl, acldefault(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END::"char", c.relowner))) x
+  UNION ALL
+  SELECT x.grantee
+    FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN schemas s ON s.oid = c.relnamespace AND s.nspname = 'swift_qr',
+         aclexplode(a.attacl) x
+   WHERE a.attacl IS NOT NULL AND NOT a.attisdropped
   UNION ALL
   SELECT x.grantee
     FROM pg_proc p JOIN schemas s ON s.oid = p.pronamespace AND s.nspname = 'swift_qr',
@@ -190,6 +198,10 @@ SELECT json_build_object(
               + g.rolcreaterole::int + g.rolreplication::int) END), 0)::int FROM grp g),
   'groupUnexpectedParents', (
     SELECT count(*) FROM pg_auth_members m WHERE m.member IN (SELECT oid FROM grp WHERE oid IS NOT NULL)),
+  'groupOwnedObjects', (
+    SELECT count(*) FROM pg_shdepend d
+     WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'o'
+       AND d.refobjid IN (SELECT oid FROM grp WHERE oid IS NOT NULL)),
   'ownershipDigest', (SELECT encode(sha256(convert_to(coalesce(string_agg(line, E'\n' ORDER BY line COLLATE "C"), ''), 'UTF8')), 'hex') FROM ownership),
   'aclDigest', (SELECT encode(sha256(convert_to(coalesce(string_agg(line, E'\n' ORDER BY line COLLATE "C"), ''), 'UTF8')), 'hex') FROM acls),
   'roles', coalesce((

@@ -29,7 +29,9 @@ this program's output. Every refusal is a constant code. One run at a time
 (an exclusive lock), and every child process gets a clean environment.
 `verify` is pinned to the approved target (migration head and digests
 included), so it holds only in the apply window; later deploys run `roles`,
-the same role contract without the target pin.
+the same role contract without the target pin. The store is paired with the
+stack: production's project uses production's store only, and a rehearsal
+(any other project or compose file) names a store of its own.
 """
 import argparse
 import base64
@@ -58,6 +60,8 @@ PUBLISHED = {'swift_app_login': 'DATABASE_URL', 'swift_system_login': 'SYSTEM_DA
 PARENTS = {'swift_app_login': ['swift_app'], 'swift_system_login': ['swift_app', 'swift_bypass_rls']}
 DB_HOST, DB_PORT = 'postgres', 5432
 DEFAULT_STORE = '/etc/credstore.encrypted/swift'
+DEFAULT_RUN = '/run/swift-secrets'  # production's live secrets, mounted into its containers
+PRODUCTION_COMPOSE = ('docker-compose.yml', 'docker-compose.wall.yml')
 DEFAULT_LOCK = '/run/lock/swift-rls-logins.lock'
 SCRAM_ITERATIONS = 4096
 TIMEOUT = 120
@@ -81,19 +85,23 @@ PGPASSFILE="$f" psql "host=postgres port=5432 dbname=$POSTGRES_DB user=$1 sslmod
 # What the login itself sees on its own connection. The verdicts mirror
 # apps/api/src/lib/rls-attestation.ts (superuser, BYPASSRLS, swift_bypass_rls
 # membership, RLS disabled, owned and not forced), plus one it cannot see from
-# flags alone: membership of a role that owns a table or function in the
-# walled schemas (an owner member can switch the wall off).
+# flags alone: membership of a role that owns a walled schema or a table,
+# function or type in one (an owner member can switch the wall off, or drop
+# the append-only trigger a function carries).
 FACTS_SQL = ' '.join('''
 WITH me AS (SELECT r.rolsuper, r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user),
 bypass AS (SELECT coalesce((SELECT pg_has_role(current_user, b.oid, 'MEMBER') FROM pg_roles b
                             WHERE b.rolname = 'swift_bypass_rls'), false) AS member),
 tenant AS (SELECT c.relrowsecurity, c.relforcerowsecurity, c.relowner FROM pg_class c
              JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
-            WHERE c.relkind = 'r' AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid
+            WHERE c.relkind IN ('r', 'p') AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid
                                                 AND a.attname = 'tenantId' AND NOT a.attisdropped)),
 owners AS (SELECT c.relowner AS owner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname IN ('public', 'swift_qr')
            UNION SELECT p.proowner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname IN ('public', 'swift_qr')
+           UNION SELECT n.nspowner FROM pg_namespace n WHERE n.nspname IN ('public', 'swift_qr')
+           UNION SELECT t.typowner FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
             WHERE n.nspname IN ('public', 'swift_qr')),
 f AS (SELECT (SELECT count(*) FROM me) = 1 AS resolved,
              coalesce((SELECT rolsuper FROM me), true) AS super,
@@ -348,6 +356,36 @@ def load_target(path):
     return approved
 
 
+def _same_or_inside(path, base):
+    path, base = os.path.realpath(path), os.path.realpath(base)
+    return path == base or path.startswith(base.rstrip('/') + '/')
+
+
+def store_env_for(args, deploy):
+    """Pair the store with the stack, before anything is touched.
+
+    Production's stack is the deploy directory's own project (no project name,
+    the deploy directory, its docker-compose.yml first and at most the wall
+    overlay beside it); it uses production's store and only that. Any other
+    stack (a rehearsal) names a store of its own, both locations, neither of
+    them production's store or its live secrets. So a rehearsal can never
+    journal or publish into production, and production never journals into
+    a store its containers do not read.
+    """
+    files = [os.path.realpath(path) for path in args.compose_file]
+    production_stack = (args.project_name is None
+                        and os.path.realpath(args.project_directory) == os.path.realpath(deploy)
+                        and files[:1] == [os.path.realpath(deploy / PRODUCTION_COMPOSE[0])]
+                        and set(files) <= {os.path.realpath(deploy / name) for name in PRODUCTION_COMPOSE})
+    if production_stack:
+        require(os.path.realpath(args.store_dir) == os.path.realpath(DEFAULT_STORE) and args.run_dir is None,
+                'PRODUCTION_STACK_NEEDS_PRODUCTION_STORE')
+        return []
+    require(args.run_dir is not None and not _same_or_inside(args.store_dir, DEFAULT_STORE)
+            and not _same_or_inside(args.run_dir, DEFAULT_RUN), 'REHEARSAL_STACK_NEEDS_ITS_OWN_STORE')
+    return ['env', f'SWIFT_SECRETS_STORE_DIR={args.store_dir}', f'SWIFT_SECRETS_RUN_DIR={args.run_dir}']
+
+
 def compose_argv(args):
     argv = ['docker', 'compose']
     if args.project_name:
@@ -371,13 +409,11 @@ def main(argv=None):
     parser.add_argument('--lock-file', default=DEFAULT_LOCK)
     args = parser.parse_args(argv)
     args.compose_file = args.compose_file or [str(deploy / 'docker-compose.yml')]
-    store_env = []
-    if args.store_dir != DEFAULT_STORE or args.run_dir:
-        # A rehearsal store, never production's: both locations are named.
-        if not args.run_dir:
-            print(json.dumps({'status': 'hold', 'reason': 'REHEARSAL_STORE_NEEDS_RUN_DIR'}))
-            return 1
-        store_env = ['env', f'SWIFT_SECRETS_STORE_DIR={args.store_dir}', f'SWIFT_SECRETS_RUN_DIR={args.run_dir}']
+    try:
+        store_env = store_env_for(args, deploy)
+    except Refusal as error:
+        print(json.dumps({'status': 'hold', 'reason': str(error)}))
+        return 1
     try:
         lock = open(args.lock_file, 'a', encoding='utf-8')
     except OSError:

@@ -1190,8 +1190,8 @@ them on the host that runs the stack, as the deploy user, with Postgres up:
 - `apply` refuses before writing anything unless the database is exactly
   the approved target and every catalogue invariant holds (row security on
   and forced, the private QR schema closed to the app, the migrations' own
-  revocations in place, no extra default grants, the two groups unchanged).
-  It never repairs an existing role.
+  revocations in place, no extra default grants, the two groups unchanged
+  and owning nothing). It never repairs an existing role.
 - The passwords are generated inside the tool, kept in the encrypted store
   (`RLS_LOGIN_SWIFT_APP_LOGIN`, `RLS_LOGIN_SWIFT_SYSTEM_LOGIN`) before either
   login exists, and the database receives only a SCRAM verifier. Each login
@@ -1203,3 +1203,9 @@ them on the host that runs the stack, as the deploy user, with Postgres up:
   migration. Later deploys run `./deploy/rls-logins.sh roles`: the same role
   and catalogue contract with both logins present, without the target pin.
 - One run at a time (a lock). Rotation is not part of this tool.
+- The store goes with the stack. Production's project (the commands above,
+  with no `--project-name` or extra compose file) uses production's store
+  and nothing else. Any other project (the Phase C rehearsal) must name a
+  store of its own with both `--store-dir` and `--run-dir`, neither of them
+  production's; the tool refuses any other pairing before it touches
+  anything.
