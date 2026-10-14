@@ -51,7 +51,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
-import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerView, unhideRestocked } from '../compliance/prohibited-gate';
+import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
@@ -1036,6 +1036,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
       mmgPayUrlPending: safeMmgPayUrl(vendor.mmgPayUrlPending),
       publicPhone: safePublicPhone(vendor.publicPhone),
+      // [GUARDRAILS §8 · owner 14 Oct, store names] Why customers can't see the store: its own words wait for Swift.
+      storeCheck: partnerStoreView(storeCheckOf(vendor)),
+      nameReviewApprovedHash: undefined,
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
@@ -1341,6 +1344,9 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...link,
         mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
         mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),
+        // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.
+        storeCheck: partnerStoreView(storeCheckOf(vendor)),
+        nameReviewApprovedHash: undefined,
       },
     };
   });
@@ -2014,24 +2020,27 @@ export async function vendorRoutes(app: FastifyInstance) {
     // it moves the counter and writes the ledger row in two statements, so
     // outside a transaction a crash between them leaves the cache and the truth
     // disagreeing, which is the exact failure the ledger exists to prevent.
-    await app.prisma.$transaction((tx) => applyStockMovement(tx, {
-      itemId: item.id,
-      delta: body.delta,
-      reason: body.reason,
-      actorId: request.user.userId,
-      note: body.note ?? null,
-    })).catch((err) => {
+    // Mirror the inventory engine's edges in the SAME transaction as the movement: zero hides, restock un-hides —
+    // never a banned item, judged under the item's row lock with the write. [GUARDRAILS §8 · DS1266 S3 · DS1267 S4]
+    await app.prisma.$transaction(async (tx) => {
+      await applyStockMovement(tx, {
+        itemId: item.id,
+        delta: body.delta,
+        reason: body.reason,
+        actorId: request.user.userId,
+        note: body.note ?? null,
+      });
+      await tx.item.updateMany({
+        where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
+        data: { isAvailable: false, autoHiddenAt: new Date() },
+      });
+      await unhideRestocked(tx, item.id);
+    }).catch((err) => {
       if (err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') {
         throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
       }
       throw err;
     });
-    // Mirror the inventory engine's edges: zero hides, restock un-hides.
-    await app.prisma.item.updateMany({
-      where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
-      data: { isAvailable: false, autoHiddenAt: new Date() },
-    });
-    await unhideRestocked(app.prisma, item.id); // never a banned item [GUARDRAILS §8 · DS1266 S3]
 
     const adjustment = await app.prisma.stockAdjustment.create({
       data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
