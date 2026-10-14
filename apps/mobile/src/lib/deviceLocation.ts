@@ -1,3 +1,5 @@
+import { currentPositionWithFallback, type PositionFix } from './positionFix';
+
 export type LocationStatus = 'unknown' | 'resolving' | 'granted' | 'denied' | 'unavailable';
 export type LocationResolutionMode = 'silent' | 'request';
 
@@ -12,7 +14,12 @@ export const GEORGETOWN = {
 export interface DeviceLocationApi {
   getForegroundPermissionsAsync: () => Promise<{ status: string }>;
   requestForegroundPermissionsAsync: () => Promise<{ status: string }>;
-  getCurrentPositionAsync: () => Promise<{ coords: { latitude: number; longitude: number } }>;
+  /** The low-power (Balanced) request. Bounded by the resolver, never awaited forever [GO-LOC-1]. */
+  getCurrentPositionAsync: () => Promise<PositionFix>;
+  /** [GO-LOC-1] The OS's cached fix; used only when fresh and accurate (positionFix.ts). */
+  getLastKnownPositionAsync: () => Promise<PositionFix | null>;
+  /** [GO-LOC-1] The satellite (High accuracy) request: needs no Wi-Fi or cell network. */
+  getHighAccuracyPositionAsync: () => Promise<PositionFix>;
   reverseGeocodeAsync: (coordinate: { latitude: number; longitude: number }) => Promise<
     Array<{
       name?: string | null;
@@ -182,7 +189,13 @@ export async function resolveDeviceLocation(
       };
     }
 
-    const position = await api.getCurrentPositionAsync();
+    // [GO-LOC-1] Balanced, bounded; then a fresh, accurate cached fix; then
+    // GPS, bounded. A phone with no network location no longer waits forever.
+    const position = await currentPositionWithFallback({
+      balanced: api.getCurrentPositionAsync,
+      lastKnown: api.getLastKnownPositionAsync,
+      gps: api.getHighAccuracyPositionAsync,
+    });
     const { latitude, longitude } = position.coords;
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
       return { status: 'unavailable' };

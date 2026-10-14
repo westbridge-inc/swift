@@ -369,6 +369,75 @@ describe('a ride without stops is the same ride with the switch on', () => {
 });
 
 // ===========================================================================
+// [PRICE-LOCK · owner: "the price shown is the price charged"] A ride without
+// stops is re-priced at /request, and the server's fare is the one stored. When
+// the app sends the fare it showed (expectedFare), the server books only at
+// that fare: a fare that moved since the quote (rates, the zone table, the
+// road) is refused with the fare now, and nothing is written. An app from
+// before the lock (build 9) sends no fare and books exactly as before.
+describe('a ride without stops books only at the fare the passenger was shown', () => {
+  async function plainQuote(token: string, rideClass = 'ECONOMY') {
+    const res = await call(app, 'POST', '/api/v1/rides/estimate', token, { pickup: PICKUP, dropoff: DEST });
+    expect(res.statusCode, res.body).toBe(200);
+    return (res.json().data.tiers as { rideClass: string; fare: number }[]).find((t) => t.rideClass === rideClass)!.fare;
+  }
+
+  it('the shown fare matches: booked at it — the answer, the stored fare and the total are that number', async () => {
+    const customer = await makeCustomer();
+    const fare = await plainQuote(customer.token);
+    const res = await requestRide(customer.token, trip(undefined, { expectedFare: fare }));
+    expect(res.statusCode, res.body).toBe(201);
+    const ride = res.json().data.ride as { id: string; fare: number };
+    expect(Number(ride.fare)).toBe(fare);
+    const row = await rideRow(ride.id);
+    expect([Number(row.taxiFareTotal), Number(row.subtotalCustomer), Number(row.totalAmount)]).toEqual([fare, fare, fare]);
+  });
+
+  it('the shown fare differs: 409 FARE_CHANGED naming the fare now, and nothing is written', async () => {
+    const customer = await makeCustomer();
+    const fare = await plainQuote(customer.token);
+    for (const expectedFare of [fare - 100, fare + 100, 0]) {
+      const res = await requestRide(customer.token, trip(undefined, { expectedFare }));
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toMatchObject({ code: 'FARE_CHANGED', details: { expectedFare, fare, rideClass: 'ECONOMY', currencyCode: 'GYD' } });
+    }
+    expect(await writesOf(customer)).toEqual(NOTHING);
+    // The corrected request books once.
+    expect((await requestRide(customer.token, trip(undefined, { expectedFare: fare }))).statusCode).toBe(201);
+  });
+
+  it('the shown fare is for the tier booked: an Economy fare on a Comfort ride is refused', async () => {
+    const customer = await makeCustomer();
+    const economy = await plainQuote(customer.token, 'ECONOMY');
+    const comfort = await plainQuote(customer.token, 'COMFORT');
+    expect(comfort).not.toBe(economy);
+    const wrong = await requestRide(customer.token, trip(undefined, { rideClass: 'COMFORT', expectedFare: economy }));
+    expect([wrong.statusCode, wrong.json().error.details.fare]).toEqual([409, comfort]);
+    const right = await requestRide(customer.token, trip(undefined, { rideClass: 'COMFORT', expectedFare: comfort }));
+    expect(right.statusCode, right.body).toBe(201);
+    expect(Number((await rideRow(right.json().data.ride.id)).taxiFareTotal)).toBe(comfort);
+  });
+
+  it('a stale fare under an Idempotency-Key releases the key: the corrected request books once', async () => {
+    const customer = await makeCustomer();
+    const fare = await plainQuote(customer.token);
+    const key = `lock-${nanoid(12)}`;
+    expect((await requestRide(customer.token, trip(undefined, { expectedFare: fare - 100 }), key)).statusCode).toBe(409);
+    const booked = await requestRide(customer.token, trip(undefined, { expectedFare: fare }), key);
+    expect(booked.statusCode, booked.body).toBe(201);
+    expect(await writesOf(customer)).toEqual({ orders: 1, stops: 0, receipts: 1 });
+  });
+
+  it('an app from before the lock sends no fare: booked as today, at the server fare', async () => {
+    const customer = await makeCustomer();
+    const fare = await plainQuote(customer.token);
+    const res = await requestRide(customer.token, trip());
+    expect(res.statusCode, res.body).toBe(201);
+    expect(Number((await rideRow(res.json().data.ride.id)).taxiFareTotal)).toBe(fare);
+  });
+});
+
+// ===========================================================================
 describe('switched on (TAXI_MAX_STOPS=3): a ride with stops', () => {
   it('two stops: created at the server\'s whole-route fare, the stops stored in the passenger\'s order with their legs, and the answer carries them', async () => {
     vi.stubEnv('TAXI_MAX_STOPS', '3');

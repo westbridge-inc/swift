@@ -59,6 +59,9 @@ export default function CourierPage() {
   });
   function closePin(end: 'pickup' | 'dropoff') { returnFocus.current = end; setPinning(null); }
   const [estimate, setEstimate] = useState<{ totalFee?: number; fare?: number } | null>(null);
+  // [PRICE-LOCK] Bumped when the server refuses a send because the fee moved:
+  // the quote is fetched again, so the new fee is what the button shows.
+  const [quoteRound, setQuoteRound] = useState(0);
   const [estimateFailed, setEstimateFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,7 +100,7 @@ export default function CourierPage() {
       .then((r) => { if (live) { setEstimate(r); setEstimateFailed(false); } })
       .catch(() => { if (live) { setEstimate(null); setEstimateFailed(true); } });
     return () => { live = false; };
-  }, [pickup, dropoff, size]);
+  }, [pickup, dropoff, size, quoteRound]);
 
   const fee = estimate ? (estimate.totalFee ?? estimate.fare ?? null) : null;
   // [WEB-PIN] The server requires who receives it (courier.routes.ts orderSchema:
@@ -126,10 +129,16 @@ export default function CourierPage() {
         recipientName: recipientName.trim(),
         recipientPhone: recipientPhone.trim(),
         ...(contents.trim() && { packageDescription: contents.trim() }),
+        // [PRICE-LOCK] The fee on the button: the server sends the parcel only at it.
+        expectedFee: fee,
       });
       const id = r?.orderId ?? r?.order?.id ?? r?.id;
       router.push(id ? `/orders/${id}` : '/orders');
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) {
+      setError((e as Error).message);
+      // The fee moved since the quote (nothing was sent): fetch the new one.
+      if ((e as { code?: string }).code === 'PRICE_CHANGED') setQuoteRound((n) => n + 1);
+    }
     finally { setBusy(false); }
   }
 
