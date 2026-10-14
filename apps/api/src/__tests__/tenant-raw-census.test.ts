@@ -44,6 +44,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/billing/sales-components.ts': { sites: 1, role: 'SHARED' },
   'modules/billing/sales-digest.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/billing/settlement-import.ts': { sites: 2, role: 'JOB' },
+  // [GUARDRAILS §8] The prohibited-items pre-filter: reached only from browse requests (Market,
+  // search) and the admin catalogue check; the request tenant is bound and named in the SQL.
+  'modules/compliance/prohibited-scan.service.ts': { sites: 1, role: 'REQUEST' },
   'modules/discovery/discovery.routes.ts': { sites: 1, role: 'REQUEST' },
   'modules/dispatch/dispatch.service.ts': { sites: 4, role: 'SHARED' },
   'modules/mover-authority-cutover-preparation.ts': { sites: 1, role: 'JOB_PENDING' },

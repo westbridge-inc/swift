@@ -129,7 +129,9 @@ describe('the seed law holds', () => {
     const slugs = RETAIL.map((c) => c.slug).sort();
     expect(slugs).toEqual([
       'auto-parts', 'beauty', 'electronics', 'fashion', 'flowers-gifts',
-      'hardware-tools', 'home-kitchen', 'pets', 'pharmacy', 'phone-accessories',
+      // No 'pharmacy': it left the seed with the medicines ban (GUARDRAILS §8, owner 13 Oct 2026).
+      // Existing rows are kept, never re-slugged — this list is still the immutability guard.
+      'hardware-tools', 'home-kitchen', 'pets', 'phone-accessories',
       'shoes', 'sports', 'stationery-books', 'toys-games',
     ]);
   });
