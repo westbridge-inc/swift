@@ -30,19 +30,6 @@
 
 import { SITE_DOMAIN, SITE_ORIGIN } from './site.domain';
 
-// Next's compiler inlines NEXT_PUBLIC_* only for this exact dot-form lookup;
-// the ambient member makes that syntax type-safe under
-// noPropertyAccessFromIndexSignature (the lib/browser-api-origin.ts pattern).
-/* eslint-disable no-unused-vars */
-declare global {
-  namespace NodeJS {
-    interface ProcessEnv {
-      NEXT_PUBLIC_WEB_ORDERING?: string;
-    }
-  }
-}
-/* eslint-enable no-unused-vars */
-
 export const site = {
   /** Exact D&B spelling. Appears on /about, /contact and every footer. */
   legalEntityName: 'Westbridge Inc.',
@@ -101,14 +88,10 @@ export const launch = {
   /** Where the product actually operates. Add a market only when it is real. */
   markets: ['Georgetown, Guyana'] as const,
 
-  /** [Item 7] THE pre-launch switch: may the PUBLIC site (swiftgy.com and
-   *  www) take orders? Set per deployment at build time —
-   *  NEXT_PUBLIC_WEB_ORDERING=live once ordering has launched there; anything
-   *  else, or nothing, keeps the public site behind the "Launching soon" front
-   *  door (src/middleware.ts). It governs the public hosts only: staging, a
-   *  preview or a local run keeps the full marketplace from the same build
-   *  (src/lib/web-ordering.ts). The native apps do not exist yet. */
-  webOrdering: (process.env.NEXT_PUBLIC_WEB_ORDERING === 'live' ? 'live' : 'soon') as LaunchState,
+  // [Item 7 · S1] THE pre-launch switch for the PUBLIC site is no longer a
+  // build-time value here: the web server reads it while it runs
+  // (src/lib/launch-switch.ts, SWIFT_WEB_ORDERING), so opening or closing
+  // ordering needs a restart with the new setting, never a rebuild.
   iosApp: 'soon' as LaunchState,
   androidApp: 'soon' as LaunchState,
 

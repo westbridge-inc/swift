@@ -139,9 +139,9 @@ export async function resolveSubject(
     // [High #9 · DS109] Reusing a subject ANOTHER account registered is a PENDING
     // assignment: the submission names the durable vehicle, but its evidence does not
     // propagate to this account until an admin approves the link (approveVehicleAssignment).
-    // The registering account is the verified owner of record and keeps an approved link.
+    // An existing approved link stays approved; a closed or pending link requires fresh review even for the registrant.
     const owned = existing.subject.createdById === input.userId;
-    return { subjectId, kind, relation, linkId: await ensureLink(db, input.userId, subjectId, relation, input.tenantId, owned ? new Date() : null), created: false, owned };
+    return { subjectId, kind, relation, linkId: await ensureLink(db, input.userId, subjectId, relation, input.tenantId, null), created: false, owned };
   }
   const subject = await db.subject.create({ data: { kind, countryCode: input.countryCode, createdById: input.userId, tenantId: input.tenantId } });
   await db.vehicleProfile.create({ data: {
