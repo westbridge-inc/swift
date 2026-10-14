@@ -1,3 +1,4 @@
+import { emitToChatRoom } from '../order/order-room-emission.service';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
@@ -267,7 +268,7 @@ export async function chatRoutes(app: FastifyInstance) {
     const view = await serializeChatMessage(msg, access, 'socket');
 
     // Broadcast via Socket.IO
-    app.io.to(`chat:${roomId}`).emit('chat:message', {
+    await emitToChatRoom(app.prisma, app.io, roomId, 'chat:message', {
       id: view.id,
       roomId,
       senderId: request.user.userId,
@@ -284,7 +285,17 @@ export async function chatRoutes(app: FastifyInstance) {
     // is live), respects the recipient's prefs, and lands in the failure
     // metrics. The old code wrote a row + a socket emit only, so a backgrounded
     // app never learned about the message.
-    for (const userId of otherUserIds) {
+    // A push is a new contact: only people who are STILL current AND were
+    // contact-checked under the lock with the write (a mover assigned after
+    // the commit was never checked against the sender's blocks).
+    const publicationAuthority = await resolveRoomAuthority(app.prisma, roomId).catch(() => null);
+    const publicationRecipients = [...(publicationAuthority?.participants.keys() ?? [])]
+      .filter((userId) => userId !== request.user.userId && persisted.recipients.includes(userId));
+    for (const userId of publicationRecipients) {
+      // An earlier notification may yield. Re-prove this recipient immediately
+      // before enqueueing, and suppress delivery if authority is unavailable.
+      const current = await resolveRoomAuthority(app.prisma, roomId).catch(() => null);
+      if (!current || current.tenantId !== access.tenantId || !current.participants.has(userId)) continue;
       await notifications.send({
         userId,
         type: 'CHAT_MESSAGE',
