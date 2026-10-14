@@ -233,9 +233,18 @@ const FUEL_WORDS = String.raw`(?:lpg|cooking\s+gas|gas)${NOT_PART(GAS_PARTS)}|ga
 const GAP = String.raw`\W+(?:\w+\W+){0,2}`;
 const supplyPattern = (fuel: string) => new RegExp(String.raw`\b${SUPPLY}${GAP}(?:${fuel})\b|\b(?:${fuel})${GAP}${SUPPLY}\b`, 'i');
 const FUEL_SUPPLY = supplyPattern(FUEL_WORDS);
-/** Short sale phrases with no supply verb: "LPG available", "get your LPG here", "order your gas from
- *  us", "diesel by the gallon". Narrow on purpose — "gas repairs available" is repair work. [DS1133] */
-const FUEL_SALE = new RegExp(String.raw`\b(?:${FUEL_WORDS})\s+(?:(?:is|are)\s+)?(?:now\s+)?available\b|\b(?:order|buy|get)\s+your\s+(?:${FUEL_WORDS})\b|\b(?:order|buy|get)\s+(?:${FUEL_WORDS})\s+(?:here|from\s+us|today|now)\b|\b(?:${FUEL_WORDS})\s+here\b|\b(?:${FUEL_WORDS})\s+by\s+the\s+(?:gallon|litre|liter|pound|lb|cylinder|tank|drum|barrel|bottle)s?\b`, 'i');
+/** Short sale phrases with no supply verb: "LPG available", "order your gas", "get your LPG here",
+ *  "LPG here, call us", "diesel by the gallon". Narrow on purpose: "gas repairs available", "get your
+ *  gas checked" and "we fix gas here" are the repair work itself. [DS1133, DS1134] */
+const FUEL_SALE = new RegExp([
+  String.raw`\b(?:${FUEL_WORDS})\s+(?:(?:is|are)\s+)?(?:now\s+)?available\b`,
+  String.raw`\bgas\s+tanks?\s+(?:(?:is|are)\s+)?(?:now\s+)?available\b`,
+  String.raw`\b(?:order|buy)\s+your\s+(?:${FUEL_WORDS})\b`,
+  String.raw`\b(?:order|buy|get)\s+(?:your\s+)?(?:${FUEL_WORDS})\s+(?:here|from\s+us|today|now|delivered|refilled)\b`,
+  // "LPG here" only where a phrase starts (not "we fix gas here")
+  String.raw`(?:^|[\n.!?;:,–—-]\s*)(?:${FUEL_WORDS})\s+here\b`,
+  String.raw`\b(?:${FUEL_WORDS})\s+by\s+the\s+(?:gallon|litre|liter|pound|lb|cylinder|tank|drum|barrel|bottle)s?\b`,
+].join('|'), 'i');
 /** A gas fitter's "tank" is a gas tank — unless it is a water, septic or fish tank. */
 const GAS_FITTER_SUPPLY = supplyPattern(String.raw`${FUEL_WORDS}|(?<!\b(?:water|septic|fish)\s)tanks?`);
 const ACCOUNTANT_TITLES = /\b(?:chartered\s+accountants?|certified\s+(?:public\s+)?accountants?|cpa|acca)\b/i;

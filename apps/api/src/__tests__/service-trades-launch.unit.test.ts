@@ -228,6 +228,10 @@ describe('[TRADES] profile wording rules', () => {
     // [DS1133 S2]
     'Get your LPG here',
     'Diesel by the gallon',
+    // [DS1134]
+    'Gas tanks available',
+    'LPG here, call us',
+    'Get your gas delivered',
   ])('refuses gas or fuel supply wording: %s', (bio) => {
     expect(() => assertProviderProfileWording('gas_fitter', bio)).toThrow(expect.objectContaining({ code: 'PROHIBITED_SERVICE_WORDING' }));
     expect(() => assertProviderProfileWording('plumber', bio)).toThrow(expect.objectContaining({ code: 'PROHIBITED_SERVICE_WORDING' }));
@@ -277,6 +281,13 @@ describe('[TRADES] profile wording rules', () => {
     'We order gas parts weekly',
     'We buy gas tanks for recycling',
     'We bought a gas truck',
+    // [DS1134 S3] "get your gas checked" and "we fix gas here" are the repair work itself
+    'Get your gas checked',
+    'Get your gas serviced',
+    'Get your gas installed',
+    'Get your diesel serviced',
+    'We fix gas here',
+    'We repair gas here',
   ])('allows ordinary trade wording that names fuel parts: %s', (bio) => {
     expect(() => assertProviderProfileWording('mechanic', bio)).not.toThrow();
     expect(() => assertProviderProfileWording('gas_fitter', bio)).not.toThrow();
