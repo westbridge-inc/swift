@@ -102,7 +102,7 @@ function harness(rows: Row[]) {
     },
     subscription: { findFirst: async () => null },
     algoConfig: { findFirst: async () => null },
-    platformConfig: { findUnique: async () => null },
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
     alertDelivery: { updateMany: async () => ({ count: 0 }) },
     notification: { updateMany: async () => ({ count: 0 }) },
     user: { findUnique: async () => ({ countryCode: 'GY' }) },

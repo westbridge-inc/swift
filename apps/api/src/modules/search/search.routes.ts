@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { launchMarketAt } from '../auth/launch-market';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -197,7 +198,7 @@ export async function searchRoutes(app: FastifyInstance) {
       // [B2] The ONE visibility predicate — this fallback previously
       // dropped tenant.isActive, so a shut-off operator's store surfaced
       // whenever Meilisearch was down.
-      ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode),
+      ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode, await readFeePause(app.prisma)),
       // [GUARDRAILS §8 · #54] A store filed under a banned category: never in the database fallback or the top-up.
       ...notProhibitedStore(await prohibitedStoreIds(app.prisma, ctx.tenantId)),
       // Empty stores stay out; CLOSED ones are found, marked closed (owner, 13 Oct).
@@ -277,7 +278,7 @@ export async function searchRoutes(app: FastifyInstance) {
       // relation filter is not reached by the tenant-scoping extension: the
       // tenant is named here.
       // A closed store's dishes are found too, marked by its closed state (owner, 13 Oct).
-      vendor: catalogueVendorInTenant(ctx.tenantId, ctx.publicMode),
+      vendor: catalogueVendorInTenant(ctx.tenantId, ctx.publicMode, await readFeePause(app.prisma)),
       ...(excluded.length > 0 ? { id: { notIn: excluded } } : {}),
     };
     const byName = nameFirst(ctx.q);
@@ -366,11 +367,11 @@ export async function searchRoutes(app: FastifyInstance) {
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
             // [GUARDRAILS §8 · #54] Nor to publish a store filed under a banned category.
-            where: { ...catalogueVendorInTenant(tenantId, false), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), id: { in: vendorHits.map((v) => v.id) } },
+            where: { ...catalogueVendorInTenant(tenantId, false, await readFeePause(app.prisma)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), id: { in: vendorHits.map((v) => v.id) } },
             select: { id: true, latitude: true, longitude: true, isCurrentlyOpen: true },
           }),
           app.prisma.item.findMany({
-            where: { id: { in: itemHits.map((i) => i.id), ...(prohibited.length > 0 ? { notIn: prohibited } : {}) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, false) },
+            where: { id: { in: itemHits.map((i) => i.id), ...(prohibited.length > 0 ? { notIn: prohibited } : {}) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, false, await readFeePause(app.prisma)) },
             select: { id: true, vendorId: true, vendor: { select: { latitude: true, longitude: true, isCurrentlyOpen: true } } },
           }),
         ]);
@@ -457,12 +458,12 @@ export async function searchRoutes(app: FastifyInstance) {
     const tiers = searchTiers(q, NAME_COLUMNS);
     // Closed stores and their dishes are suggested too, marked closed (owner, 13 Oct).
     // [GUARDRAILS §8 · #54] Nor does a store filed under a banned category autocomplete.
-    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), ...(publicMode && { items: { some: { isAvailable: true } } }) };
+    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode, await readFeePause(app.prisma)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), ...(publicMode && { items: { some: { isAvailable: true } } }) };
     const itemBase = {
       isAvailable: true,
       // [B2] This query had NO vendor predicate at all — a banned store's
       // dish names kept autocompleting for every customer who typed.
-      vendor: catalogueVendorInTenant(tenantId, publicMode),
+      vendor: catalogueVendorInTenant(tenantId, publicMode, await readFeePause(app.prisma)),
       ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
     };
 
@@ -527,7 +528,7 @@ export async function searchRoutes(app: FastifyInstance) {
     const items = await app.prisma.item.findMany({
       where: {
         isAvailable: true,
-        vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), isCurrentlyOpen: true },
+        vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)), isCurrentlyOpen: true },
         ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
       },
       // The shared select again. Trending is the Market tab's fallback rail, so
@@ -588,7 +589,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const vendors = await app.prisma.vendor.findMany({
       where: {
-        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
+        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)),
         ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), // [GUARDRAILS §8 · #54]
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.

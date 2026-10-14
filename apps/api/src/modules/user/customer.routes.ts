@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
@@ -1158,7 +1159,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // no tenant context, which the Prisma extension defines as an UNSCOPED
           // query — so without the relational predicate a deactivated operator's
           // whole catalog kept serving here after the platform shut them off.
-          where: { ...visibleVendorForCaller(), ...notProhibitedStore(prohibitedStores), items: { some: { isAvailable: true } } },
+          where: { ...visibleVendorForCaller(await readFeePause(app.prisma)), ...notProhibitedStore(prohibitedStores), items: { some: { isAvailable: true } } },
           include: {
             // imageUrl was NOT selected, so Home had nothing to draw a category
             // chip with and every chip fell back to the same stock photograph —
@@ -1184,7 +1185,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // DISH sat above the fold ([F-028-07] applies here identically: a
           // guest request is unscoped, so the relational predicate is the only
           // thing standing between a shut-off operator and the Home rail).
-          where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
+          where: { isAvailable: true, vendor: visibleVendorRelForCaller(await readFeePause(app.prisma)) },
           orderBy: { totalOrdered: 'desc' },
           take: 10,
           select: {
@@ -1386,7 +1387,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // [F-028-07] tenant.isActive rides every public browse — see /home.
     // [GUARDRAILS §8 · #54] A store filed under a banned category is never browsed.
     const where: Record<string, unknown> = {
-      ...visibleVendorForCaller(), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, getTenantId() ?? null)),
+      ...visibleVendorForCaller(await readFeePause(app.prisma)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, getTenantId() ?? null)),
       items: { some: { isAvailable: true } },
     };
     if (type) where['vendorType'] = type;
