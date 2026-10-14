@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
+import { currentDevicePosition } from '../services/devicePosition';
 import { TAXI_STOPS_CAPABILITY, maxStopsFrom } from '../lib/taxiItinerary';
 import { track } from '../lib/analytics';
 import {
@@ -784,21 +785,14 @@ export function useBroadcastLocation(kind: MoverKind | null, enabled: boolean) {
           }),
         ),
         refreshForegroundSample: async () => {
-          let timeout: ReturnType<typeof setTimeout> | undefined;
-          try {
-            const position = await Promise.race([
-              Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-              new Promise<never>((_resolve, reject) => {
-                timeout = setTimeout(() => reject(new Error('Location refresh timed out')), 10_000);
-              }),
-            ]);
-            return {
-              latitude: position.coords.latitude,
-              longitude: position.coords.longitude,
-            };
-          } finally {
-            if (timeout) clearTimeout(timeout);
-          }
+          // [GO-LOC-1] The same bounded Balanced -> fresh cached fix -> GPS
+          // policy as GO: a parked mover with no network location still renews
+          // its lease from satellites instead of silently leaving supply.
+          const position = await currentDevicePosition();
+          return {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          };
         },
         commitSharedSample: (sample) => commitLiveDeviceLocation(
           lease,
