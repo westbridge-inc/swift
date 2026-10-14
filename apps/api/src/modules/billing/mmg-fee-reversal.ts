@@ -547,6 +547,16 @@ export class MmgFeeReversalService {
         // hours old): under the payer's lock, the money must still be used, and the row
         // still held for exactly that reason (compare-and-set below).
         await lockBillingAuthority(tx, row.subscriptionId);
+        // [security review: sibling-path parity] The same reference gate as a booking: a
+        // reference that proves this return (or is written as its note) is locked and checked
+        // again here, so two closes at once can never both cite one reversal.
+        const proofRef = row.providerReference ?? reference;
+        const gated = [...new Set([...(typed ? [reference] : []), ...(proof.how === 'REVERSAL_COMPLETED' ? [proofRef] : [])])]
+          .sort((a, b) => a.trim().toUpperCase().localeCompare(b.trim().toUpperCase()));
+        for (const ref of gated) await lockReversalReference(tx, ref);
+        for (const ref of gated) {
+          if (await namesAKnownPayment(tx, row.id, ref)) throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
+        }
         const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: row.subscriptionId }, select: { balance: true, currencyCode: true } });
         if (wallet && wallet.currencyCode === row.currencyCode && amountMinorOf(wallet.balance) >= amountMinorOf(row.amount)) {
           throw new AppError(409, 'RETURN_NOW_BOOKABLE', RESOLVE_COPY.RETURN_NOW_BOOKABLE);

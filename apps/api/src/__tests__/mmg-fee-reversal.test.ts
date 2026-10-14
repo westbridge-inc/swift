@@ -1000,6 +1000,30 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     expect(shapeProviderText('Refused: payer 5926001234 has no funds')).toBe('Refused: payer (number) has no funds');
   });
 
+  it('[security review: sibling-path parity] two "returned, not booked" closes at once proven by ONE reversal reference — exactly one closes', async () => {
+    const heldShort = async () => {
+      const p = await paidCheckout();
+      sandboxScriptReversal(p.txn, 'error'); // no answer: MMG named no reversal
+      const held = await ask(p.checkoutId, p.amount);
+      await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+      sandboxSetTxStatus(p.txn, 'reversed');
+      const short = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: held.id }));
+      expect(short.heldReason).toBe('WALLET_NO_LONGER_HOLDS_IT');
+      sandboxSetTxStatus(p.txn, 'approved'); // MMG's lookup of the original no longer shows it: only the typed reversal proves
+      return { p, id: held.id };
+    };
+    const a = await heldShort();
+    const b = await heldShort();
+    const reference = `RVNB${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    sandboxAddHistory({ transactionId: reference, status: 'approved', amountMinor: a.p.amount * 100, currencyCode: 'GYD' });
+    const results = await Promise.allSettled([resolveAs(a.id, 'RETURNED_NOT_BOOKED', reference), resolveAs(b.id, 'RETURNED_NOT_BOOKED', reference)]);
+    const closed = [await reversalRow(a.id), await reversalRow(b.id)].filter((r) => r.resolution === 'RETURNED_NOT_BOOKED');
+    expect(closed).toHaveLength(1);
+    const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.reason).toMatchObject({ code: 'NOT_A_REVERSAL' });
+  });
+
   it('S3-2: a reversal MMG named is still pending — "not returned" is refused, so MMG is never asked a second time', async () => {
     const p = await paidCheckout();
     const pendingReversal = `PEND${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
