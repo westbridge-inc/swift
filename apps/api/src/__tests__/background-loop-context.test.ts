@@ -8,13 +8,14 @@ import { getTenantContext, runWithTenant, runWithoutTenant } from '../plugins/te
 import { enqueueScanEvent, flushScanLog, resetScanLogForTests, startScanLog, stopScanLog } from '../modules/qr/scan-log';
 
 // ---------------------------------------------------------------------------
-// [L01 · tenant wall · job PR-3] The three background loops that are not
-// queue jobs run as NAMED system work, never unbound:
+// [L01 · tenant wall · job PR-3] The background loops that are not queue jobs
+// and write across tenants run as NAMED system work, never unbound:
 //  - the QR scan-log flush (writes every tenant's scan events),
-//  - the socket authority fallback recheck (reads every live socket's session
-//    and user — on a walled login an unbound read returns nothing and closed
-//    every socket),
 //  - the boot seeding of platform registries and the default taxonomy.
+// The socket authority fallback recheck is NOT system work: it reads each
+// tenant's sessions bound to that tenant, one tenant at a time (the sign-in
+// under the wall change, preauth-identity-posture.test.ts), so it needs no
+// bypass login at all.
 // ---------------------------------------------------------------------------
 
 const SRC = join(__dirname, '..');
@@ -56,11 +57,6 @@ describe('[L01 · PR-3] background loops run as named system work', () => {
     expect(seen).toEqual([{ tenantId: null, mode: 'system', capability: 'qr:scan-log-flush' }]);
     const rows = await runWithoutTenant(() => prisma.scanEvent.findMany({ where: { template: tag }, select: { tenantId: true } }));
     expect(rows.map((r) => r.tenantId).sort()).toEqual(['swift-default', TENANT_B].sort());
-  });
-
-  it('the socket authority recheck runs as named system work', () => {
-    const socket = strip(readFileSync(join(SRC, 'plugins', 'socket.ts'), 'utf8'));
-    expect(socket).toMatch(/authorityRecheckPromise = runAsSystem\('socket:authority-recheck', async \(\) => \{\s+const snapshot = \[\.\.\.activeSocketAuthorities\.values\(\)\];/);
   });
 
   it('the boot seeding runs as named system work', () => {
