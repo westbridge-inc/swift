@@ -15,6 +15,10 @@ import { verificationRoutes } from '../modules/verification/verification.routes'
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { LAUNCH_HIDDEN_VEHICLE_TYPES, VEHICLE_TYPES_IN_ORDER } from '../config/vehicle-classes';
 import { grantStepUp } from './helpers/step-up';
+import { ownedVerificationFixture } from './helpers/verification-object';
+import { VerificationService } from '../modules/verification/verification.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 
 // ---------------------------------------------------------------------------
 // [VEHICLES · owner 2026-09-24] "after you save vehicle you cant switch it at
@@ -308,6 +312,47 @@ describe('PUT /partner/vehicle: moving between delivery and taxi work', () => {
     const same = await change(u.token, { vehicleType: 'BICYCLE' });
     expect(same.statusCode, same.body).toBe(200);
     expect(same.json().data).toMatchObject({ kind: 'RIDER', vehicleType: 'BICYCLE' });
+  });
+});
+
+// [Opus 13 Oct · #1551/#1546 S3-2 · coordinator ruling, owner question c] "Already verified" is a fact about ONE
+// vehicle. A motorbike rider who also starts driving a taxi keeps the rider profile, its plate and the
+// motorbike's approved papers, and must still be able to send the CAR's registration and insurance. Since a
+// registration no longer expires (#1546), a person-wide refusal would block the car for good.
+describe('the car\'s papers are not "already verified" by the motorbike\'s', () => {
+  const service = () => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
+  const submit = async (userId: string, docType: string) =>
+    system(async () => service().submitDocument(userId, 'MOVER', docType, await ownedVerificationFixture(app.prisma, userId), 'test-v1'));
+
+  it('a motorbike rider who also becomes a taxi driver can send the car\'s registration and insurance; the car\'s own approved paper still refuses a second copy', async () => {
+    const u = await makeUser();
+    expect((await become(u.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(201);
+    const bikePlate = `VC${NUM}M`;
+    await system(() => app.prisma.rider.update({ where: { userId: u.userId }, data: { licensePlate: bikePlate } }));
+    // The motorbike's papers, approved and bound to the motorbike the plate names.
+    const bike = await system(() => app.prisma.subject.create({ data: { kind: 'VEHICLE', countryCode: 'GY', createdById: u.userId } }));
+    await system(() => app.prisma.vehicleProfile.create({ data: { subjectId: bike.id, registrationMark: bikePlate, countryCode: 'GY', vehicleKind: 'MOTORCYCLE', registeredById: u.userId } }));
+    await system(() => app.prisma.subjectLink.create({ data: { accountId: u.userId, subjectId: bike.id, relation: 'ASSIGNED_DRIVER', approvedAt: new Date() } }));
+    const bikeRegistration = await approved(u.userId, 'vehicle_registration', { subjectId: bike.id, expiresAt: null });
+    const bikeInsurance = await approved(u.userId, 'vehicle_insurance', { subjectId: bike.id });
+
+    const carPlate = `HVC${NUM}N`;
+    const driving = await become(u.token, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Axio', year: 2019, color: 'White', licensePlate: carPlate } });
+    expect(driving.statusCode, driving.body).toBe(201);
+    expect(await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: u.userId }, select: { activeRole: true } }))).toEqual({ activeRole: 'DRIVER' });
+    // The motorbike's papers stay: the rider profile and its plate stay beside the new driver profile.
+    expect((await docState(bikeRegistration.id)).state).toBe('COMMITTED');
+    expect((await docState(bikeInsurance.id)).state).toBe('COMMITTED');
+
+    // The car's papers can be sent: they are not "already verified" by the motorbike's.
+    const carRegistration = await submit(u.userId, 'vehicle_registration');
+    expect(carRegistration).toMatchObject({ status: 'PENDING', state: 'REVIEW_QUEUED' });
+    expect(carRegistration.subjectId).not.toBe(bike.id);
+    expect(await submit(u.userId, 'vehicle_insurance')).toMatchObject({ status: 'PENDING', state: 'REVIEW_QUEUED' });
+
+    // Once the CAR's own registration is approved, a second copy of it is refused as before.
+    await approved(u.userId, 'vehicle_registration', { subjectId: carRegistration.subjectId, expiresAt: null });
+    await expect(submit(u.userId, 'vehicle_registration')).rejects.toMatchObject({ code: 'ALREADY_APPROVED' });
   });
 });
 
