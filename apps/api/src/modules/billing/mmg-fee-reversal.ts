@@ -210,12 +210,40 @@ export const KNOWN_PAYMENT_REFERENCE_COLUMNS: ReadonlyArray<readonly [table: str
 ];
 
 async function namesAKnownPayment(db: PrismaClient, reversalId: string, reference: string): Promise<boolean> {
-  // Identifiers come only from the constant list above; the reference is always a bound parameter.
-  const columns = KNOWN_PAYMENT_REFERENCE_COLUMNS.map(([table, column]) =>
-    Prisma.sql`(SELECT count(*) FROM ${Prisma.raw(`"${table}"`)} WHERE mmg_txn_canon(${Prisma.raw(`"${column}"`)}) = mmg_txn_canon(${reference}))`);
+  // One static subquery per KNOWN_PAYMENT_REFERENCE_COLUMNS entry: no raw identifier fragments (the
+  // production SQL safety surface), and a test keeps the list and these lines identical. The typed
+  // reference is always a bound parameter.
   const [hit] = await db.$transaction((tx) => tx.$queryRaw<Array<{ n: bigint }>>`
     SELECT (
-        ${Prisma.join(columns, ' + ')}
+        (SELECT count(*) FROM "provider_payments" WHERE mmg_txn_canon("providerTxnId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "provider_payment_aliases" WHERE mmg_txn_canon("aliasKey") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_agent_payments" WHERE mmg_txn_canon("mmgTxnId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_agent_payments" WHERE mmg_txn_canon("agentRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_checkout_intents" WHERE mmg_txn_canon("mmgTransactionId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_checkout_intents" WHERE mmg_txn_canon("merchantTransactionId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "subscription_payments" WHERE mmg_txn_canon("externalRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "subscription_refunds" WHERE mmg_txn_canon("externalRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "billing_events" WHERE mmg_txn_canon("paymentRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "fee_receipts" WHERE mmg_txn_canon("mmgRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "topup_commands" WHERE mmg_txn_canon("reference") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "topup_commands" WHERE mmg_txn_canon("providerRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_refund_sends" WHERE mmg_txn_canon("mmgRefundRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "orders" WHERE mmg_txn_canon("mmgAttestedRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "orders" WHERE mmg_txn_canon("customerPaymentRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "orders" WHERE mmg_txn_canon("refundRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "return_requests" WHERE mmg_txn_canon("refundRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "reimbursement_claims" WHERE mmg_txn_canon("paymentRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "payout_requests" WHERE mmg_txn_canon("externalRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "settlements" WHERE mmg_txn_canon("reference") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "settlement_batches" WHERE mmg_txn_canon("bankRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "deposit_confirmations" WHERE mmg_txn_canon("bankRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "transactions" WHERE mmg_txn_canon("reference") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "transactions" WHERE mmg_txn_canon("externalRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "card_sessions" WHERE mmg_txn_canon("providerTransactionRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "card_sessions" WHERE mmg_txn_canon("providerSessionRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "ad_invoices" WHERE mmg_txn_canon("providerRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "ad_refund_intents" WHERE mmg_txn_canon("providerRefundRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "ad_refund_intents" WHERE mmg_txn_canon("manualPayoutRef") = mmg_txn_canon(${reference}))
       + (SELECT count(*) FROM mmg_checkout_intents ci WHERE EXISTS (SELECT 1 FROM unnest(ci.candidates) c WHERE mmg_txn_canon(c) = mmg_txn_canon(${reference})))
       + (SELECT count(*) FROM mmg_fee_reversals r WHERE r.id <> ${reversalId}
           AND (mmg_txn_canon(r."providerReference") = mmg_txn_canon(${reference})

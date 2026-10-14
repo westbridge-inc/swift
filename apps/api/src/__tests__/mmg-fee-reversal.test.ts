@@ -852,6 +852,26 @@ describe('[DS1118] a typed reference is checked against EVERY money reference Sw
     expect(missing, 'add these to KNOWN_PAYMENT_REFERENCE_COLUMNS, or to NOT_MONEY with a reason').toEqual([]);
     expect(listed.size, 'the list names real columns').toBeGreaterThan(20);
   });
+
+  it('the check\'s SQL reads exactly the listed columns, written out statically (the list and the SQL cannot drift)', async () => {
+    const { KNOWN_PAYMENT_REFERENCE_COLUMNS } = await import('../modules/billing/mmg-fee-reversal');
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const source = readFileSync(join(__dirname, '../modules/billing/mmg-fee-reversal.ts'), 'utf8');
+    const start = source.indexOf('async function namesAKnownPayment(');
+    expect(start, 'the check is still a function in mmg-fee-reversal.ts').toBeGreaterThan(0);
+    const body = source.slice(start, source.indexOf('\n}\n', start));
+    // every listed column has its own subquery, the typed reference always a bound parameter
+    const absent = KNOWN_PAYMENT_REFERENCE_COLUMNS
+      .filter(([table, column]) => !body.includes(
+        '(SELECT count(*) FROM "' + table + '" WHERE mmg_txn_canon("' + column + '") = mmg_txn_canon(${reference}))'))
+      .map(([table, column]) => `${table}.${column}`);
+    expect(absent, 'each listed column needs its subquery in namesAKnownPayment').toEqual([]);
+    // and the SQL reads nothing the list does not name, each column once
+    const inSql = [...body.matchAll(/FROM "([a-z_0-9]+)" WHERE mmg_txn_canon\("([A-Za-z0-9]+)"\)/g)].map((m) => `${m[1]}.${m[2]}`);
+    expect([...inSql].sort()).toEqual(KNOWN_PAYMENT_REFERENCE_COLUMNS.map(([t, c]) => `${t}.${c}`).sort());
+    expect(new Set(inSql).size).toBe(inSql.length);
+  });
 });
 
 describe('[MMG REVERSAL] the record only moves forward', () => {
