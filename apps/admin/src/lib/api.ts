@@ -286,6 +286,55 @@ export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${i
 export const fetchVendorDetail = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}`);
 export const fetchRiderDetail = (id: string) => apiFetch(`/api/v1/admin/riders/${id}`);
 export const fetchDriverDetail = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}`);
+
+// ── [MC-PR2] Activation checklists: the per-document truth, in the gate's own terms ──
+export type ActivationItemState = 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | 'MISSING';
+export interface ActivationChecklistItem {
+  docType: string;
+  state: ActivationItemState;
+  documentId: string | null;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  /** The reviewer's note on a rejection — what the applicant was told. */
+  note: string | null;
+  /** Approved, and a newer submission of the same type is waiting for review. */
+  renewalPending: boolean;
+}
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
+export interface VendorActivationChecklist {
+  vendorId: string;
+  /** The owner's user id: the Review Center's applicant. */
+  applicantId: string;
+  storeStatus: string;
+  suspensionSource: string | null;
+  ownerAccountStatus: string | null;
+  /** The store's weekly-fee subscription state (null before it has one). */
+  subscriptionStatus?: string | null;
+  /** May the store's subscription operate now (the vendor gate's rule)? A suspended store whose fee cannot operate reads FEE_UNPAID. */
+  feeOperable?: boolean;
+  isVerified: boolean;
+  activationValidUntil: string | null;
+  role: string;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
+  ready: boolean;
+  next: VendorActivationNext;
+}
+export type MoverActivationNext = 'VERIFIED' | 'CAN_VERIFY' | 'NEEDS_INSURANCE' | 'NEEDS_DOCUMENTS';
+export interface MoverActivationChecklist {
+  moverId: string;
+  kind: 'RIDER' | 'DRIVER';
+  applicantId: string;
+  vehicleType: string;
+  documentsVerified: boolean;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  live: { allowed: boolean; reason: 'ok' | 'docs' | 'insurance' };
+  next: MoverActivationNext;
+}
+export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<VendorActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
+export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const suspendVendor = (id: string, reason: string) =>

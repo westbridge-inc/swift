@@ -131,13 +131,20 @@ export default function VerificationPage() {
   // nothing of theirs is waiting, the page says so instead of showing the
   // whole queue as if it were the answer.
   const deepLink = useRef<string | null | undefined>(undefined);
+  const deepDocument = useRef<string | null>(null);
   useEffect(() => {
-    if (deepLink.current === undefined) deepLink.current = new URLSearchParams(window.location.search).get('applicant');
+    if (deepLink.current === undefined) {
+      const params = new URLSearchParams(window.location.search);
+      deepLink.current = params.get('applicant');
+      deepDocument.current = params.get('document');
+    }
     const wanted = deepLink.current;
     if (!wanted || !queue.data) return;
     deepLink.current = null;
     const match = groupApplicants(queue.data).find((a) => a.id === wanted);
-    if (match) openApplicant(match);
+    // [Owner 8 Oct] &document=<id> opens that document of the applicant (the checklist's per-document link).
+    const named = match?.documents.find((d) => d.id === deepDocument.current);
+    if (match) { openApplicant(match); if (named) selectDocument(named); }
     else setNotice('No documents from this applicant are waiting for review. They may still need to upload one, or the decision is under Approved, Rejected or Expired.');
   }, [queue.data]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per queue load by design
   const needsExpiry = !!selected && (EXPIRING_DOC_TYPES as readonly string[]).includes(selected.docType);
