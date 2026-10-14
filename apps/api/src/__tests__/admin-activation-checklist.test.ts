@@ -47,7 +47,9 @@ const DAY = 86_400_000;
 const OPERATOR = { PLATFORM_LEGAL_NAME: 'Westbridge Inc.', PLATFORM_REGISTERED_ADDRESS: '1 Main Street, Georgetown, Guyana', SUPPORT_EMAIL: 'support@example.gy' };
 const prevEnv: Record<string, string | undefined> = {};
 
-const SUPERMARKET_DOCS = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
+// [VERIFY-DOCS · ruling 7] No TIN certificate on any store list: the supermarket list is the owner's ID, the
+// business registration and the storefront photo.
+const SUPERMARKET_DOCS = ['owner_national_id', 'business_registration', 'storefront_photo'];
 // [Owner rulings 6 Oct, landed in #1504] A licence holder's national ID and every mover's police clearance are optional.
 const MOTORCYCLE_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'admin-activation-checklist-test');
@@ -289,7 +291,7 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
   it('activates through the projection: the store carries the activation expiry its evidence allows', async () => {
     const owner = await makeUser('Expiry');
     const store = await makeStore(owner.id);
-    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED', t === 'tin_certificate' ? { expiresAt: new Date(Date.now() + 90 * DAY) } : {});
+    for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED', t === 'owner_national_id' ? { expiresAt: new Date(Date.now() + 90 * DAY) } : {});
     const res = await approve(store.id);
     expect(res.statusCode).toBe(200);
     const live = await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } });
@@ -463,6 +465,8 @@ describe('[MC-PR2] GET /vendors/:id/activation-checklist — the per-document tr
     const store = await makeStore(owner.id);
     await doc(owner.id, 'owner_national_id', 'APPROVED');
     await doc(owner.id, 'business_registration', 'PENDING');
+    await doc(owner.id, 'storefront_photo', 'REJECTED', { reviewNote: 'The storefront photo does not show the shop sign.' });
+    // [VERIFY-DOCS · ruling 7] a TIN certificate sent anyway is no longer on the list (MISSING is covered below).
     await doc(owner.id, 'tin_certificate', 'REJECTED', { reviewNote: 'The TIN on the certificate does not match the business name.' });
     const res = await read(`/api/v1/admin/vendors/${store.id}/activation-checklist`);
     expect(res.statusCode).toBe(200);
@@ -473,8 +477,8 @@ describe('[MC-PR2] GET /vendors/:id/activation-checklist — the per-document tr
     expect(Object.keys(byType).sort()).toEqual([...SUPERMARKET_DOCS].sort());
     expect(byType['owner_national_id']!.state).toBe('APPROVED');
     expect(byType['business_registration']!.state).toBe('PENDING');
-    expect(byType['tin_certificate']).toMatchObject({ state: 'REJECTED', note: 'The TIN on the certificate does not match the business name.' });
-    expect(byType['storefront_photo']).toMatchObject({ state: 'MISSING', documentId: null });
+    expect(byType['storefront_photo']).toMatchObject({ state: 'REJECTED', note: 'The storefront photo does not show the shop sign.' });
+    expect(byType['tin_certificate']).toBeUndefined();
     expect(res.body).not.toMatch(/fileUrl|test\//);
   });
 

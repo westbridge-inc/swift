@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -56,6 +57,7 @@ async function makeMover(opts: { docStatus?: 'APPROVED' | 'EXPIRED' | 'REJECTED'
         documentsVerified: true, // legacy grandfathered
       },
     });
+    await currentTaxiSplitDocuments(app.prisma, user.id);
     return user;
   }
 

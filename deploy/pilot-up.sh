@@ -273,6 +273,20 @@ if [ "$PILOT_ENV" = production ]; then
     "" | 0) ;;
     *) die "PILOT_ENV=production refuses WEB_ALLOW_SITE_TOKENS: the public site never shows unfilled company details" ;;
   esac
+  # [BACKUP-ENC] Owner ruling, 13 Oct: production backups leave the host only
+  # encrypted to the owner's PUBLIC key (deploy/backup.sh). The key file lives
+  # outside the checkout and its fingerprint is pinned here; backup.sh proves
+  # the file holds exactly that one public key before every dump.
+  [[ "$(env_setting BACKUP_GPG_FINGERPRINT)" =~ ^[0-9A-F]{40}$ ]] ||
+    die "PILOT_ENV=production needs BACKUP_GPG_FINGERPRINT (the owner's backup key fingerprint, 40 upper-case hex): production backups are encrypted to the owner's key (owner ruling, 13 Oct)"
+  backup_recipient="$(env_setting BACKUP_GPG_RECIPIENT_FILE)"
+  [[ "$backup_recipient" == /* ]] && [[ "$backup_recipient" != "$ROOT"/* ]] ||
+    die "PILOT_ENV=production needs BACKUP_GPG_RECIPIENT_FILE: an absolute path to the owner's exported PUBLIC backup key, outside the checkout"
+  # [S3-2] The freshness alarm (modules/ops/backup-freshness.ts) defaults to
+  # 26 hours, a nightly cadence. Production backs up hourly (owner ruling #12,
+  # 13 Oct): two missed runs must page, not a day of them.
+  [[ "$(env_setting BACKUP_MAX_AGE_HOURS)" =~ ^[1-3]$ ]] ||
+    die "PILOT_ENV=production needs BACKUP_MAX_AGE_HOURS=1, 2 or 3: the backup freshness alarm must match the hourly backups (owner ruling, 13 Oct)"
   # Owner ruling, 8 Oct: production launches with admin top-ups ON HOLD. The
   # API refuses every manual credit of fee paid ahead (503 TOPUP_ON_HOLD,
   # nothing recorded) exactly when BILLING_TOPUP_HOLD=1, read from this file.
@@ -361,6 +375,24 @@ if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq
 fi
 # [PROD-PATH] And Docker's own persisted choice of daemon (docker context use)
 # is this host's: every call below acts on the daemon the checks above vouch for.
+# [BACKUP-ENC · Opus review 14 Oct] Two read-only proofs, after the name
+# checks and before anything changes.
+# S3-3: the backup key file itself exists and holds exactly the pinned public
+# key and no private key. The proof is backup.sh's own (the one every dump
+# runs), read from the same raw deploy/.env lines systemd hands the backup
+# unit, where an inline comment is part of the value. Without it a deploy went
+# green and every hourly backup then failed.
+# S3-2: the one-hour recovery point rests on the hourly timer (PILOT-RUNBOOK
+# §4). A stage that starts the API needs it enabled and running; the
+# database-only stage comes before it is installed.
+if [ "$PILOT_ENV" = production ]; then
+  env -u BACKUP_GPG_RECIPIENT_FILE -u BACKUP_GPG_FINGERPRINT -u PILOT_ENV "$HERE/backup.sh" --check-key >/dev/null ||
+    die "PILOT_ENV=production: the backup key file is not the owner's pinned public key (backup.sh --check-key refused it; its reason is above)"
+  if [ "$DATA_ONLY" -eq 0 ]; then
+    systemctl is-enabled --quiet swift-backup-hourly.timer && systemctl is-active --quiet swift-backup-hourly.timer ||
+      die "PILOT_ENV=production needs the hourly backup timer enabled and active before the API starts (sudo systemctl enable --now swift-backup-hourly.timer; PILOT-RUNBOOK §4)"
+  fi
+fi
 if [ "$PILOT_ENV" = production ]; then
   [ "$(docker context show 2>/dev/null || true)" = default ] ||
     die "docker's current context is not this host's own daemon (default); run: docker context use default"
