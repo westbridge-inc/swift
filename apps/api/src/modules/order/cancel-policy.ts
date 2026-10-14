@@ -10,9 +10,18 @@
 // ADR: the fee is flat and announced-but-uncollected (cash-only platform —
 // Swift can't collect it); its role is deterrence + the risk-score signal.
 // Founder decision 2026-07-20: record it as a marker, keep displaying it.
+//
+// Owner decision 46 (13 Oct 2026) supersedes that for STORE orders: Swift
+// never shows or implies a fee it cannot collect. A store order cancels free
+// while it waits for the store to accept; once the store accepts, the customer
+// cannot cancel it in the app — they contact the store — unless no mover was
+// found or it is too late to deliver. `cancellationVerdict` is that rule; the
+// marker remains only for the kinds owner #46 did not rule on (rides, parcels,
+// bookings).
 // ---------------------------------------------------------------------------
 
 import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-generation-keys';
+import { isTooOldToDeliver, type TooOldSubject } from '../dispatch/rescue';
 
 /** Minutes after placing during which a PENDING order cancels free. Under
  *  LIFECYCLE_V2 the hold window itself is always free regardless. */
@@ -27,6 +36,10 @@ export const LATE_CANCEL_FEE = 500;
 export type CancellationSnapshot = {
   status: string;
   orderType: string;
+  /** DELIVERY / PICKUP / APPOINTMENT. Required: it is half of what makes an
+   *  order a STORE order (owner #46), and a caller that forgets it must fail
+   *  to compile rather than silently fall into another kind's rule. */
+  fulfillment: string;
   placedAt: Date;
   holdExpiresAt: Date | null;
   riderId: string | null;
@@ -42,10 +55,51 @@ export type CancellationSnapshot = {
    *  callers read it with `readNoMoverFound` (the charge path under the order
    *  lock) and pass it in. Absent means "not known to be true". */
   noMoverFound?: boolean;
+  /** [owner #46] The order is past the food-age cutoff with nobody to carry
+   *  it — the rescue sweep's own rule (`isTooOldToDeliver`, dispatch/rescue).
+   *  Read by the caller with `readTooLateToDeliver` and passed in, like
+   *  `noMoverFound`. Absent means "not known to be true". */
+  tooLateToDeliver?: boolean;
 };
 
 /** [Item 64] What the preview tells the customer when no mover was found. */
 export const NO_MOVER_FREE_CANCEL_MESSAGE = 'No mover was found. You can cancel without a fee.';
+
+/** [owner #46] The refusal code and the words the clients show as-is. */
+export const STORE_ACCEPTED_CANCEL_CODE = 'STORE_ACCEPTED';
+export const STORE_ACCEPTED_CANCEL_MESSAGE = 'The store has accepted your order, so it can no longer be cancelled in the app. Contact the store to change or cancel it.';
+/** [owner #46] Why a store order is free right now, in plain words. */
+export const AWAITING_STORE_FREE_CANCEL_MESSAGE = 'You can cancel for free until the store accepts your order.';
+export const TOO_LATE_FREE_CANCEL_MESSAGE = 'Your order is running very late. You can cancel it for free.';
+
+/**
+ * [owner #46] A STORE order: a marketplace order a business accepts and
+ * prepares — food or groceries, delivered or collected. Not a ride, not a
+ * parcel, and not a booking (a service business's appointment rides the same
+ * FOOD_DELIVERY spine with `fulfillment: 'APPOINTMENT'`); those keep their
+ * own rule until the owner rules on them.
+ */
+export function isStoreOrder(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'>): boolean {
+  return (order.orderType === 'FOOD_DELIVERY' || order.orderType === 'GROCERY_DELIVERY')
+    && order.fulfillment !== 'APPOINTMENT';
+}
+
+/**
+ * [owner #46] Is this store order too late to deliver? The rescue sweep's
+ * food-age cutoff, read for one order (the same scope the sweep cancels by).
+ * Only a store order can be; any other kind is never read, so a ride or a
+ * parcel never touches the cutoff's configuration. `config` reads the
+ * tenant's cutoff; the order fields come from the caller's row (the charge
+ * path's is the locked one).
+ */
+export async function readTooLateToDeliver(
+  config: Parameters<typeof isTooOldToDeliver>[0],
+  order: TooOldSubject & Pick<CancellationSnapshot, 'orderType' | 'fulfillment'>,
+  now: Date = new Date(),
+): Promise<boolean> {
+  if (!isStoreOrder(order)) return false;
+  return isTooOldToDeliver(config, order, now);
+}
 
 /**
  * [Item 64 · owner ruling 5 Oct: "no rider → no fee + plain message"] The
@@ -108,10 +162,53 @@ function scheduledMoment(appointmentSlot: Date | null | undefined, scheduledFor:
   return scheduledFor ?? null;
 }
 
+/** What a customer cancel may do right now. */
+export type CancellationVerdict =
+  | { allowed: true; free: true; reason: 'NO_MOVER' | 'TOO_LATE' | 'AWAITING_STORE' | 'NOTHING_COMMITTED' }
+  | { allowed: true; free: false; reason: 'LATE' }
+  | { allowed: false; free: false; code: typeof STORE_ACCEPTED_CANCEL_CODE; message: string };
+
 /**
- * THE one free-cancellation predicate — the charge path and the customer
- * preview must both route here, or the customer is shown one fee and
- * "charged" another (the drift this file exists to kill).
+ * THE one cancellation predicate — the charge path and the customer preview
+ * must both route here, or the customer is shown one outcome and handed
+ * another (the drift this file exists to kill).
+ *
+ * [Item 64] No mover found (and still nobody holds the job): free, for every
+ * kind of order — the platform could not deliver what it took.
+ *
+ * [owner #46] A STORE order (`isStoreOrder`) has no fee at all:
+ *  - free while it waits for the store to accept (PENDING, no clock — a
+ *    scheduled order included: nobody has committed to it yet);
+ *  - free when it is too late to deliver (`tooLateToDeliver`);
+ *  - otherwise REFUSED — the store accepted (or a mover holds the job), so the
+ *    customer contacts the store. Never a fee Swift cannot collect.
+ *
+ * Every other kind (rides, parcels, bookings) keeps the clock below and the
+ * announced-but-uncollected marker; owner #46 did not rule on them.
+ */
+export function cancellationVerdict(order: CancellationSnapshot, now: Date = new Date()): CancellationVerdict {
+  if (freeBecauseNoMoverFound(order)) return { allowed: true, free: true, reason: 'NO_MOVER' };
+  if (isStoreOrder(order)) {
+    const unassigned = order.riderId == null && order.driverId == null;
+    if (unassigned && order.tooLateToDeliver === true) return { allowed: true, free: true, reason: 'TOO_LATE' };
+    if (unassigned && order.status === 'PENDING') return { allowed: true, free: true, reason: 'AWAITING_STORE' };
+    return { allowed: false, free: false, code: STORE_ACCEPTED_CANCEL_CODE, message: STORE_ACCEPTED_CANCEL_MESSAGE };
+  }
+  return nothingCommittedYet(order, now)
+    ? { allowed: true, free: true, reason: 'NOTHING_COMMITTED' }
+    : { allowed: true, free: false, reason: 'LATE' };
+}
+
+/** Free right now — allowed AND without the marker. A refused cancel is not
+ *  free; a caller deciding whether to cancel at all reads the verdict. */
+export function isFreeCancellation(order: CancellationSnapshot, now: Date = new Date()): boolean {
+  const verdict = cancellationVerdict(order, now);
+  return verdict.allowed && verdict.free;
+}
+
+/**
+ * The clock for the kinds that still have one (rides, parcels, bookings).
+ * Store orders never reach it (owner #46); no-mover is decided above it.
  *
  * Free means NOTHING WAS COMMITTED yet:
  *  - no mover holds the job (`riderId`/`driverId`) — every assignment writer
@@ -160,12 +257,9 @@ function scheduledMoment(appointmentSlot: Date | null | undefined, scheduledFor:
  * Both slot columns are instants, so the same cutoff arithmetic applies to
  * appointments and scheduled deliveries without any zone conversion here.
  */
-export function isFreeCancellation(order: CancellationSnapshot, now: Date = new Date()): boolean {
+function nothingCommittedYet(order: CancellationSnapshot, now: Date): boolean {
   const unassigned = order.riderId == null && order.driverId == null;
   if (!unassigned) return false;
-  // [Item 64] Nothing was committed TO the customer either: no mover could be
-  // found. Whatever the store has prepared, the platform failed to deliver it.
-  if (freeBecauseNoMoverFound(order)) return true;
   if (order.holdExpiresAt != null && order.holdExpiresAt > now) return true;
   const uncommittedStatus = order.status === 'PENDING'
     || (order.orderType === 'COURIER' && order.status === 'READY_FOR_PICKUP');
@@ -194,10 +288,12 @@ export function isFreeCancellation(order: CancellationSnapshot, now: Date = new 
  * Returns null when the cancel is not free right now; there is no window to
  * promise. [Item 64] Also null when it is free because no mover was found:
  * that lasts until a mover takes the job, so there is no moment to count to.
+ * [owner #46] And null for every free STORE cancel: it is free until the
+ * store accepts (or because the order is too late) — no clock to count down.
  */
 export function freeCancellationExpiresAt(order: CancellationSnapshot, now: Date = new Date()): Date | null {
-  if (!isFreeCancellation(order, now)) return null;
-  if (freeBecauseNoMoverFound(order)) return null;
+  const verdict = cancellationVerdict(order, now);
+  if (!verdict.allowed || !verdict.free || verdict.reason !== 'NOTHING_COMMITTED') return null;
   // Held and unassigned: the hold IS the window.
   if (order.holdExpiresAt != null && order.holdExpiresAt > now) return order.holdExpiresAt;
   const candidates = [new Date(order.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * 60_000)];

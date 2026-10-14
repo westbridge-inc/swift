@@ -166,7 +166,7 @@ describe('09:00 Guyana appointment slot across the API wire', () => {
     vi.setSystemTime(new Date('2026-09-23T14:00:00.000Z'));
     const slot = new Date('2026-09-24T13:00:00.000Z');
     const snapshot = {
-      status: 'PENDING', orderType: 'FOOD_DELIVERY', placedAt: new Date('2026-09-23T13:00:00.000Z'),
+      status: 'PENDING', orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', placedAt: new Date('2026-09-23T13:00:00.000Z'),
       holdExpiresAt: null, riderId: null, driverId: null, scheduledFor: null, appointmentSlot: slot,
     };
     expect(freeCancellationExpiresAt(snapshot)?.toISOString())

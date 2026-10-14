@@ -199,11 +199,15 @@ describe('free window = nothing committed [cancel-policy]', () => {
     expect(row.lateCancelFeeDue).toBe(0);
   });
 
-  it('a scheduled order whose slot is imminent pays, like any other', async () => {
+  // [owner #46, 13 Oct] A STORE order waiting for the store is free at any
+  // age, scheduled or not (store-order-cancel-after-accept.test.ts). The clock
+  // still governs a booking, so the "imminent slot pays" case is pinned there.
+  it('a booking whose slot is imminent pays, like any other', async () => {
     const id = await makeCancellableOrder(60, {
       orderType: 'FOOD_DELIVERY',
+      fulfillment: 'APPOINTMENT',
       status: 'PENDING',
-      scheduledFor: new Date(Date.now() + 2 * 60_000),
+      appointmentSlot: new Date(Date.now() + 2 * 60_000),
     });
     const res = await orders.cancelOrder(id, customerId, 'too late');
     expect(res.cancellationFee).toBe(500);
@@ -211,22 +215,24 @@ describe('free window = nothing committed [cancel-policy]', () => {
     expect(row.lateCancelFeeDue).toBe(500);
   });
 
-  it('the COURIER carve-out does NOT leak to marketplace — vendor-prepped READY_FOR_PICKUP pays', async () => {
+  it('the COURIER carve-out does NOT leak to marketplace — vendor-prepped READY_FOR_PICKUP is never free', async () => {
     const id = await makeCancellableOrder(3, {
       orderType: 'FOOD_DELIVERY',
       status: 'READY_FOR_PICKUP',
     });
-    const res = await orders.cancelOrder(id, customerId, 'no longer hungry');
-    expect(res.cancellationFee).toBe(500);
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
-    expect(row.lateCancelFeeDue).toBe(500);
+    // [owner #46, 13 Oct] Not free — and no longer a G$500 marker either: the
+    // store accepted, so the customer cannot cancel it in the app at all.
+    await expect(orders.cancelOrder(id, customerId, 'no longer hungry'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'STORE_ACCEPTED' });
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true } });
+    expect(row).toEqual({ status: 'READY_FOR_PICKUP', lateCancelFeeDue: 0 });
   });
 });
 
 describe('isFreeCancellation — the ONE predicate both the charge path and the preview import', () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
   const base = {
-    status: 'PENDING', orderType: 'TAXI', placedAt: minutesAgo(3),
+    status: 'PENDING', orderType: 'TAXI', fulfillment: 'DELIVERY', placedAt: minutesAgo(3),
     holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
     scheduledFor: null as Date | null,
   };
@@ -272,8 +278,13 @@ describe('isFreeCancellation — the ONE predicate both the charge path and the 
 describe('scheduled orders: the clock must not expire before the work can start', () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
   const inMinutes = (m: number) => new Date(Date.now() + m * 60_000);
+  // [owner #46, 13 Oct] A STORE order no longer runs this clock (free until the
+  // store accepts, then "contact the store" — store-order-cancel-after-accept
+  // .test.ts). A booking still does: these cases are pinned on the booking
+  // shape (FOOD_DELIVERY spine + APPOINTMENT), the slot read through the same
+  // scheduled-moment helper.
   const base = {
-    status: 'PENDING', orderType: 'FOOD_DELIVERY', placedAt: minutesAgo(90),
+    status: 'PENDING', orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', placedAt: minutesAgo(90),
     holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
     scheduledFor: null as Date | null,
   };
@@ -319,8 +330,10 @@ describe('scheduled orders: the clock must not expire before the work can start'
 describe('freeCancellationExpiresAt — the countdown never expires before the window', () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
   const inMinutes = (m: number) => new Date(Date.now() + m * 60_000);
+  // [owner #46, 13 Oct] Pinned on the booking shape for the same reason as the
+  // block above: a free STORE cancel has no countdown at all (null).
   const base = {
-    status: 'PENDING', orderType: 'FOOD_DELIVERY', placedAt: minutesAgo(60),
+    status: 'PENDING', orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', placedAt: minutesAgo(60),
     holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
     scheduledFor: null as Date | null,
   };
@@ -367,9 +380,10 @@ describe('freeCancellationExpiresAt — the countdown never expires before the w
 
 describe('[Item 64] a mover search that found nobody is part of the ONE predicate', () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
-  // A prepared food order well past the window: chargeable on every other branch.
+  // A prepared food order well past the window: not free on every other branch
+  // (refused outright since owner #46 — the store accepted it).
   const prepared = {
-    status: 'READY_FOR_PICKUP', orderType: 'FOOD_DELIVERY', placedAt: minutesAgo(30),
+    status: 'READY_FOR_PICKUP', orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', placedAt: minutesAgo(30),
     holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
     scheduledFor: null as Date | null,
   };

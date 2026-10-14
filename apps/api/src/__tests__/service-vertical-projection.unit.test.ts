@@ -147,16 +147,19 @@ describe('GET /orders/:id — the order screen’s contract', () => {
     expect(res.data).toMatchObject({ vertical: 'SERVICE', canCancel: true, freeCancellationWindow: false, cancellationFee: LATE_CANCEL_FEE, freeCancellationExpiresAt: null });
   });
 
-  it('control — a PENDING food order ten minutes after placing keeps the legacy clock and its fee preview', async () => {
+  // [owner #46, 13 Oct] A food order used to keep the five-minute clock and a
+  // G$500 fee preview here. It is free while it waits for the store — no fee
+  // and no countdown — and the booking above keeps the clock.
+  it('control — a PENDING food order ten minutes after placing is free while it waits for the store, with no fee preview', async () => {
     const h = await customerHost([foodDelivery('food-1')]);
     const res = (await h.call('get /orders/:id', asCustomer({ params: { id: 'food-1' } }))) as Detail;
-    expect(res.data).toMatchObject({ vertical: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', canCancel: true, freeCancellationWindow: false, cancellationFee: LATE_CANCEL_FEE });
+    expect(res.data).toMatchObject({ vertical: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', canCancel: true, freeCancellationWindow: true, cancellationFee: 0, freeCancellationExpiresAt: null });
   });
 
-  it('control — a held food order is free while the hold runs, and the hold is the window', async () => {
+  it('control — a held food order is free while the hold runs, and stays free after it (no countdown)', async () => {
     const hold = new Date(Date.now() + 3 * MINUTE);
     const h = await customerHost([foodDelivery('food-1', { holdExpiresAt: hold, placedAt: new Date(Date.now() - MINUTE) })]);
     const res = (await h.call('get /orders/:id', asCustomer({ params: { id: 'food-1' } }))) as Detail;
-    expect(res.data).toMatchObject({ freeCancellationWindow: true, cancellationFee: 0, freeCancellationExpiresAt: hold.toISOString() });
+    expect(res.data).toMatchObject({ freeCancellationWindow: true, cancellationFee: 0, freeCancellationExpiresAt: null, holdExpiresAt: hold });
   });
 });

@@ -154,6 +154,35 @@ export function foodAge(order: { readyAt: Date | null }, limitMinutes: number | 
   return { tooOld: ageMinutes > limitMinutes, ageMinutes };
 }
 
+/** The fields the one-order cutoff reads; full order rows fit. */
+export interface TooOldSubject {
+  status: string;
+  orderType: string;
+  tenantId: string;
+  riderId: string | null;
+  driverId: string | null;
+  fulfillment: string;
+  fulfillmentMode: string | null;
+  readyAt: Date | null;
+  foodAgeWaivedAt: Date | null;
+}
+
+/**
+ * [owner #46] The food-age cutoff as a fact about ONE order — "too late to
+ * deliver". The same scope `sweepFoodAge` selects (riderless, still waiting,
+ * ready, platform-rider delivery, cutoff not waived by an operator) and the
+ * same tenant cutoff and age arithmetic, so the customer's free cancel and the
+ * system's cancel can never disagree about which orders are too old.
+ */
+export async function isTooOldToDeliver(prisma: PrismaClient, order: TooOldSubject, now = new Date()): Promise<boolean> {
+  if (order.riderId != null || order.driverId != null) return false;
+  if (!(WAITING_STATUSES as readonly string[]).includes(order.status)) return false;
+  if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY') return false;
+  if (order.readyAt == null || order.foodAgeWaivedAt != null) return false;
+  const limit = await foodAgeLimitMinutes(prisma, order.orderType, order.tenantId);
+  return foodAge(order, limit, now).tooOld;
+}
+
 export interface RetireableOrder {
   id: string;
   orderNumber: string;

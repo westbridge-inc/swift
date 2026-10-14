@@ -179,7 +179,9 @@ describe('F01 — a booking is cancelled by its LOCAL slot, resolved through the
   }
 
   it('control — scheduledFor is a real instant and is read as one: no offset is applied to it', () => {
-    const scheduled = { ...pendingBooking(), fulfillment: 'DELIVERY', appointmentSlot: null, scheduledFor: new Date('2026-09-24T18:00:00.000Z') } as unknown as CancellationSnapshot;
+    // [owner #46, 13 Oct] Read on the booking shape: a STORE order (fulfillment
+    // DELIVERY) no longer runs the clock at all — free until the store accepts.
+    const scheduled = { ...pendingBooking(), appointmentSlot: null, scheduledFor: new Date('2026-09-24T18:00:00.000Z') } as unknown as CancellationSnapshot;
     expect(isFreeCancellation(scheduled, PLACED_AT)).toBe(true);
     expect(freeCancellationExpiresAt(scheduled, PLACED_AT)?.toISOString()).toBe('2026-09-24T17:55:00.000Z');
     expect(isFreeCancellation(scheduled, new Date('2026-09-24T17:55:00.000Z'))).toBe(false);

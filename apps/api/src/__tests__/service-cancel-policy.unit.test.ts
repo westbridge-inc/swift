@@ -34,6 +34,7 @@ function booking(over: Partial<Snapshot> = {}): Snapshot {
   return {
     status: 'PENDING',
     orderType: 'FOOD_DELIVERY',
+    fulfillment: 'APPOINTMENT',
     placedAt: new Date(NOW.getTime() - 10 * MINUTE),
     holdExpiresAt: null,
     riderId: null,
@@ -80,20 +81,27 @@ describe('an appointment slot is the moment the work happens', () => {
   });
 });
 
-describe('everything else keeps its clock (controls)', () => {
-  it('a marketplace food order ten minutes after placing is not free, and the marker is unchanged', () => {
-    expect(isFreeCancellation(booking({ appointmentSlot: null }), NOW)).toBe(false);
+describe('everything else keeps its own rule (controls)', () => {
+  // [owner #46, 13 Oct] A marketplace STORE order no longer runs the clock: it
+  // is free while it waits for the store (no countdown), and refused once the
+  // store accepts (store-order-cancel-after-accept.test.ts). The marker
+  // constant is unchanged for the kinds that keep it.
+  const food = { appointmentSlot: null, fulfillment: 'DELIVERY' } as const;
+
+  it('a marketplace food order ten minutes after placing, still waiting for the store, is free; the marker is unchanged', () => {
+    expect(isFreeCancellation(booking(food), NOW)).toBe(true);
+    expect(freeCancellationExpiresAt(booking(food), NOW)).toBeNull();
     expect(LATE_CANCEL_FEE).toBe(500);
   });
 
   it('inside the first five minutes a food order is still free', () => {
-    expect(isFreeCancellation(booking({ appointmentSlot: null, placedAt: new Date(NOW.getTime() - 2 * MINUTE) }), NOW)).toBe(true);
+    expect(isFreeCancellation(booking({ ...food, placedAt: new Date(NOW.getTime() - 2 * MINUTE) }), NOW)).toBe(true);
   });
 
-  it('a scheduled delivery keeps the existing scheduled rule', () => {
-    const scheduled = booking({ appointmentSlot: null, scheduledFor: new Date('2026-09-24T18:00:00.000Z') });
+  it('a scheduled delivery waiting for the store is free with no countdown (owner #46)', () => {
+    const scheduled = booking({ ...food, scheduledFor: new Date('2026-09-24T18:00:00.000Z') });
     expect(isFreeCancellation(scheduled, NOW)).toBe(true);
-    expect(freeCancellationExpiresAt(scheduled, NOW)?.getTime()).toBe(new Date('2026-09-24T18:00:00.000Z').getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE);
+    expect(freeCancellationExpiresAt(scheduled, NOW)).toBeNull();
   });
 
   it('a mover assignment ends every free window, slot or not', () => {
@@ -102,6 +110,6 @@ describe('everything else keeps its clock (controls)', () => {
   });
 
   it('a courier parcel born READY_FOR_PICKUP keeps its carve-out', () => {
-    expect(isFreeCancellation(booking({ orderType: 'COURIER', status: 'READY_FOR_PICKUP', appointmentSlot: null, placedAt: new Date(NOW.getTime() - 2 * MINUTE) }), NOW)).toBe(true);
+    expect(isFreeCancellation(booking({ orderType: 'COURIER', fulfillment: 'DELIVERY', status: 'READY_FOR_PICKUP', appointmentSlot: null, placedAt: new Date(NOW.getTime() - 2 * MINUTE) }), NOW)).toBe(true);
   });
 });

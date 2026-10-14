@@ -22,7 +22,7 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { isFreeCancellation, freeBecauseNoMoverFound, readNoMoverFound, LATE_CANCEL_FEE } from './cancel-policy';
+import { cancellationVerdict, readNoMoverFound, readTooLateToDeliver, LATE_CANCEL_FEE } from './cancel-policy';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -2409,6 +2409,7 @@ export class OrderService {
       heldNow: boolean;
       freeCancellation: boolean;
       noMoverFree: boolean;
+      tooLateFree: boolean;
       cancellationFee: number;
       cancelledSearches: number;
     } | undefined;
@@ -2449,10 +2450,11 @@ export class OrderService {
           // capture serializes on this same orders lock, so cancel-after-
           // capture refuses here and capture-after-cancel refuses in the
           // capture CAS — CANCELLED+CAPTURED can no longer be minted in
-          // either commit order. PENDING MMG stays cancellable (the only
-          // exit from an unpaid MMG order); if external money landed
-          // unattested, the capture path's closed-order refusal directs the
-          // store to refund directly.
+          // either commit order. PENDING MMG stays cancellable while the
+          // policy below allows it (for a store order: until the store
+          // accepts, then the store declines it — owner #46); if external
+          // money landed unattested, the capture path's closed-order refusal
+          // directs the store to refund directly.
           if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
             throw new AppError(
               409,
@@ -2473,9 +2475,22 @@ export class OrderService {
           // [Item 64] ...or the mover search came back empty — read here, under
           // the order lock and before the searches are closed below, so a mover
           // assigned after the customer's preview still ends the exemption.
-          const policyOrder = { ...order, noMoverFound: await readNoMoverFound(tx, order) };
-          const freeCancellation = isFreeCancellation(policyOrder, now);
-          const noMoverFree = freeCancellation && freeBecauseNoMoverFound(policyOrder);
+          // [owner #46] ...or, for a store order, too late to deliver (the
+          // rescue cutoff, read from this LOCKED row; the tenant's cutoff is
+          // configuration, read on the app client).
+          const policyOrder = {
+            ...order,
+            noMoverFound: await readNoMoverFound(tx, order),
+            tooLateToDeliver: await readTooLateToDeliver(this.prisma, order, now),
+          };
+          const verdict = cancellationVerdict(policyOrder, now);
+          // [owner #46] A store order the store has accepted is not the
+          // customer's to cancel: refused before anything is written, in the
+          // words the apps show as-is. No fee is ever recorded for it.
+          if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+          const freeCancellation = verdict.free;
+          const noMoverFree = verdict.free && verdict.reason === 'NO_MOVER';
+          const tooLateFree = verdict.free && verdict.reason === 'TOO_LATE';
           const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
 
           // The row lock makes this update and every dependent release below one
@@ -2537,6 +2552,7 @@ export class OrderService {
             heldNow,
             freeCancellation,
             noMoverFree,
+            tooLateFree,
             cancellationFee,
             cancelledSearches: searches.count,
           };
@@ -2552,7 +2568,7 @@ export class OrderService {
     }
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
-    const { order, heldNow, freeCancellation, noMoverFree, cancellationFee, cancelledSearches } = committed;
+    const { order, heldNow, freeCancellation, noMoverFree, tooLateFree, cancellationFee, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
@@ -2609,7 +2625,10 @@ export class OrderService {
     const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
     const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
     // [Item 64] The plain reason, when the platform found nobody to do the job.
-    const cancelled = noMoverFree ? `${noun} cancelled — no mover was found, so there is no fee.` : null;
+    // [owner #46] ...and when it was running too late to deliver.
+    const cancelled = noMoverFree
+      ? `${noun} cancelled — no mover was found, so there is no fee.`
+      : tooLateFree ? `${noun} cancelled because it was running very late.` : null;
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
         message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
