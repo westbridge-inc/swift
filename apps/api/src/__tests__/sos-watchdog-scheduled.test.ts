@@ -72,4 +72,55 @@ describe('scheduled SOS watchdog recipient isolation', () => {
       expect(ctx.redis.set).not.toHaveBeenCalled();
     }
   });
+
+  // The scan returns the oldest stuck alerts first. Demo alerts are dropped
+  // BEFORE the cap of 20 pages a tick, so old demo alerts can never fill the
+  // cap and hide a real SOS behind them (GUARDRAILS §3).
+  const WATCHDOG_KEY = 'ops_page:sos-active-without-page:';
+  const watchdogTick = async (stuck: Array<{ sosAlertId: string; tenantId: string; ageSeconds: number }>) => {
+    vi.stubEnv('SOS_ESCALATION_WORKER_KILL', '0');
+    const send = vi.spyOn(NotificationService.prototype, 'send').mockResolvedValue('synthetic-notice');
+    const audience = vi.fn().mockResolvedValue([{ id: 'synthetic-super-admin' }]);
+    const query = vi.fn(async (parts: TemplateStringsArray | { sql: string }) => {
+      const sql = Array.isArray(parts) ? parts.join('?') : (parts as { sql: string }).sql;
+      if (sql.includes('WITH candidate')) return [];
+      if (sql.includes('extract(epoch')) return stuck;
+      if (sql.includes('count(*)')) return [{ pending: 0n, failed: BigInt(stuck.length) }];
+      if (sql.includes('SELECT a.')) return [];
+      throw new Error(`Unexpected watchdog SQL: ${sql}`);
+    });
+    const ctx = {
+      prisma: {
+        $queryRaw: query,
+        tenant: { findUnique: vi.fn(async ({ where }: { where: { id: string } }) => ({ kind: where.id === 'synthetic-review' ? 'REVIEW' : 'PRODUCTION' })) },
+        user: { findMany: audience },
+        alertDelivery: { createMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      },
+      io: {},
+      redis: { options: {}, set: vi.fn().mockResolvedValue('OK'), del: vi.fn().mockResolvedValue(1) },
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as unknown as JobContext;
+    await createWorkers(ctx, {} as never);
+    await state.workers.get(QUEUE_NAMES.DISPATCH)!({ name: 'promote-sos-grace', data: {} });
+    const claimed = (ctx.redis.set as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(([key]) => String(key));
+    return { send, audience, claimed };
+  };
+
+  it('21 older demo alerts do not crowd out a real one: the real alert is paged once, no demo alert is', async () => {
+    const demo = Array.from({ length: 21 }, (_, i) => ({ sosAlertId: `synthetic-demo-${i}`, tenantId: 'synthetic-review', ageSeconds: 90_000 - i }));
+    const { send, audience, claimed } = await watchdogTick([...demo, { sosAlertId: 'synthetic-real', tenantId: 'synthetic-production', ageSeconds: 600 }]);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(audience).toHaveBeenCalledTimes(1);
+    expect(audience).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ OR: [{ tenantId: 'synthetic-production' }, { roles: { has: 'SUPER_ADMIN' } }] }),
+    }));
+    expect(claimed.filter((key) => key.startsWith(WATCHDOG_KEY))).toEqual([`${WATCHDOG_KEY}synthetic-real`]);
+  });
+
+  it('the cap still holds for real alerts: 25 real stuck alerts page the oldest 20 this tick', async () => {
+    const real = Array.from({ length: 25 }, (_, i) => ({ sosAlertId: `synthetic-real-${i}`, tenantId: 'synthetic-production', ageSeconds: 90_000 - i }));
+    const { send, claimed } = await watchdogTick(real);
+    expect(send).toHaveBeenCalledTimes(20);
+    expect(claimed.filter((key) => key.startsWith(WATCHDOG_KEY))).toEqual(real.slice(0, 20).map((r) => `${WATCHDOG_KEY}${r.sosAlertId}`));
+  });
 });
