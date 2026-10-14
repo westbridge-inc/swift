@@ -62,9 +62,9 @@ export default function RefundsPage() {
           time you were promised).
         </li>
         <li>
-          <b>Rides, parcels and bookings</b> can be cancelled free in the first 5 minutes after you place them, and at
-          any time while nobody has accepted them. After that, contact your driver, rider or provider. You can still
-          cancel free if no driver or rider was found, or if they are running very late, as the app shows.
+          <b>Rides, parcels and bookings</b> can be cancelled free at any time while nobody has accepted them, and for
+          5 minutes after a driver, rider or provider accepts them. After that, contact your driver, rider or provider.
+          You can still cancel free if no driver or rider was found, or if they are running very late, as the app shows.
         </li>
         <li>
           <b>A service job</b> (a local pro you hired through the app) can be cancelled free until the provider starts

@@ -154,13 +154,14 @@ const PUBLISHED: Record<
   },
   // [OWNER #46/#50/#52 + service-job ruling · 14 Oct] Terms §7 cancellations:
   // no cancellation fee ever; a store order is free until the store accepts,
-  // then the customer contacts the store; rides, parcels and bookings free in
-  // the window or while unaccepted; a service job free until the provider
+  // then the customer contacts the store; rides, parcels and bookings free
+  // while unaccepted and for five minutes after acceptance (owner ruling
+  // 14 Oct); a service job free until the provider
   // starts; no-mover and very-late exits. Proven the only change: putting the
   // 14 Oct paragraph and date back reproduces all four 2026-10-14 hashes
   // exactly. The date re-pins all four.
   '2026-10-15': {
-    terms: 'f7332e2124a35a7e101e019c43389cdc62b17009e26edec7e65847b8ccf49dbc',
+    terms: '59a99f717a44f8738ab241d03e1a1ed7864498e268ce4045bd995e26f872e4df',
     privacy: '9b0bc20a6fef07772523483fa63d120bb915cb9c588214c519dfc506042ab2fe',
     driver_agreement: 'b148daa56ef00e9325cd364e90b7c5f19bc262ee260c557237bcd4d517c3b4d8',
     vendor_agreement: '89b9d5525e22546b9102b56421436bb7970e66ae63192bc5e31a5886de3e8c99',
