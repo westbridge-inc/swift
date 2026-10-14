@@ -8,6 +8,14 @@ import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { PUBLIC_BROWSE_CAPABILITY, runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { hostRoutes, orderStore, prismaDouble, project, recordingIo, recordingRedis, type Row } from './helpers/service-vertical-doubles';
 import { PUBLIC_DISCLOSURE_TTL_MS, resetPublicDisclosureCacheForTests } from '../modules/verification/storefront-disclosure';
+// [GUARDRAILS §8 · #54] The store-level ban's reads are proven against a real database (prohibited-items.test.ts);
+// this seam models none of the category tables, and no fixture store is filed under a banned category.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
+}));
+
 
 const crypto = vi.hoisted(() => ({ unwrap: vi.fn(), decrypt: vi.fn() }));
 vi.mock('../providers/storage/envelope', () => ({ getKeyProvider: () => ({ unwrapDek: crypto.unwrap }) }));
