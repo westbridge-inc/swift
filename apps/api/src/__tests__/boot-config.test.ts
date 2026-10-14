@@ -36,7 +36,12 @@ const good: Record<string, string | undefined> = {
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
   KYC_PROVIDER: 'didit',
   DIDIT_API_KEY: 'didit-live-key',
-  PAYMENT_PROVIDER: 'stripe',
+  // [LAUNCH-LOCK] Production takes no card payment until an attorney signs
+  // off (owner ruling, 13 Oct): the valid production base has cards off. The
+  // live Stripe key stays so a case that switches the provider back on still
+  // passes the provider's own checks and reaches the lock.
+  PAYMENT_PROVIDER: 'disabled',
+  CARD_RAIL_KILL: '1',
   STRIPE_SECRET_KEY: 'sk_live_boot_config_test',
   MMG_DRIVER: 'live',
   MMG_API_URL: 'https://api.mmg.gy/olive/publisher/v1',
@@ -201,7 +206,7 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it('refuses sandbox/test subscription card processors in production', () => {
     expect(() => assertSafeBootConfig({ ...good, PAYMENT_PROVIDER: undefined })).toThrow(/PAYMENT_PROVIDER/);
     expect(() => assertSafeBootConfig({ ...good, PAYMENT_PROVIDER: 'sandbox' })).toThrow(/PAYMENT_PROVIDER/);
-    expect(() => assertSafeBootConfig({ ...good, STRIPE_SECRET_KEY: 'sk_test_not_money' })).toThrow(/live STRIPE_SECRET_KEY/);
+    expect(() => assertSafeBootConfig({ ...good, PAYMENT_PROVIDER: 'stripe', STRIPE_SECRET_KEY: 'sk_test_not_money' })).toThrow(/live STRIPE_SECRET_KEY/);
     expect(() => assertSafeBootConfig({
       ...good,
       PAYMENT_PROVIDER: 'powertranz',
@@ -790,9 +795,13 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
     POWERTRANZ_API_URL: 'https://gateway.ptranz.com', POWERTRANZ_ID: 'LIVEID01', POWERTRANZ_PASSWORD: 'not-a-real-password',
     POWERTRANZ_PAGE_SET: 'PTZ/Swift', POWERTRANZ_PAGE_NAME: 'Weekly', API_PUBLIC_URL: 'https://api.example.com',
   };
-  it('[PT-4] boots with the real provider fully set up for live cards (and drains on the same terms)', () => {
-    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).not.toThrow();
-    expect(() => assertSafeBootConfig({ ...good, ...liveCards, CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1' })).not.toThrow();
+  // [LAUNCH-LOCK] Until an attorney signs off (owner ruling, 13 Oct) the
+  // launch lock refuses v2 in production AFTER every PT-4 check: its own
+  // message (never PT-4's "CARD_RAIL_V2=1 in production …") proves the live
+  // setup passed them all.
+  it('[PT-4] the real provider fully set up for live cards passes every card check (and drains on the same terms), and only the launch lock refuses it', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).toThrow(/^FATAL: CARD_RAIL_V2 must be unset or 0 in production/);
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards, CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1' })).toThrow(/^FATAL: CARD_RAIL_V2_DRAIN must be unset or 0 in production/);
   });
   it('[PT-4] refuses anything less: sandbox, a test URL, a missing credential or page, http — never echoing a value', () => {
     const cases: Array<[Record<string, string | undefined>, RegExp]> = [
@@ -871,7 +880,8 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
         .toThrow(/live \(real cards\) outside production/);
     }
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox', API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
-    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).not.toThrow();
+    // Production is the only mode whose card checks accept live cards; the launch lock then refuses them.
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).toThrow(/^FATAL: CARD_RAIL_V2 must be unset or 0 in production/);
   });
 
   it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
@@ -1052,5 +1062,78 @@ describe('production address lookup is an explicit deployment choice', () => {
   });
   it('refuses explicit OSM without its Photon endpoint in preflight too', () => {
     expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: undefined })).toThrow(/PHOTON_URL/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [LAUNCH-LOCK] Owner ruling, 13 Oct 2026 (#34, GUARDRAILS §8): until an
+// attorney signs off, production takes no card payment and runs no ads. Both
+// were already off by default; production now REFUSES TO BOOT with either on,
+// so turning one on is a reviewed code change, never a deploy/.env edit.
+// pilot-up.sh refuses the same settings (deploy-prod-path.test.ts).
+// ---------------------------------------------------------------------------
+describe('[LAUNCH-LOCK] production refuses to boot with card payments or ads on', () => {
+  const liveStripe = { PAYMENT_PROVIDER: 'stripe', STRIPE_SECRET_KEY: 'sk_live_boot_config_test' };
+  const livePowerTranz = { PAYMENT_PROVIDER: 'powertranz', PAYMENT_GATEWAY_KEY: 'gateway-id', PAYMENT_GATEWAY_SECRET: 'gateway-secret', POWERTRANZ_API_URL: 'https://gateway.ptranz.com' };
+  const liveCardRail = {
+    CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', CARD_RAIL_ACCOUNT: 'swift-gy',
+    POWERTRANZ_API_URL: 'https://gateway.ptranz.com', POWERTRANZ_ID: 'LIVEID01', POWERTRANZ_PASSWORD: 'not-a-real-password',
+    POWERTRANZ_PAGE_SET: 'PTZ/Swift', POWERTRANZ_PAGE_NAME: 'Weekly', API_PUBLIC_URL: 'https://api.example.com',
+  };
+
+  it('boots with cards off and ads off: the locked switches unset, empty or 0', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    for (const off of [undefined, '', '0']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: off, CARD_RAIL_V2_DRAIN: off, CARD_RAIL_ENROLL: off, ADS_ENABLED: off }), String(off)).not.toThrow();
+    }
+  });
+
+  it.each([
+    ['a live Stripe key', liveStripe],
+    ['live PowerTranz', livePowerTranz],
+  ])('refuses the legacy card provider (%s) that production used to accept, by name', (_label, provider) => {
+    expect(() => assertSafeBootConfig({ ...good, ...provider })).toThrow(/^FATAL: PAYMENT_PROVIDER must be exactly disabled in production/);
+  });
+
+  it('refuses a provider without the kill switch: cards off means PAYMENT_PROVIDER=disabled AND CARD_RAIL_KILL=1', () => {
+    for (const kill of [undefined, '', '0', 'true']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_KILL: kill }), String(kill)).toThrow(/CARD_RAIL_KILL/);
+    }
+  });
+
+  it('refuses card rail v2, its drain and saving cards with the real provider fully set up for live cards (each passed every card check before)', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...liveCardRail, CARD_RAIL_V2: '1' })).toThrow(/^FATAL: CARD_RAIL_V2 must be unset or 0 in production/);
+    expect(() => assertSafeBootConfig({ ...good, ...liveCardRail, CARD_RAIL_V2_DRAIN: '1' })).toThrow(/^FATAL: CARD_RAIL_V2_DRAIN must be unset or 0 in production/);
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_ENROLL: '1' })).toThrow(/^FATAL: CARD_RAIL_ENROLL must be unset or 0 in production/);
+  });
+
+  it.each(['1', 'true', 'yes', 'on', ' 1', '01'])('refuses ADS_ENABLED=%j: no ads in production, and no near miss either', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, ADS_ENABLED: value })).toThrow(/^FATAL: ADS_ENABLED must be unset or 0 in production/);
+  });
+
+  it.each(['true', 'yes', 'on', ' 1'])('refuses CARD_RAIL_ENROLL=%j: no near miss is read as off', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_ENROLL: value })).toThrow(/^FATAL: CARD_RAIL_ENROLL must be unset or 0 in production/);
+  });
+
+  it('names the setting and the ruling, never a credential', () => {
+    let message = '';
+    try { assertSafeBootConfig({ ...good, ...liveCardRail, CARD_RAIL_V2: '1' }); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/attorney signs off/);
+    expect(message).toMatch(/reviewed code change/);
+    expect(message).not.toContain('not-a-real-password');
+  });
+
+  it('asks nothing outside production: staging and test servers keep their switches', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ADS_ENABLED: '1', CARD_RAIL_ENROLL: '1', PAYMENT_PROVIDER: 'sandbox' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'test', ADS_ENABLED: '1' })).not.toThrow();
+  });
+
+  it('the value-free preflight names each locked switch and walks past them', () => {
+    const result = runPreflight({ ...good, ...liveStripe, ADS_ENABLED: '1', CARD_RAIL_ENROLL: '1' });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('PAYMENT_PROVIDER must be exactly disabled');
+    expect(result.stdout).toContain('CARD_RAIL_ENROLL must be unset or 0');
+    expect(result.stdout).toContain('ADS_ENABLED must be unset or 0');
   });
 });

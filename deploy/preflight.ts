@@ -118,6 +118,8 @@ const STUBS: Record<string, string> = {
   ID_ANALYZER_API_KEY: 'STUB-NOT-A-REAL-KEY',
   PAYMENT_PROVIDER: 'disabled',
   CARD_RAIL_KILL: '1',
+  // [LAUNCH-LOCK] production refuses card rail v2 and ads until an attorney signs off.
+  CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '0', CARD_RAIL_ENROLL: '0', ADS_ENABLED: '0',
   PAYMENT_GATEWAY_KEY: 'STUB-NOT-A-REAL-KEY',
   PAYMENT_GATEWAY_SECRET: 'STUB-NOT-A-REAL-KEY',
   POWERTRANZ_API_URL: 'https://stub.invalid/powertranz',
