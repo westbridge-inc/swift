@@ -1153,7 +1153,7 @@ export async function customerRoutes(app: FastifyInstance) {
             // chip with and every chip fell back to the same stock photograph —
             // "Popular", "Produce" and "Rice & Grains" were one identical image.
             // The column has been on Category the whole time.
-            categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
+            categories: { where: { archivedAt: null }, select: { id: true, name: true, imageUrl: true }, take: 5 },
           },
           orderBy: { averageRating: 'desc' },
           take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
@@ -1579,6 +1579,8 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { id, ...vendorTenantForCaller() },
       include: {
         categories: {
+          // [Item 62] A deleted (archived) category is not on the storefront.
+          where: { archivedAt: null },
           orderBy: { sortOrder: 'asc' },
           include: {
             items: {

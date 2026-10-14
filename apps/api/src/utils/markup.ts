@@ -10,6 +10,11 @@ import { DEFAULT_COURIER_RATES, type DeliverySpeed } from '../modules/courier/co
  * Calculate delivery fee based on distance.
  * delivery_fee = base_fee + (distance_km - included_km) * per_km_rate
  * The defaults are DEFAULT_DELIVERY_RATES (below), never numbers of their own.
+ *
+ * [owner #18, 13 Oct 2026] Never below the base fee, whatever the distance
+ * engine (the road route, or the straight-line fallback when routing is down)
+ * or the per-market config says: a negative per-km rate or a surge below 1
+ * cannot price a delivery under the first-3-km fee the rider is promised.
  */
 export function calculateDeliveryFee(
   distanceKm: number,
@@ -18,9 +23,9 @@ export function calculateDeliveryFee(
   includedKm: number = DEFAULT_DELIVERY_RATES.includedKm,
   surgeMultiplier: number = DEFAULT_DELIVERY_RATES.surgeMultiplier,
 ): number {
-  const distanceFee = Math.max(0, distanceKm - includedKm) * perKmRate;
+  const distanceFee = Math.max(0, distanceKm - includedKm) * Math.max(0, perKmRate);
   const subtotal = baseFee + distanceFee;
-  return Math.ceil(subtotal * surgeMultiplier);
+  return Math.max(baseFee, Math.ceil(subtotal * surgeMultiplier));
 }
 
 /**
