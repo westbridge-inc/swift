@@ -644,6 +644,26 @@ jobs:
       - name: Every public-prefixed variable is allowlisted and justified
         run: node scripts/public-secrets-gate.js
 
+  # The deploy contract tests (deploy/tests, Python standard library only):
+  # pilot-up and deploy.sh, the encrypted secret store, the migration gate,
+  # the staging, website and console Caddy contracts. Until this job they ran
+  # only on a builder's machine, so a red one could reach main unseen (a
+  # pilot-up contract test sat red for days in review). It pulls the stack's
+  # pinned Caddy image so the rendered-config and live gate tests run instead
+  # of skipping; Compose renders client-side (no daemon state is changed).
+  # NOT a required check yet: it becomes one after three green runs on main
+  # (owner's decision). The one htpasswd-only case skips (no extra package).
+  deploy-python-tests:
+    name: Deploy Python Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: The stack's pinned Caddy image (the Caddyfile tests render and serve with it)
+        run: docker pull caddy:2.10
+      - name: Run every deploy contract test
+        run: python3 -m unittest discover -s deploy/tests -v
+
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
