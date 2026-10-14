@@ -652,7 +652,7 @@ jobs:
   # pinned Caddy image so the rendered-config and live gate tests run instead
   # of skipping; Compose renders client-side (no daemon state is changed).
   # NOT a required check yet: it becomes one after three green runs on main
-  # (owner's decision). The one htpasswd-only case skips (no extra package).
+  # (owner's decision). First run: 246 tests, none skipped, about 3.5 minutes.
   deploy-python-tests:
     name: Deploy Python Tests
     runs-on: ubuntu-latest
