@@ -655,7 +655,11 @@ describe('disputed MMG orders pause the web dashboard', () => {
     expect(row.textContent).toContain('Payment under review — order paused');
     await user.click(row);
     await screen.findByText('Total (MMG)');
-    expect(screen.getByText(/Don’t hand anything over/)).toBeTruthy();
+    // The phone's own words (order-dispute.ts). A dispute can be a reference
+    // mismatch where the customer says they DID pay, so the notice never says
+    // the customer is disputing the payment (review S4-1).
+    expect(screen.getByText("The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.")).toBeTruthy();
+    expect(screen.queryByText(/customer disputes/i)).toBeNull();
     for (const name of ['Accept', 'Start preparing', 'Mark ready', 'Ready for pickup', 'Mark picked up', 'Confirm delivered', 'Search for a rider again', 'We’ll deliver', 'Get a Swift rider']) {
       expect(screen.queryByRole('button', { name }), name).toBeNull();
     }

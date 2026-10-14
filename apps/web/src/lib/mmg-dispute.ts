@@ -22,5 +22,7 @@ export function mmgDisputePaused(order: {
 
 export const MMG_DISPUTE_NOTICE = {
   title: 'Payment under review — order paused',
-  body: 'The customer disputes the MMG payment for this order. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.',
+  // The phone's words exactly. A dispute can be a reference mismatch where the
+  // customer says they DID pay, so it never says the customer is disputing.
+  body: "The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.",
 } as const;
