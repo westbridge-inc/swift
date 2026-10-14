@@ -246,13 +246,13 @@ describe('[owner #51] a store goes live only with a published contact phone', ()
     const again = await approve(neverLive.id);
     expect(again.statusCode, again.body).toBe(409);
     expect(again.json().error.code).toBe('PUBLISHED_PHONE_MISSING');
-    // The owner is asked for the number…
-    const asked = await app.prisma.notification.findMany({ where: { userId: owner.userId, title: 'Add the number customers can call' } });
-    expect(asked.length).toBeGreaterThanOrEqual(1);
+    // The owner is asked for the number — once, by the notice whose tap opens the waiting store's screen…
+    expect(await notices(owner.userId)).toHaveLength(1);
     // …and, from the waiting store, adding it puts the store live: the recovery the suspended store did not have.
     const saved = await inject('PUT', '/api/v1/vendor/profile', owner.token, neverLive.id, { publicPhone: PUBLISHED });
     expect(saved.statusCode, saved.body).toBe(200);
     expect(await storeRow(neverLive.id)).toMatchObject({ status: 'ACTIVE', isVerified: true });
+    expect(await notices(owner.userId)).toHaveLength(1);
   });
 
   it('[DS1145 S3] lifting decides again under the lock: a store wound down between the first read and the write stays closed', async () => {

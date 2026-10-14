@@ -1669,7 +1669,9 @@ export async function adminRoutes(app: FastifyInstance) {
               ? `${vendor.name} has been reinstated and can take orders again once you open it.`
               : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
           }),
-      data: { vendorId: id },
+      // [DS1321 S4] The lift's notice IS the one "add the number" notice: its tap opens the waiting store's screen,
+      // and the activation projection, which asks once per store, does not ask again.
+      data: next === 'CAN_LIFT_TO_WAITING' ? { kind: 'vendor_needs_public_phone', vendorId: id } : { vendorId: id },
     });
 
     // [VERIFY-DOCS V5] The owner's VAT billing number never rides an admin store reply.
