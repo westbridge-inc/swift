@@ -49,10 +49,12 @@ import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { searchTiers } from '../search/forgiving-text';
+import { launchMarketWhere } from '../auth/launch-market';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
 import { AccountService, closesByRequest } from './account.service';
+import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
@@ -894,36 +896,9 @@ export async function customerRoutes(app: FastifyInstance) {
   app.put('/profile', async (request: AuthRequest, _reply: FastifyReply) => {
     const { userId } = request.user;
     const body = updateProfileSchema.parse(request.body);
-
-    if (body.email) {
-      const existing = await app.prisma.user.findFirst({
-        where: { email: body.email, id: { not: userId } },
-      });
-      if (existing) {
-        throw new AppError(409, 'EMAIL_TAKEN', 'This email is already in use by another account');
-      }
-    }
-
-    // [REPORT-022 F-022-21] conditional write: a deletion that finished
-    // between auth and here cannot be re-personalized.
-    const updated = await app.prisma.user.updateMany({
-      where: { id: userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
-      data: {
-        ...(body.firstName !== undefined && { firstName: body.firstName }),
-        ...(body.lastName !== undefined && { lastName: body.lastName }),
-        ...(body.email !== undefined && { email: body.email }),
-      },
-    });
-    if (updated.count === 0) {
-      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
-    }
-    const user = await app.prisma.user.findUniqueOrThrow({
-      where: { id: userId },
-      select: {
-        id: true, phone: true, firstName: true, lastName: true,
-        email: true, avatar: true, activeRole: true, lastMoverRole: true, updatedAt: true,
-      },
-    });
+    // [OWNER #13 · Opus S2] An admin account's email change takes a fresh
+    // sign-in code and tells the old address; every change is dated.
+    const user = await updateCustomerProfile(app, userId, request.authSessionId, body);
 
     return { success: true, data: { ...user, avatar: await resolveAvatarUrl(user.avatar) } };
   });
@@ -1424,13 +1399,19 @@ export async function customerRoutes(app: FastifyInstance) {
       // (search/forgiving-text.ts), strictest first: the page uses the first
       // tier that finds anything, so a correctly typed name never shares its
       // page with slip matches, and the total and pages stay one tier's.
+      //
+      // [Review S3-PRE] A search keeps to the launch market, the rule #1563 put
+      // on every /search rail: a store pinned outside it is never found. It is
+      // part of the query (the market is a box), so the tier chosen, the page
+      // and the total all respect it.
+      where['AND'] = [launchMarketWhere()];
       const tiers = searchTiers(search, BROWSE_SEARCH_COLUMNS);
       let chosen: Record<string, unknown> = { id: { in: [] } }; // no searchable word: nothing matches
       for (const { where: tierWhere } of tiers) {
         chosen = tierWhere;
         if (await app.prisma.vendor.count({ where: { AND: [where, tierWhere] } }) > 0) break;
       }
-      where['AND'] = [chosen];
+      where['AND'] = [launchMarketWhere(), chosen];
     }
 
     const orderBy: Record<string, string>[] = [];

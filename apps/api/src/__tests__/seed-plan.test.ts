@@ -12,6 +12,8 @@ import {
 } from '../modules/ops/seed-plan';
 import { approvalRequest, parseApproverKeys, parseRequest, promotionSubject, type SignedApproval } from '../modules/ops/approver-signatures';
 import { desiredPlatformConfig, seedPlatformSpine } from '../modules/ops/platform-config';
+import { parseEmergencyPolicy, serveEmergencyPolicy } from '../modules/country/emergency-policy';
+import { marketGate, thresholdsFrom } from '../modules/market/launch-depth';
 import { assertSafeToSeedDemo } from '../utils/seed-guard';
 import { seedPlanCounter } from '../plugins/observability';
 
@@ -55,6 +57,11 @@ const both = (request: string) => [sign('alice', 'alice', request), sign('bob', 
 let priorIdentity: { deploymentId: string; environment: string; note: string | null } | null = null;
 const KEY = `r048005_${nanoid(6).toLowerCase()}`;
 const userIds: string[] = [];
+const CONFIRMED_EMERGENCY = {
+  police: { number: '911', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+  fire: { number: '912', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+  ambulance: { number: '913', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+};
 
 const setIdentity = (environment: string) => prisma.deploymentIdentity.upsert({ where: { id: 'singleton' }, create: { id: 'singleton', deploymentId: 'dep-test', environment }, update: { deploymentId: 'dep-test', environment } });
 const count = async (outcome: string) => (await seedPlanCounter.get()).values.find((v) => v.labels['outcome'] === outcome)?.value ?? 0;
@@ -89,6 +96,22 @@ afterAll(async () => {
 });
 
 describe('[R048-005] the plan applies once; a replay changes nothing', () => {
+  it('records the emergency confirmation under a new platform config version', () => {
+    // 2026-10-07.1 carried the confirmation without main's 2026-10-06.1
+    // document rulings, and 2026-10-13.1 without main's 2026-10-13.3 pricing;
+    // the merged values are a version of their own (2026-10-14.3), and the
+    // service-business document change carries them on top as 2026-10-14.4.
+    expect(desiredPlatformConfig().version).toBe('2026-10-14.4');
+  });
+
+  it.each(['create', 'policy'] as const)('seeds owner-confirmed emergency numbers for the Guyana %s path', (path) => {
+    const guyana = desiredPlatformConfig().countries.find(({ code }) => code === 'GY');
+    expect(guyana?.[path]['emergency']).toEqual(CONFIRMED_EMERGENCY);
+    expect(parseEmergencyPolicy('GY', guyana?.[path]['emergency'])).toEqual({
+      policy: { country: 'GY', numbers: CONFIRMED_EMERGENCY, notes: null },
+    });
+  });
+
   it('plan → apply → replay: the second plan has zero changes and the apply is a NOOP with its own audit row', async () => {
     const desired = desiredFor(1);
     const plan = await buildSeedPlan(prisma, URL_, desired);
@@ -112,15 +135,40 @@ describe('[R048-005] the plan applies once; a replay changes nothing', () => {
   });
 
   it('the real platform spine plans and applies against this database, and its replay is empty', async () => {
+    // An existing seed carried fire/ambulance as unverified. The next seed
+    // must upgrade them, and a replay must preserve the confirmation.
+    await prisma.countryConfig.update({ where: { code: 'GY' }, data: { emergency: {
+      police: { number: '911', verified: true, verifiedAt: '2026-09-02T00:00:00.000Z', verifiedBy: 'launch-market' },
+      fire: { number: '912', verified: false },
+      ambulance: { number: '913', verified: false },
+    } } });
     const first = await seedPlatformSpine(prisma, { databaseUrl: URL_, actor: 'test' });
     expect(first.configVersion).toBe(desiredPlatformConfig().version);
+    expect((await prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } })).emergency).toEqual(CONFIRMED_EMERGENCY);
     const replay = await seedPlatformSpine(prisma, { databaseUrl: URL_, actor: 'test' });
     expect(replay.changes).toEqual([]);
+    expect((await prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } })).emergency).toEqual(CONFIRMED_EMERGENCY);
+    const served = await serveEmergencyPolicy(prisma, 'GY');
+    expect(served).toMatchObject({ status: 'served', signed: { version: 1, country: 'GY', numbers: CONFIRMED_EMERGENCY } });
     // and the seed carries no schema DDL — the migration ledger owns it
     for (const file of ['../../prisma/seed-platform.ts', '../modules/ops/platform-config.ts', '../modules/ops/seed-plan.ts']) {
       const src = readFileSync(join(__dirname, file), 'utf8');
       expect(src, file).not.toMatch(/CREATE (UNIQUE )?INDEX|CREATE EXTENSION|ALTER TABLE|DROP /);
     }
+  });
+
+  // Owner ruling, 13 Oct: the Market tab ALWAYS shows at launch. Its depth
+  // gate reads MARKET_MIN_ITEMS / MARKET_MIN_VENDORS from platform config
+  // (market.routes.ts /depth); the spine seeds both at 0, the explicit
+  // operator choice the gate honours, so even a thin catalogue shows the tab.
+  it('the spine opens the Market tab at launch: both depth thresholds seeded at 0, and the gate then shows even an empty market', async () => {
+    const desired = Object.fromEntries(desiredPlatformConfig().platformConfig.map((c) => [c.key, c.value]));
+    expect(desired).toMatchObject({ MARKET_MIN_ITEMS: 0, MARKET_MIN_VENDORS: 0 });
+    await seedPlatformSpine(prisma, { databaseUrl: URL_, actor: 'test' });
+    const rows = await prisma.platformConfig.findMany({ where: { key: { in: ['MARKET_MIN_ITEMS', 'MARKET_MIN_VENDORS'] } }, select: { key: true, value: true } });
+    const thresholds = thresholdsFrom(Object.fromEntries(rows.map((r) => [r.key, r.value])));
+    expect(thresholds).toEqual({ minItems: 0, minVendors: 0 });
+    expect(marketGate({ items: 0, vendors: 0 }, thresholds).visible).toBe(true);
   });
 });
 
