@@ -30,8 +30,15 @@ describe('customer words', () => {
   // Groceries chip once offered "Markets & pharmacies" and the Shops card "Pharmacy".
   it('no page promises a pharmacy, medicines, alcohol, tobacco or vapes', () => {
     const banned = /\b(pharmac\w*|medicines?|liquor|alcohol|beer|wine|rum|tobacco|cigarettes?|vapes?)\b/i;
+    // [owner #67] A refusal names the goods only to say Swift never carries them (the line beside the parcel tick).
+    // That exact form is not a promise; any other line naming them is.
+    const refusal = /\bSwift never (carries|delivers|sells)\b/;
+    const promises = (line: string) => banned.test(line) && !refusal.test(line);
+    expect(promises('Markets & pharmacies')).toBe(true);
+    expect(promises('Cold beer and wine delivered')).toBe(true);
+    expect(promises('Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.')).toBe(false);
     const found = sources.flatMap((file) => withoutComments(readFileSync(file, 'utf8')).split('\n')
-      .filter((line) => banned.test(line))
+      .filter(promises)
       .map((line) => `${relative(SRC, file)}: ${line.trim().slice(0, 120)}`));
     expect(found).toEqual([]);
   });
