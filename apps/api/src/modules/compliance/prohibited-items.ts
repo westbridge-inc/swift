@@ -244,8 +244,7 @@ export const PROHIBITED_NEVER_APPROVABLE: readonly string[] = [
   'cough syrup', 'cough mixture', 'cough medicine', 'cold and flu', 'flu tablets', 'sleeping pills', 'morning after pill',
   'headache tablets', 'headache pills', 'fever reducer', 'cough and cold', 'gripe water', 'deep heat', 'bengay', 'icy hot',
   'liver salts', 'milk of magnesia',
-  // cooking gas
-  'lpg',
+  // (No gas or fuel word is here: hardware stores sell "LPG regulators", "gas stoves" and "fuel cans" — held for a person.)
 ];
 const NEVER_APPROVABLE: ReadonlySet<string> = new Set(PROHIBITED_NEVER_APPROVABLE);
 

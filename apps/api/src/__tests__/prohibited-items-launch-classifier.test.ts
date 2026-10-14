@@ -96,6 +96,7 @@ describe('[§8 launch] never approvable: the item IS beer, wine, spirits, tobacc
   it.each([
     'Rum cake', 'Beer batter fish', 'Beer-battered shrimp', 'Wine glass set (4)', 'Rum raisin ice cream', 'Champagne flutes (2)',
     'Stout work boots', 'Cigarette lighter adapter', 'Bourbon biscuits', 'Brandy snaps', 'Banks Kola Champagne', 'Tobacco pipe',
+    'LPG regulator', 'Gas stove (4 burner)', 'Kerosene lamp',
   ])('a word that is not the goods themselves is held for a person, never refused: %s', (name) => {
     expect(verdict(name).state, name).toBe('WAITING');
   });
