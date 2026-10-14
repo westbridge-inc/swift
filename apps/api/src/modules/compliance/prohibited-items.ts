@@ -65,7 +65,11 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'alcohol', 'alcoholic', 'liquor', 'liquors', 'liqueur', 'liqueurs', 'booze', 'hooch', 'moonshine',
     'beer', 'beers', 'lager', 'lagers', 'ale', 'ales', 'stout', 'stouts', 'ipa', 'pilsner', 'shandy',
     'cider', 'ciders', 'hard seltzer', 'hard lemonade', 'malt liquor', 'spiked', 'boozy', 'radler', 'radlers',
-    'spiked seltzer', 'white claw', 'truly seltzer', 'twisted tea',
+    'spiked seltzer', 'white claw', 'truly seltzer', 'twisted tea', 'truly', 'abv',
+    'hard tea', 'hard iced tea', 'hard kombucha', 'hard soda',
+    // brands written as one word
+    'whiteclaw', 'twistedtea', 'jackdaniels', 'johnniewalker', 'greygoose', 'captainmorgan', 'eldorado', 'mountgay',
+    'redstripe', 'budlight',
     'wine', 'wines', 'champagne', 'prosecco', 'sangria', 'vermouth', 'sherry',
     'rum', 'rums', 'high wine', 'puncheon', 'vodka', 'vodkas', 'whisky', 'whiskey', 'whiskies', 'whiskeys', 'bourbon',
     'gin', 'gins', 'brandy', 'brandies', 'cognac', 'tequila', 'mezcal', 'absinthe', 'schnapps', 'soju',
@@ -145,11 +149,18 @@ const EXEMPT_LONGEST_FIRST = [...PROHIBITED_EXEMPT_PHRASES].sort((a, b) => b.len
  * all: "hard ginger beer", "spiked root beer", "alcoholic ginger ale". Such an
  * occurrence is NOT cut, so the drink is judged by its own word. [DS1100 S2]
  */
-const EXEMPTION_BREAKERS: ReadonlySet<string> = new Set(['hard', 'spiked', 'boozy', 'alcoholic', 'alcohol', 'adult', 'adults']);
+const EXEMPTION_BREAKERS: ReadonlySet<string> = new Set(['hard', 'spiked', 'boozy', 'alcoholic', 'alcohol', 'adult', 'adults', 'strong']);
 
-function stripExempt(normalized: string): string {
+/** The exemptions that name a soft drink. A text that states a strength ("5%", "ABV", "proof",
+ *  "vol", "alc") never gets them: a ginger beer with a strength is a drink Swift does not carry.
+ *  [DS1103 S2] Other exemptions ("rubbing alcohol 70%") are unaffected. */
+const SOFT_DRINK_EXEMPTIONS: ReadonlySet<string> = new Set(['ginger beer', 'ginger beers', 'root beer', 'root beers', 'birch beer', 'ginger ale', 'ginger ales']);
+const STATES_A_STRENGTH = /%|\b(abv|proof|alc|vol)\b/i;
+
+function stripExempt(normalized: string, statesStrength: boolean): string {
   let words = normalized.split(' ').filter(Boolean);
   for (const phrase of EXEMPT_LONGEST_FIRST) {
+    if (statesStrength && SOFT_DRINK_EXEMPTIONS.has(phrase.join(' '))) continue;
     const kept: string[] = [];
     for (let i = 0; i < words.length;) {
       const here = phrase.every((w, k) => words[i + k] === w);
@@ -165,7 +176,7 @@ function stripExempt(normalized: string): string {
 /** One text → the first banned class and word it carries, or null. */
 export function classifyText(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
-  const judged = stripExempt(normalize(text));
+  const judged = stripExempt(normalize(text), STATES_A_STRENGTH.test(text));
   if (!judged) return null;
   for (const prohibitedClass of CLASS_ORDER) {
     for (const term of PROHIBITED_TERMS[prohibitedClass]) {

@@ -63,7 +63,8 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
     'Digicel scratch card $500', 'Samsung tablet 10"', 'Coffee capsules (10)', 'Fruit cocktail 400g', 'Pill box organiser',
     'Ginger Beer 330ml', 'Root beer float', 'Canada Dry Ginger Ale', 'Rubbing Alcohol 70% 500ml', 'Alcohol swabs (100)',
     'Hand Sanitiser — alcohol-based hand gel', 'Polo shirt — wine coloured', 'Fuel filter (Toyota)', 'Diesel jeans',
-    'Paraffin wax candles', 'Wine gums', 'Brumley stool', 'Grumpy cat mug',
+    'Paraffin wax candles', 'Wine gums', 'Brumley stool', 'Grumpy cat mug', 'Dry ginger ale 2L', 'Ginger beer (6 x 330ml)',
+    'Rubbing Alcohol 70% (500ml)',
   ])('no hit on an ordinary item: %s', (text) => {
     expect(classifyText(text)).toBeNull();
   });
@@ -75,6 +76,11 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
     ['Hard root beer', 'ALCOHOL'], ['Alcoholic ginger beer', 'ALCOHOL'], ['Spiked seltzer', 'ALCOHOL'],
     ['White Claw seltzer', 'ALCOHOL'], ['Truly seltzer', 'ALCOHOL'], ['Radler 330ml', 'ALCOHOL'], ['Boozy punch', 'ALCOHOL'],
     ['Cough drops (20)', 'MEDICINE'], ['Throat lozenges', 'MEDICINE'], ['Honey lozenge', 'MEDICINE'],
+    // [DS1103 S2] a strength is a drink marker; the hard-drink family; brands written as one word
+    ['5% ginger beer', 'ALCOHOL'], ['Ginger beer 5%', 'ALCOHOL'], ['8% ABV root beer', 'ALCOHOL'], ['Root beer 5% ABV', 'ALCOHOL'],
+    ['Ginger beer 4.5% vol', 'ALCOHOL'], ['Strong ginger beer', 'ALCOHOL'], ['Extra strong ginger ale', 'ALCOHOL'],
+    ['Hard tea', 'ALCOHOL'], ['Hard iced tea', 'ALCOHOL'], ['Hard kombucha', 'ALCOHOL'], ['Hard soda', 'ALCOHOL'],
+    ['Truly Pineapple', 'ALCOHOL'], ['WhiteClaw mango', 'ALCOHOL'], ['JackDaniels', 'ALCOHOL'], ['GreyGoose', 'ALCOHOL'],
   ] as const)('a qualified or missing drink or medicine is caught: %s', (text, cls) => {
     expect(classifyText(text)).toMatchObject({ prohibitedClass: cls });
   });
