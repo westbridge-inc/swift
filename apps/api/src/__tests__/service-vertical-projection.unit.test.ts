@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { customerRoutes } from '../modules/user/customer.routes';
-import { FREE_CANCEL_WINDOW_MIN, LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
 import {
   MINUTE,
   foodDelivery,
@@ -38,7 +37,9 @@ async function customerHost(rows: Row[]) {
   const store = orderStore(rows);
   const prisma = prismaDouble(store, {
     customer: { findUnique: async () => ({ id: 'cust-1', userId: 'user-customer', referralCode: 'REF1' }) },
-    vendor: { findMany: async () => [] },
+    // [owner #46/#50, 13–14 Oct] The business's PUBLISHED number, read only
+    // for a refused cancel's "contact the provider".
+    vendor: { findMany: async () => [], findUnique: async () => ({ status: 'ACTIVE', publicPhone: '+5926001111' }) },
     item: { findMany: async () => [] },
     user: { findUnique: async () => ({ countryCode: 'GY' }) },
     countryConfig: { findUnique: async () => null },
@@ -135,16 +136,21 @@ describe('GET /orders/:id — the order screen’s contract', () => {
       canCancel: true,
       freeCancellationWindow: true,
       cancellationFee: 0,
-      // The slot is already the true instant; the window ends five minutes
-      // before it happens.
-      freeCancellationExpiresAt: new Date(slot.getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE).toISOString(),
+      // [owner #50, 14 Oct] Free until the provider accepts it — no countdown.
+      freeCancellationExpiresAt: null,
     });
   });
 
-  it('control — an accepted booking is committed: still cancellable, not free (the existing marker, unchanged here)', async () => {
+  // [owner #50, 14 Oct] No marker any more: an accepted booking past the
+  // five-minute window is not cancelled in the app — the provider's published
+  // number instead.
+  it('control — an accepted booking past the window is committed: no Cancel, no fee, contact the provider', async () => {
     const h = await customerHost([serviceBooking('bk-1', { status: 'ACCEPTED', acceptedAt: new Date() })]);
     const res = (await h.call('get /orders/:id', asCustomer({ params: { id: 'bk-1' } }))) as Detail;
-    expect(res.data).toMatchObject({ vertical: 'SERVICE', canCancel: true, freeCancellationWindow: false, cancellationFee: LATE_CANCEL_FEE, freeCancellationExpiresAt: null });
+    expect(res.data).toMatchObject({
+      vertical: 'SERVICE', canCancel: false, freeCancellationWindow: false, cancellationFee: 0, freeCancellationExpiresAt: null,
+      cancelUnavailable: { code: 'CANCEL_WINDOW_CLOSED', contactPhone: '+5926001111' },
+    });
   });
 
   // [owner #46, 13 Oct] A food order used to keep the five-minute clock and a

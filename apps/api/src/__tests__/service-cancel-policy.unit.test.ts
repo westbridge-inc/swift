@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import * as policy from '../modules/order/cancel-policy';
 import {
   FREE_CANCEL_WINDOW_MIN,
-  LATE_CANCEL_FEE,
   freeCancellationExpiresAt,
   isFreeCancellation,
   type CancellationSnapshot,
@@ -21,6 +21,11 @@ import {
 //
 // These cases reuse FREE_CANCEL_WINDOW_MIN. No number is invented; the cancel
 // curve for long-horizon bookings remains the recorded founder decision.
+//
+// [owner #50, 14 Oct] That decision is now made: a booking nobody has accepted
+// is free at any time (no clock — nobody to contact); once the provider
+// accepts it, it is free only inside the five-minute window, then refused
+// (contact the provider). Never a fee.
 // ---------------------------------------------------------------------------
 
 const MINUTE = 60_000;
@@ -50,18 +55,21 @@ describe('an appointment slot is the moment the work happens', () => {
     expect(isFreeCancellation(booking(), NOW)).toBe(true);
   });
 
-  it('RED reproduction — the promised window ends FREE_CANCEL_WINDOW_MIN before the slot, not five minutes after placing', () => {
-    const expires = freeCancellationExpiresAt(booking(), NOW);
-    // The true instant is 14:00Z (10:00 in Guyana), so the window ends
-    // at 13:55Z.
-    expect(expires?.getTime()).toBe(new Date('2026-09-24T14:00:00.000Z').getTime() - FREE_CANCEL_WINDOW_MIN * MINUTE);
+  // [owner #50, 14 Oct] Free until the provider accepts: no countdown at all —
+  // never one that ends five minutes after placing while the server says free.
+  it('RED reproduction — no countdown that ends five minutes after placing: free until the provider accepts', () => {
+    expect(freeCancellationExpiresAt(booking(), NOW)).toBeNull();
   });
 
-  it('the slot inside the window is no longer free (the provider is about to start)', () => {
+  // [owner #50, 14 Oct] The slot no longer closes an UNACCEPTED booking (the
+  // provider has not committed — there is no one to contact); an accepted one
+  // past the five-minute window is refused.
+  it('a slot about to start: free while the provider has not accepted, refused once it has', () => {
     // NOW (14:00Z) is 10:00 local; a slot three minutes away is 14:03Z.
     const soon = booking({ appointmentSlot: new Date('2026-09-23T14:03:00.000Z') });
-    expect(isFreeCancellation(soon, NOW)).toBe(false);
+    expect(isFreeCancellation(soon, NOW)).toBe(true);
     expect(freeCancellationExpiresAt(soon, NOW)).toBeNull();
+    expect(isFreeCancellation({ ...soon, status: 'ACCEPTED' }, NOW)).toBe(false);
   });
 
   it('an accepted booking is committed — the provider reserved the slot — so it is not free', () => {
@@ -69,10 +77,14 @@ describe('an appointment slot is the moment the work happens', () => {
     expect(freeCancellationExpiresAt(booking({ status: 'ACCEPTED' }), NOW)).toBeNull();
   });
 
+  // [owner #50, 14 Oct] The window is the LATER of the hold and five minutes
+  // after placing (production holds are never shorter than the window).
   it('the checkout hold still wins while it runs, and the window it promises is the hold', () => {
-    const held = booking({ placedAt: new Date(NOW.getTime() - MINUTE), holdExpiresAt: new Date(NOW.getTime() + 2 * MINUTE) });
+    const held = booking({ placedAt: new Date(NOW.getTime() - MINUTE), holdExpiresAt: new Date(NOW.getTime() + 7 * MINUTE) });
     expect(isFreeCancellation(held, NOW)).toBe(true);
     expect(freeCancellationExpiresAt(held, NOW)?.getTime()).toBe(held.holdExpiresAt!.getTime());
+    const shortHold = booking({ placedAt: new Date(NOW.getTime() - MINUTE), holdExpiresAt: new Date(NOW.getTime() + 2 * MINUTE) });
+    expect(freeCancellationExpiresAt(shortHold, NOW)?.getTime()).toBe(shortHold.placedAt.getTime() + FREE_CANCEL_WINDOW_MIN * MINUTE);
   });
 
   it('a booking whose slot takes precedence over a scheduledFor that would already have closed', () => {
@@ -84,14 +96,14 @@ describe('an appointment slot is the moment the work happens', () => {
 describe('everything else keeps its own rule (controls)', () => {
   // [owner #46, 13 Oct] A marketplace STORE order no longer runs the clock: it
   // is free while it waits for the store (no countdown), and refused once the
-  // store accepts (store-order-cancel-after-accept.test.ts). The marker
-  // constant is unchanged for the kinds that keep it.
+  // store accepts (store-order-cancel-after-accept.test.ts). [owner #50,
+  // 14 Oct] No kind keeps the marker: the fee constant is gone.
   const food = { appointmentSlot: null, fulfillment: 'DELIVERY' } as const;
 
-  it('a marketplace food order ten minutes after placing, still waiting for the store, is free; the marker is unchanged', () => {
+  it('a marketplace food order ten minutes after placing, still waiting for the store, is free; there is no fee at all', () => {
     expect(isFreeCancellation(booking(food), NOW)).toBe(true);
     expect(freeCancellationExpiresAt(booking(food), NOW)).toBeNull();
-    expect(LATE_CANCEL_FEE).toBe(500);
+    expect('LATE_CANCEL_FEE' in policy).toBe(false);
   });
 
   it('inside the first five minutes a food order is still free', () => {

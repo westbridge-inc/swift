@@ -296,9 +296,9 @@ const referralRedeemSchema = z.object({
 // ---------------------------------------------------------------------------
 
 const MAX_DELIVERY_RADIUS_KM = 25;
-// Cancel window/fee now import from the ONE policy module [UG-CRAFT-01] —
+// The cancel rule is imported from the ONE policy module [UG-CRAFT-01] —
 // the "must match order.service" comment era is over: the preview and the
-// charge read the same constants by construction.
+// cancel read the same verdict by construction.
 const MAX_ADDRESSES = 10;
 // SWIFT-163: the Home discovery scan is bounded so an ever-growing catalogue
 // can't load every ACTIVE vendor into memory per request. The feed only ever

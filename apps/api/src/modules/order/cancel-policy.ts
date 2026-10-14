@@ -214,12 +214,14 @@ function notAcceptedYet(order: CancellationSnapshot): boolean {
  * [owner #50] When the free window of a ride, a parcel or a booking closes:
  * five minutes after placing — or, under LIFECYCLE_V2, the end of the order's
  * hold when that is later (a held order is hidden and undispatched, so its
- * whole hold is free). Nothing is "committed" inside it in a way that matters:
- * there is no fee to protect any more, only the moment after which the
- * customer contacts the driver, rider or provider instead.
+ * whole hold is free). The hold extends the window only while nobody holds
+ * the job: the hold exemption is for orders nobody committed to (no writer
+ * assigns a held order today; the policy does not trust that invariant).
+ * There is no fee to protect inside the window, only the moment after which
+ * the customer contacts the driver, rider or provider instead.
  */
 function freeWindowEnd(order: CancellationSnapshot): Date {
-  return latest([plusMinutes(order.placedAt, FREE_CANCEL_WINDOW_MIN), order.holdExpiresAt]) as Date;
+  return latest([plusMinutes(order.placedAt, FREE_CANCEL_WINDOW_MIN), unassigned(order) ? order.holdExpiresAt : null]) as Date;
 }
 
 /**

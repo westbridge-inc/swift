@@ -948,8 +948,9 @@ describe('Delivery-window auto-complete uses the canonical transaction', () => {
 // through the one cancel-policy predicate, the charge path under the order lock.
 // ---------------------------------------------------------------------------
 describe('free cancellation when the mover search found nobody', () => {
-  const NO_MOVER_PREVIEW = 'No mover was found. You can cancel without a fee.';
-  const NO_MOVER_CANCELLED = 'Order cancelled — no mover was found, so there is no fee.';
+  // [owner #46/#50, 13–14 Oct] No fee exists any more, so the words no longer name one.
+  const NO_MOVER_PREVIEW = 'No mover was found. You can cancel for free.';
+  const NO_MOVER_CANCELLED = 'Order cancelled — no mover was found.';
 
   /** A food order the store has prepared (well past the free window), out for
    *  a platform rider in delivery generation `generation`, whose search came
@@ -1007,14 +1008,17 @@ describe('free cancellation when the mover search found nobody', () => {
     expect({ status: row.status, lateCancelFeeDue: row.lateCancelFeeDue }).toEqual({ status: 'READY_FOR_PICKUP', lateCancelFeeDue: 0 });
   }
 
-  async function expectCharged(id: string, who = customer) {
+  /** [owner #50, 14 Oct] A ride nobody has accepted is free at any age — but
+   *  not for the no-mover reason: the journal decides that, never mere
+   *  unassignment, so neither the preview nor the result claims it. */
+  async function expectFreeButNotNoMover(id: string, who = customer) {
     const shown = await preview(id, who);
-    expect(shown.cancellationFee).toBe(500);
-    expect(shown.freeCancellationWindow).toBe(false);
+    expect(shown.cancellationFee).toBe(0);
+    expect(shown.freeCancellationWindow).toBe(true);
     expect(shown.cancellationMessage ?? null).toBeNull();
     const done = await cancel(id, who);
-    expect(done.cancellationFee).toBe(500);
-    expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).lateCancelFeeDue).toBe(500);
+    expect(done.cancellationFee).toBe(0);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).lateCancelFeeDue).toBe(0);
     expect(done.message).not.toContain('no mover');
   }
 
@@ -1078,7 +1082,8 @@ describe('free cancellation when the mover search found nobody', () => {
     expect(done.message).toBe(`${NO_MOVER_CANCELLED} If you already sent the MMG payment, the store refunds you directly.`);
   });
 
-  it('a taxi whose driver search came back empty cancels free; one still searching keeps the fee', async () => {
+  // [owner #50, 14 Oct] "keeps the fee" → free without the no-mover words (no fee exists).
+  it('a taxi whose driver search came back empty cancels free; one still searching is free only because nobody accepted it', async () => {
     // One open ride per passenger: each case rides with its own passenger.
     const taxi = async (status: 'EXHAUSTED' | 'SEARCHING') => {
       const rider = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -1099,9 +1104,9 @@ describe('free cancellation when the mover search found nobody', () => {
     const empty = await taxi('EXHAUSTED');
     const done = await expectFree(empty.order.id, empty.rider);
     // A ride is a ride in the customer's words, not an "order".
-    expect(done.message).toBe('Ride cancelled — no mover was found, so there is no fee.');
+    expect(done.message).toBe('Ride cancelled — no mover was found.');
     const searching = await taxi('SEARCHING');
-    await expectCharged(searching.order.id, searching.rider);
+    await expectFreeButNotNoMover(searching.order.id, searching.rider);
   });
 });
 
