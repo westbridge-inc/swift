@@ -569,6 +569,21 @@ export const resolveModerationReport = (
 // upholding a rating report REMOVES the review, while resolving a content
 // report only records the decision.
 export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/moderation');
+
+// [GUARDRAILS §8] THE CATALOGUE CHECK. A banned word in a partner's own text
+// (name, description, menu section, options) saves the item but holds it hidden
+// until a person looks. Approve shows it for the exact words seen — the
+// fingerprint the queue handed out goes back with the approval, and a partner
+// edit in between refuses it. Remove bans the item for good, with a reason the
+// partner reads. Neither can lift a certain ban (a banned category, or an
+// earlier removal).
+export const PROHIBITED_CLASSES = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'] as const;
+export type ProhibitedClass = (typeof PROHIBITED_CLASSES)[number];
+export const fetchCatalogueReview = () => apiFetch('/api/v1/admin/catalogue-review');
+export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/${itemId}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
+export const removeCatalogueItem = (itemId: string, prohibitedClass: ProhibitedClass, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/${itemId}/remove`, { method: 'POST', body: JSON.stringify({ prohibitedClass }), reason });
 export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss', reason: string) =>
   apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }), reason });
 // [ADM-006] `category` says which rule was broken; `reason` is what the
