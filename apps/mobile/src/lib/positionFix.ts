@@ -90,9 +90,15 @@ export function isUsableLastKnownFix(fix: PositionFix | null | undefined, now: n
   return Math.abs(now - timestamp) <= LAST_KNOWN_MAX_AGE_MS;
 }
 
+/**
+ * `cached: false` is for a caller whose fix is published as "now" without its
+ * time (the mover's lease heartbeat): it must never renew a lease from a cached
+ * fix, however fresh, so it gets Balanced or GPS only.
+ */
 export async function currentPositionWithFallback(
   source: PositionSource,
   now: () => number = Date.now,
+  { cached: useCached = true }: { cached?: boolean } = {},
 ): Promise<PositionFix & { source: PositionFixSource }> {
   try {
     const fix = await bounded('balanced', BALANCED_FIX_TIMEOUT_MS, source.balanced);
@@ -101,11 +107,13 @@ export async function currentPositionWithFallback(
     // No network location (or none in time): the next step decides.
   }
 
-  try {
-    const cached = await bounded('last-known', LAST_KNOWN_TIMEOUT_MS, source.lastKnown);
-    if (isUsableLastKnownFix(cached, now())) return { ...cached, source: 'last-known' };
-  } catch {
-    // No cached fix is not an error; satellites are next.
+  if (useCached) {
+    try {
+      const cached = await bounded('last-known', LAST_KNOWN_TIMEOUT_MS, source.lastKnown);
+      if (isUsableLastKnownFix(cached, now())) return { ...cached, source: 'last-known' };
+    } catch {
+      // No cached fix is not an error; satellites are next.
+    }
   }
 
   const fix = await bounded('gps', GPS_FIX_TIMEOUT_MS, source.gps);

@@ -476,13 +476,15 @@ export type DriverActionInput =
 
 /** The evidence fix for a handover / fare outcome. The server REQUIRES the
  *  mover's GPS (it is what a guarantee claim stands on). Last-known is
- *  instant; fall back to a fresh fix. The auth principal is re-checked around
- *  the wait so a session that changed underneath cannot sign the outcome. */
+ *  instant; fall back to a fresh fix — bounded, with the GPS fallback
+ *  [GO-LOC-1], so a phone with no network location fails loudly instead of
+ *  hanging the handover. The auth principal is re-checked around the wait so
+ *  a session that changed underneath cannot sign the outcome. */
 export async function evidenceFix(owner: AuthSessionSnapshot) {
-  let pos = await Location.getLastKnownPositionAsync().catch(() => null);
+  let pos: { coords: { latitude: number; longitude: number } } | null = await Location.getLastKnownPositionAsync().catch(() => null);
   let current = requireAuthSessionForPrincipal(owner);
   if (!pos) {
-    pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+    pos = await currentDevicePosition();
     current = requireAuthSessionForPrincipal(owner);
   }
   return { gps: { lat: pos.coords.latitude, lng: pos.coords.longitude }, current };
@@ -785,10 +787,11 @@ export function useBroadcastLocation(kind: MoverKind | null, enabled: boolean) {
           }),
         ),
         refreshForegroundSample: async () => {
-          // [GO-LOC-1] The same bounded Balanced -> fresh cached fix -> GPS
-          // policy as GO: a parked mover with no network location still renews
-          // its lease from satellites instead of silently leaving supply.
-          const position = await currentDevicePosition();
+          // [GO-LOC-1] The same bounded policy as GO, minus the cached fix:
+          // this sample is published as "now", so every renewal is a fresh
+          // Balanced or GPS fix. A parked mover with no network location still
+          // renews its lease from satellites instead of silently leaving supply.
+          const position = await currentDevicePosition({ cached: false });
           return {
             latitude: position.coords.latitude,
             longitude: position.coords.longitude,

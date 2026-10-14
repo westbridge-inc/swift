@@ -46,6 +46,13 @@ describe('the expo source', () => {
     expect(fx.getLastKnownPositionAsync).toHaveBeenCalledWith({ maxAge: 60_000, requiredAccuracy: 100 });
   });
 
+  it('cached: false (the lease heartbeat) never reads the cached fix, even a fresh one', async () => {
+    fx.getCurrentPositionAsync.mockImplementation(({ accuracy }: { accuracy: number }) => (accuracy === 3 ? Promise.reject(new Error('Location provider is unavailable')) : Promise.resolve(GPS)));
+    fx.getLastKnownPositionAsync.mockResolvedValue({ coords: { latitude: 6.79, longitude: -58.16, accuracy: 5 }, timestamp: Date.now() });
+    await expect(currentDevicePosition({ cached: false })).resolves.toMatchObject({ source: 'gps' });
+    expect(fx.getLastKnownPositionAsync).not.toHaveBeenCalled();
+  });
+
   it('each way is the request it names', async () => {
     fx.getCurrentPositionAsync.mockResolvedValue(GPS);
     fx.getLastKnownPositionAsync.mockResolvedValue(null);
@@ -78,9 +85,17 @@ describe('every caller that needs a current fix goes through the fallback', () =
     expect(RESOLVER_HOOK).not.toContain('Location.getCurrentPositionAsync(');
   });
 
-  it('the mover’s stationary heartbeat renews its lease through the fallback, not a bare Balanced request', () => {
+  it('the mover’s stationary heartbeat renews its lease through the fallback, never from a cached fix', () => {
+    // The heartbeat publishes no fix time: the server takes it as "now", so a
+    // cached fix would renew the lease with an old position. Balanced or GPS only.
     const heartbeat = body(MOVER_HOOKS, 'refreshForegroundSample:', 'commitSharedSample:');
-    expect(heartbeat).toContain('await currentDevicePosition()');
+    expect(heartbeat).toContain('await currentDevicePosition({ cached: false })');
     expect(heartbeat).not.toContain('Location.getCurrentPositionAsync(');
+  });
+
+  it('the handover / fare-outcome evidence fix falls back through the bounded policy, never a bare Balanced wait', () => {
+    const fix = body(MOVER_HOOKS, 'async function evidenceFix', 'export function useDriverAction');
+    expect(fix).toContain('await currentDevicePosition()');
+    expect(fix).not.toContain('Location.getCurrentPositionAsync(');
   });
 });

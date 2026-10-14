@@ -122,6 +122,13 @@ describe('the cached fix: only fresh and accurate, then it saves the GPS wait', 
     expect(isUsableLastKnownFix(cached(0, -1), NOW)).toBe(false);
   });
 
+  it('a caller that must not use a cached fix (the lease heartbeat) never gets one, however fresh', async () => {
+    const fix = cached(1_000, 5);
+    const s = source({ balanced: vi.fn(() => Promise.reject(new Error('off'))), lastKnown: vi.fn(() => Promise.resolve(fix)) });
+    await expect(currentPositionWithFallback(s, () => NOW, { cached: false })).resolves.toMatchObject({ ...GPS, source: 'gps' });
+    expect(s.lastKnown).not.toHaveBeenCalled();
+  });
+
   it('a cached lookup that hangs is bounded too', async () => {
     const s = source({ balanced: vi.fn(() => Promise.reject(new Error('off'))), lastKnown: vi.fn(() => never<PositionFix | null>()) });
     const result = currentPositionWithFallback(s, () => NOW);
