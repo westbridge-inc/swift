@@ -38,6 +38,7 @@ import {
   notAllowedMessage,
   orderRefusalMessage,
   PROHIBITED_CLASS_LABELS,
+  storeCategoryReason,
   WAITING_FOR_CHECK,
   type CatalogueCheck,
   type ItemWords,
@@ -55,6 +56,47 @@ export function assertCategoryAllowed(category: { slug: string; name: string }, 
     ? notAllowedMessage(hit.prohibitedClass)
     : `Swift doesn't allow this category: ${PROHIBITED_CLASS_LABELS[hit.prohibitedClass]}.`;
   throw new AppError(409, 'PROHIBITED_ITEM', message, { prohibitedClass: hit.prohibitedClass, categorySlug: category.slug });
+}
+
+/** The memberships that count as a store being FILED under a category: chosen by the store or by Swift — never
+ *  the machine's DERIVED rows, which only echo its items' tags (those items are judged themselves). [#54] */
+const CHOSEN_STORE_SOURCES = ['VENDOR', 'ADMIN'] as const;
+
+/** Platform categories each store CHOSE (the join table has no Prisma relation). */
+async function storeCategoriesByVendor(db: Db, vendorIds: readonly string[]): Promise<Map<string, Array<{ slug: string; name: string }>>> {
+  const out = new Map<string, Array<{ slug: string; name: string }>>();
+  if (vendorIds.length === 0) return out;
+  const rows = await db.vendorDiscoveryCategory.findMany({
+    where: { vendorId: { in: [...vendorIds] }, source: { in: [...CHOSEN_STORE_SOURCES] } },
+    select: { vendorId: true, categoryId: true },
+  });
+  if (rows.length === 0) return out;
+  const categories = await db.discoveryCategory.findMany({ where: { id: { in: [...new Set(rows.map((r) => r.categoryId))] } }, select: { id: true, slug: true, name: true } });
+  const byId = new Map(categories.map((c) => [c.id, c]));
+  for (const row of rows) {
+    const c = byId.get(row.categoryId);
+    if (c) out.set(row.vendorId, [...(out.get(row.vendorId) ?? []), { slug: c.slug, name: c.name }]);
+  }
+  return out;
+}
+
+/**
+ * The banned category a store is filed under, or null. A store filed under one
+ * (Pharmacy, a liquor category) is hidden from every list, search, storefront
+ * and Home, and every item it carries counts as banned; nothing is deleted. [#54]
+ */
+export async function prohibitedStoreCategory(db: Db, vendorId: string): Promise<{ slug: string; name: string; prohibitedClass: ProhibitedClass } | null> {
+  for (const category of (await storeCategoriesByVendor(db, [vendorId])).get(vendorId) ?? []) {
+    const hit = classifyCategory(category);
+    if (hit) return { ...category, prohibitedClass: hit.prohibitedClass };
+  }
+  return null;
+}
+
+/** A partner writing to a store filed under a banned category: refused, saying why and who changes it. [#54] */
+export async function assertStoreAllowed(db: Db, vendorId: string): Promise<void> {
+  const banned = await prohibitedStoreCategory(db, vendorId);
+  if (banned) throw new AppError(409, 'PROHIBITED_ITEM', storeCategoryReason(banned.name), { prohibitedClass: banned.prohibitedClass, categorySlug: banned.slug });
 }
 
 /** Platform categories each item is filed under (the join table has no Prisma relation). */
@@ -101,7 +143,7 @@ export async function catalogueChecksFor(db: Db, itemIds: readonly string[]): Pr
     db.item.findMany({
       where: { id: { in: ids } },
       select: {
-        id: true, name: true, description: true,
+        id: true, name: true, description: true, vendorId: true,
         prohibitedAt: true, prohibitedClass: true, prohibitedReason: true, reviewApprovedHash: true,
         category: { select: { name: true } },
         optionGroups: { select: { name: true, options: { select: { name: true } } } },
@@ -109,6 +151,7 @@ export async function catalogueChecksFor(db: Db, itemIds: readonly string[]): Pr
     }),
     categoriesByItem(db, ids),
   ]);
+  const storeCategories = await storeCategoriesByVendor(db, [...new Set(items.map((i) => i.vendorId))]);
   for (const item of items) {
     out.set(item.id, checkItem({
       name: item.name,
@@ -116,6 +159,7 @@ export async function catalogueChecksFor(db: Db, itemIds: readonly string[]): Pr
       sectionName: item.category.name,
       optionNames: item.optionGroups.flatMap((g) => [g.name, ...g.options.map((o) => o.name)]),
       categories: categories.get(item.id) ?? [],
+      storeCategories: storeCategories.get(item.vendorId) ?? [],
       prohibitedAt: item.prohibitedAt,
       prohibitedClass: item.prohibitedClass,
       prohibitedReason: item.prohibitedReason,
@@ -131,10 +175,21 @@ export async function hiddenAmong(db: Db, itemIds: readonly string[]): Promise<S
   return new Set([...checks].filter(([, check]) => isHidden(check)).map(([id]) => id));
 }
 
-/** The tenant's platform categories that are banned (judged by slug and name). */
-export async function prohibitedCategoryIds(db: Db, tenantId: string): Promise<string[]> {
-  const categories = await db.discoveryCategory.findMany({ where: { tenantId }, select: { id: true, slug: true, name: true } });
+/** The tenant's platform categories that are banned (judged by slug and name). `null`: every tenant (a guest). */
+export async function prohibitedCategoryIds(db: Db, tenantId: string | null): Promise<string[]> {
+  const categories = await db.discoveryCategory.findMany({ where: tenantId ? { tenantId } : {}, select: { id: true, slug: true, name: true } });
   return categories.filter((c) => classifyCategory(c) !== null).map((c) => c.id);
+}
+
+/** The stores filed under a banned category (chosen, not derived), read now. [#54] */
+async function readProhibitedStoreIds(db: Db, tenantId: string | null): Promise<string[]> {
+  const banned = await prohibitedCategoryIds(db, tenantId);
+  if (banned.length === 0) return [];
+  const rows = await db.vendorDiscoveryCategory.findMany({
+    where: { categoryId: { in: banned }, source: { in: [...CHOSEN_STORE_SOURCES] }, ...(tenantId ? { tenantId } : {}) },
+    select: { vendorId: true }, distinct: ['vendorId'],
+  });
+  return rows.map((r) => r.vendorId);
 }
 
 /**
@@ -150,38 +205,78 @@ export async function flaggedItemsInTenant(db: Db, tenantId: string): Promise<Ma
   const tagged = banned.length === 0 ? [] : await db.itemDiscoveryCategory.findMany({
     where: { tenantId, categoryId: { in: banned } }, select: { itemId: true }, distinct: ['itemId'],
   });
-  const checks = await catalogueChecksFor(db, [...candidates, ...tagged.map((t) => t.itemId)]);
+  // [#54] Every item of a store filed under a banned category, whatever its words.
+  const stores = await readProhibitedStoreIds(db, tenantId);
+  const stocked = stores.length === 0 ? [] : await db.item.findMany({ where: { vendorId: { in: stores } }, select: { id: true } });
+  const checks = await catalogueChecksFor(db, [...candidates, ...tagged.map((t) => t.itemId), ...stocked.map((i) => i.id)]);
   return new Map([...checks].filter(([, check]) => check.state !== 'CLEAR'));
 }
 
 /** How long a tenant's exclusion list is reused before it is read again. */
 export const HIDDEN_IDS_CACHE_MS = 60_000;
-const hiddenIdsCache = new Map<string, { at: number; ids: Promise<string[]> }>();
+
+/**
+ * Stale-while-revalidate: a list younger than HIDDEN_IDS_CACHE_MS is served as
+ * is; an older one is STILL served, at once, while one read refreshes it in the
+ * background — so no customer request ever waits for the scan, except the very
+ * first one a process serves for a tenant. A failed refresh keeps the old list;
+ * a failed first read is not kept. [DS1100 S3; Opus S3-11]
+ */
+type Swr = { at: number; value: Promise<string[]>; refreshing: Promise<unknown> | null };
+function staleWhileRevalidate(cache: Map<string, Swr>, key: string, load: () => Promise<string[]>, now: number): Promise<string[]> {
+  const entry = cache.get(key);
+  if (!entry) {
+    const value = load();
+    const fresh: Swr = { at: now, value, refreshing: null };
+    value.catch(() => { if (cache.get(key) === fresh) cache.delete(key); });
+    cache.set(key, fresh);
+    return value;
+  }
+  if (now - entry.at >= HIDDEN_IDS_CACHE_MS && !entry.refreshing) {
+    entry.refreshing = load()
+      .then((ids) => { cache.set(key, { at: Date.now(), value: Promise.resolve(ids), refreshing: null }); })
+      .catch(() => { entry.refreshing = null; });
+  }
+  return entry.value;
+}
+
+const hiddenIdsCache = new Map<string, Swr>();
+const prohibitedStoresCache = new Map<string, Swr>();
 
 /**
  * The ids a browse surface excludes IN its query, before a page or fixed
  * window is capped — the rule `hiddenOnlyItemIds` follows — so a hidden row
  * does not consume the page budget. Reading every item's words is a scan of
- * the whole catalogue, so a tenant's list is reused for HIDDEN_IDS_CACHE_MS
- * (one read in flight at a time; a failed read is not kept). [DS1100 S3]
+ * the whole catalogue, so a tenant's list is reused (stale-while-revalidate,
+ * above). [DS1100 S3]
  *
  * This list only keeps pages full. It is never what stops a hidden item being
  * shown: every browse surface also runs `withoutHidden` on the rows it returns,
  * and cart, checkout and storefronts judge each item exactly.
  */
 export function hiddenItemIds(db: Db, tenantId: string, now = Date.now()): Promise<string[]> {
-  const cached = hiddenIdsCache.get(tenantId);
-  if (cached && now - cached.at < HIDDEN_IDS_CACHE_MS) return cached.ids;
-  const ids = flaggedItemsInTenant(db, tenantId)
-    .then((flagged) => [...flagged].filter(([, check]) => isHidden(check)).map(([id]) => id));
-  ids.catch(() => { if (hiddenIdsCache.get(tenantId)?.ids === ids) hiddenIdsCache.delete(tenantId); });
-  hiddenIdsCache.set(tenantId, { at: now, ids });
-  return ids;
+  return staleWhileRevalidate(hiddenIdsCache, tenantId, () => flaggedItemsInTenant(db, tenantId)
+    .then((flagged) => [...flagged].filter(([, check]) => isHidden(check)).map(([id]) => id)), now);
 }
 
-/** Test seam: forget every tenant's cached exclusion list. */
+/**
+ * The stores no customer list shows: filed under a banned category (#54). A
+ * tenant's list (or, for a guest, every tenant's) is reused the same way. A
+ * storefront opened directly is judged exactly (`prohibitedStoreCategory`).
+ */
+export function prohibitedStoreIds(db: Db, tenantId: string | null, now = Date.now()): Promise<string[]> {
+  return staleWhileRevalidate(prohibitedStoresCache, tenantId ?? '*', () => readProhibitedStoreIds(db, tenantId), now);
+}
+
+/** Test seam: wait for any background refresh, so a test reads what it served next. */
+export async function settleProhibitedCachesForTests(): Promise<void> {
+  await Promise.all([...hiddenIdsCache.values(), ...prohibitedStoresCache.values()].map((e) => e.refreshing));
+}
+
+/** Test seam: forget every tenant's cached exclusion lists. */
 export function resetHiddenItemIdsCacheForTests(): void {
   hiddenIdsCache.clear();
+  prohibitedStoresCache.clear();
 }
 
 /** The exact last pass on rows a surface is about to return: hidden ones are dropped, whatever the cache said. */

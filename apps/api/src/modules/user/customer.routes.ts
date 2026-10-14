@@ -36,7 +36,7 @@ import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
+import { notProhibitedStore, visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
@@ -65,7 +65,7 @@ import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
-import { assertOrderableNow, hiddenAmong } from '../compliance/prohibited-gate';
+import { assertOrderableNow, hiddenAmong, prohibitedStoreCategory, prohibitedStoreIds } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
@@ -1140,6 +1140,8 @@ export async function customerRoutes(app: FastifyInstance) {
       if (cached) return cached;
 
       if (userId) await resolveCustomer(app, userId);
+      // [GUARDRAILS §8 · #54] A store filed under a banned category is on no Home rail.
+      const prohibitedStores = await prohibitedStoreIds(app.prisma, getTenantId() ?? null);
       const [allVendors, favoriteIds, popularItemRows] = await Promise.all([
         // All active, document-verified vendors with at least one orderable item
         // (unverified stores AND empty stores stay out of discovery — a vendor
@@ -1150,7 +1152,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // no tenant context, which the Prisma extension defines as an UNSCOPED
           // query — so without the relational predicate a deactivated operator's
           // whole catalog kept serving here after the platform shut them off.
-          where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
+          where: { ...visibleVendorForCaller(), ...notProhibitedStore(prohibitedStores), items: { some: { isAvailable: true } } },
           include: {
             // imageUrl was NOT selected, so Home had nothing to draw a category
             // chip with and every chip fell back to the same stock photograph —
@@ -1209,7 +1211,8 @@ export async function customerRoutes(app: FastifyInstance) {
         const card = vendorCardView(v);
         return {
           ...enrichVendor(card, lat, lng, homeDeliveryRates),
-          categories: (v.categories ?? []).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
+          // [GUARDRAILS §8 · Opus S3-8] A section named for banned goods ("Beers & Wines") is not on a card either.
+          categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
           isFavorite: favoriteIds.has(v.id),
           ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
         };
@@ -1375,7 +1378,11 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
-    const where: Record<string, unknown> = { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } };
+    // [GUARDRAILS §8 · #54] A store filed under a banned category is never browsed.
+    const where: Record<string, unknown> = {
+      ...visibleVendorForCaller(), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, getTenantId() ?? null)),
+      items: { some: { isAvailable: true } },
+    };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug
@@ -1575,6 +1582,8 @@ export async function customerRoutes(app: FastifyInstance) {
     });
 
     if (!vendor) throw new NotFoundError('Vendor', id);
+    // [GUARDRAILS §8 · #54] A store filed under a banned category has no storefront, even by a direct link.
+    if (await prohibitedStoreCategory(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     // Live promotions the store is running (§4.2) — shown on the storefront.
     const activePromos = await app.prisma.promoCode.findMany({
@@ -1736,7 +1745,8 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { userId },
       include: {
         favoriteVendors: {
-          where: { status: 'ACTIVE', ...vendorTenantForCaller() },
+          // [GUARDRAILS §8 · #54] Nor among a customer's favourites.
+          where: { status: 'ACTIVE', ...vendorTenantForCaller(), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, getTenantId() ?? null)) },
           orderBy: { name: 'asc' },
         },
       },

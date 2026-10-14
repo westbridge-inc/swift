@@ -49,7 +49,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
-import { assertNotBanned, assertNotBannedGoods, catalogueChecksFor, partnerView } from '../compliance/prohibited-gate';
+import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerView } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
@@ -2512,6 +2512,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!category || category.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
     // [GUARDRAILS §8 · #55] A name or an option that IS banned goods is refused, never held.
     assertNotBannedGoods([body.name, ...(body.optionGroups ?? []).flatMap((g) => [g.name, ...g.options.map((o) => o.name)])]);
+    // [#54] A store filed under a banned category lists nothing new: every item it carries is banned.
+    await assertStoreAllowed(app.prisma, vendorId);
 
     // Auto-assign sortOrder
     let sortOrder = body.sortOrder;
@@ -2806,6 +2808,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     await requireListingAllowed(app, verification, vendorId);
 
     const { csv } = importCsvSchema.parse(request.body);
+    // [GUARDRAILS §8 · #54] Nor imports anything.
+    await assertStoreAllowed(app.prisma, vendorId);
     const rows = parseCsvWithHeader(csv);
 
     if (rows.length === 0) {

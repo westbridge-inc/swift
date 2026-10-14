@@ -6,9 +6,9 @@ import { AppError, ForbiddenError } from '../../utils/errors';
 import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';
 import { bindBrowseTenant, requireRequestTenant } from './search-scope';
 import { customerPoint } from '../discovery/customer-point';
-import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
+import { catalogueVendorInTenant, notProhibitedStore } from '../vendor/vendor-visibility';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
-import { hiddenItemIds, withoutHidden } from '../compliance/prohibited-gate';
+import { hiddenItemIds, prohibitedStoreIds, withoutHidden } from '../compliance/prohibited-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 
@@ -149,7 +149,8 @@ export async function searchRoutes(app: FastifyInstance) {
         const prohibited = await hiddenItemIds(app.prisma, tenantId);
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
-            where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), id: { in: vendors.map((v) => v.id) }, isCurrentlyOpen: true },
+            // [GUARDRAILS §8 · #54] Nor to publish a store filed under a banned category.
+            where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), id: { in: vendors.map((v) => v.id) }, isCurrentlyOpen: true },
             select: { id: true, latitude: true, longitude: true }, take: parsedLimit,
           }),
           app.prisma.item.findMany({
@@ -200,6 +201,7 @@ export async function searchRoutes(app: FastifyInstance) {
         // whenever Meilisearch was down.
         where: {
           ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
+          ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), // [GUARDRAILS §8 · #54]
           ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }),
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
@@ -314,7 +316,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
-        where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
+        where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
         select: { name: true, vendorType: true, latitude: true, longitude: true },
         take: 5,
       }),
@@ -430,6 +432,7 @@ export async function searchRoutes(app: FastifyInstance) {
     const vendors = await app.prisma.vendor.findMany({
       where: {
         ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
+        ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), // [GUARDRAILS §8 · #54]
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.
         items: { some: { isAvailable: true } },

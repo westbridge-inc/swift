@@ -35,7 +35,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { OrderService } from '../modules/order/order.service';
 import { PickingService } from '../modules/order/picking.service';
 import { mergeGuestCart } from '../modules/user/cart-merge.service';
-import { movesTowardCustomer, resetHiddenItemIdsCacheForTests, wordsFor } from '../modules/compliance/prohibited-gate';
+import { catalogueChecksFor, HIDDEN_IDS_CACHE_MS, hiddenItemIds, movesTowardCustomer, resetHiddenItemIdsCacheForTests, settleProhibitedCachesForTests, wordsFor } from '../modules/compliance/prohibited-gate';
 import { judgedWordsHash } from '../modules/compliance/prohibited-items';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
@@ -43,14 +43,14 @@ import { lockUserRoleAuthority } from '../modules/mover-authority';
 
 // The index engine is the only thing replaced: what it returns is decided per
 // test, so the signed-in (index) path and the database fallback are both run.
-const engine = vi.hoisted(() => ({ itemHits: [] as Array<Record<string, unknown>>, fail: false }));
+const engine = vi.hoisted(() => ({ itemHits: [] as Array<Record<string, unknown>>, vendorHits: [] as Array<Record<string, unknown>>, fail: false }));
 vi.mock('../modules/search/search.service', () => ({ SearchService: class {
   async initialize() {}
   async syncAllVendors() { return 0; }
   async syncAllItems() { return 0; }
   async syncVendorItems() { return 0; }
   async removeItemDoc() {}
-  async searchVendors() { if (engine.fail) throw new Error('index down'); return { hits: [], estimatedTotalHits: 0, processingTimeMs: 1 }; }
+  async searchVendors() { if (engine.fail) throw new Error('index down'); return { hits: engine.vendorHits, estimatedTotalHits: engine.vendorHits.length, processingTimeMs: 1 }; }
   async searchItems() { if (engine.fail) throw new Error('index down'); return { hits: engine.itemHits, estimatedTotalHits: engine.itemHits.length, processingTimeMs: 1 }; }
 } }));
 
@@ -438,7 +438,9 @@ describe('[§8] nobody sees a hidden item', () => {
     await system(() => app.prisma.vendorDiscoveryCategory.deleteMany({ where: { vendorId: vendor.id } }));
     await system(() => app.prisma.vendorDiscoveryCategory.createMany({ data: [
       { tenantId: TENANT, vendorId: vendor.id, categoryId: snacksCategory.id, role: 'PRIMARY', source: 'ADMIN' },
-      { tenantId: TENANT, vendorId: vendor.id, categoryId: pharmacyCategory.id, role: 'SECONDARY', source: 'ADMIN' },
+      // Derived by the machine from its Pharmacy-tagged item (legacy.relief) — the rail must still never offer it.
+      // A store CHOSEN into Pharmacy is hidden outright (#54, the last describe below).
+      { tenantId: TENANT, vendorId: vendor.id, categoryId: pharmacyCategory.id, role: 'SECONDARY', source: 'DERIVED' },
     ] }));
     resetDiscoveryCacheForTests();
     const res = await inject('GET', '/api/v1/discovery/categories', customer.token);
@@ -778,5 +780,121 @@ describe('[§8] an order already placed with a line Swift no longer allows never
     await expect(orders.updateStatus(o.id, 'RIDER_EN_ROUTE_PICKUP', r.userId, 'Rider heading to the store'))
       .rejects.toMatchObject({ statusCode: 409, code: 'JOB_UNAVAILABLE', message: 'This job isn\'t available — Swift has paused it. Take another job.' });
     expect(await statusOf(o.id)).toBe('RIDER_ASSIGNED');
+  });
+});
+
+// [GUARDRAILS §8 · owner #54 · Opus S3-8] A store FILED under a banned category (Pharmacy, a liquor category) is
+// hidden from every list, search, storefront and Home, and every item it carries counts as banned. Nothing is
+// deleted, and the partner cannot file itself out of it — only Swift can (as with an item's banned tag, S3-5).
+describe('[§8 · #54] a store filed under a banned category', () => {
+  it('is hidden from Home, browse, favourites, its storefront, the website and every search; its items are banned; nothing is deleted', async () => {
+    const lat = Number(`6.8${NUM}`);
+    const lng = -58.15;
+    const owner = await userWithSession(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    const vendorOwner = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
+    const b = await app.prisma.vendor.create({ data: {
+      ownerId: vendorOwner.id, name: `Prohibited Corner Store ${RUN}`, slug: `prohibited-corner-${RUN}`, vendorType: 'STORE', phone: `+59267${NUM}02`,
+      addressLine1: '2 Rule Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: lat, longitude: lng,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, minOrderAmount: 0, averageRating: 5,
+    } });
+    vendorIds.push(b.id);
+    const shelf = await app.prisma.category.create({ data: { vendorId: b.id, name: 'Personal care', sortOrder: 0 } });
+    const shampoo = await app.prisma.item.create({ data: { vendorId: b.id, categoryId: shelf.id, name: `Coconut shampoo ${RUN}`, basePrice: 800, totalOrdered: TOP } });
+    await app.prisma.customer.update({ where: { userId: customer.id }, data: { favoriteVendors: { connect: [{ id: b.id }, { id: vendor.id }] } } });
+    engine.fail = false;
+    engine.vendorHits = [vendor, b].map((v) => ({ entityId: v.id, id: `${TENANT}:${v.id}`, name: `x ${RUN}`, vendorType: 'STORE', latitude: lat, longitude: lng, isCurrentlyOpen: true }));
+
+    let homeCall = 0;
+    const surfaces: Record<string, () => Promise<string[]>> = {
+      home: async () => {
+        homeCall += 1; // a fresh cache key per read
+        const res = await inject('GET', `/api/v1/customer/home?lat=${lat}&lng=${lng + homeCall / 100_000}`, customer.token);
+        expect(res.statusCode).toBe(200);
+        const data = res.json().data as { openVendors: Array<{ id: string }>; closedVendors: Array<{ id: string }> };
+        return ids([...data.openVendors, ...data.closedVendors]);
+      },
+      browse: async () => ids((await inject('GET', `/api/v1/customer/vendors?search=${RUN}&limit=50`, customer.token)).json().data),
+      favourites: async () => ids((await inject('GET', '/api/v1/customer/favorites', customer.token)).json().data),
+      website: async () => ids((await inject('GET', `/api/v1/public/storefronts?q=${RUN}`)).json().data),
+      searchIndex: async () => { engine.fail = false; return ids((await inject('GET', `/api/v1/search?q=${RUN}&limit=50`, customer.token)).json().data.vendors); },
+      searchDatabase: async () => { engine.fail = true; try { return ids((await inject('GET', `/api/v1/search?q=${RUN}&limit=50`, customer.token)).json().data.vendors); } finally { engine.fail = false; } },
+      nearby: async () => ids((await inject('GET', `/api/v1/search/nearby?lat=${lat}&lng=${lng}&radius=2`, customer.token)).json().data),
+    };
+    const suggestions = async () => ((await inject('GET', `/api/v1/search/suggestions?q=${RUN}`, customer.token)).json().data as Array<{ text: string; type: string }>)
+      .filter((sg) => sg.type === 'vendor').map((sg) => sg.text);
+
+    // Positive control: before it is filed under Pharmacy, the store shows on every surface.
+    for (const [surface, read] of Object.entries(surfaces)) expect(await read(), `${surface} shows the store`).toContain(b.id);
+    expect(await suggestions()).toContain(b.name);
+    expect((await inject('GET', `/api/v1/customer/vendors/${b.id}`, customer.token)).statusCode).toBe(200);
+    expect((await inject('GET', `/api/v1/public/storefronts/${b.slug}`)).statusCode).toBe(200);
+
+    await app.prisma.vendorDiscoveryCategory.create({ data: { tenantId: TENANT, vendorId: b.id, categoryId: pharmacyCategory.id, role: 'PRIMARY', source: 'ADMIN' } });
+    resetHiddenItemIdsCacheForTests();
+
+    for (const [surface, read] of Object.entries(surfaces)) {
+      const seen = await read();
+      expect(seen, `${surface} hides the store`).not.toContain(b.id);
+      if (surface !== 'favourites' && surface !== 'nearby') expect(seen, `${surface} still shows an ordinary store`).toContain(vendor.id);
+    }
+    expect(await suggestions()).not.toContain(b.name);
+    expect((await inject('GET', `/api/v1/customer/vendors/${b.id}`, customer.token)).statusCode).toBe(404);
+    expect((await inject('GET', `/api/v1/public/storefronts/${b.slug}`)).statusCode).toBe(404);
+    expect((await inject('GET', `/api/v1/customer/vendors/${vendor.id}`, customer.token)).statusCode).toBe(200);
+
+    // Its items are banned, whatever their words — and say why to the partner.
+    expect((await catalogueChecksFor(app.prisma, [shampoo.id])).get(shampoo.id)).toMatchObject({
+      state: 'BANNED', source: 'store', prohibitedClass: 'MEDICINE',
+      reason: 'Your store is filed under Pharmacy & Health, which Swift doesn\'t allow. Ask Swift support to change your store\'s category.',
+    });
+    const cart = await inject('POST', '/api/v1/customer/cart/items', customer.token, { vendorId: b.id, itemId: shampoo.id, quantity: 1 });
+    expect(cart.json().error).toMatchObject({ code: 'ITEM_UNAVAILABLE', details: { reason: 'PROHIBITED' } });
+    const own = await inject('GET', '/api/v1/vendor/items', owner.token);
+    expect((own.json().data as Array<{ id: string; catalogueCheck: { status: string; reason: string } }>).find((i) => i.id === shampoo.id)?.catalogueCheck)
+      .toMatchObject({ status: 'NOT_ALLOWED', reason: expect.stringContaining('Your store is filed under Pharmacy & Health') });
+    const create = await inject('POST', '/api/v1/vendor/items', owner.token, { categoryId: shelf.id, basePrice: 500, name: `Bar soap ${RUN}` });
+    expect(create.statusCode).toBe(409);
+    expect(create.json().error.message).toBe('Your store is filed under Pharmacy & Health, which Swift doesn\'t allow. Ask Swift support to change your store\'s category.');
+    // The partner cannot file itself out of the banned category; only Swift can.
+    const refile = await inject('PUT', '/api/v1/vendor/store-categories', owner.token, { primarySlug: snacksCategory.slug, secondarySlugs: [] });
+    expect(refile.statusCode).toBe(409);
+    expect(await app.prisma.vendorDiscoveryCategory.count({ where: { vendorId: b.id, categoryId: pharmacyCategory.id } })).toBe(1);
+    // Nothing deleted.
+    expect(await app.prisma.vendor.count({ where: { id: b.id } })).toBe(1);
+    expect(await app.prisma.item.count({ where: { id: shampoo.id } })).toBe(1);
+  });
+
+  it('Home cards show no section named for banned goods', async () => {
+    const res = await inject('GET', `/api/v1/customer/home?lat=6.801&lng=-58.156`, customer.token);
+    const card = (res.json().data.openVendors as Array<{ id: string; categories: Array<{ name: string }> }>).find((v) => v.id === vendor.id);
+    expect(card, 'the ordinary store is on Home').toBeTruthy();
+    const names = card!.categories.map((c) => c.name);
+    expect(names).toContain('Shelf');
+    expect(names).not.toContain('Beers & Wines');
+  });
+
+  // [Opus S3-5] An item's banned category tag is a certain ban; a partner removing it would lift the ban.
+  it('a partner cannot untag an item from a banned category; an ordinary tag can be removed', async () => {
+    const untag = await inject('DELETE', `/api/v1/vendor/items/${legacy.relief.id}/categories/pharmacy`, vendor.token);
+    expect(untag.statusCode).toBe(409);
+    expect(untag.json().error).toMatchObject({ code: 'PROHIBITED_ITEM', message: 'This item is filed under Pharmacy & Health, which Swift doesn\'t allow. Ask Swift support to check it.' });
+    expect(await app.prisma.itemDiscoveryCategory.count({ where: { itemId: legacy.relief.id, categoryId: pharmacyCategory.id } })).toBe(1);
+    expect((await catalogueChecksFor(app.prisma, [legacy.relief.id])).get(legacy.relief.id)).toMatchObject({ state: 'BANNED', source: 'category' });
+    expect((await inject('DELETE', `/api/v1/vendor/items/${control.id}/categories/${snacksCategory.slug}`, vendor.token)).statusCode).toBe(200);
+  });
+});
+
+// [Opus S3-11] The minute-old exclusion list is served at once; the rebuild runs behind the request, never in it.
+describe('[§8] the browse exclusion lists are rebuilt behind the request', () => {
+  it('a stale list is served at once while one read refreshes it; the next read has the new item', async () => {
+    resetHiddenItemIdsCacheForTests();
+    const t0 = Date.now();
+    const first = await runWithTenant(TENANT, () => hiddenItemIds(app.prisma, TENANT, t0));
+    const added = await item({ name: `Rum fudge bites ${RUN}` });
+    const stale = await runWithTenant(TENANT, () => hiddenItemIds(app.prisma, TENANT, t0 + HIDDEN_IDS_CACHE_MS + 1));
+    expect(stale).toEqual(first); // served without waiting for a rebuild — a rebuild would carry the new item
+    expect(stale).not.toContain(added.id);
+    await settleProhibitedCachesForTests();
+    expect(await runWithTenant(TENANT, () => hiddenItemIds(app.prisma, TENANT))).toContain(added.id);
   });
 });
