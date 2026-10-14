@@ -10,6 +10,7 @@ import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
 import { requestAuthContinuation } from '../../../navigation/authContinuation';
 import { distanceLabel } from '../../../lib/geo';
+import { forgivingFilter } from '../../../lib/forgivingSearch';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
@@ -264,8 +265,9 @@ export function RestaurantScreen() {
   })();
   const martItems = useMemo(() => {
     const base = aisleId ? (categories.find((c: any) => c.id === aisleId)?.items ?? []) : allItems;
-    const q = storeQuery.trim().toLowerCase();
-    return q ? base.filter((i: any) => String(i.name).toLowerCase().includes(q)) : base;
+    // Owner, 13 Oct: the in-store search forgives like the Search tab — any
+    // word order, a typed plural, one slip — exact matches first (lib/forgivingSearch).
+    return forgivingFilter(base, storeQuery, (i: any) => ({ name: i?.name, description: i?.description }));
   }, [aisleId, storeQuery, categories, allItems]);
 
   // Bounded render windows (see renderCap above). The mart grid is a flat slice;

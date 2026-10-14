@@ -46,7 +46,7 @@ export function toAmount(value: unknown): number | null {
  * the letters "$NaN" onto a vendor's own order total).
  *
  * A value that is not a finite number renders an em-dash. A real zero still
- * renders "GY$0".
+ * renders "$0".
  */
 export function money(value: unknown): string {
   return formatMoney(value);
@@ -152,7 +152,15 @@ export interface CatalogItem {
   imageUrl?: string | null;
   substitutionGroup?: string | null;
   category?: { id: string; name: string } | null;
+  /** [GUARDRAILS §8] Set when Swift does not allow the item, or is holding it for a
+   *  quick check (a banned word in the partner's own text). Absent on older servers. */
+  catalogueCheck?: CatalogueCheck | null;
 }
+
+/** [GUARDRAILS §8] What the server tells a partner about an item it hides. `message` is the words to show. */
+export type CatalogueCheck =
+  | { status: 'NOT_ALLOWED'; message: string; prohibitedClass: string; reason: string | null }
+  | { status: 'WAITING_FOR_CHECK'; message: string; prohibitedClass: string; field: string; term: string };
 
 // ── Normalisers: the ONLY place a wire Decimal becomes a JS number ───────────
 // Each spreads the raw row first, so every field the server sends survives
@@ -295,7 +303,11 @@ export const automapXlsx = (file: File) => {
 };
 export const confirmImport = (csv: string) =>
   apiFetch(`${V}/items/import`, { method: 'POST', body: JSON.stringify({ csv }) }).then(
-    (r) => r.data as { imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }> },
+    (r) => r.data as {
+      imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }>;
+      /** [GUARDRAILS §8] Imported rows a banned word is holding for a quick check (absent on older servers). */
+      waitingForCheck?: Array<{ row: number; name: string }>; waitingForCheckCount?: number;
+    },
   );
 
 // ── Analytics + money ────────────────────────────────────────────────────────

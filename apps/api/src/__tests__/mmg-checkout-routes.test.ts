@@ -390,11 +390,13 @@ describe('behind the flag: MMG_CHECKOUT_ENABLED unset (the default)', () => {
 describe('live: payActions per the contract (section 3)', () => {
   beforeEach(() => enable(true));
 
-  it('MMG_CHECKOUT is live with the amount due, or one week ahead when nothing is due; CARD stays off', async () => {
+  it('MMG_CHECKOUT is live with the amount due; once the coming week is paid there is no button (one week at a time, owner #62); CARD stays off', async () => {
     const owing = await makeStore({ balance: 600 });
     expect((await subscriptionOf(owing)).json().data.payActions).toEqual([{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD' }, { id: 'CARD', state: 'off' }]);
     const paidUp = await makeStore({ balance: 2100 });
-    expect((await subscriptionOf(paidUp)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' });
+    expect((await subscriptionOf(paidUp)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    const fresh = await makeStore();
+    expect((await subscriptionOf(fresh)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' });
     const rider = await makeRider({ balance: 1000 });
     expect((await subscriptionOf(rider)).json().data.payActions[0]).toMatchObject({ state: 'live', amountGyd: 5000 });
     const driver = await makeDriver();
