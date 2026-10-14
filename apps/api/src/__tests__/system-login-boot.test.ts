@@ -115,6 +115,32 @@ describe('a walled API or worker refuses to start without a working system login
       .rejects.toThrow(/FATAL[\s\S]*not the request login's database/);
   });
 
+  // [TA-S0-003 · R3] One capability, nothing above it.
+  it('refuses the database owner (a superuser) as the system login, though it passes the membership check', async () => {
+    await expect(attestSystemLoginAtBoot(request, log, { ...WALL_ON, SYSTEM_DATABASE_URL: TEST_URL }))
+      .rejects.toThrow(/FATAL[\s\S]*is a superuser/);
+  });
+
+  it('refuses a BYPASSRLS system login, and one that is a member of the owner role', async () => {
+    const role = `l04_wide_${randomBytes(6).toString('hex')}`;
+    const password = randomBytes(24).toString('hex');
+    await owner.$executeRawUnsafe(`CREATE ROLE ${role} LOGIN PASSWORD '${password}' BYPASSRLS`);
+    try {
+      await owner.$executeRawUnsafe(`GRANT swift_app, swift_bypass_rls TO ${role}`);
+      const err = await attestSystemLoginAtBoot(request, log, { ...WALL_ON, SYSTEM_DATABASE_URL: urlFor(role, password) })
+        .then(() => null, (e: unknown) => e as Error);
+      expect(err?.message).toMatch(/FATAL[\s\S]*holds the BYPASSRLS attribute/);
+      expect(err?.message).not.toContain(password);
+      await owner.$executeRawUnsafe(`ALTER ROLE ${role} NOBYPASSRLS`);
+      const ownerRole = (await owner.$queryRaw<Array<{ owner: string }>>`SELECT current_user::text AS owner`)[0]!.owner;
+      await owner.$executeRawUnsafe(`GRANT "${ownerRole}" TO ${role}`);
+      await expect(attestSystemLoginAtBoot(request, log, { ...WALL_ON, SYSTEM_DATABASE_URL: urlFor(role, password) }))
+        .rejects.toThrow(/FATAL[\s\S]*owns tables or functions in the walled schemas/);
+    } finally {
+      await owner.$executeRawUnsafe(`DROP ROLE IF EXISTS ${role}`);
+    }
+  });
+
   it('starts with a reachable bypass-member system login', async () => {
     await expect(attestSystemLoginAtBoot(request, log, { ...WALL_ON, SYSTEM_DATABASE_URL: logins.systemUrl }))
       .resolves.toBeUndefined();

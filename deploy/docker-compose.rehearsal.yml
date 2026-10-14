@@ -1,0 +1,54 @@
+# ===========================================================================
+# [TA-S0-003 · C1] The Phase C rehearsal's isolation, layered over
+# docker-compose.yml and docker-compose.wall.yml by deploy/wall/rehearsal.sh
+# only, always under its own project name (swift-rehearsal). Never by hand,
+# never with the production project.
+#
+# What it changes, and why each one matters:
+# - Its own network, internal (no route out of the host): the base file joins
+#   the external swift-pilot-private, where `postgres` would also resolve to
+#   PRODUCTION's database container, and providers (SMS, email, push, storage)
+#   would be reachable. Here nothing leaves.
+# - Its own secrets: fresh values generated for the rehearsal into its own
+#   store, materialized at /run/swift-rehearsal-secrets. Never production's.
+# - Its own volumes: the base file's named volumes are scoped by the project
+#   name, so swift-rehearsal_swift-pgdata is not production's swift-pgdata.
+# - Nothing public: Caddy, the website and the console are in a profile that
+#   is never enabled, and no service publishes a port.
+# - Postgres is healthy only once it answers over TCP (the image's first start
+#   answers on its socket while it is still initialising).
+# ===========================================================================
+services:
+  postgres:
+    volumes: !override
+      - swift-pgdata:/var/lib/postgresql/data
+      - /run/swift-rehearsal-secrets:/run/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-swift} -d ${POSTGRES_DB:-swift}"]
+  meilisearch:
+    volumes: !override
+      - swift-meilidata:/meili_data
+      - /run/swift-rehearsal-secrets:/run/secrets:ro
+  migrate:
+    volumes: !override
+      - /run/swift-rehearsal-secrets:/run/secrets:ro
+  api:
+    volumes: !override
+      - /run/swift-rehearsal-secrets:/run/secrets:ro
+      - /dev/null:/run/secrets/POSTGRES_PASSWORD:ro
+  worker:
+    volumes: !override
+      - /run/swift-rehearsal-secrets:/run/secrets:ro
+      - /dev/null:/run/secrets/POSTGRES_PASSWORD:ro
+  caddy:
+    profiles: !override ["rehearsal-never"]
+    ports: !reset []
+  web:
+    profiles: !override ["rehearsal-never"]
+  admin:
+    profiles: !override ["rehearsal-never"]
+
+networks:
+  private: !override
+    name: swift-rehearsal-private
+    internal: true

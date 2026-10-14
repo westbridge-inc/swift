@@ -94,7 +94,17 @@ export type RlsBypass =
    * for an unattested production boot at any tenant count, so an `enforced`
    * that can be a lie is the whole gate.
    */
-  | 'BYPASS_ROLE_MEMBER';
+  | 'BYPASS_ROLE_MEMBER'
+  /**
+   * [TA-S0-003 · R3] Membership of a role that OWNS a table or function in the
+   * walled schemas (public, swift_qr) — the owner itself included. FORCE ROW
+   * LEVEL SECURITY binds an owner's queries, but an owner (and every member
+   * that inherits from it) can ALTER the table back to NO FORCE, disable row
+   * security or drop the policy: a wall its own subject can take down is not
+   * a wall. None of the role flags shows this, and `OWNER_NOT_FORCED` only
+   * counts tables owned by the connected role by name.
+   */
+  | 'OWNER_ROLE_MEMBER';
 
 export interface RlsFacts {
   /** The role the pool actually authenticated as — not the configured one. */
@@ -105,6 +115,8 @@ export interface RlsFacts {
   hasBypassRls: boolean;
   /** Member of `swift_bypass_rls` — the escape the tenant policy itself grants. */
   isBypassRoleMember: boolean;
+  /** Member of a role owning a table or function in public/swift_qr (owner included) — see OWNER_ROLE_MEMBER. */
+  isOwnerRoleMember: boolean;
   /** Tables in `public` carrying a `tenantId` column. */
   tenantTables: number;
   /** ...of those, with row security not enabled at all. */
@@ -132,6 +144,8 @@ export function explainBypass(bypass: RlsBypass, facts: RlsFacts): string {
       return `role "${facts.role}" holds the BYPASSRLS attribute`;
     case 'BYPASS_ROLE_MEMBER':
       return `role "${facts.role}" is a member of swift_bypass_rls — every tenant policy in this schema has an OR branch that this membership satisfies, so the wall is open to it whatever the table flags say`;
+    case 'OWNER_ROLE_MEMBER':
+      return `role "${facts.role}" is (or is a member of) a role that owns tables or functions in the walled schemas — it can switch row security off or drop the policies, so the wall does not bind it`;
     case 'RLS_DISABLED':
       return `${facts.rlsDisabledTables} tenant-bearing table(s) have no row security enabled at all`;
     case 'OWNER_NOT_FORCED':
@@ -152,6 +166,7 @@ export function attestationOf(facts: RlsFacts): RlsAttestation {
   if (facts.isSuperuser) bypasses.push('SUPERUSER');
   if (facts.hasBypassRls) bypasses.push('BYPASSRLS');
   if (facts.isBypassRoleMember) bypasses.push('BYPASS_ROLE_MEMBER');
+  if (facts.isOwnerRoleMember) bypasses.push('OWNER_ROLE_MEMBER');
   if (facts.rlsDisabledTables > 0) bypasses.push('RLS_DISABLED');
   if (facts.ownedUnforcedTables > 0) bypasses.push('OWNER_NOT_FORCED');
   return { facts, bypasses, enforced: bypasses.length === 0 && facts.tenantTables > 0 };
@@ -177,7 +192,7 @@ type RawDb = {
  * config, which is what made the gap invisible in the first place.
  */
 export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
-  const [role] = await db.$queryRaw<Array<{ role: string; superuser: boolean; bypassrls: boolean; bypass_member: boolean }>>`
+  const [role] = await db.$queryRaw<Array<{ role: string; superuser: boolean; bypassrls: boolean; bypass_member: boolean; owner_member?: boolean }>>`
     SELECT current_user::text AS role,
            COALESCE(r.rolsuper, false)     AS superuser,
            COALESCE(r.rolbypassrls, false) AS bypassrls,
@@ -185,7 +200,15 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
            -- Addressed by oid so a missing role yields no row (=> NULL => false)
            -- instead of the error the name,name,text form raises.
            COALESCE((SELECT pg_has_role(current_user, b.oid, 'MEMBER')
-                       FROM pg_roles b WHERE b.rolname = 'swift_bypass_rls'), false) AS bypass_member
+                       FROM pg_roles b WHERE b.rolname = 'swift_bypass_rls'), false) AS bypass_member,
+           -- [TA-S0-003 · R3] Owner, or a member of an owner, of anything in
+           -- the walled schemas (distinct owners first: a handful of checks).
+           EXISTS (SELECT 1 FROM (SELECT c.relowner AS owner FROM pg_class c
+                                    JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname IN ('public', 'swift_qr')
+                                  UNION
+                                  SELECT p.proowner FROM pg_proc p
+                                    JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname IN ('public', 'swift_qr')) o
+                    WHERE pg_has_role(current_user, o.owner, 'MEMBER')) AS owner_member
       FROM pg_roles r
      WHERE r.rolname = current_user`;
   const [tables] = await db.$queryRaw<Array<{ total: bigint; disabled: bigint; owned_unforced: bigint }>>`
@@ -206,6 +229,7 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
     isSuperuser: role?.superuser ?? false,
     hasBypassRls: role?.bypassrls ?? false,
     isBypassRoleMember: role?.bypass_member ?? false,
+    isOwnerRoleMember: role?.owner_member ?? false,
     tenantTables: Number(tables?.total ?? 0),
     rlsDisabledTables: Number(tables?.disabled ?? 0),
     ownedUnforcedTables: Number(tables?.owned_unforced ?? 0),

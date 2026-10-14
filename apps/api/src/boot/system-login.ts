@@ -71,6 +71,16 @@ export async function attestSystemLoginAtBoot(
   } else if (system && !system.isBypassRoleMember) {
     gaps.push(`the system login (${system.role}) is not a member of swift_bypass_rls${system.role === request.facts.role ? ' — it is the request login itself' : ''}`);
   }
+  // [TA-S0-003 · R3] The system login carries ONE capability, membership of
+  // swift_bypass_rls, and nothing above it. A superuser or a BYPASSRLS login
+  // passes the membership check by being above every check (the database
+  // owner's own URL did); an owner member can switch the wall off. None of
+  // them is a least-privilege system login.
+  if (system && system.roleResolved) {
+    if (system.isSuperuser) gaps.push(`the system login (${system.role}) is a superuser — system work runs on a least-privilege member of swift_bypass_rls, never on the database owner or a superuser`);
+    if (system.hasBypassRls) gaps.push(`the system login (${system.role}) holds the BYPASSRLS attribute — its capability must be the swift_bypass_rls membership the policies name, nothing wider`);
+    if (system.isOwnerRoleMember) gaps.push(`the system login (${system.role}) is (or is a member of) a role that owns tables or functions in the walled schemas — it could switch the wall off`);
+  }
   if (system) {
     const requestIdentity = await readDatabaseIdentity(requestDb);
     if (!systemIdentity || !requestIdentity || systemIdentity.database !== requestIdentity.database
