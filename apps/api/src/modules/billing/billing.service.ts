@@ -2276,7 +2276,7 @@ export class BillingService {
     }
     const wallet = await this.lockWalletInTx(tx, opts.subscriptionId, opts.currencyCode);
     if (wallet.currencyCode !== opts.currencyCode) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The returned payment and the fee paid ahead are in different currencies; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The returned payment and the money received for the weekly fee are in different currencies; reconciliation is required');
     }
     const debited = await tx.prepaidBalance.updateMany({
       where: { subscriptionId: opts.subscriptionId, currencyCode: opts.currencyCode, balance: { gte: opts.amount } },

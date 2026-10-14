@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
 import { nanoid } from 'nanoid';
@@ -204,6 +204,7 @@ afterAll(async () => {
     await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { endsWith: RUN } }] } });
     await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.subscriptionRefund.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
@@ -740,6 +741,73 @@ describe('[security review, 14 Oct] every decision is taken on the row and the b
     await app.prisma.mmgFeeReversal.update({ where: { id: held.id }, data: { resolution: 'RETURNED_BY_REFERENCE', resolvedBy: admin.userId, resolutionNote: `REVS${RUN}` } });
     const after = await settleAt(held.id, new Date());
     expect(after).toMatchObject({ state: 'HELD', resolution: 'RETURNED_BY_REFERENCE' });
+  });
+});
+
+describe('[DS1117] every MMG number Swift recorded is known; a held return never sticks half-resolved', () => {
+  it('S2: a push-rail payment, an MMG refund or a billing event reference is a payment Swift recorded, never a return', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    const other = await paidCheckout();
+    const push = `PUSH${seq}${RUN}`;
+    const refund = `RFND${seq}${RUN}`;
+    const event = `EVNT${seq}${RUN}`;
+    const pay = await app.prisma.subscriptionPayment.create({ data: { subscriptionId: other.subId, amount: p.amount, status: 'CAPTURED', paymentMethod: 'MOBILE_MONEY',
+      externalRef: push, periodStart: new Date(Date.now() - 7 * DAY), periodEnd: new Date(), paidAt: new Date() } });
+    await app.prisma.subscriptionRefund.create({ data: { subscriptionId: other.subId, paymentId: pay.id, amount: p.amount, refundType: 'FULL', reason: 'test',
+      processedBy: admin.userId, refundDestination: 'MMG', status: 'COMPLETED', externalRef: refund } });
+    await app.prisma.billingEvent.create({ data: { subscriptionId: other.subId, type: 'CHARGE_SUCCESS', amount: p.amount, currencyCode: 'GYD',
+      idempotencyKey: `ds1117:${event}`, paymentRef: event } });
+    for (const ref of [push, refund, event]) {
+      sandboxAddHistory({ transactionId: ref, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+      await expect(resolveAs(held.id, 'RETURNED', ref), ref).rejects.toMatchObject({ code: 'NOT_A_REVERSAL' });
+    }
+    expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+  });
+
+  it('S3: "returned" books in the same transaction it is written: if the booking cannot happen, nothing is written and the return can still be closed', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    const typed = `REVW${seq}${RUN}`;
+    sandboxAddHistory({ transactionId: typed, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    // the money is drained between the check and the booking (another path, a race)
+    const short = vi.spyOn(billing, 'debitWalletForReversalInTx').mockResolvedValueOnce({ short: true });
+    try {
+      await expect(resolveAs(held.id, 'RETURNED', typed)).rejects.toMatchObject({ code: 'RETURN_NOT_BOOKABLE' });
+    } finally {
+      short.mockRestore();
+    }
+    expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+    // nothing stuck: the same answer now books it once
+    expect((await resolveAs(held.id, 'RETURNED', typed)).state).toBe('REVERSED');
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('S4: MMG\'s lookup that cannot be read is "MMG unavailable", never "not standing" or "no proof"', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    const unread = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => ({ ...reversalClient, transactionLookupDetail: async () => ({ outcome: 'error' as const }) }) as never });
+    await expect(resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}J`, unread)).rejects.toMatchObject({ code: 'MMG_LOOKUP_UNAVAILABLE' });
+    await expect(resolveAs(held.id, 'RETURNED', `STMT${RUN}K`, unread)).rejects.toMatchObject({ code: 'MMG_LOOKUP_UNAVAILABLE' });
+    expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+  });
+
+  it('S4: a return held because the money already paid for a week keeps that reason through a flaky lookup', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const sent = await ask(p.checkoutId, p.amount);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const held = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    expect(held.heldReason).toBe('WALLET_NO_LONGER_HOLDS_IT');
+    sandboxSetTxStatus(p.txn, 'approved'); // a flaky read: MMG's lookup briefly does not show the return
+    const later = await runWithTenant('swift-default', () => reversals.settle(held.id, { now: new Date(Date.now() + 25 * 3_600_000) }));
+    expect(later).toMatchObject({ state: 'HELD', heldReason: 'WALLET_NO_LONGER_HOLDS_IT' });
   });
 });
 
