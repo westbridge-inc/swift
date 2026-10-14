@@ -27,7 +27,7 @@ function serveOrders(held: ApiReply, onWrite?: (_r: ApiRequest) => ApiReply) {
 
 describe('[MC-AD4] held orders', () => {
   it('lists a held paid order and releases it with "Deliver anyway", the one release the server offers', async () => {
-    const fetchMock = serveOrders({ body: { success: true, data: [heldOrder] } }, () => ({ body: { success: true, data: { released: true, decision: 'DELIVER_ANYWAY', dispatch: {} } } }));
+    const fetchMock = serveOrders({ body: { success: true, data: [heldOrder] } }, () => ({ body: { success: true, data: { released: true, decision: 'DELIVER_ANYWAY', dispatch: { offered: 'drv-1' } } } }));
     const { user } = renderWithQuery(<OrdersPage />);
     const section = await screen.findByRole('region', { name: /Held for review/ });
     expect(section.textContent).toContain('SW-1001');
@@ -40,6 +40,32 @@ describe('[MC-AD4] held orders', () => {
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(String(url)).toMatch(/\/api\/v1\/admin\/orders\/ord-held-1\/food-age-hold\/release$/);
     expect(JSON.parse(String(init?.body))).toEqual({ decision: 'DELIVER_ANYWAY' });
+  });
+
+  // [DS878 S4] The release route answers `dispatch: {}` when no rider search ran and `{ exhausted: true }`
+  // when no rider took it this round. Neither is "back with dispatch": the operator is told and offered a retry.
+  it.each([
+    ['no rider search ran', {}, /no rider search started/],
+    ['no rider took it this round', { exhausted: true }, /no rider took it this round/],
+  ])('a release where %s says so and offers a dispatch retry; it never reads "back with dispatch"', async (_case, dispatch, wording) => {
+    serveOrders({ body: { success: true, data: [heldOrder] } }, () => ({ body: { success: true, data: { released: true, decision: 'DELIVER_ANYWAY', dispatch } } }));
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: 'Deliver order SW-1001 anyway' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Deliver anyway' }));
+    expect(await screen.findByText(wording)).toBeTruthy();
+    expect(screen.queryByText('Order SW-1001 is released and back with dispatch.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Retry dispatch for SW-1001' })).toBeTruthy();
+  });
+
+  // [DS878 S4] A 200 whose body is not a list of held orders is an unreadable answer, not "nothing held".
+  it.each([
+    ['no data', { success: true }],
+    ['data that is not a list', { success: true, data: { rows: [] } }],
+    ['success not true', { success: false, data: [] }],
+  ])('a held-orders answer with %s is shown as a failed read, never as "nothing held"', async (_case, body) => {
+    serveOrders({ body });
+    renderWithQuery(<OrdersPage />);
+    expect((await screen.findByRole('alert')).textContent).toContain("Couldn't load the held orders");
   });
 
   it('a failed read of the held orders says so; it is never read as "nothing held"', async () => {

@@ -997,9 +997,16 @@ export interface HeldOrder {
   readyMinutes: number | null;
   vendor: { id: string; name: string } | null;
 }
-export const fetchHeldOrders = (): Promise<Envelope<HeldOrder[]>> => apiFetch('/api/v1/admin/orders/held');
 /** An unreadable acknowledgement does not establish whether an action completed. */
 const unreadableOrderAction = () => Object.assign(new Error('Swift returned an unreadable answer. Refresh the order and check whether the action went through before retrying.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+/** [DS878 S4] A 200 that is not a list of held orders is a failed read — never "nothing held". */
+export const fetchHeldOrders = async (): Promise<Envelope<HeldOrder[]>> => {
+  const response = await apiFetch('/api/v1/admin/orders/held');
+  if (response?.success !== true || !Array.isArray(response.data)) {
+    throw Object.assign(new Error('Swift returned an unreadable list of held orders.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+  }
+  return response;
+};
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 export const retryOrderDispatch = async (id: string) => {
   const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/retry-dispatch`, { method: 'POST', body: '{}' });

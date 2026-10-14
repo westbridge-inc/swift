@@ -56,10 +56,17 @@ export function HeldOrders() {
       return response;
     },
     success: (response) => {
-      if (response.data?.dispatch?.error) {
+      // The release route returns the rider search's own answer: { offered } when a rider was
+      // offered the order, { exhausted } when none took it this round, {} when no search ran,
+      // { error } when the search failed. Only an offer is "back with dispatch" [DS878 S4].
+      const dispatch = response.data?.dispatch ?? {};
+      const needsRetry = (title: string, next: string) => {
         setDispatchRetry((pending) => [...pending.filter((item) => item.id !== o.id), o]);
-        return { tone: 'failed', title: `Order ${o.orderNumber} is released; dispatch needs retry.`, next: 'The hold is released, but finding a rider failed. Retry dispatch below.' };
-      }
+        return { tone: 'failed' as const, title, next };
+      };
+      if (dispatch.error) return needsRetry(`Order ${o.orderNumber} is released; dispatch needs retry.`, 'The hold is released, but finding a rider failed. Retry dispatch below.');
+      if (dispatch.exhausted) return needsRetry(`Order ${o.orderNumber} is released, but no rider took it this round.`, 'The hold is released. Retry dispatch below, or open the order to check its rider search.');
+      if (!dispatch.offered) return needsRetry(`Order ${o.orderNumber} is released, but no rider search started.`, 'The hold is released. Retry dispatch below, or open the order to check its state.');
       return `Order ${o.orderNumber} is released and back with dispatch.`;
     },
   });
