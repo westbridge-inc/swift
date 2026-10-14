@@ -14,6 +14,8 @@
  * forgot it — are inserted directly, so the read side is proven independently
  * of the write side.
  */
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -35,7 +37,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { OrderService } from '../modules/order/order.service';
 import { PickingService } from '../modules/order/picking.service';
 import { mergeGuestCart } from '../modules/user/cart-merge.service';
-import { catalogueChecksFor, HIDDEN_IDS_CACHE_MS, hiddenItemIds, movesTowardCustomer, resetHiddenItemIdsCacheForTests, settleProhibitedCachesForTests, wordsFor } from '../modules/compliance/prohibited-gate';
+import { catalogueChecksFor, HIDDEN_IDS_CACHE_MS, hiddenItemIds, movesTowardCustomer, resetHiddenItemIdsCacheForTests, settleProhibitedCachesForTests, unhideRestocked, wordsFor } from '../modules/compliance/prohibited-gate';
 import { judgedWordsHash } from '../modules/compliance/prohibited-items';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
@@ -398,6 +400,44 @@ describe('[§8] a partner saving and editing items', () => {
     const bread = await off(`Coconut bread ${RUN}`, { autoHiddenAt: new Date(), stockQuantity: 0 });
     expect((await inject('PUT', `/api/v1/vendor/items/${bread.id}`, vendor.token, { stockQuantity: 5 })).statusCode).toBe(200);
     expect(await row(bread.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 5 });
+  });
+
+  // [DS1266 S3 · the rule of Opus S3-1] Stock coming back un-hides only an item Swift allows: the stock adjust route,
+  // an order cancelled before pickup and a picking restock all go through one guard (unhideRestocked).
+  it('stock coming back never switches on a banned item; an ordinary auto-hidden item comes back', async () => {
+    const shelf = async (name: string, stockQuantity: number) => {
+      const created = await item({ name });
+      return app.prisma.item.update({ where: { id: created.id }, data: { isAvailable: false, autoHiddenAt: new Date(), stockQuantity, totalOrdered: 0 } });
+    };
+    const row = (id: string) => app.prisma.item.findUniqueOrThrow({ where: { id } });
+
+    const gin = await shelf(`${RUN} Spare Gin`, 0);
+    expect((await inject('POST', `/api/v1/vendor/items/${gin.id}/adjust`, vendor.token, { delta: 5, reason: 'RECEIVED' })).statusCode).toBe(200);
+    expect(await row(gin.id)).toMatchObject({ isAvailable: false, stockQuantity: 5 });
+    const bun = await shelf(`Coconut bun ${RUN}`, 0);
+    expect((await inject('POST', `/api/v1/vendor/items/${bun.id}/adjust`, vendor.token, { delta: 5, reason: 'RECEIVED' })).statusCode).toBe(200);
+    expect(await row(bun.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null, stockQuantity: 5 });
+
+    const whisky = await shelf(`${RUN} Spare Whisky`, 3);
+    await unhideRestocked(app.prisma, whisky.id);
+    expect(await row(whisky.id)).toMatchObject({ isAvailable: false });
+    const roll = await shelf(`Coconut roll ${RUN}`, 3);
+    await unhideRestocked(app.prisma, roll.id);
+    expect(await row(roll.id)).toMatchObject({ isAvailable: true, autoHiddenAt: null });
+  });
+
+  it('no code un-hides a restocked item except through the guard (or the item editor, which judges the item first)', () => {
+    const root = join(__dirname, '..', 'modules');
+    const files = (function walk(dir: string): string[] {
+      return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.ts') && !e.name.includes('.test.') ? [join(dir, e.name)] : []));
+    })(root);
+    const sites = files.flatMap((file) => readFileSync(file, 'utf8').split('\n')
+      .filter((line) => /isAvailable: true, autoHiddenAt: null/.test(line))
+      .map((line) => `${relative(root, file)}: ${line.trim().slice(0, 90)}`));
+    expect(sites).toEqual([
+      expect.stringMatching(/^compliance\/prohibited-gate\.ts: /),
+      expect.stringMatching(/^vendor\/vendor\.routes\.ts: return banned \? updated : tx\.item\.update/),
+    ]);
   });
 
   it('a banned platform category is refused outright: tag, accepted suggestion, store category', async () => {

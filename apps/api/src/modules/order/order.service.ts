@@ -71,7 +71,7 @@ import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
-import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject } from '../compliance/prohibited-gate';
+import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
 
 interface CheckoutInput {
   userId: string;
@@ -1928,10 +1928,7 @@ export class OrderService {
         note: 'Order cancelled before pickup',
       });
       if (restock.applied) {
-        await db.item.updateMany({
-          where: { id: restockItemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-          data: { isAvailable: true, autoHiddenAt: null },
-        });
+        await unhideRestocked(db, restockItemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
       }
     }
   }

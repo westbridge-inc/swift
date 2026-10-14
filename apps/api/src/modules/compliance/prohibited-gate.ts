@@ -302,6 +302,19 @@ export async function assertNotBanned(db: Db, itemId: string, options: { wordBan
 }
 
 /**
+ * Stock coming back un-hides an item the stock engine hid ("zero hides, restock un-hides"), never one Swift does not
+ * allow: a banned item stays off, and its stock is still counted. The stock adjust route, an order cancelled before
+ * pickup and a picking restock all use this one guard; the item editor judges the edited item itself. [GUARDRAILS §8 ·
+ * DS1266 S3, the rule of Opus S3-1]
+ */
+export async function unhideRestocked(db: Db, itemId: string): Promise<void> {
+  const restocked = { id: itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } };
+  if (!(await db.item.findFirst({ where: restocked, select: { id: true } }))) return;
+  if ((await catalogueChecksFor(db, [itemId])).get(itemId)?.state === 'BANNED') return;
+  await db.item.updateMany({ where: restocked, data: { isAvailable: true, autoHiddenAt: null } });
+}
+
+/**
  * A name or an option a partner is about to save that IS banned goods — a
  * brand, a product phrase, a goods noun heading it: refused before anything is
  * written, never held for a reviewer. [#55/#56, Opus S1-LAUNCH-2]

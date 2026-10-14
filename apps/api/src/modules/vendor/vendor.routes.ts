@@ -51,7 +51,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
-import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerView } from '../compliance/prohibited-gate';
+import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerView, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
@@ -2014,10 +2014,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
       data: { isAvailable: false, autoHiddenAt: new Date() },
     });
-    await app.prisma.item.updateMany({
-      where: { id: item.id, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-      data: { isAvailable: true, autoHiddenAt: null },
-    });
+    await unhideRestocked(app.prisma, item.id); // never a banned item [GUARDRAILS §8 · DS1266 S3]
 
     const adjustment = await app.prisma.stockAdjustment.create({
       data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
