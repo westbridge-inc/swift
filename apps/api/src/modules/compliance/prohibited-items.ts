@@ -37,7 +37,7 @@
  * Words are judged whole ("rum" never hits "drumstick", "gin" never hits
  * "ginger"); phrases match whole words in order. A text is read through its
  * disguises first: compatibility forms (fullwidth "Ｒｕｍ"), invisible format
- * characters ("R​um"), Cyrillic and Greek look-alikes ("Rцm") and
+ * characters ("R\u200Bum"), Cyrillic and Greek look-alikes ("Rцm") and
  * spelled-out letters ("R.U.M"). This file is the ONE place the word list
  * lives. Prohibited is not the same as the moderation queue: reports
  * (ILLEGAL_GOODS) still reach a person exactly as before.
@@ -310,7 +310,7 @@ const STATES_A_STRENGTH = /%|\d\s*°|\d\s*(abv|proof|alc|vol|volume|percent|per\
 /**
  * Unicode's format characters (General Category Cf, Unicode 15.1): zero-width
  * spaces and joiners, the soft hyphen, direction marks, the byte-order mark.
- * Invisible, so "R​um" reads "Rum". A bracket expression of literal
+ * Invisible, so "R\u200Bum" reads "Rum". A bracket expression of literal
  * characters, so the database pre-filter removes exactly the same set.
  */
 const FORMAT_RANGES: ReadonlyArray<readonly [number, number]> = [
@@ -325,14 +325,14 @@ const FORMAT_CHARS = new RegExp(PROHIBITED_FORMAT_CHARS_PATTERN, 'gu');
 /** Cyrillic and Greek letters that look Latin ("Rцm", "Неineken", "Ηennessy"), one to one, so the database
  *  pre-filter can apply the same table with translate(). */
 const CONFUSABLE_PAIRS: ReadonlyArray<readonly [string, string]> = [
-  ['а', 'a'], ['е', 'e'], ['ё', 'e'], ['о', 'o'], ['р', 'p'], ['с', 'c'], ['у', 'y'], ['х', 'x'], ['і', 'i'], ['ї', 'i'],
-  ['ј', 'j'], ['ѕ', 's'], ['ԁ', 'd'], ['ɡ', 'g'], ['ц', 'u'], ['и', 'u'], ['к', 'k'], ['м', 'm'], ['н', 'h'], ['т', 't'],
-  ['г', 'r'], ['п', 'n'], ['ӏ', 'l'], ['ı', 'i'], ['ɑ', 'a'],
-  ['А', 'A'], ['В', 'B'], ['Е', 'E'], ['Ё', 'E'], ['К', 'K'], ['М', 'M'], ['Н', 'H'], ['О', 'O'], ['Р', 'P'], ['С', 'C'],
-  ['Т', 'T'], ['У', 'Y'], ['Х', 'X'], ['Ѕ', 'S'], ['І', 'I'], ['Ї', 'I'], ['Ј', 'J'],
-  ['α', 'a'], ['ο', 'o'], ['ν', 'v'], ['ρ', 'p'], ['τ', 't'], ['υ', 'u'], ['ι', 'i'], ['κ', 'k'], ['ε', 'e'], ['χ', 'x'],
-  ['Α', 'A'], ['Β', 'B'], ['Ε', 'E'], ['Ζ', 'Z'], ['Η', 'H'], ['Ι', 'I'], ['Κ', 'K'], ['Μ', 'M'], ['Ν', 'N'], ['Ο', 'O'],
-  ['Ρ', 'P'], ['Τ', 'T'], ['Υ', 'Y'], ['Χ', 'X'],
+  ['\u0430', 'a'], ['\u0435', 'e'], ['\u0451', 'e'], ['\u043E', 'o'], ['\u0440', 'p'], ['\u0441', 'c'], ['\u0443', 'y'], ['\u0445', 'x'], ['\u0456', 'i'], ['\u0457', 'i'],
+  ['\u0458', 'j'], ['\u0455', 's'], ['\u0501', 'd'], ['\u0261', 'g'], ['\u0446', 'u'], ['\u0438', 'u'], ['\u043A', 'k'], ['\u043C', 'm'], ['\u043D', 'h'], ['\u0442', 't'],
+  ['\u0433', 'r'], ['\u043F', 'n'], ['\u04CF', 'l'], ['\u0131', 'i'], ['\u0251', 'a'],
+  ['\u0410', 'A'], ['\u0412', 'B'], ['\u0415', 'E'], ['\u0401', 'E'], ['\u041A', 'K'], ['\u041C', 'M'], ['\u041D', 'H'], ['\u041E', 'O'], ['\u0420', 'P'], ['\u0421', 'C'],
+  ['\u0422', 'T'], ['\u0423', 'Y'], ['\u0425', 'X'], ['\u0405', 'S'], ['\u0406', 'I'], ['\u0407', 'I'], ['\u0408', 'J'],
+  ['\u03B1', 'a'], ['\u03BF', 'o'], ['\u03BD', 'v'], ['\u03C1', 'p'], ['\u03C4', 't'], ['\u03C5', 'u'], ['\u03B9', 'i'], ['\u03BA', 'k'], ['\u03B5', 'e'], ['\u03C7', 'x'],
+  ['\u0391', 'A'], ['\u0392', 'B'], ['\u0395', 'E'], ['\u0396', 'Z'], ['\u0397', 'H'], ['\u0399', 'I'], ['\u039A', 'K'], ['\u039C', 'M'], ['\u039D', 'N'], ['\u039F', 'O'],
+  ['\u03A1', 'P'], ['\u03A4', 'T'], ['\u03A5', 'Y'], ['\u03A7', 'X'],
 ];
 export const PROHIBITED_CONFUSABLES = {
   from: CONFUSABLE_PAIRS.map(([f]) => f).join(''),
@@ -618,7 +618,7 @@ export function orderRefusalMessage(itemName: string): string {
  * Marks"). The database pre-filter strips the same marks from the same NFD form,
  * so it reads a column exactly as the classifier reads the text. [DS1100 S2]
  */
-export const PROHIBITED_MARKS_PATTERN = '[̀-ͯ]+';
+export const PROHIBITED_MARKS_PATTERN = '[\u0300-\u036F]+';
 
 /**
  * The words a database pre-filter looks for, after reading each column as the

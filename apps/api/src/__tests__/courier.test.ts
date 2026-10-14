@@ -585,7 +585,7 @@ describe('[§8 · #67] a parcel is screened against the prohibited-items list', 
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     for (const [packageDescription, label] of [
       ['2 bottles of El Dorado', 'alcohol'], ['20lb gas cylinder', 'cooking gas (LPG)'], ['Pack of cigarettes', 'tobacco and cigarettes'],
-      ['R​um for the party', 'alcohol'], ['Panadol for my mother', 'medicines'], ['Ganja', 'cannabis and illegal drugs'],
+      ['R\u200Bum for the party', 'alcohol'], ['Panadol for my mother', 'medicines'], ['Ganja', 'cannabis and illegal drugs'],
     ] as const) {
       const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription }, sender.token);
       expect(res.statusCode, packageDescription).toBe(409);

@@ -122,7 +122,7 @@ describe('[§8 launch] never approvable: the item IS beer, wine, spirits, tobacc
 
 describe('[§8 launch] disguised spellings read as the word they hide (Opus S3-10)', () => {
   it.each([
-    'R​um 750ml', 'Ru‍m', 'R﻿um', 'R­um', 'Rцm', 'Rum сake', 'Ｒｕｍ', 'ＲＵＭ　７５０ｍｌ', 'R.U.M', 'R U M 750ml',
+    'R\u200Bum 750ml', 'Ru\u200Dm', 'R\uFEFFum', 'R\u00ADum', 'Rцm', 'Rum сake', 'Ｒｕｍ', 'ＲＵＭ\u3000７５０ｍｌ', 'R.U.M', 'R U M 750ml',
     'V-O-D-K-A', 'G.I.N', 'Неineken', 'Ηennessy', 'Mаrlboro', 'ｖａｐｅ',
   ])('%s is not CLEAR', (name) => {
     expect(verdict(name).state, name).not.toBe('CLEAR');
@@ -163,12 +163,12 @@ describe('[§8 launch] the database pre-filter still keeps every disguised spell
 
   it('every listed word and brand-first word, disguised every way, is kept when the classifier catches it', () => {
     const disguises: Array<(t: string) => string> = [
-      (t) => [...t].join('​'),
+      (t) => [...t].join('\u200B'),
       (t) => [...t].map((ch) => (ch === ' ' ? ch : String.fromCodePoint(ch.codePointAt(0)! + 0xFEE0))).join(''),
       (t) => t.replace(/o/g, 'о').replace(/a/g, 'а').replace(/e/g, 'е').replace(/c/g, 'с').replace(/p/g, 'р'),
       (t) => (t.includes(' ') ? t : [...t].join('.')),
       (t) => (t.includes(' ') ? t : [...t].join(' ').toUpperCase()),
-      (t) => `${t[0]!.toUpperCase()}­${t.slice(1)} 750ml`,
+      (t) => `${t[0]!.toUpperCase()}\u00AD${t.slice(1)} 750ml`,
     ];
     let checked = 0;
     for (const term of [...Object.values(PROHIBITED_TERMS).flat(), ...PROHIBITED_BRAND_FIRST_WORDS]) {
@@ -180,7 +180,7 @@ describe('[§8 launch] the database pre-filter still keeps every disguised spell
       }
     }
     expect(checked).toBeGreaterThan(2000);
-    for (const raw of ['Rosé 750ml', 'ROSÉ', 'Rosé wine', 'R​um', 'Rцm', 'Ｒｕｍ', 'R.U.M']) expect(kept(raw), raw).toBe(true);
+    for (const raw of ['Rosé 750ml', 'ROSÉ', 'Rose\u0301 wine', 'R\u200Bum', 'Rцm', 'Ｒｕｍ', 'R.U.M']) expect(kept(raw), raw).toBe(true);
   });
 
   it('the format characters it removes are exactly Unicode\'s, and the look-alike table is one-to-one', () => {
