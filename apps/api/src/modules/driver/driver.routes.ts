@@ -781,13 +781,8 @@ export async function driverRoutes(app: FastifyInstance) {
         // [TAXI multi-stop] A ride with stops: how many and where, in order. The
         // dropoff above stays the FINAL destination; distance, duration and
         // fare are the whole route's. A ride without stops gains no key.
-        ...(itinerary && {
-          stopCount: itinerary.stopCount,
-          stops: itinerary.stops.map((stop) => {
-            const point = coarsePoint(stop.lat, stop.lng);
-            return { sequence: stop.sequence, lat: point?.lat ?? null, lng: point?.lng ?? null };
-          }),
-        }),
+        // Coarse stops only, like the offer cards (offerItinerary).
+        ...itinerary,
       };
     });
 

@@ -99,3 +99,19 @@ describe('unassigned boards reveal operational summaries only', () => {
     expect(JSON.stringify(row)).not.toContain('private');
   });
 });
+
+describe('pre-accept offer cards name only public places', () => {
+  it('a store pickup is named; a courier or taxi pickup and every drop-off are not', async () => {
+    const { offerCardAddresses, coarseStops } = await import('../modules/dispatch/board-privacy');
+    expect(offerCardAddresses({ orderType: 'FOOD_DELIVERY', pickupAddress: 'Store, Main St', deliveryAddress: 'Home' }))
+      .toEqual({ pickupAddress: 'Store, Main St', deliveryAddress: null });
+    expect(offerCardAddresses({ orderType: 'GROCERY_DELIVERY', pickupAddress: 'Market', deliveryAddress: 'Home' }))
+      .toEqual({ pickupAddress: 'Market', deliveryAddress: null });
+    for (const orderType of ['COURIER', 'TAXI']) {
+      expect(offerCardAddresses({ orderType, pickupAddress: 'Sender home', deliveryAddress: 'Recipient home' }))
+        .toEqual({ pickupAddress: null, deliveryAddress: null });
+    }
+    expect(coarseStops([{ sequence: 2, lat: pickup.lat, lng: pickup.lng }, { sequence: 3, lat: null, lng: null }]))
+      .toEqual([{ sequence: 2, lat: snap(pickup.lat), lng: snap(pickup.lng) }, { sequence: 3, lat: null, lng: null }]);
+  });
+});

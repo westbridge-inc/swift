@@ -688,36 +688,43 @@ describe('the reads carry the stops, in order', () => {
     const res = await requestRide(customer.token, trip([S1, S2, S3], { expectedFare: q.fare }), `read-${nanoid(10)}`);
     expect(res.statusCode, res.body).toBe(201);
     const rideId = res.json().data.ride.id as string;
-    const preview = [
-      { sequence: 1, address: S1.address, lat: S1.lat, lng: S1.lng },
-      { sequence: 2, address: S2.address, lat: S2.lat, lng: S2.lng },
-      { sequence: 3, address: S3.address, lat: S3.lat, lng: S3.lng },
-    ];
+    // [L05] Before acceptance every surface (live card, rebuilt card, board)
+    // shows a stop as its order and a ~330 m point: no typed address.
+    const coarseStops = [S1, S2, S3].map((s, i) => ({ sequence: i + 1, lat: Math.round(s.lat / 0.003) * 0.003, lng: Math.round(s.lng / 0.003) * 0.003 }));
+    const noStopAddress = (stops: Array<Record<string, unknown>>) => stops.every((s) => !('address' in s));
 
     // The live card (socket), as the app receives it.
     const live = emitted.filter((e) => e.event === 'dispatch:offer' && e.room === `user:${driver.userId}`).at(-1);
     expect(live, 'the nearest driver was offered the ride').toBeTruthy();
     const card = JSON.parse(JSON.stringify(live!.payload));
-    expect(card).toMatchObject({ orderId: rideId, stopCount: 3, stops: preview });
+    expect(card).toMatchObject({ orderId: rideId, stopCount: 3, stops: coarseStops });
+    expect(noStopAddress(card.stops), 'the live card names no stop address').toBe(true);
+    expect(JSON.stringify(card)).not.toContain(S1.address);
     expect(Object.keys(card)).toEqual([...LIVE_OFFER_KEYS, 'stopCount', 'stops']);
 
     // The card rebuilt after the app died: the same stops.
     const recovered = await call(app, 'GET', '/api/v1/driver/offers/current', driver.token);
     expect(recovered.statusCode, recovered.body).toBe(200);
     const offer = recovered.json().data.offer;
-    expect(offer).toMatchObject({ orderId: rideId, offerAttemptId: card.offerAttemptId, stopCount: 3, stops: preview });
+    expect(offer).toMatchObject({ orderId: rideId, offerAttemptId: card.offerAttemptId, stopCount: 3, stops: coarseStops });
+    expect(noStopAddress(offer.stops), 'the rebuilt card names no stop address').toBe(true);
+    // A taxi's pickup and destination are private places: the rebuilt card keeps
+    // the keys (the installed app falls back) but names neither before accept.
+    expect({ pickup: offer.pickupAddress, dropoff: offer.deliveryAddress }).toEqual({ pickup: null, dropoff: null });
+    expect(recovered.body).not.toContain(S1.address);
+    expect(recovered.body).not.toContain(DROPOFF_ADDRESS);
     expect(Object.keys(offer)).toEqual([...RECOVERED_OFFER_KEYS, 'stopCount', 'stops']);
     // A server restart loses nothing either: a fresh instance (its own dispatch
     // service, its own Redis connection) rebuilds the same card from the ride.
     restarted = await buildApp();
     const afterRestart = await call(restarted, 'GET', '/api/v1/driver/offers/current', driver.token);
-    expect(afterRestart.json().data.offer).toMatchObject({ orderId: rideId, offerAttemptId: card.offerAttemptId, stopCount: 3, stops: preview });
+    expect(afterRestart.json().data.offer).toMatchObject({ orderId: rideId, offerAttemptId: card.offerAttemptId, stopCount: 3, stops: coarseStops, pickupAddress: null, deliveryAddress: null });
 
     // The open board.
     const board = await call(app, 'GET', '/api/v1/driver/rides/available', driver.token);
     const item = (board.json().data as { id: string }[]).find((r) => r.id === rideId);
-    const coarseStops = [S1, S2, S3].map((s, i) => ({ sequence: i + 1, lat: Math.round(s.lat / 0.003) * 0.003, lng: Math.round(s.lng / 0.003) * 0.003 }));
     expect(item).toMatchObject({ stopCount: 3, stops: coarseStops, dropoffLat: Math.round(DEST.lat / 0.003) * 0.003, dropoffLng: Math.round(DEST.lng / 0.003) * 0.003, fareTotal: q.fare });
+    expect(noStopAddress((item as unknown as { stops: Array<Record<string, unknown>> }).stops), 'the board names no stop address').toBe(true);
     expect(item).not.toHaveProperty('pickupAddress');
     expect(item).not.toHaveProperty('dropoffAddress');
     expect(Object.keys((item as { id: string; customer: object }).customer)).toEqual(['displayRating']);
