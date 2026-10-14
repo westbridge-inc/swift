@@ -1350,7 +1350,7 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.vendor.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(vendors, total, { page, limit, skip }) };
+    return { success: true, ...paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip }) };
   });
 
   app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
@@ -1361,7 +1361,7 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       orderBy: { createdAt: 'asc' },
     });
-    return { success: true, data: vendors };
+    return { success: true, data: vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })) };
   });
 
   /** One business, whole story: profile, owner, sibling stores, subscription,
@@ -1404,6 +1404,7 @@ export async function adminRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...vendor,
+        vatRegistrationNumber: undefined,
         recentOrders: recentOrders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
         prohibitedItems,
       },
@@ -1629,7 +1630,8 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { vendorId: id },
     });
 
-    return { success: true, data: updated };
+    // [VERIFY-DOCS V5] The owner's VAT billing number never rides an admin store reply.
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   app.put('/vendors/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
@@ -1659,7 +1661,7 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { vendorId: id },
     });
 
-    return { success: true, data: updated };
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   app.put('/vendors/:id/feature', { preHandler: [adminGuard] }, async (request) => {
@@ -1680,7 +1682,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     await audit(request.user.userId, 'TOGGLE_FEATURED_VENDOR', 'Vendor', id, { isFeatured }, request);
 
-    return { success: true, data: updated };
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   // ─── Riders ────────────────────────────────────────────────────────────
