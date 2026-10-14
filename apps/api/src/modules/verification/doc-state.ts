@@ -67,6 +67,9 @@ export const DOC_TRANSITIONS: readonly DocTransition[] = [
   { from: 'IN_REVIEW', to: 'INFO_REQUESTED', event: 'decide', spec: 'T14' },
   { from: 'IN_REVIEW', to: 'REVIEW_QUEUED', event: 'decide', spec: 'T15 escalate · X-RELEASE' },
   { from: 'INFO_REQUESTED', to: 'SUPERSEDED', event: 'resubmit', spec: 'T16' },
+  // [REPLACE-PENDING · owner request 8 Oct, brief 11 Oct] a newer copy uploaded before review replaces the waiting one
+  { from: 'REVIEW_QUEUED', to: 'SUPERSEDED', event: 'resubmit', spec: 'REPLACE-PENDING' },
+  { from: 'IN_REVIEW', to: 'SUPERSEDED', event: 'resubmit', spec: 'REPLACE-PENDING' },
   { from: 'APPROVED', to: 'COMMITTED', event: 'commit', spec: 'T17' },
   { from: 'AUTO_APPROVED', to: 'COMMITTED', event: 'commit', spec: 'T17' },
   { from: 'COMMITTED', to: 'EXPIRED', event: 'expire', spec: 'T20' },

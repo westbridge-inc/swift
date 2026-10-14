@@ -6,6 +6,7 @@ import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
 import { MutationError } from '@/components/MutationError';
 import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
+import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
 import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
@@ -13,7 +14,7 @@ import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type Rej
 import { REVIEW_STATUSES, applicantId, isSystemActor, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
-  'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
+  'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
   'road_service_licence', 'food_handler_cert', 'gra_restaurant_licence',
   'drivers_licence', 'vehicle_registration',
   // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate
@@ -48,6 +49,8 @@ export default function VerificationPage() {
   const [selected, setSelected] = useState<ReviewDocument | null>(null);
   const [viewed, setViewed] = useState(false);
   const [expiresAt, setExpiresAt] = useState('');
+  const [documentNumber, setDocumentNumber] = useState('');
+  const [issuedOn, setIssuedOn] = useState('');
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
   const [decision, setDecision] = useState<'approve' | 'reject' | null>(null);
   const [reason, setReason] = useState('');
@@ -111,7 +114,7 @@ export default function VerificationPage() {
     documentList.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
   };
   const selectDocument = (doc: ReviewDocument) => {
-    setSelected(doc); setViewed(false); setExpiresAt(''); setInsurance(EMPTY_INSURANCE);
+    setSelected(doc); setViewed(false); setExpiresAt(''); setDocumentNumber(''); setIssuedOn(''); setInsurance(EMPTY_INSURANCE);
     setMutationError(null); setDecision(null); setReason(''); setReasonCode('');
   };
   const openApplicant = (next: Applicant | null) => {
@@ -138,7 +141,11 @@ export default function VerificationPage() {
   const isInsurance = selected?.docType === 'vehicle_insurance';
   const insuranceReady = insurance.insurerName.trim() && insurance.policyNumber.trim() &&
     (insurance.coverageClass !== 'HIRE' || (insurance.hireClassConfirmed && insurance.plateCrossChecked));
-  const approveBlocked = !viewed || !expiryOk || (isInsurance && !insuranceReady);
+  const needsNumber = selected?.reviewerTypes?.includes('documentNumber') ?? false;
+  const needsIssuedOn = selected?.reviewerTypes?.includes('issuedOn') ?? false;
+  const typedReady = (!needsNumber || documentNumber.replace(/[^a-z0-9]/gi, '').length >= 4)
+    && (!needsIssuedOn || (!!issuedOn && Number.isFinite(Date.parse(issuedOn)) && Date.parse(issuedOn) <= now));
+  const approveBlocked = !viewed || !expiryOk || !typedReady || (isInsurance && !insuranceReady);
   const currentIndex = filtered.findIndex((a) => a.id === applicant?.id);
   const move = (offset: number) => {
     const next = filtered[currentIndex + offset];
@@ -150,6 +157,8 @@ export default function VerificationPage() {
       return action === 'approve' ? approveDoc(doc.id, {
         ...(needsExpiry ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
         ...(isInsurance ? { insurance } : {}),
+        ...(needsNumber ? { documentNumber: documentNumber.trim() } : {}),
+        ...(needsIssuedOn ? { issuedOn: new Date(issuedOn).toISOString() } : {}),
       }, note) : rejectDoc(doc.id, note, code as RejectionReasonCode);
     },
     onError: (error) => setMutationError(error),
@@ -201,6 +210,7 @@ export default function VerificationPage() {
   return <div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
     <div inert={decision ? true : undefined}>
       <header className="rc-page-heading"><div><h1>Review Center</h1><p>Review the evidence. Record the decision. Keep applicants moving.</p></div><span className="rc-muted">Oldest submissions first</span></header>
+      {!applicant && <ReviewerAccess />}
       {notice && <p role="status" className="rc-notice">{notice}</p>}
       <div className="rc-queue-controls">
         <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{s}</button>)}</div>
@@ -259,7 +269,9 @@ export default function VerificationPage() {
               ]);
               openApplicant(null);
             }} />
-            {selected.status === 'PENDING' && (needsExpiry || isInsurance) && <div className="rc-fields">
+            {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn) && <div className="rc-fields">
+              {needsNumber && <label>Document number<input aria-label="Document number" autoComplete="off" maxLength={40} value={documentNumber} onChange={(e) => setDocumentNumber(e.target.value)} disabled={busy} /><small>Read the number from this document.</small></label>}
+              {needsIssuedOn && <label>Issue date printed on the document<input type="date" aria-label="Issue date printed on the document" max={new Date(now).toISOString().slice(0, 10)} value={issuedOn} onChange={(e) => setIssuedOn(e.target.value)} disabled={busy} /><small>Read its issue date. The server determines when it must be checked again.</small></label>}
               {needsExpiry && <label>Expiry printed on the document (required)<input type="date" aria-label="Expiry printed on the document" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} disabled={busy} />{!expiryOk && <small>{expiresAt ? 'That date has already passed; an expired document cannot be approved.' : 'This document type expires — key the date from the document.'}</small>}</label>}
               {isInsurance && <fieldset disabled={busy}><legend>Insurance 5-point check</legend>
                 <label>Insurer<input placeholder="Insurer" value={insurance.insurerName} onChange={(e) => setInsurance({ ...insurance, insurerName: e.target.value })} /></label>
