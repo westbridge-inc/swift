@@ -45,6 +45,7 @@ import {
   type ProhibitedClass,
 } from './prohibited-items';
 import { prefilterCandidateIds } from './prohibited-scan.service';
+import { trackBackgroundRead } from '../../lib/background-reads';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -233,9 +234,10 @@ function staleWhileRevalidate(cache: Map<string, Swr>, key: string, load: () => 
     return value;
   }
   if (now - entry.at >= HIDDEN_IDS_CACHE_MS && !entry.refreshing) {
-    entry.refreshing = load()
+    // Tracked, so a server closing waits for it before the database disconnects.
+    entry.refreshing = trackBackgroundRead(load()
       .then((ids) => { cache.set(key, { at: Date.now(), value: Promise.resolve(ids), refreshing: null }); })
-      .catch(() => { entry.refreshing = null; });
+      .catch(() => { entry.refreshing = null; }));
   }
   return entry.value;
 }

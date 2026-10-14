@@ -8,6 +8,7 @@ import { getTenantContext, tenantContext, type TenantMode } from './tenant-conte
 import { tenantUnscopedAccessCounter, tenantBindCounter } from './observability';
 import { poolRoleForApiProcess, resolveDatabaseUrl } from '../utils/db-pool';
 import { isDevelopment } from '../utils/runtime-mode';
+import { settleBackgroundReads } from '../lib/background-reads';
 
 // Multi-tenancy stage 2 — tenant scoping at the ORM layer. When a request has
 // bound a tenant (tenant-context), EVERY direct operation on a tenant-owned
@@ -744,6 +745,9 @@ export const prismaPlugin = fp(async (app: FastifyInstance) => {
   app.decorate('prisma', prisma as unknown as PrismaClient);
 
   app.addHook('onClose', async () => {
+    // A read a request started and did not wait for finishes first: a query in flight across
+    // $disconnect leaves this one shared client unable to answer the next caller. [#1678]
+    await settleBackgroundReads();
     await prisma.$disconnect();
   });
 });
