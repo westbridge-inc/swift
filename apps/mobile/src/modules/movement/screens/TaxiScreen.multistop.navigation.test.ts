@@ -134,6 +134,11 @@ vi.mock('../../../kit', async () => {
   return {
     T, Eyebrow: T, PopupTitle: T, Card: Box,
     PillButton,
+    // Typable, so the courier form can be filled (TaxiScreen draws none).
+    LabeledInput: (p: any) => h('input', { value: p.value ?? '', placeholder: p.placeholder, onChange: (e: any) => p.onChangeText?.(e.target.value) }),
+    TonePill: (p: any) => h('span', null, p.label),
+    // [owner #67] The courier form's "This parcel has no prohibited items" tick.
+    BrandCheckbox: (p: any) => h('button', { type: 'button', role: 'checkbox', 'aria-label': p.label, 'aria-checked': !!p.checked, onClick: p.onToggle }),
     Money: (p: any) => h('span', null, money(p.amount)),
     CircleChip: (p: any) => h('button', { type: 'button', 'aria-label': p.label, onClick: p.onPress }, ''),
     StatePill: (p: any) => h('span', { 'data-pill': '', style: { borderWidth: 1, borderStyle: 'solid', borderColor: color.border.subtle, borderRadius: 99, padding: '2px 8px', fontSize: 11 } }, p.label),
@@ -141,7 +146,7 @@ vi.mock('../../../kit', async () => {
     CalmRadar: (p: any) => h('div', null, p.title),
     EmptyState: (p: any) => h('div', null, p.title),
     LoadingBlock: () => h('div', null, 'Loading'),
-    IconChip: () => null, Pictogram: () => null, PinGlyph: () => null, Stars: () => null, VehicleRender: () => null,
+    IconChip: () => null, DecorativeIcon: () => null, Pictogram: () => null, PinGlyph: () => null, Stars: () => null, VehicleRender: () => null,
     cardShadow: {},
   };
 });
@@ -149,7 +154,15 @@ vi.mock('../../../kit/toast', () => ({ toast: { show: vi.fn(), error: vi.fn(), s
 vi.mock('../../../kit/map-style', () => ({ rideMapProps: () => ({}) }));
 vi.mock('../map/useInterpolatedDriver', () => ({ useInterpolatedDriver: () => ({ hasFix: false, stale: false, animatedProps: {} }) }));
 // The real ride hooks, through the real API client; nothing else from the hooks barrel.
-vi.mock('../../../hooks', async () => ({ ...(await vi.importActual<typeof import('../../../hooks/rides')>('../../../hooks/rides')) }));
+vi.mock('../../../hooks', async () => ({
+  ...(await vi.importActual<typeof import('../../../hooks/rides')>('../../../hooks/rides')),
+  ...(await vi.importActual<typeof import('../../../hooks/courier')>('../../../hooks/courier')),
+}));
+vi.mock('../../../kit/journey-rail', async () => {
+  const R = await import('react');
+  return { JourneyRail: (p: any) => R.createElement('div', null, p.start, p.end) };
+});
+vi.mock('../../../hooks/mover', () => ({ evidenceFix: () => { throw new Error('No mover evidence in a customer quote test'); } }));
 vi.mock('../../../hooks/customer', () => ({ customerKeys: { homeAll: ['customer', 'home'] } }));
 vi.mock('../../../hooks/useDeviceLocation', () => ({ useDeviceLocation: () => ({ resolve: vi.fn() }) }));
 vi.mock('../../../services/socket', () => ({ connectSocket: vi.fn(), getSocket: () => fx.socket, subscribeToOrder: vi.fn() }));
@@ -165,7 +178,8 @@ vi.mock('../../../components/LocationPrimerCard', () => ({ LocationPrimerCard: (
 vi.mock('../../../lib/images', () => ({ mediaUrl: (x: unknown) => x }));
 vi.mock('../../../lib/haptics', () => ({ haptic: { success: vi.fn(), commit: vi.fn(), warn: vi.fn(), failure: vi.fn(), select: vi.fn() } }));
 vi.mock('../../../lib/openExternal', () => ({ openExternal: vi.fn() }));
-vi.mock('../../../services/emergencyPolicy', () => ({ currentMarketDial: () => ({ kind: 'manual' }), emergencyDialCopy: () => '', previewEmergencyDial: () => null }));
+// The live ride now hosts the SOS ceremony (TaxiScreen.sos.navigation.test.ts), which reads the market policy too.
+vi.mock('../../../services/emergencyPolicy', () => ({ currentMarketDial: () => ({ kind: 'manual' }), emergencyDialCopy: () => '', previewEmergencyDial: () => null, useEmergencyPolicy: () => ({ country: 'GY', dial: { kind: 'manual' } }), emergencyDialFor: () => ({ kind: 'manual' }) }));
 vi.mock('../taxiEntry', () => ({ signInForTaxi: vi.fn() }));
 vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null }) } }));
 vi.mock('../../../lib/storage', () => ({
@@ -193,6 +207,7 @@ vi.mock('../../../stores/authStore', () => {
 
 import { api } from '../../../services/api';
 import { TaxiScreen } from './TaxiScreen';
+import { CourierScreen } from './CourierScreen';
 
 const LAMAHA = { lat: 6.82, lng: -58.16, label: 'Lamaha Street' };
 const CAMP = { lat: CAMP_STREET.lat, lng: CAMP_STREET.lng, label: CAMP_STREET.address };
@@ -285,7 +300,7 @@ describe('flag off — the booking screen is exactly today’s', () => {
   it.each([
     ['an older server without the capability read (404)', () => refuse(404, 'NOT_FOUND')],
     ['a server with stops switched off (maxStops 0)', () => ok({ maxStops: 0 })],
-  ])('%s: no stop control anywhere; today’s bodies; still a key', async (_label, capabilities) => {
+  ])('%s: no stop control anywhere; today’s bodies plus the fare on screen; still a key', async (_label, capabilities) => {
     fx.routes['get /rides/capabilities'] = capabilities;
     await mount();
     await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
@@ -300,7 +315,9 @@ describe('flag off — the booking screen is exactly today’s', () => {
 
     await click(requestButton() ?? null);
     const [request] = sent('post /rides/request');
-    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass']);
+    // [PRICE-LOCK] Today's body plus the fare the passenger was shown.
+    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass', 'expectedFare']);
+    expect(bodyOf(request).expectedFare).toBe(ESTIMATE_WITHOUT_STOPS.data.tiers.find((t) => t.rideClass === 'ECONOMY')!.fare);
     expect(request.headers.get('Idempotency-Key')).toMatch(/^ride_[0-9a-z]+_[0-9a-z]{10}$/);
   });
 });
@@ -399,7 +416,9 @@ describe('[review 1] the server takes stops away after the rider chose some', ()
 
     await click(requestButton() ?? null);
     const [request] = sent('post /rides/request');
-    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass']);
+    // No stops; the fare of the stop-free quote on screen [PRICE-LOCK].
+    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass', 'expectedFare']);
+    expect(bodyOf(request).expectedFare).toBe(ESTIMATE_WITHOUT_STOPS.data.tiers.find((t) => t.rideClass === 'ECONOMY')!.fare);
   });
 
   it('maxStops lowered below the count: the extra stops go, the rest are booked', async () => {
@@ -576,5 +595,123 @@ describe('the live ride', () => {
     await act(async () => fx.fire('order:status_changed', { orderId: 'cm-ride-3', status: 'DELIVERED', fare: { total: 2400 } }));
     await settle();
     expect(byTestId('post-trip')?.textContent).toBe('no breakdown');
+  });
+});
+
+
+// [PRICE-LOCK · owner: the price shown is the price charged]
+describe('the price on screen is the price booked', () => {
+  /** Types into an input the way a person does (React reads the native value). */
+  async function type(el: HTMLInputElement | null, value: string) {
+    expect(el, 'the field is on screen').toBeTruthy();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')!.set!.call(el, value);
+      const DomEvent = (el!.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
+      el!.dispatchEvent(new DomEvent('input', { bubbles: true }));
+    });
+    await settle();
+  }
+  const courierQuote = (totalFee: number) => ok({ baseFee: 800, distanceFee: 360, sizeSurcharge: 0, speedMultiplier: 1, totalFee, estimatedMinutes: 45, currency: 'GYD', distanceKm: 3 });
+
+  it('a ride without stops: a changed fare is shown, re-quoted, and booked at the new fare', async () => {
+    let fare = 2400;
+    fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, tiers: [{ rideClass: 'ECONOMY', multiplier: 1, fare, capacity: 4, source: 'formula' }] });
+    let calls = 0;
+    fx.routes['post /rides/request'] = () => (++calls === 1
+      ? refuse(409, 'FARE_CHANGED', { expectedFare: 2400, fare: 2600, rideClass: 'ECONOMY', currencyCode: 'GYD' })
+      : { status: 201, data: REQUEST_ANSWER_WITH_ONE_STOP });
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    fare = 2600;
+    await click(requestButton() ?? null);
+    expect(requestButton()?.textContent).toMatch(/\$2.?600$/);
+    await click(requestButton() ?? null);
+    expect(sent('post /rides/request').map((c) => bodyOf(c).expectedFare)).toEqual([2400, 2600]);
+  });
+
+  it('courier sends the fee on the button, and a changed fee is quoted again before anything is sent', async () => {
+    let fee = 1160;
+    fx.routes['get /courier/orders'] = () => ok([]);
+    fx.routes['post /courier/estimate'] = () => courierQuote(fee);
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1
+      ? refuse(409, 'PRICE_CHANGED', { expectedFee: 1160, fee: 1280, currencyCode: 'GYD' })
+      : { status: 201, data: { success: true, data: { orderId: 'parcel-1', fee: 1280 } } });
+    await act(async () => root.render(React.createElement(QueryClientProvider, { client }, React.createElement(CourierScreen, { navigation }))));
+    await settle();
+    await pickFromSearch(byLabel('Set drop-off location'), LAMAHA);
+    await type(host.querySelector('input[placeholder="Recipient name"]'), 'Aunty Pat');
+    await type(host.querySelector('input[placeholder="Recipient phone"]'), '+5926001234');
+    const sendButton = () => Array.from(host.querySelectorAll('button')).find((b) => /^Send parcel/.test(b.textContent ?? '')) as HTMLElement | undefined;
+    expect(sendButton()?.textContent).toMatch(/1.?160$/);
+    // [owner #67] Nothing is sent until the sender ticks "This parcel has no prohibited items".
+    expect(sendButton()?.hasAttribute('disabled')).toBe(true);
+    expect(text()).toContain('Tick “This parcel has no prohibited items” to continue.');
+    await click(byLabel('This parcel has no prohibited items'));
+    expect(sendButton()?.hasAttribute('disabled')).toBe(false);
+    fee = 1280;
+    const quotesBefore = sent('post /courier/estimate').length;
+    await click(sendButton() ?? null);
+    expect(text()).toContain('server words for PRICE_CHANGED');
+    expect(sent('post /courier/estimate').length).toBeGreaterThan(quotesBefore);
+    expect(sendButton()?.textContent).toMatch(/1.?280$/);
+    await click(sendButton() ?? null);
+    expect(sent('post /courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
+    expect(sent('post /courier/order').map((c) => bodyOf(c).declaresNoProhibitedItems)).toEqual([true, true]);
+  });
+});
+
+describe('a road-routing outage is explained on single-stop quote screens', () => {
+  it('taxi says routing is unavailable instead of blaming the destination', async () => {
+    fx.routes['post /rides/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    expect(text()).toContain('Road routing is unavailable. Try again in a moment.');
+    expect(text()).not.toContain('Try another destination');
+    expect(requestButton()?.hasAttribute('disabled') ?? true).toBe(true);
+  });
+  it('courier explains the outage and leaves a working retry control', async () => {
+    fx.routes['get /courier/orders'] = () => ok([]);
+    fx.routes['post /courier/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await act(async () => root.render(React.createElement(QueryClientProvider, { client }, React.createElement(CourierScreen, { navigation }))));
+    await settle();
+    await pickFromSearch(byLabel('Set drop-off location'), LAMAHA);
+    expect(text()).toContain('Road routing is unavailable. Try again in a moment.');
+    const before = sent('post /courier/estimate').length;
+    await click(byLabel('Retry'));
+    expect(sent('post /courier/estimate').length).toBeGreaterThan(before);
+    expect(byLabel('Send parcel')?.hasAttribute('disabled')).toBe(true);
+  });
+});
+
+describe('a cached road quote does not hide a later routing refusal', () => {
+  it('taxi removes the old fare and disables booking after a failed refresh', async () => {
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    expect(requestButton()?.hasAttribute('disabled')).toBe(false);
+    fx.routes['post /rides/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await act(async () => { await client.invalidateQueries({ queryKey: ['rides', 'estimate'] }); });
+    await settle();
+    expect(text()).toContain('Road routing is unavailable. Try again in a moment.');
+    expect(requestButton()?.hasAttribute('disabled')).toBe(true);
+    expect(requestButton()?.textContent).toBe('Request ride');
+  });
+  it('courier hides a stale price and its retry can recover a real quote', async () => {
+    const price = { totalFee: 1100, distanceKm: 3, estimatedMinutes: 12 };
+    fx.routes['get /courier/orders'] = () => ok([]);
+    fx.routes['post /courier/estimate'] = () => ok(price);
+    await act(async () => root.render(React.createElement(QueryClientProvider, { client }, React.createElement(CourierScreen, { navigation }))));
+    await settle();
+    await pickFromSearch(byLabel('Set drop-off location'), LAMAHA);
+    expect(byLabel('Send parcel · $1,100')).toBeTruthy();
+    fx.routes['post /courier/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await act(async () => { await client.invalidateQueries({ queryKey: ['courier', 'estimate'] }); });
+    await settle();
+    expect(text()).toContain('Road routing is unavailable. Try again in a moment.');
+    expect(byLabel('Send parcel · $1,100')).toBeNull();
+    fx.routes['post /courier/estimate'] = () => ok(price);
+    await click(byLabel('Retry'));
+    expect(byLabel('Send parcel · $1,100')).toBeTruthy();
+    expect(text()).not.toContain('Road routing is unavailable.');
   });
 });

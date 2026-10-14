@@ -1,7 +1,7 @@
 import { money } from './money';
 
 // Billing view-model helpers shared by the mover + vendor billing surfaces
-// (My Swift Number screen, wallet status, honest grace/suspension banners).
+// (My Swift Number screen, fee paid ahead, honest grace/suspension banners).
 // Pure functions only, so they unit-test without a renderer. The subscription
 // payload is the spread of the Subscription row + billing/san.service.sanDisplay
 // + billing/agent-cash.service.payInfo (see the /rider|/driver|/vendor
@@ -104,8 +104,8 @@ export function resumeBillingMethod(sub: any): 'CASH' | 'MOBILE_MONEY' {
   return sub?.billingMethod === 'MOBILE_MONEY' ? 'MOBILE_MONEY' : 'CASH';
 }
 
-/** Whole weeks a parked wallet balance covers at the weekly fee. Floors — we
- *  never over-promise coverage. 0 when the fee is unknown or nothing's banked. */
+/** Whole weekly fees the money received for coming weeks pays. Floors — we
+ *  never over-promise. 0 when the fee is unknown or nothing has been received. */
 export function weeksCovered(balanceGyd?: number | null, weeklyGyd?: number | null): number {
   const bal = Number(balanceGyd ?? 0);
   const wk = Number(weeklyGyd ?? 0);
@@ -113,15 +113,20 @@ export function weeksCovered(balanceGyd?: number | null, weeklyGyd?: number | nu
   return Math.floor(bal / wk);
 }
 
-/** The banked-wallet line for a positive balance — "$2,400 banked · covers 2
- *  weeks", dropping the coverage clause when the weekly fee is unknown. null
- *  when nothing is banked (the caller then renders nothing). */
-export function walletLine(balanceGyd?: number | null, weeklyGyd?: number | null): string | null {
-  const bal = Number(balanceGyd ?? 0);
-  if (!(bal > 0)) return null;
-  const weeks = weeksCovered(bal, weeklyGyd);
-  const covers = weeks >= 1 ? ` · covers ${weeks} ${weeks === 1 ? 'week' : 'weeks'}` : '';
-  return `${money(bal)} banked${covers}`;
+/** [OWNER RULING 8 Oct, NO "WALLET" · owner #62, NO PAYING AHEAD] Money
+ *  received before its week starts is named only as the next weekly fee being
+ *  paid: never a wallet, a balance or a top-up, and never "paid ahead" or a
+ *  count of weeks (partners pay one week at a time). Swift holds no money; this
+ *  is Swift's own fee, paid before it is due. Less than one week (or an unknown
+ *  weekly fee) names the amount instead. null when nothing has been received
+ *  (the caller then renders nothing). */
+export function feePaidAheadLine(paidAheadGyd?: number | null, weeklyGyd?: number | null): string | null {
+  const paid = Number(paidAheadGyd ?? 0);
+  if (!(paid > 0)) return null;
+  if (weeksCovered(paid, weeklyGyd) >= 1) return 'Next weekly fee already paid';
+  return Number(weeklyGyd ?? 0) > 0
+    ? `${money(paid)} paid toward your next weekly fee`
+    : `${money(paid)} paid toward your weekly fee`;
 }
 
 // ---------------------------------------------------------------------------

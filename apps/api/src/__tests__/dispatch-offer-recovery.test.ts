@@ -208,6 +208,10 @@ describe('P12 — reopening inside the window rebuilds the SAME card', () => {
     }
     expect(typeof rebuilt.etaMinutes, '"N min away" is on the rebuilt card').toBe('number');
     expect(rebuilt.cashMath, 'the cash box is on the rebuilt card').toEqual(live.cashMath);
+    // [L05] Before acceptance the rebuilt card names the store's public pickup
+    // only; the customer's drop-off waits for acceptance (the live card names neither).
+    expect({ pickup: rebuilt.pickupAddress, dropoff: rebuilt.deliveryAddress }).toEqual({ pickup: 'Vendor HQ', dropoff: null });
+    expect(res.body).not.toContain('Customer place');
   });
 
   it('accept binds to the recovered generation: a fabricated attempt is refused WITHOUT consuming the live card', async () => {

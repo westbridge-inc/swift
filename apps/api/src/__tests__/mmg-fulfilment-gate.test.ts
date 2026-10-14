@@ -90,7 +90,7 @@ let rider: { userId: string; token: string };
 let riderId: string;
 let customer: { userId: string; token: string };
 
-async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: PaymentStatus; fee?: number; tip?: number; withRider?: boolean } = {}) {
+async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: PaymentStatus; fee?: number; tip?: number; withRider?: boolean; promisedAt?: Date } = {}) {
   const fee = opts.fee ?? 300;
   const tip = opts.tip ?? 200;
   const order = await app.prisma.order.create({
@@ -102,10 +102,15 @@ async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: Payment
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
       deliveryFee: fee, tipAmount: tip, totalAmount: 1000 + fee + tip,
       paymentMethod: 'MOBILE_MONEY', paymentStatus: opts.paymentStatus ?? 'PENDING',
+      ...(opts.promisedAt ? { promisedAt: opts.promisedAt } : {}),
     },
   });
   return order;
 }
+
+/** [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
+ *  cancel only when it is very late — 30 minutes past its promise. */
+const PAST_PROMISE = () => new Date(Date.now() - 31 * 60_000);
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, token: string, payload?: unknown, vendor?: string) {
   return app.inject({
@@ -268,7 +273,7 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
   });
 
   it('cancelling unattested MMG says the truth and tells the STORE a refund may be owed [REPORT-007-v4 F-02]', async () => {
-    const order = await makeMmgOrder('ACCEPTED', { withRider: false }); // payment PENDING
+    const order = await makeMmgOrder('ACCEPTED', { withRider: false, promisedAt: PAST_PROMISE() }); // payment PENDING; [owner #46/#52, 13–14 Oct]
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'changed my mind' });
     expect(res.statusCode).toBe(200);
     // Customer copy never asserts "no charge" on MMG — the platform cannot know.
@@ -457,28 +462,35 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     });
   }
 
-  it('a board grab with a lower fare refuses on captured MMG — assignment and price untouched', async () => {
+  // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the price.
+  // An older app's slider may still send a fare: the server ignores it and
+  // never errors the mover out — the order is taken at its checkout price.
+  // (Was: a lower fare on a captured MMG order was refused MMG_PRICE_LOCKED.)
+  it('a board grab carrying an older app\u2019s lower fare on captured MMG assigns at the checkout price — the fare is ignored, never an error', async () => {
     await riderOnline();
     const order = await makeMmgOrder('READY_FOR_PICKUP', { paymentStatus: 'CAPTURED', withRider: false });
     const res = await inject('POST', `/api/v1/rider/orders/${order.id}/accept`, rider.token, { fare: 100 });
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error?.code ?? res.json().code).toBe('MMG_PRICE_LOCKED');
+    expect(res.statusCode).toBe(200);
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(fresh.riderId).toBeNull();
+    expect(fresh.riderId).toBe(riderId);
     expect(Number(fresh.deliveryFee)).toBe(300);
     expect(Number(fresh.totalAmount)).toBe(1500);
+    await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
   });
 
-  it('the persistence seam itself refuses a repricing attempt on MMG (defense in depth)', async () => {
+  it('the persistence seam takes no price at all: a stray fee from any caller never reprices (defense in depth)', async () => {
+    await riderOnline();
     const order = await makeMmgOrder('ACCEPTED', { paymentStatus: 'CAPTURED', withRider: false });
-    await expect(
-      app.prisma.$transaction((tx) => orders.stageDirectRiderAssignment(tx, {
-        orderId: order.id, riderId, changedBy: rider.userId, moverUserId: rider.userId, requestedFee: 100,
-      })),
-    ).rejects.toMatchObject({ code: 'MMG_PRICE_LOCKED' });
+    await app.prisma.$transaction((tx) => orders.stageDirectRiderAssignment(tx, {
+      orderId: order.id, riderId, changedBy: rider.userId, moverUserId: rider.userId, requestedFee: 100,
+    } as unknown as Parameters<OrderService['stageDirectRiderAssignment']>[1]));
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(fresh.riderId).toBeNull();
+    expect(fresh.riderId).toBe(riderId);
     expect(Number(fresh.deliveryFee)).toBe(300);
+    expect(Number(fresh.totalAmount)).toBe(1500);
+    await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
   });
 
   it('a market-fee board grab (no undercut) still assigns a captured MMG order', async () => {
@@ -822,7 +834,7 @@ describe('[F-106-05] claim vs cancel, each COMMIT order forced (sequential, not 
   });
 
   it('CANCEL commits first: the claim is refused and no money state is minted', async () => {
-    const order = await makeMmgOrder('ACCEPTED', { withRider: false });
+    const order = await makeMmgOrder('ACCEPTED', { withRider: false, promisedAt: PAST_PROMISE() }); // [owner #46/#52, 13–14 Oct]
     const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'forced-cancel-first' });
     expect(cancel.statusCode, cancel.body).toBe(200);
     const claim = await inject('POST', `/api/v1/vendor/orders/${order.id}/confirm-payment`, vendorOwner.token, { reference: mmgRef() }, vendorId);

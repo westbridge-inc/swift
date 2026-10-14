@@ -650,6 +650,40 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(updated.averageRating).toBe(5);
   });
 
+  it('[owner #50 · coordinator ruling 14 Oct] the customer cancels free until the provider starts the job; once in progress the app refuses and names who to contact — never a fee', async () => {
+    const provider = await makeVerifiedProvider('carpenter');
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const job = async () => {
+      const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
+      expect(created.statusCode, created.body).toBe(201);
+      const jobId = created.json().data.id as string;
+      await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000 }, provider.token);
+      const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+      expect(scheduled.json().data.status).toBe('SCHEDULED');
+      return jobId;
+    };
+
+    // Scheduled, not started: free.
+    const notStarted = await job();
+    const freed = await inject('POST', `/api/v1/services/jobs/${notStarted}/cancel`, {}, customer.token);
+    expect(freed.statusCode, freed.body).toBe(200);
+    expect(freed.json().data.status).toBe('CANCELLED');
+    expect(freed.body).not.toMatch(/fee/i);
+
+    // Started: refused, nothing written.
+    const started = await job();
+    await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: started }, data: { status: 'IN_PROGRESS' } }), 'services-test-fixture');
+    const refused = await inject('POST', `/api/v1/services/jobs/${started}/cancel`, {}, customer.token);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toMatchObject({
+      code: 'SERVICE_JOB_STARTED',
+      message: 'Your provider has started this job, so it can no longer be cancelled in the app. Contact your provider, or Swift support, to change or stop it.',
+    });
+    expect(refused.body).not.toMatch(/fee/i);
+    const row = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: started } }), 'services-test-fixture');
+    expect({ status: row.status, cancelledAt: row.cancelledAt }).toEqual({ status: 'IN_PROGRESS', cancelledAt: null });
+  });
+
   it('refuses a slot that is not in the future; the job stays QUOTED and the customer can pick a real time', async () => {
     const provider = await makeVerifiedProvider('carpenter');
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');

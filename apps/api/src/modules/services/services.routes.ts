@@ -18,6 +18,7 @@ import {
   tradeRiskTier,
 } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
@@ -732,6 +733,13 @@ export async function servicesRoutes(app: FastifyInstance) {
     const { expectedUpdatedAt } = commandGeneration(command, job);
     if (['COMPLETED', 'CANCELLED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', 'This job is already closed');
     const cancelledByCustomer = job.customerId === request.user.userId;
+    // [owner #50 · coordinator ruling 14 Oct (Opus S3-3)] The one cancellation
+    // rule decides the customer's cancel: free until the provider starts the
+    // job, refused once it is in progress (contact the provider). Never a fee.
+    if (cancelledByCustomer) {
+      const verdict = serviceJobCancelVerdict(job);
+      if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+    }
     const when = job.scheduledFor ? slotLabel(job.scheduledFor) : null;
     const cancelledAt = new Date();
     const transitioned = await executeTenantBoundServiceJobTransaction(

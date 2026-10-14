@@ -124,6 +124,8 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
     expect(destinationFor({ kind: 'prep_ready', orderId: 'o1', audience: 'earner' })).toEqual({ screen: 'ActiveJob' });
     // Untagged rows from before the API tagged it route the same way.
     expect(destinationFor({ kind: 'prep_ready', orderId: 'o1' })).toEqual({ screen: 'ActiveJob' });
+    // [L07] The customer cancelled the rider's delivery: the mover dashboard, not Delivery.
+    expect(destinationFor({ kind: 'mover_job_cancelled', orderId: 'o1', status: 'CANCELLED', audience: 'earner' })).toEqual({ screen: 'Main' });
   });
 });
 
@@ -297,6 +299,7 @@ const CENSUS: Case[] = [
   { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1', expiresAt: '2026-09-24T20:00:20.000Z' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
   { k: 'custody_handoff_code', d: { ...O, caseId: 'c1' }, to: { screen: 'ActiveJob' }, why: 'RIDER holding the goods — [AF-MOB-006] a relay rider is coming; the handoff code is on their live job, which MoverStack mounts' },
   { k: 'custody_relay_cancelled', d: { caseId: 'c1', reason: 'called_off' }, to: { screen: 'Main' }, why: 'RELAY RIDER — [AF-MOB-006 · DS667] the handoff they were asked to make was called off or expired; their dashboard no longer shows it' },
+  { k: 'mover_job_cancelled', d: { ...O, status: 'CANCELLED', audience: 'earner' }, to: { screen: 'Main' }, why: 'RIDER — [L07] the customer cancelled the delivery they held; the job is gone, so their dashboard, never the customer Delivery screen its orderId used to send it to' },
   { k: 'custody_relay_assigned', d: { caseId: 'c1' }, to: { screen: 'Main' }, why: 'RELAY RIDER — [AF-MOB-006] asked to take an order over; the order is not theirs until the code is verified, so it opens their dashboard, never the order' },
   { k: 'prep_ready', d: { ...O, audience: 'earner' }, to: { screen: 'ActiveJob' }, why: 'RIDER — the kitchen marked the bag ready; ActiveJob is their live job, which MoverStack mounts [Q10]. It sat in the customer group aimed at Delivery, which MoverStack never mounts, so the tap opened nothing' },
 
@@ -391,6 +394,7 @@ const CENSUS: Case[] = [
   { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'GAP: admin only — the reserve line is below its floor' },
   { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'GAP: admin only — the monthly provisioning notice' },
   { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6)' },
+  { k: 'vendor_needs_public_phone', d: { vendorId: 'v1' }, to: { screen: 'Main' }, why: 'vendor owner — [owner #51] documents done, the store goes live once it publishes a number customers can call; the waiting store\'s own screen asks for it' },
   { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps' },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
@@ -497,6 +501,7 @@ describe('every destination is a route the app actually registers', () => {
     custody_handoff_code: 'the rider holding the goods is told a relay rider is coming',
     custody_relay_assigned: 'a relay rider is asked to take an order over',
     custody_relay_cancelled: 'a relay rider is told the handoff is off',
+    mover_job_cancelled: 'the rider is told the customer cancelled the delivery they held',
   };
 
   it('a push aimed at a MOVER lands on a screen MoverStack mounts', () => {
