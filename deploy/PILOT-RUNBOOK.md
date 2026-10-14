@@ -1169,3 +1169,37 @@ Once the owner's provider secrets are stored and wired (TWILIO_*,
 SMTP_PASS_FILE, OPS_ONCALL_PHONES) and DNS points at this host, run
 `./deploy/pilot-up.sh "$APPROVED_SHA"`. It ends with `PRODUCTION READY at
 exact SHA …`. Then follow section 9 for the certificate chain.
+
+## 13. The least-privilege database logins (TA-S0-003)
+
+The API and worker can run on two runtime logins instead of the database
+owner: `swift_app_login` (member of `swift_app` only; the tenant wall binds
+it) and `swift_system_login` (`swift_app` and `swift_bypass_rls`; audited
+system work only). Both are LOGIN, never superuser, BYPASSRLS, CREATEDB,
+CREATEROLE or REPLICATION, and own nothing. `deploy/rls-logins.sh` creates
+them on the host that runs the stack, as the deploy user, with Postgres up:
+
+    ./deploy/rls-logins.sh fingerprint > ~/rls-target.json    # review it: cluster, database, migration, owner, two digests
+    ./deploy/rls-logins.sh plan   --approved-target-file ~/rls-target.json
+    ./deploy/rls-logins.sh apply  --approved-target-file ~/rls-target.json
+    ./deploy/rls-logins.sh verify --approved-target-file ~/rls-target.json   # twice; identical output
+
+- Every command prints one JSON line of names, counts, digests and a
+  constant reason code. It never prints a password, and none travels in an
+  argument or an environment variable.
+- `apply` refuses before writing anything unless the database is exactly
+  the approved target and every catalogue invariant holds (row security on
+  and forced, the private QR schema closed to the app, the migrations' own
+  revocations in place, no extra default grants, the two groups unchanged).
+  It never repairs an existing role.
+- The passwords are generated inside the tool, kept in the encrypted store
+  (`RLS_LOGIN_SWIFT_APP_LOGIN`, `RLS_LOGIN_SWIFT_SYSTEM_LOGIN`) before either
+  login exists, and the database receives only a SCRAM verifier. Each login
+  must then sign in on a new connection (a wrong password refused first)
+  before `DATABASE_URL` and `SYSTEM_DATABASE_URL` are written to the store.
+  A run that stops halfway is finished by running `apply` again, with the
+  same credentials; a re-run that finds everything done writes nothing.
+- `verify` checks the approved target, so it holds only until the next
+  migration. Later deploys run `./deploy/rls-logins.sh roles`: the same role
+  and catalogue contract with both logins present, without the target pin.
+- One run at a time (a lock). Rotation is not part of this tool.
