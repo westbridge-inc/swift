@@ -962,6 +962,13 @@ purge tools bind to, once, as swift-deploy:
     VALUES ('singleton', 'swift-production', 'production', now());
     SQL
 
+The row also ties the database to the production posture: a production API
+or worker refuses to start on a database without it, or whose row says
+anything but `production`, and a process in any other mode (a deploy/.env
+edited to NODE_ENV=development) refuses a database whose row says
+`production`. pilot-up.sh refuses the same mismatches before it stops or
+migrates anything: a staging host never deploys onto this database.
+
 Before the API ever starts, the weekly-fee confirmation cutover must report
 READY: apps/api/BILLING-CONFIRMATION-CUTOVER.md, step 3 (the versioned
 backfill) and step 4 (the check). Until then billing stays BLOCKED: no

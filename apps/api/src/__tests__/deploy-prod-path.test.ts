@@ -72,6 +72,12 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
     sys.exit(0)
 if argv[:1] == ["run"] and any("photon:2322" in a for a in argv) and os.environ.get("PHOTON_DOWN") == "1":
     sys.exit(1)
+if argv[:1] == ["compose"] and "exec" in argv and "postgres" in argv:
+    # [S3-L1] the database's deployment_identity, as psql -tA prints it
+    # ("<count>:<environment>"); unset = a database not set up yet.
+    if os.environ.get("DB_IDENTITY"):
+        print(os.environ["DB_IDENTITY"])
+    sys.exit(0)
 if argv[:1] == ["compose"] and "ps" in argv and "-q" in argv:
     if os.environ.get("PS_FAIL") == "1":
         sys.exit(1)
@@ -336,6 +342,57 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
     expect(staging.stderr).not.toContain('refuses the agent-cash webhook');
+  });
+});
+
+// [S3-L1] A host deploys only onto a database of its own kind: pilot-up reads
+// the database's deployment_identity once Postgres is up, before anything is
+// stopped or migrated (the API and worker refuse to start on a mismatch too).
+describe('[S3-L1] pilot-up.sh: a host deploys only onto a database of its own kind', () => {
+  const PROD_MODES: Array<{ args: string[]; env: Record<string, string> }> = [
+    { args: [SHA], env: {} },
+    { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1' } },
+    { args: ['--no-public', SHA], env: { DNS_MAP: '', CADDY_STOPPED: '1' } },
+  ];
+  const stoppedOrMigrated = (calls: string[]) => calls.filter((l) => /stop api worker|force-recreate migrate|force-recreate api worker|force-recreate caddy/.test(l));
+  const readsIdentity = (calls: string[]) => indexOf(calls, 'exec -T postgres');
+
+  it('staging refuses a database whose identity says production, after Postgres is up and before anything is stopped or migrated', () => {
+    for (const args of [[SHA], ['--data-only', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot(STAGING, { args, env: { DB_IDENTITY: '1:production', API_STOPPED: args.length > 1 ? '1' : '' } });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain("PILOT_ENV=staging, but this database's deployment_identity says production: a staging host never deploys onto the production database. Nothing was stopped or migrated");
+      expect(readsIdentity(r.calls)).toBeGreaterThan(indexOf(r.calls, 'up -d --wait postgres redis meilisearch'));
+      expect(indexOf(r.calls, 'up -d --wait postgres redis meilisearch')).toBeGreaterThan(-1);
+      expect(stoppedOrMigrated(r.calls), args.join(' ')).toEqual([]);
+    }
+  });
+
+  it.each(['1:staging', '0: ', ''])('staging deploys on a database that says %j (its own, or not set up yet)', (identity) => {
+    const r = runPilot(STAGING, { env: { DB_IDENTITY: identity } });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readsIdentity(r.calls)).toBeGreaterThan(-1);
+    expect(readsIdentity(r.calls)).toBeLessThan(indexOf(r.calls, 'stop api worker'));
+  });
+
+  it.each(['1:staging', '1:development', '1:test', '1:Production'])('production refuses a database that says %j, in every mode, before anything is stopped or migrated', (identity) => {
+    for (const mode of PROD_MODES) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args: mode.args, env: { ...mode.env, DB_IDENTITY: identity } });
+      expect(r.status, mode.args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain("PILOT_ENV=production, but this database's deployment_identity is not production: a production host never deploys onto another deployment's database. Nothing was stopped or migrated");
+      expect(stoppedOrMigrated(r.calls), mode.args.join(' ')).toEqual([]);
+    }
+  });
+
+  it.each(['1:production', '0: ', ''])('production goes on with a database that says %j (its own, or not set up yet: the first --data-only run)', (identity) => {
+    for (const mode of PROD_MODES) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args: mode.args, env: { ...mode.env, DB_IDENTITY: identity } });
+      expect(r.status, `${mode.args.join(' ')}: ${r.stderr}`).toBe(0);
+      expect(readsIdentity(r.calls)).toBeGreaterThan(-1);
+    }
   });
 });
 

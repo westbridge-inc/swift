@@ -29,6 +29,7 @@ import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout
 import { resolveDatabaseUrl } from './utils/db-pool';
 import { installProcessLifecycle } from './utils/process-lifecycle';
 import { isProduction } from './utils/runtime-mode';
+import { assertDeploymentIdentityMatchesMode } from './utils/deployment-identity';
 
 async function main() {
   assertSafeBootConfig();
@@ -49,6 +50,9 @@ async function main() {
   // real ones do) still gets it. See utils/db-pool.ts.
   const prisma = new PrismaClient({ datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'worker') });
   redis.on('error', (err) => log.error({ err }, 'Worker Redis connection error'));
+  // [S3-L1] Only on a database of this process's own kind (its
+  // deployment_identity), before any job runs; a refusal exits 1 (below).
+  await assertDeploymentIdentityMatchesMode(prisma);
 
   const io = new Server();
   const adapterConns: Redis[] = [];
