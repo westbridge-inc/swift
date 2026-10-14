@@ -205,10 +205,17 @@ export function CourierScreen({ navigation }: any) {
         recipientPhone: recipientPhone.trim(),
         packageDescription: description.trim() || undefined,
         payer: 'SENDER',
+        // [PRICE-LOCK] The fee on the button: the server sends the parcel only at it.
+        ...(typeof estimate?.totalFee === 'number' ? { expectedFee: estimate.totalFee } : {}),
       },
       {
         onSuccess: (res: any) => {
           if (res?.orderId) navigation?.navigate?.('Delivery', { orderId: res.orderId });
+        },
+        onError: (error: any) => {
+          // The fee moved since the quote: fetch the new one to show (the
+          // server's message says so; nothing was sent).
+          if (error?.response?.data?.error?.code === 'PRICE_CHANGED') void refetchEstimate();
         },
       },
     );
