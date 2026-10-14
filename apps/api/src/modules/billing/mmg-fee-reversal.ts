@@ -1,4 +1,4 @@
-import type { MmgCheckoutIntent, MmgFeeReversal, Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, type MmgCheckoutIntent, type MmgFeeReversal, type PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { formatMoney } from '../../utils/currency-amount';
@@ -177,30 +177,46 @@ const RESOLVE_COPY: Record<ResolveRefusal, string> = {
  * [DS1115 S2] A typed reference must name a REVERSAL, not a payment: MMG's
  * lookup reports a payment and a completed reversal alike ("successful"), and
  * weekly fees share amounts. Any number Swift has on record for an incoming
- * payment — this payment's own MMG transaction or ledger number, any other
- * checkout payment, a push-rail payment, an agent payment, a checkout's
- * candidates, a historical alias, an MMG refund, a billing event's payment
- * reference — or another return's reference or note is refused before MMG is
- * asked. Canonical spelling (mmg_txn_canon). RESIDUAL, stated: a same-amount
- * MMG transaction Swift has NOT recorded (made outside Swift) still passes;
+ * payment — every money-reference column Swift keeps (KNOWN_PAYMENT_REFERENCE_
+ * COLUMNS: provider identities and aliases, checkouts and their candidates,
+ * agent and push-rail payments, refunds, receipts, top-ups, order MMG claims and
+ * refunds, payouts, claims, settlements and deposits, card and ads references)
+ * — or another return's reference or note is refused before MMG is asked.
+ * Canonical spelling (mmg_txn_canon). RESIDUAL, stated: a same-amount MMG
+ * transaction Swift has NOT recorded anywhere (made outside Swift) still passes;
  * the two-person (or solo) approval is the remaining control until MMG's
  * lookup shows a reversal marker (owner UAT, Q5). Read in the request's
  * tenant: today's login bypasses the tenant wall, so every tenant's records
  * count; under a tenant-bound login only this tenant's would.
  */
+/**
+ * [DS1118 S2] Every column where Swift records a money reference — MMG, bank,
+ * card or ads — that a typed "this is MMG's reversal" reference is checked
+ * against. A schema census test keeps it complete: a new reference column must
+ * be added here, or named in the test as not money.
+ */
+export const KNOWN_PAYMENT_REFERENCE_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
+  ['provider_payments', 'providerTxnId'], ['provider_payment_aliases', 'aliasKey'],
+  ['mmg_agent_payments', 'mmgTxnId'], ['mmg_agent_payments', 'agentRef'],
+  ['mmg_checkout_intents', 'mmgTransactionId'], ['mmg_checkout_intents', 'merchantTransactionId'],
+  ['subscription_payments', 'externalRef'], ['subscription_refunds', 'externalRef'],
+  ['billing_events', 'paymentRef'], ['fee_receipts', 'mmgRef'], ['topup_commands', 'reference'], ['topup_commands', 'providerRef'],
+  ['mmg_refund_sends', 'mmgRefundRef'], ['orders', 'mmgAttestedRef'], ['orders', 'customerPaymentRef'], ['orders', 'refundRef'],
+  ['return_requests', 'refundRef'], ['reimbursement_claims', 'paymentRef'], ['payout_requests', 'externalRef'],
+  ['settlements', 'reference'], ['settlement_batches', 'bankRef'], ['deposit_confirmations', 'bankRef'],
+  ['transactions', 'reference'], ['transactions', 'externalRef'],
+  ['card_sessions', 'providerTransactionRef'], ['card_sessions', 'providerSessionRef'],
+  ['ad_invoices', 'providerRef'], ['ad_refund_intents', 'providerRefundRef'], ['ad_refund_intents', 'manualPayoutRef'],
+];
+
 async function namesAKnownPayment(db: PrismaClient, reversalId: string, reference: string): Promise<boolean> {
+  // Identifiers come only from the constant list above; the reference is always a bound parameter.
+  const columns = KNOWN_PAYMENT_REFERENCE_COLUMNS.map(([table, column]) =>
+    Prisma.sql`(SELECT count(*) FROM ${Prisma.raw(`"${table}"`)} WHERE mmg_txn_canon(${Prisma.raw(`"${column}"`)}) = mmg_txn_canon(${reference}))`);
   const [hit] = await db.$transaction((tx) => tx.$queryRaw<Array<{ n: bigint }>>`
     SELECT (
-        (SELECT count(*) FROM provider_payments p WHERE p.provider = 'MMG' AND mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${reference}))
-      + (SELECT count(*) FROM provider_payment_aliases a WHERE a.provider = 'MMG' AND mmg_txn_canon(a."aliasKey") = mmg_txn_canon(${reference}))
-      + (SELECT count(*) FROM mmg_agent_payments ap WHERE mmg_txn_canon(ap."mmgTxnId") = mmg_txn_canon(${reference}))
-      -- [DS1117 S2] the push rail's captured payments, MMG refunds, and any payment reference on a billing event
-      + (SELECT count(*) FROM subscription_payments sp WHERE mmg_txn_canon(sp."externalRef") = mmg_txn_canon(${reference}))
-      + (SELECT count(*) FROM subscription_refunds sr WHERE mmg_txn_canon(sr."externalRef") = mmg_txn_canon(${reference}))
-      + (SELECT count(*) FROM billing_events be WHERE mmg_txn_canon(be."paymentRef") = mmg_txn_canon(${reference}))
-      + (SELECT count(*) FROM mmg_checkout_intents ci
-          WHERE mmg_txn_canon(ci."mmgTransactionId") = mmg_txn_canon(${reference})
-             OR EXISTS (SELECT 1 FROM unnest(ci.candidates) c WHERE mmg_txn_canon(c) = mmg_txn_canon(${reference})))
+        ${Prisma.join(columns, ' + ')}
+      + (SELECT count(*) FROM mmg_checkout_intents ci WHERE EXISTS (SELECT 1 FROM unnest(ci.candidates) c WHERE mmg_txn_canon(c) = mmg_txn_canon(${reference})))
       + (SELECT count(*) FROM mmg_fee_reversals r WHERE r.id <> ${reversalId}
           AND (mmg_txn_canon(r."providerReference") = mmg_txn_canon(${reference})
             -- [security review R2] a reference a person typed for another return is kept as its note

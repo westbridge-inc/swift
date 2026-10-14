@@ -811,6 +811,49 @@ describe('[DS1117] every MMG number Swift recorded is known; a held return never
   });
 });
 
+describe('[DS1118] a typed reference is checked against EVERY money reference Swift records', () => {
+  it('S2: a payout\'s MMG reference (recorded in payout requests) is never a return', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    const payoutRef = `PAYO${seq}${RUN}`;
+    const payout = await app.prisma.payoutRequest.create({ data: { userId: admin.userId, amount: p.amount, netAmount: p.amount, method: 'MOBILE_MONEY', destination: {}, externalRef: payoutRef } });
+    try {
+      sandboxAddHistory({ transactionId: payoutRef, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+      await expect(resolveAs(held.id, 'RETURNED', payoutRef)).rejects.toMatchObject({ code: 'NOT_A_REVERSAL' });
+      expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+      expect(await reversalEvents(p.subId)).toHaveLength(0);
+    } finally {
+      await app.prisma.payoutRequest.delete({ where: { id: payout.id } });
+    }
+  });
+
+  it('the list covers every money-reference column in the schema (a new one must be added, or named as not money)', async () => {
+    const { KNOWN_PAYMENT_REFERENCE_COLUMNS } = await import('../modules/billing/mmg-fee-reversal');
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const schema = readFileSync(join(__dirname, '../../prisma/schema.prisma'), 'utf8');
+    // Reference-named columns that are not money: documents, audit chain, moderation, validators.
+    const NOT_MONEY = new Set(['verification_documents.kycRef', 'validator.implRef', 'doc_field.validatorRef', 'extraction_run.processorRef',
+      'content_reports.authorityRef', 'content_reports.enforcementRef', 'audit_chain.subjectRef', 'audit_chain.submissionRef',
+      'doc_type.externalProcessingDecisionRef']);
+    // Columns the census reads on its own terms (this return's own row is excluded there).
+    const HANDLED = new Set(['mmg_fee_reversals.providerReference', 'mmg_fee_reversals.mmgTransactionId']);
+    const listed = new Set(KNOWN_PAYMENT_REFERENCE_COLUMNS.map(([t, c]) => `${t}.${c}`));
+    const missing: string[] = [];
+    for (const block of schema.split(/\nmodel /).slice(1)) {
+      const table = /@@map\("([a-z_0-9]+)"\)/.exec(block)?.[1];
+      if (!table) continue;
+      for (const m of block.matchAll(/^\s+([a-zA-Z]+(?:Ref|ref|Reference|reference|TxnId|TransactionId))\s+String/gm)) {
+        const key = `${table}.${m[1]}`;
+        if (!listed.has(key) && !NOT_MONEY.has(key) && !HANDLED.has(key)) missing.push(key);
+      }
+    }
+    expect(missing, 'add these to KNOWN_PAYMENT_REFERENCE_COLUMNS, or to NOT_MONEY with a reason').toEqual([]);
+    expect(listed.size, 'the list names real columns').toBeGreaterThan(20);
+  });
+});
+
 describe('[MMG REVERSAL] the record only moves forward', () => {
   it('the database refuses a backwards state, a rewritten amount, and a second wallet debit', async () => {
     const p = await paidCheckout();
