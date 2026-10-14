@@ -227,6 +227,25 @@ describe('a short index answer is topped up from the database', () => {
     expect(data.vendors.map((v: { id: string }) => v.id)).toContain(ids['tandoori']);
   });
 
+  it('[review Md] a dish the index returned is never repeated by the database top-up, even when the database also matches it', async () => {
+    engine.vendorDocs = [];
+    engine.itemDocs = [docs['tandoori']!.item];
+    const items = (await signedIn('tandoori', 10)).json().data.items as Array<{ id: string }>;
+    expect(items.filter((i) => i.id === ids['tandooriDish'])).toHaveLength(1);
+    expect(new Set(items.map((i) => i.id)).size).toBe(items.length);
+  });
+
+  it('[review S2-1] the top-up asks the database for exact spellings only — slips are the index\'s job', async () => {
+    engine.vendorDocs = [];
+    engine.itemDocs = [];
+    // "tandori" is one slip from "Tandoori": the database slip tiers would find it; the top-up must not run them
+    const data = (await signedIn('tandori', 10)).json().data;
+    expect(data.items.map((i: { id: string }) => i.id)).not.toContain(ids['tandooriDish']);
+    expect(data.vendors.map((v: { id: string }) => v.id)).not.toContain(ids['tandoori']);
+    // ...while an exact piece inside a word still tops up
+    expect((await signedIn('doori', 10)).json().data.items.map((i: { id: string }) => i.id)).toContain(ids['tandooriDish']);
+  });
+
   it('a top-up never repeats what the index already returned, and never adds a closed or out-of-market store', async () => {
     engine.vendorDocs = [docs['tandoori']!.vendor];
     engine.itemDocs = [docs['tandoori']!.item];

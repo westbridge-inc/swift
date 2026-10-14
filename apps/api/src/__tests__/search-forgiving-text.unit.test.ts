@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 import {
-  MAX_SLIP_FORMS, MAX_SLIP_WORD_LENGTH, MAX_TERMS, MIN_TYPO_LENGTH, literalForms, nameMatcher, searchTerms, searchTiers, typoForms,
+  MAX_SLIP_FORMS, MAX_SLIP_WORD_LENGTH, MAX_TERMS, MIN_TYPO_LENGTH, literalForms, slipGate, nameMatcher, searchTerms, searchTiers, typoForms, wholeQueryLiteral,
 } from '../modules/search/forgiving-text';
 import { SearchService, TYPO_TOLERANCE, type SearchClientLike, type SearchIndexLike } from '../modules/search/search.service';
 import { ITEM_INDEX, VENDOR_INDEX } from '../modules/search/search-scope';
@@ -22,6 +22,17 @@ function likeValues(where: unknown, out: string[] = []): string[] {
 }
 
 describe('what a customer types never becomes a wildcard', () => {
+  it('[review S3-2] a query of only short words is searched as one exact piece, metacharacters removed', () => {
+    expect(wholeQueryLiteral('A&W')).toBe('A&W');
+    expect(wholeQueryLiteral(' b ')).toBe('b');
+    expect(wholeQueryLiteral('5%_\\')).toBe('5');
+    expect(wholeQueryLiteral('%_')).toBeNull();
+    const tiers = searchTiers('A&W', { text: ['name'], typoText: ['name'] });
+    expect(tiers).toEqual([{ tier: { every: true, typos: false }, where: { OR: [{ name: { contains: 'A&W', mode: 'insensitive' } }] } }]);
+    expect(nameMatcher('A&W', true)('A&W Grill')).toBe(true);
+    expect(nameMatcher('A&W', true)('Grill')).toBe(false);
+  });
+
   it('a query of LIKE metacharacters has no searchable word at all', () => {
     expect(searchTerms('%%')).toEqual([]);
     expect(searchTerms('__')).toEqual([]);
@@ -111,6 +122,63 @@ describe('words and forms', () => {
     ]);
     // no column forgives a slip: no slip tier
     expect(searchTiers('chicken', { text: ['description'] }).map((t) => t.tier)).toEqual([{ every: true, typos: false }]);
+  });
+});
+
+describe('[review S2-1] every slip clause sits behind a cheap, exact gate', () => {
+  /** Walk a predicate; report every slip clause (a value with `_`, or a ' '-anchored form
+   *  longer than one letter) together with whether it is inside AND[gate, OR[slips]]. */
+  function slipPlacements(where: unknown, gated = false, out: Array<{ value: string; gated: boolean }> = []) {
+    if (Array.isArray(where)) { for (const w of where) slipPlacements(w, gated, out); return out; }
+    if (!where || typeof where !== 'object') return out;
+    const obj = where as Record<string, unknown>;
+    if (Array.isArray(obj['AND']) && obj['AND'].length === 2) {
+      const [gate, slips] = obj['AND'] as [unknown, unknown];
+      const values = likeValues(gate);
+      // a gate holds no wildcard, and its word-start pieces are two letters
+      const isGate = values.length > 0 && values.every((v) => !v.includes('_'));
+      if (isGate) { slipPlacements(slips, true, out); return out; }
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      if ((k === 'contains' || k === 'startsWith') && typeof v === 'string') {
+        if (v.includes('_') || (k === 'startsWith' && v.length > 1) || (v.startsWith(' ') && v.length > 2)) out.push({ value: v, gated });
+      } else slipPlacements(v, gated, out);
+    }
+    return out;
+  }
+
+  it.each(['chiken', 'curry chikcen', 'brocoli tomatoes salad rice wrap'])('"%s"', (q) => {
+    const cols = { text: ['name', 'description'], typoText: ['name'], lists: ['tags'] } as const;
+    const slipTiers = searchTiers(q, cols).filter((t) => t.tier.typos);
+    expect(slipTiers.length).toBeGreaterThan(0);
+    for (const { where } of slipTiers) {
+      const placed = slipPlacements(where);
+      expect(placed.length).toBeGreaterThan(0);
+      expect(placed.filter((p) => !p.gated)).toEqual([]);
+    }
+  });
+
+  it('the gate is exactness-preserving: every text any slip form matches passes it (enumerated)', () => {
+    const passes = (text: string, term: string) => {
+      const g = slipGate(term);
+      const t = text.toLowerCase();
+      return g.wordStarts.some((p) => t.startsWith(p) || t.includes(` ${p}`)) || t.includes(g.inside);
+    };
+    let checked = 0;
+    for (const word of ['chiken', 'brocoli', 'tandori', 'aabba', 'pepperpot', 'abcdefghijklmnopqrst']) {
+      for (const form of typoForms(word)) {
+        // fill the one-letter wildcard every possible way, and place the form at a word start
+        for (const fill of ['a', 'z', word[1]!, word[2]!]) {
+          const piece = form.replace('_', fill);
+          for (const text of [piece, `x ${piece}`, `${piece}y`, `hot ${piece}s here`]) {
+            expect(passes(text, word), `${word} / ${form} / "${text}"`).toBe(true);
+            checked += 1;
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(1000);
+    expect(slipGate('chiken')).toEqual({ wordStarts: ['ch', 'ci'], inside: 'iken' });
   });
 });
 
