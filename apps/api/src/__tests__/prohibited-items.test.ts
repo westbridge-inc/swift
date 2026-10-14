@@ -529,7 +529,7 @@ describe('[§8] the admin catalogue check', () => {
     const second = await userWithSession(['SUPER_ADMIN'], 'SUPER_ADMIN');
     const refused = await inject('POST', `/api/v1/admin/catalogue-review/${toffee}/approve`, second.token, { wordsHash: row.wordsHash }, { 'x-swift-reason': REASON });
     expect(refused.statusCode).toBe(403);
-    expect(refused.json().error).toMatchObject({ code: 'CATALOGUE_APPROVER_REQUIRED', message: 'You need the catalogue-approver permission to show a held item. A super-admin grants it under Staff. You can still remove an item.' });
+    expect(refused.json().error).toMatchObject({ code: 'CATALOGUE_APPROVER_REQUIRED', message: 'You need the catalogue-approver permission to show a held item. Ask a super-admin to grant it to you. You can still remove an item.' });
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: toffee }, select: { reviewApprovedHash: true } })).reviewApprovedHash).toBeNull();
     // Without the grant a moderator still REMOVES (the strict direction).
     const scratch = await item({ name: `Rum glaze ${RUN}` });

@@ -19,7 +19,7 @@ export { CATALOGUE_APPROVER_CAPABILITY };
 export const CATALOGUE_APPROVER_REQUIRED = 'CATALOGUE_APPROVER_REQUIRED';
 /** What the console shows. Plain words, and it says what to do next. */
 export const CATALOGUE_APPROVER_MESSAGE =
-  'You need the catalogue-approver permission to show a held item. A super-admin grants it under Staff. You can still remove an item.';
+  'You need the catalogue-approver permission to show a held item. Ask a super-admin to grant it to you. You can still remove an item.';
 
 export function catalogueApproverRequired(): AppError {
   return new AppError(403, CATALOGUE_APPROVER_REQUIRED, CATALOGUE_APPROVER_MESSAGE);
