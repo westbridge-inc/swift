@@ -1,3 +1,4 @@
+import { STORE_SLUG_RE } from './store-slug';
 // A tab-scoped Add intent, never a cart or a source of prices. The live menu
 // supplies every name, price and available choice when this is reopened.
 const KEY = 'swift_storefront_add';
@@ -43,7 +44,7 @@ export function clearStorefrontContinuation(): void {
 
 function validReturn(path: unknown, slug: string): path is string {
   return typeof path === 'string' && typeof slug === 'string'
-    && /^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)
+    && STORE_SLUG_RE.test(slug)
     && (path === `/store/${slug}` || path.startsWith(`/store/${slug}?`))
     && !/[\\\r\n#]/.test(path);
 }
