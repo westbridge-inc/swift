@@ -710,6 +710,8 @@ export const rideApi = {
     dropoffAddress: string;
     passengerCount?: number;
     rideClass?: RideClass;
+    /** [PRICE-LOCK] The fare on screen: the queue books the ride only at it. */
+    expectedFare?: number;
   }) => api.post('/rides/queue/join', data),
   queueLeave: () => api.post('/rides/queue/leave', {}),
   queueStatus: () => api.get('/rides/queue'),

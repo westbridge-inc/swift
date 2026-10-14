@@ -169,7 +169,7 @@ export class RideRequestOutcomeUnknownError extends AppError {
 
 /** The server's fare for this itinerary and tier is not the one the passenger
  *  was shown: nothing is booked, and the answer names the fare now. */
-function fareChanged(expectedFare: number | undefined, fare: number, rideClass: RideClass, currencyCode: string): AppError {
+export function fareChanged(expectedFare: number | undefined, fare: number, rideClass: RideClass, currencyCode: string): AppError {
   return new AppError(409, 'FARE_CHANGED',
     'The fare for this trip has changed. Check the new fare, then book again.',
     { expectedFare: expectedFare ?? null, fare, rideClass, currencyCode });

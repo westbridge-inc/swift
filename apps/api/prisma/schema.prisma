@@ -794,6 +794,12 @@ model RideQueueEntry {
   expiresAt         DateTime
   matchedOrderId    String?
   expiredNotifiedAt DateTime?
+  /// [PRICE-LOCK] The fare the passenger was shown for this trip and class
+  /// when they joined (whole units of the market's currency). The scan books
+  /// the ride only at this fare; a fare that moved by then is never charged —
+  /// the entry ends and the passenger is asked again. NULL for a join from an
+  /// app before the lock (booked at the scan-time fare, as before).
+  quotedFare        Decimal?  @db.Decimal(12, 2)
 
   @@index([status, expiresAt])
   @@index([customerId, status])
