@@ -35,7 +35,8 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { OrderService } from '../modules/order/order.service';
 import { PickingService } from '../modules/order/picking.service';
 import { mergeGuestCart } from '../modules/user/cart-merge.service';
-import { movesTowardCustomer, resetHiddenItemIdsCacheForTests } from '../modules/compliance/prohibited-gate';
+import { movesTowardCustomer, resetHiddenItemIdsCacheForTests, wordsFor } from '../modules/compliance/prohibited-gate';
+import { judgedWordsHash } from '../modules/compliance/prohibited-items';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { lockUserRoleAuthority } from '../modules/mover-authority';
@@ -74,7 +75,7 @@ let vendor: { id: string; slug: string; token: string; ownerUserId: string; shel
 let customer: { id: string; token: string };
 let admin: { token: string };
 let control: { id: string; name: string };
-type Legacy = 'rum' | 'combo' | 'bottle' | 'relief' | 'removed' | 'accent';
+type Legacy = 'rum' | 'cake' | 'combo' | 'bottle' | 'relief' | 'removed' | 'accent';
 const legacy = {} as Record<Legacy, { id: string; name: string }>;
 let pharmacyCategory: { id: string; slug: string };
 let snacksCategory: { id: string; slug: string };
@@ -200,14 +201,17 @@ beforeAll(async () => {
   const c = await item({ name: `Legacy Pepperpot ${RUN}` });
   control = { id: c.id, name: c.name };
   for (const [key, data] of [
-    ['rum', { name: `Legacy Rum ${RUN}` }],
-    ['combo', { name: `Legacy Combo ${RUN}`, options: ['Coke', 'Carib Lager'] }],
+    // [#55] A bottle of rum by name is refused outright, never approvable ("Legacy Rum" is the goods);
+    // a rum cake is held for a person. The run tag LEADS where a goods noun must stay the last word.
+    ['rum', { name: `${RUN} Legacy Rum` }],
+    ['cake', { name: `Legacy Rum cake ${RUN}` }],
+    ['combo', { name: `Legacy Combo ${RUN}`, options: ['Coke', 'Beer-battered fries'] }],
     ['bottle', { name: `Legacy Bottle ${RUN}`, categoryId: legacySection.id }],
     ['relief', { name: `Legacy Relief ${RUN}` }],
     ['removed', { name: `Legacy Tonic ${RUN}`, removed: { cls: 'MEDICINE', reason: 'Sold as a cure for fever' } }],
     // [DS1100 S2] A banned word written with an accent the plain pattern does not spell
     // (precomposed "Ś", and a combining acute inside "be\u0301er"): judged exactly like "stout".
-    ['accent', { name: `Legacy \u015Atout be\u0301er ${RUN}` }],
+    ['accent', { name: `Legacy \u015Atout be\u0301er mug ${RUN}` }],
   ] as const) {
     const row = await item(data);
     legacy[key] = { id: row.id, name: row.name };
@@ -249,10 +253,10 @@ afterAll(async () => {
 
 describe('[§8] a partner saving and editing items', () => {
   it('a banned word saves the item but holds it for a quick check; an ordinary item is simply saved', async () => {
-    const beer = await createItem({ name: `Banks Beer 275ml ${RUN}` });
+    const beer = await createItem({ name: `Beer batter fish ${RUN}` });
     expect(beer.statusCode).toBe(200);
     expect(beer.json().data.catalogueCheck).toEqual({ status: 'WAITING_FOR_CHECK', message: 'Waiting for a quick check', prohibitedClass: 'ALCOHOL', field: 'name', term: 'beer' });
-    const combo = await createItem({ name: `Chicken combo ${RUN}`, optionGroups: [{ name: 'Add a drink', options: [{ name: 'Coke' }, { name: 'Carib Lager' }] }] });
+    const combo = await createItem({ name: `Chicken combo ${RUN}`, optionGroups: [{ name: 'Add a side', options: [{ name: 'Coke' }, { name: 'Beer-battered fries' }] }] });
     expect(combo.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', field: 'option' });
     const gas = await createItem({ name: `Gas stove ${RUN}` });
     expect(gas.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', prohibitedClass: 'LPG' });
@@ -265,7 +269,7 @@ describe('[§8] a partner saving and editing items', () => {
   it('every edit is judged again: ordinary → banned word is held; an approved item renamed is held again', async () => {
     const created = await createItem({ name: `Sorrel drink ${RUN}` });
     const id = created.json().data.id as string;
-    const toRum = await inject('PUT', `/api/v1/vendor/items/${id}`, vendor.token, { name: `Rum punch ${RUN}` });
+    const toRum = await inject('PUT', `/api/v1/vendor/items/${id}`, vendor.token, { name: `Rum glazed wings ${RUN}` });
     expect(toRum.statusCode).toBe(200);
     expect(toRum.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', term: 'rum' });
     await visibleOn(storefrontItemIds, [control.id], [id]);
@@ -299,19 +303,65 @@ describe('[§8] a partner saving and editing items', () => {
   it('CSV import: every valid row imports; rows a banned word holds are listed by row', async () => {
     const csv = [
       'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl',
-      `Shelf,Banks Beer ${RUN},,400,,,,,,`,
+      `Shelf,${RUN} Banks Beer,,400,,,,,,`,
       `Shelf,Mauby ${RUN},Bark brew,300,,,,,,`,
       `Pharmacy ${RUN},Vitamin C ${RUN},,900,,,,,,`,
       `Shelf,Cough syrup ${RUN},,700,,,,,,`,
+      `Shelf,Beer batter mix ${RUN},,450,,,,,,`,
     ].join('\n');
     const res = await inject('POST', '/api/v1/vendor/items/import', vendor.token, { csv });
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
-    expect(data).toMatchObject({ imported: 4, failedCount: 0, waitingForCheckCount: 3 });
-    expect(data.waitingForCheck.map((w: { row: number }) => w.row).sort()).toEqual([2, 4, 5]);
+    // [#55] A row that IS banned goods (a beer, a cough syrup) is refused and listed; a word only holds the row.
+    expect(data).toMatchObject({ imported: 3, failedCount: 2, waitingForCheckCount: 2 });
+    expect(data.failures).toEqual([
+      { row: 2, errors: ['Swift doesn\'t allow this item: alcohol.'] },
+      { row: 5, errors: ['Swift doesn\'t allow this item: medicines.'] },
+    ]);
+    expect(data.waitingForCheck.map((w: { row: number }) => w.row).sort()).toEqual([4, 6]);
+    expect(await app.prisma.item.count({ where: { vendorId: vendor.id, name: { in: [`${RUN} Banks Beer`, `Cough syrup ${RUN}`] } } })).toBe(0);
     const mauby = await app.prisma.item.findFirstOrThrow({ where: { vendorId: vendor.id, name: `Mauby ${RUN}` } });
-    const beer = await app.prisma.item.findFirstOrThrow({ where: { vendorId: vendor.id, name: `Banks Beer ${RUN}` } });
-    await visibleOn(storefrontItemIds, [mauby.id], [beer.id]);
+    const batter = await app.prisma.item.findFirstOrThrow({ where: { vendorId: vendor.id, name: `Beer batter mix ${RUN}` } });
+    await visibleOn(storefrontItemIds, [mauby.id], [batter.id]);
+  });
+
+  // [#55/#56 · Opus S1-LAUNCH-2] A name or an option that IS beer, wine, spirits, tobacco, a vape or a branded
+  // medicine is refused outright — on create, rename and options — never held for a reviewer.
+  it('a name or an option that IS banned goods is refused outright; an item banned by its own name can be renamed out of it', async () => {
+    const before = await app.prisma.item.count({ where: { vendorId: vendor.id } });
+    for (const body of [
+      { name: `${RUN} Hennessy VS` },
+      { name: `${RUN} Red Wine 750ml` },
+      { name: `${RUN} Cooking wine` },
+      { name: `Wings combo ${RUN}`, optionGroups: [{ name: 'Add a drink', options: [{ name: 'Coke' }, { name: 'Carib Lager' }] }] },
+    ]) {
+      const res = await createItem(body);
+      expect(res.statusCode, body.name).toBe(409);
+      expect(res.json().error).toMatchObject({ code: 'PROHIBITED_ITEM', message: 'Swift doesn\'t allow this item: alcohol.' });
+    }
+    expect(await app.prisma.item.count({ where: { vendorId: vendor.id } })).toBe(before);
+
+    const plain = (await createItem({ name: `Garlic pork ${RUN}` })).json().data.id as string;
+    const toWine = await inject('PUT', `/api/v1/vendor/items/${plain}`, vendor.token, { name: `${RUN} House wine` });
+    expect(toWine.statusCode).toBe(409);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: plain } })).name).toBe(`Garlic pork ${RUN}`);
+    const drinks = await inject('POST', `/api/v1/vendor/items/${plain}/option-groups`, vendor.token, { name: 'Add a drink', options: [{ name: 'Coke' }, { name: 'Heineken 0.0' }] });
+    expect(drinks.statusCode).toBe(409);
+    const group = await inject('POST', `/api/v1/vendor/items/${plain}/option-groups`, vendor.token, { name: 'Add a drink', options: [{ name: 'Coke' }] });
+    expect(group.statusCode).toBe(200);
+    const groupId = group.json().data.id as string;
+    expect((await inject('POST', `/api/v1/vendor/option-groups/${groupId}/options`, vendor.token, { name: 'Shot of rum' })).statusCode).toBe(409);
+    const coke = group.json().data.options[0].id as string;
+    expect((await inject('PUT', `/api/v1/vendor/options/${coke}`, vendor.token, { name: 'Stag 12oz beer' })).statusCode).toBe(409);
+    expect((await inject('PUT', `/api/v1/vendor/option-groups/${groupId}`, vendor.token, { name: 'Beers' })).statusCode).toBe(409);
+    expect((await inject('PUT', `/api/v1/vendor/options/${coke}`, vendor.token, { name: 'Sprite' })).statusCode).toBe(200);
+
+    // A legacy row banned by its own name: never switched on, but it can be renamed out of the ban.
+    const legacyBottle = await item({ name: `${RUN} Old Rum` });
+    expect((await inject('PUT', `/api/v1/vendor/items/${legacyBottle.id}/availability`, vendor.token, { isAvailable: true })).statusCode).toBe(409);
+    const renamed = await inject('PUT', `/api/v1/vendor/items/${legacyBottle.id}`, vendor.token, { name: `Rum cake slice ${RUN}` });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', term: 'rum' });
   });
 
   it('a banned platform category is refused outright: tag, accepted suggestion, store category', async () => {
@@ -419,7 +469,8 @@ describe('[§8] nobody sees a hidden item', () => {
     const own = await inject('GET', '/api/v1/vendor/items', vendor.token);
     expect(own.statusCode).toBe(200);
     const rows = own.json().data as Array<{ id: string; catalogueCheck: unknown }>;
-    expect(rows.find((r) => r.id === legacy.rum.id)?.catalogueCheck).toEqual({ status: 'WAITING_FOR_CHECK', message: 'Waiting for a quick check', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' });
+    expect(rows.find((r) => r.id === legacy.rum.id)?.catalogueCheck).toEqual({ status: 'NOT_ALLOWED', message: 'Swift doesn\'t allow this item: alcohol.', prohibitedClass: 'ALCOHOL', reason: null });
+    expect(rows.find((r) => r.id === legacy.cake.id)?.catalogueCheck).toEqual({ status: 'WAITING_FOR_CHECK', message: 'Waiting for a quick check', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' });
     expect(rows.find((r) => r.id === legacy.relief.id)?.catalogueCheck).toEqual({ status: 'NOT_ALLOWED', message: 'Swift doesn\'t allow this item: medicines.', prohibitedClass: 'MEDICINE', reason: null });
     expect(rows.find((r) => r.id === legacy.removed.id)?.catalogueCheck).toMatchObject({ status: 'NOT_ALLOWED', reason: 'Sold as a cure for fever' });
     expect(rows.find((r) => r.id === control.id)?.catalogueCheck).toBeNull();
@@ -427,7 +478,8 @@ describe('[§8] nobody sees a hidden item', () => {
     expect(detail.statusCode).toBe(200);
     const flagged = detail.json().data.prohibitedItems as Array<{ id: string; state: string; source?: string; field?: string; term: string | null }>;
     for (const id of hiddenIds()) expect(flagged.map((f) => f.id)).toContain(id);
-    expect(flagged.find((f) => f.id === legacy.combo.id)).toMatchObject({ state: 'WAITING', field: 'option', term: 'lager' });
+    expect(flagged.find((f) => f.id === legacy.combo.id)).toMatchObject({ state: 'WAITING', field: 'option', term: 'beer' });
+    expect(flagged.find((f) => f.id === legacy.rum.id)).toMatchObject({ state: 'BANNED', source: 'word', term: 'rum' });
     expect(flagged.find((f) => f.id === legacy.relief.id)).toMatchObject({ state: 'BANNED', source: 'category' });
     expect(flagged.map((f) => f.id)).not.toContain(control.id);
   });
@@ -437,24 +489,43 @@ describe('[§8] the admin catalogue check', () => {
   it('the queue holds the waiting items only; approval needs a reason, the words seen, and never lifts a ban', async () => {
     const q = await queue();
     const queued = q.map((r) => r.itemId);
-    for (const id of [legacy.rum.id, legacy.combo.id, legacy.bottle.id]) expect(queued).toContain(id);
-    for (const id of [legacy.relief.id, legacy.removed.id, control.id]) expect(queued).not.toContain(id);
-    const rum = q.find((r) => r.itemId === legacy.rum.id)!;
-    expect(rum).toMatchObject({ state: 'WAITING', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' });
+    for (const id of [legacy.cake.id, legacy.combo.id, legacy.bottle.id]) expect(queued).toContain(id);
+    // [#55] "Legacy Rum" IS a bottle of rum: never in the queue, never approvable.
+    for (const id of [legacy.rum.id, legacy.relief.id, legacy.removed.id, control.id]) expect(queued).not.toContain(id);
+    const cake = q.find((r) => r.itemId === legacy.cake.id)!;
+    expect(cake).toMatchObject({ state: 'WAITING', prohibitedClass: 'ALCOHOL', field: 'name', term: 'rum' });
 
-    expect((await approve(legacy.rum.id, rum.wordsHash, null)).statusCode).toBe(400);
-    const stale = await approve(legacy.rum.id, '0'.repeat(64));
+    expect((await approve(legacy.cake.id, cake.wordsHash, null)).statusCode).toBe(400);
+    const stale = await approve(legacy.cake.id, '0'.repeat(64));
     expect(stale.statusCode).toBe(409);
     expect(stale.json().error.code).toBe('ITEM_CHANGED');
     const ban = await approve(legacy.relief.id, '0'.repeat(64));
     expect(ban.statusCode).toBe(409);
     expect(ban.json().error.message).toBe('Approval never lifts a ban. Swift doesn\'t allow this item: medicines.');
     expect((await approve(control.id, '0'.repeat(64))).json().error.code).toBe('NOTHING_TO_CHECK');
+    const rumWords = (await wordsFor(app.prisma, [legacy.rum.id])).get(legacy.rum.id)!;
+    const rum = await approve(legacy.rum.id, judgedWordsHash(rumWords));
+    expect(rum.statusCode).toBe(409);
+    expect(rum.json().error).toMatchObject({ code: 'PROHIBITED_ITEM', message: 'Approval never lifts a ban. Swift doesn\'t allow this item: alcohol.' });
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: legacy.rum.id }, select: { reviewApprovedHash: true } })).reviewApprovedHash).toBeNull();
 
-    const ok = await approve(legacy.rum.id, rum.wordsHash);
+    const ok = await approve(legacy.cake.id, cake.wordsHash);
     expect(ok.statusCode).toBe(200);
-    await visibleOn(storefrontItemIds, [legacy.rum.id], [legacy.combo.id]);
-    expect((await queue()).map((r) => r.itemId)).not.toContain(legacy.rum.id);
+    await visibleOn(storefrontItemIds, [legacy.cake.id], [legacy.combo.id, legacy.rum.id]);
+    expect((await queue()).map((r) => r.itemId)).not.toContain(legacy.cake.id);
+  });
+
+  // [Opus S3-10] A disguised word reaches a person: the database pre-filter reads each column as the
+  // classifier does (format characters, look-alikes, fullwidth, spelled-out letters, "rosé").
+  it('a disguised word reaches the queue', async () => {
+    const ids: string[] = [];
+    for (const description of ['R\u200Bum truffles', 'Rцm truffles', 'Ｒｕｍ truffles', 'R.U.M truffles', 'Rosé jelly', 'Неineken glaze']) {
+      const row = await app.prisma.item.create({ data: { vendorId: vendor.id, categoryId: vendor.shelfId, name: `Gift box ${ids.length} ${RUN}`, description, basePrice: 900 } });
+      ids.push(row.id);
+    }
+    const queued = await queue();
+    for (const id of ids) expect(queued.find((r) => r.itemId === id), id).toMatchObject({ state: 'WAITING', field: 'description' });
+    await visibleOn(storefrontItemIds, [control.id], ids);
   });
 
   it('a partner edit after the reviewer opened the item: that approval is refused and the item stays hidden; the current words can be approved', async () => {
@@ -462,7 +533,7 @@ describe('[§8] the admin catalogue check', () => {
     const fudgeId = fudge.json().data.id as string;
     const seen = (await queue()).find((q) => q.itemId === fudgeId)!;
     // The partner changes the words while the reviewer is reading the old ones.
-    expect((await inject('PUT', `/api/v1/vendor/items/${fudgeId}`, vendor.token, { name: `Rum 1L ${RUN}` })).statusCode).toBe(200);
+    expect((await inject('PUT', `/api/v1/vendor/items/${fudgeId}`, vendor.token, { name: `Rum fudge (1kg) ${RUN}` })).statusCode).toBe(200);
     const stale = await approve(fudgeId, seen.wordsHash);
     expect(stale.statusCode).toBe(409);
     expect(stale.json().error).toMatchObject({ code: 'ITEM_CHANGED', message: 'This item changed — review it again.' });
@@ -482,8 +553,8 @@ describe('[§8] the admin catalogue check', () => {
     expect((await inject('PUT', `/api/v1/vendor/items/${legacy.combo.id}`, vendor.token, { basePrice: 100 })).json().error.code).toBe('PROHIBITED_ITEM');
     expect((await inject('POST', `/api/v1/admin/catalogue-review/${legacy.combo.id}/remove`, admin.token, { prohibitedClass: 'ALCOHOL' }, { 'x-swift-reason': 'Sells beer as a combo option' })).json().error.code).toBe('ALREADY_REMOVED');
     expect((await queue()).map((r) => r.itemId)).not.toContain(legacy.combo.id);
-    const audit = await system(() => app.prisma.auditLog.findMany({ where: { entityId: { in: [legacy.combo.id, legacy.rum.id] } } }));
-    expect(audit.map((a) => a.entityId).sort()).toEqual(expect.arrayContaining([legacy.combo.id, legacy.rum.id]));
+    const audit = await system(() => app.prisma.auditLog.findMany({ where: { entityId: { in: [legacy.combo.id, legacy.cake.id] } } }));
+    expect(audit.map((a) => a.entityId).sort()).toEqual(expect.arrayContaining([legacy.combo.id, legacy.cake.id]));
   });
 });
 
@@ -494,7 +565,7 @@ describe('[§8] nobody can cart or order a hidden item', () => {
     expect(bottle.json().error).toMatchObject({ code: 'ITEM_UNAVAILABLE', details: { itemId: legacy.bottle.id, reason: 'PROHIBITED' } });
     expect(bottle.json().error.message).toBe(`${legacy.bottle.name} isn't available on Swift. Remove it from your cart to continue.`);
     expect((await inject('POST', '/api/v1/customer/cart/items', customer.token, { vendorId: vendor.id, itemId: control.id, quantity: 1 })).statusCode).toBe(201);
-    expect((await inject('POST', '/api/v1/customer/cart/items', customer.token, { vendorId: vendor.id, itemId: legacy.rum.id, quantity: 1 })).statusCode).toBe(201);
+    expect((await inject('POST', '/api/v1/customer/cart/items', customer.token, { vendorId: vendor.id, itemId: legacy.cake.id, quantity: 1 })).statusCode).toBe(201);
   });
 
   it('an existing cart line: marked unavailable, cannot grow, blocks checkout — and can always be removed', async () => {
@@ -610,7 +681,7 @@ describe('[§8] an order already placed with a line Swift no longer allows never
     expect((await inject('PUT', `/api/v1/vendor/orders/${ordinary.id}/accept`, vendor.token, {})).statusCode).toBe(200);
     expect(await statusOf(ordinary.id)).toBe('ACCEPTED');
     // A word a person approved (the catalogue check above approved this rum line's words) goes ahead.
-    const approvedWords = await placed('PENDING', [legacy.rum]);
+    const approvedWords = await placed('PENDING', [legacy.cake]);
     expect((await inject('PUT', `/api/v1/vendor/orders/${approvedWords.id}/accept`, vendor.token, {})).statusCode).toBe(200);
   });
 
@@ -666,7 +737,7 @@ describe('[§8] an order already placed with a line Swift no longer allows never
     expect((await app.prisma.orderItem.findUniqueOrThrow({ where: { id: ok.lineId } })).subStatus).toBe('APPROVED');
     expect((await inject('PUT', `/api/v1/vendor/orders/${ok.orderId}/preparing`, vendor.token, {})).statusCode).toBe(200);
     // A clean substitute for an approved word: the line reads "Plain Bread (sub for … Rum …)", and the goods are the bread.
-    const forRum = await placed('ACCEPTED', [legacy.rum]);
+    const forRum = await placed('ACCEPTED', [legacy.cake]);
     const rumLine = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: forRum.id } });
     await app.prisma.orderItem.update({ where: { id: rumLine.id }, data: { subStatus: 'PENDING', substituteItemId: clean.id, substituteName: clean.name, substitutePrice: 1500 } });
     await runWithTenant(TENANT, () => picking.decideSubstitution(forRum.id, rumLine.id, customer.id, true));
@@ -675,7 +746,7 @@ describe('[§8] an order already placed with a line Swift no longer allows never
 
     // An order already carrying an approved substitute that is now banned does not move — even when the
     // original it replaced is an approved word (whose name the line still carries).
-    for (const original of [control, legacy.rum]) {
+    for (const original of [control, legacy.cake]) {
       const o = await placed('ACCEPTED', [original]);
       const line = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: o.id } });
       await app.prisma.orderItem.update({ where: { id: line.id }, data: {

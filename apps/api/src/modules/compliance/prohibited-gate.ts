@@ -5,9 +5,12 @@
  * approved / clear); this file reads the facts from the database and applies
  * the verdict:
  *
- *   · a partner cannot file an item or a store under a banned category, and
- *     cannot edit an item that is banned (409 PROHIBITED_ITEM, the owner's
- *     words: "Swift doesn't allow this item: alcohol.");
+ *   · a partner cannot file an item or a store under a banned category, cannot
+ *     save a name or an option that IS banned goods ("Hennessy VS", "Carib
+ *     Lager"), and cannot edit an item that is banned outright (409
+ *     PROHIBITED_ITEM, the owner's words: "Swift doesn't allow this item:
+ *     alcohol."). An item banned only by its own words may be edited out of
+ *     them — the edit is judged too;
  *   · nobody sees a hidden item (banned, or a word hit not yet approved) —
  *     storefront menus, the website, Market, search, Home and the category
  *     rail leave it out, browse surfaces before any page is capped;
@@ -27,6 +30,7 @@ import { Prisma, type OrderStatus, type PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { custodyOf, ORDER_TRANSITIONS } from '../order/order-status';
 import {
+  certainGoods,
   checkItem,
   classifyCategory,
   classifyText,
@@ -187,11 +191,29 @@ export async function withoutHidden<T extends { id: string }>(db: Db, rows: read
   return hidden.size === 0 ? [...rows] : rows.filter((r) => !hidden.has(r.id));
 }
 
-/** An item a partner may not edit or switch back on: banned outright. */
-export async function assertNotBanned(db: Db, itemId: string): Promise<void> {
+/**
+ * An item a partner may not edit or switch back on: banned outright. An item
+ * banned only by its own words ("Legacy Rum") may still be EDITED — a new name
+ * is judged before it is written (`assertNotBannedGoods`) — but never switched
+ * back on while it is banned. [#55]
+ */
+export async function assertNotBanned(db: Db, itemId: string, options: { wordBanEditable?: boolean } = {}): Promise<void> {
   const check = (await catalogueChecksFor(db, [itemId])).get(itemId);
   if (check?.state !== 'BANNED') return;
+  if (options.wordBanEditable && check.source === 'word') return;
   throw new AppError(409, 'PROHIBITED_ITEM', notAllowedMessage(check.prohibitedClass), { prohibitedClass: check.prohibitedClass });
+}
+
+/**
+ * A name or an option a partner is about to save that IS banned goods — a
+ * brand, a product phrase, a goods noun heading it: refused before anything is
+ * written, never held for a reviewer. [#55/#56, Opus S1-LAUNCH-2]
+ */
+export function assertNotBannedGoods(texts: ReadonlyArray<string | null | undefined>): void {
+  for (const text of texts) {
+    const hit = certainGoods(text);
+    if (hit) throw new AppError(409, 'PROHIBITED_ITEM', notAllowedMessage(hit.prohibitedClass), { prohibitedClass: hit.prohibitedClass, term: hit.term });
+  }
 }
 
 /**

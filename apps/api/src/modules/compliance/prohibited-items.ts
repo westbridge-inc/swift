@@ -3,46 +3,59 @@
  *
  * Owner, 13 Oct 2026, with the law behind it: alcohol, cigarettes and tobacco,
  * vapes, every other 18+ item, ALL medicines (over-the-counter included),
- * cooking gas (LPG) and fuel are banned outright and permanently. There is no
- * switch: nothing in configuration, no licence on file and no reviewer can
- * make them sellable. (The Tobacco Control Act 2017 makes arranging or
- * facilitating a remote tobacco sale, payment or delivery an offence; a
- * druggist's licence is needed even for over-the-counter medicines; LPG and
- * fuel need a GEA licence.)
+ * cooking gas (LPG) and fuel are banned outright and permanently; so are
+ * cannabis and other illegal drugs (§8 "never … illegal or prohibited items").
+ * There is no switch: nothing in configuration, no licence on file and no
+ * reviewer can make them sellable. (The Tobacco Control Act 2017 makes
+ * arranging or facilitating a remote tobacco sale, payment or delivery an
+ * offence; a druggist's licence is needed even for over-the-counter medicines;
+ * LPG and fuel need a GEA licence.)
  *
- * TWO KINDS OF EVIDENCE, TWO ANSWERS (owner, 13 Oct):
+ * TWO KINDS OF EVIDENCE, TWO ANSWERS (owner, 13 Oct; #55/#56, 14 Oct):
  *
- *   · CERTAIN — the item is filed under a banned platform category (Pharmacy,
- *     or any category named for a banned good), or a person removed it as
- *     prohibited. Refused outright: "Swift doesn't allow this item: <what>."
+ *   · CERTAIN — refused outright: "Swift doesn't allow this item: <what>."
+ *       – the item is filed under a banned platform category (Pharmacy, or any
+ *         category named for a banned good), or its STORE is (#54);
+ *       – a person removed it as prohibited;
+ *       – its own name, or one of its options, IS the banned goods: a brand
+ *         ("Hennessy VS", "Carib Lager", "Panadol"), a product phrase ("rum
+ *         essence", "cooking wine", "e-liquid"), or a goods noun heading the
+ *         name ("Legacy Rum", "Non-alcoholic beer", "Red wine 750ml",
+ *         "Rum - Bristol White"). Anything SOLD as beer, wine or spirits is
+ *         never approvable, whatever its strength (#55); cooking wine, rum
+ *         essence and bitters are alcohol (#56).
  *
- *   · A WORD — only the partner's own text (name, description, menu section,
- *     options) carries a banned word: "rum cake", "gas stove", "Vicks
- *     VapoRub". The save succeeds, but the item stays HIDDEN — not shown,
- *     searched, carted or ordered — until a person looks at it. The partner
- *     sees "Waiting for a quick check". Approval is bound to the exact words a
- *     person saw (a hash of the judged text), so ANY edit — a rename, a new
- *     option, a move to another section — brings the check back. Approval
- *     never overrides a certain ban.
+ *   · A WORD — the partner's own text mentions a banned word without being the
+ *     goods: "rum cake", "beer batter fish", "gas stove", a "Beers & Wines"
+ *     section, a description. The save succeeds, but the item stays HIDDEN —
+ *     not shown, searched, carted or ordered — until a person looks at it. The
+ *     partner sees "Waiting for a quick check". Approval is bound to the exact
+ *     words a person saw (a hash of the judged text), so ANY edit — a rename, a
+ *     new option, a move to another section — brings the check back. Lozenges
+ *     are held this way, never refused (#58).
  *
  * Words are judged whole ("rum" never hits "drumstick", "gin" never hits
- * "ginger"); phrases match whole words in order. This file is the ONE place
- * the word list lives. Prohibited is not the same as the moderation queue:
- * reports (ILLEGAL_GOODS) still reach a person exactly as before.
+ * "ginger"); phrases match whole words in order. A text is read through its
+ * disguises first: compatibility forms (fullwidth "Ｒｕｍ"), invisible format
+ * characters ("R​um"), Cyrillic and Greek look-alikes ("Rцm") and
+ * spelled-out letters ("R.U.M"). This file is the ONE place the word list
+ * lives. Prohibited is not the same as the moderation queue: reports
+ * (ILLEGAL_GOODS) still reach a person exactly as before.
  */
 import { createHash } from 'node:crypto';
 import { normalize } from '../discovery/matcher';
 
-export type ProhibitedClass = 'ALCOHOL' | 'TOBACCO' | 'VAPES' | 'MEDICINE' | 'AGE_RESTRICTED' | 'LPG' | 'FUEL';
+export type ProhibitedClass = 'ALCOHOL' | 'TOBACCO' | 'VAPES' | 'DRUGS' | 'MEDICINE' | 'AGE_RESTRICTED' | 'LPG' | 'FUEL';
 export type JudgedField = 'name' | 'description' | 'section' | 'option';
 
-export const PROHIBITED_CLASSES: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
+export const PROHIBITED_CLASSES: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
 
 /** Plain words for each class — the end of "Swift doesn't allow this item: …". */
 export const PROHIBITED_CLASS_LABELS: Readonly<Record<ProhibitedClass, string>> = {
   ALCOHOL: 'alcohol',
   TOBACCO: 'tobacco and cigarettes',
   VAPES: 'vapes',
+  DRUGS: 'cannabis and illegal drugs',
   MEDICINE: 'medicines',
   AGE_RESTRICTED: '18+ items',
   LPG: 'cooking gas (LPG)',
@@ -58,7 +71,8 @@ export const PROHIBITED_CLASS_LABELS: Readonly<Record<ProhibitedClass, string>> 
  * scotch (bonnet pepper, tape), spirits (white spirit is paint thinner),
  * cocktail (fruit cocktail), sake (salmon), port, malt and malta (soft drinks),
  * syrup (maple, pancake), tablet (electronics), capsule (coffee), scratch card
- * (phone credit), pills alone (pill box).
+ * (phone credit), pills alone (pill box), rose (the flower — the wine is
+ * "rosé", read as "rosewine"), hemp (seeds and oil are food).
  */
 export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[]>> = {
   ALCOHOL: [
@@ -70,26 +84,38 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     // brands written as one word
     'whiteclaw', 'twistedtea', 'jackdaniels', 'johnniewalker', 'greygoose', 'captainmorgan', 'eldorado', 'mountgay',
     'redstripe', 'budlight',
-    'wine', 'wines', 'champagne', 'prosecco', 'sangria', 'vermouth', 'sherry',
-    'rum', 'rums', 'high wine', 'puncheon', 'vodka', 'vodkas', 'whisky', 'whiskey', 'whiskies', 'whiskeys', 'bourbon',
-    'gin', 'gins', 'brandy', 'brandies', 'cognac', 'tequila', 'mezcal', 'absinthe', 'schnapps', 'soju',
+    'wine', 'wines', 'champagne', 'prosecco', 'sangria', 'vermouth', 'sherry', 'rosewine',
+    'chardonnay', 'merlot', 'cabernet', 'sauvignon', 'pinot', 'shiraz', 'syrah', 'malbec', 'zinfandel', 'riesling',
+    'moscato', 'lambrusco', 'chianti',
+    'rum', 'rums', 'rhum', 'high wine', 'puncheon', 'vodka', 'vodkas', 'whisky', 'whiskey', 'whiskies', 'whiskeys', 'bourbon',
+    'gin', 'gins', 'brandy', 'brandies', 'cognac', 'tequila', 'mezcal', 'absinthe', 'schnapps', 'soju', 'bitters',
     'mojito', 'martini', 'daiquiri', 'pina colada',
+    // [#56] cooking alcohol, and drinks sold ready-mixed
+    'rum essence', 'rum extract', 'rum flavouring', 'rum flavoring', 'rum punch', 'rum cream', 'rum and coke', 'gin and tonic',
     // brands on Guyanese and Caribbean shelves — phrases where the word alone is ordinary
     'el dorado', 'xm rum', 'xm royal', 'russian bear', 'king of diamonds', 'diamond reserve', 'carib',
     'guinness', 'heineken', 'corona extra', 'mackeson', 'budweiser', 'bud light', 'coors', 'stella artois',
-    'red stripe', 'presidente', 'hennessy', 'johnnie walker', 'jack daniel', 'jack daniels', 'jameson', 'smirnoff',
+    'red stripe', 'presidente', 'hennessy', 'johnnie walker', 'johnny walker', 'jack daniel', 'jack daniels', 'jameson', 'smirnoff',
     'bacardi', 'absolut', 'grey goose', 'baileys', 'captain morgan', 'appleton', 'mount gay', 'wray and nephew',
     'chivas', 'glenfiddich', 'jagermeister', 'moet', 'hpnotiq', 'ciroc', 'don julio', 'angostura',
+    'barbancourt', 'old parr', 'courvoisier', 'remy martin', 'kahlua', 'seagrams', 'black and white scotch', 'jose cuervo',
+    'tanqueray', 'bombay sapphire', 'ballantines', 'famous grouse', 'glenlivet', 'jim beam', 'crown royal', 'campari',
+    'aperol', 'martell', 'veuve clicquot', 'dom perignon', 'modelo', 'skol', 'becks', 'peroni', 'amstel', 'carlsberg',
+    'kronenbourg', 'miller lite', 'michelob', 'pabst', 'hoegaarden', 'desperados',
   ],
   TOBACCO: [
-    'tobacco', 'cigarette', 'cigarettes', 'cigar', 'cigars', 'cigarillo', 'cigarillos', 'nicotine',
-    'rolling paper', 'rolling papers', 'rizla', 'snuff', 'hookah', 'shisha',
+    'tobacco', 'cigarette', 'cigarettes', 'cig', 'cigs', 'cigar', 'cigars', 'cigarillo', 'cigarillos', 'nicotine',
+    'rolling paper', 'rolling papers', 'rizla', 'snuff', 'hookah', 'hooka', 'shisha', 'sheesha', 'grabba', 'bh',
     'marlboro', 'benson and hedges', 'benson hedges', 'rothmans', 'du maurier', 'pall mall', 'dunhill', 'lucky strike',
+    'black and mild', 'swisher', 'swisher sweets', 'backwoods', 'craven a', 'al fakher', 'zyn',
   ],
   VAPES: [
     'vape', 'vapes', 'vaping', 'vaper', 'e cig', 'e cigs', 'ecig', 'ecigs', 'e cigarette', 'e cigarettes',
     'e liquid', 'e liquids', 'eliquid', 'vape juice', 'vape pen', 'vape coil', 'vape coils', 'vape pod', 'vape pods',
-    'juul', 'elf bar', 'elfbar', 'geek bar', 'puff bar',
+    'juul', 'elf bar', 'elfbar', 'geek bar', 'puff bar', 'lost mary', 'smok', 'dab pen', 'vaporizer', 'vaporiser',
+  ],
+  DRUGS: [
+    'ganja', 'marijuana', 'marihuana', 'cannabis', 'kush', 'weed', 'cbd', 'thc', 'bong', 'bongs',
   ],
   MEDICINE: [
     'medicine', 'medicines', 'medication', 'medications', 'medicinal', 'pharmacy', 'pharmaceutical', 'pharmaceuticals',
@@ -101,13 +127,16 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'antihistamine', 'antihistamines', 'loratadine', 'claritin', 'cetirizine', 'zyrtec', 'benadryl', 'diphenhydramine',
     'piriton', 'chlorpheniramine', 'cough syrup', 'cough mixture', 'cough medicine', 'cold and flu', 'flu tablets',
     'decongestant', 'robitussin', 'buckleys', 'vicks', 'vaporub', 'strepsils', 'throat lozenges', 'lozenge', 'lozenges',
-    'cough drop', 'cough drops', 'throat drops', 'nasal spray',
-    'eye drops', 'ear drops', 'antacid', 'antacids', 'gaviscon', 'pepto bismol', 'milk of magnesia', 'imodium',
+    'cough drop', 'cough drops', 'throat drops', 'nasal spray', 'fishermans friend',
+    'eye drops', 'ear drops', 'antacid', 'antacids', 'gaviscon', 'pepto bismol', 'pepto', 'milk of magnesia', 'imodium',
     'loperamide', 'laxative', 'laxatives', 'omeprazole', 'ranitidine', 'metformin', 'insulin', 'inhaler', 'inhalers',
     'salbutamol', 'ventolin', 'prednisone', 'prednisolone', 'steroid', 'steroids', 'hydrocortisone', 'antifungal',
     'clotrimazole', 'canesten', 'calamine', 'gripe water', 'deep heat', 'bengay', 'icy hot', 'liver salts', 'dewormer',
     'deworming', 'mebendazole', 'albendazole', 'chloroquine', 'contraceptive', 'contraceptives', 'morning after pill',
     'postinor', 'viagra', 'sildenafil', 'cialis', 'tadalafil', 'rehydration salts', 'oral rehydration',
+    'benylin', 'nyquil', 'dayquil', 'alka seltzer', 'sudafed', 'theraflu', 'excedrin', 'voltaren', 'buscopan', 'tums', 'eno',
+    'cataflam', 'ponstan', 'brufen', 'mucinex', 'neosporin', 'tiger balm', 'headache tablets', 'headache pills',
+    'headache relief', 'fever reducer', 'cough and cold',
   ],
   AGE_RESTRICTED: [
     'lottery', 'lotto', 'lottery ticket', 'lottery tickets', 'betting', 'gambling', 'casino',
@@ -116,10 +145,12 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
   ],
   LPG: [
     'lpg', 'gas', 'cooking gas', 'gas cylinder', 'gas cylinders', 'gas bottle', 'gas bottles', 'gas refill', 'gas refills',
-    'propane', 'butane', '20lb gas', '25lb gas', '100lb gas',
+    'propane', 'butane', '20lb gas', '25lb gas', '100lb gas', 'lp gas', 'lp refill', 'lp cylinder', 'cylinder refill',
+    '20lb cylinder', '25lb cylinder', '100lb cylinder',
   ],
   FUEL: [
-    'fuel', 'fuels', 'gasoline', 'petrol', 'diesel', 'kerosene', 'paraffin', 'lamp oil', 'avgas', 'jet fuel',
+    'fuel', 'fuels', 'gasoline', 'petrol', 'diesel', 'kerosene', 'kero', 'paraffin', 'lamp oil', 'avgas', 'jet fuel',
+    'lighter fluid', 'methylated spirit', 'methylated spirits',
   ],
 };
 
@@ -138,19 +169,124 @@ export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
   'fuel line', 'fuel hose', 'fuel gauge', 'diesel engine', 'diesel jeans', 'diesel watch', 'paraffin wax',
   // [DS1105] a grocery staple, not a drink
   'cider vinegar', 'cider vinegars',
+  // [launch] soft drinks and mocktails named after a drink; paper and garden goods named after a brand or a word
+  'kola champagne', 'cola champagne', 'champagne kola', 'champagne cola',
+  'virgin mojito', 'virgin mojitos', 'virgin pina colada', 'virgin colada', 'virgin daiquiri',
+  'bristol board', 'bristol boards', 'bristol paper',
+  'weed killer', 'weed killers', 'weed eater', 'weed eaters', 'weed whacker', 'weed wacker', 'weed trimmer',
+  'weed control', 'weed spray', 'weed barrier', 'weed preventer', 'weed puller', 'weed and feed', 'weed block',
 ];
 
 /**
  * Brand words that are ordinary English in prose ("a truly Guyanese
- * breakfast"): they count only as the FIRST word of an item's name or of an
- * option ("Truly Pineapple", "Add a drink → Truly Mango"), never in a
- * description or a section. [DS1103 S2 brand; DS1104/DS1105 false holds]
+ * breakfast", "river banks", "a tiger"): they count only as the FIRST word of
+ * an item's name or of an option ("Truly Pineapple", "Banks 6 pack"), never in
+ * a description or a section. [DS1103 S2 brand; DS1104/DS1105 false holds;
+ * Opus S1-LAUNCH-1] Most only HOLD the item for a person — "Bud vase",
+ * "Tiger prawns", "Halls" (a lozenge, #58). XM is Banks DIH's rum and nothing
+ * else on a Guyanese shelf, so it is certain.
  */
-export const PROHIBITED_BRAND_FIRST_WORDS: readonly string[] = ['truly'];
-const BRAND_FIRST: ReadonlySet<string> = new Set(PROHIBITED_BRAND_FIRST_WORDS);
+const BRAND_FIRST: Readonly<Record<string, { prohibitedClass: ProhibitedClass; certain: boolean }>> = {
+  truly: { prohibitedClass: 'ALCOHOL', certain: false },
+  xm: { prohibitedClass: 'ALCOHOL', certain: true },
+  banks: { prohibitedClass: 'ALCOHOL', certain: false },
+  stag: { prohibitedClass: 'ALCOHOL', certain: false },
+  bud: { prohibitedClass: 'ALCOHOL', certain: false },
+  corona: { prohibitedClass: 'ALCOHOL', certain: false },
+  tiger: { prohibitedClass: 'ALCOHOL', certain: false },
+  malibu: { prohibitedClass: 'ALCOHOL', certain: false },
+  camel: { prohibitedClass: 'TOBACCO', certain: false },
+  bristol: { prohibitedClass: 'TOBACCO', certain: false },
+  halls: { prohibitedClass: 'MEDICINE', certain: false },
+  bayer: { prohibitedClass: 'MEDICINE', certain: false },
+};
+export const PROHIBITED_BRAND_FIRST_WORDS: readonly string[] = Object.keys(BRAND_FIRST);
+
+/**
+ * NEVER APPROVABLE wherever they appear in an item's name or one of its
+ * options: brands, wine grapes, branded and generic medicines (not lozenges —
+ * #58 holds them), ready-mixed drinks, cooking alcohol (#56) and cannabis.
+ * The name or option IS the goods. [Opus S1-LAUNCH-2; #55/#56]
+ */
+export const PROHIBITED_NEVER_APPROVABLE: readonly string[] = [
+  // alcohol: brands, grapes, product phrases
+  'whiteclaw', 'twistedtea', 'jackdaniels', 'johnniewalker', 'greygoose', 'captainmorgan', 'eldorado', 'mountgay', 'redstripe', 'budlight',
+  'hard seltzer', 'hard lemonade', 'malt liquor', 'spiked seltzer', 'white claw', 'truly seltzer', 'twisted tea',
+  'hard tea', 'hard iced tea', 'hard kombucha', 'hard soda', 'high wine',
+  'chardonnay', 'merlot', 'cabernet', 'sauvignon', 'pinot', 'shiraz', 'syrah', 'malbec', 'zinfandel', 'riesling', 'moscato', 'lambrusco', 'chianti',
+  'rum essence', 'rum extract', 'rum flavouring', 'rum flavoring', 'rum punch', 'rum cream', 'rum and coke', 'gin and tonic',
+  'el dorado', 'xm rum', 'xm royal', 'russian bear', 'king of diamonds', 'diamond reserve', 'carib',
+  'guinness', 'heineken', 'corona extra', 'mackeson', 'budweiser', 'bud light', 'coors', 'stella artois',
+  'red stripe', 'presidente', 'hennessy', 'johnnie walker', 'johnny walker', 'jack daniel', 'jack daniels', 'jameson', 'smirnoff',
+  'bacardi', 'absolut', 'grey goose', 'baileys', 'captain morgan', 'appleton', 'mount gay', 'wray and nephew',
+  'chivas', 'glenfiddich', 'jagermeister', 'moet', 'hpnotiq', 'ciroc', 'don julio', 'angostura',
+  'barbancourt', 'old parr', 'courvoisier', 'remy martin', 'kahlua', 'seagrams', 'black and white scotch', 'jose cuervo',
+  'tanqueray', 'bombay sapphire', 'ballantines', 'famous grouse', 'glenlivet', 'jim beam', 'crown royal', 'campari',
+  'aperol', 'martell', 'veuve clicquot', 'dom perignon', 'modelo', 'skol', 'becks', 'peroni', 'amstel', 'carlsberg',
+  'kronenbourg', 'miller lite', 'michelob', 'pabst', 'hoegaarden', 'desperados',
+  // tobacco and vapes: brands and the products themselves
+  'marlboro', 'benson and hedges', 'benson hedges', 'rothmans', 'du maurier', 'pall mall', 'dunhill', 'lucky strike',
+  'black and mild', 'swisher', 'swisher sweets', 'backwoods', 'craven a', 'al fakher', 'zyn', 'rizla',
+  'juul', 'elf bar', 'elfbar', 'geek bar', 'puff bar', 'lost mary', 'smok', 'dab pen',
+  'e cig', 'e cigs', 'ecig', 'ecigs', 'e cigarette', 'e cigarettes', 'e liquid', 'e liquids', 'eliquid',
+  'vape juice', 'vape pen', 'vape coil', 'vape coils', 'vape pod', 'vape pods',
+  // cannabis
+  'ganja', 'marijuana', 'marihuana', 'cannabis', 'kush', 'thc',
+  // medicines by name (lozenges are held, #58)
+  'paracetamol', 'acetaminophen', 'panadol', 'tylenol', 'ibuprofen', 'advil', 'motrin', 'nurofen', 'aspirin', 'disprin',
+  'diclofenac', 'naproxen', 'aleve', 'codeine', 'tramadol', 'morphine', 'oxycodone', 'diazepam', 'valium', 'xanax', 'alprazolam',
+  'amoxicillin', 'penicillin', 'azithromycin', 'ciprofloxacin', 'metronidazole', 'flagyl', 'loratadine', 'claritin',
+  'cetirizine', 'zyrtec', 'benadryl', 'diphenhydramine', 'piriton', 'chlorpheniramine', 'robitussin', 'buckleys', 'vaporub',
+  'gaviscon', 'pepto bismol', 'pepto', 'imodium', 'loperamide', 'omeprazole', 'ranitidine', 'metformin', 'salbutamol', 'ventolin',
+  'prednisone', 'prednisolone', 'hydrocortisone', 'clotrimazole', 'canesten', 'mebendazole', 'albendazole', 'chloroquine',
+  'postinor', 'viagra', 'sildenafil', 'cialis', 'tadalafil', 'benylin', 'nyquil', 'dayquil', 'alka seltzer', 'sudafed',
+  'theraflu', 'excedrin', 'voltaren', 'buscopan', 'tums', 'eno', 'cataflam', 'ponstan', 'brufen', 'mucinex',
+  'cough syrup', 'cough mixture', 'cough medicine', 'cold and flu', 'flu tablets', 'sleeping pills', 'morning after pill',
+  'headache tablets', 'headache pills', 'fever reducer', 'cough and cold', 'gripe water', 'deep heat', 'bengay', 'icy hot',
+  'liver salts', 'milk of magnesia',
+  // cooking gas
+  'lpg',
+];
+const NEVER_APPROVABLE: ReadonlySet<string> = new Set(PROHIBITED_NEVER_APPROVABLE);
+
+/**
+ * Goods nouns: never approvable when they HEAD the item's name, an option, or
+ * a part of either set off by a comma or a dash — after any size, pack,
+ * strength or style words that follow ("Legacy Rum", "Red Wine 750ml", "Beer,
+ * alcohol free", "Rum - Bristol White", "Cigarettes 20s"). Elsewhere they only
+ * hold the item: "Rum cake", "Wine glass set", "Cigarette lighter". [#55]
+ */
+export const PROHIBITED_GOODS_NOUNS: readonly string[] = [
+  'liquor', 'liquors', 'liqueur', 'liqueurs', 'booze', 'hooch', 'moonshine', 'beer', 'beers', 'lager', 'lagers', 'ale', 'ales',
+  'stout', 'stouts', 'ipa', 'pilsner', 'shandy', 'radler', 'radlers', 'wine', 'wines', 'champagne', 'prosecco', 'sangria',
+  'vermouth', 'sherry', 'rosewine', 'rum', 'rums', 'rhum', 'vodka', 'vodkas', 'whisky', 'whiskey', 'whiskies', 'whiskeys',
+  'bourbon', 'gin', 'gins', 'brandy', 'brandies', 'cognac', 'tequila', 'mezcal', 'absinthe', 'schnapps', 'soju', 'mojito',
+  'martini', 'daiquiri', 'pina colada', 'bitters', 'puncheon',
+  'tobacco', 'cigarette', 'cigarettes', 'cig', 'cigs', 'cigar', 'cigars', 'cigarillo', 'cigarillos', 'snuff', 'shisha',
+  'sheesha', 'hookah', 'hooka', 'grabba', 'rolling paper', 'rolling papers',
+  'vape', 'vapes',
+];
+/** Goods nouns that are also a colour or a cut ("Dress — Wine", "Heels - Champagne", a "Stout" fit): certain only with
+ *  another word in front ("Red wine", "House wine") or a size after ("Wine 750ml"); alone they hold. */
+const AMBIGUOUS_ALONE: ReadonlySet<string> = new Set(['wine', 'wines', 'champagne', 'cognac', 'stout', 'stouts', 'sherry', 'brandy', 'bourbon', 'rosewine']);
+const GOODS_LONGEST_FIRST = [...PROHIBITED_GOODS_NOUNS].sort((a, b) => b.split(' ').length - a.split(' ').length).map((p) => p.split(' '));
+
+/** Words that follow a goods noun without changing what it is: sizes, packs, strengths, ages, styles. */
+const TRAILING_SIZE = /^(\d+[a-z]{0,6}(\d+[a-z]{0,6})?|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|fl|lb|lbs|kg|g|gm|mg|mcg|gal|gallon|gallons|pint|pints|quart|quarts|pk|pack|packs|ct|count|pc|pcs|piece|pieces|x|s|case|cases|carton|cartons|crate|crates|bottle|bottles|btl|can|cans|tin|tins|nip|nips|flask|flasks|mini|minis|miniature|magnum|jumbo|single|singles|each|set|sets|puff|puffs|year|years|yr|yrs|yo|old|aged|proof|abv|percent|pct|vol|alc|zero|free|non|alcoholic|alcohol|by|per|the|a|an|of|in|only)$/;
+const TRAILING_STYLE: ReadonlySet<string> = new Set([
+  'gold', 'golden', 'white', 'dark', 'black', 'amber', 'silver', 'red', 'blush', 'spiced', 'overproof', 'premium', 'reserve',
+  'special', 'extra', 'original', 'classic', 'select', 'superior', 'dry', 'sweet', 'brut', 'blanc', 'blanco', 'reposado',
+  'anejo', 'light', 'lite', 'strong', 'draft', 'draught', 'imported', 'local', 'craft', 'double', 'triple', 'xo', 'vs',
+  'vsop', 'xxo', 'smooth', 'bold', 'export',
+]);
+/** Where a name or an option splits into parts: "Rum - Bristol White", "Vodka, Russian Standard", "Beer (non-alcoholic)". */
+const SEGMENT_BREAK = /\s+[-–—|]\s+|[,;:|/()[\]{}]/u;
 
 /** The order a mixed text reports its classes in. */
-const CLASS_ORDER: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
+const CLASS_ORDER: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
+const CLASS_OF: ReadonlyMap<string, ProhibitedClass> = new Map(
+  [...CLASS_ORDER].reverse().flatMap((c) => PROHIBITED_TERMS[c].map((t): [string, ProhibitedClass] => [t, c])),
+);
 
 const hasPhrase = (haystack: string, phrase: string): boolean => ` ${haystack} `.includes(` ${phrase} `);
 const EXEMPT_LONGEST_FIRST = [...PROHIBITED_EXEMPT_PHRASES].sort((a, b) => b.length - a.length).map((p) => p.split(' '));
@@ -169,9 +305,71 @@ const EXEMPTION_BREAKERS: ReadonlySet<string> = new Set(['hard', 'spiked', 'booz
 const SOFT_DRINK_EXEMPTIONS: ReadonlySet<string> = new Set(['ginger beer', 'ginger beers', 'root beer', 'root beers', 'birch beer', 'ginger ale', 'ginger ales']);
 const STATES_A_STRENGTH = /%|\d\s*°|\d\s*(abv|proof|alc|vol|volume|percent|per\s*cent|pct)\b|\b(abv|proof|alc|vol|volume|percent|per\s*cent)\b/i;
 
+// ── Disguises [Opus S3-10] ───────────────────────────────────────────────────
+
+/**
+ * Unicode's format characters (General Category Cf, Unicode 15.1): zero-width
+ * spaces and joiners, the soft hyphen, direction marks, the byte-order mark.
+ * Invisible, so "R​um" reads "Rum". A bracket expression of literal
+ * characters, so the database pre-filter removes exactly the same set.
+ */
+const FORMAT_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x00AD, 0x00AD], [0x0600, 0x0605], [0x061C, 0x061C], [0x06DD, 0x06DD], [0x070F, 0x070F], [0x0890, 0x0891],
+  [0x08E2, 0x08E2], [0x180E, 0x180E], [0x200B, 0x200F], [0x202A, 0x202E], [0x2060, 0x2064], [0x2066, 0x206F],
+  [0xFEFF, 0xFEFF], [0xFFF9, 0xFFFB], [0x110BD, 0x110BD], [0x110CD, 0x110CD], [0x13430, 0x1343F], [0x1BCA0, 0x1BCA3],
+  [0x1D173, 0x1D17A], [0xE0001, 0xE0001], [0xE0020, 0xE007F],
+];
+export const PROHIBITED_FORMAT_CHARS_PATTERN = `[${FORMAT_RANGES.map(([a, b]) => (a === b ? String.fromCodePoint(a) : `${String.fromCodePoint(a)}-${String.fromCodePoint(b)}`)).join('')}]`;
+const FORMAT_CHARS = new RegExp(PROHIBITED_FORMAT_CHARS_PATTERN, 'gu');
+
+/** Cyrillic and Greek letters that look Latin ("Rцm", "Неineken", "Ηennessy"), one to one, so the database
+ *  pre-filter can apply the same table with translate(). */
+const CONFUSABLE_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ['а', 'a'], ['е', 'e'], ['ё', 'e'], ['о', 'o'], ['р', 'p'], ['с', 'c'], ['у', 'y'], ['х', 'x'], ['і', 'i'], ['ї', 'i'],
+  ['ј', 'j'], ['ѕ', 's'], ['ԁ', 'd'], ['ɡ', 'g'], ['ц', 'u'], ['и', 'u'], ['к', 'k'], ['м', 'm'], ['н', 'h'], ['т', 't'],
+  ['г', 'r'], ['п', 'n'], ['ӏ', 'l'], ['ı', 'i'], ['ɑ', 'a'],
+  ['А', 'A'], ['В', 'B'], ['Е', 'E'], ['Ё', 'E'], ['К', 'K'], ['М', 'M'], ['Н', 'H'], ['О', 'O'], ['Р', 'P'], ['С', 'C'],
+  ['Т', 'T'], ['У', 'Y'], ['Х', 'X'], ['Ѕ', 'S'], ['І', 'I'], ['Ї', 'I'], ['Ј', 'J'],
+  ['α', 'a'], ['ο', 'o'], ['ν', 'v'], ['ρ', 'p'], ['τ', 't'], ['υ', 'u'], ['ι', 'i'], ['κ', 'k'], ['ε', 'e'], ['χ', 'x'],
+  ['Α', 'A'], ['Β', 'B'], ['Ε', 'E'], ['Ζ', 'Z'], ['Η', 'H'], ['Ι', 'I'], ['Κ', 'K'], ['Μ', 'M'], ['Ν', 'N'], ['Ο', 'O'],
+  ['Ρ', 'P'], ['Τ', 'T'], ['Υ', 'Y'], ['Χ', 'X'],
+];
+export const PROHIBITED_CONFUSABLES = {
+  from: CONFUSABLE_PAIRS.map(([f]) => f).join(''),
+  to: CONFUSABLE_PAIRS.map(([, t]) => t).join(''),
+} as const;
+const CONFUSABLE = new Map(CONFUSABLE_PAIRS);
+
+/** "Rosé" is the wine; "rose" is the flower. Read before accents are removed (after NFKC, so a decomposed é counts). */
+export const PROHIBITED_ROSE_PATTERN = '[rR][oO][sS][éÉ]';
+const ROSE = new RegExp(`${PROHIBITED_ROSE_PATTERN}(?![\\p{L}\\p{N}])`, 'gu');
+
+/** Two single letters in a row ("r u m" from "R.U.M"): the database keeps such a row for the exact check. */
+export const PROHIBITED_SINGLE_LETTER_RUN_PATTERN = '(^|[^a-z0-9])[a-z][^a-z0-9]+[a-z]([^a-z0-9]|$)';
+
+/** The text as it reads: compatibility forms folded (fullwidth, ligatures), format characters removed,
+ *  look-alike letters made Latin, "rosé" spelled out. */
+function undisguise(text: string): string {
+  const folded = text.normalize('NFKC').replace(FORMAT_CHARS, '');
+  return [...folded].map((ch) => CONFUSABLE.get(ch) ?? ch).join('').replace(ROSE, 'rosewine');
+}
+
+/** "r u m" → "rum": runs of single letters, joined. Judged beside the text, never instead of it. */
+function joinSingleLetters(normalized: string): string {
+  const out: string[] = [];
+  let run: string[] = [];
+  const flush = () => { if (run.length >= 2) out.push(run.join('')); else out.push(...run); run = []; };
+  for (const w of normalized.split(' ').filter(Boolean)) {
+    if (/^[a-z]$/.test(w)) run.push(w);
+    else { flush(); out.push(w); }
+  }
+  flush();
+  return out.join(' ');
+}
+
 /** A text that takes a soft drink's exemption away: a stated strength, or a qualifier word anywhere. */
 function qualifiesSoftDrinks(text: string): boolean {
-  return STATES_A_STRENGTH.test(text) || normalize(text).split(' ').some((w) => EXEMPTION_BREAKERS.has(w));
+  return STATES_A_STRENGTH.test(text) || normalize(undisguise(text)).split(' ').some((w) => EXEMPTION_BREAKERS.has(w));
 }
 
 function stripExempt(normalized: string, noSoftDrinks: boolean): string {
@@ -198,13 +396,26 @@ function stripExempt(normalized: string, noSoftDrinks: boolean): string {
  * Only the classifier joins the "'s": the database pre-filter holds the stem of every listed word
  * ending in "s" instead (see PROHIBITED_PREFILTER_WORDS).
  */
-const POSSESSIVE_S = /([\p{L}\p{N}])\s*['\u2018\u2019\u0060\u00b4\u02bc]\s*([sS])(?![\p{L}\p{N}])/gu;
+const POSSESSIVE_S = /([\p{L}\p{N}])\s*['‘’`´ʼ]\s*([sS])(?![\p{L}\p{N}])/gu;
 /** "&", "+" and a lone "n" read as "and" ("Wray & Nephew", "Wray + Nephew", "Wray n Nephew"). [DS1105 S4] */
 const anded = (text: string): string => text.replace(/[&+]/g, ' and ').replace(/(^|[^\p{L}\p{N}])n(?![\p{L}\p{N}])/giu, '$1and');
 function labelSpellings(text: string): string[] {
   const unescaped = text.replace(/&amp;/gi, '&'); // a till or a CSV export that escaped the "&"
   const joined = unescaped.replace(POSSESSIVE_S, '$1$2');
   return [...new Set([text, unescaped, joined, anded(unescaped), anded(joined)])];
+}
+
+/** Every reading of a text that is judged: each label spelling, normalized, with spelled-out letters joined, exemptions cut. */
+function readings(text: string, noSoftDrinks: boolean): string[] {
+  const out = new Set<string>();
+  for (const spelling of labelSpellings(undisguise(text))) {
+    const n = normalize(spelling);
+    for (const variant of [n, joinSingleLetters(n)]) {
+      const judged = stripExempt(variant, noSoftDrinks);
+      if (judged) out.add(judged);
+    }
+  }
+  return [...out];
 }
 
 export interface ClassifyOptions {
@@ -219,7 +430,7 @@ export interface ClassifyOptions {
 export function classifyText(text: string | null | undefined, options: ClassifyOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
   const noSoftDrinks = options.noSoftDrinks === true || qualifiesSoftDrinks(text);
-  const judged = labelSpellings(text).map((spelling) => stripExempt(normalize(spelling), noSoftDrinks)).filter(Boolean);
+  const judged = readings(text, noSoftDrinks);
   if (judged.length === 0) return null;
   for (const prohibitedClass of CLASS_ORDER) {
     for (const term of PROHIBITED_TERMS[prohibitedClass]) {
@@ -229,8 +440,57 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
   if (options.brandFirst !== false) {
     for (const j of judged) {
       const first = j.split(' ')[0]!;
-      if (BRAND_FIRST.has(first)) return { prohibitedClass: 'ALCOHOL', term: first };
+      const brand = BRAND_FIRST[first];
+      if (brand) return { prohibitedClass: brand.prohibitedClass, term: first };
     }
+  }
+  return null;
+}
+
+/** The goods noun heading one part of a name or option, if any ("red wine 750ml" → "wine"). */
+function headGoods(words: readonly string[]): string | null {
+  let end = words.length;
+  let sized = false;
+  while (end > 0 && (TRAILING_SIZE.test(words[end - 1]!) || TRAILING_STYLE.has(words[end - 1]!))) {
+    if (TRAILING_SIZE.test(words[end - 1]!)) sized = true;
+    end -= 1;
+  }
+  for (const phrase of GOODS_LONGEST_FIRST) {
+    const start = end - phrase.length;
+    if (start < 0 || !phrase.every((w, k) => words[start + k] === w)) continue;
+    const noun = phrase.join(' ');
+    if (AMBIGUOUS_ALONE.has(noun) && start === 0 && !sized) return null;
+    return noun;
+  }
+  return null;
+}
+
+/**
+ * Is an item's NAME or one of its OPTIONS the banned goods themselves — never
+ * approvable? A brand or product phrase anywhere in it, a goods noun heading
+ * it or one of its parts, or a certain brand-first word. Judged on the text
+ * alone: a qualifier written in another field can hold a soft drink, never
+ * refuse it ("Ginger beer" with "Strong" in its description is a check, not
+ * a ban). [#55/#56, Opus S1-LAUNCH-2]
+ */
+export function certainGoods(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
+  if (!text) return null;
+  const sameText = STATES_A_STRENGTH.test(text);
+  const whole = readings(text, sameText);
+  for (const prohibitedClass of CLASS_ORDER) {
+    for (const term of PROHIBITED_TERMS[prohibitedClass]) {
+      if (NEVER_APPROVABLE.has(term) && whole.some((j) => hasPhrase(j, term))) return { prohibitedClass, term };
+    }
+  }
+  for (const part of undisguise(text).split(SEGMENT_BREAK)) {
+    for (const reading of readings(part, sameText || STATES_A_STRENGTH.test(part))) {
+      const noun = headGoods(reading.split(' '));
+      if (noun) return { prohibitedClass: CLASS_OF.get(noun)!, term: noun };
+    }
+  }
+  for (const j of whole) {
+    const first = j.split(' ')[0]!;
+    if (BRAND_FIRST[first]?.certain) return { prohibitedClass: BRAND_FIRST[first]!.prohibitedClass, term: first };
   }
   return null;
 }
@@ -253,6 +513,8 @@ export interface ItemWords {
 export interface CatalogueFacts extends ItemWords {
   /** Platform categories the item is filed under. */
   categories?: ReadonlyArray<{ slug: string; name: string }>;
+  /** Platform categories the item's STORE chose (not machine-derived): a banned one bans every item of the store. [#54] */
+  storeCategories?: ReadonlyArray<{ slug: string; name: string }>;
   /** Set when a person removed the item as prohibited — one way, never undone. */
   prohibitedAt?: Date | null;
   prohibitedClass?: string | null;
@@ -261,13 +523,17 @@ export interface CatalogueFacts extends ItemWords {
   reviewApprovedHash?: string | null;
 }
 
+export type BanSource = 'category' | 'store' | 'removed' | 'word';
 export type CatalogueCheck =
-  | { state: 'BANNED'; prohibitedClass: ProhibitedClass; source: 'category' | 'removed'; term: string | null; reason: string | null }
+  | { state: 'BANNED'; prohibitedClass: ProhibitedClass; source: BanSource; term: string | null; reason: string | null; field?: JudgedField }
   | { state: 'WAITING' | 'APPROVED'; prohibitedClass: ProhibitedClass; field: JudgedField; term: string }
   | { state: 'CLEAR' };
 
-/** First word hit across the partner's text, in the order a partner reads it. */
-export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string } | null {
+/**
+ * The partner's text judged: the first word hit, in the order a partner reads
+ * it — or, when the name or an option IS the banned goods, that, as certain.
+ */
+export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
   const fields: Array<[JudgedField, string | null | undefined]> = [
     ['name', item.name],
     ['section', item.sectionName],
@@ -276,11 +542,16 @@ export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; fi
   ];
   // A strength or a qualifier in ANY of the item's own texts takes the soft-drink exemptions away in all of them. [DS1105 S3]
   const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
+  let first: { prohibitedClass: ProhibitedClass; field: JudgedField; term: string } | null = null;
   for (const [field, text] of fields) {
-    const hit = classifyText(text, { noSoftDrinks, brandFirst: field === 'name' || field === 'option' });
-    if (hit) return { ...hit, field };
+    const product = field === 'name' || field === 'option';
+    const hit = classifyText(text, { noSoftDrinks, brandFirst: product });
+    if (!hit) continue;
+    const certain = product ? certainGoods(text) : null;
+    if (certain) return { ...certain, field, certain: true };
+    first ??= { ...hit, field };
   }
-  return null;
+  return first ? { ...first, certain: false } : null;
 }
 
 /**
@@ -301,7 +572,12 @@ export function judgedWordsHash(item: ItemWords): string {
 const asClass = (value: string | null | undefined): ProhibitedClass | null =>
   (PROHIBITED_CLASSES as readonly string[]).includes(value ?? '') ? (value as ProhibitedClass) : null;
 
-/** The verdict on one item. Certain bans first; approval only ever answers a word hit. */
+/** What a partner reads about an item banned because of its STORE's category, not its own words. */
+export function storeCategoryReason(categoryName: string): string {
+  return `Your store is filed under ${categoryName}, which Swift doesn't allow. Ask Swift support to change your store's category.`;
+}
+
+/** The verdict on one item. Certain bans first; approval only ever answers a word hit that is not the goods themselves. */
 export function checkItem(item: CatalogueFacts): CatalogueCheck {
   if (item.prohibitedAt) {
     return { state: 'BANNED', prohibitedClass: asClass(item.prohibitedClass) ?? 'AGE_RESTRICTED', source: 'removed', term: null, reason: item.prohibitedReason ?? null };
@@ -310,10 +586,15 @@ export function checkItem(item: CatalogueFacts): CatalogueCheck {
     const hit = classifyCategory(category);
     if (hit) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'category', term: hit.term, reason: null };
   }
+  for (const category of item.storeCategories ?? []) {
+    const hit = classifyCategory(category);
+    if (hit) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'store', term: hit.term, reason: storeCategoryReason(category.name) };
+  }
   const hit = wordHit(item);
   if (!hit) return { state: 'CLEAR' };
+  if (hit.certain) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'word', term: hit.term, reason: null, field: hit.field };
   const approved = item.reviewApprovedHash != null && item.reviewApprovedHash === judgedWordsHash(item);
-  return { state: approved ? 'APPROVED' : 'WAITING', ...hit };
+  return { state: approved ? 'APPROVED' : 'WAITING', prohibitedClass: hit.prohibitedClass, field: hit.field, term: hit.term };
 }
 
 /** Hidden from every customer surface: banned, or a word hit nobody has approved yet. */
@@ -337,13 +618,15 @@ export function orderRefusalMessage(itemName: string): string {
  * Marks"). The database pre-filter strips the same marks from the same NFD form,
  * so it reads a column exactly as the classifier reads the text. [DS1100 S2]
  */
-export const PROHIBITED_MARKS_PATTERN = '[\u0300-\u036f]+';
+export const PROHIBITED_MARKS_PATTERN = '[̀-ͯ]+';
 
 /**
  * The words a database pre-filter looks for, after reading each column as the
- * classifier does (NFD, the marks above removed, lowercased, split on every
+ * classifier does (NFKC, format characters removed, look-alikes translated,
+ * "rosé" spelled out, NFD, the marks above removed, lowercased, split on every
  * non-letter): a superset of what the word list can match, so the exact
- * judgement above runs only on the rows that could hit. [DS1100 S2/S3]
+ * judgement above runs only on the rows that could hit. Spelled-out letters
+ * ("R.U.M") are kept by PROHIBITED_SINGLE_LETTER_RUN_PATTERN. [DS1100 S2/S3]
  *
  * A whole-word phrase hit means each of its words is a whole word of the text,
  * so a phrase needs only ONE of its words here. It contributes nothing when one
@@ -357,6 +640,8 @@ const ORDINARY_WORDS: ReadonlySet<string> = new Set([
   'jack', 'captain', 'mount', 'lucky', 'pain', 'cold', 'morning', 'sleeping', 'eye', 'ear', 'deep', 'hot', 'oral', 'milk',
   'water', 'bar', 'tea', 'oil', 'juice', 'pen', 'coil', 'coils', 'pod', 'pods', 'toy', 'toys', 'ticket', 'tickets', 'liver',
   'paper', 'papers', 'throat', 'lemonade', 'mall', 'e',
+  'black', 'martin', 'old', 'lost', 'tablets', 'pills', 'relief', 'reducer', 'refill', 'cylinder', 'lighter', 'sapphire',
+  'friend', 'crown', 'famous', 'balm',
 ]);
 const SINGLE_WORD_TERMS: ReadonlySet<string> = new Set(CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).filter((t) => !t.includes(' ')));
 const longest = (words: readonly string[]): string => words.reduce((a, b) => (b.length > a.length ? b : a));
