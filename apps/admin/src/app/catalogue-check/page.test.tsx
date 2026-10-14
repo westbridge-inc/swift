@@ -97,7 +97,7 @@ describe('the catalogue check', () => {
   it('a partner edit in between: the server refuses the approval and says so', async () => {
     mockApi(handler([waiting], (request) => (
       request.method === 'POST' && request.url.pathname.endsWith('/approve')
-        ? { status: 409, body: { success: false, error: { code: 'ITEM_CHANGED', message: 'The item changed since you opened it. Reload and check it again.' } } }
+        ? { status: 409, body: { success: false, error: { code: 'ITEM_CHANGED', message: 'This item changed — review it again.' } } }
         : undefined
     )));
     const { user } = renderWithQuery(<CatalogueCheckPage />);
@@ -105,7 +105,20 @@ describe('the catalogue check', () => {
     const dialog = screen.getByRole('dialog', { name: 'Approve Rum cake slice?' });
     await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), REASON);
     await user.click(within(dialog).getByRole('button', { name: 'Approve item' }));
-    expect(await screen.findByText(/The item changed since you opened it/)).toBeTruthy();
+    expect(await screen.findByText(/This item changed — review it again/)).toBeTruthy();
+  });
+
+  it('an item id is sent as one path segment, never as more path', async () => {
+    const fetchMock = mockApi(handler([{ ...waiting, itemId: 'odd/../id' }], (request) => (
+      request.method === 'POST' ? { body: { success: true, data: {} } } : undefined
+    )));
+    const { user } = renderWithQuery(<CatalogueCheckPage />);
+    await user.click(await screen.findByRole('button', { name: 'Approve…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Approve Rum cake slice?' });
+    await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Approve item' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    expect(String(requestsByMethod(fetchMock, 'POST')[0]![0])).toBe(`${API_ORIGIN}/api/v1/admin/catalogue-review/odd%2F..%2Fid/approve`);
   });
 
   it('says so when nothing is waiting', async () => {

@@ -581,9 +581,9 @@ export const PROHIBITED_CLASSES = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'A
 export type ProhibitedClass = (typeof PROHIBITED_CLASSES)[number];
 export const fetchCatalogueReview = () => apiFetch('/api/v1/admin/catalogue-review');
 export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: string) =>
-  apiFetch(`/api/v1/admin/catalogue-review/${itemId}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
+  apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
 export const removeCatalogueItem = (itemId: string, prohibitedClass: ProhibitedClass, reason: string) =>
-  apiFetch(`/api/v1/admin/catalogue-review/${itemId}/remove`, { method: 'POST', body: JSON.stringify({ prohibitedClass }), reason });
+  apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/remove`, { method: 'POST', body: JSON.stringify({ prohibitedClass }), reason });
 export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss', reason: string) =>
   apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }), reason });
 // [ADM-006] `category` says which rule was broken; `reason` is what the
