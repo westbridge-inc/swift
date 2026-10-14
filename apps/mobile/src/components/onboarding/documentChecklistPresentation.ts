@@ -25,6 +25,17 @@ export function faceMatchedDocTypes(status: { faceMatchDocTypes?: unknown } | nu
 }
 
 /**
+ * [REPLACE-PENDING · owner request 8 Oct 2026] What a document waiting for review says: it can be replaced
+ * (the person sent the wrong one), and once replaced it says so. The server marks a copy that replaced an
+ * earlier waiting one (`replaced` on GET /verification/status documents).
+ */
+export function pendingDocumentLabel(replaced: boolean, submittedAt?: string | null): string {
+  if (replaced) return 'Replaced — waiting for review · tap to replace again';
+  const on = submittedAt ? new Date(submittedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : null;
+  return on ? `Submitted ${on} — in review · tap to replace` : 'In review · tap to replace';
+}
+
+/**
  * [VERIFY-DOCS · owner rulings 6 Oct 2026] The documents the server says this person MAY add —
  * GET /verification/status's `optional` (a police clearance for a mover; a licence holder's
  * national ID). Never required, never in the progress count. Only the server's own list, only
