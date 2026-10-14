@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid';
 import type { Prisma, PrismaClient, UserRole } from '@prisma/client';
 import { withSuiteCapability } from '../lib/test-target-lock';
 import { recordCreditRefundPaid } from '../modules/billing/credit-refund';
+import { approvalRefusalMessage } from '../modules/admin/admin-approval';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -1329,9 +1330,35 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     expect((await twoPeople(owner, other, 'POST', url(fx.subId, 'set-aside'), { amount: 6500 })).statusCode).toBe(200);
     const setAsideId = await openSetAsideIdOf(fx.subId);
     const recorded = await soloStep(owner, url(fx.subId, 'paid'), { amount: 6500, method: 'MMG', reference: ref('NOTSOLO'), setAsideId });
-    expect(recorded.statusCode, recorded.payload).not.toBe(200);
+    // [Opus delta S4-a] Refused by the gate's own recount ("solo-ended"), not by some other barrier.
+    expect(recorded.statusCode, recorded.payload).toBe(403);
+    expect(recorded.json().error.message).toBe(approvalRefusalMessage('solo-ended'));
     expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
     expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(6500);
+  });
+
+  it('[Opus delta S4-a] the payout record counts "still the only admin" itself: a solo-decided approval while a second admin exists is refused as the same person', async () => {
+    const owner = await makeOwner();
+    const fx = await storeWithCredit(6200);
+    // The owner asks for the set-aside and `other` approves it: the owner is the set-aside's requester.
+    expect((await twoPeople(owner, other, 'POST', url(fx.subId, 'set-aside'), { amount: 6200 })).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    // A payout approval the owner decided solo, handed straight to the record (the gate would refuse
+    // it first: its own recount is graded above and in admin-solo-approval). The record counts again.
+    const now = Date.now();
+    const approval = await app.prisma.privilegedApproval.create({ data: {
+      action: 'POST /subscriptions/:id/refund-credit/paid', cls: 'C4', capability: 'subscription.refund',
+      entityId: fx.subId, fingerprint: ref('FINGERPRINT'), requestedBy: owner.userId, approvedBy: owner.userId,
+      decidedSolo: true, decidedAt: new Date(now), soloRequestedAt: new Date(now - 13 * 3_600_000), soloEligibleAt: new Date(now - 60_000),
+      status: 'APPLIED', reason: TEST_ADMIN_REASON, expiresAt: new Date(now + DAY),
+    } as never });
+    const error = await recordCreditRefundPaid(app.prisma, {
+      adminId: owner.userId, approvalId: approval.id, subscriptionId: fx.subId, amount: 6200, method: 'MMG', reference: ref('SOLOREC'), setAsideId,
+    }).then(() => null, (e: unknown) => e);
+    expect(error).toMatchObject({ code: 'REFUND_SAME_PERSON' });
+    expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(6200);
+    await booksAgree(fx.subId);
   });
 
   it('[review S2-1] a payout record that could never be recorded is refused when ASKED, and no "payout reported" marker is written', async () => {
