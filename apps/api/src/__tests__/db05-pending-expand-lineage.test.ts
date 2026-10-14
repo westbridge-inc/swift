@@ -37,6 +37,20 @@ const ids = {
   reviewVendor: '', reviewOwnerUser: '', reviewSub: '', splitSub: '', prodRider: '',
 };
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'db05-expand-test');
+// One return per order is the API contract and, since return_order_unique, a
+// unique index: every return row a case writes gets an order of its own.
+const freshOrders: string[] = [];
+let orderSeq = 0;
+const freshOrder = (tenant: 'review' | 'production') => system(async () => {
+  const tenantId = tenant === 'review' ? REVIEW : PRODUCTION;
+  const customerId = tenant === 'review' ? ids.reviewUser : ids.prodUser;
+  const o = await app.prisma.order.create({ data: {
+    tenantId, orderNumber: `D5-${RUN}-${tenant[0]}${(orderSeq += 1)}`, orderType: 'FOOD_DELIVERY', customerId, deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+    subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300, paymentMethod: 'CASH',
+  } });
+  freshOrders.push(o.id);
+  return o.id;
+});
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -93,7 +107,7 @@ afterAll(async () => {
     await app.prisma.contentReport.deleteMany({ where: { reporterId: { in: users } } });
     await app.prisma.collectionContact.deleteMany({ where: { subscriptionId: { in: [ids.reviewSub, ids.splitSub] } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: [ids.reviewSub, ids.splitSub] } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: [ids.reviewOrder, ids.prodOrder] } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: [ids.reviewOrder, ids.prodOrder, ...freshOrders] } } });
     await app.prisma.vendor.deleteMany({ where: { slug: { startsWith: `d5` }, name: { contains: RUN } } });
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: users } } });
@@ -136,17 +150,21 @@ describe('[DB-05] the three tables are walled on the row', () => {
 
 describe('[DB-05] a new row takes its tenant from its owners, or is refused', () => {
   it('ReturnRequest: bound callers are stamped, system rows derived; split, missing or contradicting owners are refused', async () => {
-    const bound = await runWithTenant(REVIEW, () => app.prisma.returnRequest.create({ data: rr(ids.reviewOrder, ids.reviewUser) }));
+    const bound = await runWithTenant(REVIEW, async () => app.prisma.returnRequest.create({ data: rr(await freshOrder('review'), ids.reviewUser) }));
     expect(bound.tenantId).toBe(REVIEW);
-    const derived = await system(() => app.prisma.returnRequest.create({ data: rr(ids.reviewOrder, ids.reviewUser) }));
+    const derived = await system(async () => app.prisma.returnRequest.create({ data: rr(await freshOrder('review'), ids.reviewUser) }));
     expect(derived.tenantId).toBe(REVIEW);
     // an order in one tenant and a customer in another: no owner
-    await expect(system(() => app.prisma.returnRequest.create({ data: rr(ids.reviewOrder, ids.prodUser) }))).rejects.toThrow(/STA-1 lineage/);
+    const reviewOrderForSplit = await freshOrder('review');
+    await expect(system(() => app.prisma.returnRequest.create({ data: rr(reviewOrderForSplit, ids.prodUser) }))).rejects.toThrow(/STA-1 lineage/);
     await expect(system(() => app.prisma.returnRequest.create({ data: rr(`missing-${RUN}`, ids.reviewUser) }))).rejects.toThrow(/STA-1 lineage/);
-    await expect(runWithTenant(PRODUCTION, () => app.prisma.returnRequest.create({ data: rr(ids.reviewOrder, ids.reviewUser) }))).resolves.toMatchObject({ tenantId: REVIEW }); // production default = unstamped → derived
-    await expect(system(() => app.prisma.returnRequest.create({ data: rr(ids.reviewOrder, ids.reviewUser, { tenantId: `other-${RUN}` }) }))).rejects.toThrow(/STA-1 lineage|Foreign key/);
+    const reviewOrderUnstamped = await freshOrder('review');
+    await expect(runWithTenant(PRODUCTION, () => app.prisma.returnRequest.create({ data: rr(reviewOrderUnstamped, ids.reviewUser) }))).resolves.toMatchObject({ tenantId: REVIEW }); // production default = unstamped → derived
+    const reviewOrderContradicted = await freshOrder('review');
+    await expect(system(() => app.prisma.returnRequest.create({ data: rr(reviewOrderContradicted, ids.reviewUser, { tenantId: `other-${RUN}` }) }))).rejects.toThrow(/STA-1 lineage|Foreign key/);
     // moving an existing return to another tenant's order is refused
-    await expect(system(() => app.prisma.returnRequest.update({ where: { id: derived.id }, data: { orderId: ids.prodOrder, customerId: ids.prodUser } }))).rejects.toThrow(/STA-1 lineage/);
+    const productionOrder = await freshOrder('production');
+    await expect(system(() => app.prisma.returnRequest.update({ where: { id: derived.id }, data: { orderId: productionOrder, customerId: ids.prodUser } }))).rejects.toThrow(/STA-1 lineage/);
   });
 
   it('ContentReport: derived from the reporter; a missing reporter or a contradicting tenant is refused', async () => {
@@ -177,11 +195,13 @@ describe('[DB-05] the backfill: true where the owners agree, quarantined (NULL) 
   class RolledBack extends Error {}
   it('existing rows take their owners’ tenant; split and orphan rows stay NULL — never the production default', async () => {
     let seen: Record<string, string | null> = {};
+    const goodOrder = await freshOrder('review');
+    const splitOrder = await freshOrder('review');
     try {
       await system(() => app.prisma.$transaction(async (tx) => {
         for (const t of TABLES) await tx.$executeRawUnsafe(`ALTER TABLE ${t} DISABLE TRIGGER USER`);
         const ins = (sql: Prisma.Sql) => tx.$executeRaw(sql);
-        await ins(Prisma.sql`INSERT INTO return_requests (id, "orderId", "customerId", reason) VALUES ('bf-rr-good', ${ids.reviewOrder}, ${ids.reviewUser}, 'x'), ('bf-rr-split', ${ids.reviewOrder}, ${ids.prodUser}, 'x'), ('bf-rr-orphan', ${`gone-${RUN}`}, ${ids.reviewUser}, 'x')`);
+        await ins(Prisma.sql`INSERT INTO return_requests (id, "orderId", "customerId", reason) VALUES ('bf-rr-good', ${goodOrder}, ${ids.reviewUser}, 'x'), ('bf-rr-split', ${splitOrder}, ${ids.prodUser}, 'x'), ('bf-rr-orphan', ${`gone-${RUN}`}, ${ids.reviewUser}, 'x')`);
         await ins(Prisma.sql`INSERT INTO content_reports (id, "reporterId", "targetType", "targetId", reason, status, "createdAt", "updatedAt") VALUES ('bf-cr-good', ${ids.reviewUser}, 'USER', 'a', 'SPAM', 'PENDING', now(), now()), ('bf-cr-orphan', ${`gone-${RUN}`}, 'USER', 'b', 'SPAM', 'PENDING', now(), now())`);
         await ins(Prisma.sql`INSERT INTO collection_contacts (id, "subscriptionId", outcome, "byAdminId") VALUES ('bf-cc-good', ${ids.reviewSub}, 'REACHED', 'a'), ('bf-cc-split', ${ids.splitSub}, 'REACHED', 'a'), ('bf-cc-orphan', ${`gone-${RUN}`}, 'REACHED', 'a')`);
         for (const t of TABLES) await tx.$executeRawUnsafe(lineageBackfillSql(t));
@@ -205,8 +225,8 @@ describe('[DB-05] the application wall: a tenant-bound read sees its own rows, n
   it('ContentReport and ReturnRequest listed from each tenant (the admin queues’ scope is now this column)', async () => {
     const mine = await system(() => app.prisma.contentReport.create({ data: report(ids.reviewUser) }));
     const theirs = await system(() => app.prisma.contentReport.create({ data: report(ids.prodUser) }));
-    const rMine = await system(() => app.prisma.returnRequest.create({ data: rr(ids.reviewOrder, ids.reviewUser) }));
-    const rTheirs = await system(() => app.prisma.returnRequest.create({ data: rr(ids.prodOrder, ids.prodUser) }));
+    const rMine = await system(async () => app.prisma.returnRequest.create({ data: rr(await freshOrder('review'), ids.reviewUser) }));
+    const rTheirs = await system(async () => app.prisma.returnRequest.create({ data: rr(await freshOrder('production'), ids.prodUser) }));
     const reports = (tenant: string) => runWithTenant(tenant, () => app.prisma.contentReport.findMany({ where: { id: { in: [mine.id, theirs.id] } }, select: { id: true } }));
     const returns = (tenant: string) => runWithTenant(tenant, () => app.prisma.returnRequest.findMany({ where: { id: { in: [rMine.id, rTheirs.id] } }, select: { id: true } }));
     expect((await reports(REVIEW)).map((r) => r.id)).toEqual([mine.id]);
