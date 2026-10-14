@@ -25,7 +25,7 @@ import { DiscoveryService } from '../modules/discovery/discovery.service';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { seedDocRegistry, registryCode, CATEGORY_GATES, EXTRA_DOC_TYPES } from '../modules/verification/doc-registry';
-import { blockedCategoryIdsForVendors, submittableGateDocTypes } from '../modules/verification/category-gate';
+import { assertOrderable, blockedCategoryIdsForVendors, submittableGateDocTypes } from '../modules/verification/category-gate';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
@@ -153,29 +153,34 @@ describe('[DOC-1 P18-2] documents control what can be sold', () => {
     expect(CATEGORY_GATES.length).toBe(SPEC_GATES.length);
   });
 
-  it('test_expired_liquor_licence_blocks_alcohol_orders: no licence → the alcohol tag is refused; a valid one → listed and orderable; expired → hidden from the feed AND the order fails', async () => {
+  it('test_expired_liquor_licence_blocks_alcohol_orders: the licence gate still judges a liquor licence (valid → not blocking; expired → blocking, BLOCK_ORDER fails the line) — but alcohol is banned outright (GUARDRAILS §8), so no licence ever lists or sells it', async () => {
     const alcohol = await category('alcohol', 'RETAIL');
     const s = await shop();
     const rum = await item(s.vendorId, s.shelfId, `Demerara rum ${RUN}`);
-    await expect(runWithTenant(TENANT, () => discovery.addItemTag(rum.id, 'alcohol', 'VENDOR'))).rejects.toMatchObject({ code: 'CATEGORY_GATED' });
+    // [GUARDRAILS §8, owner 13 Oct 2026] The ban is checked first: the tag is refused with or without a licence.
+    await expect(runWithTenant(TENANT, () => discovery.addItemTag(rum.id, 'alcohol', 'VENDOR'))).rejects.toMatchObject({ code: 'PROHIBITED_ITEM' });
     const lic = await licence(s.ownerUserId, 'liquor_licence', new Date(Date.now() + 30 * DAY));
-    await runWithTenant(TENANT, () => discovery.addItemTag(rum.id, 'alcohol', 'VENDOR'));
+    await expect(runWithTenant(TENANT, () => discovery.addItemTag(rum.id, 'alcohol', 'VENDOR'))).rejects.toMatchObject({ code: 'PROHIBITED_ITEM', message: 'Swift doesn\'t allow this item: alcohol.' });
+    // A tag filed before the ban (no gate ran): the licence gate still reads the licence…
+    await system(() => app.prisma.itemDiscoveryCategory.create({ data: { tenantId: TENANT, itemId: rum.id, categoryId: alcohol.id, source: 'VENDOR' } }));
     expect((await system(() => blockedCategoryIdsForVendors(app.prisma, TENANT, [s.vendorId]))).get(s.vendorId)?.has(alcohol.id)).toBe(false);
+    await expect(runWithTenant(TENANT, () => assertOrderable(app.prisma, s.vendorId, [{ id: rum.id, name: rum.name }]))).resolves.toBeUndefined();
+    // …and a valid licence unlocks nothing: not listed, not orderable.
     const listed = await feed('alcohol');
     expect(listed.statusCode).toBe(200);
-    expect(listed.json().data.items.some((i: { id: string }) => i.id === rum.id)).toBe(true);
+    expect(listed.json().data.items.some((i: { id: string }) => i.id === rum.id)).toBe(false);
     const c1 = await customerWithCart(s.vendorId, rum.id);
-    const ok = await checkout(c1, s.vendorId);
-    expect(ok.order.id).toBeTruthy();
-    // The licence expires at midnight — the sweep marks it, and the item stops being orderable, not merely listed.
+    await expect(checkout(c1, s.vendorId)).rejects.toMatchObject({ code: 'ITEM_UNAVAILABLE', details: { reason: 'PROHIBITED' } });
+    // The licence expires at midnight — the sweep marks it, and the gate turns blocking: BLOCK_ORDER fails the line.
     await system(() => app.prisma.verificationDocument.update({ where: { id: lic.id }, data: { expiresAt: new Date(Date.now() - DAY) } }));
     await verification.expireLapsedDocuments();
     expect((await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: lic.id } }))).status).not.toBe('APPROVED');
     expect((await system(() => blockedCategoryIdsForVendors(app.prisma, TENANT, [s.vendorId]))).get(s.vendorId)?.has(alcohol.id)).toBe(true);
+    await expect(runWithTenant(TENANT, () => assertOrderable(app.prisma, s.vendorId, [{ id: rum.id, name: rum.name }]))).rejects.toMatchObject({ code: 'CATEGORY_LICENCE_LAPSED' });
     const hidden = await feed('alcohol');
     expect(hidden.json().data.items.some((i: { id: string }) => i.id === rum.id)).toBe(false);
     const c2 = await customerWithCart(s.vendorId, rum.id);
-    await expect(checkout(c2, s.vendorId)).rejects.toMatchObject({ code: 'CATEGORY_LICENCE_LAPSED' });
+    await expect(checkout(c2, s.vendorId)).rejects.toMatchObject({ code: 'ITEM_UNAVAILABLE', details: { reason: 'PROHIBITED' } });
   });
 
   it('BLOCK_LISTING (meat) refuses the tag without a sanitary certificate and allows it with one; WARN (an aisle) allows without a trade licence', async () => {
@@ -191,11 +196,11 @@ describe('[DOC-1 P18-2] documents control what can be sold', () => {
     expect(await system(() => app.prisma.itemDiscoveryCategory.count({ where: { itemId: plantain.id } }))).toBe(1);
   });
 
-  it('pharmacy is disabled platform-wide (FD-DOC-15): the tag is refused and the authorisation cannot even be submitted; a liquor licence can be', async () => {
+  it('pharmacy is disabled platform-wide (FD-DOC-15, and banned outright by GUARDRAILS §8): the tag is refused and the authorisation cannot even be submitted; a liquor licence can be', async () => {
     const pharmacy = await category('pharmacy', 'RETAIL');
     const s = await shop();
     const pills = await item(s.vendorId, s.shelfId, `Paracetamol ${RUN}`);
-    await expect(runWithTenant(TENANT, () => discovery.addItemTag(pills.id, pharmacy.slug, 'VENDOR'))).rejects.toMatchObject({ code: 'CATEGORY_GATED' });
+    await expect(runWithTenant(TENANT, () => discovery.addItemTag(pills.id, pharmacy.slug, 'VENDOR'))).rejects.toMatchObject({ code: 'PROHIBITED_ITEM', message: 'Swift doesn\'t allow this item: medicines.' });
     const submittable = await system(() => submittableGateDocTypes(app.prisma, 'GY'));
     expect(submittable).toContain('liquor_licence');
     expect(submittable).not.toContain('pharmacy_authorisation');

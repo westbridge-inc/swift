@@ -454,9 +454,10 @@ export async function authRoutes(app: FastifyInstance) {
    *  nothing here concerns them. Weekly tiers only; checklists/cash-rules
    *  stay internal (OWASP API3). Every rate is resolved by `partnerRateFor`,
    *  the function signup and the weekly re-tier bill through; a market that
-   *  cannot be priced is an error, never a zero or a partial list. The
-   *  franchise is a discount on each location's own rate, not a separate
-   *  price, so it is quoted as the rule rather than a number. */
+   *  cannot be priced is an error, never a zero or a partial list. Every
+   *  store pays its own tier by its own catalogue — there is no multi-store
+   *  pricing (owner, 13 Oct 2026) — and a vehicle Swift does not take on yet
+   *  is listed with `offered: false`, so no client shows it a price. */
   app.get('/pricing', async (request, reply) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
     const countryCode = country.toUpperCase();

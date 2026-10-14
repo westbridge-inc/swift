@@ -553,8 +553,9 @@ export interface TieredEstimate {
   /** [TAXI waiting charge] The terms shown beside the fare, when the server sends them. */
   waiting?: unknown;
 }
-/** The ride request body. `stops` and `expectedFare` travel only on a ride
- *  WITH stops; a ride without them sends exactly today's body. */
+/** The ride request body. `stops` travel only on a ride WITH stops.
+ *  [PRICE-LOCK] `expectedFare` travels with every ride whose quote is on
+ *  screen: the server books only at it (409 FARE_CHANGED otherwise). */
 export interface RideRequestBody {
   pickup: Point;
   dropoff: Point;
@@ -766,6 +767,9 @@ export const courierApi = {
     recipientName: string;
     recipientPhone: string;
     payer?: 'SENDER' | 'RECIPIENT';
+    /** [PRICE-LOCK] The fee on screen (estimate totalFee): the server creates
+     *  the job only at it (409 PRICE_CHANGED otherwise). */
+    expectedFee?: number;
   }) => api.post('/courier/order', data),
   orders: () => api.get('/courier/orders'),
   get: (id: string) => api.get(`/courier/order/${id}`),
