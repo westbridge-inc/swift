@@ -1428,7 +1428,7 @@ export function DeliveryScreen() {
           />
 
           {/* [owner #46/#50] No Cancel once the store (or the driver, rider or
-              provider past the five-minute window) has the order: the server's
+              provider five minutes after accepting) has the order: the server's
               reason, and the store's published number to call instead. */}
           {!o.canCancel && !terminal && o.cancelUnavailable?.message ? (
             <View
