@@ -371,16 +371,18 @@ export const setAsideSubscriptionCredit = (id: string, amount: number, reason: s
     body: JSON.stringify({ amount }),
     reason,
   });
-export const recordSubscriptionRefundPaid = (id: string, amount: number, method: 'MMG' | 'BANK_TRANSFER', reference: string, reason: string) =>
+// [Sol r2 S1] A payout record and a release name the set-aside they are for
+// (refundSetAsideId from the list), so an approval acts only on that one.
+export const recordSubscriptionRefundPaid = (id: string, amount: number, method: 'MMG' | 'BANK_TRANSFER', reference: string, setAsideId: string, reason: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/paid`, {
     method: 'POST',
-    body: JSON.stringify({ amount, method, reference }),
+    body: JSON.stringify({ amount, method, reference, setAsideId }),
     reason,
   });
-export const releaseSubscriptionRefund = (id: string, amount: number, reason: string) =>
+export const releaseSubscriptionRefund = (id: string, amount: number, setAsideId: string, reason: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/release`, {
     method: 'POST',
-    body: JSON.stringify({ amount }),
+    body: JSON.stringify({ amount, setAsideId }),
     reason,
   });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);

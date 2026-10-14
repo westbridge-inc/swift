@@ -137,12 +137,12 @@ export default function SubscriptionsPage() {
     ...refundStep('set-aside'),
   });
   const recordPaid = useMutation({
-    mutationFn: ({ id, amount, method, reference, reason }: { id: string; amount: number; method: 'MMG' | 'BANK_TRANSFER'; reference: string; reason: string }) =>
-      recordSubscriptionRefundPaid(id, amount, method, reference, reason),
+    mutationFn: ({ id, amount, method, reference, setAsideId, reason }: { id: string; amount: number; method: 'MMG' | 'BANK_TRANSFER'; reference: string; setAsideId: string; reason: string }) =>
+      recordSubscriptionRefundPaid(id, amount, method, reference, setAsideId, reason),
     ...refundStep('paid'),
   });
   const release = useMutation({
-    mutationFn: ({ id, amount, reason }: { id: string; amount: number; reason: string }) => releaseSubscriptionRefund(id, amount, reason),
+    mutationFn: ({ id, amount, setAsideId, reason }: { id: string; amount: number; setAsideId: string; reason: string }) => releaseSubscriptionRefund(id, amount, setAsideId, reason),
     ...refundStep('release'),
   });
   const refundBusy = setAside.isPending || recordPaid.isPending || release.isPending;
@@ -263,7 +263,7 @@ export default function SubscriptionsPage() {
                                   if (!reference) return;
                                   if (!window.confirm(`Record that GY$${owed.toLocaleString()} was paid back to ${h.name} by ${method === 'MMG' ? 'MMG' : 'bank transfer'} (${reference})? A second admin approves it.`)) return;
                                   const reason = askReason({ action: 'record this refund payout', subject: `${h.name} (${reference})` });
-                                  if (reason) recordPaid.mutate({ id: s.id, amount: owed, method, reference, reason });
+                                  if (reason) recordPaid.mutate({ id: s.id, amount: owed, method, reference, setAsideId: String(s.refundSetAsideId ?? ''), reason });
                                 }}
                                 disabled={refundBusy || payoutReported}
                                 className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -275,7 +275,7 @@ export default function SubscriptionsPage() {
                                   const owed = Number(s.refundSetAside);
                                   if (!window.confirm(`Return the GY$${owed.toLocaleString()} set aside for ${h.name} to their credit? Only if the refund could not be paid.`)) return;
                                   const reason = askReason({ action: 'return this refund set-aside to credit', subject: h.name });
-                                  if (reason) release.mutate({ id: s.id, amount: owed, reason });
+                                  if (reason) release.mutate({ id: s.id, amount: owed, setAsideId: String(s.refundSetAsideId ?? ''), reason });
                                 }}
                                 disabled={refundBusy || payoutReported}
                                 className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"

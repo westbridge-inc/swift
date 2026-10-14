@@ -68,7 +68,7 @@ import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminR
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
-import { openCreditRefunds, recordCreditRefundPaid, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
+import { openCreditRefunds, openSetAsideIds, recordCreditRefundPaid, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -3806,10 +3806,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // A refund set aside and not yet paid or released: the console shows its
     // next step (record the payout, or release it) instead of a new refund.
     const setAside = await openCreditRefunds(app.prisma, subscriptions.map((sub) => sub.id));
+    const setAsideIds = await openSetAsideIds(app.prisma, [...setAside.keys()]);
     const current = await Promise.all(subscriptions.map(async (sub) => {
       const payer = sub.rider?.user.id ?? sub.driver?.user.id;
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
-      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0 };
+      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null };
     }));
     // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
     return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
@@ -3946,6 +3947,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // A wallet is Decimal(12,2): any balance it can hold can be refunded whole.
   const refundAmount = z.number().positive().max(9_999_999_999.99)
     .refine((n) => new Prisma.Decimal(n).decimalPlaces() <= 2, 'At most two decimal places');
+  const refundSetAsideId = z.string().min(1, 'Name the set-aside this step is for.').max(64);
   const refundSubject = async (request: { params: unknown }) => {
     requireDefaultTenantBilling();
     const tenantId = getTenantId();
@@ -3973,23 +3975,24 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.post('/subscriptions/:id/refund-credit/paid', { preHandler: [adminGuard] }, async (request) => {
     const id = await refundSubject(request);
-    const body = z.object({ amount: refundAmount, method: z.enum(['MMG', 'BANK_TRANSFER']), reference: z.string().max(200) }).parse(request.body);
+    // [Sol r2 S1] The set-aside this payout pays is part of what the second admin approves.
+    const body = z.object({ amount: refundAmount, method: z.enum(['MMG', 'BANK_TRANSFER']), reference: z.string().max(200), setAsideId: refundSetAsideId }).parse(request.body);
     const reference = normaliseReference(body.reference, {
       required: 'Enter the MMG or bank reference of the refund you paid. It is the only proof the money went back.',
       invalid: 'That does not look like a transfer reference. Copy it from the MMG or bank record.',
     }, 'REFUND_REFERENCE');
     return refundAnswer(await recordCreditRefundPaid(app.prisma, {
       adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id,
-      amount: body.amount, method: body.method, reference,
+      amount: body.amount, method: body.method, reference, setAsideId: body.setAsideId,
       onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
     }));
   });
 
   app.post('/subscriptions/:id/refund-credit/release', { preHandler: [adminGuard] }, async (request) => {
     const id = await refundSubject(request);
-    const body = z.object({ amount: refundAmount }).parse(request.body);
+    const body = z.object({ amount: refundAmount, setAsideId: refundSetAsideId }).parse(request.body);
     return refundAnswer(await releaseCreditRefund(app.prisma, {
-      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id, amount: body.amount,
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id, amount: body.amount, setAsideId: body.setAsideId,
       onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
     }));
   });

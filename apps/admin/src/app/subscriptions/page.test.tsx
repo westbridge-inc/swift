@@ -153,7 +153,7 @@ describe('[A-12] a waived fee carries the operator’s own words', () => {
 // ---------------------------------------------------------------------------
 describe('fee credit refund: set aside, pay, record, and every answer is shown', () => {
   const withCredit = { ...subscription, prepaidBalance: { balance: 5000, currencyCode: 'GYD' }, refundSetAside: 0 };
-  const setAsideRow = { ...subscription, prepaidBalance: { balance: 0, currencyCode: 'GYD' }, refundSetAside: 5000 };
+  const setAsideRow = { ...subscription, prepaidBalance: { balance: 0, currencyCode: 'GYD' }, refundSetAside: 5000, refundSetAsideId: 'evt-aside-1' };
   const REASON = 'Partner asked to close their account and get the credit back';
   function refundServer(row: unknown, reply: (_r: ApiRequest) => { status?: number; body: unknown }) {
     return mockApi((request: ApiRequest) => {
@@ -206,7 +206,8 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/refund-credit/paid`);
-    expect(JSON.parse(String(init?.body))).toEqual({ amount: 5000, method: 'MMG', reference: 'REFUND9001' });
+    // [Sol r2 S1] the payout record names the set-aside it pays
+    expect(JSON.parse(String(init?.body))).toEqual({ amount: 5000, method: 'MMG', reference: 'REFUND9001', setAsideId: 'evt-aside-1' });
     expect((await screen.findByRole('status')).textContent).toContain('Payout recorded');
   });
 
@@ -258,7 +259,7 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/refund-credit/release`);
-    expect(JSON.parse(String(init?.body))).toEqual({ amount: 5000 });
+    expect(JSON.parse(String(init?.body))).toEqual({ amount: 5000, setAsideId: 'evt-aside-1' });
     expect((await screen.findByRole('status')).textContent).toContain('apr_9');
   });
 });

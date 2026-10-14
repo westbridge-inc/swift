@@ -861,8 +861,14 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
   }
   const url = (subId: string, step: 'set-aside' | 'paid' | 'release') => `/api/v1/admin/subscriptions/${subId}/refund-credit/${step}`;
   const setAside = (subId: string, amount: number) => injectWithApproval(app, { method: 'POST', url: url(subId, 'set-aside'), payload: { amount }, headers: headers() });
-  const paid = (subId: string, payload: Record<string, unknown>) => injectWithApproval(app, { method: 'POST', url: url(subId, 'paid'), payload, headers: headers() });
-  const release = (subId: string, amount: number) => injectWithApproval(app, { method: 'POST', url: url(subId, 'release'), payload: { amount }, headers: headers() });
+  /** [Sol r2 S1] The set-aside the console shows as open now (its own event id), as the console sends it. */
+  const openSetAsideIdOf = async (subId: string) => {
+    const rows = await app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: { in: ['PREPAID_REFUND_RESERVED', 'PREPAID_REFUND', 'PREPAID_REFUND_RELEASED'] as never } }, orderBy: { createdAt: 'asc' } });
+    const open = rows.reduce((c, r) => c + (r.type === ('PREPAID_REFUND_RESERVED' as never) ? 1 : -1) * Math.round(Number(r.amount) * 100), 0);
+    return open > 0 ? rows.filter((r) => r.type === ('PREPAID_REFUND_RESERVED' as never)).at(-1)!.id : 'none';
+  };
+  const paid = async (subId: string, payload: Record<string, unknown>) => injectWithApproval(app, { method: 'POST', url: url(subId, 'paid'), payload: { setAsideId: await openSetAsideIdOf(subId), ...payload }, headers: headers() });
+  const release = async (subId: string, amount: number) => injectWithApproval(app, { method: 'POST', url: url(subId, 'release'), payload: { amount, setAsideId: await openSetAsideIdOf(subId) }, headers: headers() });
   /** The real two-person path with chosen people: `asker` asks, `approver` approves, `asker` re-sends. */
   async function twoPeople(asker: { token: string }, approver: { token: string }, method: 'POST', target: string, payload: Record<string, unknown>, between?: () => Promise<void>) {
     const first = await app.inject({ method, url: target, payload, headers: headersFor(asker.token) });
@@ -1008,7 +1014,7 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
         } }) as PrismaClient;
         const error = await recordCreditRefundPaid(db, {
           adminId: admin.userId, approvalId: approval.id, subscriptionId: fx.subId,
-          amount: 7000, method: 'MMG', reference: historical.toLowerCase(),
+          amount: 7000, method: 'MMG', reference: historical.toLowerCase(), setAsideId: await openSetAsideIdOf(fx.subId),
         }).then(() => null, (e: unknown) => e);
         expect(error).toMatchObject({ code: 'REFUND_REFERENCE_IS_A_PAYMENT' });
         expect(await tx.billingEvent.count({ where: { subscriptionId: fx.subId, type: 'PREPAID_REFUND' } })).toBe(0);
@@ -1039,7 +1045,7 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
   it('[Sol S1] once set aside, the amount is frozen: credit that arrives while the payout record waits for approval never makes the payout unrecordable', async () => {
     const fx = await storeWithCredit(15000);
     expect((await setAside(fx.subId, 15000)).statusCode).toBe(200);
-    const res = await twoPeople(admin, other, 'POST', url(fx.subId, 'paid'), { amount: 15000, method: 'MMG', reference: ref('WAITED') },
+    const res = await twoPeople(admin, other, 'POST', url(fx.subId, 'paid'), { amount: 15000, method: 'MMG', reference: ref('WAITED'), setAsideId: await openSetAsideIdOf(fx.subId) },
       async () => { await topUp(fx.subId, 5000); });
     expect(res.statusCode, res.payload).toBe(200);
     // The answer is today's truth: the new credit is the person's, nothing is set aside.
@@ -1062,14 +1068,84 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     // `admin` asks for the set-aside and `other` approves it.
     expect((await twoPeople(admin, other, 'POST', url(fx.subId, 'set-aside'), { amount: 6000 })).statusCode).toBe(200);
     // `other` then records the payout and `admin` approves: refused.
-    const crossed = await twoPeople(other, admin, 'POST', url(fx.subId, 'paid'), { amount: 6000, method: 'MMG', reference: ref('CROSSED') });
+    const crossed = await twoPeople(other, admin, 'POST', url(fx.subId, 'paid'), { amount: 6000, method: 'MMG', reference: ref('CROSSED'), setAsideId: await openSetAsideIdOf(fx.subId) });
     expect(crossed.statusCode, crossed.payload).toBe(403);
     expect(crossed.json().error.code).toBe('REFUND_SAME_PERSON');
     expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
     expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(6000);
     // `admin` records it and `other` approves: recorded.
-    const ok = await twoPeople(admin, other, 'POST', url(fx.subId, 'paid'), { amount: 6000, method: 'MMG', reference: ref('STRAIGHT') });
+    const ok = await twoPeople(admin, other, 'POST', url(fx.subId, 'paid'), { amount: 6000, method: 'MMG', reference: ref('STRAIGHT'), setAsideId: await openSetAsideIdOf(fx.subId) });
     expect(ok.statusCode, ok.payload).toBe(200);
+    await booksAgree(fx.subId);
+  });
+
+  // [Sol r2 S1] Each payout record and release names the set-aside it was asked
+  // for, and a reported payout is never undone by a release.
+  it('[Sol r2 S1] a release approved before a payout was reported never returns that set-aside: the payout stays recordable', async () => {
+    const fx = await storeWithCredit(15000);
+    expect((await setAside(fx.subId, 15000)).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    const reference = ref('REPORTED');
+    // The release is approved; before it is applied, the payout is sent and its record asked for.
+    const back = await twoPeople(admin, other, 'POST', url(fx.subId, 'release'), { amount: 15000, setAsideId }, async () => {
+      const reported = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: { amount: 15000, method: 'MMG', reference, setAsideId }, headers: headersFor(other.token) });
+      expect(reported.statusCode, reported.payload).toBe(202);
+    });
+    expect(back.statusCode, back.payload).toBe(409);
+    expect(back.json().error.code).toBe('REFUND_PAYOUT_REPORTED');
+    expect(await wallet(fx.subId)).toBe(0);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(15000);
+    expect(await events(fx.subId, 'PREPAID_REFUND_RELEASED')).toHaveLength(0);
+    const recorded = await paid(fx.subId, { amount: 15000, method: 'MMG', reference });
+    expect(recorded.statusCode, recorded.payload).toBe(200);
+    expect(recorded.json().data).toMatchObject({ refundSetAside: 0 });
+    await booksAgree(fx.subId);
+  });
+
+  it('[Sol r2 S1 · keep the hold] a payout record that is refused still keeps the set-aside from going back', async () => {
+    const fx = await storeWithCredit(4000);
+    expect((await setAside(fx.subId, 4000)).statusCode).toBe(200);
+    const setAsideId = await openSetAsideIdOf(fx.subId);
+    const reported = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: { amount: 4000, method: 'BANK_TRANSFER', reference: ref('REFUSED'), setAsideId }, headers: headersFor(admin.token) });
+    expect(reported.statusCode, reported.payload).toBe(202);
+    const refused = await app.inject({ method: 'POST', url: `/api/v1/admin/approvals/${reported.json().error.details.approvalId}/decide`, payload: { approve: false, note: 'reference does not match the bank record' }, headers: headersFor(other.token) });
+    expect(refused.statusCode, refused.payload).toBe(200);
+    const back = await release(fx.subId, 4000);
+    expect(back.statusCode, back.payload).toBe(409);
+    expect(back.json().error.code).toBe('REFUND_PAYOUT_REPORTED');
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(4000);
+    await booksAgree(fx.subId);
+  });
+
+  it('[Sol r2 S1] an approval for an earlier set-aside never acts on a later one of the same amount', async () => {
+    const fx = await storeWithCredit(9000);
+    expect((await setAside(fx.subId, 9000)).statusCode).toBe(200);
+    const first = await openSetAsideIdOf(fx.subId);
+    const ask = async (step: 'paid' | 'release', payload: Record<string, unknown>) => {
+      const asked = await app.inject({ method: 'POST', url: url(fx.subId, step), payload, headers: headersFor(admin.token) });
+      expect(asked.statusCode, asked.payload).toBe(202);
+      const approvalId = asked.json().error.details.approvalId as string;
+      const decided = await app.inject({ method: 'POST', url: `/api/v1/admin/approvals/${approvalId}/decide`, payload: { approve: true, note: 'second person' }, headers: headersFor(other.token) });
+      expect(decided.statusCode, decided.payload).toBe(200);
+      return () => app.inject({ method: 'POST', url: url(fx.subId, step), payload, headers: { ...headersFor(admin.token), 'x-swift-approval': approvalId } });
+    };
+    // Approved for the FIRST set-aside, not used yet.
+    const staleRelease = await ask('release', { amount: 9000, setAsideId: first });
+    const stalePayout = await ask('paid', { amount: 9000, method: 'MMG', reference: ref('STALE'), setAsideId: first });
+    // The first set-aside is paid and recorded; credit arrives and a second one of the same amount is set aside.
+    expect((await paid(fx.subId, { amount: 9000, method: 'MMG', reference: ref('FIRST') })).statusCode).toBe(200);
+    await topUp(fx.subId, 9000);
+    expect((await setAside(fx.subId, 9000)).statusCode).toBe(200);
+    expect(await openSetAsideIdOf(fx.subId)).not.toBe(first);
+    const released = await staleRelease();
+    expect(released.statusCode, released.payload).toBe(409);
+    expect(released.json().error.code).toBe('REFUND_CYCLE_CHANGED');
+    const recorded = await stalePayout();
+    expect(recorded.statusCode, recorded.payload).toBe(409);
+    expect(recorded.json().error.code).toBe('REFUND_CYCLE_CHANGED');
+    expect(await wallet(fx.subId)).toBe(0);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(9000);
+    expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(1);
     await booksAgree(fx.subId);
   });
 

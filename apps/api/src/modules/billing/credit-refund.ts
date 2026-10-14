@@ -58,6 +58,21 @@ export async function openCreditRefunds(db: Db, subscriptionIds: string[]): Prom
   return open;
 }
 
+/** [Sol r2 S1] The id of each open set-aside (its PREPAID_REFUND_RESERVED
+ *  event). A payout record or a release names it, so an approval can only ever
+ *  act on the set-aside it was asked for. */
+export async function openSetAsideIds(db: Db, subscriptionIds: string[]): Promise<Map<string, string>> {
+  const ids = new Map<string, string>();
+  const open = await openCreditRefunds(db, subscriptionIds);
+  if (open.size === 0) return ids;
+  const opened = await db.billingEvent.findMany({
+    where: { subscriptionId: { in: [...open.keys()] }, type: 'PREPAID_REFUND_RESERVED' },
+    orderBy: { createdAt: 'asc' }, select: { id: true, subscriptionId: true },
+  });
+  for (const row of opened) ids.set(row.subscriptionId, row.id); // the newest one opened the open set-aside
+  return ids;
+}
+
 /** What the console shows after any step: the LIVE wallet and the open set-aside. */
 export interface CreditRefundState {
   balance: number;
@@ -88,6 +103,23 @@ async function openSetAside(tx: Prisma.TransactionClient, subscriptionId: string
   });
   if (!opened) throw new Error(`Open refund set-aside without its event for subscription ${subscriptionId}`);
   return { amount, currencyCode: opened.currencyCode, opened };
+}
+
+/** [Sol r2 S1] The route a payout record is asked on; its approval row is
+ *  the durable "a payout was reported" marker for the set-aside it names. */
+const PAID_ACTION = 'POST /subscriptions/:id/refund-credit/paid';
+
+/**
+ * [Sol r2 S1] A payout record or a release acts only on the set-aside it was
+ * asked for (`setAsideId`, part of what the second admin approved). An approval
+ * for an earlier set-aside never touches a later one, even of the same amount.
+ */
+async function namedOpenSetAside(tx: Prisma.TransactionClient, subscriptionId: string, setAsideId: string, nothing: string, changed: string) {
+  const open = await openSetAside(tx, subscriptionId);
+  if (open && open.opened.id === setAsideId) return open;
+  const named = await tx.billingEvent.findFirst({ where: { id: setAsideId, subscriptionId, type: 'PREPAID_REFUND_RESERVED' }, select: { id: true } });
+  if (!open && !named) throw new AppError(409, 'NO_REFUND_SET_ASIDE', nothing);
+  throw new AppError(409, 'REFUND_CYCLE_CHANGED', changed);
 }
 
 export interface CreditRefundStep extends CreditRefundState {
@@ -160,6 +192,8 @@ export async function recordCreditRefundPaid(prisma: PrismaClient, input: {
   method: RefundMethod;
   /** Already normalised (trimmed, upper-cased) by the caller. */
   reference: string;
+  /** The set-aside this payout pays (its PREPAID_REFUND_RESERVED event id). */
+  setAsideId: string;
   onAudit?: OnAudit;
 }): Promise<CreditRefundStep> {
   if (!(input.amount > 0)) throw new AppError(400, 'INVALID_AMOUNT', 'A refund must be positive.');
@@ -189,8 +223,9 @@ export async function recordCreditRefundPaid(prisma: PrismaClient, input: {
       if ((inbound?.n ?? 0) > 0) {
         throw new AppError(409, 'REFUND_REFERENCE_IS_A_PAYMENT', 'That reference is a payment Swift received, not the refund you sent. Enter the reference of the refund transfer.');
       }
-      const open = await openSetAside(tx, input.subscriptionId);
-      if (!open) throw new AppError(409, 'NO_REFUND_SET_ASIDE', 'No refund is set aside for this account. Set the credit aside first; pay only after that.');
+      const open = await namedOpenSetAside(tx, input.subscriptionId, input.setAsideId,
+        'No refund is set aside for this account. Set the credit aside first; pay only after that.',
+        'The refund this payout record names is no longer the one set aside (it was paid or returned since). Nothing was recorded. If you already sent this payout, tell finance: it is settled by the refund procedure.');
       if (cents(open.amount) !== cents(input.amount)) {
         throw new AppError(409, 'REFUND_AMOUNT_MISMATCH', `The amount set aside is ${open.amount} ${open.currencyCode}. Record exactly that amount.`);
       }
@@ -237,6 +272,8 @@ export async function releaseCreditRefund(prisma: PrismaClient, input: {
   approvalId: string;
   subscriptionId: string;
   amount: number;
+  /** The set-aside this release returns (its PREPAID_REFUND_RESERVED event id). */
+  setAsideId: string;
   onAudit?: OnAudit;
 }): Promise<CreditRefundStep> {
   if (!(input.amount > 0)) throw new AppError(400, 'INVALID_AMOUNT', 'A release must be positive.');
@@ -246,8 +283,21 @@ export async function releaseCreditRefund(prisma: PrismaClient, input: {
     await lockPayer(tx, input.subscriptionId);
     const prior = await tx.billingEvent.findUnique({ where: { idempotencyKey: eventKey } });
     if (prior) return { replayed: true, amount: Number(prior.amount), billingEventId: prior.id };
-    const open = await openSetAside(tx, input.subscriptionId);
-    if (!open) throw new AppError(409, 'NO_REFUND_SET_ASIDE', 'No refund is set aside for this account. Nothing was released.');
+    const open = await namedOpenSetAside(tx, input.subscriptionId, input.setAsideId,
+      'No refund is set aside for this account. Nothing was released.',
+      'The refund this release names is no longer the one set aside (it was paid or returned since). Nothing was released: ask again for the refund that is set aside now.');
+    // [Sol r2 S1 · keep the hold] Once a payout record has been asked for this
+    // set-aside (its approval row is written before that request is answered),
+    // the payout may have been sent: the set-aside is never returned to the
+    // partner's fee money, even if that record is later refused or expires.
+    // The payout is recorded, or finance settles it by the refund procedure.
+    const reported = await tx.privilegedApproval.findFirst({
+      where: { action: PAID_ACTION, entityId: input.subscriptionId, bodySnapshot: { path: ['body', 'setAsideId'], equals: open.opened.id } },
+      select: { id: true },
+    });
+    if (reported) {
+      throw new AppError(409, 'REFUND_PAYOUT_REPORTED', `A payout was reported for this refund (approval ${reported.id}), so it cannot go back to the partner's fee money. Record the payout, or have finance settle it by the refund procedure. Nothing was released.`);
+    }
     if (cents(open.amount) !== cents(input.amount)) {
       throw new AppError(409, 'REFUND_AMOUNT_MISMATCH', `The amount set aside is ${open.amount} ${open.currencyCode}. Release exactly that amount.`);
     }
@@ -260,7 +310,7 @@ export async function releaseCreditRefund(prisma: PrismaClient, input: {
       where: { subscriptionId: input.subscriptionId, currencyCode: open.currencyCode },
       data: { balance: { increment: open.amount } },
     });
-    if (returned.count !== 1) throw new AppError(409, 'WALLET_CURRENCY_CONFLICT', 'The fee paid ahead is now held in another currency. Nothing was released: this needs finance review.');
+    if (returned.count !== 1) throw new AppError(409, 'WALLET_CURRENCY_CONFLICT', 'The partner\'s weekly-fee money is now in another currency. Nothing was released: this needs finance review.');
     const event = await tx.billingEvent.create({ data: {
       subscriptionId: input.subscriptionId, type: 'PREPAID_REFUND_RELEASED', amount: open.amount, currencyCode: open.currencyCode,
       idempotencyKey: eventKey,
