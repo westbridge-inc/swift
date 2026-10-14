@@ -67,7 +67,8 @@ describe('the driver action', () => {
   it('the evidence fix falls back to a fresh position when no last-known fix exists', () => {
     const fix = body(HOOKS, 'async function evidenceFix', 'export function useDriverAction');
     expect(fix).toContain('Location.getLastKnownPositionAsync()');
-    expect(fix).toContain('Location.getCurrentPositionAsync(');
+    // [GO-LOC-1] The fresh position is the bounded Balanced -> GPS policy.
+    expect(fix).toContain('await currentDevicePosition()');
   });
 });
 

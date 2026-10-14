@@ -460,7 +460,8 @@ def caddy_render(text: str, env: dict) -> str:
 def top_level_blocks(rendered: str):
     """[addresses, body lines] for every top-level SITE block of a rendered
     Caddyfile. The file opens with Caddy's global options block (the log filter
-    that keeps credentials out of proxy-failure logs, #1435); having no address,
+    that keeps credentials out of proxy-failure logs, #1435, then the one
+    certificate issuer, CERT-ISSUER); having no address,
     it is no site and is left out. Only the FIRST block may be address-less:
     any later one is a site that lost its address, and is returned as such."""
     blocks, depth = [], 0
@@ -654,9 +655,20 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
 
 def with_global_options(text: str, options: str) -> str:
     """The Caddyfile with test-only global options added to its own global
-    options block, which must open the file (Caddy refuses a second one)."""
+    options block, which must open the file (Caddy refuses a second one).
+    [CERT-ISSUER] When the test options choose Caddy's own local CA
+    (local_certs: the live tests run with no network), the file's production
+    issuer line is taken out, exactly once: an explicit cert_issuer outranks
+    local_certs, so the test Caddy would wait on Let's Encrypt forever. The
+    production issuer itself is held by CertificateIssuerRenderedByCaddy and
+    caddy-cert-issuer.test.ts."""
     if not text.startswith("{\n"):
         raise AssertionError("the Caddyfile must open with its global options block")
+    if "local_certs" in options.split():
+        production_issuer = f"    cert_issuer acme {LETS_ENCRYPT_DIRECTORY}\n"
+        if text.count(production_issuer) != 1:
+            raise AssertionError("the Caddyfile must name its production certificate issuer exactly once")
+        text = text.replace(production_issuer, "", 1)
     return "{\n" + options + text[len("{\n"):]
 
 
@@ -699,6 +711,36 @@ class Q11WebsiteCaddyfileRenderedByCaddy(unittest.TestCase):
         self.assertEqual(hosts, [[API_HOST, WEB_HOST]])
         self.assertIn('"dial": "web:3000"', config)
         self.assertIn('"dial": "api:3000"', config)
+
+
+LETS_ENCRYPT_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory"
+
+
+@unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
+class CertificateIssuerRenderedByCaddy(unittest.TestCase):
+    """[CERT-ISSUER] The apps pin api.swiftgy.com to the Let's Encrypt roots (ISRG Root X1 and X2;
+    GTS Root R1 is the backup pin, apps/mobile/app.config.ts and plugins/withTlsPinning.js). Caddy's
+    built-in issuers can fall back to another CA whose chain is outside that pin set, so the
+    Caddyfile names its only issuer. Whatever names are set, the config Caddy actually runs must
+    carry exactly that issuer and nothing else."""
+
+    caddy = Q11WebsiteCaddyfileRenderedByCaddy.caddy
+
+    def test_every_host_combination_validates_and_carries_only_lets_encrypt(self):
+        for env in (
+            {"API_HOST": API_HOST},
+            {"API_HOST": API_HOST, "API_ALIAS_HOST": "", "WEB_HOST": "", "WEB_ALIAS_HOSTS": "", "ADMIN_HOST": ""},
+            {"API_HOST": API_HOST, "API_ALIAS_HOST": ALIAS_HOST, "WEB_HOST": WEB_HOST,
+             "WEB_ALIAS_HOSTS": PUBLIC_ALIASES, "ADMIN_HOST": ADMIN_HOST},
+        ):
+            with self.subTest(env=env):
+                self.caddy("validate", env)
+                config = json.loads(self.caddy("adapt", env))
+                policies = config.get("apps", {}).get("tls", {}).get("automation", {}).get("policies", [])
+                self.assertTrue(policies, "no certificate issuer is named: Caddy would use its built-in issuers")
+                for policy in policies:
+                    self.assertEqual(policy.get("issuers"), [{"module": "acme", "ca": LETS_ENCRYPT_DIRECTORY}])
+                self.assertNotIn("zerossl", json.dumps(config).lower())
 
 
 class Q11WebsiteDockerfile(unittest.TestCase):

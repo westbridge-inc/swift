@@ -15,7 +15,7 @@ import { VendorCard, VendorGridSkeleton, EmptyNote, VENDOR_GRID } from '@/compon
 const KINDS: { key: string; label: string; types: string[] | null }[] = [
   { key: 'all', label: 'All', types: null },
   { key: 'food', label: 'Food', types: ['RESTAURANT'] },
-  { key: 'groceries', label: 'Groceries', types: ['SUPERMARKET', 'PHARMACY'] },
+  { key: 'groceries', label: 'Groceries', types: ['SUPERMARKET'] },
   { key: 'shops', label: 'Shops', types: ['STORE'] },
   { key: 'services', label: 'Services', types: ['SERVICE'] },
 ];
