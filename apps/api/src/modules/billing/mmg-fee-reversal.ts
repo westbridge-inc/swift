@@ -256,6 +256,40 @@ async function namesAKnownPayment(tx: Tx, reversalId: string, reference: string)
 }
 
 /**
+ * [security review: census poisoning] The references MMG or Swift itself
+ * recorded for money Swift RECEIVED (or a return's own MMG reference) —
+ * never a column a partner, a customer or a reply can write into. A reference
+ * MMG's own answer names is checked against THESE only: a reference someone
+ * typed elsewhere (an order's payment claim, a reply candidate) can never
+ * stop a real return from being proven and booked. Typed references keep the
+ * full census (KNOWN_PAYMENT_REFERENCE_COLUMNS).
+ */
+export const MMG_RECORDED_PAYMENT_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
+  ['provider_payments', 'providerTxnId'], ['provider_payment_aliases', 'aliasKey'],
+  ['mmg_agent_payments', 'mmgTxnId'],
+  ['mmg_checkout_intents', 'mmgTransactionId'], ['mmg_checkout_intents', 'merchantTransactionId'],
+  ['fee_receipts', 'mmgRef'], ['mmg_refund_sends', 'mmgRefundRef'],
+];
+
+async function mmgNamedIsAPayment(tx: Tx, reversalId: string, reference: string): Promise<boolean> {
+  // One static subquery per MMG_RECORDED_PAYMENT_COLUMNS entry (a test keeps them identical).
+  const [hit] = await tx.$queryRaw<Array<{ n: bigint }>>`
+    SELECT (
+        (SELECT count(*) FROM "provider_payments" WHERE mmg_txn_canon("providerTxnId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "provider_payment_aliases" WHERE mmg_txn_canon("aliasKey") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_agent_payments" WHERE mmg_txn_canon("mmgTxnId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_checkout_intents" WHERE mmg_txn_canon("mmgTransactionId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_checkout_intents" WHERE mmg_txn_canon("merchantTransactionId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "fee_receipts" WHERE mmg_txn_canon("mmgRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "mmg_refund_sends" WHERE mmg_txn_canon("mmgRefundRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM mmg_fee_reversals r WHERE r.id <> ${reversalId}
+          AND (mmg_txn_canon(r."providerReference") = mmg_txn_canon(${reference})
+            OR mmg_txn_canon(r."resolutionNote") = mmg_txn_canon(${reference})))
+    )::bigint AS n`;
+  return Number(hit?.n ?? 0) > 0;
+}
+
+/**
  * [review S3-1] One booking per MMG reversal reference at a time: the lock is
  * held to the end of the booking transaction, and the census is read again
  * under it, so two returns closed at once with one reference cannot both book.
@@ -267,9 +301,10 @@ async function lockReversalReference(tx: Tx, reference: string): Promise<void> {
 export class MmgFeeReversalService {
   constructor(private readonly deps: ReversalDeps) {}
 
-  /** [DS1124 S2] The known-payment census, for lookupProof (this return's own row excluded). */
+  /** [DS1124 S2 · census poisoning] For lookupProof: is a reference MMG named a payment MMG or
+   *  Swift recorded (this return's own row excluded)? Never the partner-writable columns. */
   private knownPaymentFor(reversalId: string): (reference: string) => Promise<boolean> {
-    return (reference) => this.deps.prisma.$transaction((tx) => namesAKnownPayment(tx, reversalId, reference));
+    return (reference) => this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, reversalId, reference));
   }
 
   private client(): MmgReversalClient {
@@ -463,7 +498,7 @@ export class MmgFeeReversalService {
       if (row.state === 'REVERSED' || row.state === 'FAILED') return { row, applied: false, short: false };
       if (how === 'REVERSAL_COMPLETED' && row.providerReference) {
         await lockReversalReference(tx, row.providerReference);
-        if (await namesAKnownPayment(tx, row.id, row.providerReference)) {
+        if (await mmgNamedIsAPayment(tx, row.id, row.providerReference)) {
           throw new AppError(409, 'MMG_NAMED_A_PAYMENT', 'The reversal MMG named is a payment or another return Swift has on record.');
         }
       }
@@ -548,7 +583,8 @@ export class MmgFeeReversalService {
       const proof = await proofOf({ ...row, providerReference: row.providerReference ?? reference });
       if (!proof.proven) throw proof.unreadable ? unavailable() : new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
       // [review S2-2] Proven through the reversal MMG named: that reference is checked too.
-      if (proof.how === 'REVERSAL_COMPLETED' && row.providerReference && await knownPayment(row.providerReference)) {
+      if (proof.how === 'REVERSAL_COMPLETED' && row.providerReference
+        && await this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, row.id, row.providerReference!))) {
         throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
       }
       const closed = await this.deps.prisma.$transaction(async (tx) => {
@@ -560,11 +596,16 @@ export class MmgFeeReversalService {
         // reference that proves this return (or is written as its note) is locked and checked
         // again here, so two closes at once can never both cite one reversal.
         const proofRef = row.providerReference ?? reference;
+        const mmgNamedProof = proof.how === 'REVERSAL_COMPLETED' && row.providerReference !== null;
         const gated = [...new Set([...(typed ? [reference] : []), ...(proof.how === 'REVERSAL_COMPLETED' ? [proofRef] : [])])]
           .sort((a, b) => a.trim().toUpperCase().localeCompare(b.trim().toUpperCase()));
         for (const ref of gated) await lockReversalReference(tx, ref);
         for (const ref of gated) {
-          if (await namesAKnownPayment(tx, row.id, ref)) throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
+          // A typed reference: the full census; the reference MMG named: what MMG or Swift recorded.
+          const known = typed && ref === reference ? await namesAKnownPayment(tx, row.id, ref)
+            : mmgNamedProof && ref === proofRef ? await mmgNamedIsAPayment(tx, row.id, ref)
+              : await namesAKnownPayment(tx, row.id, ref);
+          if (known) throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
         }
         const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: row.subscriptionId }, select: { balance: true, currencyCode: true } });
         if (wallet && wallet.currencyCode === row.currencyCode && amountMinorOf(wallet.balance) >= amountMinorOf(row.amount)) {
@@ -593,7 +634,7 @@ export class MmgFeeReversalService {
     }
     const proof = await proofOf({ ...row, providerReference: reference });
     if (!proof.proven) throw proof.unreadable ? unavailable() : new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
-    if (proof.how === 'REVERSAL_COMPLETED' && !typed && await knownPayment(reference)) {
+    if (proof.how === 'REVERSAL_COMPLETED' && !typed && await this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, row.id, reference))) {
       throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
     }
     // [DS1117 S3] The answer and the booking are ONE transaction under the payer's lock: if
@@ -608,7 +649,8 @@ export class MmgFeeReversalService {
       // then sees the first's reference on record and is refused.
       if (typed || proof.how === 'REVERSAL_COMPLETED') {
         await lockReversalReference(tx, reference);
-        if (await namesAKnownPayment(tx, row.id, reference)) throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
+        const known = typed ? await namesAKnownPayment(tx, row.id, reference) : await mmgNamedIsAPayment(tx, row.id, reference);
+        if (known) throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
       }
       let debit: { eventId: string } | { short: true };
       try {
@@ -693,6 +735,8 @@ export class MmgFeeReversalService {
         if (after.state === 'REVERSED' || after.state === 'FAILED') settled += 1;
       } catch (err) {
         log().error({ err, reversalId: id }, '[MMG reversal] the sweep could not settle a reversal; it is read again next poll');
+        // [security review: missed alert] It rotates to the back: one row that keeps failing never starves the batch.
+        await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id, state: { in: ['SENDING', 'SENT', 'HELD'] } }, data: { lastCheckedAt: now } }).catch(() => undefined);
       }
     }
     await this.watchClosedReturns(now);
@@ -745,6 +789,8 @@ export class MmgFeeReversalService {
         }).catch((err) => log().error({ err, reversalId: row.id }, '[MMG reversal] the late-return page failed; the row is marked and listed'));
       } catch (err) {
         log().error({ err, reversalId: row.id }, '[MMG reversal] the late-return watch could not read MMG; read again next poll');
+        // [security review: missed alert] It rotates to the back: one row that keeps failing never starves the watch.
+        await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id: row.id, state: 'FAILED' }, data: { lastCheckedAt: now } }).catch(() => undefined);
       }
     }
   }

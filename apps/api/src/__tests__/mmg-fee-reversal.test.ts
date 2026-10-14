@@ -900,6 +900,25 @@ describe('[DS1118] a typed reference is checked against EVERY money reference Sw
     expect([...inSql].sort()).toEqual(KNOWN_PAYMENT_REFERENCE_COLUMNS.map(([t, c]) => `${t}.${c}`).sort());
     expect(new Set(inSql).size).toBe(inSql.length);
   });
+
+  it('[security review] the MMG-recorded subset is written out statically, matches its list, and is part of the full census', async () => {
+    const { KNOWN_PAYMENT_REFERENCE_COLUMNS, MMG_RECORDED_PAYMENT_COLUMNS } = await import('../modules/billing/mmg-fee-reversal');
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const source = readFileSync(join(__dirname, '../modules/billing/mmg-fee-reversal.ts'), 'utf8');
+    const start = source.indexOf('async function mmgNamedIsAPayment(');
+    expect(start).toBeGreaterThan(0);
+    const body = source.slice(start, source.indexOf('\n}\n', start));
+    const inSql = [...body.matchAll(/FROM "([a-z_0-9]+)" WHERE mmg_txn_canon\("([A-Za-z0-9]+)"\)/g)].map((m) => `${m[1]}.${m[2]}`);
+    const listed = MMG_RECORDED_PAYMENT_COLUMNS.map(([t, c]) => `${t}.${c}`);
+    expect([...inSql].sort()).toEqual([...listed].sort());
+    const full = new Set(KNOWN_PAYMENT_REFERENCE_COLUMNS.map(([t, c]) => `${t}.${c}`));
+    expect(listed.filter((k) => !full.has(k))).toEqual([]);
+    // never a column a customer, a partner or a reply writes
+    for (const writable of ['orders.customerPaymentRef', 'orders.mmgAttestedRef', 'reimbursement_claims.paymentRef', 'return_requests.refundRef', 'mmg_agent_payments.agentRef']) {
+      expect(listed).not.toContain(writable);
+    }
+  });
 });
 
 describe('[MMG REVERSAL] the record only moves forward', () => {
@@ -1026,6 +1045,30 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     expect(refused).toHaveLength(1);
     expect(refused[0]!.reason).toMatchObject({ code: 'NOT_A_REVERSAL' });
+  });
+
+  it('[security review: census poisoning] a reversal reference someone wrote into a reply candidate cannot stop MMG\'s real return from booking', async () => {
+    const p = await paidCheckout();
+    const reversal = `RVPZ${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    sandboxAddHistory({ transactionId: reversal, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    // Another account's open checkout carries that number as a reply candidate (anyone's reply can name one).
+    const other = await makeSub();
+    const { checkout } = await checkoutService.createCheckout({ subscriptionId: other.subId, userId: other.userId, platform: 'ios', clientKey: `rev-${nanoid(12)}` });
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: checkout.ref }, data: { candidates: { push: reversal } } });
+    const row = await askWith(serviceWith(namingClient(() => reversal)), p.checkoutId, p.amount);
+    expect(row).toMatchObject({ state: 'REVERSED', lookupStatus: 'REVERSAL_COMPLETED' });
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('[security review: missed alert] a closed return whose MMG read keeps failing still rotates, so it never starves the watch', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    const closed = await resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}R`);
+    const failing = serviceWith({ reverseTransaction: async () => ({ status: 'error', transactionId: '' }), transactionLookupDetail: async () => { throw new Error('MMG down'); } });
+    const later = new Date(Date.now() + 60 * 60_000);
+    await failing.sweep(later);
+    expect((await reversalRow(closed.id)).lastCheckedAt?.getTime()).toBe(later.getTime());
   });
 
   it('S3-2: a reversal MMG named is still pending — "not returned" is refused, so MMG is never asked a second time', async () => {

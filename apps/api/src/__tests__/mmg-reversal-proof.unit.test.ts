@@ -67,6 +67,11 @@ describe('[MMG REVERSAL] what MMG\'s lookup proves', () => {
       .toEqual({ proven: false, standing: true, unreadable: false });
   });
 
+  it('[security review: fail-open] while MMG cannot read the payment itself, nothing it named proves a return', async () => {
+    const unreadable: MmgLookupClient = { transactionLookupDetail: async (id) => (id === 'TX1' ? { outcome: 'error', reason: 'timeout' } : found('approved')) };
+    expect(await lookupProof(unreadable, row({ providerReference: 'REV1' }))).toEqual({ proven: false, standing: false, unreadable: true });
+  });
+
   it('[DS1124 S2] a reference MMG named that Swift has on record as a payment is neither proof nor in flight', async () => {
     const r = row({ providerReference: 'PAY2' });
     expect(await lookupProof(client({ TX1: found('approved'), PAY2: found('approved') }), r, async (ref) => ref === 'PAY2'))

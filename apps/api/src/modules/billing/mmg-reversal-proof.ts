@@ -66,7 +66,9 @@ export async function lookupProof(
   if (original.outcome === 'found' && original.status === 'reversed' && matchesAmount(original, row)) {
     return { proven: true, how: 'ORIGINAL_REVERSED' };
   }
-  let named = namedReversalOf(row, original);
+  // [security review: fail-open] While MMG cannot read the payment itself, nothing it names can be
+  // told apart from the payment's own ledger number: no proof through it until it can.
+  let named = original.outcome === 'error' ? null : namedReversalOf(row, original);
   let namedKnownPayment = false;
   if (named && isKnownPayment && await isKnownPayment(named)) {
     // A payment is never a return: neither proof nor a return in flight.
