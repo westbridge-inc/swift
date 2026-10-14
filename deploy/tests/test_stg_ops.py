@@ -668,9 +668,20 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
 
 def with_global_options(text: str, options: str) -> str:
     """The Caddyfile with test-only global options added to its own global
-    options block, which must open the file (Caddy refuses a second one)."""
+    options block, which must open the file (Caddy refuses a second one).
+    [CERT-ISSUER] When the test options choose Caddy's own local CA
+    (local_certs: the live tests run with no network), the file's production
+    issuer line is taken out, exactly once: an explicit cert_issuer outranks
+    local_certs, so the test Caddy would wait on Let's Encrypt forever. The
+    production issuer itself is held by CertificateIssuerRenderedByCaddy and
+    caddy-cert-issuer.test.ts."""
     if not text.startswith("{\n"):
         raise AssertionError("the Caddyfile must open with its global options block")
+    if "local_certs" in options.split():
+        production_issuer = f"    cert_issuer acme {LETS_ENCRYPT_DIRECTORY}\n"
+        if text.count(production_issuer) != 1:
+            raise AssertionError("the Caddyfile must name its production certificate issuer exactly once")
+        text = text.replace(production_issuer, "", 1)
     return "{\n" + options + text[len("{\n"):]
 
 
