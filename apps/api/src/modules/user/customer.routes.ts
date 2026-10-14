@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
@@ -47,6 +48,7 @@ import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, pric
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
+import { searchTiers } from '../search/forgiving-text';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
@@ -98,6 +100,11 @@ const latLngQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),
 });
+
+/** The store columns the browse search reads: name and description as text, a
+ *  slip forgiven in the name only, and the cuisine list (an element equal to a
+ *  word, as `has: search` matched before). */
+const BROWSE_SEARCH_COLUMNS = { text: ['name', 'description'], typoText: ['name'], lists: ['cuisineTypes'] } as const;
 
 const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
   type: z.nativeEnum(VendorType).optional(),
@@ -1150,7 +1157,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // no tenant context, which the Prisma extension defines as an UNSCOPED
           // query — so without the relational predicate a deactivated operator's
           // whole catalog kept serving here after the platform shut them off.
-          where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
+          where: { ...visibleVendorForCaller(await readFeePause(app.prisma)), items: { some: { isAvailable: true } } },
           include: {
             // imageUrl was NOT selected, so Home had nothing to draw a category
             // chip with and every chip fell back to the same stock photograph —
@@ -1176,7 +1183,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // DISH sat above the fold ([F-028-07] applies here identically: a
           // guest request is unscoped, so the relational predicate is the only
           // thing standing between a shut-off operator and the Home rail).
-          where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
+          where: { isAvailable: true, vendor: visibleVendorRelForCaller(await readFeePause(app.prisma)) },
           orderBy: { totalOrdered: 'desc' },
           take: 10,
           select: {
@@ -1375,7 +1382,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
-    const where: Record<string, unknown> = { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } };
+    const where: Record<string, unknown> = { ...visibleVendorForCaller(await readFeePause(app.prisma)), items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug
@@ -1410,16 +1417,27 @@ export async function customerRoutes(app: FastifyInstance) {
     if (open === 'true') where['isCurrentlyOpen'] = true;
     if (minRating != null) where['averageRating'] = { gte: minRating };
     if (search) {
-      where['OR'] = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { cuisineTypes: { has: search } },
-      ];
+      // Owner, 13 Oct — search must forgive. This used to match ONE substring
+      // of the whole text, so a misspelt name, a plural, or the words in
+      // another order found no store (the website's search page and the app's
+      // Shops / Services chips read this list). The forgiving tiers
+      // (search/forgiving-text.ts), strictest first: the page uses the first
+      // tier that finds anything, so a correctly typed name never shares its
+      // page with slip matches, and the total and pages stay one tier's.
+      const tiers = searchTiers(search, BROWSE_SEARCH_COLUMNS);
+      let chosen: Record<string, unknown> = { id: { in: [] } }; // no searchable word: nothing matches
+      for (const { where: tierWhere } of tiers) {
+        chosen = tierWhere;
+        if (await app.prisma.vendor.count({ where: { AND: [where, tierWhere] } }) > 0) break;
+      }
+      where['AND'] = [chosen];
     }
 
     const orderBy: Record<string, string>[] = [];
     // Category feeds read open-first, closed under the divider (honest order).
-    if (categoryRow) orderBy.push({ isCurrentlyOpen: 'desc' });
+    // So does a search: it lists closed stores too, after the open ones (owner, 13 Oct).
+    const openFirstOrder = Boolean(categoryRow || search);
+    if (openFirstOrder) orderBy.push({ isCurrentlyOpen: 'desc' });
     switch (sort) {
       case 'rating': orderBy.push({ averageRating: 'desc' }); break;
       case 'popular': orderBy.push({ totalOrders: 'desc' }); break;
@@ -1441,7 +1459,7 @@ export async function customerRoutes(app: FastifyInstance) {
       const surfAll = await ratingSurfaces(app.prisma, 'VENDOR', idRows.map((r) => r.id));
       idRows.sort(
         (a, b) =>
-          (categoryRow ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
+          (openFirstOrder ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
           (surfAll.get(b.id)!.displayRating ?? -1) - (surfAll.get(a.id)!.displayRating ?? -1) ||
           b.averageRating - a.averageRating ||
           a.name.localeCompare(b.name),
@@ -2544,8 +2562,11 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'ORDER_NOT_COMPLETE', 'Receipts are issued once the order completes.');
     }
     const { renderReceiptHtml } = await import('../order/receipt');
+    // [TAXI waiting charge] A ride whose waiting charge was frozen itemises it.
+    const { readFareBreakdown } = await import('../rides/taxi-waiting');
+    const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml(order as never);
+    return renderReceiptHtml((fareBreakdown ? { ...order, fareBreakdown } : order) as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {

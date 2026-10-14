@@ -133,6 +133,8 @@ const TENANT_QUERY_EXTENSIONS = {
   taxiTripStop: scoped,
   // [AF-MOB-006] A custody recovery case belongs to its order's operator.
   custodyRecoveryCase: scoped,
+  // [TAXI waiting charge] A ride's waiting terms and frozen charge belong to its operator, like the ride.
+  taxiRideWaiting: scoped,
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
   supplyWatch: scoped,

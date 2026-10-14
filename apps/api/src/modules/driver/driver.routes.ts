@@ -20,6 +20,7 @@ import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { loadTaxiStops, offerItinerary, readRideItinerary } from '../rides/taxi-stops-read';
+import { decorateRideWaiting, readFareBreakdown, type TaxiFareBreakdown } from '../rides/taxi-waiting';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
@@ -38,6 +39,7 @@ import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { moverLocationAccepted } from '../../contracts/mover-location';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
@@ -60,8 +62,10 @@ import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
-import { normalizeRegistrationMark } from '../verification/subjects';
+import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
+import { assertHirePlateChange } from '../verification/hire-plate';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 
 const updateDriverProfileSchema = z.object({
@@ -179,19 +183,20 @@ export async function driverRoutes(app: FastifyInstance) {
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const me = await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    // [Owner ruling 11 Oct 2026 — H-PLATE] A new taxi plate is H-series, said before step-up or any write.
+    assertHirePlateChange(me.vehicleType, body.licensePlate, me.licensePlate);
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: its taxi
     // driver has no MMG pay link to set or clear. Refused before any step-up,
     // money-surface command or owner notice (whose SMS would reach a fictional number).
     if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') {
       throw new ReviewDemoMoneyRefusedError();
     }
-    // [High #9 · DS109] Changing the plate re-identifies the vehicle the driver operates.
+    // [High #9 · DS109] Changing the plate, make, model, year or colour re-identifies the vehicle the driver operates.
     // Step-up first (the same proof as a money surface), and the old vehicle links close so
     // GO re-checks the EXACT new vehicle — a retyped plate never carries another subject's
     // approved documents, and the old vehicle's evidence stops counting.
-    const plateChanged = body.licensePlate !== undefined
-      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(me.licensePlate ?? '');
-    if (plateChanged) {
+    const identityChanged = vehicleIdentityChanged(me, body);
+    if (identityChanged) {
       await requireStepUp(app, request);
     }
     const mmgPayUrl = body.mmgPayUrl === undefined
@@ -210,6 +215,7 @@ export async function driverRoutes(app: FastifyInstance) {
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
+      if (identityChanged && me.currentRideId) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active ride before changing your vehicle.');
       const driver = await tx.driver.update({
         where: { userId: request.user.userId },
         data: {
@@ -228,10 +234,10 @@ export async function driverRoutes(app: FastifyInstance) {
           ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
           ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
           ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
-          // [High #9 · DS109] A real plate change re-identifies the vehicle: retire live supply
+          // [High #9 · DS109] A real vehicle identity change re-identifies the vehicle: retire live supply
           // NOW (same atomic shape as the admin reject path) and clear the legacy verification
           // flag, so the new vehicle must be verified before this driver is dispatchable again.
-          ...(plateChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
+          ...(identityChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
         },
         include: {
           user: {
@@ -248,14 +254,8 @@ export async function driverRoutes(app: FastifyInstance) {
           },
         },
       });
-      if (plateChanged) {
-        // A plate change never inherits another subject's approved documents: every open
-        // vehicle link closes. New submissions for the new plate create a PENDING assignment
-        // that an admin must approve before its evidence propagates.
-        await tx.subjectLink.updateMany({
-          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-          data: { validTo: new Date() },
-        });
+      if (identityChanged) {
+        await requireFreshVehicleReview(tx, request.user.userId, me.licensePlate, { ...driver, kind: 'DRIVER' });
       }
 
       return driver;
@@ -684,7 +684,8 @@ export async function driverRoutes(app: FastifyInstance) {
       }
     }
 
-    return { success: true };
+    // The app checkpoints only an explicit acceptance (contracts/mover-location.ts).
+    return moverLocationAccepted();
   });
 
   // ─── Available Rides ───────────────────────────────────────────────────
@@ -815,7 +816,10 @@ export async function driverRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] A ride with stops: each with its progress, in order, and
     // the one the ride is heading for. A ride without them gains no key.
     const itinerary = order ? await readRideItinerary(app.prisma, order) : null;
-    return { success: true, data: order && itinerary ? { ...order, ...itinerary } : order };
+    // [TAXI waiting charge] From the arrival on, the live wait: what the driver
+    // collects on top of the route fare, the same number the freeze will take.
+    const waiting = order ? await decorateRideWaiting(app.prisma, order, itinerary?.stops ?? null) : {};
+    return { success: true, data: order && (itinerary || waiting.waiting) ? { ...order, ...itinerary, ...waiting } : order };
   });
 
   // ─── Ride Lifecycle ────────────────────────────────────────────────────
@@ -1326,6 +1330,39 @@ export async function driverRoutes(app: FastifyInstance) {
     gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
     photoUrl: z.string().max(2048).optional(),
   });
+  /** [TAXI waiting charge] What a finished ride tells the passenger: the
+   *  DELIVERED event's fare object (with its breakdown once a waiting charge is
+   *  frozen, CONTRACT §8.4) and the completion notice. A ride with no frozen
+   *  charge gets today's object and today's sentence, exactly. */
+  const finishedFare = async (
+    order: Parameters<typeof readFareBreakdown>[1] & { taxiFareBase: unknown; taxiFarePerKm: unknown; taxiFarePerMin: unknown; taxiFareSurge: unknown },
+    status: string,
+    log: { warn: (obj: unknown, msg: string) => void },
+  ) => {
+    let breakdown: TaxiFareBreakdown | null = null;
+    if (status === 'DELIVERED') {
+      breakdown = await readFareBreakdown(app.prisma, order).catch((err: unknown) => {
+        log.warn({ err, orderId: order.id }, 'taxi fare breakdown could not be read after commit');
+        return null;
+      });
+    }
+    const fare = {
+      base: order.taxiFareBase,
+      perKm: order.taxiFarePerKm,
+      perMin: order.taxiFarePerMin,
+      surge: order.taxiFareSurge,
+      // [DS1201 S3] The amount collected: with a frozen waiting charge, the
+      // route fare + the charge — an older app reads only this figure. A ride
+      // with no charge keeps today's value exactly.
+      total: breakdown && breakdown.waitingCharge > 0 ? breakdown.total : order.taxiFareTotal,
+      ...(breakdown ? { fareBreakdown: breakdown } : {}),
+    };
+    const body = breakdown && breakdown.waitingCharge > 0
+      ? `You have arrived at your destination. Total fare: $${breakdown.total.toLocaleString()} GYD (trip $${breakdown.routeFare.toLocaleString()} + waiting $${breakdown.waitingCharge.toLocaleString()}).`
+      : `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`;
+    return { fare, body };
+  };
+
   app.post('/rides/:id/handover-photo', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
@@ -1358,17 +1395,12 @@ export async function driverRoutes(app: FastifyInstance) {
       };
     });
     if (!replayed) {
+      const finished = await finishedFare(order, data.status, request.log);
       try {
         app.io.to(`order:${id}`).emit('order:status_changed', {
           orderId: id,
           status: data.status,
-          fare: {
-            base: order.taxiFareBase,
-            perKm: order.taxiFarePerKm,
-            perMin: order.taxiFarePerMin,
-            surge: order.taxiFareSurge,
-            total: order.taxiFareTotal,
-          },
+          fare: finished.fare,
           actualDuration: data.actualDuration,
         });
       } catch (error) {
@@ -1379,7 +1411,7 @@ export async function driverRoutes(app: FastifyInstance) {
           userId: order.customerId,
           type: 'ORDER_UPDATE',
           title: 'Ride Complete',
-          body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
+          body: finished.body,
           data: taxiNotificationData(id, { status: 'DELIVERED' }),
         }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
       }
@@ -1424,17 +1456,12 @@ export async function driverRoutes(app: FastifyInstance) {
       invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${current}`),
     });
 
+    const finished = await finishedFare(order, 'DELIVERED', request.log);
     try {
       app.io.to(`order:${id}`).emit('order:status_changed', {
         orderId: id,
         status: 'DELIVERED',
-        fare: {
-          base: order.taxiFareBase,
-          perKm: order.taxiFarePerKm,
-          perMin: order.taxiFarePerMin,
-          surge: order.taxiFareSurge,
-          total: order.taxiFareTotal,
-        },
+        fare: finished.fare,
         actualDuration,
       });
     } catch (error) {
@@ -1445,7 +1472,7 @@ export async function driverRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Ride Complete',
-      body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
+      body: finished.body,
       data: taxiNotificationData(id, { status: 'DELIVERED' }),
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
 
