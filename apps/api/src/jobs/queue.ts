@@ -1513,11 +1513,21 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         const watchdog = await scanSosEscalations(ctx.prisma).catch(() => null);
         if (watchdog && watchdog.activeWithoutPage.length > 0) {
-          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
-          for (const stuck of watchdog.activeWithoutPage.slice(0, 20)) {
+          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+          // Legacy demo alerts can remain pending during retry backoff. They never
+          // page real operations, and are dropped BEFORE the cap of 20 pages a
+          // tick, so old demo alerts can never fill it and hide a real SOS (the
+          // scan drops them too; this is the second wall).
+          const realStuck: typeof watchdog.activeWithoutPage = [];
+          for (const stuck of watchdog.activeWithoutPage) {
+            if (realStuck.length >= 20) break;
+            if (stuck.tenantId && await isReviewTenantId(ctx.prisma, stuck.tenantId)) continue;
+            realStuck.push(stuck);
+          }
+          for (const stuck of realStuck) {
             await opsPageOnce(ctx, `sos-active-without-page:${stuck.sosAlertId}`, 600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
-                tenantId: null,
+                tenantId: stuck.tenantId,
                 title: '🚨 SOS ACTIVE with no ops page delivered',
                 body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
                 data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
