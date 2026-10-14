@@ -19,6 +19,7 @@ import {
   notAllowedMessage,
   PROHIBITED_CLASSES,
   PROHIBITED_CLASS_LABELS,
+  PROHIBITED_BRAND_FIRST_WORDS,
   PROHIBITED_MARKS_PATTERN,
   PROHIBITED_PREFILTER_WORDS,
   PROHIBITED_TERMS,
@@ -107,6 +108,21 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
     }
   });
 
+  // [DS1105 S4] A strength in words or degrees; label spellings as they arrive from tills and typing.
+  it.each([
+    ['Six percent ginger beer', 'ALCOHOL', 'beer'], ['Ginger beer 5°', 'ALCOHOL', 'beer'], ['Ginger beer 5 °', 'ALCOHOL', 'beer'],
+    ['Bailey \'s Irish Cream', 'ALCOHOL', 'baileys'], ['Wray n Nephew', 'ALCOHOL', 'wray and nephew'],
+    ['Wray + Nephew 700ml', 'ALCOHOL', 'wray and nephew'], ['Wray &amp; Nephew', 'ALCOHOL', 'wray and nephew'],
+  ] as const)('a strength or a spelling as written in the wild: %s', (text, cls, term) => {
+    expect(classifyText(text)).toEqual({ prohibitedClass: cls, term });
+  });
+
+  it('apple cider vinegar is a grocery staple; cider is still cider', () => {
+    for (const ordinary of ['Apple cider vinegar 500ml', 'Cider vinegar', 'Raw apple cider vinegar (with the mother)']) expect(classifyText(ordinary), ordinary).toBeNull();
+    expect(classifyText('Apple cider 330ml')).toEqual({ prohibitedClass: 'ALCOHOL', term: 'cider' });
+    expect(classifyText('Hard cider and cider vinegar')).toMatchObject({ prohibitedClass: 'ALCOHOL' });
+  });
+
   // [DS1104 S3/S4] A soft drink's exemption goes when a strength or a qualifier appears ANYWHERE in the
   // text — after the phrase, as a comparative, or a strength written joined to its number.
   it.each([
@@ -180,6 +196,12 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
       }
     }
     expect(labelled).toBeGreaterThan(400);
+    for (const word of PROHIBITED_BRAND_FIRST_WORDS) {
+      for (const raw of [`${word} Pineapple`, `${word.toUpperCase()} — mango`, `${word}\u2019s seltzer`]) {
+        expect(checkItem({ name: raw }).state, raw).toBe('WAITING');
+        expect(kept(raw), `the pre-filter misses ${JSON.stringify(raw)}`).toBe(true);
+      }
+    }
     for (const raw of ['Bailey\'s Irish Cream', 'Buckley’s Mixture', 'Wray & Nephew', 'Jack Daniel\'s']) {
       expect(classifyText(raw), raw).not.toBeNull();
       expect(kept(raw), raw).toBe(true);
@@ -238,6 +260,24 @@ describe('[§8] the verdict on an item: certain bans refuse, a word holds it for
     const banned = { ...rumCake, categories: [{ slug: 'alcohol', name: 'Alcohol' }] };
     expect(checkItem({ ...banned, reviewApprovedHash: judgedWordsHash(banned) }).state).toBe('BANNED');
     expect(checkItem({ ...rumCake, reviewApprovedHash: judgedWordsHash(rumCake), prohibitedAt: new Date(), prohibitedClass: 'ALCOHOL' }).state).toBe('BANNED');
+  });
+
+  // [DS1105 S3] A qualifier in one of the item's own texts reaches the soft drink named in another:
+  // name "Ginger Beer" with description "8 proof" was CLEAR in every field judged alone.
+  it.each([
+    [{ name: 'Ginger Beer', description: '8 proof' }, 'name'], [{ name: 'Ginger Beer', description: 'Strong' }, 'name'],
+    [{ name: 'Ginger Beer', description: '6 vol.' }, 'name'], [{ name: 'Root beer', description: '4.5abv' }, 'name'],
+    [{ name: 'Ginger ale', sectionName: 'Strong drinks' }, 'name'], [{ name: 'Fried chicken combo', description: '12proof', optionNames: ['Coke', 'Ginger beer'] }, 'option'],
+  ] as const)('a qualifier in another field: %o', (item, field) => {
+    expect(checkItem(item)).toMatchObject({ state: 'WAITING', prohibitedClass: 'ALCOHOL', field });
+  });
+
+  it('"Truly" is the seltzer brand at the head of a name or an option, an ordinary adverb in prose', () => {
+    expect(checkItem({ name: 'Truly Pineapple' })).toMatchObject({ state: 'WAITING', prohibitedClass: 'ALCOHOL', field: 'name', term: 'truly' });
+    expect(checkItem({ name: 'Wings combo', optionNames: ['Add a drink', 'Truly Mango'] })).toMatchObject({ state: 'WAITING', field: 'option', term: 'truly' });
+    expect(checkItem({ name: 'Pepperpot', description: 'A truly Guyanese classic' })).toEqual({ state: 'CLEAR' });
+    expect(checkItem({ name: 'Truly local bread', sectionName: 'Bakery' })).toMatchObject({ state: 'WAITING' }); // a name led by the brand word is held for a person
+    expect(checkItem({ name: 'Bread', sectionName: 'Truly local' })).toEqual({ state: 'CLEAR' });
   });
 
   it('a word anywhere in the partner\'s text holds the item, and says where', () => {

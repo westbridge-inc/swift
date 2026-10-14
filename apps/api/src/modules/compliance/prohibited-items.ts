@@ -65,7 +65,7 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'alcohol', 'alcoholic', 'liquor', 'liquors', 'liqueur', 'liqueurs', 'booze', 'hooch', 'moonshine',
     'beer', 'beers', 'lager', 'lagers', 'ale', 'ales', 'stout', 'stouts', 'ipa', 'pilsner', 'shandy',
     'cider', 'ciders', 'hard seltzer', 'hard lemonade', 'malt liquor', 'spiked', 'boozy', 'radler', 'radlers',
-    'spiked seltzer', 'white claw', 'truly seltzer', 'twisted tea', 'truly', 'abv',
+    'spiked seltzer', 'white claw', 'truly seltzer', 'twisted tea', 'abv',
     'hard tea', 'hard iced tea', 'hard kombucha', 'hard soda',
     // brands written as one word
     'whiteclaw', 'twistedtea', 'jackdaniels', 'johnniewalker', 'greygoose', 'captainmorgan', 'eldorado', 'mountgay',
@@ -136,7 +136,18 @@ export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
   'alcohol pad', 'alcohol pads', 'alcohol gel', 'alcohol hand', 'alcohol based hand',
   'fuel filter', 'fuel filters', 'fuel pump', 'fuel pumps', 'fuel cap', 'fuel injector', 'fuel injectors',
   'fuel line', 'fuel hose', 'fuel gauge', 'diesel engine', 'diesel jeans', 'diesel watch', 'paraffin wax',
+  // [DS1105] a grocery staple, not a drink
+  'cider vinegar', 'cider vinegars',
 ];
+
+/**
+ * Brand words that are ordinary English in prose ("a truly Guyanese
+ * breakfast"): they count only as the FIRST word of an item's name or of an
+ * option ("Truly Pineapple", "Add a drink → Truly Mango"), never in a
+ * description or a section. [DS1103 S2 brand; DS1104/DS1105 false holds]
+ */
+export const PROHIBITED_BRAND_FIRST_WORDS: readonly string[] = ['truly'];
+const BRAND_FIRST: ReadonlySet<string> = new Set(PROHIBITED_BRAND_FIRST_WORDS);
 
 /** The order a mixed text reports its classes in. */
 const CLASS_ORDER: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
@@ -156,11 +167,15 @@ const EXEMPTION_BREAKERS: ReadonlySet<string> = new Set(['hard', 'spiked', 'booz
  *  strong", "Stronger ginger beer") never gets them: such a ginger beer is a drink Swift does not
  *  carry. [DS1103 S2, DS1104 S3/S4] Other exemptions ("rubbing alcohol 70%") are unaffected. */
 const SOFT_DRINK_EXEMPTIONS: ReadonlySet<string> = new Set(['ginger beer', 'ginger beers', 'root beer', 'root beers', 'birch beer', 'ginger ale', 'ginger ales']);
-const STATES_A_STRENGTH = /%|\d\s*(abv|proof|alc|vol|volume|percent|per\s*cent|pct)\b|\b(abv|proof|alc|vol|volume)\b/i;
+const STATES_A_STRENGTH = /%|\d\s*°|\d\s*(abv|proof|alc|vol|volume|percent|per\s*cent|pct)\b|\b(abv|proof|alc|vol|volume|percent|per\s*cent)\b/i;
 
-function stripExempt(normalized: string, statesStrength: boolean): string {
+/** A text that takes a soft drink's exemption away: a stated strength, or a qualifier word anywhere. */
+function qualifiesSoftDrinks(text: string): boolean {
+  return STATES_A_STRENGTH.test(text) || normalize(text).split(' ').some((w) => EXEMPTION_BREAKERS.has(w));
+}
+
+function stripExempt(normalized: string, noSoftDrinks: boolean): string {
   let words = normalized.split(' ').filter(Boolean);
-  const noSoftDrinks = statesStrength || words.some((w) => EXEMPTION_BREAKERS.has(w));
   for (const phrase of EXEMPT_LONGEST_FIRST) {
     if (noSoftDrinks && SOFT_DRINK_EXEMPTIONS.has(phrase.join(' '))) continue;
     const kept: string[] = [];
@@ -183,21 +198,38 @@ function stripExempt(normalized: string, statesStrength: boolean): string {
  * Only the classifier joins the "'s": the database pre-filter holds the stem of every listed word
  * ending in "s" instead (see PROHIBITED_PREFILTER_WORDS).
  */
-const POSSESSIVE_S = /([\p{L}\p{N}])['\u2018\u2019\u0060\u00b4\u02bc]([sS])(?![\p{L}\p{N}])/gu;
+const POSSESSIVE_S = /([\p{L}\p{N}])\s*['\u2018\u2019\u0060\u00b4\u02bc]\s*([sS])(?![\p{L}\p{N}])/gu;
+/** "&", "+" and a lone "n" read as "and" ("Wray & Nephew", "Wray + Nephew", "Wray n Nephew"). [DS1105 S4] */
+const anded = (text: string): string => text.replace(/[&+]/g, ' and ').replace(/(^|[^\p{L}\p{N}])n(?![\p{L}\p{N}])/giu, '$1and');
 function labelSpellings(text: string): string[] {
-  const joined = text.replace(POSSESSIVE_S, '$1$2');
-  return [...new Set([text, joined, text.replace(/&/g, ' and '), joined.replace(/&/g, ' and ')])];
+  const unescaped = text.replace(/&amp;/gi, '&'); // a till or a CSV export that escaped the "&"
+  const joined = unescaped.replace(POSSESSIVE_S, '$1$2');
+  return [...new Set([text, unescaped, joined, anded(unescaped), anded(joined)])];
+}
+
+export interface ClassifyOptions {
+  /** Take the soft-drink exemptions away whatever this text says: another of the item's own texts states a
+   *  strength or a qualifier ("Ginger Beer" named, "8 proof" in its description). [DS1105 S3] */
+  noSoftDrinks?: boolean;
+  /** Judge the brand-first words (default true: a name, an option, a line on an order). */
+  brandFirst?: boolean;
 }
 
 /** One text → the first banned class and word it carries, or null. */
-export function classifyText(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
+export function classifyText(text: string | null | undefined, options: ClassifyOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
-  const statesStrength = STATES_A_STRENGTH.test(text);
-  const judged = labelSpellings(text).map((spelling) => stripExempt(normalize(spelling), statesStrength)).filter(Boolean);
+  const noSoftDrinks = options.noSoftDrinks === true || qualifiesSoftDrinks(text);
+  const judged = labelSpellings(text).map((spelling) => stripExempt(normalize(spelling), noSoftDrinks)).filter(Boolean);
   if (judged.length === 0) return null;
   for (const prohibitedClass of CLASS_ORDER) {
     for (const term of PROHIBITED_TERMS[prohibitedClass]) {
       if (judged.some((j) => hasPhrase(j, term))) return { prohibitedClass, term };
+    }
+  }
+  if (options.brandFirst !== false) {
+    for (const j of judged) {
+      const first = j.split(' ')[0]!;
+      if (BRAND_FIRST.has(first)) return { prohibitedClass: 'ALCOHOL', term: first };
     }
   }
   return null;
@@ -242,8 +274,10 @@ export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; fi
     ['description', item.description],
     ...(item.optionNames ?? []).map((n): [JudgedField, string | null | undefined] => ['option', n]),
   ];
+  // A strength or a qualifier in ANY of the item's own texts takes the soft-drink exemptions away in all of them. [DS1105 S3]
+  const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
   for (const [field, text] of fields) {
-    const hit = classifyText(text);
+    const hit = classifyText(text, { noSoftDrinks, brandFirst: field === 'name' || field === 'option' });
     if (hit) return { ...hit, field };
   }
   return null;
@@ -329,6 +363,7 @@ const longest = (words: readonly string[]): string => words.reduce((a, b) => (b.
 
 const PREFILTER_BASE: readonly string[] = [
   ...SINGLE_WORD_TERMS,
+  ...PROHIBITED_BRAND_FIRST_WORDS,
   ...CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).filter((t) => t.includes(' ')).flatMap((phrase) => {
     const words = phrase.split(' ');
     if (words.some((w) => SINGLE_WORD_TERMS.has(w))) return [];
