@@ -29,13 +29,12 @@ import {
   notAllowedMessage,
   orderRefusalMessage,
   PROHIBITED_CLASS_LABELS,
-  PROHIBITED_MARKS_PATTERN,
-  PROHIBITED_PREFILTER_WORDS,
   WAITING_FOR_CHECK,
   type CatalogueCheck,
   type ItemWords,
   type ProhibitedClass,
 } from './prohibited-items';
+import { prefilterCandidateIds } from './prohibited-scan.service';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -137,27 +136,12 @@ export async function prohibitedCategoryIds(db: Db, tenantId: string): Promise<s
  * banned category are added whatever their words.
  */
 export async function flaggedItemsInTenant(db: Db, tenantId: string): Promise<Map<string, CatalogueCheck>> {
-  // Each column is read as the classifier reads text — NFD, combining marks removed
-  // (so "Śtout" is "stout" here too), lowercased, split into words — and kept when
-  // it shares a word with the pre-filter set. [DS1100 S2/S3]
-  const M = PROHIBITED_MARKS_PATTERN;
-  const W = [...PROHIBITED_PREFILTER_WORDS];
-  const words = (column: Prisma.Sql) => Prisma.sql`regexp_split_to_array(lower(regexp_replace(normalize(${column}, NFD), ${M}, '', 'g')), '[^a-z0-9]+') && ${W}::text[]`;
-  const candidates = await db.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-    SELECT i.id FROM items i JOIN categories c ON c.id = i."categoryId"
-    WHERE i."tenantId" = ${tenantId}
-      AND (i."prohibitedAt" IS NOT NULL
-        OR ${words(Prisma.sql`i.name`)}
-        OR ${words(Prisma.sql`coalesce(i.description, '')`)}
-        OR ${words(Prisma.sql`c.name`)}
-        OR EXISTS (SELECT 1 FROM option_groups g WHERE g."itemId" = i.id
-          AND (${words(Prisma.sql`g.name`)}
-            OR EXISTS (SELECT 1 FROM options o WHERE o."optionGroupId" = g.id AND ${words(Prisma.sql`o.name`)}))))`);
+  const candidates = await prefilterCandidateIds(db, tenantId);
   const banned = await prohibitedCategoryIds(db, tenantId);
   const tagged = banned.length === 0 ? [] : await db.itemDiscoveryCategory.findMany({
     where: { tenantId, categoryId: { in: banned } }, select: { itemId: true }, distinct: ['itemId'],
   });
-  const checks = await catalogueChecksFor(db, [...candidates.map((c) => c.id), ...tagged.map((t) => t.itemId)]);
+  const checks = await catalogueChecksFor(db, [...candidates, ...tagged.map((t) => t.itemId)]);
   return new Map([...checks].filter(([, check]) => check.state !== 'CLEAR'));
 }
 
