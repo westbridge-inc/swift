@@ -62,6 +62,15 @@ describe('[MMG REVERSAL] what MMG\'s lookup proves', () => {
       .toEqual({ proven: false, standing: true, unreadable: false, namedInFlight: true });
     expect(await lookupProof(client({ TX1: found('approved'), REV1: found('declined') }), r))
       .toEqual({ proven: false, standing: true, unreadable: false });
+    // [DS1124 S3] A final answer for another amount is not a return of this payment, not "in flight".
+    expect(await lookupProof(client({ TX1: found('approved'), REV1: found('approved', 100) }), r))
+      .toEqual({ proven: false, standing: true, unreadable: false });
+  });
+
+  it('[DS1124 S2] a reference MMG named that Swift has on record as a payment is neither proof nor in flight', async () => {
+    const r = row({ providerReference: 'PAY2' });
+    expect(await lookupProof(client({ TX1: found('approved'), PAY2: found('approved') }), r, async (ref) => ref === 'PAY2'))
+      .toEqual({ proven: false, standing: true, unreadable: false, namedKnownPayment: true });
   });
 
   it('standing = MMG still shows the payment successful for the amount; unreadable = MMG does not know it', async () => {

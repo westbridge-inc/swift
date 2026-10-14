@@ -793,7 +793,7 @@ export class MmgCheckoutService {
       }
       // [MMG REVERSAL] Every open fee reversal is read again from MMG's lookup
       // (bounded): a proof settles it, a refusal closes it, nothing is guessed.
-      // [review S2-1] Always run (bounded, two indexed reads when idle): a return
+      // [review S2-1] Always run (two small bounded reads when idle): a return
       // closed as "not returned" is watched for a week even when nothing is open.
       try {
         await new MmgFeeReversalService({ prisma: this.prisma, billing: this.billing, notifications: this.notifications, ...(this.reversal ? { client: this.reversal } : {}) }).sweep(now);

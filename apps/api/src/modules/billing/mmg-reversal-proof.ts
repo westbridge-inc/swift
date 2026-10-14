@@ -25,8 +25,9 @@ export interface ProofSubject {
 export type ReversalProof =
   | { proven: true; how: 'ORIGINAL_REVERSED' | 'REVERSAL_COMPLETED' }
   /** `namedInFlight`: the reversal MMG's own answer named is still pending at
-   *  MMG, or shown done for another amount, or could not be read [review S3-2]. */
-  | { proven: false; standing: boolean; unreadable: boolean; namedInFlight?: boolean };
+   *  MMG, or could not be read [review S3-2]. `namedKnownPayment`: MMG named a
+   *  reference Swift has on record as a payment (never a return) [DS1124 S2]. */
+  | { proven: false; standing: boolean; unreadable: boolean; namedInFlight?: boolean; namedKnownPayment?: boolean };
 
 /** mmg_txn_canon in TypeScript: an MMG transaction id trimmed and upper-cased. */
 const canon = (id: string): string => id.trim().toUpperCase();
@@ -56,26 +57,38 @@ function matchesAmount(detail: Extract<MmgLookupDetail, { outcome: 'found' }>, r
  * `standing` = MMG reports the original still successful, for exactly the
  * amount; `unreadable` = MMG could not be asked or does not know it.
  */
-export async function lookupProof(client: MmgLookupClient, row: ProofSubject): Promise<ReversalProof> {
+export async function lookupProof(
+  client: MmgLookupClient, row: ProofSubject,
+  /** [DS1124 S2] Is this reference one Swift has on record as a payment (or another return's)? */
+  isKnownPayment?: (reference: string) => Promise<boolean>,
+): Promise<ReversalProof> {
   const original = await client.transactionLookupDetail(row.mmgTransactionId);
   if (original.outcome === 'found' && original.status === 'reversed' && matchesAmount(original, row)) {
     return { proven: true, how: 'ORIGINAL_REVERSED' };
   }
-  const named = namedReversalOf(row, original);
+  let named = namedReversalOf(row, original);
+  let namedKnownPayment = false;
+  if (named && isKnownPayment && await isKnownPayment(named)) {
+    // A payment is never a return: neither proof nor a return in flight.
+    named = null;
+    namedKnownPayment = true;
+  }
   let namedInFlight = false;
   if (named) {
     const reversal = await client.transactionLookupDetail(named);
     if (reversal.outcome === 'found' && reversal.status === 'approved' && matchesAmount(reversal, row)) {
       return { proven: true, how: 'REVERSAL_COMPLETED' };
     }
-    namedInFlight = reversal.outcome === 'error'
-      || (reversal.outcome === 'found' && (reversal.status === 'pending' || reversal.status === 'approved' || reversal.status === 'reversed'));
+    // [DS1124 S3] Only MMG still working on it (or not answering now) is "in flight"; a final
+    // answer for another amount or currency is not a return of this payment.
+    namedInFlight = reversal.outcome === 'error' || (reversal.outcome === 'found' && reversal.status === 'pending');
   }
   return {
     proven: false,
     standing: original.outcome === 'found' && original.status === 'approved' && matchesAmount(original, row),
     unreadable: original.outcome !== 'found',
     ...(namedInFlight ? { namedInFlight: true } : {}),
+    ...(namedKnownPayment ? { namedKnownPayment: true } : {}),
   };
 }
 

@@ -155,7 +155,7 @@ export async function reversalEligibilityInTx(
 export function shapeProviderText(text: string | null | undefined): string | null {
   if (!text) return null;
   // [review S4-5] A run of 7+ digits may be a payer's number: never kept.
-  const shaped = text.replace(/[^A-Za-z0-9 _:.,()/-]/g, '').replace(/\d{7,}/g, '(number)').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const shaped = text.replace(/[^A-Za-z0-9 _:.,()/-]/g, '').replace(/(?:\d[\s().-]*){7,}/g, '(number) ').replace(/\s+/g, ' ').trim().slice(0, 120);
   return shaped || null;
 }
 
@@ -172,7 +172,7 @@ const RESOLVE_COPY: Record<ResolveRefusal, string> = {
   NOT_SHORT: 'Only a return MMG made after the money had already paid for a week is closed this way. Nothing changed.',
   RETURN_NOW_BOOKABLE: "The partner's weekly-fee payments hold this amount again, so the return can be booked: use \"Check with MMG\". Nothing changed.",
   MMG_LOOKUP_UNAVAILABLE: 'MMG could not be asked just now. Nothing changed; try again in a few minutes.',
-  MMG_RETURN_IN_FLIGHT: "MMG named a return for this payment that it has not finished (or that cannot be read now). While MMG may still return the money it cannot be closed as not returned: use \"Check with MMG\" later. Nothing changed.",
+  MMG_RETURN_IN_FLIGHT: "MMG named a return for this payment that it has not finished (or that cannot be read now). While MMG may still return the money (up to a week after the request) it cannot be closed as not returned: use \"Check with MMG\" later. Nothing changed.",
 };
 
 /**
@@ -187,7 +187,8 @@ const RESOLVE_COPY: Record<ResolveRefusal, string> = {
  * Canonical spelling (mmg_txn_canon). RESIDUAL, stated: a same-amount MMG
  * transaction Swift has NOT recorded anywhere (made outside Swift) still passes;
  * the two-person (or solo) approval is the remaining control until MMG's
- * lookup shows a reversal marker (owner UAT, Q5).
+ * lookup shows a reversal marker (owner UAT, Q5). Read in the request's
+ * tenant: a reference recorded only under another tenant may not be seen.
  */
 /**
  * [DS1118 S2] Every column where Swift records a money reference — MMG, bank,
@@ -265,6 +266,11 @@ async function lockReversalReference(tx: Tx, reference: string): Promise<void> {
 
 export class MmgFeeReversalService {
   constructor(private readonly deps: ReversalDeps) {}
+
+  /** [DS1124 S2] The known-payment census, for lookupProof (this return's own row excluded). */
+  private knownPaymentFor(reversalId: string): (reference: string) => Promise<boolean> {
+    return (reference) => this.deps.prisma.$transaction((tx) => namesAKnownPayment(tx, reversalId, reference));
+  }
 
   private client(): MmgReversalClient {
     return (this.deps.client ?? (() => getMmgReversalClient()))();
@@ -348,18 +354,17 @@ export class MmgFeeReversalService {
     if (row.state === 'REVERSED' || row.state === 'FAILED') return row;
     let proof: ReversalProof;
     try {
-      proof = await lookupProof(this.client(), row);
+      proof = await lookupProof(this.client(), row, this.knownPaymentFor(row.id));
     } catch (err) {
       log().error({ err, reversalId: id }, '[MMG reversal] MMG lookup failed; the reversal stays open');
       proof = { proven: false, standing: false, unreadable: true };
     }
     const decision = decideAfterLookup(proof, { state: row.state as 'SENDING' | 'SENT' | 'HELD', providerStatus: row.providerStatus, providerReason: row.providerReason, sentAt: row.sentAt }, { now, afterAnswer: !!opts.afterAnswer });
     // [review S2-2] The reversal MMG's own answer named is checked like a typed one: a
-    // reference Swift has on record as a payment (or another return's) never proves this return.
-    const named = row.providerReference;
-    if (decision.action === 'apply' && decision.how === 'REVERSAL_COMPLETED' && named
-      && await this.deps.prisma.$transaction((tx) => namesAKnownPayment(tx, row.id, named))) {
-      await this.hold(row, 'MMG_NAMED_A_PAYMENT', 'NOT_PROVEN', now);
+    // reference Swift has on record as a payment (or another return's) never proves this
+    // return (lookupProof skips it); a person is asked to look.
+    if (!proof.proven && proof.namedKnownPayment && decision.action !== 'fail' && decision.action !== 'leave') {
+      await this.hold(row, 'MMG_NAMED_A_PAYMENT', proof.standing ? 'STANDING' : 'NOT_PROVEN', now);
       return this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
     }
     switch (decision.action) {
@@ -433,7 +438,7 @@ export class MmgFeeReversalService {
       const row = await this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
       if (row.state === 'REVERSED') return row;
       const code = (err as { code?: unknown }).code;
-      await this.hold(row, `APPLY_FAILED${typeof code === 'string' ? `:${code}`.slice(0, 60) : ''}`, how, now);
+      await this.hold(row, code === 'MMG_NAMED_A_PAYMENT' ? 'MMG_NAMED_A_PAYMENT' : `APPLY_FAILED${typeof code === 'string' ? `:${code}`.slice(0, 60) : ''}`, how, now);
       return this.deps.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id } });
     }
     if (result.short) {
@@ -500,7 +505,7 @@ export class MmgFeeReversalService {
     // [DS1115 S4] MMG not answering is a clean refusal, never a raw failure.
     const proofOf = async (subject: MmgFeeReversal): Promise<ReversalProof> => {
       try {
-        return await lookupProof(this.client(), subject);
+        return await lookupProof(this.client(), subject, this.knownPaymentFor(row.id));
       } catch (err) {
         log().warn({ err, reversalId: row.id }, '[MMG reversal] MMG lookup failed while a person resolved a held return');
         throw new AppError(503, 'MMG_LOOKUP_UNAVAILABLE', RESOLVE_COPY.MMG_LOOKUP_UNAVAILABLE);
@@ -514,7 +519,11 @@ export class MmgFeeReversalService {
       if (proof.unreadable) throw unavailable();
       if (!proof.standing) throw new AppError(409, 'PAYMENT_NOT_STANDING', RESOLVE_COPY.PAYMENT_NOT_STANDING);
       // [review S3-2] Closing it would free the payment for a second reversal while MMG's first may complete.
-      if (proof.namedInFlight) throw new AppError(409, 'MMG_RETURN_IN_FLIGHT', RESOLVE_COPY.MMG_RETURN_IN_FLIGHT);
+      // [DS1124 S3] Bounded: after a week MMG's return is not waited for any longer (the late
+      // watch still pages if it completes after the close).
+      if (proof.namedInFlight && now.getTime() - row.sentAt.getTime() < REVERSAL_LATE_WATCH_MS) {
+        throw new AppError(409, 'MMG_RETURN_IN_FLIGHT', RESOLVE_COPY.MMG_RETURN_IN_FLIGHT);
+      }
       return this.deps.prisma.$transaction(async (tx) => {
         await lockBillingAuthority(tx, row.subscriptionId);
         const moved = await tx.mmgFeeReversal.updateMany({
@@ -708,12 +717,13 @@ export class MmgFeeReversalService {
     });
     for (const row of rows) {
       try {
-        // [review S4-1] Returned since through a later request (booked): nothing to page.
-        if (await this.deps.prisma.mmgFeeReversal.count({ where: { checkoutId: row.checkoutId, state: 'REVERSED' } }) > 0) {
+        // [review S4-1] Returned since through a later request (booked, or closed "returned, not
+        // booked"): nothing to page.
+        if (await this.deps.prisma.mmgFeeReversal.count({ where: { checkoutId: row.checkoutId, OR: [{ state: 'REVERSED' }, { resolution: 'RETURNED_NOT_BOOKED' }] } }) > 0) {
           await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id: row.id, state: 'FAILED' }, data: { lastCheckedAt: now } });
           continue;
         }
-        const proof = await lookupProof(this.client(), row);
+        const proof = await lookupProof(this.client(), row, this.knownPaymentFor(row.id));
         if (!proof.proven) {
           await this.deps.prisma.mmgFeeReversal.updateMany({ where: { id: row.id, state: 'FAILED' }, data: { lastCheckedAt: now } });
           continue;

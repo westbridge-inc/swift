@@ -967,10 +967,13 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     const p = await paidCheckout();
     const q = await paidCheckout();
     const before = await walletOf(p.subId);
-    const row = await askWith(serviceWith(namingClient(() => q.txn)), p.checkoutId, p.amount);
+    const service = serviceWith(namingClient(() => q.txn));
+    const row = await askWith(service, p.checkoutId, p.amount);
     expect(row).toMatchObject({ state: 'HELD', heldReason: 'MMG_NAMED_A_PAYMENT' });
     expect(await walletOf(p.subId)).toBe(before);
     expect(await reversalEvents(p.subId)).toHaveLength(0);
+    // [DS1124 S2] It can be closed: MMG shows the payment standing, and a payment is never a return.
+    expect(await resolveAs(row.id, 'NOT_RETURNED', `STMT${RUN}N`, service)).toMatchObject({ state: 'FAILED', resolution: 'NOT_RETURNED' });
   });
 
   it('S3-1: two held returns closed "returned" at once with ONE reversal reference — exactly one books', async () => {
@@ -998,6 +1001,7 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     expect(await rowsFor(p.checkoutId)).toHaveLength(0);
     const { shapeProviderText } = await import('../modules/billing/mmg-fee-reversal');
     expect(shapeProviderText('Refused: payer 5926001234 has no funds')).toBe('Refused: payer (number) has no funds');
+    expect(shapeProviderText('Refused: payer 592-600 1234 has no funds')).toBe('Refused: payer (number) has no funds');
   });
 
   it('[security review: sibling-path parity] two "returned, not booked" closes at once proven by ONE reversal reference — exactly one closes', async () => {
@@ -1035,5 +1039,9 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     expect(held).toMatchObject({ state: 'HELD', heldReason: 'NOT_PROVEN_IN_TIME' });
     await expect(resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}P`, service)).rejects.toMatchObject({ code: 'MMG_RETURN_IN_FLIGHT' });
     expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+    // [DS1124 S3] Bounded: a week after the request it can be closed (the late watch still pages if MMG completes it).
+    const weekLater = new Date(sent.sentAt.getTime() + 8 * 24 * 3_600_000);
+    const closed = await runWithTenant('swift-default', () => service.resolveHeld({ tenantId: 'swift-default', reversalId: held.id, outcome: 'NOT_RETURNED', mmgReference: `STMT${RUN}Q`, actorId: admin.userId }, async () => {}, weekLater));
+    expect(closed).toMatchObject({ state: 'FAILED', resolution: 'NOT_RETURNED' });
   });
 });
