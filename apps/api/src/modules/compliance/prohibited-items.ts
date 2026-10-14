@@ -149,18 +149,20 @@ const EXEMPT_LONGEST_FIRST = [...PROHIBITED_EXEMPT_PHRASES].sort((a, b) => b.len
  * all: "hard ginger beer", "spiked root beer", "alcoholic ginger ale". Such an
  * occurrence is NOT cut, so the drink is judged by its own word. [DS1100 S2]
  */
-const EXEMPTION_BREAKERS: ReadonlySet<string> = new Set(['hard', 'spiked', 'boozy', 'alcoholic', 'alcohol', 'adult', 'adults', 'strong']);
+const EXEMPTION_BREAKERS: ReadonlySet<string> = new Set(['hard', 'spiked', 'boozy', 'alcoholic', 'alcohol', 'adult', 'adults', 'strong', 'stronger', 'strongest']);
 
 /** The exemptions that name a soft drink. A text that states a strength ("5%", "ABV", "proof",
- *  "vol", "alc") never gets them: a ginger beer with a strength is a drink Swift does not carry.
- *  [DS1103 S2] Other exemptions ("rubbing alcohol 70%") are unaffected. */
+ *  "vol", "alc", "6vol", "5 percent") or carries a breaker word ANYWHERE ("Ginger beer, extra
+ *  strong", "Stronger ginger beer") never gets them: such a ginger beer is a drink Swift does not
+ *  carry. [DS1103 S2, DS1104 S3/S4] Other exemptions ("rubbing alcohol 70%") are unaffected. */
 const SOFT_DRINK_EXEMPTIONS: ReadonlySet<string> = new Set(['ginger beer', 'ginger beers', 'root beer', 'root beers', 'birch beer', 'ginger ale', 'ginger ales']);
-const STATES_A_STRENGTH = /%|\b(abv|proof|alc|vol)\b/i;
+const STATES_A_STRENGTH = /%|\d\s*(abv|proof|alc|vol|volume|percent|per\s*cent|pct)\b|\b(abv|proof|alc|vol|volume)\b/i;
 
 function stripExempt(normalized: string, statesStrength: boolean): string {
   let words = normalized.split(' ').filter(Boolean);
+  const noSoftDrinks = statesStrength || words.some((w) => EXEMPTION_BREAKERS.has(w));
   for (const phrase of EXEMPT_LONGEST_FIRST) {
-    if (statesStrength && SOFT_DRINK_EXEMPTIONS.has(phrase.join(' '))) continue;
+    if (noSoftDrinks && SOFT_DRINK_EXEMPTIONS.has(phrase.join(' '))) continue;
     const kept: string[] = [];
     for (let i = 0; i < words.length;) {
       const here = phrase.every((w, k) => words[i + k] === w);
@@ -173,14 +175,29 @@ function stripExempt(normalized: string, statesStrength: boolean): string {
   return words.join(' ');
 }
 
+/**
+ * A brand's own label spelling: the possessive "'s" ("Bailey's", "Buckley's") and "&" for "and"
+ * ("Wray & Nephew"). Plain normalizing reads them as "bailey s" and "wray nephew" — words the list
+ * does not carry. So a text is judged as written AND in each label spelling; a hit in any is a hit,
+ * and none loses a word the text already carried ("Tobacco's" still holds by "tobacco"). [DS1104 S2]
+ * Only the classifier joins the "'s": the database pre-filter holds the stem of every listed word
+ * ending in "s" instead (see PROHIBITED_PREFILTER_WORDS).
+ */
+const POSSESSIVE_S = /([\p{L}\p{N}])['\u2018\u2019\u0060\u00b4\u02bc]([sS])(?![\p{L}\p{N}])/gu;
+function labelSpellings(text: string): string[] {
+  const joined = text.replace(POSSESSIVE_S, '$1$2');
+  return [...new Set([text, joined, text.replace(/&/g, ' and '), joined.replace(/&/g, ' and ')])];
+}
+
 /** One text → the first banned class and word it carries, or null. */
 export function classifyText(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
-  const judged = stripExempt(normalize(text), STATES_A_STRENGTH.test(text));
-  if (!judged) return null;
+  const statesStrength = STATES_A_STRENGTH.test(text);
+  const judged = labelSpellings(text).map((spelling) => stripExempt(normalize(spelling), statesStrength)).filter(Boolean);
+  if (judged.length === 0) return null;
   for (const prohibitedClass of CLASS_ORDER) {
     for (const term of PROHIBITED_TERMS[prohibitedClass]) {
-      if (hasPhrase(judged, term)) return { prohibitedClass, term };
+      if (judged.some((j) => hasPhrase(j, term))) return { prohibitedClass, term };
     }
   }
   return null;
@@ -310,7 +327,7 @@ const ORDINARY_WORDS: ReadonlySet<string> = new Set([
 const SINGLE_WORD_TERMS: ReadonlySet<string> = new Set(CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).filter((t) => !t.includes(' ')));
 const longest = (words: readonly string[]): string => words.reduce((a, b) => (b.length > a.length ? b : a));
 
-export const PROHIBITED_PREFILTER_WORDS: readonly string[] = [...new Set([
+const PREFILTER_BASE: readonly string[] = [
   ...SINGLE_WORD_TERMS,
   ...CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).filter((t) => t.includes(' ')).flatMap((phrase) => {
     const words = phrase.split(' ');
@@ -318,4 +335,12 @@ export const PROHIBITED_PREFILTER_WORDS: readonly string[] = [...new Set([
     const unusual = words.filter((w) => !ORDINARY_WORDS.has(w));
     return [longest(unusual.length ? unusual : words)];
   }),
+];
+
+/** …plus the stem of every word ending in "s": the classifier joins "bailey's" into "baileys",
+ *  but the database splits it into "bailey" and "s". ("and" from "&" is never a pre-filter word.)
+ *  [DS1104 S2] */
+export const PROHIBITED_PREFILTER_WORDS: readonly string[] = [...new Set([
+  ...PREFILTER_BASE,
+  ...PREFILTER_BASE.filter((w) => w.length > 1 && w.endsWith('s')).map((w) => w.slice(0, -1)),
 ])].sort();

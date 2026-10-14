@@ -85,6 +85,37 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
     expect(classifyText(text)).toMatchObject({ prohibitedClass: cls });
   });
 
+  // [DS1104 S2] A brand's own label spelling: the possessive "'s" (straight or curly) and "&" for "and".
+  // These were CLEAR before — "bailey's" read as "bailey s", "Wray & Nephew" as "wray nephew".
+  it.each([
+    ['Bailey\'s Irish Cream 750ml', 'ALCOHOL', 'baileys'], ['Bailey’s Original', 'ALCOHOL', 'baileys'],
+    ['BAILEY\'S', 'ALCOHOL', 'baileys'], ['Buckley\'s Mixture', 'MEDICINE', 'buckleys'],
+    ['Buckley’s Original Mixture 100ml', 'MEDICINE', 'buckleys'], ['Wray & Nephew 700ml', 'ALCOHOL', 'wray and nephew'],
+    ['WRAY&NEPHEW Overproof', 'ALCOHOL', 'wray and nephew'],
+  ] as const)('a label spelling is still the brand: %s', (text, cls, term) => {
+    expect(classifyText(text)).toEqual({ prohibitedClass: cls, term });
+  });
+
+  it('the label spellings never lose a word the text already carried', () => {
+    // Read only as joined, "Tobacco's" would be "tobaccos" — not a listed word; it is judged as written too.
+    expect(classifyText('Tobacco\'s finest blend')).toEqual({ prohibitedClass: 'TOBACCO', term: 'tobacco' });
+    expect(classifyText('Hennessy\'s VS')).toEqual({ prohibitedClass: 'ALCOHOL', term: 'hennessy' });
+    expect(classifyText('Jack Daniel\'s 1L')).toMatchObject({ prohibitedClass: 'ALCOHOL' });
+    expect(classifyText('Benson & Hedges Gold')).toMatchObject({ prohibitedClass: 'TOBACCO' });
+    for (const ordinary of ['Mac & cheese', 'Fish & chips', 'Rock & roll burger', 'Pharmacist\'s choice soap', 'Children\'s rain boots', 'Ginger beer & lime']) {
+      expect(classifyText(ordinary), ordinary).toBeNull();
+    }
+  });
+
+  // [DS1104 S3/S4] A soft drink's exemption goes when a strength or a qualifier appears ANYWHERE in the
+  // text — after the phrase, as a comparative, or a strength written joined to its number.
+  it.each([
+    'Ginger beer strong', 'Stronger ginger beer', 'Ginger beer — the strongest', 'Ginger beer, extra strong', 'Root beer hard',
+    'Ginger beer 6vol', 'Ginger beer 4.5abv', 'Root beer 12proof', 'Ginger beer volume', 'Ginger beer 5 percent', 'Ginger ale 5 per cent',
+  ])('a soft drink with a strength or a qualifier anywhere is judged by its own word: %s', (text) => {
+    expect(classifyText(text)).toMatchObject({ prohibitedClass: 'ALCOHOL' });
+  });
+
   it('an exempt phrase is cut out and the rest is still judged', () => {
     expect(classifyText('Ginger beer and rum punch')).toEqual({ prohibitedClass: 'ALCOHOL', term: 'rum' });
     expect(classifyText('Non-alcoholic beer')).toMatchObject({ prohibitedClass: 'ALCOHOL' });
@@ -127,6 +158,32 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
       }
     }
     expect(checked).toBeGreaterThan(1500);
+    // [DS1104 S2] Label spellings: any listed word ending in "s" written with a possessive "'s" (straight or curly),
+    // and every "and" written "&". The SQL never joins the "'s", so the pre-filter must hold the stem too.
+    let labelled = 0;
+    for (const terms of Object.values(PROHIBITED_TERMS)) {
+      for (const term of terms) {
+        const words = term.split(' ');
+        const variants = [term.replace(/ and /g, ' & '), term.replace(/ and /g, '&')];
+        words.forEach((w, k) => {
+          if (!w.endsWith('s') || w.length < 2) return;
+          for (const apostrophe of ['\'', '’']) {
+            variants.push(words.map((x, j) => (j === k ? `${x.slice(0, -1)}${apostrophe}s` : x)).join(' '));
+            variants.push(`${words.map((x, j) => (j === k ? `${x.slice(0, -1)}${apostrophe}S` : x)).join(' ').toUpperCase()} 750ml`);
+          }
+        });
+        for (const raw of variants) {
+          if (!classifyText(raw)) continue;
+          labelled += 1;
+          expect(kept(raw), `the pre-filter misses ${JSON.stringify(raw)}`).toBe(true);
+        }
+      }
+    }
+    expect(labelled).toBeGreaterThan(400);
+    for (const raw of ['Bailey\'s Irish Cream', 'Buckley’s Mixture', 'Wray & Nephew', 'Jack Daniel\'s']) {
+      expect(classifyText(raw), raw).not.toBeNull();
+      expect(kept(raw), raw).toBe(true);
+    }
     for (const raw of ['Jägermeister', '\u015Atout', 'be\u0301er', 'E-Cigarette kit', 'Pepto-Bismol', 'Benson & Hedges', 'COOKING  GAS']) {
       expect(classifyText(raw), raw).not.toBeNull();
       expect(kept(raw), raw).toBe(true);
