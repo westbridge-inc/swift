@@ -96,6 +96,8 @@ beforeAll(async () => {
       ['chikenTypo', 'Chiken Gravy Bowl', true, 9_000_000],
     ],
   });
+  // a name made only of one-letter words (review S3-2)
+  await store({ key: 'aw', name: 'A&W Fake Grill', items: [['curly', 'Curly Fries']] });
   // one slip from "tandoori" ("tandoor"): a correctly typed store name must not share its page with it
   await store({ key: 'tandoor', name: 'Tandoor Express', items: [['naan', 'Garlic Naan']] });
   await store({ key: 'hardware', name: 'Sunny Hardware Depot', type: 'STORE', items: [['brush', 'Paint Brush'], ['spread', 'Spread Toast'], ['fantastic', 'Fantastic Fries']] });
@@ -193,6 +195,14 @@ describe.each<Who>(['signed-in', 'guest'])('/search on the database path (%s)', 
   });
 });
 
+describe('[review S3-2] a query of only one-letter words still searches', () => {
+  it.each<Who>(['signed-in', 'guest'])('"A&W" finds the A&W store on /search and in suggestions (%s)', async (who) => {
+    expect((await search(who, 'A&W')).vendors).toContain(ids['aw']);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/search/suggestions?q=A%26W', headers: who === 'signed-in' ? { authorization: `Bearer ${token}` } : {} });
+    expect((res.json().data as Array<{ text: string }>).map((s) => s.text)).toContain('A&W Fake Grill');
+  });
+});
+
 describe('/search/suggestions under the search box', () => {
   it.each<Who>(['signed-in', 'guest'])('a misspelling still suggests the dish (%s)', async (who) => {
     const res = await app.inject({
@@ -220,6 +230,11 @@ describe('/customer/vendors?search= (the website search page; the app\'s Shops a
   it('a misspelt store name still finds the store', async () => {
     expect(await browse('tandori')).toContain(ids['tandooriHouse']);
     expect(await browse('hardwre')).toContain(ids['hardware']);
+  });
+
+  it('[review S3-2] "A&W", and one typed letter (the store list narrows from the first keystroke), still search', async () => {
+    expect(await browse('A&W')).toContain(ids['aw']);
+    expect((await browse('x')).sort()).toEqual([ids['tandoor']].sort());
   });
 
   it('a plural and words out of order still find the store', async () => {

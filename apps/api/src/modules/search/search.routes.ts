@@ -77,9 +77,10 @@ const ITEM_HIT_PIN_SELECT = {
 
 /**
  * How many index hits /search asks for per hit it will return. The live gates
- * (open now, still visible, inside the launch market) run AFTER the index
- * answers, so asking for exactly `limit` left the page short — or empty —
- * whenever closed or out-of-market hits filled the window ahead of a live one.
+ * (still visible, inside the launch market) run AFTER the index answers, so
+ * asking for exactly `limit` left the page short — or empty — whenever
+ * out-of-market or no-longer-visible hits filled the window ahead of a live
+ * one. (Closed stores are kept and listed after the open ones, owner 13 Oct.)
  */
 export const ENGINE_OVERFETCH = 3;
 /** The most index hits one /search reads, whatever the limit. */
@@ -94,6 +95,21 @@ export const SEARCH_WARM_CAPABILITY = 'search-index-warm';
 const VENDOR_COLUMNS = { text: ['name', 'description'], typoText: ['name'], lists: ['cuisineTypes', 'tags'] } as const;
 const ITEM_COLUMNS = { text: ['name', 'description'], typoText: ['name'] } as const;
 const NAME_COLUMNS = { text: ['name'], typoText: ['name'] } as const;
+
+/**
+ * [Review S2-1] The database top-up of a short INDEX answer runs the
+ * exact-spelling tiers only. Its purpose is what the index cannot do — a part
+ * inside a word ("doori" -> "Tandoori") and a listing the index has not caught
+ * up with — while slips are the index's own job (typo tolerance). The slip
+ * tiers are the expensive ones, and a top-up runs on most specific searches.
+ */
+export const TOP_UP_TIERS = { slips: false } as const;
+
+/** The tiers a database search runs: all of them, or (slips false) the exact-spelling ones. */
+function tiersFor(q: string, columns: Parameters<typeof searchTiers>[1], slips = true) {
+  const tiers = searchTiers(q, columns);
+  return slips ? tiers : tiers.filter((t) => !t.tier.typos);
+}
 
 /** Name matches first inside one fetched window; the window's own order
  *  (rating, popularity) breaks ties. Array.sort is stable. */
@@ -171,6 +187,8 @@ export async function searchRoutes(app: FastifyInstance) {
     q: string; tenantId: string; publicMode: boolean;
     type?: 'RESTAURANT' | 'SUPERMARKET'; cuisine?: string; limit: number; exclude?: Iterable<string>;
     near?: { lat: number; lng: number };
+    /** false: the exact-spelling tiers only (see TOP_UP_TIERS). */
+    slips?: boolean;
   }): Promise<VendorHit[]> {
     const base = {
       // [B2] The ONE visibility predicate — this fallback previously
@@ -184,7 +202,7 @@ export async function searchRoutes(app: FastifyInstance) {
     };
     const byName = nameFirst(ctx.q);
     const rows = await fillFromTiers({
-      tiers: searchTiers(ctx.q, VENDOR_COLUMNS),
+      tiers: tiersFor(ctx.q, VENDOR_COLUMNS, ctx.slips),
       fetch: (where, take) => app.prisma.vendor.findMany({
         where: { AND: [base, where] },
         select: {
@@ -238,6 +256,8 @@ export async function searchRoutes(app: FastifyInstance) {
   async function dbItems(ctx: {
     q: string; tenantId: string; publicMode: boolean; hiddenOnly: string[];
     limit: number; exclude?: Iterable<string>;
+    /** false: the exact-spelling tiers only (see TOP_UP_TIERS). */
+    slips?: boolean;
   }): Promise<ItemHit[]> {
     const base = {
       isAvailable: true,
@@ -253,7 +273,7 @@ export async function searchRoutes(app: FastifyInstance) {
     };
     const byName = nameFirst(ctx.q);
     const rows = await fillFromTiers({
-      tiers: searchTiers(ctx.q, ITEM_COLUMNS),
+      tiers: tiersFor(ctx.q, ITEM_COLUMNS, ctx.slips),
       fetch: (where, take) => app.prisma.item.findMany({
         where: { AND: [base, where] },
         // The shared select, so this path cannot quietly serve fewer fields
@@ -359,10 +379,10 @@ export async function searchRoutes(app: FastifyInstance) {
         // and a listing the index has not caught up with yet.
         const [moreVendors, moreItems] = await Promise.all([
           visibleVendors.length < parsedLimit
-            ? dbVendors({ q, tenantId, publicMode: false, type, cuisine, limit: parsedLimit - visibleVendors.length, exclude: vendorHits.map((v) => v.id) })
+            ? dbVendors({ q, tenantId, publicMode: false, type, cuisine, limit: parsedLimit - visibleVendors.length, exclude: vendorHits.map((v) => v.id), slips: TOP_UP_TIERS.slips })
             : Promise.resolve([]),
           visibleItems.length < parsedLimit
-            ? dbItems({ q, tenantId, publicMode: false, hiddenOnly, limit: parsedLimit - visibleItems.length, exclude: itemHits.map((i) => i.id) })
+            ? dbItems({ q, tenantId, publicMode: false, hiddenOnly, limit: parsedLimit - visibleItems.length, exclude: itemHits.map((i) => i.id), slips: TOP_UP_TIERS.slips })
             : Promise.resolve([]),
         ]);
         const vendors = openFirst([...visibleVendors, ...moreVendors], storeOpen);

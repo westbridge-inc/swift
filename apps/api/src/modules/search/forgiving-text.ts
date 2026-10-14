@@ -26,11 +26,14 @@
 //
 // SAFETY: a word keeps only letters and digits, so nothing a customer types
 // can reach the LIKE pattern as a wildcard (`%`, `_`, `\`). The ONE wildcard
-// in a pattern is the `_` placed here for a slip. These helpers only build the
+// in a pattern is the `_` placed here for a slip. A query of only one-letter
+// words is matched as its whole text with `%`, `_` and `\` removed. These helpers only build the
 // TEXT half of a query; every caller still ANDs its own visibility predicate.
 // ---------------------------------------------------------------------------
 
-/** Words shorter than this are dropped ("a", "&"); a query of only such words matches nothing. */
+/** Words shorter than this are dropped ("a", "&") from a query that has a
+ *  longer word; a query of ONLY such words matches its whole text as one
+ *  exact piece instead (wholeQueryLiteral). */
 const MIN_TERM_LENGTH = 2;
 /** The fewest letters a word needs before one slip is forgiven. Meilisearch's default floor for one typo. */
 export const MIN_TYPO_LENGTH = 5;
@@ -136,16 +139,61 @@ function termWhere(columns: SearchColumns, term: string, slips: readonly string[
   for (const column of columns.text) {
     for (const form of literal) or.push({ [column]: { contains: form, mode: 'insensitive' } });
   }
-  if (slips.length > 0) {
-    for (const column of columns.typoText ?? []) {
+  const typoColumns = columns.typoText ?? [];
+  if (slips.length > 0 && typoColumns.length > 0) {
+    const slipOr: Where[] = [];
+    for (const column of typoColumns) {
       for (const form of slips) {
-        or.push({ [column]: { startsWith: form, mode: 'insensitive' } });
-        or.push({ [column]: { contains: ` ${form}`, mode: 'insensitive' } });
+        slipOr.push({ [column]: { startsWith: form, mode: 'insensitive' } });
+        slipOr.push({ [column]: { contains: ` ${form}`, mode: 'insensitive' } });
       }
     }
+    // [Review S2-1] A cheap gate in FRONT of the slip clauses, so the ~250
+    // slip clauses run only for rows that could match. Exactness-preserving
+    // (slipGate below; proved by enumeration in the unit test).
+    or.push({ AND: [slipGateWhere(typoColumns, term), { OR: slipOr }] });
   }
   for (const column of columns.lists ?? []) or.push({ [column]: { hasSome: casings(literal) } });
   return { OR: or };
+}
+
+/**
+ * A necessary condition for ANY slip form of `term` to match a text: one slip
+ * (never in the first letter, always at a word start) leaves at least one of
+ *   - the first two letters at a word start (a slip at the third letter or later),
+ *   - the first and third letters at a word start (a wrong, missing or swapped
+ *     second letter, or an extra one typed there),
+ *   - the letters from the third on, intact somewhere (a letter left out or an
+ *     extra one typed right after the first).
+ * Far more selective than "a word starting with the first letter", and never
+ * stricter than the slip clauses themselves.
+ */
+export function slipGate(term: string): { wordStarts: string[]; inside: string } {
+  const c = [...term];
+  return { wordStarts: [...new Set([c[0]! + c[1]!, c[0]! + c[2]!])], inside: c.slice(2).join('') };
+}
+
+function slipGateWhere(columns: readonly string[], term: string): Where {
+  const gate = slipGate(term);
+  return {
+    OR: columns.flatMap((column) => [
+      ...gate.wordStarts.flatMap((p) => [
+        { [column]: { startsWith: p, mode: 'insensitive' } },
+        { [column]: { contains: ` ${p}`, mode: 'insensitive' } },
+      ]),
+      { [column]: { contains: gate.inside, mode: 'insensitive' } },
+    ]),
+  };
+}
+
+/** [Review S3-2] A query whose every word is shorter than MIN_TERM_LENGTH
+ *  ("A&W", "B&B", one typed letter) still searches: the whole trimmed text,
+ *  as one exact piece, the way every door matched before. LIKE metacharacters
+ *  are removed so nothing typed acts as a wildcard. Null when it holds no
+ *  letter or digit at all. */
+export function wholeQueryLiteral(q: string): string | null {
+  const whole = q.normalize('NFC').trim().replace(/[%_\\]/g, '').slice(0, 200);
+  return /[\p{L}\p{N}]/u.test(whole) ? whole : null;
 }
 
 /** A strictness level: must EVERY word match, and is one slip forgiven? */
@@ -164,7 +212,19 @@ export type Tier = { every: boolean; typos: boolean };
  */
 export function searchTiers(q: string, columns: SearchColumns): Array<{ tier: Tier; where: Where }> {
   const terms = searchTerms(q);
-  if (terms.length === 0) return [];
+  if (terms.length === 0) {
+    const whole = wholeQueryLiteral(q);
+    if (whole === null) return [];
+    return [{
+      tier: { every: true, typos: false },
+      where: {
+        OR: [
+          ...columns.text.map((column) => ({ [column]: { contains: whole, mode: 'insensitive' } })),
+          ...(columns.lists ?? []).map((column) => ({ [column]: { hasSome: casings([whole.toLowerCase()]) } })),
+        ],
+      },
+    }];
+  }
   const plan = slipPlan(terms);
   const canSlip = (columns.typoText ?? []).length > 0 && plan.size > 0;
   const tiers: Tier[] = [
@@ -185,7 +245,10 @@ export function searchTiers(q: string, columns: SearchColumns): Array<{ tier: Ti
  *  Used to rank NAME matches above matches found only in a description. */
 export function nameMatcher(q: string, typos: boolean): (text: string | null | undefined) => boolean {
   const terms = searchTerms(q);
-  if (terms.length === 0) return () => false;
+  if (terms.length === 0) {
+    const whole = wholeQueryLiteral(q)?.toLowerCase();
+    return (text) => whole !== undefined && typeof text === 'string' && text.toLowerCase().includes(whole);
+  }
   // forms hold letters, digits and `_` only, so nothing else needs escaping
   const literal = terms.flatMap(literalForms);
   const slips = typos ? [...slipPlan(terms).values()].flat().map((f) => f.replace(/_/g, '.')) : [];
