@@ -413,6 +413,9 @@ function coerceMoney<T>(value: T): T {
   return out as unknown as T;
 }
 
+/** [GUARDRAILS §8] How many held items the catalogue-check queue returns at once. */
+const CATALOGUE_REVIEW_PAGE = 200;
+
 /** [GUARDRAILS §8] One shape for "why is this item hidden", wherever an admin reads it. */
 function catalogueCheckSummary(check: Exclude<CatalogueCheck, { state: 'CLEAR' }>) {
   return check.state === 'BANNED'
@@ -1415,7 +1418,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/catalogue-review', { preHandler: [adminGuard] }, async () => {
     const tenantId = requireTenantId();
-    const flagged = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING');
+    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING');
+    // A bounded page: the first CATALOGUE_REVIEW_PAGE held items, and how many are held in all.
+    const flagged = waiting.slice(0, CATALOGUE_REVIEW_PAGE);
     const words = await wordsFor(app.prisma, flagged.map(([id]) => id));
     const items = flagged.flatMap(([id, check]) => {
       const w = words.get(id);
@@ -1428,7 +1433,7 @@ export async function adminRoutes(app: FastifyInstance) {
         wordsHash: judgedWordsHash(w),
       }];
     });
-    return { success: true, data: { items } };
+    return { success: true, data: { items, total: waiting.length } };
   });
 
   const approveCatalogueItemSchema = z.object({ wordsHash: z.string().regex(/^[0-9a-f]{64}$/), reason: z.string().optional() });

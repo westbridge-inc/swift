@@ -64,7 +64,8 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
   ALCOHOL: [
     'alcohol', 'alcoholic', 'liquor', 'liquors', 'liqueur', 'liqueurs', 'booze', 'hooch', 'moonshine',
     'beer', 'beers', 'lager', 'lagers', 'ale', 'ales', 'stout', 'stouts', 'ipa', 'pilsner', 'shandy',
-    'cider', 'ciders', 'hard seltzer', 'hard lemonade', 'malt liquor',
+    'cider', 'ciders', 'hard seltzer', 'hard lemonade', 'malt liquor', 'spiked', 'boozy', 'radler', 'radlers',
+    'spiked seltzer', 'white claw', 'truly seltzer', 'twisted tea',
     'wine', 'wines', 'champagne', 'prosecco', 'sangria', 'vermouth', 'sherry',
     'rum', 'rums', 'high wine', 'puncheon', 'vodka', 'vodkas', 'whisky', 'whiskey', 'whiskies', 'whiskeys', 'bourbon',
     'gin', 'gins', 'brandy', 'brandies', 'cognac', 'tequila', 'mezcal', 'absinthe', 'schnapps', 'soju',
@@ -95,7 +96,8 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'antibiotic', 'antibiotics', 'amoxicillin', 'penicillin', 'azithromycin', 'ciprofloxacin', 'metronidazole', 'flagyl',
     'antihistamine', 'antihistamines', 'loratadine', 'claritin', 'cetirizine', 'zyrtec', 'benadryl', 'diphenhydramine',
     'piriton', 'chlorpheniramine', 'cough syrup', 'cough mixture', 'cough medicine', 'cold and flu', 'flu tablets',
-    'decongestant', 'robitussin', 'buckleys', 'vicks', 'vaporub', 'strepsils', 'throat lozenges', 'nasal spray',
+    'decongestant', 'robitussin', 'buckleys', 'vicks', 'vaporub', 'strepsils', 'throat lozenges', 'lozenge', 'lozenges',
+    'cough drop', 'cough drops', 'throat drops', 'nasal spray',
     'eye drops', 'ear drops', 'antacid', 'antacids', 'gaviscon', 'pepto bismol', 'milk of magnesia', 'imodium',
     'loperamide', 'laxative', 'laxatives', 'omeprazole', 'ranitidine', 'metformin', 'insulin', 'inhaler', 'inhalers',
     'salbutamol', 'ventolin', 'prednisone', 'prednisolone', 'steroid', 'steroids', 'hydrocortisone', 'antifungal',
@@ -136,14 +138,28 @@ export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
 const CLASS_ORDER: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
 
 const hasPhrase = (haystack: string, phrase: string): boolean => ` ${haystack} `.includes(` ${phrase} `);
-const EXEMPT_LONGEST_FIRST = [...PROHIBITED_EXEMPT_PHRASES].sort((a, b) => b.length - a.length);
+const EXEMPT_LONGEST_FIRST = [...PROHIBITED_EXEMPT_PHRASES].sort((a, b) => b.length - a.length).map((p) => p.split(' '));
+
+/**
+ * A word in front of an exempt phrase that makes it the restricted thing after
+ * all: "hard ginger beer", "spiked root beer", "alcoholic ginger ale". Such an
+ * occurrence is NOT cut, so the drink is judged by its own word. [DS1100 S2]
+ */
+const EXEMPTION_BREAKERS: ReadonlySet<string> = new Set(['hard', 'spiked', 'boozy', 'alcoholic', 'alcohol', 'adult', 'adults']);
 
 function stripExempt(normalized: string): string {
-  let text = ` ${normalized} `;
+  let words = normalized.split(' ').filter(Boolean);
   for (const phrase of EXEMPT_LONGEST_FIRST) {
-    while (text.includes(` ${phrase} `)) text = text.replace(` ${phrase} `, ' ');
+    const kept: string[] = [];
+    for (let i = 0; i < words.length;) {
+      const here = phrase.every((w, k) => words[i + k] === w);
+      if (here && !(i > 0 && EXEMPTION_BREAKERS.has(words[i - 1]!))) { i += phrase.length; continue; }
+      kept.push(words[i]!);
+      i += 1;
+    }
+    words = kept;
   }
-  return text.trim();
+  return words.join(' ');
 }
 
 /** One text → the first banned class and word it carries, or null. */
@@ -254,18 +270,41 @@ export function orderRefusalMessage(itemName: string): string {
   return `${itemName} isn't available on Swift. Remove it from your cart to continue.`;
 }
 
-/** Accent-tolerant letters, so the database pre-filter finds "Jägermeister" as the classifier does after normalizing. */
-const ACCENTED: Readonly<Record<string, string>> = { a: '[aàáâãäå]', e: '[eèéêë]', i: '[iìíîï]', o: '[oòóôõö]', u: '[uùúûü]', n: '[nñ]', c: '[cç]' };
+/**
+ * The marks `normalize` removes after NFD (Unicode block "Combining Diacritical
+ * Marks"). The database pre-filter strips the same marks from the same NFD form,
+ * so it reads a column exactly as the classifier reads the text. [DS1100 S2]
+ */
+export const PROHIBITED_MARKS_PATTERN = '[\u0300-\u036f]+';
 
 /**
- * One case-insensitive pattern for a database pre-filter (Postgres `~*`): a
- * superset of what the word list can match, so the exact judgement above runs
- * only on the rows that could hit. Each phrase allows any run of spaces or
- * punctuation between its words, as `normalize` does; letters allow their
- * common accents. Terms hold only letters, digits and spaces, so nothing
- * else needs escaping.
+ * The words a database pre-filter looks for, after reading each column as the
+ * classifier does (NFD, the marks above removed, lowercased, split on every
+ * non-letter): a superset of what the word list can match, so the exact
+ * judgement above runs only on the rows that could hit. [DS1100 S2/S3]
+ *
+ * A whole-word phrase hit means each of its words is a whole word of the text,
+ * so a phrase needs only ONE of its words here. It contributes nothing when one
+ * of its words is already a banned word ("cooking gas" → "gas"); otherwise its
+ * least ordinary word ("bud light" → "bud", never "light"), so ordinary goods
+ * are not dragged into the exact check by the thousand. Set overlap, not one
+ * long regex: a 400-way alternation costs Postgres ~0.2 ms a row.
  */
-export const PROHIBITED_PREFILTER_PATTERN: string = CLASS_ORDER
-  .flatMap((c) => PROHIBITED_TERMS[c])
-  .map((term) => term.split(' ').map((word) => [...word].map((ch) => ACCENTED[ch] ?? ch).join('')).join('[^a-z0-9]+'))
-  .join('|');
+const ORDINARY_WORDS: ReadonlySet<string> = new Set([
+  'after', 'and', 'of', 'the', 'only', 'hard', 'high', 'light', 'red', 'white', 'grey', 'royal', 'extra', 'reserve', 'king',
+  'jack', 'captain', 'mount', 'lucky', 'pain', 'cold', 'morning', 'sleeping', 'eye', 'ear', 'deep', 'hot', 'oral', 'milk',
+  'water', 'bar', 'tea', 'oil', 'juice', 'pen', 'coil', 'coils', 'pod', 'pods', 'toy', 'toys', 'ticket', 'tickets', 'liver',
+  'paper', 'papers', 'throat', 'lemonade', 'mall', 'e',
+]);
+const SINGLE_WORD_TERMS: ReadonlySet<string> = new Set(CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).filter((t) => !t.includes(' ')));
+const longest = (words: readonly string[]): string => words.reduce((a, b) => (b.length > a.length ? b : a));
+
+export const PROHIBITED_PREFILTER_WORDS: readonly string[] = [...new Set([
+  ...SINGLE_WORD_TERMS,
+  ...CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).filter((t) => t.includes(' ')).flatMap((phrase) => {
+    const words = phrase.split(' ');
+    if (words.some((w) => SINGLE_WORD_TERMS.has(w))) return [];
+    const unusual = words.filter((w) => !ORDINARY_WORDS.has(w));
+    return [longest(unusual.length ? unusual : words)];
+  }),
+])].sort();

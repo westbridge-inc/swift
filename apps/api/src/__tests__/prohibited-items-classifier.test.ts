@@ -19,7 +19,8 @@ import {
   notAllowedMessage,
   PROHIBITED_CLASSES,
   PROHIBITED_CLASS_LABELS,
-  PROHIBITED_PREFILTER_PATTERN,
+  PROHIBITED_MARKS_PATTERN,
+  PROHIBITED_PREFILTER_WORDS,
   PROHIBITED_TERMS,
   WAITING_FOR_CHECK,
 } from '../modules/compliance/prohibited-items';
@@ -67,6 +68,17 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
     expect(classifyText(text)).toBeNull();
   });
 
+  // [DS1100 S2] An exemption names a soft drink; a qualifier in front of it makes it a drink
+  // Swift does not carry. These were CLEAR before — a missed drink is the exposure ruled out.
+  it.each([
+    ['Hard ginger beer', 'ALCOHOL'], ['Spiked ginger beer', 'ALCOHOL'], ['Hard ginger ale', 'ALCOHOL'],
+    ['Hard root beer', 'ALCOHOL'], ['Alcoholic ginger beer', 'ALCOHOL'], ['Spiked seltzer', 'ALCOHOL'],
+    ['White Claw seltzer', 'ALCOHOL'], ['Truly seltzer', 'ALCOHOL'], ['Radler 330ml', 'ALCOHOL'], ['Boozy punch', 'ALCOHOL'],
+    ['Cough drops (20)', 'MEDICINE'], ['Throat lozenges', 'MEDICINE'], ['Honey lozenge', 'MEDICINE'],
+  ] as const)('a qualified or missing drink or medicine is caught: %s', (text, cls) => {
+    expect(classifyText(text)).toMatchObject({ prohibitedClass: cls });
+  });
+
   it('an exempt phrase is cut out and the rest is still judged', () => {
     expect(classifyText('Ginger beer and rum punch')).toEqual({ prohibitedClass: 'ALCOHOL', term: 'rum' });
     expect(classifyText('Non-alcoholic beer')).toMatchObject({ prohibitedClass: 'ALCOHOL' });
@@ -86,13 +98,39 @@ describe('[§8] the word list: what is banned, judged by whole words', () => {
     expect(Object.keys(PROHIBITED_CLASS_LABELS).sort()).toEqual([...PROHIBITED_CLASSES].sort());
   });
 
-  it('the database pre-filter is a superset: it finds every word and phrase, accents and punctuation included', () => {
-    const pattern = new RegExp(PROHIBITED_PREFILTER_PATTERN, 'i');
-    for (const terms of Object.values(PROHIBITED_TERMS)) for (const term of terms) expect(pattern.test(term), term).toBe(true);
-    for (const raw of ['Jägermeister', 'E-Cigarette kit', 'Pepto-Bismol', 'Benson & Hedges', 'COOKING  GAS']) {
-      expect(classifyText(raw), raw).not.toBeNull();
-      expect(pattern.test(raw), raw).toBe(true);
+  it('the database pre-filter is a superset: every word and phrase, any accent, decomposed or not, any punctuation', () => {
+    // The SQL reads each column as normalize() does: NFD, marks removed, lowercased, split on non-letters.
+    const sqlWords = (raw: string) => raw.normalize('NFD').replace(new RegExp(PROHIBITED_MARKS_PATTERN, 'g'), '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const prefilter = new Set(PROHIBITED_PREFILTER_WORDS);
+    const kept = (raw: string) => sqlWords(raw).some((w) => prefilter.has(w));
+    const precomposed: Record<string, string> = { a: 'á', c: 'ç', e: 'é', g: 'ǵ', i: 'í', k: 'ḱ', l: 'ĺ', n: 'ñ', o: 'ó', r: 'ŕ', s: 'ś', u: 'ú', w: 'ẃ', y: 'ý', z: 'ź' };
+    let checked = 0;
+    for (const terms of Object.values(PROHIBITED_TERMS)) {
+      for (const term of terms) {
+        const variants = [
+          term, term.toUpperCase(), term.replace(/ /g, ' — '), `Brand ${term} (750ml)`,
+          [...term].map((ch) => precomposed[ch] ?? ch).join(''),
+          [...term].map((ch) => (/[a-z]/.test(ch) ? `${ch}\u0301` : ch)).join(''),
+          [...term].map((ch) => (precomposed[ch] ?? ch).toUpperCase()).join(''),
+        ];
+        for (const raw of variants) {
+          if (!classifyText(raw)) continue;
+          checked += 1;
+          expect(kept(raw), `the pre-filter misses ${JSON.stringify(raw)}`).toBe(true);
+        }
+      }
     }
+    expect(checked).toBeGreaterThan(1500);
+    for (const raw of ['Jägermeister', '\u015Atout', 'be\u0301er', 'E-Cigarette kit', 'Pepto-Bismol', 'Benson & Hedges', 'COOKING  GAS']) {
+      expect(classifyText(raw), raw).not.toBeNull();
+      expect(kept(raw), raw).toBe(true);
+    }
+    // Ordinary goods are not dragged into the exact check by the thousand.
+    // ("liquid" must stay: "e-liquid" reads as "e liquid", and "e" would catch every "Vitamin E".)
+    for (const word of ['morning', 'light', 'water', 'cooking', 'the', 'and', 'of', 'e', 'paper', 'pain', 'oil', 'bread', 'fresh']) {
+      expect(prefilter.has(word), word).toBe(false);
+    }
+    expect(kept('Freshly made every morning by the bakery')).toBe(false);
   });
 
   it('no setting can turn the ban off: the rule reads no environment variable', () => {

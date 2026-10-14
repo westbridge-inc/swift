@@ -35,6 +35,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { OrderService } from '../modules/order/order.service';
 import { PickingService } from '../modules/order/picking.service';
 import { mergeGuestCart } from '../modules/user/cart-merge.service';
+import { resetHiddenItemIdsCacheForTests } from '../modules/compliance/prohibited-gate';
 
 // The index engine is the only thing replaced: what it returns is decided per
 // test, so the signed-in (index) path and the database fallback are both run.
@@ -69,7 +70,7 @@ let vendor: { id: string; slug: string; token: string; ownerUserId: string; shel
 let customer: { id: string; token: string };
 let admin: { token: string };
 let control: { id: string; name: string };
-type Legacy = 'rum' | 'combo' | 'bottle' | 'relief' | 'removed';
+type Legacy = 'rum' | 'combo' | 'bottle' | 'relief' | 'removed' | 'accent';
 const legacy = {} as Record<Legacy, { id: string; name: string }>;
 let pharmacyCategory: { id: string; slug: string };
 let snacksCategory: { id: string; slug: string };
@@ -146,7 +147,9 @@ const createItem = (body: Record<string, unknown>) => inject('POST', '/api/v1/ve
 const queue = async () => {
   const res = await inject('GET', '/api/v1/admin/catalogue-review', admin.token);
   expect(res.statusCode).toBe(200);
-  return res.json().data.items as Array<{ itemId: string; wordsHash: string; state: string; prohibitedClass: string; field: string; term: string }>;
+  const data = res.json().data as { items: Array<{ itemId: string; wordsHash: string; state: string; prohibitedClass: string; field: string; term: string }>; total: number };
+  expect(data.total).toBeGreaterThanOrEqual(data.items.length);
+  return data.items;
 };
 const approve = (itemId: string, wordsHash: string, reason: string | null = REASON) =>
   inject('POST', `/api/v1/admin/catalogue-review/${itemId}/approve`, admin.token, { wordsHash }, reason ? { 'x-swift-reason': reason } : {});
@@ -198,6 +201,9 @@ beforeAll(async () => {
     ['bottle', { name: `Legacy Bottle ${RUN}`, categoryId: legacySection.id }],
     ['relief', { name: `Legacy Relief ${RUN}` }],
     ['removed', { name: `Legacy Tonic ${RUN}`, removed: { cls: 'MEDICINE', reason: 'Sold as a cure for fever' } }],
+    // [DS1100 S2] A banned word written with an accent the plain pattern does not spell
+    // (precomposed "Ś", and a combining acute inside "be\u0301er"): judged exactly like "stout".
+    ['accent', { name: `Legacy \u015Atout be\u0301er ${RUN}` }],
   ] as const) {
     const row = await item(data);
     legacy[key] = { id: row.id, name: row.name };
@@ -326,6 +332,7 @@ describe('[§8] nobody sees a hidden item', () => {
   });
 
   it('Market, search (index path and database fallback), suggestions, trending and the Home rail', async () => {
+    resetHiddenItemIdsCacheForTests();
     await visibleOn(marketItemIds, [control.id], hiddenIds());
     engine.fail = false;
     await visibleOn(searchItemIds, [control.id], hiddenIds());
@@ -347,6 +354,24 @@ describe('[§8] nobody sees a hidden item', () => {
     const chips = (home.json().data.categories as Array<{ name: string }>).map((c) => c.name);
     expect(chips).toContain('Shelf');
     expect(chips).not.toContain('Beers & Wines');
+  });
+
+  it('a stale exclusion list never shows a hidden item: the exact last pass on every surface catches it', async () => {
+    // Prime every tenant's list as if nothing were hidden, then read every browse surface.
+    const { hiddenItemIds } = await import('../modules/compliance/prohibited-gate');
+    resetHiddenItemIdsCacheForTests();
+    const nothingHidden = { item: { findMany: async () => [] }, itemDiscoveryCategory: { findMany: async () => [] }, discoveryCategory: { findMany: async () => [] }, $queryRaw: async () => [] };
+    expect(await hiddenItemIds(nothingHidden as never, TENANT)).toEqual([]);
+    try {
+      await visibleOn(marketItemIds, [control.id], hiddenIds());
+      engine.fail = false;
+      await visibleOn(searchItemIds, [control.id], hiddenIds());
+      engine.fail = true;
+      try { await visibleOn(searchItemIds, [control.id], hiddenIds()); } finally { engine.fail = false; }
+      await visibleOn(async () => ids((await inject('GET', '/api/v1/search/trending', customer.token)).json().data), [control.id], hiddenIds());
+      const words = ((await inject('GET', `/api/v1/search/suggestions?q=${RUN}`, customer.token)).json().data as Array<{ text: string }>).map((x) => x.text);
+      for (const l of Object.values(legacy)) expect(words).not.toContain(l.name);
+    } finally { resetHiddenItemIdsCacheForTests(); }
   });
 
   it('the category rail never offers Pharmacy', async () => {

@@ -56,7 +56,9 @@ export function matches(row: Row, where: Row = {}): boolean {
 function select(row: Row, fields?: Row): Row {
   if (!fields) return row;
   return Object.fromEntries(Object.entries(fields).map(([key, spec]) => [key,
-    spec === true ? row[key] : row[key] == null ? null : select(row[key], spec.select),
+    spec === true ? row[key] : row[key] == null ? null
+      // A to-many relation selects each of its rows, as Prisma returns it: an array.
+      : Array.isArray(row[key]) ? row[key].map((r: Row) => select(r, spec.select)) : select(row[key], spec.select),
   ]));
 }
 
@@ -87,7 +89,7 @@ export async function guestSearchApp(max = 200) {
   const items: Row[] = vendors.map((vendor) => ({
     id: `item-${vendor['id']}`, tenantId: vendor['tenantId'], vendorId: vendor['id'], vendor,
     name: `Pepper dish ${vendor['id']}`, description: 'Pepper', isAvailable: true, basePrice: 1200,
-    imageUrl: null, createdAt: new Date(0), category: { name: 'Meals' }, totalOrdered: 50,
+    imageUrl: null, createdAt: new Date(0), category: { name: 'Meals' }, optionGroups: [], totalOrdered: 50,
     sku: 'private-sku', stockQuantity: 100,
   }));
   items.push({ ...items[0], id: 'hidden-item', name: 'Pepper hidden', isAvailable: false });

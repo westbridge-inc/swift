@@ -18,6 +18,7 @@ vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
   hiddenAmong: async () => new Set<string>(),
   hiddenItemIds: async () => [],
   assertOrderableNow: async () => undefined,
+  withoutHidden: async <T,>(_db: unknown, rows: readonly T[]) => [...rows],
 }));
 afterEach(() => vi.restoreAllMocks());
 

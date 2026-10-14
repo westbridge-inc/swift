@@ -29,7 +29,8 @@ import {
   notAllowedMessage,
   orderRefusalMessage,
   PROHIBITED_CLASS_LABELS,
-  PROHIBITED_PREFILTER_PATTERN,
+  PROHIBITED_MARKS_PATTERN,
+  PROHIBITED_PREFILTER_WORDS,
   WAITING_FOR_CHECK,
   type CatalogueCheck,
   type ItemWords,
@@ -136,13 +137,22 @@ export async function prohibitedCategoryIds(db: Db, tenantId: string): Promise<s
  * banned category are added whatever their words.
  */
 export async function flaggedItemsInTenant(db: Db, tenantId: string): Promise<Map<string, CatalogueCheck>> {
+  // Each column is read as the classifier reads text — NFD, combining marks removed
+  // (so "Śtout" is "stout" here too), lowercased, split into words — and kept when
+  // it shares a word with the pre-filter set. [DS1100 S2/S3]
+  const M = PROHIBITED_MARKS_PATTERN;
+  const W = [...PROHIBITED_PREFILTER_WORDS];
+  const words = (column: Prisma.Sql) => Prisma.sql`regexp_split_to_array(lower(regexp_replace(normalize(${column}, NFD), ${M}, '', 'g')), '[^a-z0-9]+') && ${W}::text[]`;
   const candidates = await db.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     SELECT i.id FROM items i JOIN categories c ON c.id = i."categoryId"
     WHERE i."tenantId" = ${tenantId}
       AND (i."prohibitedAt" IS NOT NULL
-        OR i.name ~* ${PROHIBITED_PREFILTER_PATTERN} OR coalesce(i.description, '') ~* ${PROHIBITED_PREFILTER_PATTERN} OR c.name ~* ${PROHIBITED_PREFILTER_PATTERN}
+        OR ${words(Prisma.sql`i.name`)}
+        OR ${words(Prisma.sql`coalesce(i.description, '')`)}
+        OR ${words(Prisma.sql`c.name`)}
         OR EXISTS (SELECT 1 FROM option_groups g WHERE g."itemId" = i.id
-          AND (g.name ~* ${PROHIBITED_PREFILTER_PATTERN} OR EXISTS (SELECT 1 FROM options o WHERE o."optionGroupId" = g.id AND o.name ~* ${PROHIBITED_PREFILTER_PATTERN}))))`);
+          AND (${words(Prisma.sql`g.name`)}
+            OR EXISTS (SELECT 1 FROM options o WHERE o."optionGroupId" = g.id AND ${words(Prisma.sql`o.name`)}))))`);
   const banned = await prohibitedCategoryIds(db, tenantId);
   const tagged = banned.length === 0 ? [] : await db.itemDiscoveryCategory.findMany({
     where: { tenantId, categoryId: { in: banned } }, select: { itemId: true }, distinct: ['itemId'],
@@ -151,13 +161,41 @@ export async function flaggedItemsInTenant(db: Db, tenantId: string): Promise<Ma
   return new Map([...checks].filter(([, check]) => check.state !== 'CLEAR'));
 }
 
+/** How long a tenant's exclusion list is reused before it is read again. */
+export const HIDDEN_IDS_CACHE_MS = 60_000;
+const hiddenIdsCache = new Map<string, { at: number; ids: Promise<string[]> }>();
+
 /**
  * The ids a browse surface excludes IN its query, before a page or fixed
  * window is capped — the rule `hiddenOnlyItemIds` follows — so a hidden row
- * never consumes the page budget.
+ * does not consume the page budget. Reading every item's words is a scan of
+ * the whole catalogue, so a tenant's list is reused for HIDDEN_IDS_CACHE_MS
+ * (one read in flight at a time; a failed read is not kept). [DS1100 S3]
+ *
+ * This list only keeps pages full. It is never what stops a hidden item being
+ * shown: every browse surface also runs `withoutHidden` on the rows it returns,
+ * and cart, checkout and storefronts judge each item exactly.
  */
-export async function hiddenItemIds(db: Db, tenantId: string): Promise<string[]> {
-  return [...(await flaggedItemsInTenant(db, tenantId))].filter(([, check]) => isHidden(check)).map(([id]) => id);
+export function hiddenItemIds(db: Db, tenantId: string, now = Date.now()): Promise<string[]> {
+  const cached = hiddenIdsCache.get(tenantId);
+  if (cached && now - cached.at < HIDDEN_IDS_CACHE_MS) return cached.ids;
+  const ids = flaggedItemsInTenant(db, tenantId)
+    .then((flagged) => [...flagged].filter(([, check]) => isHidden(check)).map(([id]) => id));
+  ids.catch(() => { if (hiddenIdsCache.get(tenantId)?.ids === ids) hiddenIdsCache.delete(tenantId); });
+  hiddenIdsCache.set(tenantId, { at: now, ids });
+  return ids;
+}
+
+/** Test seam: forget every tenant's cached exclusion list. */
+export function resetHiddenItemIdsCacheForTests(): void {
+  hiddenIdsCache.clear();
+}
+
+/** The exact last pass on rows a surface is about to return: hidden ones are dropped, whatever the cache said. */
+export async function withoutHidden<T extends { id: string }>(db: Db, rows: readonly T[]): Promise<T[]> {
+  if (rows.length === 0) return [];
+  const hidden = await hiddenAmong(db, rows.map((r) => r.id));
+  return hidden.size === 0 ? [...rows] : rows.filter((r) => !hidden.has(r.id));
 }
 
 /** An item a partner may not edit or switch back on: banned outright. */

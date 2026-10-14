@@ -8,7 +8,7 @@ import { bindBrowseTenant, requireRequestTenant } from './search-scope';
 import { customerPoint } from '../discovery/customer-point';
 import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
-import { hiddenItemIds } from '../compliance/prohibited-gate';
+import { hiddenItemIds, withoutHidden } from '../compliance/prohibited-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 
@@ -160,7 +160,8 @@ export async function searchRoutes(app: FastifyInstance) {
         const vendorIds = new Set(liveVendors.filter(inLaunchMarket).map((v) => v.id));
         const itemIds = new Set(liveItems.filter((i) => inLaunchMarket(i.vendor)).map((i) => i.id));
         const visibleVendors = vendors.filter((v) => vendorIds.has(v.id));
-        const visibleItems = items.filter((i) => itemIds.has(i.id));
+        // [GUARDRAILS §8] The exact last pass on index hits too.
+        const visibleItems = await withoutHidden(app.prisma, items.filter((i) => itemIds.has(i.id)));
         return {
           success: true,
           data: {
@@ -282,9 +283,10 @@ export async function searchRoutes(app: FastifyInstance) {
     }
 
     const marketItems = items.filter((item) => inLaunchMarket(item.vendor));
-    const listable = request.publicTenantId
+    // [GUARDRAILS §8] The exact last pass: a prohibited row is never returned, whatever the cached list said.
+    const listable = await withoutHidden(app.prisma, request.publicTenantId
       ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
-      : marketItems;
+      : marketItems);
     const shapedItems: ItemHit[] = listable.map(toItemHit);
 
     return {
@@ -335,9 +337,10 @@ export async function searchRoutes(app: FastifyInstance) {
 
     // [DS982] A store outside the launch market never autocompletes, nor do its dishes.
     const marketItems = items.filter((i) => inLaunchMarket(i.vendor));
-    const listable = request.publicTenantId
+    // [GUARDRAILS §8] The exact last pass: a prohibited row is never returned, whatever the cached list said.
+    const listable = await withoutHidden(app.prisma, request.publicTenantId
       ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
-      : marketItems;
+      : marketItems);
     const suggestions = [
       ...vendors.filter(inLaunchMarket).map((v) => ({ text: v.name, type: 'vendor' as const })),
       ...listable.map((i) => ({ text: i.name, type: 'item' as const })),
@@ -379,9 +382,10 @@ export async function searchRoutes(app: FastifyInstance) {
 
     // [DS982] A dish from a store outside the launch market never trends.
     const marketItems = items.filter((i) => inLaunchMarket(i.vendor));
-    const listable = request.publicTenantId
+    // [GUARDRAILS §8] The exact last pass: a prohibited row is never returned, whatever the cached list said.
+    const listable = await withoutHidden(app.prisma, request.publicTenantId
       ? await listableItemsForVendors(app.prisma, tenantId, marketItems)
-      : marketItems;
+      : marketItems);
     return {
       success: true,
       // ItemHit plus the one field that makes it *trending* — a superset, never
