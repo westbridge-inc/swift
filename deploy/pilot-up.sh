@@ -273,6 +273,20 @@ if [ "$PILOT_ENV" = production ]; then
     "" | 0) ;;
     *) die "PILOT_ENV=production refuses WEB_ALLOW_SITE_TOKENS: the public site never shows unfilled company details" ;;
   esac
+  # [BACKUP-ENC] Owner ruling, 13 Oct: production backups leave the host only
+  # encrypted to the owner's PUBLIC key (deploy/backup.sh). The key file lives
+  # outside the checkout and its fingerprint is pinned here; backup.sh proves
+  # the file holds exactly that one public key before every dump.
+  [[ "$(env_setting BACKUP_GPG_FINGERPRINT)" =~ ^[0-9A-F]{40}$ ]] ||
+    die "PILOT_ENV=production needs BACKUP_GPG_FINGERPRINT (the owner's backup key fingerprint, 40 upper-case hex): production backups are encrypted to the owner's key (owner ruling, 13 Oct)"
+  backup_recipient="$(env_setting BACKUP_GPG_RECIPIENT_FILE)"
+  [[ "$backup_recipient" == /* ]] && [[ "$backup_recipient" != "$ROOT"/* ]] ||
+    die "PILOT_ENV=production needs BACKUP_GPG_RECIPIENT_FILE: an absolute path to the owner's exported PUBLIC backup key, outside the checkout"
+  # [S3-2] The freshness alarm (modules/ops/backup-freshness.ts) defaults to
+  # 26 hours, a nightly cadence. Production backs up hourly (owner ruling #12,
+  # 13 Oct): two missed runs must page, not a day of them.
+  [[ "$(env_setting BACKUP_MAX_AGE_HOURS)" =~ ^[1-3]$ ]] ||
+    die "PILOT_ENV=production needs BACKUP_MAX_AGE_HOURS=1, 2 or 3: the backup freshness alarm must match the hourly backups (owner ruling, 13 Oct)"
   # Owner ruling, 8 Oct: production launches with admin top-ups ON HOLD. The
   # API refuses every manual credit of fee paid ahead (503 TOPUP_ON_HOLD,
   # nothing recorded) exactly when BILLING_TOPUP_HOLD=1, read from this file.
@@ -284,6 +298,20 @@ if [ "$PILOT_ENV" = production ]; then
   for agent_cash_name in AGENT_CASH_WEBHOOK_SECRET AGENT_CASH_WEBHOOK_SECRET_FILE; do
     [ -z "$(env_setting "$agent_cash_name")" ] ||
       die "PILOT_ENV=production refuses the agent-cash webhook ($agent_cash_name is set): partners pay the weekly fee only on the MMG checkout page"
+  done
+  # [LAUNCH-LOCK] Owner ruling, 13 Oct: until an attorney signs off,
+  # production takes no card payment and runs no ads. The API's boot guard
+  # refuses the same settings (boot-config.ts assertProductionLaunchLocks);
+  # turning either on is a reviewed code change in both, never an .env edit.
+  [ "$(env_setting PAYMENT_PROVIDER)" = disabled ] ||
+    die "PILOT_ENV=production needs PAYMENT_PROVIDER=disabled: no card payment until an attorney signs off (owner ruling, 13 Oct)"
+  [ "$(env_setting CARD_RAIL_KILL)" = 1 ] ||
+    die "PILOT_ENV=production needs CARD_RAIL_KILL=1: no card payment until an attorney signs off (owner ruling, 13 Oct)"
+  for locked_name in CARD_RAIL_V2 CARD_RAIL_V2_DRAIN CARD_RAIL_ENROLL ADS_ENABLED; do
+    case "$(env_setting "$locked_name")" in
+      "" | 0) ;;
+      *) die "PILOT_ENV=production refuses $locked_name unless it is unset or 0: no card payment and no ads until an attorney signs off (owner ruling, 13 Oct)" ;;
+    esac
   done
   # Address search (the API refuses to boot in production without a provider,
   # #1563): osm, the private Photon service this script then starts, or
@@ -347,6 +375,24 @@ if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq
 fi
 # [PROD-PATH] And Docker's own persisted choice of daemon (docker context use)
 # is this host's: every call below acts on the daemon the checks above vouch for.
+# [BACKUP-ENC · Opus review 14 Oct] Two read-only proofs, after the name
+# checks and before anything changes.
+# S3-3: the backup key file itself exists and holds exactly the pinned public
+# key and no private key. The proof is backup.sh's own (the one every dump
+# runs), read from the same raw deploy/.env lines systemd hands the backup
+# unit, where an inline comment is part of the value. Without it a deploy went
+# green and every hourly backup then failed.
+# S3-2: the one-hour recovery point rests on the hourly timer (PILOT-RUNBOOK
+# §4). A stage that starts the API needs it enabled and running; the
+# database-only stage comes before it is installed.
+if [ "$PILOT_ENV" = production ]; then
+  env -u BACKUP_GPG_RECIPIENT_FILE -u BACKUP_GPG_FINGERPRINT -u PILOT_ENV "$HERE/backup.sh" --check-key >/dev/null ||
+    die "PILOT_ENV=production: the backup key file is not the owner's pinned public key (backup.sh --check-key refused it; its reason is above)"
+  if [ "$DATA_ONLY" -eq 0 ]; then
+    systemctl is-enabled --quiet swift-backup-hourly.timer && systemctl is-active --quiet swift-backup-hourly.timer ||
+      die "PILOT_ENV=production needs the hourly backup timer enabled and active before the API starts (sudo systemctl enable --now swift-backup-hourly.timer; PILOT-RUNBOOK §4)"
+  fi
+fi
 if [ "$PILOT_ENV" = production ]; then
   [ "$(docker context show 2>/dev/null || true)" = default ] ||
     die "docker's current context is not this host's own daemon (default); run: docker context use default"
@@ -484,6 +530,24 @@ if [ -n "$ADMIN_HOST" ] && [ "$DATA_ONLY" -eq 0 ] && [ "$NO_PUBLIC" -eq 0 ]; the
   "${COMPOSE[@]}" build admin
 fi
 "${COMPOSE[@]}" up -d --wait postgres redis meilisearch
+# [S3-L1] The database says which deployment it belongs to (deployment_identity,
+# written once when it is set up; seed-production.sh reads it the same way). A
+# staging host never deploys onto the production database, nor a production
+# host onto another deployment's: refused here, before anything is stopped or
+# migrated. The API and worker refuse to start on a mismatch as well
+# (apps/api/src/utils/deployment-identity.ts). A database not set up yet (no
+# table or no row) passes here; production writes its row before the first boot.
+DB_IDENTITY="$("${COMPOSE[@]}" exec -T postgres sh -c \
+  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) || chr(58) || coalesce(max(environment), chr(32)) FROM deployment_identity;"' 2>/dev/null || true)"
+DB_IDENTITY_ENV=""
+if [ "${DB_IDENTITY%%:*}" = "1" ]; then DB_IDENTITY_ENV="${DB_IDENTITY#*:}"; fi
+if [ "$PILOT_ENV" = production ]; then
+  [ -z "$DB_IDENTITY_ENV" ] || [ "$DB_IDENTITY_ENV" = production ] ||
+    die "PILOT_ENV=production, but this database's deployment_identity is not production: a production host never deploys onto another deployment's database. Nothing was stopped or migrated"
+else
+  [ "$DB_IDENTITY_ENV" != production ] ||
+    die "PILOT_ENV=$PILOT_ENV, but this database's deployment_identity says production: a staging host never deploys onto the production database. Nothing was stopped or migrated"
+fi
 # [PROD-PATH] Photon only with PLACES_PROVIDER=osm on production; never
 # Nominatim (the geocoding profile's other, heavy member).
 if [ "$PLACES_PHOTON" -eq 1 ]; then

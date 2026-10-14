@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -508,6 +509,7 @@ describe('[ZONE-FARES] a change prices NEW quotes only — a requested ride keep
       fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
       coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
     } }));
+    await sys(() => currentTaxiSplitDocuments(app.prisma, u.userId));
     return { ...u, driverId: driver.id };
   }
 

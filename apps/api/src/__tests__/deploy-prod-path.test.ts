@@ -72,6 +72,12 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
     sys.exit(0)
 if argv[:1] == ["run"] and any("photon:2322" in a for a in argv) and os.environ.get("PHOTON_DOWN") == "1":
     sys.exit(1)
+if argv[:1] == ["compose"] and "exec" in argv and "postgres" in argv:
+    # [S3-L1] the database's deployment_identity, as psql -tA prints it
+    # ("<count>:<environment>"); unset = a database not set up yet.
+    if os.environ.get("DB_IDENTITY"):
+        print(os.environ["DB_IDENTITY"])
+    sys.exit(0)
 if argv[:1] == ["compose"] and "ps" in argv and "-q" in argv:
     if os.environ.get("PS_FAIL") == "1":
         sys.exit(1)
@@ -119,7 +125,8 @@ function baseShims() {
   shim('id', 'if [ "$1" = "-u" ]; then echo 1000; else echo "uid=1000"; fi');
   shim('sudo', 'echo "sudo $*" >> "$CALL_LOG"\n[ "$1" = -n ] && shift\nexec "$@"');
   shim('swift-secrets', '[ "$1" = list ] && printf "%s\\n" $STORE_NAMES\nexit 0');
-  shim('systemctl', 'echo "systemctl $*" >> "$CALL_LOG"\nexit 0');
+  // BACKUP_TIMER_OFF=is-enabled|is-active makes that read-only query of the hourly backup timer say no.
+  shim('systemctl', 'echo "systemctl $*" >> "$CALL_LOG"\n[ -n "$BACKUP_TIMER_OFF" ] && [ "$1" = "$BACKUP_TIMER_OFF" ] && exit 1\nexit 0');
   shim('hostname', '[ "$1" = "-I" ] && echo "$HOST_IPS"\nexit 0');
   shim('sleep', 'exit 0');
 }
@@ -144,6 +151,11 @@ function preparePilot() {
   for (const f of ['pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'Caddyfile', 'docker-compose.yml', 'docker-compose.routing.yml']) {
     copyFileSync(join(DEPLOY, f), join(here, f));
   }
+  // backup.sh --check-key (the owner-key proof, run with real GnuPG in deploy/tests/test_backup_encryption.py)
+  // stands in here: it logs its call and refuses with BACKUP_KEY_REFUSE's reason.
+  writeFileSync(join(here, 'backup.sh'), '#!/bin/sh\necho "backup.sh $*" >> "$CALL_LOG"\n'
+    + 'if [ "$1" = --check-key ] && [ -n "${BACKUP_KEY_REFUSE:-}" ]; then echo "FATAL: $BACKUP_KEY_REFUSE" >&2; exit 1; fi\nexit 0\n');
+  chmodSync(join(here, 'backup.sh'), 0o755);
   mkdirSync(join(tmp, 'repo', 'apps', 'api', 'src', 'utils'), { recursive: true });
   copyFileSync(join(DEPLOY, '../apps/api/src/utils/secret-files.ts'), join(tmp, 'repo', 'apps', 'api', 'src', 'utils', 'secret-files.ts'));
   return here;
@@ -156,9 +168,15 @@ const PRODUCTION = {
   API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://example.org',
   // Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
+  // No card payment in production until an attorney signs off (owner ruling, 13 Oct).
+  PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1',
   // Address search (the API refuses production without it once #1563 lands;
   // osm or google is the owner's choice).
   PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon:2322',
+  // Production backups are encrypted to the owner's public key (owner ruling, 13 Oct).
+  BACKUP_GPG_FINGERPRINT: '0123456789ABCDEF0123456789ABCDEF01234567', BACKUP_GPG_RECIPIENT_FILE: '/etc/swift/backup-recipient.asc',
+  // The backup freshness alarm matches the hourly backups (Opus review 14 Oct, S3-2).
+  BACKUP_MAX_AGE_HOURS: '3',
 };
 const STAGING = { ...PRODUCTION, PILOT_ENV: 'staging', NODE_ENV: 'development', API_HOST: 'api-staging.example.org', STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' };
 
@@ -178,15 +196,19 @@ function runPilot(settings: Record<string, string | undefined>, opts: { args?: s
   return { ...res, calls: calls() };
 }
 /** Every call that changes the stack: a compose up, stop or build, or a systemctl. */
-const changedNothing = (lines: string[]) => lines.filter((l) => /^docker compose .* (up|stop|build)( |$)/.test(l) || l.startsWith('systemctl '));
+const changedNothing = (lines: string[]) => lines.filter((l) => /^docker compose .* (up|stop|build)( |$)/.test(l)
+  || (l.startsWith('systemctl ') && !/^systemctl (is-enabled|is-active) /.test(l)));
 
 describe('[PROD-PATH] the test helper that finds stack-changing calls', () => {
-  it('finds a compose up, stop or build and a systemctl, and nothing else (positive control)', () => {
+  it('finds a compose up, stop or build and a systemctl that acts, and nothing else (positive control)', () => {
     expect(changedNothing([
       'docker compose --project-directory /x -f /x/docker-compose.yml build api',
       'docker compose --project-directory /x -f /x/docker-compose.yml up -d --wait postgres redis meilisearch',
       'docker compose --project-directory /x -f /x/docker-compose.yml stop api worker',
       'systemctl restart swift-secrets.service',
+      // Read-only questions change nothing: whether the hourly backup timer is on.
+      'systemctl is-enabled --quiet swift-backup-hourly.timer',
+      'systemctl is-active --quiet swift-backup-hourly.timer',
       'docker compose --project-directory /x -f /x/docker-compose.yml config --quiet',
       'docker compose --project-directory /x -f /x/docker-compose.yml ps -q api',
       'docker network inspect swift-pilot-private',
@@ -336,6 +358,189 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     writeFileSync(log, '');
     const staging = runPilot({ ...STAGING, AGENT_CASH_WEBHOOK_SECRET_FILE: '/run/secrets/AGENT_CASH_WEBHOOK_SECRET' }, { env: { STORE_NAMES: withStore } });
     expect(staging.stderr).not.toContain('refuses the agent-cash webhook');
+  });
+
+  // [LAUNCH-LOCK] Owner ruling, 13 Oct: until an attorney signs off,
+  // production takes no card payment and runs no ads. The API's boot guard
+  // refuses the same settings (boot-config.test.ts); turning either on is a
+  // reviewed code change in both places, never an .env edit.
+  const everyMode = [[SHA], ['--data-only', SHA], ['--no-public', SHA]];
+  const modeEnv = (args: string[]): Record<string, string> => (args.length > 1 ? { DNS_MAP: '' } : {});
+  it('production refuses any card provider but disabled, and no kill switch, in every mode, before anything changes', () => {
+    const cases: Array<[Record<string, string | undefined>, string]> = [
+      [{ PAYMENT_PROVIDER: undefined }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'stripe' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'powertranz' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ PAYMENT_PROVIDER: 'Disabled' }, 'needs PAYMENT_PROVIDER=disabled'],
+      [{ CARD_RAIL_KILL: undefined }, 'needs CARD_RAIL_KILL=1'],
+      [{ CARD_RAIL_KILL: '0' }, 'needs CARD_RAIL_KILL=1'],
+      [{ CARD_RAIL_KILL: 'yes' }, 'needs CARD_RAIL_KILL=1'],
+    ];
+    for (const args of everyMode) {
+      for (const [over, refusal] of cases) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, ...over }, { args, env: modeEnv(args) });
+        expect(r.status, `${args.join(' ')} ${JSON.stringify(over)}`).not.toBe(0);
+        expect(r.stderr).toContain(`PILOT_ENV=production ${refusal}`);
+        expect(r.stderr).toContain('until an attorney signs off');
+        expect(changedNothing(r.calls)).toEqual([]);
+      }
+    }
+  });
+
+  it.each(['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'])('production refuses %s unless it is unset or 0, in every mode, before anything changes', (name) => {
+    for (const args of everyMode) {
+      for (const value of ['1', 'true', 'on']) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, [name]: value }, { args, env: modeEnv(args) });
+        expect(r.status, `${args.join(' ')} ${name}=${value}`).not.toBe(0);
+        expect(r.stderr).toContain(`PILOT_ENV=production refuses ${name} unless it is unset or 0`);
+        expect(changedNothing(r.calls)).toEqual([]);
+      }
+    }
+    for (const off of ['', '0']) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, [name]: off });
+      expect(r.status, `${name}=${JSON.stringify(off)}: ${r.stderr}`).toBe(0);
+    }
+  });
+
+  it('staging is not asked: its card and ad switches deploy exactly as before', () => {
+    const r = runPilot({ ...STAGING, PAYMENT_PROVIDER: 'sandbox', CARD_RAIL_KILL: '0', CARD_RAIL_V2: '1', CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_ENROLL: '1', ADS_ENABLED: '1' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`STAGING READY at exact SHA ${SHA}`);
+  });
+});
+
+// [S3-L1] A host deploys only onto a database of its own kind: pilot-up reads
+// the database's deployment_identity once Postgres is up, before anything is
+// stopped or migrated (the API and worker refuse to start on a mismatch too).
+describe('[S3-L1] pilot-up.sh: a host deploys only onto a database of its own kind', () => {
+  const PROD_MODES: Array<{ args: string[]; env: Record<string, string> }> = [
+    { args: [SHA], env: {} },
+    { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1' } },
+    { args: ['--no-public', SHA], env: { DNS_MAP: '', CADDY_STOPPED: '1' } },
+  ];
+  const stoppedOrMigrated = (calls: string[]) => calls.filter((l) => /stop api worker|force-recreate migrate|force-recreate api worker|force-recreate caddy/.test(l));
+  const readsIdentity = (calls: string[]) => indexOf(calls, 'exec -T postgres');
+
+  it('staging refuses a database whose identity says production, after Postgres is up and before anything is stopped or migrated', () => {
+    for (const args of [[SHA], ['--data-only', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot(STAGING, { args, env: { DB_IDENTITY: '1:production', API_STOPPED: args.length > 1 ? '1' : '' } });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain("PILOT_ENV=staging, but this database's deployment_identity says production: a staging host never deploys onto the production database. Nothing was stopped or migrated");
+      expect(readsIdentity(r.calls)).toBeGreaterThan(indexOf(r.calls, 'up -d --wait postgres redis meilisearch'));
+      expect(indexOf(r.calls, 'up -d --wait postgres redis meilisearch')).toBeGreaterThan(-1);
+      expect(stoppedOrMigrated(r.calls), args.join(' ')).toEqual([]);
+    }
+  });
+
+  it.each(['1:staging', '0: ', ''])('staging deploys on a database that says %j (its own, or not set up yet)', (identity) => {
+    const r = runPilot(STAGING, { env: { DB_IDENTITY: identity } });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readsIdentity(r.calls)).toBeGreaterThan(-1);
+    expect(readsIdentity(r.calls)).toBeLessThan(indexOf(r.calls, 'stop api worker'));
+  });
+
+  it.each(['1:staging', '1:development', '1:test', '1:Production'])('production refuses a database that says %j, in every mode, before anything is stopped or migrated', (identity) => {
+    for (const mode of PROD_MODES) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args: mode.args, env: { ...mode.env, DB_IDENTITY: identity } });
+      expect(r.status, mode.args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain("PILOT_ENV=production, but this database's deployment_identity is not production: a production host never deploys onto another deployment's database. Nothing was stopped or migrated");
+      expect(stoppedOrMigrated(r.calls), mode.args.join(' ')).toEqual([]);
+    }
+  });
+
+  it.each(['1:production', '0: ', ''])('production goes on with a database that says %j (its own, or not set up yet: the first --data-only run)', (identity) => {
+    for (const mode of PROD_MODES) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args: mode.args, env: { ...mode.env, DB_IDENTITY: identity } });
+      expect(r.status, `${mode.args.join(' ')}: ${r.stderr}`).toBe(0);
+      expect(readsIdentity(r.calls)).toBeGreaterThan(-1);
+    }
+  });
+});
+
+// [BACKUP-ENC] Owner ruling, 13 Oct: production backups leave the host only
+// encrypted to the owner's public key. pilot-up refuses a production host
+// whose settings do not pin that key (backup.sh proves the file itself).
+describe('[BACKUP-ENC] pilot-up.sh: production pins the owner\'s backup key', () => {
+  const modes = [[SHA], ['--data-only', SHA], ['--no-public', SHA]];
+  it.each([
+    [{ BACKUP_GPG_FINGERPRINT: undefined }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123456789abcdef0123456789abcdef01234567' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123456789ABCDEF0123456789ABCDEF0123456' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_FINGERPRINT: '0123 4567 89AB CDEF 0123 4567 89AB CDEF 0123 4567' }, 'BACKUP_GPG_FINGERPRINT'],
+    [{ BACKUP_GPG_RECIPIENT_FILE: undefined }, 'BACKUP_GPG_RECIPIENT_FILE'],
+    [{ BACKUP_GPG_RECIPIENT_FILE: 'backup-recipient.asc' }, 'BACKUP_GPG_RECIPIENT_FILE'],
+  ])('refuses %j in every production mode, before anything changes', (over, named) => {
+    for (const args of modes) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, ...over }, { args, env: args.length > 1 ? { DNS_MAP: '' } : {} });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain(`PILOT_ENV=production needs ${named}`);
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  it('refuses a key file inside the checkout (the seed and the deploy refuse untracked files there)', () => {
+    const here = preparePilot();
+    const inside = join(here, '..', 'backup-recipient.asc');
+    const r = runPilot({ ...PRODUCTION, BACKUP_GPG_RECIPIENT_FILE: inside });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('PILOT_ENV=production needs BACKUP_GPG_RECIPIENT_FILE');
+  });
+
+  it('staging is not asked', () => {
+    const r = runPilot({ ...STAGING, BACKUP_GPG_FINGERPRINT: undefined, BACKUP_GPG_RECIPIENT_FILE: undefined, BACKUP_MAX_AGE_HOURS: undefined }, { env: { BACKUP_KEY_REFUSE: 'not asked', BACKUP_TIMER_OFF: 'is-enabled' } });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.calls.filter((l) => l.startsWith('backup.sh') || /^systemctl is-/.test(l))).toEqual([]);
+  });
+
+  // Opus review 14 Oct, S3-3: the pin was checked for its shape only; a missing file, another key or a private
+  // key deployed green and every hourly backup then failed. backup.sh's own proof runs first, in every mode.
+  it('proves the key file with backup.sh --check-key in every production mode, and stops before anything changes when it refuses', () => {
+    for (const args of modes) {
+      writeFileSync(log, '');
+      const ok = runPilot(PRODUCTION, { args, env: args.length > 1 ? { DNS_MAP: '' } : {} });
+      expect(ok.calls, args.join(' ')).toContain('backup.sh --check-key');
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args, env: { ...(args.length > 1 ? { DNS_MAP: '' } : {}), BACKUP_KEY_REFUSE: 'the key in BACKUP_GPG_RECIPIENT_FILE is not the pinned owner key' } });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain('FATAL: the key in BACKUP_GPG_RECIPIENT_FILE is not the pinned owner key');
+      expect(r.stderr).toContain('PILOT_ENV=production: the backup key file is not the owner\'s pinned public key');
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  // S3-2: the freshness alarm defaulted to 26 hours, a nightly cadence, on an hourly production.
+  it.each([[undefined], ['26'], ['0'], ['4'], ['x']])('refuses BACKUP_MAX_AGE_HOURS=%s in every production mode, before anything changes', (hours) => {
+    for (const args of modes) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, BACKUP_MAX_AGE_HOURS: hours }, { args, env: args.length > 1 ? { DNS_MAP: '' } : {} });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain('PILOT_ENV=production needs BACKUP_MAX_AGE_HOURS=1, 2 or 3');
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  // S3-2: the hourly timer was installed by hand only, and nothing checked it.
+  it.each([['is-enabled'], ['is-active']])('a stage that starts the API refuses while the hourly backup timer fails %s, before anything changes', (off) => {
+    for (const args of [[SHA], ['--no-public', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args, env: { ...(args.length > 1 ? { DNS_MAP: '' } : {}), BACKUP_TIMER_OFF: off } });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain('PILOT_ENV=production needs the hourly backup timer enabled and active');
+      expect(changedNothing(r.calls)).toEqual([]);
+    }
+  });
+
+  it('the database-only stage, which comes before the timer is installed, does not ask for it', () => {
+    const r = runPilot(PRODUCTION, { args: ['--data-only', SHA], env: { DNS_MAP: '', BACKUP_TIMER_OFF: 'is-enabled' } });
+    expect(r.stderr).not.toContain('hourly backup timer');
+    expect(r.calls.filter((l) => /^systemctl is-/.test(l))).toEqual([]);
   });
 });
 

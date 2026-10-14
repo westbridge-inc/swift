@@ -51,7 +51,7 @@
  */
 import type { CoverageClass, PrismaClient, RiderType, VehicleType } from '@prisma/client';
 import { CountryConfigService } from '../country/country-config.service';
-import { approvedEvidenceFor } from '../verification/evidence';
+import { recordEvidenceFor } from '../verification/evidence';
 import { AUTO_APPROVE_EXPIRY_DAYS, IDENTITY_DOC_TYPES } from '../verification/doc-registry';
 import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { renderPackPicture } from './pack-image';
@@ -162,11 +162,16 @@ export async function packPartnerDocuments(db: Db, countryCode: string, vehicleT
   return [...required, ...identity];
 }
 
-/** What the checklist still lacks for this account now — by THE evidence query the gates read. */
+/**
+ * What the checklist still lacks for this account now, by the records the gates read, WITHOUT the 60-day
+ * hire-car permit grace. [Opus 13 Oct · #1546 S3-1] A pack seeded before the split holds the old permit,
+ * which the grace counts as both new licences; read with the grace, a re-seed would add nothing and the
+ * review taxi would go offline the day the window closes. The fiction always holds the real documents.
+ */
 async function missingEvidence(db: Db, role: PartnerRole, userId: string, countryCode: string, now: Date): Promise<string[]> {
   const spec = REVIEW_PACK_PARTNERS[role];
   const checklist = await packPartnerDocuments(db, countryCode, spec.vehicleType);
-  const rows = await approvedEvidenceFor(db, userId, checklist, now);
+  const rows = await recordEvidenceFor(db, userId, checklist, now);
   const held = new Set(rows.map((r) => r.docType));
   const missing = checklist.filter((t) => !held.has(t));
   if (role === 'DRIVER') {
