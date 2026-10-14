@@ -109,6 +109,8 @@ export const TENANT_TABLES = [
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
   // walled like the provider payment that credits it.
   'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
+  // [MMG REVERSAL] returning a whole weekly-fee payment: the payer's operator's money.
+  'mmg_fee_reversals',
   'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
   // [#1393] Consumed weekly-fee coverage: the paid or resumed obligation a clock moved past.
   'billing_obligation_transitions',

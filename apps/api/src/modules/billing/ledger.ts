@@ -114,6 +114,16 @@ export function topupPostings(subscriptionId: string, amount: number, rail: 'EXT
   ];
 }
 
+/** [MMG REVERSAL] MMG returned a weekly-fee payment to the payer: the exact
+ *  reverse of its MMG top-up — the wallet owes the payer less, and the MMG
+ *  clearing account holds less. */
+export function walletReversalPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, debit: amount },
+    { account: 'CLEARING_MMG', credit: amount },
+  ];
+}
+
 /** A weekly fee was collected. `rail` decides where the debit lands: prepaid
  *  consumes the wallet; external rails hit their clearing account. */
 export function chargeSuccessPostings(

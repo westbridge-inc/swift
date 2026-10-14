@@ -1,0 +1,22 @@
+-- [MMG REVERSAL] Guarded rollback. A reversal row is money evidence (MMG was
+-- asked to return a payment); the table is dropped only when it has never held
+-- one. PostgreSQL cannot drop an enum value without rebuilding the type, so
+-- PREPAID_REVERSAL stays in "BillingEventType" (inert while no event uses it);
+-- this refuses if any event does, because the previous application's client
+-- could not read it.
+BEGIN;
+SET LOCAL lock_timeout = '10s';
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM "mmg_fee_reversals") THEN
+    RAISE EXCEPTION 'MMG_FEE_REVERSALS_IN_USE: reversals were requested; their record is kept, not rolling back';
+  END IF;
+  IF EXISTS (SELECT 1 FROM "billing_events" WHERE "type"::text = 'PREPAID_REVERSAL') THEN
+    RAISE EXCEPTION 'PREPAID_REVERSAL_IN_USE: a wallet was debited for a reversal; not rolling back';
+  END IF;
+END $$;
+DROP TRIGGER IF EXISTS mmg_fee_reversals_forward ON "mmg_fee_reversals";
+DROP FUNCTION IF EXISTS mmg_fee_reversals_forward();
+DROP TABLE IF EXISTS "mmg_fee_reversals";
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261013210000_mmg_fee_reversals';
+COMMIT;

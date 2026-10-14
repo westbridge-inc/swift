@@ -696,6 +696,16 @@ export const mmgCheckoutLookupsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [MMG REVERSAL · owner #11] Returning a whole weekly-fee payment through MMG:
+ *  claimed, MMG's answer (answer_<status>), and the outcome the lookup decided
+ *  (reversed / failed / held). `held` should be rare and always has a person. */
+export const mmgFeeReversalsCounter = new client.Counter({
+  name: 'swift_mmg_fee_reversals_total',
+  help: 'MMG weekly-fee payment reversals: claims, MMG answers, and lookup-decided outcomes',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 /** [M-18] Provider transactions that hold MORE than one credited observation —
  *  the historical double credits the backfill could not resolve. Set by the
  *  billing poll; reversed only after provider / human reconciliation. */

@@ -355,6 +355,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/mmg-checkouts': c('C1', 'billing.mmg.read'),
   'GET /billing/mmg-checkouts/:id': c('C1', 'billing.mmg.read'),
   'POST /billing/confirmations/:id/resolve': c('C4', 'billing.payment.attach', E.paymentConfirmation),
+  // [MMG REVERSAL · owner #11] Return a whole weekly-fee payment through MMG:
+  // money (C4, a reason and two people); its state, read; MMG's lookup re-read.
+  'GET /billing/mmg-checkouts/:id/reversal': c('C0', 'billing.read'),
+  'POST /billing/mmg-checkouts/:id/reverse': c('C4', 'billing.mmg.reverse'),
+  'POST /billing/mmg-fee-reversals/:id/check': c('C2', 'billing.mmg.reverse.check'),
   'GET /billing/collections': c('C0', 'billing.read'),
   'GET /billing/mover-fees': c('C0', 'billing.read'),
   'GET /billing/mover-fees/:userId': c('C0', 'billing.read'),
@@ -725,6 +730,8 @@ export function reasonOf(body: unknown, headers?: Record<string, unknown>): stri
 export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>> = {
   'GET /legal/processors': 'code-declared register (DGP-1); no row to name',
   'POST /promos': 'creates the row; there is no before state to digest',
+  // [MMG REVERSAL] the claim row is the record; the audit facts name it
+  'POST /billing/mmg-checkouts/:id/reverse': 'creates the reversal claim row; the audit facts carry the reversal id, the checkout, the amount and the MMG transaction',
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',

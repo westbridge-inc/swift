@@ -1,0 +1,473 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
+import { nanoid } from 'nanoid';
+import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
+import { redisPlugin } from '../plugins/redis';
+import { authPlugin } from '../plugins/auth';
+import { socketPlugin } from '../plugins/socket';
+import { runWithTenant } from '../plugins/tenant-context';
+import { registerErrorHandler } from '../middleware/error-handler';
+import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
+import { adminRoutes } from '../modules/admin/admin.routes';
+import { BillingService } from '../modules/billing/billing.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { getPaymentProvider } from '../providers/payment/payment-provider';
+import { MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
+import { MmgFeeReversalService, MMG_FEE_REVERSAL_SWITCH } from '../modules/billing/mmg-fee-reversal';
+import { readFeePaymentDecision } from '../modules/billing/fee-payment-authority';
+import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTests } from '../modules/billing/provider-identity-backfill';
+import { ensureLedgerAccounts } from '../modules/billing/ledger';
+import { getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
+import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type SandboxCheckoutKeys } from '../providers/mmg/mmg-checkout';
+import {
+  SandboxMmgProvider, lookupDetailFrom, sandboxAddHistory, sandboxResetMmg, sandboxScriptReversal, sandboxSetTxStatus,
+  type MmgLookupClient, type MmgLookupDetail, type MmgReversalClient,
+} from '../providers/mmg/mmg-provider';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
+import { purgeAuditLogs } from '../lib/audit-immutability';
+
+// ---------------------------------------------------------------------------
+// [MMG REVERSAL · owner decision #11, 13 Oct] Return a WHOLE weekly-fee
+// payment to the partner's MMG account.
+//
+// Only a payment Swift credited on MMG's own proof; only the whole amount;
+// only while the fee balance still holds it. A durable claim before MMG is
+// asked; MMG asked once; only MMG's LOOKUP decides; the fee balance debited
+// exactly once, on that proof; anything unclear is HELD for a person — never
+// a silent drop, never a guess. The payments here are real checkouts, credited
+// through the real checkout service on a scripted MMG lookup (as in
+// mmg-checkout-service.test.ts); the reversal talks to the MMG sandbox.
+// ---------------------------------------------------------------------------
+
+const DAY = 86_400_000;
+const FEE = 2100;
+let app: FastifyInstance;
+let billing: BillingService;
+let notifications: NotificationService;
+let checkoutService: MmgCheckoutService;
+let reversals: MmgFeeReversalService;
+let keys: SandboxCheckoutKeys;
+let sandbox: SandboxMmgCheckoutProvider;
+let kekBefore: string | undefined;
+let switchBefore: string | undefined;
+let admin: { token: string; userId: string };
+
+/** MMG's lookup as the checkout verifier reads it (scripted per transaction, UAT shape). */
+const lookups = new Map<string, MmgLookupDetail>();
+const checkoutLookup: MmgLookupClient = { transactionLookupDetail: async (id) => lookups.get(id) ?? { outcome: 'not_found' } };
+const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
+const uatAnswer = (txn: string, amountGyd: number): Record<string, unknown> => ({
+  transactionStatus: 'successful', amount: String(amountGyd), currency: 'GYD', creationDate: gyStamp(new Date()),
+  subType: 'subscriber_mpay', transactionReference: `L${txn}`,
+  creditParty: [{ key: 'accountid', value: SANDBOX_MERCHANT_ID }], debitParty: [{ key: 'accountid', value: '6000002' }],
+  metadata: [{ key: 'description', value: '' }],
+});
+
+/** The reversal's MMG: the sandbox (stateful per transaction), counted. */
+const reversalCalls: string[] = [];
+const mmg = new SandboxMmgProvider();
+const reversalClient: MmgReversalClient = {
+  reverseTransaction: async (req) => { reversalCalls.push(req.transactionId); return mmg.reverseTransaction(req); },
+  transactionLookupDetail: (id) => mmg.transactionLookupDetail(id),
+};
+
+const RUN = nanoid(6).toUpperCase().replace(/[^A-Z0-9]/g, 'Q');
+const userIds: string[] = [];
+const vendorIds: string[] = [];
+const subIds: string[] = [];
+let seq = 0;
+const phoneBase = 592_647_000_000 + Math.floor(Math.random() * 900_000);
+const REASON = 'Partner paid this week twice by mistake; returning the second payment';
+
+async function makeSub(opts: { balance?: number; due?: Date } = {}) {
+  seq += 1;
+  const user = await app.prisma.user.create({ data: {
+    phone: `+${phoneBase + seq}`, firstName: 'Rev', lastName: `P${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER',
+    isPhoneVerified: true, selfieCapturedAt: new Date(),
+  } });
+  userIds.push(user.id);
+  const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
+  const vendor = await app.prisma.vendor.create({ data: {
+    ownerId: owner.id, name: `Reversal Store ${seq}`, slug: `reversal-store-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
+    phone: `+${phoneBase + 5000 + seq}`, addressLine1: '1 Reversal Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+    latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
+  } });
+  vendorIds.push(vendor.id);
+  const due = opts.due ?? new Date(Date.now() + 3 * DAY);
+  const sub = await app.prisma.subscription.create({ data: {
+    vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: FEE, billingMethod: 'CASH',
+    currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due, nextBillingDate: due,
+    prepaidBalance: { create: { balance: opts.balance ?? 0 } },
+  } });
+  subIds.push(sub.id);
+  return { userId: user.id, subId: sub.id };
+}
+
+/** A weekly-fee payment Swift credited on MMG's proof: a real checkout, confirmed. */
+async function paidCheckout(opts: { due?: Date } = {}) {
+  const s = await makeSub(opts);
+  const { checkout } = await checkoutService.createCheckout({ subscriptionId: s.subId, userId: s.userId, platform: 'ios', clientKey: `rev-${nanoid(12)}` });
+  const row = await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: checkout.ref } });
+  const txn = `RV${seq}${RUN}`;
+  const amount = Number(row.amount);
+  lookups.set(txn, lookupDetailFrom(uatAnswer(txn, amount), txn));
+  const token = sandbox.sandboxReplyToken({ merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0', secretKey: 'x' });
+  expect(await checkoutService.observeReply({ source: 'RETURN', outcome: 'success', params: { token } })).toBe('CONFIRMED');
+  // MMG's merchant API knows the transaction too (the reversal's lookup).
+  sandboxAddHistory({ transactionId: txn, status: 'approved', amountMinor: amount * 100, currencyCode: 'GYD' });
+  return { ...s, checkoutId: row.id, txn, amount };
+}
+
+const walletOf = async (subId: string) => Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } })).balance);
+const reversalEvents = (subId: string) => app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: 'PREPAID_REVERSAL' } });
+const rowsFor = (checkoutId: string) => app.prisma.mmgFeeReversal.findMany({ where: { checkoutId }, orderBy: { createdAt: 'asc' } });
+const ask = (checkoutId: string, amountGyd: number) => runWithTenant('swift-default', () =>
+  reversals.requestReversal({ tenantId: 'swift-default', checkoutId, amountGyd, reason: REASON, actorId: admin.userId, approvalId: null }, async () => {}));
+/** Wallet provability for one payer [billing invariant 1] and its ledger subledger [invariant 6]. */
+async function booksBalance(subId: string) {
+  const [topups, settles, reversed, ledger] = await Promise.all([
+    app.prisma.billingEvent.aggregate({ where: { subscriptionId: subId, type: 'PREPAID_TOPUP' }, _sum: { amount: true } }),
+    app.prisma.subscriptionPayment.aggregate({ where: { subscriptionId: subId, status: 'CAPTURED', externalRef: 'prepaid' }, _sum: { amount: true } }),
+    app.prisma.billingEvent.aggregate({ where: { subscriptionId: subId, type: 'PREPAID_REVERSAL' }, _sum: { amount: true } }),
+    app.prisma.ledgerEntry.aggregate({ where: { accountCode: 'WALLET_LIABILITY', subledgerId: subId }, _sum: { credit: true, debit: true } }),
+  ]);
+  return {
+    events: Number(topups._sum.amount ?? 0) - Number(settles._sum.amount ?? 0) - Number(reversed._sum.amount ?? 0),
+    ledger: Number(ledger._sum.credit ?? 0) - Number(ledger._sum.debit ?? 0),
+    wallet: await walletOf(subId),
+  };
+}
+
+beforeAll(async () => {
+  process.env['NODE_ENV'] = 'development';
+  delete process.env['MMG_DRIVER'];
+  kekBefore = process.env['MASTER_KEK'];
+  process.env['MASTER_KEK'] = randomBytes(32).toString('base64');
+  resetKeyProviderForTests();
+  switchBefore = process.env[MMG_FEE_REVERSAL_SWITCH];
+  process.env[MMG_FEE_REVERSAL_SWITCH] = 'on';
+  const pair = await new Promise<{ publicKey: KeyObject; privateKey: KeyObject }>((resolve, reject) => {
+    generateKeyPair('rsa', { modulusLength: 4096 }, (err, publicKey, privateKey) => (err ? reject(err) : resolve({ publicKey, privateKey })));
+  });
+  keys = { request: pair, result: pair };
+  sandbox = new SandboxMmgCheckoutProvider(keys, 'GUYANA_WALL_CLOCK');
+  app = Fastify({ logger: false });
+  registerErrorHandler(app);
+  registerEmptyJsonBodyParser(app);
+  await app.register(prismaPlugin);
+  await app.register(redisPlugin);
+  await app.register(authPlugin);
+  await app.register(socketPlugin);
+  await app.register(adminRoutes, { prefix: '/api/v1/admin' });
+  await app.ready();
+  await ensureLedgerAccounts(app.prisma);
+  notifications = new NotificationService(app.prisma, app.io);
+  billing = new BillingService(app.prisma, notifications, getPaymentProvider());
+  checkoutService = new MmgCheckoutService(app.prisma, billing, notifications, { checkout: () => sandbox, lookup: () => checkoutLookup, reversal: () => reversalClient });
+  reversals = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => reversalClient });
+  resetProviderIdentityBackfillCacheForTests();
+  await ensureProviderIdentityBackfill(app.prisma);
+  void getKeyProvider;
+  const user = await app.prisma.user.create({ data: {
+    phone: `+${phoneBase + 9000}`, firstName: 'Finance', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN',
+    status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } },
+  } });
+  userIds.push(user.id);
+  const token = app.jwt.sign({ userId: user.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
+  await app.prisma.session.create({ data: {
+    userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: 'mmg-reversal', deviceType: 'test',
+    expiresAt: new Date(Date.now() + DAY),
+  } });
+  admin = { token, userId: user.id };
+}, 120_000);
+
+beforeEach(() => {
+  reversalCalls.length = 0;
+});
+
+afterAll(async () => {
+  await cleanupSecondApprovers(app);
+  await runWithoutTenant(async () => {
+    await cleanupBillingClocks(app.prisma, subIds);
+    await app.prisma.mmgFeeReversal.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    const intents = await app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
+    await app.prisma.mmgCheckoutObservation.deleteMany({ where: { intentId: { in: intents.map((i) => i.id) } } });
+    await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.mmgAgentPayment.deleteMany({ where: { mmgTxnId: { endsWith: RUN } } }).catch(() => {});
+    await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { endsWith: RUN } }] } });
+    await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: admin.userId } }).catch(() => {});
+    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'test-cleanup:mmg-fee-reversal').catch(() => 0);
+    await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  }, 'test-cleanup:mmg-fee-reversal');
+  sandboxResetMmg();
+  await app.close();
+  if (kekBefore === undefined) delete process.env['MASTER_KEK']; else process.env['MASTER_KEK'] = kekBefore;
+  if (switchBefore === undefined) delete process.env[MMG_FEE_REVERSAL_SWITCH]; else process.env[MMG_FEE_REVERSAL_SWITCH] = switchBefore;
+  resetKeyProviderForTests();
+});
+
+const reverseRoute = (checkoutId: string, body: Record<string, unknown>) => ({
+  method: 'POST' as const,
+  url: `/api/v1/admin/billing/mmg-checkouts/${checkoutId}/reverse`,
+  headers: { authorization: `Bearer ${admin.token}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
+  payload: { ...body, reason: REASON },
+});
+
+describe('[MMG REVERSAL] the admin action: two people, then MMG, then MMG\'s proof', () => {
+  it('needs a second person first: the ask alone changes nothing and asks MMG nothing', async () => {
+    const p = await paidCheckout();
+    const res = await app.inject(reverseRoute(p.checkoutId, { amountGyd: p.amount }));
+    expect(res.statusCode, res.body).toBe(202);
+    expect(res.json().error.code).toBe('APPROVAL_REQUIRED');
+    expect(reversalCalls).toEqual([]);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(0);
+    expect(await walletOf(p.subId)).toBe(p.amount);
+  });
+
+  it('approved: MMG reverses, its lookup proves it, the fee balance is debited ONCE, books balance, the partner is told', async () => {
+    const p = await paidCheckout();
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    const res = await injectWithApproval(app, reverseRoute(p.checkoutId, { amountGyd: p.amount }));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.state).toBe('REVERSED');
+
+    const [row] = await rowsFor(p.checkoutId);
+    expect(row).toMatchObject({ state: 'REVERSED', mmgTransactionId: p.txn, lookupStatus: 'ORIGINAL_REVERSED' });
+    expect(row!.approvalId).toBeTruthy();
+    expect(row!.walletDebitedAt).toBeTruthy();
+    expect(await walletOf(p.subId)).toBe(0);
+    const events = await reversalEvents(p.subId);
+    expect(events).toHaveLength(1);
+    expect(Number(events[0]!.amount)).toBe(p.amount);
+    expect(events[0]!.id).toBe(row!.billingEventId);
+    // The reversing posting: the wallet owes less, MMG clearing holds less.
+    const posting = await app.prisma.ledgerTransaction.findUniqueOrThrow({ where: { idempotencyKey: `ledger:mmg-reversal:${row!.id}` }, include: { entries: true } });
+    expect(posting.entries.map((e) => [e.accountCode, Number(e.debit), Number(e.credit)]).sort()).toEqual([
+      ['CLEARING_MMG', 0, p.amount], ['WALLET_LIABILITY', p.amount, 0],
+    ]);
+    expect(await booksBalance(p.subId)).toEqual({ events: 0, ledger: 0, wallet: 0 });
+    // The MMG transaction stays CREDITED: it can never be credited again.
+    expect((await app.prisma.providerPayment.findMany({ where: { creditedPaymentId: `mco:${p.checkoutId}` } })).every((r) => r.status === 'CREDITED')).toBe(true);
+    // The audit row of the approved act names the reversal.
+    const audit = await app.prisma.auditLog.findFirst({ where: { action: { contains: '/reverse' }, changes: { path: ['reversalId'], equals: row!.id } } });
+    expect(audit).toBeTruthy();
+    // The partner, in plain words.
+    const told = await app.prisma.notification.findMany({ where: { userId: p.userId, data: { path: ['status'], equals: 'REVERSED' } } });
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body).toMatch(/^Your payment of .*2,?100.* on .+ was returned to your MMG account\.$/);
+    expect(reversalCalls).toEqual([p.txn]);
+
+    // A second ask is refused before MMG is asked again.
+    const again = await injectWithApproval(app, reverseRoute(p.checkoutId, { amountGyd: p.amount }));
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error.code).toBe('ALREADY_REVERSED');
+    expect(reversalCalls).toEqual([p.txn]);
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('the whole amount only: a different amount is refused (MMG reverses in full)', async () => {
+    const p = await paidCheckout();
+    const res = await injectWithApproval(app, reverseRoute(p.checkoutId, { amountGyd: p.amount - 100 }));
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('AMOUNT_MISMATCH');
+    expect(reversalCalls).toEqual([]);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(0);
+  });
+
+  it('switched off (the default until the owner\'s UAT run): refused, nothing written, MMG not asked', async () => {
+    const p = await paidCheckout();
+    delete process.env[MMG_FEE_REVERSAL_SWITCH];
+    try {
+      const res = await injectWithApproval(app, reverseRoute(p.checkoutId, { amountGyd: p.amount }));
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json().error.code).toBe('REVERSAL_OFF');
+    } finally {
+      process.env[MMG_FEE_REVERSAL_SWITCH] = 'on';
+    }
+    expect(reversalCalls).toEqual([]);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(0);
+  });
+
+  it('the payment page shows whether it can be returned, and why not', async () => {
+    const p = await paidCheckout();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/admin/billing/mmg-checkouts/${p.checkoutId}/reversal`, headers: { authorization: `Bearer ${admin.token}` } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ checkoutId: p.checkoutId, amountGyd: p.amount, canReverse: true, switchedOn: true, reversals: [] });
+  });
+});
+
+describe('[MMG REVERSAL] only a payment Swift credited on MMG\'s proof, whole and unspent', () => {
+  it('a payment that is not confirmed is refused', async () => {
+    const s = await makeSub();
+    const { checkout } = await checkoutService.createCheckout({ subscriptionId: s.subId, userId: s.userId, platform: 'ios', clientKey: `rev-${nanoid(12)}` });
+    await expect(ask(checkout.ref, FEE)).rejects.toMatchObject({ code: 'NOT_CONFIRMED' });
+    expect(reversalCalls).toEqual([]);
+  });
+
+  it('a PROVIDER_ID_CONFLICT on the same MMG transaction: never reversed', async () => {
+    const p = await paidCheckout();
+    await app.prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: `conflict-${p.txn}`, mmgTxnId: p.txn, sanRaw: 'conflict', amount: p.amount,
+      currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', failureCode: 'PROVIDER_ID_CONFLICT', raw: {},
+    } });
+    await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'IDENTITY_CONFLICT' });
+    expect(reversalCalls).toEqual([]);
+    expect(await walletOf(p.subId)).toBe(p.amount);
+  });
+
+  it('a held duplicate identity on the same MMG number: never reversed', async () => {
+    const p = await paidCheckout();
+    await app.prisma.providerPayment.create({ data: {
+      provider: 'MMG', providerTxnId: p.txn, status: 'HELD_DUPLICATE', amount: p.amount, currencyCode: 'GYD', tenantId: 'swift-default',
+    } });
+    await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'IDENTITY_CONFLICT' });
+    expect(reversalCalls).toEqual([]);
+  });
+
+  it('money already spent on a week is not returned here (the fee balance no longer holds it)', async () => {
+    // Due now: the payment pays the running week the moment it is credited.
+    const p = await paidCheckout({ due: new Date(Date.now() - 60_000) });
+    expect(await walletOf(p.subId)).toBe(0);
+    await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'MONEY_ALREADY_USED' });
+    expect(reversalCalls).toEqual([]);
+  });
+
+  it('two asks at once: exactly one claim, MMG asked once, the balance debited once', async () => {
+    const p = await paidCheckout();
+    const both = await Promise.allSettled([ask(p.checkoutId, p.amount), ask(p.checkoutId, p.amount)]);
+    expect(both.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const refused = both.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(['ALREADY_REVERSING', 'ALREADY_REVERSED', 'P2002']).toContain(refused.reason.code);
+    expect(reversalCalls).toEqual([p.txn]);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(1);
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+    expect(await walletOf(p.subId)).toBe(0);
+  });
+});
+
+describe('[MMG REVERSAL] only MMG\'s lookup decides — a lost answer is never guessed', () => {
+  it('MMG reversed but its answer was LOST: the lookup proves it, debited once', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'lost');
+    const row = await ask(p.checkoutId, p.amount);
+    expect(row.state).toBe('REVERSED');
+    expect(row.providerStatus).toBe('error');
+    expect(await walletOf(p.subId)).toBe(0);
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('no answer and MMG did nothing: HELD for a person, the balance untouched, operators paged, billing paused', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'error');
+    const row = await ask(p.checkoutId, p.amount);
+    expect(row).toMatchObject({ state: 'HELD', heldReason: 'NO_ANSWER_FROM_MMG' });
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+    const paged = await app.prisma.notification.findMany({ where: { userId: admin.userId, data: { path: ['reversalId'], equals: row.id } } });
+    expect(paged.length).toBeGreaterThanOrEqual(1);
+    // While it is open the partner is not asked to pay beside it, and nothing is spent.
+    expect(await readFeePaymentDecision(app.prisma, p.subId)).toMatchObject({ allowed: false, reason: 'PAYMENT_CONFIRMING' });
+    // "Check with MMG": MMG still shows the payment standing and never refused — still a person's.
+    const checked = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id }));
+    expect(checked.state).toBe('HELD');
+    expect(await walletOf(p.subId)).toBe(p.amount);
+  });
+
+  it('MMG refused and its lookup shows the payment standing: FAILED, nothing changed, and it may be asked again', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'declined');
+    const row = await ask(p.checkoutId, p.amount);
+    expect(row).toMatchObject({ state: 'FAILED', providerStatus: 'declined', lookupStatus: 'STANDING' });
+    expect(row.failedAt).toBeTruthy();
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+    expect(await readFeePaymentDecision(app.prisma, p.subId)).not.toMatchObject({ reason: 'PAYMENT_CONFIRMING' });
+    // A refused attempt frees the payment for another.
+    sandboxScriptReversal(p.txn, 'reversed');
+    const second = await ask(p.checkoutId, p.amount);
+    expect(second.state).toBe('REVERSED');
+    expect(await rowsFor(p.checkoutId)).toHaveLength(2);
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('MMG says "already reversed" while its lookup shows the payment standing: a contradiction, HELD', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'duplicate');
+    const row = await ask(p.checkoutId, p.amount);
+    expect(row).toMatchObject({ state: 'HELD', heldReason: 'MMG_SAYS_ALREADY_REVERSED' });
+    expect(await walletOf(p.subId)).toBe(p.amount);
+  });
+
+  it('MMG accepted (pending): SENT until the lookup proves it; "Check with MMG" then debits ONCE, and again changes nothing', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const row = await ask(p.checkoutId, p.amount);
+    expect(row.state).toBe('SENT');
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    sandboxSetTxStatus(p.txn, 'reversed'); // MMG finishes
+    const done = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id }));
+    expect(done.state).toBe('REVERSED');
+    const again = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id }));
+    expect(again.state).toBe('REVERSED');
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+    expect(await walletOf(p.subId)).toBe(0);
+  });
+
+  it('the checkout poll settles a pending reversal on its own once MMG\'s lookup proves it', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const row = await ask(p.checkoutId, p.amount);
+    expect(row.state).toBe('SENT');
+    sandboxSetTxStatus(p.txn, 'reversed');
+    await checkoutService.pollIntents(new Date(Date.now() + 5 * 60_000));
+    expect((await app.prisma.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } })).state).toBe('REVERSED');
+    expect(await reversalEvents(p.subId)).toHaveLength(1);
+  });
+
+  it('MMG proves the return but the balance no longer holds it: HELD for a person, never below zero', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const row = await ask(p.checkoutId, p.amount);
+    // The balance moved by some path outside this pause (simulated).
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const after = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: row.id }));
+    expect(after).toMatchObject({ state: 'HELD', heldReason: 'WALLET_NO_LONGER_HOLDS_IT' });
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+    expect(await walletOf(p.subId)).toBe(0);
+  });
+});
+
+describe('[MMG REVERSAL] the record only moves forward', () => {
+  it('the database refuses a backwards state, a rewritten amount, and a second wallet debit', async () => {
+    const p = await paidCheckout();
+    const row = await ask(p.checkoutId, p.amount);
+    expect(row.state).toBe('REVERSED');
+    await expect(app.prisma.mmgFeeReversal.update({ where: { id: row.id }, data: { state: 'SENT' } })).rejects.toThrow(/only moves forward/);
+    await expect(app.prisma.mmgFeeReversal.update({ where: { id: row.id }, data: { amount: 1 } })).rejects.toThrow(/written once/);
+    await expect(app.prisma.mmgFeeReversal.update({ where: { id: row.id }, data: { walletDebitedAt: new Date() } })).rejects.toThrow(/written once/);
+    // and a debited wallet can only belong to a REVERSED row
+    const p2 = await paidCheckout();
+    sandboxScriptReversal(p2.txn, 'error');
+    const held = await ask(p2.checkoutId, p2.amount);
+    await expect(app.prisma.mmgFeeReversal.update({ where: { id: held.id }, data: { walletDebitedAt: new Date() } })).rejects.toThrow();
+    // one live reversal per payment, in the database itself
+    await expect(app.prisma.mmgFeeReversal.create({ data: {
+      tenantId: held.tenantId, subscriptionId: held.subscriptionId, checkoutId: held.checkoutId, providerPaymentId: held.providerPaymentId,
+      mmgTransactionId: held.mmgTransactionId, amount: held.amount, currencyCode: held.currencyCode, reason: REASON,
+      requestedBy: admin.userId, sentAt: new Date(),
+    } })).rejects.toMatchObject({ code: 'P2002' });
+  });
+});
