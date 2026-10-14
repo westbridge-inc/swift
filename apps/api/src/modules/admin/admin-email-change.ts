@@ -59,7 +59,8 @@ export async function sendAdminEmailChangeNotice(oldAddress: string, newAddress:
     'It was confirmed with a sign-in code sent to the phone on your account.',
     `Solo approval stays off for ${EMAIL_CHANGE_SOLO_QUIET_DAYS} days after any email change.`,
     '',
-    'If this was not you: sign in, change the address back, and sign out of every device.',
+    // [Opus S4-1] After a SIM swap the thief also receives the sign-in code: the carrier comes first.
+    'If this was not you: call your carrier to lock your SIM, then change it back and sign out of every device.',
   ].join('\n');
   let ref: string;
   try {

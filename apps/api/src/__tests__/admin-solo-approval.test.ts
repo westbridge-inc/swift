@@ -567,6 +567,8 @@ describe('[Opus S2] an admin account email is where solo warnings go — a sessi
     expect(emailsTo(owner.email).length, 'the OLD address is told').toBe(toOld + 1);
     const notice = emailsTo(owner.email).at(-1)!;
     expect(notice.body).toMatch(/was not you/i);
+    // [Opus S4-1] after a SIM swap, signing in and the code both reach the thief: the first step is the carrier
+    expect(notice.body).toMatch(/call your carrier to lock your SIM, then change it back/i);
     expect(notice.body, 'the new address is masked, never copied').not.toContain(next);
     expect(await hasStepUp(owner), 'the code authorises ONE change').toBe(false);
   });
