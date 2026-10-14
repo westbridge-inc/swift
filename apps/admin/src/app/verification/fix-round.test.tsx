@@ -80,7 +80,7 @@ describe('coordinator screenshot fixes', () => {
     expect(history.textContent).not.toMatch(/reviewer-id|V_PLATE_CLASS|\/api\/|VENDOR_OWNER|owner_national_id/);
     expect(history.querySelectorAll('time')).toHaveLength(3);
   });
-  it('keeps an audited new-tab PDF fallback visible and approval locked until the label row is checked', async () => {
+  it('keeps an audited new-tab PDF fallback visible while failed inline rendering locks approval', async () => {
     const fetch = vi.fn(async (...[url]: [string, RequestInit?]) => url.includes('/document-url')
       ? new Response(JSON.stringify({ data: { url: '/api/v1/verification/render/doc?sig=fixture&expires=1' } }), { headers: { 'content-type': 'application/json' } })
       : new Response('pdf', { headers: { 'content-type': 'application/pdf' } }));
@@ -100,7 +100,8 @@ describe('coordinator screenshot fixes', () => {
     expect(screen.getByRole('link', { name: 'Open document in a new tab' })).toBeTruthy();
     const check = screen.getByRole('checkbox');
     await user.click(check.closest('label')!);
-    expect(viewed).toHaveBeenLastCalledWith(true);
+    expect((check as HTMLInputElement).disabled).toBe(true);
+    expect(viewed).not.toHaveBeenCalledWith(true);
   });
   it('uses a concise global search placeholder with a descriptive accessible label', () => {
     renderWithQuery(<GlobalSearch />);

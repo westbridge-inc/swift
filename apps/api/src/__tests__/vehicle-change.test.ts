@@ -45,6 +45,7 @@ let seq = 0;
 // One file, one block: +592019nnnnnn (1M wide), never past +593.
 const phoneBase = 592_019_000_000 + Math.floor(Math.random() * 900_000);
 const NUM = String(Date.now()).slice(-4);
+// [Owner ruling 11 Oct 2026 — H-PLATE] A taxi (car / wagon car) plate is H-series where it is typed; fixture plates follow it. Buses keep B-series.
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'vehicle-change-test');
 const DAY = 86_400_000;
 
@@ -280,7 +281,7 @@ describe('PUT /partner/vehicle: moving between delivery and taxi work', () => {
   it('a delivery rider switching to a car becomes a taxi Driver: profile provisioned from the taxonomy, pointer moved, rider offline', async () => {
     const u = await makeUser();
     expect((await become(u.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(201);
-    const plate = `VC${NUM}A`;
+    const plate = `HVC${NUM}A`;
     const res = await change(u.token, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Axio', year: 2019, color: 'White', licensePlate: plate } });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().data).toMatchObject({ kind: 'DRIVER', vehicleType: 'CAR', previousVehicleType: 'MOTORCYCLE', changed: true, activeRole: 'DRIVER', lastMoverRole: 'DRIVER' });
@@ -302,7 +303,7 @@ describe('PUT /partner/vehicle: moving between delivery and taxi work', () => {
       riderId, type: 'DELIVERY_RIDER', status: 'TRIAL', weeklyRate: 0,
       currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * DAY), nextBillingDate: new Date(Date.now() + 7 * DAY),
     } }));
-    const res = await change(u.token, { vehicleType: 'WAGON_CAR', vehicle: { make: 'Toyota', model: 'Fielder', year: 2017, color: 'Grey', licensePlate: `VC${NUM}B` } });
+    const res = await change(u.token, { vehicleType: 'WAGON_CAR', vehicle: { make: 'Toyota', model: 'Fielder', year: 2017, color: 'Grey', licensePlate: `HVC${NUM}B` } });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('PLAN_ON_CURRENT_ROLE');
     expect(await system(() => app.prisma.driver.count({ where: { userId: u.userId } }))).toBe(0);
@@ -358,7 +359,7 @@ describe('the car\'s papers are not "already verified" by the motorbike\'s', () 
 describe('PUT /partner/vehicle: a driver changes car', () => {
   it('same plate, new type: papers bound to the plate stay; a new plate retires them and closes the assignment', async () => {
     const u = await makeUser();
-    const plateA = `VC${NUM}C`;
+    const plateA = `HVC${NUM}C`;
     const made = await become(u.token, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Premio', year: 2018, color: 'Blue', licensePlate: plateA } });
     expect(made.statusCode, made.body).toBe(201);
     // The car's insurance, bound to the car the plate names (as submission binds it).
@@ -387,10 +388,10 @@ describe('PUT /partner/vehicle: a driver changes car', () => {
 
   it('a verified driver steps up first; a driver on a ride cannot change at all', async () => {
     const u = await makeUser();
-    const made = await become(u.token, { vehicleType: 'CAR', vehicle: { make: 'Nissan', model: 'Tiida', year: 2015, color: 'Black', licensePlate: `VC${NUM}E` } });
+    const made = await become(u.token, { vehicleType: 'CAR', vehicle: { make: 'Nissan', model: 'Tiida', year: 2015, color: 'Black', licensePlate: `HVC${NUM}E` } });
     expect(made.statusCode, made.body).toBe(201);
     await system(() => app.prisma.driver.update({ where: { userId: u.userId }, data: { documentsVerified: true } }));
-    const next = { vehicleType: 'WAGON_CAR', vehicle: { make: 'Nissan', model: 'Wingroad', year: 2016, color: 'Black', licensePlate: `VC${NUM}F` } };
+    const next = { vehicleType: 'WAGON_CAR', vehicle: { make: 'Nissan', model: 'Wingroad', year: 2016, color: 'Black', licensePlate: `HVC${NUM}F` } };
 
     const noStepUp = await change(u.token, next);
     expect(noStepUp.statusCode).toBe(403);

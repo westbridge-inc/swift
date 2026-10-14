@@ -496,7 +496,7 @@ describe('[ZONE-FARES] a change prices NEW quotes only — a requested ride keep
     const driver = await sys(() => app.prisma.driver.create({
       data: {
         userId: u.userId, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020, vehicleColor: 'Silver',
-        licensePlate: `ZF-${seq}`, driverLicenseUrl: 'storage://zf/dl.jpg', vehicleInsuranceUrl: 'storage://zf/ins.jpg',
+        licensePlate: `HZF-${seq}`, /* [owner 11 Oct] a taxi plate is H-series */ driverLicenseUrl: 'storage://zf/dl.jpg', vehicleInsuranceUrl: 'storage://zf/ins.jpg',
         documentsVerified: true, isOnline: true, isAvailable: true, currentLat: point.lat, currentLng: point.lng,
         lastLocationUpdate: new Date(), locationSessionId: u.sessionId,
       },

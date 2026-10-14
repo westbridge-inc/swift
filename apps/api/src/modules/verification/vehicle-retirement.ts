@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma, VehicleType } from '@prisma/client';
 import { BUCKET_OF, VEHICLE_REGISTRATION_DOC_TYPE } from './doc-registry';
 import { hopDocState } from './doc-state';
 import { normalizeRegistrationMark, resolveSubject, rootSubjectId } from './subjects';
@@ -60,5 +60,22 @@ export async function requireFreshVehicleReview(tx: Prisma.TransactionClient, us
   if (withdrawn.length) await tx.reviewCase.updateMany({ where: { submissionId: { in: withdrawn }, closedAt: null }, data: { closedAt: now } });
   const subject = await resolveSubject(tx, { userId, ...user, docType: VEHICLE_REGISTRATION_DOC_TYPE, vehicleProfile: next });
   if (subject) await tx.subjectLink.updateMany({ where: { id: subject.linkId }, data: { approvedAt: null } });
+  await alignStoredVehicleKind(tx, userId, user.countryCode, next.licensePlate, next.vehicleType);
   return { superseded, withdrawn };
+}
+
+/**
+ * [Opus 12 Oct · H-plate follow-up] The registrant re-declared the vehicle on this plate as another class
+ * (a car declared as a motorbike, or back): the stored record follows the vehicle now in use, so it — not
+ * one the mover no longer has — decides how that plate's papers are judged at approval. A vehicle another
+ * account registered is never rewritten. (Old papers cannot smuggle the old class back: a taxi still needs
+ * an H plate at approval and at go-online, and hire insurance at go-online.)
+ */
+export async function alignStoredVehicleKind(tx: Prisma.TransactionClient, userId: string, countryCode: string, plate: string | null | undefined, vehicleType: VehicleType) {
+  const registrationMark = normalizeRegistrationMark(plate ?? '');
+  if (!registrationMark) return;
+  await tx.vehicleProfile.updateMany({
+    where: { registrationMark, countryCode, registeredById: userId, vehicleKind: { not: vehicleType } },
+    data: { vehicleKind: vehicleType },
+  });
 }
