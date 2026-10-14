@@ -1605,7 +1605,7 @@ export class BillingService {
         await notifyAdmins(this.prisma, this.notifications, {
           tenantId: await tenantOfSubscription(this.prisma, sub.id),
           title: '💳 A card charge was captured with no local payment — repaired',
-          body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or fee paid ahead; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
+          body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or money kept for the next weekly fee; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
           data: { kind: 'billing_invariants', alert: 'card-captured-without-local-payment', subscriptionId: sub.id, paymentId: row.id },
         }).catch(() => {});
         continue;
@@ -1775,7 +1775,7 @@ export class BillingService {
       select: { balance: true, currencyCode: true },
     });
     if (balanceRow && balanceRow.currencyCode !== sub.currencyCode) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The fee paid ahead is in a different currency from the issued weekly fee; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The money received for the next weekly fee is in a different currency from the issued weekly fee; reconciliation is required');
     }
     if (balanceRow && Number(balanceRow.balance) >= amount) {
       return { ok: true, ref: 'prepaid', spendPrepaid: amount };
@@ -1963,7 +1963,7 @@ export class BillingService {
 
     // Prepaid already tried and came up short above; no usable external rail
     // (a CASH sub with an empty balance, or a CARD/MMG sub missing credentials).
-    return { ok: false, reason: 'Not enough fee paid ahead to cover this week' };
+    return { ok: false, reason: 'Not enough has been received to pay this week' };
   }
 
   private async applySuccessfulCharge(
@@ -2002,7 +2002,7 @@ export class BillingService {
     if (settled.disposition === 'skipped' || settled.disposition === 'held') return false;
     if (settled.disposition === 'advanced') await this.afterSuccessfulCharge({ ...sub, currencyCode: settled.currencyCode! }, settled.amount!, settled.periodKey!);
     // [REVIEW S3-1] A card capture banked, or one that moved the paid week on,
-    // is kept; past four weeks ahead the operators are paged to refund it.
+    // is kept; past one week ahead [owner #62] the operators are paged to refund it.
     await this.pageIfPayAheadOverCap(sub.id);
     return true;
   }
@@ -2267,14 +2267,14 @@ export class BillingService {
     if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
     const wallet = await this.lockWalletInTx(tx, opts.subscriptionId, opts.currencyCode);
     if (wallet.currencyCode !== opts.currencyCode) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The payment and the fee paid ahead are in different currencies; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The payment and the money received for the next weekly fee are in different currencies; reconciliation is required');
     }
     const credited = await tx.prepaidBalance.updateMany({
       where: { subscriptionId: opts.subscriptionId, currencyCode: opts.currencyCode },
       data: { balance: { increment: opts.amount } },
     });
     if (credited.count !== 1) {
-      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The currency of the fee paid ahead changed before this payment was applied; reconciliation is required');
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The currency of the money received for the next weekly fee changed before this payment was applied; reconciliation is required');
     }
     const event = await tx.billingEvent.create({
       data: {
@@ -2955,7 +2955,7 @@ export class BillingService {
       const otherApprovalHeld = await this.subscriptionHasConfirmationHold(tx, sub.id, payment.id, now);
       if (covered || authority.bankInsteadOfAdvance || otherApprovalHeld) {
         const walletHold = await this.holdWalletCurrencyMismatch(tx, payment, originalAttempt!.currencyCode, evidence.transactionId);
-        if (walletHold) return { kind: 'held' as const, reason: 'Captured payment currency differs from the fee paid ahead', paymentId: payment.id, notify: walletHold.notify };
+        if (walletHold) return { kind: 'held' as const, reason: 'Captured payment currency differs from the money received for the next weekly fee', paymentId: payment.id, notify: walletHold.notify };
       }
 
       const claimed = await tx.subscriptionPayment.updateMany({
@@ -3060,8 +3060,8 @@ export class BillingService {
       await this.notifications.send({
         userId: this.payerUserId(sub),
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'MMG payment received — kept as fee paid ahead',
-        body: `Your MMG approval of $${result.amount.toLocaleString()} ${result.currencyCode} arrived after ${result.reason}. It is kept as fee paid ahead for a coming week and has not changed your subscription state.`,
+        title: 'MMG payment received — kept for your next weekly fee',
+        body: `Your MMG approval of $${result.amount.toLocaleString()} ${result.currencyCode} arrived after ${result.reason}. It is kept for your next weekly fee and has not changed your subscription state.`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_banked', subscriptionId: sub.id },
       }).catch(() => {});
@@ -4167,7 +4167,7 @@ export class BillingService {
       /** The rail the money came by, when the caller names it (MMG_CHECKOUT). */
       channel?: string;
       /** [OWNER RULING 8 Oct (2)] A payment a person records by hand is refused
-       *  past four weeks paid ahead (they refund the rest). Money that arrived
+       *  past one week ahead [owner #62] (they refund the rest). Money that arrived
        *  without anyone choosing it (a checkout MMG confirmed) is never refused:
        *  afterTopUpCommitted pages the operators to refund any excess. */
       payAheadLimit?: 'refuse';
@@ -4259,7 +4259,7 @@ export class BillingService {
   /** [OWNER RULING 8 Oct (2)] Money that reached a weekly fee without anyone
    *  choosing to pay ahead (a checkout MMG confirmed, an agent payment, a late
    *  approval or card capture for a week already paid) is never refused once it
-   *  is Swift's to hold. When it leaves more than four weeks paid ahead, the
+   *  is Swift's to hold. When it leaves more than one week ahead [owner #62], the
    *  operators are paged, once per amount, to refund the part above the cap.
    *  Best-effort and after the commit: it moves no money. */
   async pageIfPayAheadOverCap(subscriptionId: string): Promise<void> {
@@ -4269,8 +4269,8 @@ export class BillingService {
       const money = (n: number) => formatMoney(n, position.currencyCode);
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: await tenantOfSubscription(this.prisma, subscriptionId),
-        title: 'Weekly fees paid ahead past the 4-week limit — refund owed',
-        body: `A partner now has ${money(position.heldAhead)} of weekly fees paid ahead, more than the ${PAY_AHEAD_MAX_WEEKS}-week limit (${money(position.cap)}${position.due ? `, plus ${money(position.weeklyFee)} for the week now due` : ''}). Refund the ${money(position.excess)} above the limit to the partner (finance procedure: weekly fees paid ahead). The money had already arrived, so nothing was refused.`,
+        title: 'Weekly fee paid more than one week ahead — refund owed',
+        body: `A partner now has ${money(position.heldAhead)} received for weeks that have not started, more than the ${PAY_AHEAD_MAX_WEEKS}-week limit (${money(position.cap)}${position.due ? `, plus ${money(position.weeklyFee)} for the week now due` : ''}). Refund the ${money(position.excess)} above the limit to the partner (finance procedure: weekly fee refunds). The money had already arrived, so nothing was refused.`,
         data: { kind: 'billing_invariants', alert: 'pay-ahead-over-cap', subscriptionId, excess: position.excess, currencyCode: position.currencyCode },
         dedupeKey: `pay-ahead-over-cap:${subscriptionId}:${position.heldAhead}`,
       });
@@ -4306,8 +4306,8 @@ export class BillingService {
       await this.notifications.send({
         userId: this.payerUserId(sub as SubWithRelations),
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Weekly fee paid ahead',
-        body: `$${amount.toLocaleString()} ${sub.currencyCode} received as fee paid ahead. It pays your coming weekly fees.`,
+        title: 'Weekly fee received',
+        body: `$${amount.toLocaleString()} ${sub.currencyCode} received. It goes toward your next weekly fee.`,
         audience: this.payerAudience(sub),
         data: { kind: 'billing_topup', subscriptionId },
       });

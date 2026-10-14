@@ -148,7 +148,7 @@ describe('[A-12] a waived fee carries the operator’s own words', () => {
 // [OWNER 8 Oct (4)] Production records no fee payment by hand (BILLING_TOPUP_HOLD):
 // partners pay through the MMG checkout page. The server says when the hold is on,
 // and the console then offers no "Record fee payment" button. When it is offered and
-// the server refuses (the hold, or four weeks already paid ahead), its words show.
+// the server refuses (the hold, or more than one week ahead, owner #62), its words show.
 // ---------------------------------------------------------------------------
 describe('[owner 8 Oct] recording a fee payment by hand', () => {
   it('is not offered while the server says the hold is on', async () => {
@@ -169,7 +169,7 @@ describe('[owner 8 Oct] recording a fee payment by hand', () => {
       return '9000';
     }));
     vi.stubGlobal('confirm', vi.fn(() => true));
-    const refusal = 'This would put more than 4 weeks of weekly fees paid ahead on this account. Record at most GY$8,400 now and refund the rest to the partner (finance procedure: weekly fees paid ahead).';
+    const refusal = 'This would pay more than one week ahead on this account. Record at most GY$8,400 now and refund the rest to the partner (finance procedure: weekly fee refunds).';
     mockApi(handler(() => ({ status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT', message: refusal } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
