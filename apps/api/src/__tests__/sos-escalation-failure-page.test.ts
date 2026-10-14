@@ -23,8 +23,10 @@ import { log, setAppLogger } from '../utils/logger';
 //    later, and two sweeps at once page nothing more; a page that died after
 //    its claim is taken over only once the lease lapses; a page that throws
 //    releases its claim and the next sweep pages;
-//  - the store-review fiction's SOS is never paged about; a row that never
-//    failed, or failed and then delivered, or belongs to an ended alert, is not;
+//  - the store-review fiction's SOS is never paged about, and its old failures
+//    never fill a sweep and hide a real one; a row that never failed, or
+//    failed and then delivered (even between the sweep's read and its claim),
+//    or belongs to an emergency that ended, is not;
 //  - no phone number reaches a row's error, a log line, a page or a text.
 // ---------------------------------------------------------------------------
 
@@ -250,7 +252,7 @@ describe('who is never paged about', () => {
     const fiction = await alertWithFailedRow({ tenantId: TENANT_REVIEW });
     const real = await alertWithFailedRow({ tenantId: TENANT_REAL });
     const res = await page([fiction.alert.id, real.alert.id]);
-    expect(res.review).toEqual([fiction.row.id]);
+    expect(res.review, 'the fiction’s row is dropped by the sweep itself, never even read').toEqual([]);
     expect(res.paged).toEqual([real.row.id]);
     expect(await prisma.opsAlert.count({ where: { sosAlertId: fiction.alert.id } })).toBe(0);
     expect(await superAdminNotices(fiction.alert.id)).toHaveLength(0);
@@ -272,5 +274,68 @@ describe('who is never paged about', () => {
   it('an acknowledged emergency is still live: its failed contact text pages', async () => {
     const { alert, row } = await alertWithFailedRow({ alertStatus: 'ACKNOWLEDGED' });
     expect((await page(alert.id)).paged).toEqual([row.id]);
+  });
+});
+
+describe('old store-review failures never fill a sweep and hide a real one', () => {
+  it('the fiction’s rows are dropped before the bound: a real failure behind older fiction failures pages, with a window no wider than they are', async () => {
+    const fictions = [];
+    for (let i = 0; i < 3; i += 1) fictions.push(await alertWithFailedRow({ tenantId: TENANT_REVIEW }));
+    // Older than the real failure, so oldest-first they come first.
+    await prisma.sosEscalation.updateMany({ where: { id: { in: fictions.map((f) => f.row.id) } }, data: { createdAt: new Date(Date.now() - 60 * 60_000) } });
+    const real = await alertWithFailedRow({ tenantId: TENANT_REAL });
+    const res = await page([...fictions.map((f) => f.alert.id), real.alert.id], { limit: fictions.length });
+    expect(res.paged, 'old store-review failures filled the sweep and hid a real SOS').toEqual([real.row.id]);
+    expect(await prisma.opsAlert.count({ where: { sosAlertId: { in: fictions.map((f) => f.alert.id) } } })).toBe(0);
+    expect(oncallFailureTexts()).toHaveLength(1); // the real one only
+  });
+
+  it('when the store-review tenants cannot be read, the real failure still pages and the fiction still does not', async () => {
+    const fiction = await alertWithFailedRow({ tenantId: TENANT_REVIEW });
+    const real = await alertWithFailedRow({ tenantId: TENANT_REAL });
+    const blind = new Proxy(prisma, {
+      get(target, key, receiver) {
+        if (key !== 'tenant') return Reflect.get(target, key, receiver);
+        return new Proxy(target.tenant, { get: (t, k) => (k === 'findMany' ? async () => { throw new Error('tenant lookup down'); } : Reflect.get(t, k)) });
+      },
+    }) as PrismaClient;
+    const res = await pageFailedSosEscalations(blind, notifications(), { alertIds: [fiction.alert.id, real.alert.id] });
+    expect(res.paged, 'a lookup hiccup left a real SOS failure unpaged').toEqual([real.row.id]);
+    expect(res.review).toEqual([fiction.row.id]); // the per-row check caught it
+    expect(await prisma.opsAlert.count({ where: { sosAlertId: fiction.alert.id } })).toBe(0);
+    expect(oncallFailureTexts()).toHaveLength(1);
+    expect(logged.some((l) => l.includes('could not read the store-review tenants'))).toBe(true);
+  });
+});
+
+describe('the claim re-reads the row and the emergency', () => {
+  /** A sweep that read the failure, then — before its claim — something else changed it. */
+  const readThen = (meanwhile: () => Promise<unknown>) => new Proxy(prisma, {
+    get(target, key, receiver) {
+      if (key !== 'sosEscalation') return Reflect.get(target, key, receiver);
+      return new Proxy(target.sosEscalation, {
+        get: (t, k) => (k === 'findMany'
+          ? async (args: Parameters<typeof t.findMany>[0]) => { const rows = await t.findMany(args); await meanwhile(); return rows; }
+          : Reflect.get(t, k)),
+      });
+    },
+  }) as PrismaClient;
+
+  it('a row the worker delivered between the read and the claim is not paged', async () => {
+    const { alert, row } = await alertWithFailedRow({ rowStatus: 'PENDING', attempts: 2, lastError: 'gateway down' });
+    const delivered = readThen(() => prisma.sosEscalation.update({ where: { id: row.id }, data: { status: 'SENT', deliveredAt: new Date() } }));
+    expect((await pageFailedSosEscalations(delivered, notifications(), { alertIds: [alert.id] })).paged).toEqual([]);
+    expect(await failurePages(alert.id)).toHaveLength(0);
+    expect(oncallFailureTexts()).toHaveLength(0);
+    expect(await prisma.sosEscalation.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ failurePageClaimedAt: null, failurePageOpsAlertId: null });
+  });
+
+  it('an emergency that ended between the read and the claim is not paged', async () => {
+    const { alert, row } = await alertWithFailedRow();
+    const ended = readThen(() => prisma.sosAlert.update({ where: { id: alert.id }, data: { status: 'RESOLVED' } }));
+    expect((await pageFailedSosEscalations(ended, notifications(), { alertIds: [alert.id] })).paged).toEqual([]);
+    expect(await failurePages(alert.id)).toHaveLength(0);
+    expect(oncallFailureTexts()).toHaveLength(0);
+    expect(await prisma.sosEscalation.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ failurePageClaimedAt: null, failurePageOpsAlertId: null });
   });
 });

@@ -294,6 +294,19 @@ export function redactDeliveryError(err: unknown): string {
   return maskPii(err instanceof Error ? err.message : String(err)).slice(0, 2_000);
 }
 
+/** The store-review tenants, read fresh each sweep (a handful of rows). A
+ *  lookup that fails drops nothing: the per-row check and the ops-alert
+ *  opener's own suppression still stand, and a real failure is never left
+ *  unpaged because of a lookup hiccup. */
+async function reviewTenantIds(prisma: PrismaClient): Promise<string[]> {
+  try {
+    return (await prisma.tenant.findMany({ where: { kind: 'REVIEW' }, select: { id: true } })).map((t) => t.id);
+  } catch (err) {
+    log().error({ errName: err instanceof Error ? err.name : typeof err }, '[AUD-L4-016] could not read the store-review tenants — the per-row check still stands');
+    return [];
+  }
+}
+
 /** How long a failure-page claim holds before another tick may take it over
  *  (a process that died between the claim and the page). */
 export const FAILURE_PAGE_LEASE_SECONDS = 120;
@@ -335,10 +348,12 @@ const FAILURE_PAGE_WORDS: Record<SosEscalationChannel, { title: string; body: (s
  * ends. The row itself keeps retrying on its own policy.
  *
  * Exactly once per failed row: a claim (a lease, so a page that died half-way
- * is claimed again once it lapses) and then the covering ops alert's id
- * written back as done. A page that throws releases its claim for the next
- * tick. The store-review fiction is never paged about. No title, body, log or
- * receipt carries a phone number.
+ * is claimed again once it lapses; it re-checks that the row is still failed
+ * and its emergency still live) and then the covering ops alert's id written
+ * back as done. A page that throws releases its claim for the next tick. The
+ * store-review fiction is never paged about, and its rows are dropped before
+ * the sweep's bound so they can never hide a real failure. No title, body,
+ * log or receipt carries a phone number.
  */
 export async function pageFailedSosEscalations(
   prisma: PrismaClient,
@@ -351,11 +366,21 @@ export async function pageFailedSosEscalations(
     failurePageOpsAlertId: null,
     OR: [{ failurePageClaimedAt: null }, { failurePageClaimedAt: { lt: lapsed } }],
   };
+  // A failure to page: the row has failed (still retrying, or exhausted) and
+  // its emergency is still live. Read by the sweep AND re-checked by the claim:
+  // a row the worker delivered, or an emergency that ended, after the sweep
+  // read it is not paged.
+  const failedNow: Prisma.SosEscalationWhereInput = { OR: [{ status: 'FAILED' }, { status: 'PENDING', lastError: { not: null } }] };
+  const liveAlert: Prisma.SosAlertWhereInput = { status: { in: ['ACTIVE', 'ACKNOWLEDGED'] } };
+  // [GUARDRAILS §3] The store-review fiction's rows are dropped HERE, before
+  // the oldest-first bound: old demo failures can never fill a sweep and hide
+  // a real SOS (the watchdog's own rule). No tenant = real: when in doubt, page.
+  const fiction = await reviewTenantIds(prisma);
   const rows = await prisma.sosEscalation.findMany({
     where: {
       ...claimable,
-      AND: [{ OR: [{ status: 'FAILED' }, { status: 'PENDING', lastError: { not: null } }] }],
-      sosAlert: { status: { in: ['ACTIVE', 'ACKNOWLEDGED'] } },
+      AND: [failedNow],
+      sosAlert: fiction.length ? { AND: [liveAlert, { OR: [{ tenantId: null }, { tenantId: { notIn: fiction } }] }] } : liveAlert,
       ...(options.alertIds?.length ? { sosAlertId: { in: options.alertIds } } : {}),
     },
     orderBy: { createdAt: 'asc' },
@@ -365,10 +390,11 @@ export async function pageFailedSosEscalations(
   const paged: string[] = []; const review: string[] = [];
   for (const row of rows) {
     const alert = row.sosAlert;
-    // [GUARDRAILS §3] The store-review fiction's SOS never pages real operations.
+    // [GUARDRAILS §3] The store-review fiction's SOS never pages real operations
+    // (checked again per row, and once more inside the ops-alert opener).
     if (alert.tenantId && await isReviewTenantId(prisma, alert.tenantId)) { review.push(row.id); continue; }
-    const claim = await prisma.sosEscalation.updateMany({ where: { id: row.id, ...claimable }, data: { failurePageClaimedAt: now } });
-    if (claim.count !== 1) continue; // another tick holds it, or it is already covered
+    const claim = await prisma.sosEscalation.updateMany({ where: { id: row.id, ...claimable, AND: [failedNow], sosAlert: liveAlert }, data: { failurePageClaimedAt: now } });
+    if (claim.count !== 1) continue; // another tick holds it, it is already covered, it delivered, or the emergency ended
     const words = FAILURE_PAGE_WORDS[row.channel];
     const retrying = row.status === 'FAILED' ? ` Swift stopped retrying after ${row.attempts} attempts.` : ' Swift keeps retrying.';
     try {
