@@ -4,7 +4,7 @@ import React, { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { NavigationContainer, createNavigationContainerRef, createNavigatorFactory, StackRouter, useNavigationBuilder } from '@react-navigation/native';
+import { NavigationContainer, createNavigationContainerRef, createNavigatorFactory, StackRouter, useNavigationBuilder, type ParamListBase } from '@react-navigation/native';
 
 const fx = vi.hoisted(() => ({
   listener: undefined as undefined | ((response: any) => void), reads: vi.fn(),
@@ -58,10 +58,10 @@ describe('a repeated invitation tap refreshes an already focused inbox', () => {
     let rows: Array<{ id: string; storeName: string; role: 'STAFF'; expiresAt: string; createdAt: string }> = [];
     fx.reads.mockImplementation(async () => ({ data: { data: rows } }));
     fx.client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const ref = createNavigationContainerRef<any>();
+    const ref = createNavigationContainerRef<ParamListBase>();
     host = document.createElement('div'); document.body.append(host); root = createRoot(host);
     await act(async () => root!.render(React.createElement(QueryClientProvider, { client: fx.client! },
-      React.createElement(NavigationContainer, { ref }, React.createElement(Stack.Navigator, null,
+      React.createElement(NavigationContainer<ParamListBase>, { ref }, React.createElement(Stack.Navigator, null,
         React.createElement(Stack.Screen, { name: 'Storefront', component: Storefront }))))));
     fx.navigate = (name, params) => { ref.navigate(name, params); return true; };
     uninstall = installNotificationTapRouter();
