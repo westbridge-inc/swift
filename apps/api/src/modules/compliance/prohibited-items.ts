@@ -608,9 +608,17 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
   }
   if (options.brandFirst !== false) {
     for (const j of judged) {
-      const first = j.split(' ')[0]!;
+      // A count before the brand ("1 Camel", "Two Newport") leaves it first. [DS1261]
+      const first = afterLeadingCount(j.split(' '))[0]!;
       const brand = BRAND_FIRST[first];
       if (brand) return { prohibitedClass: brand.prohibitedClass, term: first };
+    }
+    // Further in, with a measure of its kind after it ("Pack of Camel 20s"), it is held for a person too. [DS1261 S2]
+    for (const part of undisguise(text).split(SEGMENT_BREAK)) {
+      for (const reading of readings(part, noSoftDrinks)) {
+        const hit = brandMeasuredAnywhere(reading.split(' '));
+        if (hit) return hit;
+      }
     }
   }
   return options.splitWords === false ? null : splitWordHit(text);
@@ -666,8 +674,42 @@ function headGoods(words: readonly string[]): string | null {
   return end < core.length ? match(core.slice(0, end), true) : null;
 }
 
+/** Counts written before a brand-first word ("1 Camel 20s", "Two Newport 20s", "2x Stag"): a quantity, not another
+ *  product, so the brand is still the first word. [DS1261] */
+const LEADING_COUNT = /^(\d+x?|x\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen)$/;
+function afterLeadingCount(words: readonly string[]): readonly string[] {
+  let start = 0;
+  while (start < words.length - 1 && LEADING_COUNT.test(words[start]!)) start += 1;
+  return words.slice(start);
+}
+
+/**
+ * A brand-first word anywhere in one part of the text, with a measure of its kind anywhere after it: "Pack of Camel
+ * 20s", "Camel Blue 20 pack king size", "Bayer 100 tablets box". The catalogue holds it for a person; a parcel, which
+ * no person reviews, is refused. A lozenge brand counts by any measure here: it is only ever held in the catalogue
+ * (#58). [DS1261 S2]
+ */
+function brandMeasuredAnywhere(words: readonly string[]): { prohibitedClass: ProhibitedClass; term: string } | null {
+  // "Empty Camel 20s" is not let through either: an empty container is held for a person, like "Empty Hennessy
+  // bottle" (DS1110 S3-4), and a parcel has none.
+  for (let i = 0; i < words.length; i += 1) {
+    const brand = BRAND_FIRST[words[i]!];
+    if (!brand) continue;
+    const rest = words.slice(i + 1);
+    const kind = brand.measure === 'none' ? 'any' : brand.measure ?? 'any';
+    const aged = brand.prohibitedClass === 'ALCOHOL' && rest.some((w) => AGE_STATEMENT.test(w));
+    const ofItsKind = kind === 'any' ? aged || rest.some((w) => DRINK_MEASURE.test(w))
+      : kind === 'liquid' ? aged || rest.some((w) => LIQUID_MEASURE.test(w))
+        : rest.some((w) => TOBACCO_MEASURE.test(w));
+    const dosed = brand.prohibitedClass === 'MEDICINE' && rest.some((w) => PILL_MEASURE.test(w));
+    if (ofItsKind || dosed) return { prohibitedClass: brand.prohibitedClass, term: words[i]! };
+  }
+  return null;
+}
+
 /** "Banks 6 pack", "Bristol 20s", "XM Gold": a brand-first word followed only by measure and style words. */
-function brandPack(words: readonly string[], options: GoodsOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
+function brandPack(written: readonly string[], options: GoodsOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
+  const words = afterLeadingCount(written);
   const brand = BRAND_FIRST[words[0] ?? ''];
   if (!brand || words.includes('empty')) return null;
   const { core, measured, liquid, tobacco, aged } = stripTrailing(words.slice(1));
@@ -742,6 +784,11 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
       if (noun) return { prohibitedClass: CLASS_OF.get(noun)!, term: noun };
       const pack = brandPack(words, options);
       if (pack) return pack;
+      // No person reviews a parcel: a brand with a measure of its kind anywhere after it is the goods. [DS1261 S2]
+      if (options.noReviewer) {
+        const anywhere = brandMeasuredAnywhere(words);
+        if (anywhere) return anywhere;
+      }
     }
   }
   return null;

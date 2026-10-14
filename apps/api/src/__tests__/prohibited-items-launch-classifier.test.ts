@@ -386,4 +386,34 @@ describe('[§8 launch · DS1112] the fourth review', () => {
   it.each(['Camel Blue 20 pack', 'Kool Aid 2 pack', 'Tiger prawns 2 pack'])('%s in the catalogue is held for a person, never refused', (name) => {
     expect(verdict(name).state).toBe('WAITING');
   });
+
+  // [DS1261 S2] Words after the measure, or before the brand, do not make a parcel something else either: the brand
+  // anywhere in a part, with a measure of its kind anywhere after it, is the goods where no person reviews the text.
+  it.each(['Newport Menthol 20s king size', 'Camel Blue 20 pack king size', 'Camel Blue 20 pack sealed', 'Camel Blue 20 pack fresh',
+    'Winston Blue 20 pack box', 'Camel Blue 20 pack sleeve', 'Velo Citrus 20 pouches mint', 'Halls Honey Lemon 9 pack sugar free',
+    'Bayer One A Day 100 tablets chewable', 'Bayer 100 tablets box', 'Camel 20s for my uncle', 'Banks 6 pack and chips',
+    '1 Camel Blue 20 pack', 'Pack of Camel 20s', 'Two Newport 20s', 'Uncle s Camel 20s', 'Box of Banks 6 pack', 'Gift Halls 9 pack',
+    'My Bayer 30 tabs', 'Some Bayer One A Day 100 tablets', 'Gift of Bounty 12 year old', 'Empty Camel 20s', 'Gift Halls 12ct'])('a parcel of %s is refused', (parcel) => {
+    expect(parcelProhibited(parcel)).not.toBeNull();
+  });
+  it.each(['Bounty paper towels 2 pack white', 'Davidoff Cool Water 125ml gift', 'Tiger prawns 500g frozen', 'Banks birthday card',
+    'Shoes for Ron', 'Gift for Ron, 2 bottles of pepper sauce', 'Halls', 'A Bounty bar'])('a parcel of %s is carried (no measure of its kind)', (parcel) => {
+    expect(parcelProhibited(parcel)).toBeNull();
+  });
+  // A count before the brand is not a different product: "1 Camel 20s" is judged as "Camel 20s", as a name and an option.
+  it.each(['1 Camel 20s', 'Two Newport 20s', '1 Banks 6 pack', '2x Stag 12 pack', 'A Corona 330ml', '1 XM Gold'])('%s is refused like the same words without the count', (name) => {
+    expect(verdict(name).state).toBe('BANNED');
+    expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('BANNED');
+  });
+  // The catalogue holds a brand that is not the first word when a measure of its kind follows it; it is never listed unseen.
+  it.each(['Pack of Camel 20s', 'Box of Banks 6 pack', 'Gift Halls 9 pack', 'Uncle s Camel 20s', 'Camel Blue 20 pack king size', '2 Tiger prawns 2 pack',
+    'Gift of Bounty 12 year old', 'Empty Camel 20s', '1 Camel', 'Two Banks', 'A Tiger'])(
+    '%s in the catalogue is held for a person', (name) => {
+      expect(verdict(name).state).toBe('WAITING');
+      expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('WAITING');
+    },
+  );
+  it.each(['Shoes for Ron', 'Cake for the Banks family', 'Paper towels for Ron'])('%s stays clear (a brand-first word that is not first, with no measure)', (name) => {
+    expect(verdict(name).state).toBe('CLEAR');
+  });
 });
