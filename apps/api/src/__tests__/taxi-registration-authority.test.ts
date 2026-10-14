@@ -110,18 +110,30 @@ describe('taxi approval uses the stored registration subject', () => {
 });
 
 describe('every taxi approval path checks stored vehicle authority', () => {
-  it('a motorbike-to-car change with the same private plate cannot approve the old motorbike subject', async () => {
-    const doc = await pending('PAB444444', 'PAB444444');
+  // [#1617 · owner ruling 11 Oct] The vehicle screen now refuses a car on a private plate outright, so the
+  // class change below can only exist as LEGACY data (a car saved before the rule). The approval check stays
+  // as defence in depth for it.
+  async function legacyCarOnMotorbikePlate(doc: { userId: string; subjectId: string | null }, plate: string) {
     await system(async () => {
       await app.prisma.driver.delete({ where: { userId: doc.userId } });
-      await app.prisma.rider.create({ data: { userId: doc.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', licensePlate: 'PAB444444' } });
+      await app.prisma.rider.create({ data: { userId: doc.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', licensePlate: plate } });
       await app.prisma.user.update({ where: { id: doc.userId }, data: { lastMoverRole: 'RIDER' } });
       await app.prisma.vehicleProfile.update({ where: { subjectId: doc.subjectId! }, data: { vehicleKind: 'MOTORCYCLE' } });
-      await new PartnerService(app.prisma).changeVehicleWithAuthority(doc.userId, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: 'PAB444444' } }, async (tx) => {
-        await tx.user.update({ where: { id: doc.userId }, data: { activeRole: 'DRIVER', lastMoverRole: 'DRIVER', roles: ['MOVER', 'RIDER', 'DRIVER'] } });
-        return null;
-      });
     });
+    await expect(system(() => new PartnerService(app.prisma).changeVehicleWithAuthority(doc.userId, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: plate } }, async () => null)))
+      .rejects.toMatchObject({ code: 'TAXI_PLATE_NOT_HIRE' });
+    await system(async () => {
+      await app.prisma.driver.create({ data: {
+        userId: doc.userId, vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2018, vehicleColor: 'Silver', licensePlate: plate,
+        driverLicenseUrl: '/uploads/synthetic-licence', vehicleInsuranceUrl: '/uploads/synthetic-insurance',
+      } });
+      await app.prisma.user.update({ where: { id: doc.userId }, data: { activeRole: 'DRIVER', lastMoverRole: 'DRIVER', roles: ['MOVER', 'RIDER', 'DRIVER', 'CUSTOMER'] } });
+    });
+  }
+
+  it('a motorbike-to-car change with the same private plate cannot approve the old motorbike subject', async () => {
+    const doc = await pending('PAB444444', 'PAB444444');
+    await legacyCarOnMotorbikePlate(doc, 'PAB444444');
     // The car now in use on that plate is a taxi: its private plate is refused for the reason that matters.
     await refused(doc.id, 'WRONG_PLATE_CLASS');
     // A fresh submission is taken (no dead end), but automatic processing never approves it.
@@ -135,19 +147,10 @@ describe('every taxi approval path checks stored vehicle authority', () => {
   it.each(['RIDER', 'CUSTOMER'] as const)('the class change is still refused when the applicant is in %s mode at approval', async (mode) => {
     const plate = `PAD${nanoid(6).replace(/[^a-z0-9]/gi, '0').toUpperCase()}`;
     const doc = await pending(plate, plate);
-    await system(async () => {
-      await app.prisma.driver.delete({ where: { userId: doc.userId } });
-      await app.prisma.rider.create({ data: { userId: doc.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', licensePlate: plate } });
-      await app.prisma.user.update({ where: { id: doc.userId }, data: { lastMoverRole: 'RIDER' } });
-      await app.prisma.vehicleProfile.update({ where: { subjectId: doc.subjectId! }, data: { vehicleKind: 'MOTORCYCLE' } });
-      await new PartnerService(app.prisma).changeVehicleWithAuthority(doc.userId, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: plate } }, async (tx) => {
-        await tx.user.update({ where: { id: doc.userId }, data: { activeRole: 'DRIVER', lastMoverRole: 'DRIVER', roles: ['MOVER', 'RIDER', 'DRIVER', 'CUSTOMER'] } });
-        return null;
-      });
-      // Both profiles are kept; the applicant now switches mode before the reviewer acts.
-      expect(await app.prisma.rider.findUnique({ where: { userId: doc.userId } })).not.toBeNull();
-      await app.prisma.user.update({ where: { id: doc.userId }, data: { activeRole: mode } });
-    });
+    await legacyCarOnMotorbikePlate(doc, plate);
+    expect(await app.prisma.rider.findUnique({ where: { userId: doc.userId } })).not.toBeNull();
+    // Both profiles are kept; the applicant now switches mode before the reviewer acts.
+    await system(() => app.prisma.user.update({ where: { id: doc.userId }, data: { activeRole: mode } }));
     await refused(doc.id, 'WRONG_PLATE_CLASS');
   });
 

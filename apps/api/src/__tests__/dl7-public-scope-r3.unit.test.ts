@@ -45,7 +45,7 @@ async function fixture() {
   const readItems = vi.fn(async (q: Query) => items.map(i => queryRow(i, q)).filter(i => i !== null));
   const prisma = prismaDouble(orderStore([]), {
     vendor: { findMany: readVendors }, item: { findMany: readItems, count: async (q: Query) => (await readItems(q)).length },
-    actorRatingStat: { findMany: async () => [] }, platformConfig: { findMany: async () => [] },
+    actorRatingStat: { findMany: async () => [] }, platformConfig: { findUnique: async () => null, findMany: async () => [] },
   });
   const parts = { prisma, redis: recordingRedis(), io: recordingIo() };
   const search = await hostRoutes(searchRoutes, parts); const market = await hostRoutes(marketRoutes, parts);

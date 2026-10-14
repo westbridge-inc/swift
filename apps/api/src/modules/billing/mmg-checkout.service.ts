@@ -517,7 +517,7 @@ export class MmgCheckoutService {
       // [I1] Priced here, from payInfo's own amount due.
       const priced = await payInfo(this.prisma, sub);
       const amountGyd = checkoutAmountGyd(priced);
-      // [OWNER RULING 8 Oct (2)] Four weeks paid ahead at most: refused before
+      // [OWNER RULING 8 Oct (2) · owner #62] One week ahead at most: refused before
       // any page exists (and again under the locks below).
       await assertPayAheadRoom(this.prisma, sub.id, amountGyd, now, 'partner');
       const quoteBasis = checkoutQuoteBasis(sub);

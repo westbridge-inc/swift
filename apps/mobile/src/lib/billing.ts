@@ -104,8 +104,8 @@ export function resumeBillingMethod(sub: any): 'CASH' | 'MOBILE_MONEY' {
   return sub?.billingMethod === 'MOBILE_MONEY' ? 'MOBILE_MONEY' : 'CASH';
 }
 
-/** Whole weeks the fee paid ahead covers at the weekly fee. Floors — we
- *  never over-promise coverage. 0 when the fee is unknown or nothing is paid ahead. */
+/** Whole weekly fees the money received for coming weeks pays. Floors — we
+ *  never over-promise. 0 when the fee is unknown or nothing has been received. */
 export function weeksCovered(balanceGyd?: number | null, weeklyGyd?: number | null): number {
   const bal = Number(balanceGyd ?? 0);
   const wk = Number(weeklyGyd ?? 0);
@@ -113,20 +113,20 @@ export function weeksCovered(balanceGyd?: number | null, weeklyGyd?: number | nu
   return Math.floor(bal / wk);
 }
 
-/** [OWNER RULING 8 Oct, NO "WALLET"] Weekly fees paid ahead are named only
- *  "Fee paid ahead — covers N weeks": never a wallet, a balance or a top-up.
- *  Swift holds no money; this is Swift's own fee, paid before it is due. Less
- *  than one week (or an unknown weekly fee) names the amount instead of a
- *  coverage it does not have. null when nothing is paid ahead (the caller then
- *  renders nothing). */
+/** [OWNER RULING 8 Oct, NO "WALLET" · owner #62, NO PAYING AHEAD] Money
+ *  received before its week starts is named only as the next weekly fee being
+ *  paid: never a wallet, a balance or a top-up, and never "paid ahead" or a
+ *  count of weeks (partners pay one week at a time). Swift holds no money; this
+ *  is Swift's own fee, paid before it is due. Less than one week (or an unknown
+ *  weekly fee) names the amount instead. null when nothing has been received
+ *  (the caller then renders nothing). */
 export function feePaidAheadLine(paidAheadGyd?: number | null, weeklyGyd?: number | null): string | null {
   const paid = Number(paidAheadGyd ?? 0);
   if (!(paid > 0)) return null;
-  const weeks = weeksCovered(paid, weeklyGyd);
-  if (weeks >= 1) return `Fee paid ahead — covers ${weeks} ${weeks === 1 ? 'week' : 'weeks'}`;
+  if (weeksCovered(paid, weeklyGyd) >= 1) return 'Next weekly fee already paid';
   return Number(weeklyGyd ?? 0) > 0
-    ? `Fee paid ahead — ${money(paid)} toward your next weekly fee`
-    : `Fee paid ahead — ${money(paid)}`;
+    ? `${money(paid)} paid toward your next weekly fee`
+    : `${money(paid)} paid toward your weekly fee`;
 }
 
 // ---------------------------------------------------------------------------

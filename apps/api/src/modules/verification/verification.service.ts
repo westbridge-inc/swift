@@ -454,13 +454,17 @@ export class VerificationService {
       // vehicle) and links the account to it — in the same transaction, so a submission
       // without a subject cannot exist (a mover without a plate has no vehicle subject).
       const subject = await resolveSubject(tx, { userId: data.userId, countryCode: alive[0]!.countryCode, docType: data.docType, tenantId: alive[0]!.tenantId, ...(review.authority && { vehicleProfile: review.authority.profile }) });
-      const created = await tx.verificationDocument.create({ data: { ...born, status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
+      const pendingVehicleReview = subject?.kind === 'VEHICLE' && await tx.subjectLink.count({ where: { id: subject.linkId, approvedAt: null, validTo: null } }) > 0;
+      const created = await tx.verificationDocument.create({ data: { ...born, ...(pendingVehicleReview ? { reviewedBy: null, reviewedAt: null } : {}), status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
       // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
       // a submission without its extraction ledger cannot exist.
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      let finalVerdict = verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING' as const;
+      // [L06] An automatic approval stands only when nothing a reviewer would be asked holds it:
+      // a vehicle link still awaiting fresh review (#1551) or a stored-vehicle refusal (#1553)
+      // sends the submission to a person instead.
+      let finalVerdict = verdict === 'APPROVED' && pendingVehicleReview ? 'PENDING' as const : verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING' as const;
       if (finalVerdict === 'APPROVED') {
         try { await this.assertStoredVehicleApproval(tx, created); }
         catch (error) {
@@ -642,6 +646,7 @@ export class VerificationService {
         userId,
         docType,
         status: 'APPROVED',
+        state: 'COMMITTED',
         OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }],
       },
     });
@@ -1357,10 +1362,25 @@ export class VerificationService {
       }
 
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
+      if (requestedStatus === 'APPROVED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
+        const subject = await tx.subject.findUnique({ where: { id: updated.subjectId }, select: { createdById: true } });
+        const vehicle = await tx.vehicleProfile.findUnique({ where: { subjectId: updated.subjectId }, select: { registrationMark: true } });
+        // Any vehicle the registrant holds on that plate (Rider or Driver profile), whatever mode they are
+        // in right now: holding both profiles never blocks the reviewer's approval (Opus 12 Oct, S3-1).
+        const [riderOnAccount, driverOnAccount] = await Promise.all([
+          tx.rider.findUnique({ where: { userId: updated.userId }, select: { licensePlate: true } }),
+          tx.driver.findUnique({ where: { userId: updated.userId }, select: { licensePlate: true } }),
+        ]);
+        const mark = normalizeRegistrationMark(vehicle?.registrationMark ?? '');
+        const onPlate = mark !== '' && [riderOnAccount, driverOnAccount].some((profile) => !!profile && normalizeRegistrationMark(profile.licensePlate ?? '') === mark);
+        if (subject?.createdById === updated.userId && vehicle && onPlate) {
+          await tx.subjectLink.updateMany({ where: { accountId: updated.userId, subjectId: updated.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null }, data: { approvedAt: now } });
+        }
+      }
       // [High #9 · DS109] The PENDING vehicle link lifecycle rides the doc decision: rejecting
       // the submission that created a cross-account assignment closes the link, so it can
-      // never be approved later by anything else. An approved document does NOT approve the
-      // assignment — only the explicit, audited admin action (approveVehicleAssignment) does.
+      // never be approved later by anything else. A human decision can restore the registrant
+      // after an identity edit; cross-account assignments still need the explicit admin action.
       if (requestedStatus === 'REJECTED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
         // Filter on the RAW stored subjectId on purpose: `resolveSubject` keys the link it
         // creates at the same root-of-moment value it stores on the document (one transaction),

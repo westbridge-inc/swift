@@ -1,4 +1,10 @@
-import { currentPositionWithFallback, type PositionFix } from './positionFix';
+import {
+  BALANCED_FIX_TIMEOUT_MS,
+  currentPositionWithFallback,
+  GPS_FIX_TIMEOUT_MS,
+  LAST_KNOWN_TIMEOUT_MS,
+  type PositionFix,
+} from './positionFix';
 
 export type LocationStatus = 'unknown' | 'resolving' | 'granted' | 'denied' | 'unavailable';
 export type LocationResolutionMode = 'silent' | 'request';
@@ -79,6 +85,8 @@ function createLocationResolutionCoordinator() {
   let latestStartedSequence = 0;
   let liveGeneration = 0;
   let permissionState: LocationStatus = 'unknown';
+  // Resolves when the newest started operation has finished (claimed or not).
+  let latestFinished: Promise<void> = Promise.resolve();
 
   return {
     begin(_mode: LocationResolutionMode) {
@@ -90,6 +98,11 @@ function createLocationResolutionCoordinator() {
       liveGeneration += 1;
       permissionState = 'resolving';
 
+      let markFinished!: () => void;
+      latestFinished = new Promise<void>((resolve) => {
+        markFinished = resolve;
+      });
+
       return {
         claim(result: DeviceLocationResolution) {
           // Among operations that actually start, last-start-wins. In
@@ -99,8 +112,18 @@ function createLocationResolutionCoordinator() {
           permissionState = result.status;
           return true;
         },
-        finish: () => {},
+        finish: () => markFinished(),
       };
+    },
+    /** [GO-RELIABILITY] Waits for the newest started operation's answer, and
+     * for any operation that starts while waiting. It grants nothing itself:
+     * the newest answer is committed, or refused, by the rules above. */
+    async settled(): Promise<void> {
+      for (;;) {
+        const sequence = latestStartedSequence;
+        await latestFinished;
+        if (sequence === latestStartedSequence) return;
+      }
     },
     createLiveLease(): LiveDeviceLocationLease | null {
       return permissionState === 'granted' ? { generation: liveGeneration } : null;
@@ -135,6 +158,34 @@ export function createLiveDeviceLocationLease() {
 
 export function isLiveDeviceLocationLeaseValid(lease: LiveDeviceLocationLease) {
   return sharedLocationResolutionCoordinator.acceptsLiveLease(lease);
+}
+
+/** [GO-RELIABILITY] The longest one resolution can take: a permission check,
+ * the whole Balanced, cached and GPS budget, and a reverse geocode. */
+export const DEVICE_LOCATION_SETTLE_TIMEOUT_MS =
+  BALANCED_FIX_TIMEOUT_MS + LAST_KNOWN_TIMEOUT_MS + GPS_FIX_TIMEOUT_MS + 4_000;
+
+/**
+ * [GO-RELIABILITY] Resolves true once every location resolution started so
+ * far has answered, or false after `timeoutMs` (a native call that never
+ * returns must not hold GO busy for ever).
+ *
+ * On Android every permission request opens the system permission screen,
+ * even when access is already granted, and coming back from it (or from
+ * Settings) resumes the app, which re-checks location. That newer check
+ * supersedes the one GO started, so GO must wait for its answer and read the
+ * shared state again rather than report "no location" in under a second.
+ */
+export function settleDeviceLocation(timeoutMs = DEVICE_LOCATION_SETTLE_TIMEOUT_MS): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    sharedLocationResolutionCoordinator.settled().then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
 }
 
 /** Permission sheets cause inactive -> active. iOS may foreground through
