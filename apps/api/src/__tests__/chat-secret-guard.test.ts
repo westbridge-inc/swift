@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { chatRoutes } from '../modules/chat/chat.routes';
 import { digitRun, mediaUrlCarriesSecret, normaliseDigits, redactOrderSecrets, SECRET_REDACTION } from '../modules/chat/secret-guard';
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 
 // ---------------------------------------------------------------------------
 // [F-027-12] The handover secret must never travel over chat.
@@ -283,9 +284,10 @@ describe('the send path never stores, broadcasts or pushes a live code', () => {
 
   it('the stored row, the socket payload and the push body are all redacted, and the sender is told why', async () => {
     const emitted: Array<Record<string, unknown>> = [];
-    const emitSpy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
-      emit: (_event: string, payload: Record<string, unknown>) => { emitted.push({ room, ...payload }); },
-    })) as never);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { tenantId: true } });
+    const detach = orderSocketFixture(app.io, { id: orderId, tenantId: order.tenantId, customerId: otherId }, (event, payload) => {
+      if (event === 'chat:message') emitted.push(payload as Record<string, unknown>);
+    }, `chat:${roomId}`);
     const sendSpy = vi.spyOn(NotificationService.prototype, 'send').mockResolvedValue('notif-id');
     try {
       const res = await send(`hey the code is ${RIDE_PIN}, mark it done`);
@@ -302,7 +304,9 @@ describe('the send path never stores, broadcasts or pushes a live code', () => {
 
       // 3. the socket broadcast
       expect(emitted).toHaveLength(1);
+      expect(emitted[0]!['roomId']).toBe(roomId);
       expect(String(emitted[0]!['message'])).not.toContain(RIDE_PIN);
+      expect(String(emitted[0]!['message'])).toContain(SECRET_REDACTION);
 
       // 4. the PUSH body — the lock screen the invariant names
       expect(sendSpy).toHaveBeenCalledTimes(1);
@@ -310,7 +314,7 @@ describe('the send path never stores, broadcasts or pushes a live code', () => {
       expect(pushed.userId).toBe(otherId);
       expect(pushed.body).not.toContain(RIDE_PIN);
     } finally {
-      emitSpy.mockRestore();
+      detach();
       sendSpy.mockRestore();
     }
   });
