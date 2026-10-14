@@ -13,6 +13,11 @@ import { riskScoreFor } from '../modules/cash/risk-score.service';
 // RECORDED as a marker (cash-only — never collected) and the risk score's
 // cancel signal counts ONLY late cancels, matching the wording its own doc
 // always carried ("after the free window").
+//
+// [owner #46/#50, 13–14 Oct] Superseded: there is no fee and no marker any
+// more. A cancel past the window is REFUSED (the customer contacts the store,
+// driver, rider or provider) and writes nothing; every allowed cancel is free.
+// The risk score still reads markers recorded before the change.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -116,12 +121,18 @@ afterAll(async () => {
 });
 
 describe('late-cancel fee marker [decision #5]', () => {
-  it('a LATE cancel records the announced fee on the order', async () => {
-    const id = await makeCancellableOrder(10); // past the 5-min free window
-    const res = await orders.cancelOrder(id, customerId, 'changed my mind');
-    expect(res.cancellationFee).toBe(500);
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
-    expect(row.lateCancelFeeDue).toBe(500);
+  // [owner #46/#50, 13–14 Oct] A LATE cancel is refused — no marker, nothing written.
+  it('a LATE cancel is refused and records no marker', async () => {
+    // past the 5-min free window, a rider on the job (an accepted parcel)
+    const id = await makeCancellableOrder(10, { status: 'READY_FOR_PICKUP', riderId });
+    await expect(orders.cancelOrder(id, customerId, 'changed my mind'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CANCEL_WINDOW_CLOSED' });
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true, cancelledAt: true } });
+    expect(row).toEqual({ status: 'READY_FOR_PICKUP', lateCancelFeeDue: 0, cancelledAt: null });
+    // Fixture hygiene: the refused job must not keep the shared fixture rider
+    // busy for the cases below (a rider's other live leg is where a release
+    // re-points them).
+    await app.prisma.order.update({ where: { id }, data: { status: 'CANCELLED', riderId: null } });
   });
 
   it('a FREE cancel records 0', async () => {
@@ -133,8 +144,12 @@ describe('late-cancel fee marker [decision #5]', () => {
   });
 
   it('the risk score now counts ONLY late cancels — free cancels stop punishing', async () => {
+    // [owner #46/#50, 13–14 Oct] No new marker can be written, so the late
+    // cancel here is one recorded before the change (history the score reads).
+    const id = await makeCancellableOrder(40, { status: 'CANCELLED', cancelledBy: customerId, cancelledAt: new Date(), lateCancelFeeDue: 500 });
+    expect(id).toBeTruthy();
     const risk = await riskScoreFor(app.prisma, customerId);
-    expect(risk.signals.cancels30d).toBe(1); // one late, one free from above
+    expect(risk.signals.cancels30d).toBe(1); // one historical late, one free from above
     expect(risk.score).toBe(5); // 1 late cancel × 5
   });
 });
@@ -161,7 +176,11 @@ describe('free window = nothing committed [cancel-policy]', () => {
     expect(row.lateCancelFeeDue).toBe(0);
   });
 
-  it('a mover assignment ends the free window — a claimed courier inside the window still pays', async () => {
+  // [owner #46/#50, 13–14 Oct] The owner's five-minute timer: inside the
+  // window a parcel cancels free even once a rider claimed it (no fee exists
+  // to protect any more) — and the cancel still frees the mover in the same
+  // commit. Past the window the claim makes it a refusal (block above).
+  it('a claimed courier inside the window cancels free — and the mover is freed in the same commit', async () => {
     // Status stays READY_FOR_PICKUP on purpose. Every assignment writer CASes
     // riderId and status forward in one update, so RIDER_ASSIGNED would be
     // refused by the STATUS half of the predicate and this test would pass
@@ -175,9 +194,9 @@ describe('free window = nothing committed [cancel-policy]', () => {
     });
     await app.prisma.rider.update({ where: { id: riderId }, data: { currentOrderId: id, isAvailable: false } });
     const res = await orders.cancelOrder(id, customerId, 'changed my mind');
-    expect(res.cancellationFee).toBe(500);
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
-    expect(row.lateCancelFeeDue).toBe(500);
+    expect(res.cancellationFee).toBe(0);
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true } });
+    expect(row).toEqual({ status: 'CANCELLED', lateCancelFeeDue: 0 });
     // and the cancel freed the mover in the same commit
     const freed = await app.prisma.rider.findUniqueOrThrow({
       where: { id: riderId },
@@ -199,34 +218,49 @@ describe('free window = nothing committed [cancel-policy]', () => {
     expect(row.lateCancelFeeDue).toBe(0);
   });
 
-  it('a scheduled order whose slot is imminent pays, like any other', async () => {
-    const id = await makeCancellableOrder(60, {
+  // [owner #46/#50, 13–14 Oct] A STORE order waiting for the store is free at
+  // any age (store-order-cancel-after-accept.test.ts); a booking the provider
+  // has not accepted is too, whatever the slot. An ACCEPTED booking past the
+  // window is refused — never charged.
+  it('a booking whose slot is imminent: free while the provider has not accepted, refused once it has', async () => {
+    const pending = await makeCancellableOrder(60, {
       orderType: 'FOOD_DELIVERY',
+      fulfillment: 'APPOINTMENT',
       status: 'PENDING',
-      scheduledFor: new Date(Date.now() + 2 * 60_000),
+      appointmentSlot: new Date(Date.now() + 2 * 60_000),
     });
-    const res = await orders.cancelOrder(id, customerId, 'too late');
-    expect(res.cancellationFee).toBe(500);
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
-    expect(row.lateCancelFeeDue).toBe(500);
+    const res = await orders.cancelOrder(pending, customerId, 'too late');
+    expect(res.cancellationFee).toBe(0);
+    const accepted = await makeCancellableOrder(60, {
+      orderType: 'FOOD_DELIVERY',
+      fulfillment: 'APPOINTMENT',
+      status: 'ACCEPTED',
+      appointmentSlot: new Date(Date.now() + 2 * 60_000),
+    });
+    await expect(orders.cancelOrder(accepted, customerId, 'too late'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CANCEL_WINDOW_CLOSED' });
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: accepted }, select: { status: true, lateCancelFeeDue: true } });
+    expect(row).toEqual({ status: 'ACCEPTED', lateCancelFeeDue: 0 });
   });
 
-  it('the COURIER carve-out does NOT leak to marketplace — vendor-prepped READY_FOR_PICKUP pays', async () => {
+  it('the COURIER carve-out does NOT leak to marketplace — vendor-prepped READY_FOR_PICKUP is never free', async () => {
     const id = await makeCancellableOrder(3, {
       orderType: 'FOOD_DELIVERY',
       status: 'READY_FOR_PICKUP',
     });
-    const res = await orders.cancelOrder(id, customerId, 'no longer hungry');
-    expect(res.cancellationFee).toBe(500);
-    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { lateCancelFeeDue: true } });
-    expect(row.lateCancelFeeDue).toBe(500);
+    // [owner #46, 13 Oct] Not free — and no longer a G$500 marker either: the
+    // store accepted, so the customer cannot cancel it in the app at all.
+    await expect(orders.cancelOrder(id, customerId, 'no longer hungry'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'STORE_ACCEPTED' });
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, lateCancelFeeDue: true } });
+    expect(row).toEqual({ status: 'READY_FOR_PICKUP', lateCancelFeeDue: 0 });
   });
 });
 
 describe('isFreeCancellation — the ONE predicate both the charge path and the preview import', () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
   const base = {
-    status: 'PENDING', orderType: 'TAXI', placedAt: minutesAgo(3),
+    status: 'PENDING', orderType: 'TAXI', fulfillment: 'DELIVERY', placedAt: minutesAgo(3),
     holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
     scheduledFor: null as Date | null,
   };
@@ -235,30 +269,40 @@ describe('isFreeCancellation — the ONE predicate both the charge path and the 
     expect(isFreeCancellation({ ...base })).toBe(true);
   });
 
-  it('the assignment belt: PENDING + a driver holding the job is NEVER free (even though no status writer mints this today)', () => {
-    expect(isFreeCancellation({ ...base, driverId: 'd1' })).toBe(false);
-    expect(isFreeCancellation({ ...base, riderId: 'r1' })).toBe(false);
+  // [owner #46/#50, 13–14 Oct] Inside the five-minute window a cancel is free
+  // whoever holds the job; the belt now guards the "nobody accepted yet"
+  // exemption, which has no clock — so it is graded past the window.
+  it('the assignment belt: PENDING + a driver holding the job is NEVER "not accepted" (even though no status writer mints this today)', () => {
+    expect(isFreeCancellation({ ...base, placedAt: minutesAgo(10) })).toBe(true);
+    expect(isFreeCancellation({ ...base, placedAt: minutesAgo(10), driverId: 'd1' })).toBe(false);
+    expect(isFreeCancellation({ ...base, placedAt: minutesAgo(10), riderId: 'r1' })).toBe(false);
   });
 
   it('held + assigned is not free — the hold exemption is for orders nobody committed to', () => {
-    expect(isFreeCancellation({ ...base, holdExpiresAt: minutesAgo(-2), riderId: 'r1' })).toBe(false);
+    // [owner #50, 14 Oct] Past the five-minute window (inside it every cancel is free).
+    expect(isFreeCancellation({ ...base, placedAt: minutesAgo(10), holdExpiresAt: minutesAgo(-2), riderId: 'r1' })).toBe(false);
   });
 
   it('held + unassigned is always free, whatever the clock says', () => {
     expect(isFreeCancellation({ ...base, placedAt: minutesAgo(10), holdExpiresAt: minutesAgo(-1) })).toBe(true);
   });
 
-  it('COURIER READY_FOR_PICKUP tracks the window; marketplace READY_FOR_PICKUP never does', () => {
+  // [owner #46/#50, 13–14 Oct] An unclaimed parcel is "not accepted yet" —
+  // free at any age; a claimed one follows the window.
+  it('COURIER READY_FOR_PICKUP is uncommitted (free while unclaimed); marketplace READY_FOR_PICKUP never is', () => {
     const courier = { ...base, orderType: 'COURIER', status: 'READY_FOR_PICKUP' };
     expect(isFreeCancellation({ ...courier })).toBe(true);
-    expect(isFreeCancellation({ ...courier, placedAt: minutesAgo(6) })).toBe(false);
+    expect(isFreeCancellation({ ...courier, placedAt: minutesAgo(6) })).toBe(true);
+    expect(isFreeCancellation({ ...courier, placedAt: minutesAgo(6), riderId: 'r1' })).toBe(false);
     expect(isFreeCancellation({ ...courier, orderType: 'FOOD_DELIVERY' })).toBe(false);
   });
 
   it('window boundary: exactly 5 minutes is free, past it is not', () => {
+    // [owner #50, 14 Oct] Graded on an ACCEPTED ride — an unaccepted one is free at any age.
     const placed = new Date('2026-08-25T12:00:00Z');
-    expect(isFreeCancellation({ ...base, placedAt: placed }, new Date('2026-08-25T12:05:00Z'))).toBe(true);
-    expect(isFreeCancellation({ ...base, placedAt: placed }, new Date('2026-08-25T12:05:01Z'))).toBe(false);
+    const accepted = { ...base, status: 'DRIVER_ASSIGNED', driverId: 'd1', placedAt: placed };
+    expect(isFreeCancellation(accepted, new Date('2026-08-25T12:05:00Z'))).toBe(true);
+    expect(isFreeCancellation(accepted, new Date('2026-08-25T12:05:01Z'))).toBe(false);
   });
 });
 
@@ -272,8 +316,13 @@ describe('isFreeCancellation — the ONE predicate both the charge path and the 
 describe('scheduled orders: the clock must not expire before the work can start', () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
   const inMinutes = (m: number) => new Date(Date.now() + m * 60_000);
+  // [owner #46, 13 Oct] A STORE order no longer runs this clock (free until the
+  // store accepts, then "contact the store" — store-order-cancel-after-accept
+  // .test.ts). A booking still does: these cases are pinned on the booking
+  // shape (FOOD_DELIVERY spine + APPOINTMENT), the slot read through the same
+  // scheduled-moment helper.
   const base = {
-    status: 'PENDING', orderType: 'FOOD_DELIVERY', placedAt: minutesAgo(90),
+    status: 'PENDING', orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', placedAt: minutesAgo(90),
     holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
     scheduledFor: null as Date | null,
   };
@@ -282,15 +331,21 @@ describe('scheduled orders: the clock must not expire before the work can start'
     expect(isFreeCancellation({ ...base, scheduledFor: inMinutes(60 * 34) })).toBe(true);
   });
 
+  // [owner #50, 14 Oct] An ACCEPTED booking keeps the ordinary five-minute
+  // window; one nobody accepted is free whatever the clock says.
   it('an UNSCHEDULED order is untouched — the ordinary window still closes at 5 minutes', () => {
-    expect(isFreeCancellation({ ...base, placedAt: minutesAgo(6) })).toBe(false);
-    expect(isFreeCancellation({ ...base, placedAt: minutesAgo(4) })).toBe(true);
+    expect(isFreeCancellation({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(6) })).toBe(false);
+    expect(isFreeCancellation({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(4) })).toBe(true);
+    expect(isFreeCancellation({ ...base, placedAt: minutesAgo(6) })).toBe(true);
   });
 
-  it('the slot arriving closes the window, exactly like placing does', () => {
+  // [owner #50, 14 Oct] The slot no longer closes anything early: nobody
+  // accepted means free; accepted means the five minutes from placing.
+  it('the slot arriving closes nothing on its own — acceptance and the five-minute window do', () => {
     expect(isFreeCancellation({ ...base, scheduledFor: inMinutes(6) })).toBe(true);
-    expect(isFreeCancellation({ ...base, scheduledFor: inMinutes(4) })).toBe(false);
-    expect(isFreeCancellation({ ...base, scheduledFor: minutesAgo(30) })).toBe(false);
+    expect(isFreeCancellation({ ...base, scheduledFor: inMinutes(4) })).toBe(true);
+    expect(isFreeCancellation({ ...base, scheduledFor: minutesAgo(30) })).toBe(true);
+    expect(isFreeCancellation({ ...base, status: 'ACCEPTED', scheduledFor: inMinutes(4) })).toBe(false);
   });
 
   it('commitment still ends it: a vendor who accepted, or a mover holding the job, is never free', () => {
@@ -319,38 +374,48 @@ describe('scheduled orders: the clock must not expire before the work can start'
 describe('freeCancellationExpiresAt — the countdown never expires before the window', () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
   const inMinutes = (m: number) => new Date(Date.now() + m * 60_000);
+  // [owner #46, 13 Oct] Pinned on the booking shape for the same reason as the
+  // block above: a free STORE cancel has no countdown at all (null).
   const base = {
-    status: 'PENDING', orderType: 'FOOD_DELIVERY', placedAt: minutesAgo(60),
+    status: 'PENDING', orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', placedAt: minutesAgo(60),
     holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
     scheduledFor: null as Date | null,
   };
 
-  it('THE INVARIANT: whenever the cancel is free, the promised moment is still ahead', () => {
+  // [owner #50, 14 Oct] Only the five-minute window (or the hold) has a
+  // moment to count down to; a cancel that is free because nobody accepted it
+  // yet has no clock at all (null) — never a moment in the past.
+  it('THE INVARIANT: whenever the cancel is free, the promised moment is still ahead — or there is none', () => {
     const now = new Date();
-    const cases = [
-      { ...base, placedAt: minutesAgo(1) },
-      { ...base, scheduledFor: inMinutes(60 * 34) },
-      { ...base, placedAt: minutesAgo(1), scheduledFor: inMinutes(2) },
+    // [owner ruling 14 Oct] The five minutes count from acceptance: before anyone accepts, the cancel is free with
+    // no clock (below); once accepted, the window counts from that moment.
+    const windowed = [
+      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt: minutesAgo(1) },
+      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt: minutesAgo(1), scheduledFor: inMinutes(2) },
       { ...base, placedAt: minutesAgo(90), holdExpiresAt: inMinutes(3) },
+      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(2) },
     ];
-    for (const order of cases) {
+    for (const order of windowed) {
       expect(isFreeCancellation(order, now), 'fixture should be free').toBe(true);
       const until = freeCancellationExpiresAt(order, now);
-      expect(until, 'a free cancel must name its window').not.toBeNull();
+      expect(until, 'a free cancel in its window must name its window').not.toBeNull();
       expect(until!.getTime(), `promised ${until?.toISOString()} which is in the past`).toBeGreaterThan(now.getTime());
+    }
+    for (const clockless of [{ ...base, scheduledFor: inMinutes(60 * 34) }, { ...base, placedAt: minutesAgo(1) }, { ...base, placedAt: minutesAgo(1), scheduledFor: inMinutes(2) }]) {
+      expect(isFreeCancellation(clockless, now)).toBe(true);
+      expect(freeCancellationExpiresAt(clockless, now)).toBeNull();
     }
   });
 
-  it("a scheduled order counts down to its SLOT, not to five minutes after checkout", () => {
-    const slot = inMinutes(60 * 34);
-    const until = freeCancellationExpiresAt({ ...base, scheduledFor: slot })!;
-    expect(until.getTime()).toBe(slot.getTime() - 5 * 60_000);
+  it('a scheduled booking nobody accepted has no countdown — free until the provider accepts', () => {
+    expect(freeCancellationExpiresAt({ ...base, scheduledFor: inMinutes(60 * 34) })).toBeNull();
   });
 
-  it('an immediate order still counts down from placing', () => {
-    const placedAt = minutesAgo(1);
-    const until = freeCancellationExpiresAt({ ...base, placedAt })!;
-    expect(until.getTime()).toBe(placedAt.getTime() + 5 * 60_000);
+  // [owner ruling 14 Oct] "counts down from placing" became "counts down from acceptance".
+  it('an accepted booking counts down from its acceptance, not from placing', () => {
+    const acceptedAt = minutesAgo(1);
+    const until = freeCancellationExpiresAt({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt })!;
+    expect(until.getTime()).toBe(acceptedAt.getTime() + 5 * 60_000);
   });
 
   it('a held order counts down to the hold', () => {
@@ -367,9 +432,10 @@ describe('freeCancellationExpiresAt — the countdown never expires before the w
 
 describe('[Item 64] a mover search that found nobody is part of the ONE predicate', () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
-  // A prepared food order well past the window: chargeable on every other branch.
+  // A prepared food order well past the window: not free on every other branch
+  // (refused outright since owner #46 — the store accepted it).
   const prepared = {
-    status: 'READY_FOR_PICKUP', orderType: 'FOOD_DELIVERY', placedAt: minutesAgo(30),
+    status: 'READY_FOR_PICKUP', orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', placedAt: minutesAgo(30),
     holdExpiresAt: null as Date | null, riderId: null as string | null, driverId: null as string | null,
     scheduledFor: null as Date | null,
   };
