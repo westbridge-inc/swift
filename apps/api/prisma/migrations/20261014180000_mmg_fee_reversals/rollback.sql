@@ -28,5 +28,5 @@ DELETE FROM "ledger_accounts" WHERE "code" = 'FEE_RECEIVABLE';
 DROP TRIGGER IF EXISTS mmg_fee_reversals_forward ON "mmg_fee_reversals";
 DROP FUNCTION IF EXISTS mmg_fee_reversals_forward();
 DROP TABLE IF EXISTS "mmg_fee_reversals";
-DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261014130000_mmg_fee_reversals';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261014180000_mmg_fee_reversals';
 COMMIT;
