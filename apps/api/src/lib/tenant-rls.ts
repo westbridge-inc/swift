@@ -416,6 +416,23 @@ export function allRlsDdl(): string[] {
   return TENANT_TABLES.flatMap((t) => rlsDdlFor(t));
 }
 
+/** Table privileges later migrations take back from swift_app after the broad
+ *  grant (billing facts the app may add but never change or remove; provider
+ *  aliases it may only look up; the QR identity table it never touches). The
+ *  heal below grants every table again, so it must re-apply these right after,
+ *  or a healed database lets the app role write rows production refuses — and
+ *  any suite proving that refusal goes red depending on which file ran first.
+ *  app-role-revocations.test.ts pins this list to the migrations both ways. */
+const APP_ROLE_MIGRATION_REVOCATIONS: ReadonlyArray<{ readonly table: string; readonly privileges: string }> = [
+  { table: 'public.provider_payment_aliases', privileges: 'INSERT, UPDATE, DELETE' }, // 20260930140000
+  { table: 'public.billing_dunning_clocks', privileges: 'DELETE' }, // 20260930180000
+  { table: 'public.payment_confirmation_holds', privileges: 'DELETE' },
+  { table: 'public.billing_fee_notices', privileges: 'DELETE' },
+  { table: 'public.billing_notice_handoffs', privileges: 'DELETE' },
+  { table: 'public.billing_obligation_transitions', privileges: 'UPDATE, DELETE' },
+  { table: 'swift_qr.token_identities', privileges: 'ALL' }, // 20261005210300
+];
+
 /** [W-201b] The future app role + grants, idempotent (mirrors migration
  *  20260819150000; the test installer heals db-push environments). NOLOGIN —
  *  no credentials in a public repo; deploy provisions LOGIN out-of-band. */
@@ -433,6 +450,9 @@ export function appRoleDdl(): string[] {
     END $$`,
     `GRANT USAGE ON SCHEMA public TO swift_app`,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_app`,
+    // Guarded: a db-push database has no raw-SQL-only tables.
+    ...APP_ROLE_MIGRATION_REVOCATIONS.map(({ table, privileges }) =>
+      `DO $$ BEGIN IF to_regclass('${table}') IS NOT NULL THEN REVOKE ${privileges} ON TABLE ${table} FROM swift_app; END IF; END $$`),
     `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_app`,
     // Purge functions are operator-only. Never re-grant them when healing an
     // app-role environment, even if creation defaults previously granted them.
