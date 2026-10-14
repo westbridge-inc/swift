@@ -13,7 +13,8 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
-import { readOfferItinerary, type TaxiStopPreview } from '../rides/taxi-stops-read';
+import { readOfferItinerary } from '../rides/taxi-stops-read';
+import { offerCardAddresses, type CoarseStop } from './board-privacy';
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
 import { algoConfig } from '../algo/algo-config';
@@ -1761,7 +1762,7 @@ export class DispatchService {
     /** [TAXI multi-stop] The live card's stops, for a ride that has them: a
      *  card rebuilt after an app restart shows the same itinerary. */
     stopCount?: number;
-    stops?: TaxiStopPreview[];
+    stops?: CoarseStop[];
   } | null> {
     const reverse = await this.redis.get(moverOfferKey(moverId));
     if (!reverse) return null;
@@ -1855,8 +1856,9 @@ export class DispatchService {
       deliveryFee: Number(order.deliveryFee),
       tipAmount: Number(order.tipAmount),
       taxiFareTotal: order.taxiFareTotal != null ? Number(order.taxiFareTotal) : null,
-      pickupAddress: order.pickupAddress ?? null,
-      deliveryAddress: order.deliveryAddress ?? null,
+      // [L05 · DS1301] The live card names no address; the rebuilt card names
+      // only a store's public pickup. Private places wait for acceptance.
+      ...offerCardAddresses(order),
       etaMinutes,
       rescueIncentiveGyd: rescueIncentive,
       // The SAME function the live emit calls — one definition of the triple.
