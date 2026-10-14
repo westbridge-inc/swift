@@ -10,6 +10,7 @@ import { assertSafeBootConfig, assertProductionData } from './utils/boot-config'
 import { attestTenantWallAtBoot } from './boot/tenant-wall';
 import { attestSystemLoginAtBoot } from './boot/system-login';
 import { isProduction } from './utils/runtime-mode';
+import { runAsSystem } from './plugins/tenant-context';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
@@ -54,7 +55,10 @@ async function start() {
     // extensions reach existing tenants without trampling admin additions.
     // Failure is logged, never fatal — a missing taxonomy degrades the rail,
     // it must not take the API down.
-    void (async () => {
+    // [L01 · tenant wall] Boot seeding writes platform registries and the
+    // default tenant's taxonomy (each names its tenant explicitly): named
+    // system work, never an unbound composition root.
+    void runAsSystem('boot:seed-registries', async () => {
       try {
         const { seedDiscoveryTaxonomy } = await import('./modules/discovery/taxonomy.seed');
         const { created, aliasUpdated } = await seedDiscoveryTaxonomy(app.prisma);
@@ -90,7 +94,7 @@ async function start() {
       } catch (err) {
         app.log.warn({ err }, 'discovery: taxonomy seed failed — the category rail will be empty (or the document registry seed failed); readiness stays 503');
       }
-    })();
+    });
   } catch (err) {
     console.error('Failed to start server:', err);
     process.exit(1);
