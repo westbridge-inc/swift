@@ -354,12 +354,15 @@ export function SosCeremony({
             </View>
           ) : null}
           {callButton}
-          <PillButton
-            label={raisePending ? 'Alerting Swift…' : swiftNotReached ? 'Try alerting Swift again' : dial.kind === 'auto' ? 'Yes — get help now' : 'Alert Swift now'}
-            loading={raisePending}
-            style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-            onPress={startRaise}
-          />
+          {/* With no record to raise on, a retry could never succeed: no button promises one. */}
+          {outcome === 'no-context' ? null : (
+            <PillButton
+              label={raisePending ? 'Alerting Swift…' : swiftNotReached ? 'Try alerting Swift again' : dial.kind === 'auto' ? 'Yes — get help now' : 'Alert Swift now'}
+              loading={raisePending}
+              style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+              onPress={startRaise}
+            />
+          )}
           <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={onClose} />
         </>
       ) : alert.status === 'TRIGGER_PENDING' ? (

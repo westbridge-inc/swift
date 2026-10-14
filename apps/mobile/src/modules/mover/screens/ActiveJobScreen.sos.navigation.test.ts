@@ -380,6 +380,8 @@ describe('a context that names no record never raises with an undefined id, and 
     await click(buttonNamed('Call 911'));
     expect(dialed('911')).toBe(2);
     expect(emergencyCounters().transition['ACTIVE->NO_CONTEXT']).toBe(1);
+    // A retry could never succeed with no record: none is offered.
+    expect(buttonNamed('Try alerting Swift again')).toBeNull();
     await tapOutside();
     expect(dialog()).not.toBeNull();
   });

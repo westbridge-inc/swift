@@ -1117,9 +1117,9 @@ export function ActiveJobScreen({ navigation }: any) {
             ) : null}
 
             {/* SOS after the action — anyone alone with a stranger on a cash
-                job needs an emergency path (driver AND rider; the general
-                /safety/sos route authorises both — see the SosCeremony split
-                below). */}
+                job needs an emergency path (driver AND rider, one ceremony: a
+                taxi ride on its own /rides/:id/sos route, every other job on
+                /safety/sos — see the SosCeremony below). */}
             {job?.id ? (
               <PillButton
                 label="Emergency — get help now"
