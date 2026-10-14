@@ -1,6 +1,5 @@
 import { createRequire } from 'node:module';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AuthSessionSnapshot } from '../lib/authSession';
 import { createMoverLocationController, MOVER_LOCATION_HEARTBEAT_MS, type MoverLocationTransition } from '../lib/moverLocation';
 import { locationReplyAnswer, parseAcceptance } from '../lib/moverBackgroundRuntime';
 import { MOVER_LOCATION_SESSION_MMKV_KEY } from '../lib/moverLocationStorage';
@@ -164,7 +163,7 @@ beforeEach(() => {
         mocks.native.task = task;
       },
     },
-  } as unknown as NodeJS.Module;
+  } as unknown as (typeof nodeRequire.cache)[string];
 });
 
 afterEach(() => {
