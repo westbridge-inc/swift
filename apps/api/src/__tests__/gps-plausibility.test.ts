@@ -134,9 +134,9 @@ describe('over HTTP: a flag is a row, the fix is still accepted, and nothing lea
     const r = await onlineRider(1);
     const res = await put(r.token, { latitude: GT.lat + 0.045, longitude: GT.lng, accuracy: 8 });
     expect(res.statusCode, res.body).toBe(200);
-    // With no live leg the route answers { success: true } — accepted, nothing refused.
+    // With no live leg the route answers an explicit acceptance — nothing refused.
     expect(res.json().success).toBe(true);
-    expect(res.json().data?.accepted).not.toBe(false);
+    expect(res.json().data?.accepted).toBe(true);
     expect(res.payload).not.toMatch(/mock|plausib|teleport|speed|flag/i);
     await settle();
     const rows = await app.prisma.algoDecision.findMany({ where: { algo: 'ALG-15', subjectId: r.riderId } });
