@@ -147,6 +147,24 @@ describe('[deep links] the association files must not redirect', () => {
     expect(rule, 'the www redirect does not exempt the association files').toMatch(/well-known/);
   });
 
+  it('the deploy stack hands ANDROID_CERT_SHA256 to the website container', () => {
+    // The assetlinks route reads ANDROID_CERT_SHA256 from the WEBSITE
+    // container's own environment. The API and worker read deploy/.env
+    // through env_file, but the web service has no env_file and only the
+    // variables listed under its `environment:`. Without this line, a value
+    // set in deploy/.env lit the admin console's "Android app links" switch
+    // (the API reads it) while the website kept answering 404, so Android
+    // never verified the app links.
+    const COMPOSE = read('deploy/docker-compose.yml');
+    const ENV_TEMPLATE = read('deploy/.env.deploy.example');
+    const web = COMPOSE.match(/(?:^|\n) {2}web:\n([\s\S]*?)(?=\n {2}[\w-]+:\n|\nvolumes:|\nnetworks:|$)/)?.[1] ?? '';
+    expect(web, 'no web service in deploy/docker-compose.yml').not.toBe('');
+    const environment = web.match(/\n {4}environment:\n((?: {6}.*\n|\s*\n)*)/)?.[1] ?? '';
+    expect(environment, 'the web service has no environment block').not.toBe('');
+    expect(environment).toMatch(/^ {6}ANDROID_CERT_SHA256: \$\{ANDROID_CERT_SHA256:-\}$/m);
+    expect(ENV_TEMPLATE, 'deploy/.env.deploy.example does not document ANDROID_CERT_SHA256').toMatch(/^ANDROID_CERT_SHA256=$/m);
+  });
+
   it('the app claims www, so www has to serve the file', () => {
     // The two halves have to agree. Either the app stops claiming www, or www
     // serves the association — claiming a host whose file 301s is the state

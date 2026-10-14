@@ -32,7 +32,7 @@ vi.mock('react', async (original) => {
   return { ...actual, ...hooks, default: { ...actual, ...hooks } };
 });
 vi.mock('react-native', () => ({ ScrollView: 'ScrollView', View: 'View', RefreshControl: 'RefreshControl', AppState: { addEventListener: () => ({ remove: () => {} }) } }));
-vi.mock('@react-navigation/native', () => ({ useFocusEffect: () => {} }));
+vi.mock('@react-navigation/native', () => ({ useFocusEffect: () => {}, useNavigation: () => ({ navigate: () => {} }) }));
 vi.mock('expo-web-browser', () => ({ openAuthSessionAsync: (...args: unknown[]) => host.open(...args) }));
 vi.mock('expo-crypto', () => ({ randomUUID: () => `tap-key-${++host.keys}` }));
 vi.mock('@swift/ui', () => {
