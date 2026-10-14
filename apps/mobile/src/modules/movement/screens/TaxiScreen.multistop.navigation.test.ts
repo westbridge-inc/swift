@@ -137,6 +137,8 @@ vi.mock('../../../kit', async () => {
     // Typable, so the courier form can be filled (TaxiScreen draws none).
     LabeledInput: (p: any) => h('input', { value: p.value ?? '', placeholder: p.placeholder, onChange: (e: any) => p.onChangeText?.(e.target.value) }),
     TonePill: (p: any) => h('span', null, p.label),
+    // [owner #67] The courier form's "This parcel has no prohibited items" tick.
+    BrandCheckbox: (p: any) => h('button', { type: 'button', role: 'checkbox', 'aria-label': p.label, 'aria-checked': !!p.checked, onClick: p.onToggle }),
     Money: (p: any) => h('span', null, money(p.amount)),
     CircleChip: (p: any) => h('button', { type: 'button', 'aria-label': p.label, onClick: p.onPress }, ''),
     StatePill: (p: any) => h('span', { 'data-pill': '', style: { borderWidth: 1, borderStyle: 'solid', borderColor: color.border.subtle, borderRadius: 99, padding: '2px 8px', fontSize: 11 } }, p.label),
@@ -144,7 +146,7 @@ vi.mock('../../../kit', async () => {
     CalmRadar: (p: any) => h('div', null, p.title),
     EmptyState: (p: any) => h('div', null, p.title),
     LoadingBlock: () => h('div', null, 'Loading'),
-    IconChip: () => null, Pictogram: () => null, PinGlyph: () => null, Stars: () => null, VehicleRender: () => null,
+    IconChip: () => null, DecorativeIcon: () => null, Pictogram: () => null, PinGlyph: () => null, Stars: () => null, VehicleRender: () => null,
     cardShadow: {},
   };
 });
@@ -176,7 +178,8 @@ vi.mock('../../../components/LocationPrimerCard', () => ({ LocationPrimerCard: (
 vi.mock('../../../lib/images', () => ({ mediaUrl: (x: unknown) => x }));
 vi.mock('../../../lib/haptics', () => ({ haptic: { success: vi.fn(), commit: vi.fn(), warn: vi.fn(), failure: vi.fn(), select: vi.fn() } }));
 vi.mock('../../../lib/openExternal', () => ({ openExternal: vi.fn() }));
-vi.mock('../../../services/emergencyPolicy', () => ({ currentMarketDial: () => ({ kind: 'manual' }), emergencyDialCopy: () => '', previewEmergencyDial: () => null }));
+// The live ride now hosts the SOS ceremony (TaxiScreen.sos.navigation.test.ts), which reads the market policy too.
+vi.mock('../../../services/emergencyPolicy', () => ({ currentMarketDial: () => ({ kind: 'manual' }), emergencyDialCopy: () => '', previewEmergencyDial: () => null, useEmergencyPolicy: () => ({ country: 'GY', dial: { kind: 'manual' } }), emergencyDialFor: () => ({ kind: 'manual' }) }));
 vi.mock('../taxiEntry', () => ({ signInForTaxi: vi.fn() }));
 vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null }) } }));
 vi.mock('../../../lib/storage', () => ({
@@ -641,6 +644,11 @@ describe('the price on screen is the price booked', () => {
     await type(host.querySelector('input[placeholder="Recipient phone"]'), '+5926001234');
     const sendButton = () => Array.from(host.querySelectorAll('button')).find((b) => /^Send parcel/.test(b.textContent ?? '')) as HTMLElement | undefined;
     expect(sendButton()?.textContent).toMatch(/1.?160$/);
+    // [owner #67] Nothing is sent until the sender ticks "This parcel has no prohibited items".
+    expect(sendButton()?.hasAttribute('disabled')).toBe(true);
+    expect(text()).toContain('Tick “This parcel has no prohibited items” to continue.');
+    await click(byLabel('This parcel has no prohibited items'));
+    expect(sendButton()?.hasAttribute('disabled')).toBe(false);
     fee = 1280;
     const quotesBefore = sent('post /courier/estimate').length;
     await click(sendButton() ?? null);
@@ -649,6 +657,7 @@ describe('the price on screen is the price booked', () => {
     expect(sendButton()?.textContent).toMatch(/1.?280$/);
     await click(sendButton() ?? null);
     expect(sent('post /courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
+    expect(sent('post /courier/order').map((c) => bodyOf(c).declaresNoProhibitedItems)).toEqual([true, true]);
   });
 });
 

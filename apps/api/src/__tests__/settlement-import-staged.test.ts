@@ -53,7 +53,9 @@ async function makeVendorSub() {
   vendorIds.push(vendor.id);
   const sub = await prisma.subscription.create({
     data: {
-      vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 2100, billingMethod: 'CASH',
+      // [owner #62 · 14 Oct] One week ahead at most: the fee is large enough that every row this file
+      // imports for one store stays within the one coming week a partner may hold.
+      vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 20000, billingMethod: 'CASH',
       currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000),
     },
   });
@@ -369,6 +371,9 @@ describe('[G5-F6 · operations] the repair pass finishes a publication that stop
 
   it('[AX314-F2] the lease is read on the database clock: this server 10 minutes AHEAD still leaves a live publication alone; 10 minutes BEHIND, it still takes over a dead one', async () => {
     const { sub, san } = await makeVendorSub();
+    // [owner #62] A week part-way through: with the server clock moved 10 minutes back, a week that
+    // began this very second would not have started yet and would count as one week ahead.
+    await prisma.subscription.update({ where: { id: sub.id }, data: { nextBillingDate: new Date(Date.now() + 3 * 86_400_000), currentPeriodEnd: new Date(Date.now() + 3 * 86_400_000) } });
     const liveCsv = file([`${txn()},${san},2100,2026-08-01T10:00:00Z`, 'TOTAL,2100']);
     const deadCsv = file([`${txn()},${san},1000,2026-08-01T11:00:00Z`, 'TOTAL,1000']);
     process.env['SETTLEMENT_PUBLISH_KILL'] = '1';

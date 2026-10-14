@@ -13,10 +13,11 @@ import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 import { launchCity } from '@/lib/web-ordering';
 import { SwiftLogo } from '@/components/swift-logo';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
-import { MOVER_VEHICLES } from '@/lib/signup-roles';
+import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
 import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
+import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 
 /** The server's rule for a taxi's year (partner.routes vehicle schema): 1980
  *  to next year. Checked here too, so a typo is caught before the round trip. */
@@ -87,6 +88,8 @@ export default function SignupPage() {
   }, [placingStore]);
   const closeStorePicker = () => { restorePinFocus.current = true; setPlacingStore(false); };
   const [veh, setVeh] = useState({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
+  // A Driver's vehicles are taxis (car / wagon car): their plate starts with H.
+  const taxiPlateWrong = !!veh.licensePlate.trim() && MOVER_VEHICLES.DRIVER.some((v) => v.value === veh.vehicleType) && !isHirePlate(veh.licensePlate);
   const mover = role === 'RIDER' || role === 'DRIVER' ? role : null;
   // The partner agreement: an explicit, unticked clickwrap. The API records the
   // consent and refuses a partner sign-up without it (AGREEMENT_REQUIRED).
@@ -315,16 +318,20 @@ export default function SignupPage() {
             </select></div>
             {mover === 'DRIVER' ? (
               <>
+                {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
+                <p className={styles.smallCopy}>{TAXI_TWO_LICENCES}</p>
                 <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
                 <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
                 <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
                 <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} aria-describedby="vehicle-plate-rule" aria-invalid={taxiPlateWrong || undefined} />
+                  {/* [Owner ruling 11 Oct 2026 — H-PLATE] said where the plate is typed; the server refuses a non-H taxi plate too */}
+                  <p id="vehicle-plate-rule" className={taxiPlateWrong ? styles.error : styles.smallCopy} role={taxiPlateWrong ? 'alert' : undefined}>{taxiPlateWrong ? TAXI_PLATE_ERROR : TAXI_PLATE_HINT}</p></div>
               </>
             ) : null}
             <PartnerAgreement kind="Driver" doc="driver-agreement" agree={agree} onChange={setAgree} />
             {mover === 'DRIVER' ? (
-              <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
+              <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || taxiPlateWrong || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
             ) : (
               <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create rider account'}</button>
             )}

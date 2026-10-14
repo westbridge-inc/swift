@@ -11,12 +11,17 @@ import { attestTenantWallAtBoot } from './boot/tenant-wall';
 import { attestSystemLoginAtBoot } from './boot/system-login';
 import { isProduction } from './utils/runtime-mode';
 import { runAsSystem } from './plugins/tenant-context';
+import { checkDeploymentIdentityAtStart } from './utils/deployment-identity';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
 async function start() {
   try {
     assertSafeBootConfig();
+    // [S3-L1] Only on a database of this process's own kind (its
+    // deployment_identity), and BEFORE the app is built: building it starts
+    // the in-process job workers.
+    await checkDeploymentIdentityAtStart();
     const app = await buildApp();
     // SWIFT-010: refuse to serve a production DB with no active market seeded
     // (empty CountryConfig = every signup rejected). Dev/test/CI skip inside.
@@ -72,6 +77,10 @@ async function start() {
         // are never minted lazily on a request path.
         const { seedDocRegistry } = await import('./modules/verification/doc-registry');
         const registry = await seedDocRegistry(app.prisma);
+        // [VERIFY-DOCS] The hire-car permit split takes effect with this code: its 60-day window starts
+        // at the first boot that runs it on this environment, and no later boot moves it.
+        const { ensureHireSplitStarted } = await import('./modules/verification/hire-permit-grace');
+        await ensureHireSplitStarted(app.prisma);
         app.log.info({ docTypes: registry.docTypes, requirementSets: registry.requirementSets, validators: registry.validators }, 'documents: registry seeded');
         // [DOC-INV-2] An ACTIVE document type the registry cannot validate — no
         // profile, no fields, a required field without a validator, a blocking

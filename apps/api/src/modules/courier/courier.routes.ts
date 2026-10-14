@@ -25,6 +25,7 @@ import { redactCounterpartyPhone, redactLiveLocation, riderCounterpartySelect } 
 import { invalidateHomeCache } from '../user/home-cache';
 import { SupportService } from '../support/support.service';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
+import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -62,6 +63,9 @@ const orderSchema = z.object({
   packageSize: sizeSchema,
   packageDescription: z.string().trim().max(500).optional(),
   packagePhotoUrl: z.string().max(2048).optional(),
+  /** [GUARDRAILS §8 · owner #67] The sender's tick on "This parcel has no prohibited items". Absent from apps
+   *  before build 11; when sent, it is recorded on the order's own trail, and `false` books nothing. */
+  declaresNoProhibitedItems: z.boolean().optional(),
   speed: speedSchema,
   recipientName: z.string().trim().min(2).max(120),
   recipientPhone: z.string().trim().min(5).max(30),
@@ -218,6 +222,20 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Courier is disabled on this account after repeated failed payments. Contact support.');
     }
 
+    // [GUARDRAILS §8 · owner #67] Swift never delivers banned goods: the description is screened against the
+    // same list as the catalogue (disguises included) and refused in plain words, before anything is written.
+    if (body.declaresNoProhibitedItems === false) {
+      throw new AppError(409, 'PROHIBITED_PARCEL', 'Swift can\'t carry a parcel with a prohibited item in it.');
+    }
+    // A brand-first word ("Banks", "Corona", "Tiger") alone is not enough, but with a pack or a measure ("Banks 6
+    // pack", "Halls 9 pack") it is the goods. [DS1109 S4-1, DS1112 S4-2]
+    const prohibited = parcelProhibited(body.packageDescription);
+    if (prohibited) {
+      throw new AppError(409, 'PROHIBITED_PARCEL',
+        `Swift can't carry this parcel: Swift never delivers ${PROHIBITED_CLASS_LABELS[prohibited.prohibitedClass]}. If it's something else, describe it in other words.`,
+        { prohibitedClass: prohibited.prohibitedClass });
+    }
+
     const { distanceKm, source, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(userId));
     // [PRICE-LOCK · owner: the price shown is the price charged] A fee that
     // moved since the sender's quote (rates, the road) is shown to them again
@@ -278,7 +296,10 @@ export default async function courierRoutes(app: FastifyInstance) {
           estimatedDeliveryTime: estimate.estimatedMinutes,
           paymentMethod: 'CASH',
           statusHistory: {
-            create: { status: 'READY_FOR_PICKUP', changedBy: userId, note: `Courier requested — fee $${estimate.totalFee}` },
+            create: {
+              status: 'READY_FOR_PICKUP', changedBy: userId,
+              note: `Courier requested — fee $${estimate.totalFee}${body.declaresNoProhibitedItems ? '. The sender declared the parcel holds no prohibited items.' : ''}`,
+            },
           },
         },
       });
