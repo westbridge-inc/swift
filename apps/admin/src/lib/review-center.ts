@@ -8,6 +8,7 @@ export interface ReviewDocument {
   id: string; userId: string; docType: string; role: string; status: ReviewStatus;
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
+  reviewerTypes?: Array<'documentNumber' | 'issuedOn'>;
   /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
   reviewedBy?: string | null;
   user?: {
