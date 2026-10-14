@@ -40,6 +40,8 @@ import {
   type CardRailRuntime,
 } from '../modules/billing/card-rail.routes';
 import { NotificationService } from '../modules/notification/notification.service';
+import helmet from '@fastify/helmet';
+import { helmetOptions } from '../config/security-headers';
 import { REVIEW_DEMO_NO_MONEY } from '../modules/review/demo-policy';
 import { SandboxPaymentProvider } from '../providers/payment/payment-provider';
 import type { CardRailProvider } from '../providers/card/card-provider';
@@ -1255,6 +1257,87 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     await ptz.close();
   });
 
+  // [CARD embed] The website shows the card page inside its own weekly-fee page. The API's card
+  // pages may therefore be framed by Swift's OWN web origin (APP_PUBLIC_URL, https) — never by
+  // anything else, never '*'. Read through the real security headers (helmet), as production sends them.
+  describe('[CARD embed] the card pages may be framed by Swift\'s own web, and by nothing else', () => {
+    const WEB = 'https://web.example.test';
+    let framed: FastifyInstance;
+    let webBefore: string | undefined;
+    const directives = (csp: string | undefined) => Object.fromEntries(String(csp ?? '').split(/;\s*/).filter(Boolean).map((d) => [d.split(' ')[0]!, d.split(' ').slice(1).join(' ')]));
+    beforeAll(async () => {
+      webBefore = process.env['APP_PUBLIC_URL'];
+      framed = Fastify({ logger: false });
+      registerErrorHandler(framed);
+      await framed.register(helmet, helmetOptions);
+      await framed.register(prismaPlugin);
+      await framed.register(redisPlugin);
+      framed.decorate(CARD_RAIL_RUNTIME_DECORATION, (ptz as unknown as Record<string, unknown>)[CARD_RAIL_RUNTIME_DECORATION]);
+      await framed.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card' });
+      await framed.ready();
+    });
+    afterEach(() => { if (webBefore === undefined) delete process.env['APP_PUBLIC_URL']; else process.env['APP_PUBLIC_URL'] = webBefore; });
+    afterAll(async () => { await framed.close(); });
+
+    it('the hosted card page: frame-ancestors names only Swift\'s web origin, everything else unchanged; X-Frame-Options gives way to it', async () => {
+      process.env['APP_PUBLIC_URL'] = `${WEB}/`;
+      const p = await makeStore();
+      const session = (await open(p)).json().data;
+      const res = await framed.inject({ method: 'GET', url: pathOf(session.hostedUrl) });
+      expect(res.statusCode, res.body).toBe(200);
+      const csp = directives(res.headers['content-security-policy'] as string);
+      expect(csp['frame-ancestors']).toBe(WEB);
+      expect({ ...csp, 'frame-ancestors': "'none'" }).toEqual(directives(HOSTED_CARD_PAGE_CSP));
+      expect(res.headers['x-frame-options']).toBeUndefined();
+      // Its "no such page" answer carries the same policy.
+      const missing = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/pay/ptz_000000000000000000000000' });
+      expect(missing.statusCode).toBe(404);
+      expect(directives(missing.headers['content-security-policy'] as string)['frame-ancestors']).toBe(WEB);
+    });
+
+    it.each([undefined, 'http://web.example.test', 'not a url', 'https://user:pw@web.example.test'])('without an https web origin (%s) the hosted page is framed by nothing: frame-ancestors none, X-Frame-Options DENY', async (web) => {
+      if (web === undefined) delete process.env['APP_PUBLIC_URL']; else process.env['APP_PUBLIC_URL'] = web;
+      const missing = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/pay/ptz_000000000000000000000000' });
+      expect(directives(missing.headers['content-security-policy'] as string)['frame-ancestors']).toBe("'none'");
+      expect(missing.headers['x-frame-options']).toBe('DENY');
+    });
+
+    it('the return page: framed only by itself, the card provider\'s frames and Swift\'s web; it runs no script and posts nothing', async () => {
+      process.env['APP_PUBLIC_URL'] = WEB;
+      const res = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/return' });
+      expect(res.statusCode).toBe(200);
+      const csp = directives(res.headers['content-security-policy'] as string);
+      expect(csp['frame-ancestors']).toBe(`'self' https://*.ptranz.com ${WEB}`);
+      expect(csp).toMatchObject({ 'default-src': "'none'", 'form-action': "'none'", 'base-uri': "'none'", 'object-src': "'none'", 'connect-src': "'none'" });
+      expect(csp['script-src']).toBeUndefined();
+      expect(res.headers['x-frame-options']).toBeUndefined();
+      delete process.env['APP_PUBLIC_URL'];
+      const plain = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/return' });
+      expect(directives(plain.headers['content-security-policy'] as string)['frame-ancestors']).toBe("'self' https://*.ptranz.com");
+    });
+
+    it('the simulator page (test servers only): framed only by itself and Swift\'s web; its buttons post only to itself', async () => {
+      process.env['APP_PUBLIC_URL'] = WEB;
+      const res = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/simulator/sim_0000000000000000' });
+      const csp = directives(res.headers['content-security-policy'] as string);
+      expect(csp['frame-ancestors']).toBe(`'self' ${WEB}`);
+      expect(csp).toMatchObject({ 'default-src': "'none'", 'form-action': "'self'" });
+      expect(res.headers['x-frame-options']).toBeUndefined();
+      delete process.env['APP_PUBLIC_URL'];
+      const plain = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/simulator/sim_0000000000000000' });
+      expect(directives(plain.headers['content-security-policy'] as string)['frame-ancestors']).toBe("'self'");
+      expect(plain.headers['x-frame-options']).toBe('SAMEORIGIN');
+    });
+
+    it('no card page ever lets just anyone frame it', async () => {
+      process.env['APP_PUBLIC_URL'] = WEB;
+      for (const url of ['/api/v1/billing/card/pay/ptz_000000000000000000000000', '/api/v1/billing/card/return', '/api/v1/billing/card/simulator/sim_0000000000000000']) {
+        const ancestors = directives((await framed.inject({ method: 'GET', url })).headers['content-security-policy'] as string)['frame-ancestors'] ?? '';
+        expect(ancestors, url).not.toMatch(/(^|\s)(\*|https:|http:|data:)(\s|$)/);
+      }
+    });
+  });
+
   it('Pay now: Swift\'s page frames the bank\'s form; the bank\'s check passes; ONE completion books the week ONCE', async () => {
     sale = preprocess; payment = approve();
     const p = await makeStore();
@@ -1266,7 +1349,11 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     expect(session).toMatchObject({ purpose: 'PAY_NOW', status: 'OPEN', testMode: true, testModeLabel: CARD_SANDBOX_TEST_LABEL });
     expect(session.hostedUrl).toMatch(/^https:\/\/api\.example\.test\/api\/v1\/billing\/card\/pay\/ptz_[0-9a-f]{24}$/);
 
-    const pageRes = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) });
+    // [CARD embed] With no web origin to allow, the page is framed by nothing (pinned here: a local env may set one).
+    const webBefore = process.env['APP_PUBLIC_URL'];
+    delete process.env['APP_PUBLIC_URL'];
+    let pageRes: Awaited<ReturnType<typeof ptz.inject>>;
+    try { pageRes = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) }); } finally { if (webBefore !== undefined) process.env['APP_PUBLIC_URL'] = webBefore; }
     expect(pageRes.statusCode).toBe(200);
     expect(pageRes.headers['content-security-policy']).toBe(HOSTED_CARD_PAGE_CSP);
     // [Review S3] Scripts, styles and form posts reach only the card provider's own hosts; the frame is sandboxed.

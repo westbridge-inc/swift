@@ -71,6 +71,8 @@ const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> 
   { name: 'CARD_RAIL_ENROLL', whenUnset: '0', what: 'whether partners may save a card for the weekly fee' },
   // [PT-2] Unset reads as OFF (utils/card-rail.ts cardSimulatorLiveEnabled); production refuses any other value.
   { name: 'CARD_RAIL_SIMULATOR_LIVE', whenUnset: '0', what: 'whether a test server shows the simulator card choice' },
+  // [L07] Only exactly 'true' turns it on (notification/mover-push-authority.ts moverPushRequired).
+  { name: 'MOVER_PUSH_REQUIRED', whenUnset: 'false', what: 'whether a rider or driver needs an active push registration to go online' },
 ];
 
 /**
