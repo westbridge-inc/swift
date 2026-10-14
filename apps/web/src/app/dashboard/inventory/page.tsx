@@ -171,6 +171,7 @@ export default function InventoryPage() {
           <div className="flex items-center gap-3">
             <span className="grid h-12 w-12 flex-none place-items-center rounded-xl bg-[var(--swift-sunken)]"><Pictogram name="food" size={26} /></span>
             <div className={`min-w-0 flex-1 ${i.isAvailable ? '' : 'opacity-60'}`}><h2 className="sw-label">{i.name}</h2><p className="sw-caption">{i.category?.name ?? 'Uncategorised'}</p>
+              {i.catalogueCheck && <CatalogueCheckNote check={i.catalogueCheck} />}
               {editingPrice === i.id ? <PriceEdit item={i} onDone={() => { setEditingPrice(null); refresh(); }} /> : <button onClick={() => setEditingPrice(i.id)} className="min-h-8 font-semibold hover:underline">{money(i.basePrice)}</button>}
             </div>
             <button role="switch" aria-label={`In stock: ${i.name}`} aria-checked={i.isAvailable} onClick={() => availMut.mutate({ id: i.id, isAvailable: !i.isAvailable })} disabled={availMut.isPending}
@@ -191,5 +192,15 @@ export default function InventoryPage() {
         Photos, descriptions, options and new single items are managed in the Swift app — you can edit prices, stock and availability here.
       </p>
     </div>
+  );
+}
+
+/** [GUARDRAILS §8] Why customers cannot see this item: Swift does not allow it, or a person is checking it. */
+function CatalogueCheckNote({ check }: { check: NonNullable<CatalogItem['catalogueCheck']> }) {
+  const reason = check.status === 'NOT_ALLOWED' && check.reason ? ` Reason: ${check.reason}` : '';
+  return (
+    <p role="status" className={`text-[13px] font-semibold ${check.status === 'NOT_ALLOWED' ? 'text-[var(--swift-red)]' : 'text-amber-700'}`}>
+      {check.message}{check.status === 'WAITING_FOR_CHECK' ? ' — customers see it once Swift has checked it.' : ''}{reason}
+    </p>
   );
 }

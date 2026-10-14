@@ -8,7 +8,7 @@ import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 import { automapCsv, automapXlsx, confirmImport, templateUrl } from '@/lib/vendor-api';
 
 type Preview = { mapping: Record<string, string>; rowCount: number; preview: Record<string, string>[]; normalizedCsv: string };
-type Result = { imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }> };
+type Result = Awaited<ReturnType<typeof confirmImport>>;
 
 export default function ImportPage() {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -141,6 +141,18 @@ export default function ImportPage() {
       {result && (
         <div className="sw-card p-6">
           <p className="sw-heading text-green-700">✓ {result.imported.toLocaleString()} items imported</p>
+          {(result.waitingForCheckCount ?? 0) > 0 && (
+            <>
+              <p className="mt-2 text-sm font-semibold text-amber-700">
+                {result.waitingForCheckCount} waiting for a quick check — customers see them once Swift has checked them:
+              </p>
+              <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
+                {(result.waitingForCheck ?? []).map((w) => (
+                  <li key={w.row}>Row {w.row}: {w.name}</li>
+                ))}
+              </ul>
+            </>
+          )}
           {result.failedCount > 0 && (
             <>
               <p className="mt-2 text-sm font-semibold text-[var(--swift-red)]">{result.failedCount} rows failed:</p>
