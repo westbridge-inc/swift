@@ -19,9 +19,10 @@
  * INCOMPLETE or PRESENT — rather than pretending.
  *
  * Fictional identifiers: E.164 under REVIEW_PHONE_PREFIX (default
- * `+59200099`). Whether a prefix is truly undialable is a carrier fact the
- * founder confirms (founder-inputs FD-STA-6); the default is a placeholder and
- * says so in `status`.
+ * `+592000`), filled with random digits up to a full Guyana number. Whether a
+ * prefix is truly undialable is a carrier fact the founder confirms
+ * (founder-inputs FD-STA-6); the default is a placeholder and says so in
+ * `status`.
  */
 import crypto from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
@@ -30,7 +31,16 @@ import { assertTenantWall, attestationOf, readRlsFacts } from '../../lib/rls-att
 import { REVIEW_SLUG_PATTERN, reviewContentPackFacts, type ContentPackState, type ContentPackFacts } from './content-pack';
 
 export const DEFAULT_REVIEW_TTL_DAYS = 14;
-export const DEFAULT_REVIEW_PHONE_PREFIX = '+59200099';
+/**
+ * The default range: 10,000 numbers (+592 000 0000 to +592 000 9999). It was
+ * `+59200099`, 100 numbers, and every provisioning run keeps three of them.
+ * The old range lies inside this one.
+ */
+export const DEFAULT_REVIEW_PHONE_PREFIX = '+592000';
+/** A Guyana number is +592 and seven digits; the app's phone box refuses any other length. */
+const REVIEW_IDENTIFIER_LENGTH = '+592'.length + 7;
+/** How many numbers one login may draw before provisioning gives up on the range. */
+export const REVIEW_IDENTIFIER_ATTEMPTS = 20;
 export const REVIEW_ROLES = ['CUSTOMER', 'RIDER', 'DRIVER'] as const;
 export type ReviewRole = typeof REVIEW_ROLES[number];
 
@@ -70,7 +80,17 @@ export interface ProvisionResult {
 }
 
 const sixDigits = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
-const identifierFor = (prefix: string) => `${prefix}${String(crypto.randomInt(0, 100)).padStart(2, '0')}`;
+/**
+ * How many random digits follow the prefix: enough to make a full Guyana
+ * number, and never fewer than two (a longer prefix keeps its old two digits).
+ */
+export function reviewIdentifierDigits(prefix: string): number {
+  return Math.max(2, REVIEW_IDENTIFIER_LENGTH - prefix.length);
+}
+const identifierFor = (prefix: string) => {
+  const digits = reviewIdentifierDigits(prefix);
+  return `${prefix}${String(crypto.randomInt(0, 10 ** digits)).padStart(digits, '0')}`;
+};
 
 export class ReviewProvisionRefusedError extends Error {
   constructor(slug: string, kind: string) {
@@ -108,6 +128,33 @@ async function reviewTenantFor(prisma: PrismaClient, slug: string, name?: string
   throw new Error(`[STA-1] review:provision could not settle the tenant "${slug}"; nothing was provisioned`);
 }
 
+/**
+ * The synthetic account behind one login, under a number nobody holds. The
+ * look-up only skips numbers already taken: another account (a second
+ * provisioning run, say) can take the number between the look-up and the
+ * insert, and the unique phone then refuses ours (P2002). That is not a
+ * failure of the run — a new number is drawn — up to
+ * REVIEW_IDENTIFIER_ATTEMPTS draws in all, then the range is reported full.
+ */
+async function createReviewAccount(prisma: PrismaClient, prefix: string, tenantId: string, role: ReviewRole): Promise<string> {
+  const account = REVIEW_ACCOUNTS[role];
+  for (let attempt = 1; attempt <= REVIEW_IDENTIFIER_ATTEMPTS; attempt++) {
+    const identifier = identifierFor(prefix);
+    if (await prisma.user.findUnique({ where: { phone: identifier }, select: { id: true } })) continue;
+    try {
+      await prisma.user.create({ data: {
+        phone: identifier, firstName: 'Demo', lastName: account.lastName, roles: account.roles, activeRole: account.activeRole,
+        lastMoverRole: account.lastMoverRole, tenantId, isSynthetic: true, isPhoneVerified: true,
+      } });
+      return identifier;
+    } catch (err) {
+      // Taken since the look-up: draw again. Anything else is a real failure.
+      if ((err as { code?: string }).code !== 'P2002') throw err;
+    }
+  }
+  throw new Error(`[STA-1] review:provision found no free number under ${prefix} in ${REVIEW_IDENTIFIER_ATTEMPTS} draws — the range is nearly full; set a shorter REVIEW_PHONE_PREFIX`);
+}
+
 /** Idempotent on the tenant; a new session and fresh credentials each run. */
 export async function provisionReviewTenant(prisma: PrismaClient, input: ProvisionInput): Promise<ProvisionResult> {
   const now = input.now ?? new Date();
@@ -124,17 +171,10 @@ export async function provisionReviewTenant(prisma: PrismaClient, input: Provisi
   const session = await prisma.reviewSession.create({ data: { tenantId: tenant.id, expiresAt: new Date(now.getTime() + ttlDays * 86_400_000) } });
   const credentials: MintedCredential[] = [];
   for (const role of REVIEW_ROLES) {
-    let identifier = identifierFor(prefix);
-    for (let i = 0; i < 20 && await prisma.user.findUnique({ where: { phone: identifier }, select: { id: true } }); i++) identifier = identifierFor(prefix);
-    const account = REVIEW_ACCOUNTS[role];
-    const user = await prisma.user.create({ data: {
-      phone: identifier, firstName: 'Demo', lastName: account.lastName, roles: account.roles, activeRole: account.activeRole,
-      lastMoverRole: account.lastMoverRole, tenantId: tenant.id, isSynthetic: true, isPhoneVerified: true,
-    } });
+    const identifier = await createReviewAccount(prisma, prefix, tenant.id, role);
     const code = sixDigits();
     const id = `rc_${crypto.randomBytes(8).toString('hex')}`;
     await prisma.reviewCredential.create({ data: { id, tenantId: tenant.id, role, identifier, staticOtpHash: hashReviewCode(id, code) } });
-    void user;
     credentials.push({ role, identifier, code });
   }
   const pack = await reviewContentPackFacts(prisma, tenant.id);
