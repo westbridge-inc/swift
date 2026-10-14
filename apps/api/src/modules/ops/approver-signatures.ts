@@ -67,8 +67,10 @@ export interface SignedApproval { approver: string; request: string; signature: 
 export interface RequestFacts { change: ApprovalKind; target: string; subject: string; admin: string; shows: string[] }
 export interface ApprovalRequest extends RequestFacts { issued: string; expires: string; nonce: string }
 /** Each line an approver reads names its fact; nothing else may be signed,
- *  and no control character (one could hide a line on a terminal). */
-const SHOW_LINE = /^(database|config|admin phone|admin email|approval|change|promote): \P{Cc}+$/u;
+ *  and no control character (one could hide a line on a terminal) nor any
+ *  Unicode format character (right-to-left overrides and isolates, zero-width
+ *  marks, a byte-order mark: one could reorder or hide text) [SECREVIEW S4]. */
+const SHOW_LINE = /^(database|config|admin phone|admin email|approval|change|promote): [^\p{Cc}\p{Cf}]+$/u;
 
 export interface PinnedApprover { name: string; keyBlob: Buffer; fingerprint: string }
 
@@ -86,6 +88,10 @@ export function canonicalRequest(r: ApprovalRequest): string {
 
 /** What the server prints for the approvers to sign: issued now, valid for `lifetimeMs`. */
 export function approvalRequest(facts: RequestFacts, now = new Date(), lifetimeMs = APPROVAL_DEFAULT_LIFETIME_MS): string {
+  // Never print words the approver could misread: parseRequest refuses them at apply anyway.
+  if (!facts.shows.every((l) => SHOW_LINE.test(l))) {
+    throw new ApprovalRefused('REQUEST_MALFORMED', 'a line of this request holds a control, invisible or direction-changing character; nothing printed');
+  }
   return canonicalRequest({
     ...facts, issued: now.toISOString(), expires: new Date(now.getTime() + lifetimeMs).toISOString(), nonce: randomBytes(16).toString('hex'),
   });

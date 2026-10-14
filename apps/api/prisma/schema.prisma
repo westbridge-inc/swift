@@ -1590,6 +1590,8 @@ model Vendor {
   @@index([tenantId])
   @@index([isSynthetic])
   @@index([mmgPayUrlApplyAt])
+  /// [SEARCH] Trigram GIN index on the store name (pg_trgm), see Item.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "vendors_name_trgm_idx")
   @@map("vendors")
 }
 
@@ -1748,6 +1750,11 @@ model Item {
   @@index([isAvailable, createdAt])
   @@index([isAvailable, basePrice])
   @@index([tenantId])
+  /// [SEARCH] Trigram GIN indexes (pg_trgm, owner decision 26, 13 Oct): customer
+  /// search matches pieces of a name or description (ILIKE '%..%' and the
+  /// one-slip patterns); without them every search reads every item.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "items_name_trgm_idx")
+  @@index([description(ops: raw("gin_trgm_ops"))], type: Gin, map: "items_description_trgm_idx")
   @@map("items")
 }
 
