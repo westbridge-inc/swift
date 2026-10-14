@@ -94,8 +94,12 @@ describe('public pricing (price on the door)', () => {
     // Older clients read the legacy numbers, which never under-quote a bill:
     // the old card's "Large catalogues (1000+ items)" line stands for every
     // store from 1,000 items up, so it carries the 10,000+ bill [PR1270-S2-05].
-    expect(d.weekly.mover).toBe(9000);
-    expect(d.weekly.moverHeavy).toBe(9000);
+    // The mover figures cover only the vehicles a mover can register today:
+    // heavy delivery is off at launch (owner, 13 Oct 2026), so the highest is
+    // the taxi rate, car or bus.
+    expect(d.movers.find((q: { vehicleType: string }) => q.vehicleType === 'CANTER_LONG')?.offered).toBe(false);
+    expect(d.weekly.mover).toBe(8000);
+    expect(d.weekly.moverHeavy).toBe(8000);
     expect(d.weekly.smallVendor).toBe(15000);
     expect(d.weekly.largeVendor).toBe(60000);
     expect(d.weekly.departmentVendor).toBe(60000);
