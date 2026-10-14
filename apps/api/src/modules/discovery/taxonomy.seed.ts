@@ -77,13 +77,16 @@ const GROCERY: Array<[string, string, string, string[]]> = [
 //   · `tape`    — sellotape, and a measuring tape (the PHRASE is safe, so the
 //                 phrase is what appears below)
 // Aliases UNION on re-seed, so an operator's own additions are never trampled.
+//
+// [GUARDRAILS §8, owner 13 Oct 2026] No `pharmacy` category: Swift never sells
+// medicines, over-the-counter included. A tenant seeded before this keeps its
+// row (seeds never delete); the prohibited-items rule hides it and refuses it.
 const RETAIL: Array<[string, string, string, string[]]> = [
   ['electronics', 'Electronics', '📱', ['phone', 'laptop', 'tv', 'speaker', 'charger', 'radio', 'headphones', 'monitor', 'printer', 'tablet', 'camera', 'powerbank']],
   ['phone-accessories', 'Phone Accessories', '🔌', ['case', 'screen protector', 'earbuds', 'cable', 'sim', 'pouch', 'phone holder', 'otg']],
   ['fashion', 'Fashion & Clothing', '👕', ['clothes', 'dress', 'jeans', 'shirt', 't-shirt', 'blouse', 'skirt', 'trousers', 'shorts', 'jersey', 'socks', 'cap', 'belt', 'uniform', 'underwear']],
   ['shoes', 'Shoes', '👟', ['sneakers', 'slippers', 'sandals', 'shoes', 'boots', 'heels', 'crocs', 'slides']],
   ['beauty', 'Beauty & Cosmetics', '💄', ['makeup', 'skincare', 'wig', 'lashes', 'lipstick', 'foundation', 'perfume', 'lotion', 'shampoo', 'conditioner', 'nail polish', 'weave', 'braids']],
-  ['pharmacy', 'Pharmacy & Health', '💊', ['medicine', 'otc', 'vitamins', 'first aid', 'syrup', 'bandage', 'plaster', 'paracetamol', 'thermometer', 'face mask']],
   ['flowers-gifts', 'Flowers & Gifts', '💐', ['bouquet', 'roses', 'gift basket', 'teddy', 'flowers', 'balloon', 'hamper', 'greeting card']],
   ['home-kitchen', 'Home & Kitchen', '🍳', ['cookware', 'appliances', 'bedding', 'pot', 'pan', 'plate', 'bowl', 'cup', 'mug', 'kettle', 'blender', 'microwave', 'toaster', 'cutlery', 'towel', 'pillow']],
   ['hardware-tools', 'Hardware & Tools', '🔧', ['tools', 'paint', 'plumbing', 'electrical', 'hammer', 'screwdriver', 'wrench', 'spanner', 'drill', 'saw', 'pliers', 'nails', 'screws', 'bolt', 'hinge', 'padlock', 'sandpaper', 'trowel', 'chisel', 'cement', 'plywood', 'lumber', 'pipe', 'bulb', 'led', 'wire', 'socket', 'ladder', 'hose', 'measuring tape', 'tape measure', 'extension cord']],
