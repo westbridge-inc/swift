@@ -95,10 +95,13 @@ describe('the store-list search keeps to the launch market', () => {
   it.each([true, false])('a store pinned outside the market is never listed (signed in: %s)', async (signedIn) => {
     const r = await browse(`${WORD} hardware`, signedIn);
     expect(r.ids).toEqual([ids['georgetown']]);
+    expect(r.total).toBe(1); // the total agrees with the page: the market is in the query, not a filter after it
   });
 
   it('a search whose only match lies outside the market finds nothing', async () => {
-    expect((await browse('abroad', true)).ids).toEqual([]);
+    const r = await browse('abroad', true);
+    expect(r.ids).toEqual([]);
+    expect(r.total).toBe(0);
   });
 
   it('when the exact match lies only outside the market, the page falls through to the matches inside it (the tier is chosen with the market applied)', async () => {
