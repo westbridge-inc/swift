@@ -47,11 +47,21 @@ describe('history is returned only to the current participant set', () => {
   });
 
   it('a room preview is suppressed when authority changes during serialization', async () => {
+    // Earlier denial checks can remove the old mover from the participant
+    // cache. Refresh it after reset, then prove the room is actually listed
+    // before injecting reassignment at its authority read.
+    const opened = await f.inject('POST', '/rooms', f.customer.token, { orderId: f.order.id });
+    expect(opened.statusCode, opened.body).toBe(200);
+    const before = await f.inject('GET', '/rooms', f.oldMover.token);
+    expect(before.statusCode, before.body).toBe(200);
+    expect(before.json().data.map((room: { id: string }) => room.id)).toContain(f.room.id);
+    expect(before.body).toContain('private history fixture');
     const read = f.app.prisma.order.findUnique.bind(f.app.prisma.order);
-    vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce((async (args: Prisma.OrderFindUniqueArgs) => {
+    const spy = vi.spyOn(f.app.prisma.order, 'findUnique').mockImplementationOnce((async (args: Prisma.OrderFindUniqueArgs) => {
       const result = await read(args); await f.revoke(); return result;
     }) as never);
     const res = await f.inject('GET', '/rooms', f.oldMover.token);
+    expect(spy).toHaveBeenCalled();
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().data).toEqual([]);
     expect(res.body).not.toContain('private history fixture');
