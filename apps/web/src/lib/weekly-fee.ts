@@ -112,7 +112,7 @@ export class FeeCheckoutSession {
       } else if (f.status === 403 || f.code === 'PAY_ACTION_OFF') {
         this.emit({ blocked: true }); this.transport.refresh();
       } else {
-        this.emit({ error: f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.' });
+        this.emit({ error: f.code === 'PAY_AHEAD_LIMIT' ? 'Your weekly fee is already paid ahead as far as Swift allows (4 weeks). You can pay again once a week has been used.' : f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.' });
         if (f.code === 'SUBSCRIPTION_NOT_FOUND') this.transport.refresh();
       }
     } finally { this.emit({ busy: false }); }

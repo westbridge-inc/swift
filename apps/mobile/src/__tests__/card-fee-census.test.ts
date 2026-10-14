@@ -62,3 +62,30 @@ describe('Swift has no card field of its own', () => {
     expect(source('src/lib/cardFee.ts')).toBe(source('../web/src/lib/card-fee.ts'));
   });
 });
+
+// [CARD embed] The bank's card page shown INSIDE Swift: one sheet hosts its web view, and
+// the card section reaches that sheet only through the guarded loader (else the in-app browser).
+describe('the card page inside Swift (the card sheet)', () => {
+  const SHEET = 'src/modules/billing/components/CardPageSheet.tsx';
+  const strip = (code: string) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  it('hosts the bank page in a web view and nothing a card could be typed into', () => {
+    const code = strip(source(SHEET));
+    expect(code).toMatch(/<WebView\b/);
+    expect(code).not.toMatch(/<(?:input|textarea|select|iframe|form|TextInput|LabeledInput|CodeInput)\b|keyboardType|secureTextEntry|textContentType|autoComplete|cc-number|cc-csc|onChangeText/);
+  });
+  it('gives the page no channel into the app: nothing injected, no messages, nothing kept, every navigation decided', () => {
+    const code = strip(source(SHEET));
+    expect(code).not.toMatch(/onMessage|injectedJavaScript|injectJavaScript|postMessage|onFileDownload|=\{true\}/);
+    expect(code).toContain("originWhitelist={['*']}");
+    expect(code).toMatch(/^\s*incognito$/m);
+    expect(code).toContain('cacheEnabled={false}');
+    expect(code).toContain('onShouldStartLoadWithRequest={(request) => {');
+    expect(code).toContain('cardPageDecision(request, apiOrigin)');
+    expect(code).toContain('cardMainFrameLeft(event.nativeEvent.url, apiOrigin)');
+  });
+  it('the card section opens the sheet only through the guarded loader, and the in-app browser otherwise', () => {
+    const section = source('src/modules/billing/components/CardPaySection.tsx');
+    expect(section).toContain('cardSheetFor(url, cardWebView, () => API_URL)');
+    expect(section).toContain('if (!embed) return WebBrowser.openAuthSessionAsync(url, CARD_RETURN);');
+  });
+});

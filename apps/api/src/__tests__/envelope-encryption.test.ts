@@ -24,6 +24,9 @@ import crypto from 'node:crypto';
 let app: FastifyInstance;
 let token: string;
 let userId: string;
+// [VERIFY-DOCS V3] A render link is minted for a reviewer who holds the
+// document reviewer grant; the render route re-checks it on every load.
+let reviewerId: string;
 const marker = nanoid(6).toLowerCase();
 // Real PNG magic at offset 0 — the upload route magic-byte-sniffs content now.
 const PLAINTEXT = Buffer.concat([
@@ -58,6 +61,15 @@ beforeAll(async () => {
     },
   });
   userId = user.id;
+  const reviewer = await app.prisma.user.create({
+    data: {
+      phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      firstName: 'Env', lastName: 'Reviewer',
+      roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, status: 'ACTIVE',
+      isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } },
+    },
+  });
+  reviewerId = reviewer.id;
   token = app.jwt.sign({ userId: user.id, role: 'MOVER', jti: nanoid(8) });
   await app.prisma.session.create({
     data: {
@@ -80,6 +92,11 @@ afterAll(async () => {
     await app.prisma.session.deleteMany({ where: { userId } });
     await app.prisma.customer.deleteMany({ where: { userId } });
     await app.prisma.user.deleteMany({ where: { id: userId } });
+  }
+  if (reviewerId) {
+    await app.prisma.admin.deleteMany({ where: { userId: reviewerId } });
+    await app.prisma.customer.deleteMany({ where: { userId: reviewerId } });
+    await app.prisma.user.deleteMany({ where: { id: reviewerId } });
   }
   await app.close();
 });
@@ -119,15 +136,17 @@ describe('crypto primitives', () => {
   it('SWIFT-106: verifyRenderToken is constant-time, accepts valid, rejects tampered/wrong-length', () => {
     const docId = 'doc-abc';
     const expires = 1_900_000_000;
-    const good = signRenderToken(docId, expires);
-    expect(verifyRenderToken(docId, expires, good)).toBe(true);
+    const good = signRenderToken(docId, expires, 'reviewer-1');
+    expect(verifyRenderToken(docId, expires, 'reviewer-1', good)).toBe(true);
     // One byte flipped, SAME length — timingSafeEqual still compares fully.
     const tampered = (good[0] === 'a' ? 'b' : 'a') + good.slice(1);
-    expect(verifyRenderToken(docId, expires, tampered)).toBe(false);
+    expect(verifyRenderToken(docId, expires, 'reviewer-1', tampered)).toBe(false);
     // Wrong length must return false, never throw (timingSafeEqual throws on ≠ length).
-    expect(verifyRenderToken(docId, expires, good.slice(0, 10))).toBe(false);
+    expect(verifyRenderToken(docId, expires, 'reviewer-1', good.slice(0, 10))).toBe(false);
     // Bound to the exact docId + expiry.
-    expect(verifyRenderToken('other-doc', expires, good)).toBe(false);
+    expect(verifyRenderToken('other-doc', expires, 'reviewer-1', good)).toBe(false);
+    // [VERIFY-DOCS V3] ...and to the reviewer it was minted for.
+    expect(verifyRenderToken(docId, expires, 'reviewer-2', good)).toBe(false);
   });
 
   it('wrap/unwrap round-trips; a different KEK cannot unwrap', async () => {
@@ -167,7 +186,7 @@ describe('encrypted upload → render → shred', () => {
     });
     docId = doc.id;
 
-    const minted = mintRenderPath(docId, 60);
+    const minted = mintRenderPath(docId, reviewerId, 60);
     const res = await app.inject({ method: 'GET', url: minted.path });
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('image/png');
@@ -186,7 +205,7 @@ describe('encrypted upload → render → shred', () => {
     const past = Math.floor(Date.now() / 1000) - 5;
     const expired = await app.inject({
       method: 'GET',
-      url: `/api/v1/verification/render/${docId}?expires=${past}&sig=${signRenderToken(docId, past)}`,
+      url: `/api/v1/verification/render/${docId}?expires=${past}&reviewer=${reviewerId}&sig=${signRenderToken(docId, past, reviewerId)}`,
     });
     expect(expired.statusCode).toBe(410);
   });
@@ -196,7 +215,7 @@ describe('encrypted upload → render → shred', () => {
       where: { fileKey },
       data: { wrappedDek: null, shreddedAt: new Date() },
     });
-    const minted = mintRenderPath(docId, 60);
+    const minted = mintRenderPath(docId, reviewerId, 60);
     const res = await app.inject({ method: 'GET', url: minted.path });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('VERIFICATION_OBJECT_UNAVAILABLE');
