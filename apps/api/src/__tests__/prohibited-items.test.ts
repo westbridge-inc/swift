@@ -425,6 +425,22 @@ describe('[§8] the admin catalogue check', () => {
     expect((await queue()).map((r) => r.itemId)).not.toContain(legacy.rum.id);
   });
 
+  it('a partner edit after the reviewer opened the item: that approval is refused and the item stays hidden; the current words can be approved', async () => {
+    const fudge = await createItem({ name: `Rum fudge ${RUN}` });
+    const fudgeId = fudge.json().data.id as string;
+    const seen = (await queue()).find((q) => q.itemId === fudgeId)!;
+    // The partner changes the words while the reviewer is reading the old ones.
+    expect((await inject('PUT', `/api/v1/vendor/items/${fudgeId}`, vendor.token, { name: `Rum 1L ${RUN}` })).statusCode).toBe(200);
+    const stale = await approve(fudgeId, seen.wordsHash);
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error).toMatchObject({ code: 'ITEM_CHANGED', message: 'This item changed — review it again.' });
+    await visibleOn(storefrontItemIds, [control.id], [fudgeId]);
+    const current = (await queue()).find((q) => q.itemId === fudgeId)!;
+    expect(current.wordsHash).not.toBe(seen.wordsHash);
+    expect((await approve(fudgeId, current.wordsHash)).statusCode).toBe(200);
+    await visibleOn(storefrontItemIds, [fudgeId], []);
+  });
+
   it('remove bans an item for good, with the reason the partner reads; it cannot be removed twice', async () => {
     const res = await inject('POST', `/api/v1/admin/catalogue-review/${legacy.combo.id}/remove`, admin.token, { prohibitedClass: 'ALCOHOL' }, { 'x-swift-reason': 'Sells beer as a combo option' });
     expect(res.statusCode).toBe(200);

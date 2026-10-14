@@ -1435,19 +1435,25 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/catalogue-review/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = approveCatalogueItemSchema.parse(request.body ?? {});
+    const tenantId = requireTenantId();
     const item = await tenantPrisma.item.findUnique({ where: { id }, select: { id: true } });
     if (!item) throw new NotFoundError('Item', id);
-    const check = (await catalogueChecksFor(app.prisma, [id])).get(id);
-    if (check?.state === 'BANNED') {
-      throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. ${notAllowedMessage(check.prohibitedClass)}`, { prohibitedClass: check.prohibitedClass });
-    }
-    if (!check || check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This item has nothing waiting for a check.');
-    const words = (await wordsFor(app.prisma, [id])).get(id)!;
-    const wordsHash = judgedWordsHash(words);
-    if (wordsHash !== body.wordsHash) {
-      throw new AppError(409, 'ITEM_CHANGED', 'The item changed since you opened it. Reload and check it again.');
-    }
-    await tenantPrisma.item.update({ where: { id }, data: { reviewApprovedHash: wordsHash, reviewApprovedAt: new Date() } });
+    // The words are judged and the approval written under the item's row lock, and the
+    // approval stores the fingerprint the REVIEWER saw: words edited at any moment after
+    // that never match it, so they are never shown unseen.
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "items" WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE`;
+      const check = (await catalogueChecksFor(tx, [id])).get(id);
+      if (check?.state === 'BANNED') {
+        throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. ${notAllowedMessage(check.prohibitedClass)}`, { prohibitedClass: check.prohibitedClass });
+      }
+      if (!check || check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This item has nothing waiting for a check.');
+      const words = (await wordsFor(tx, [id])).get(id);
+      if (!words || judgedWordsHash(words) !== body.wordsHash) {
+        throw new AppError(409, 'ITEM_CHANGED', 'This item changed — review it again.');
+      }
+      await tx.item.update({ where: { id }, data: { reviewApprovedHash: body.wordsHash, reviewApprovedAt: new Date() } });
+    });
     return { success: true, data: { itemId: id, state: 'APPROVED' } };
   });
 
@@ -1457,13 +1463,14 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = removeCatalogueItemSchema.parse(request.body ?? {});
     const header = request.headers['x-swift-reason'];
     const reason = (typeof header === 'string' && header.trim() ? header : body.reason ?? '').trim();
-    const item = await tenantPrisma.item.findUnique({ where: { id }, select: { id: true, prohibitedAt: true } });
+    const item = await tenantPrisma.item.findUnique({ where: { id }, select: { id: true } });
     if (!item) throw new NotFoundError('Item', id);
-    if (item.prohibitedAt) throw new AppError(409, 'ALREADY_REMOVED', 'This item was already removed.');
-    await tenantPrisma.item.update({
-      where: { id },
+    // One way, once: the write only lands on a row not already removed.
+    const removed = await tenantPrisma.item.updateMany({
+      where: { id, prohibitedAt: null },
       data: { prohibitedAt: new Date(), prohibitedClass: body.prohibitedClass, prohibitedReason: reason, isAvailable: false },
     });
+    if (removed.count === 0) throw new AppError(409, 'ALREADY_REMOVED', 'This item was already removed.');
     return { success: true, data: { itemId: id, state: 'BANNED', prohibitedClass: body.prohibitedClass } };
   });
 
