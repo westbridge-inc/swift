@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
+import { csvTextCell } from '../../utils/csv';
 
 // Sequential receipts [san spec 20.1] — gapless per tenant per year, proven
 // under concurrency by a row lock on the counter (scenario R). Every credit
@@ -100,7 +101,8 @@ export async function cashJournalCsv(prisma: PrismaClient, from: Date, to: Date)
     select: { id: true, san: true, type: true, vendor: { select: { name: true } } },
   });
   const byId = new Map(subs.map((s) => [s.id, s]));
-  const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  // [security review: csv-formula-injection] every text cell is neutralised; amounts are Swift's own numbers.
+  const esc = csvTextCell;
   const day = (d: Date) => d.toISOString().slice(0, 10);
   const lines = ['date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref,status'];
   for (const r of receipts) {
@@ -110,13 +112,13 @@ export async function cashJournalCsv(prisma: PrismaClient, from: Date, to: Date)
     const on = ret ? returnedOn(ret) : null;
     lines.push([
       day(r.issuedAt),
-      r.receiptNumber,
-      s?.san ?? '',
+      esc(r.receiptNumber),
+      esc(s?.san ?? ''),
       esc(s?.vendor?.name ?? r.subscriptionId),
-      s?.type ?? '',
-      r.channel ?? '',
+      esc(s?.type ?? ''),
+      esc(r.channel ?? ''),
       Number(r.amount).toFixed(2),
-      r.mmgRef ?? '',
+      esc(r.mmgRef ?? ''),
       ret ? `returned${on ? ` ${day(on)}` : ''}` : '',
     ].join(','));
   }
@@ -125,10 +127,10 @@ export async function cashJournalCsv(prisma: PrismaClient, from: Date, to: Date)
     const on = returnedOn(ret);
     lines.push([
       on ? day(on) : '',
-      receiptOfPayment.get(ret.providerPaymentId) ?? '',
-      s?.san ?? '',
+      esc(receiptOfPayment.get(ret.providerPaymentId) ?? ''),
+      esc(s?.san ?? ''),
       esc(s?.vendor?.name ?? ret.subscriptionId),
-      s?.type ?? '',
+      esc(s?.type ?? ''),
       'MMG_RETURN',
       (-Number(ret.amount)).toFixed(2),
       esc((ret.resolution ? ret.resolutionNote : null) ?? ret.providerReference ?? ''),

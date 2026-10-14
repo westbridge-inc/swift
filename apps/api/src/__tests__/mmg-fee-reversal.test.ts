@@ -1005,6 +1005,40 @@ describe('[owner Q-1654-BOOKS] the books show every MMG return', () => {
   });
 });
 
+describe('[security review: csv-formula-injection] the cash journal never hands a spreadsheet a formula', () => {
+  it('a text cell starting with = + - @ tab or CR is neutralised; numbers stay numbers', async () => {
+    const { csvTextCell } = await import('../utils/csv');
+    expect(csvTextCell('=HYPERLINK("http://x","y")')).toBe(`"'=HYPERLINK(""http://x"",""y"")"`);
+    expect(csvTextCell('+1+1')).toBe("'+1+1");
+    expect(csvTextCell('-2+3')).toBe("'-2+3");
+    expect(csvTextCell('@SUM(A1)')).toBe("'@SUM(A1)");
+    expect(csvTextCell('\tcmd')).toBe("'\tcmd");
+    expect(csvTextCell('\rcmd')).toBe(`"'\rcmd"`);
+    expect(csvTextCell('MMG REF 123')).toBe('MMG REF 123');
+    expect(csvTextCell('a,b')).toBe('"a,b"');
+  });
+
+  it('a typed MMG note like =HYPERLINK(...) reaches the journal as text, and the return amount stays a negative number', async () => {
+    const { parseCsv } = await import('../utils/csv');
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const sent = await ask(p.checkoutId, p.amount);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const held = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    const note = `=HYPERLINK("http://evil.example/${RUN}","statement")`;
+    await resolveAs(held.id, 'RETURNED_NOT_BOOKED', note);
+    const { cashJournalCsv } = await import('../modules/billing/receipts');
+    const csv = await runWithTenant('swift-default', () => cashJournalCsv(app.prisma, new Date(Date.now() - 3_600_000), new Date(Date.now() + 3_600_000)));
+    const rows = parseCsv(csv);
+    const line = rows.find((r) => r[5] === 'MMG_RETURN' && r[7]!.includes(`evil.example/${RUN}`));
+    expect(line, 'the return line').toBeDefined();
+    expect(line![7]).toBe(`'${note}`);
+    expect(line![6]).toBe(`-${p.amount.toFixed(2)}`);
+    for (const row of rows.slice(1)) for (const [i, cell] of row.entries()) if (i !== 6) expect(cell).not.toMatch(/^[=+\-@\t\r]/);
+  });
+});
+
 describe('[review #1654] what MMG names is checked, one reference books once, nothing closes under a return in flight', () => {
   /** MMG answers the reversal "pending", naming `named(txn)`; the lookup is the sandbox's, with the
    *  payment's own ledger number set when `ledger` is given. */
