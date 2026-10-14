@@ -23,6 +23,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 import { TERMINAL_ORDER_STATUSES, MOVER_HOLDING_STATUSES } from '../modules/order/order-status';
+import { assertOrderMayProceed } from '../modules/compliance/prohibited-gate';
 
 const RUN = nanoid(8);
 const REASON = 'The store cannot fulfil this order; support is following up with the store about its direct refund.';
@@ -254,5 +255,32 @@ describe('record-only closure of store-claimed MMG orders', () => {
     const res = await close(o.id, 'ADMIN', 3, await approve(o.id));
     expect(res.statusCode).toBe(409);
     expect(res.json().error.message).toMatch(/cash/i);
+  });
+
+  // [Opus 14 Oct S3-7] A paid MMG order with a line Swift removed under the
+  // prohibited-items rule cannot go forward, the store cannot reject it and no
+  // cancel path takes MMG money: this close is its only exit, so it must work.
+  it('an order frozen by the prohibited-items rule can still be closed this way', async () => {
+    const shelf = await sys(() => app.prisma.category.create({ data: { vendorId, name: `Shelf ${RUN}` } }));
+    const removed = await sys(() => app.prisma.item.create({ data: {
+      vendorId, categoryId: shelf.id, name: `Fixture bottle ${RUN}`, basePrice: 1000, isAvailable: false,
+      prohibitedAt: new Date(), prohibitedClass: 'ALCOHOL', prohibitedReason: 'Removed by Swift support',
+    } }));
+    const frozen = await order();
+    await sys(() => app.prisma.orderItem.create({ data: {
+      orderId: frozen.id, itemId: removed.id, name: removed.name, quantity: 1,
+      basePrice: 1000, markedUpPrice: 1000, markupAmount: 0, totalBase: 1000, totalMarkup: 0, totalCustomer: 1000,
+    } }));
+    // Frozen: the canonical seam refuses every forward move.
+    await expect(sys(() => assertOrderMayProceed(app.prisma, frozen.id, 'store'))).rejects.toMatchObject({ code: 'PROHIBITED_ITEM' });
+
+    const res = await close(frozen.id, 'ADMIN', 3, await approve(frozen.id));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ orderId: frozen.id, status: 'CANCELLED', disposition: 'REFUND_HANDLED_BY_STORE' });
+    const after = await read(frozen.id);
+    expect(after).toMatchObject({ status: 'CANCELLED', paymentStatus: 'CLAIMED' });
+    const obligation = await sys(() => app.prisma.mmgRefundObligation.findFirstOrThrow({ where: { orderId: frozen.id } }));
+    expect(obligation).toMatchObject({ kind: 'CANCELLATION', status: 'OWED', sendId: null });
+    expect(String(obligation.amount)).toBe('1300');
   });
 });
