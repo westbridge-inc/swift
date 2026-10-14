@@ -489,7 +489,10 @@ export class PartnerService {
       // racing a reviewer's claim waits for it instead of deadlocking.
       const awaitingIds = toRetire.filter((p) => !p.committed).map((p) => p.id);
       if (awaitingIds.length > 0) {
-        await tx.$queryRaw`SELECT "id" FROM "review_case" WHERE "submissionId" = ANY(${awaitingIds}) FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "review_case" WHERE "submissionId" = ANY(${awaitingIds}) ORDER BY "id" FOR UPDATE`;
+        // Then the papers themselves (the escalation's order): a paper with no open case still serializes with an
+        // escalation, so the second-review read below sees one that committed first [DS1064 S3].
+        await tx.$queryRaw`SELECT "id" FROM "verification_documents" WHERE "id" = ANY(${awaitingIds}) ORDER BY "id" FOR UPDATE`;
       }
       // [DOC-1 §24.2] A paper under a second review is frozen too: its confirmation opens the fraud case.
       const underSecondReview = await papersUnderSecondReview(tx, awaitingIds);

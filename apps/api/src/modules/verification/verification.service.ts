@@ -1158,12 +1158,13 @@ export class VerificationService {
    */
   private async escalateToSecondReview(docId: string, adminId: string, reasonCode: RejectionReasonCode, note?: string): Promise<VerificationDocument> {
     return this.projectionTransaction(async (tx) => {
-      // [DS1054 S3] Lock the paper's open case FIRST, the lock a vehicle edit takes before it decides what to
-      // withdraw (vehicle-retirement.ts). Whichever holds it first wins: an edit that got there first has already
-      // withdrawn the paper (refused below as not pending); an edit that comes second waits, then sees
-      // SECOND_REVIEW and keeps the paper. Reading the paper before this lock let the suspicion land on a
-      // withdrawn paper that no second reviewer could ever confirm.
+      // [DS1054 S3 · DS1064 S3] Lock the paper's open case, then the paper itself, BEFORE reading either: the
+      // locks a vehicle edit takes, in the same order, before it decides what to withdraw (vehicle-retirement.ts,
+      // partner.service.ts). Whichever holds them first wins: an edit that got there first has already withdrawn
+      // the paper (refused below as not pending); an edit that comes second waits, then sees SECOND_REVIEW and
+      // keeps the paper. The paper lock matters when it has no open case (a case lock on no row holds nothing).
       await tx.$queryRaw`SELECT id FROM review_case WHERE "submissionId" = ${docId} AND "closedAt" IS NULL ORDER BY id FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM verification_documents WHERE id = ${docId} FOR UPDATE`;
       const doc = await tx.verificationDocument.findUnique({ where: { id: docId } });
       if (!doc) throw new NotFoundError('VerificationDocument', docId);
       if (doc.status !== 'PENDING') throw new AppError(409, 'NOT_PENDING', 'Only a pending document can be escalated');

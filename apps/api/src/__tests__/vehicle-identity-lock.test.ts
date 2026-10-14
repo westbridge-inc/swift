@@ -257,22 +257,22 @@ describe('a vehicle paper under a second review survives a vehicle edit', () => 
   // must hold that same lock before it reads anything. Otherwise the edit withdraws the paper and the suspicion lands on
   // a withdrawn paper, where no second reviewer can ever confirm it. The edit is started from inside A's transaction,
   // right after A read the paper. The hook waits until the edit has finished or is blocked on a lock, then lets A go on.
-  it('an escalation racing a vehicle edit is never lost: the edit waits for the case and keeps the paper', async () => {
-    const mover = await fixture('driver');
-    const paper = await upload(mover.userId, 'vehicle_registration');
-    const a = await reviewer(); const b = await reviewer();
-    await grantStepUp(app, mover.token);
-    let edit: ReturnType<typeof edits['driver profile colour']> | null = null;
+  // Reviewer A escalates while the mover's colour edit runs: the edit is started from inside A's transaction (at its
+  // recusal check, after A took its locks and read the paper), and A goes on once the edit has finished or is
+  // waiting on a row lock. With the locks in place the edit waits for A, then sees SECOND_REVIEW and keeps the paper.
+  const raceEscalationWithEdit = async (door: keyof typeof edits, mover: { token: string }, paper: string, a: string) => {
+    let edit: ReturnType<typeof edits[typeof door]> | null = null;
     const original = recusal.assertNotRecused;
     const spy = vi.spyOn(recusal, 'assertNotRecused').mockImplementation(async (db, reviewerId, subjectUserId) => {
       if (edit === null && db !== app.prisma) {
-        edit = edits['driver profile colour'](mover);
+        edit = edits[door](mover);
         let settled = false;
         void edit.then(() => { settled = true; }, () => { settled = true; });
         for (let i = 0; i < 400 && !settled; i += 1) {
           const [row] = await app.prisma.$queryRaw<Array<{ waiting: number }>>`
             SELECT count(*)::int AS waiting FROM pg_stat_activity
-            WHERE wait_event_type = 'Lock' AND query LIKE '%review_case%FOR UPDATE%'`;
+            WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%'
+              AND (query LIKE '%review_case%' OR query LIKE '%verification_documents%')`;
           if (row!.waiting > 0) break;
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
@@ -285,7 +285,8 @@ describe('a vehicle paper under a second review survives a vehicle edit', () => 
     expect(edit).not.toBeNull();
     const edited = await edit!;
     expect(edited.statusCode, edited.body).toBe(200);
-
+  };
+  const suspicionSurvivesAndIsConfirmed = async (moverUserId: string, paper: string, b: string) => {
     // The suspicion survives the edit: the paper still waits, its one open case is in SECOND_REVIEW.
     expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: paper } })).toMatchObject({ status: 'PENDING', state: 'REVIEW_QUEUED' });
     expect(await app.prisma.reviewCase.count({ where: { submissionId: paper, closedAt: null } })).toBe(1);
@@ -295,6 +296,31 @@ describe('a vehicle paper under a second review survives a vehicle edit', () => 
     const row = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: paper } });
     expect(row.status).toBe('REJECTED');
     expect(row.legalHoldId).not.toBeNull();
-    expect(await system(() => app.prisma.fraudCase.findFirst({ where: { subjectUserId: mover.userId, submissionId: paper } }))).toMatchObject({ confirmedBy: b });
+    expect(await system(() => app.prisma.fraudCase.findFirst({ where: { subjectUserId: moverUserId, submissionId: paper } }))).toMatchObject({ confirmedBy: b });
+  };
+
+  // [DS1054 S3] The race: reviewer A's escalation has read the paper as waiting, and the mover's vehicle edit runs
+  // before A's write. Unless both lock the same rows (the case, then the paper) before deciding, the edit withdraws
+  // the paper and the suspicion lands on a withdrawn paper that no second reviewer can ever confirm.
+  it.each(Object.keys(edits) as Array<keyof typeof edits>)('%s: an escalation racing the edit is never lost: the edit waits for the case and keeps the paper', async (door) => {
+    const mover = await fixture(door.startsWith('rider') ? 'rider' : 'driver');
+    const paper = await upload(mover.userId, 'vehicle_registration');
+    const a = await reviewer(); const b = await reviewer();
+    await grantStepUp(app, mover.token);
+    await raceEscalationWithEdit(door, mover, paper, a);
+    await suspicionSurvivesAndIsConfirmed(mover.userId, paper, b);
+  });
+
+  // [DS1064 S3] The same race when the waiting paper has no open case (a state the review watchdog heals): a lock
+  // on the case matches no row and holds nothing, so both sides also lock the paper itself.
+  it.each(Object.keys(edits) as Array<keyof typeof edits>)('%s: the same race on a waiting paper with no open case: the edit waits for the paper and keeps it', async (door) => {
+    const mover = await fixture(door.startsWith('rider') ? 'rider' : 'driver');
+    const paper = await upload(mover.userId, 'vehicle_registration');
+    await app.prisma.reviewCase.updateMany({ where: { submissionId: paper, closedAt: null }, data: { closedAt: new Date() } });
+    expect(await openCase(paper)).toBeNull();
+    const a = await reviewer(); const b = await reviewer();
+    await grantStepUp(app, mover.token);
+    await raceEscalationWithEdit(door, mover, paper, a);
+    await suspicionSurvivesAndIsConfirmed(mover.userId, paper, b);
   });
 });
