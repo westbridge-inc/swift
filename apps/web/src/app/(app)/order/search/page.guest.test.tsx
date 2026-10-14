@@ -54,6 +54,20 @@ describe('web guest catalogue search', () => {
     expect(screen.getByRole('region', { name: 'Dishes and products' })).toBeTruthy();
   });
 
+  it('[owner 13 Oct] a dish of a closed store says so under its store\'s name; an open store\'s dish does not', async () => {
+    vi.stubGlobal('fetch', engine(
+      [{ id: 'v1', name: 'Pepper Kitchen', vendorType: 'RESTAURANT', isCurrentlyOpen: false }],
+      [
+        { id: 'i1', name: 'Pepperpot', vendorId: 'v2', vendorName: 'Granny Fakeplace', basePrice: 1500, imageUrl: null, categoryName: null, isNew: false, vendorIsCurrentlyOpen: true },
+        { id: 'i2', name: 'Pepper Roti', vendorId: 'v1', vendorName: 'Pepper Kitchen', basePrice: 900, imageUrl: null, categoryName: null, isNew: false, vendorIsCurrentlyOpen: false },
+      ],
+    ));
+    render(<AppLayout><SearchPage /></AppLayout>);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search stores and dishes' }), { target: { value: 'Pepper' } });
+    expect(await screen.findByText('Pepper Roti · Pepper Kitchen · Closed right now')).toBeTruthy();
+    expect(screen.getByText('Pepperpot · Granny Fakeplace')).toBeTruthy();
+  });
+
   it('a kind chip narrows the stores; dishes, which carry no kind, show under All only', async () => {
     vi.stubGlobal('fetch', engine(
       [{ id: 'v1', name: 'Pepper Kitchen', vendorType: 'RESTAURANT' }, { id: 'v3', name: 'Pepper Hardware', vendorType: 'STORE' }],
