@@ -58,18 +58,18 @@ export function GuestBasketSync() {
     <p role="alert" className="my-2">{error ?? (changedStore ? 'Your saved cart is from another store. Both baskets are unchanged.' : 'A price, choice or availability changed. Nothing from this basket was added.')}</p>
     {result ? <ul>{result.verdicts.filter(v => v.status !== 'READY').map(v => <li key={v.clientLineId}>{readGuestBasket().lines.find(l => l.clientLineId === v.clientLineId)?.name ?? 'Item'}: {v.status === 'PRICE_CHANGED' ? `now ${money(v.unitPrice)}` : v.status.replaceAll('_', ' ').toLowerCase()}</li>)}</ul> : null}
     <div className="mt-3 flex flex-wrap gap-3">
-      <button className="sw-btn-primary" disabled={busy} onClick={() => void sync()}>Retry basket upload</button>
-      {changedPrice ? <button className="sw-btn-secondary" disabled={busy || !pricesKnown} onClick={() => {
+      <button className="sw-btn sw-btn-md" disabled={busy} onClick={() => void sync()}>Retry basket upload</button>
+      {changedPrice ? <button className="sw-btn sw-btn-md sw-btn-outline" disabled={busy || !pricesKnown} onClick={() => {
         const basket = readGuestBasket(); clearGuestBasket();
         for (const line of basket.lines) { const verdict = result?.verdicts.find(v => v.clientLineId === line.clientLineId); addGuestLine({ ...line, unitPrice: verdict?.unitPrice ?? line.unitPrice }); }
         void sync();
       }}>Accept current item prices</button> : null}
       {changedStore ? <>
-        <button className="sw-btn-secondary" disabled={busy} onClick={() => { clearGuestBasket(); setScopedResult(null); }}>Keep saved cart</button>
-        <button className="sw-btn-secondary" disabled={busy} onClick={() => { if (readCheckoutAttempt()) { setError('An earlier checkout still has an unresolved outcome. Check Orders before replacing this cart.'); return; } if (window.confirm('Replace the saved cart with this browser basket?')) void clearCart().then(sync).catch(e => setError(e.message)); }}>Replace saved cart</button>
+        <button className="sw-btn sw-btn-md sw-btn-outline" disabled={busy} onClick={() => { clearGuestBasket(); setScopedResult(null); }}>Keep saved cart</button>
+        <button className="sw-btn sw-btn-md sw-btn-outline" disabled={busy} onClick={() => { if (readCheckoutAttempt()) { setError('An earlier checkout still has an unresolved outcome. Check Orders before replacing this cart.'); return; } if (window.confirm('Replace the saved cart with this browser basket?')) void clearCart().then(sync).catch(e => setError(e.message)); }}>Replace saved cart</button>
       </> : null}
-      <button className="sw-btn-secondary" disabled={busy} onClick={() => { if (discardBasket()) { setScopedResult(null); setScopedError(null); } }}>Discard this browser basket</button>
-      <Link href="/cart" className="sw-btn-secondary">Review basket</Link>
+      <button className="sw-btn sw-btn-md sw-btn-outline" disabled={busy} onClick={() => { if (discardBasket()) { setScopedResult(null); setScopedError(null); } }}>Discard this browser basket</button>
+      <Link href="/cart" className="sw-btn sw-btn-md sw-btn-outline">Review basket</Link>
     </div>
   </section>;
 }
@@ -85,15 +85,15 @@ export function GuestCart() {
         <div><p className="font-semibold">{l.name}</p><p>{money(l.customerPrice)} each</p></div>
         <div className="flex items-center gap-3"><button aria-label={`Decrease ${l.name}`} className="sw-icon-btn" onClick={() => change(l.id, l.quantity - 1)}>−</button><span>{l.quantity}</span><button aria-label={`Increase ${l.name}`} className="sw-icon-btn" onClick={() => change(l.id, l.quantity + 1)}>+</button></div>
       </li>)}</ul>
-      <p className="my-4">Items estimate: {money(subtotal)}. Delivery and the final total are quoted by the server after sign-in.</p>
-      <button className="sw-btn-primary" onClick={() => void ensureSignedIn().then(async ok => {
+      <p className="my-4">Items estimate: {money(subtotal)}. We confirm the delivery fee and the final total after you sign in.</p>
+      <div className="flex flex-wrap gap-3"><button className="sw-btn sw-btn-md" onClick={() => void ensureSignedIn().then(async ok => {
         // Back to this same page (the cart or the checkout) after the code.
         if (!ok) { router.push(`/login?next=${encodeURIComponent(window.location.pathname === '/checkout' ? '/checkout' : '/cart')}`); return; }
         try { const result = await uploadGuestBasket(getSessionPrincipal() ?? scope); if (result && !result.applied) { setError('Your basket changed. Check the items and retry the upload.'); return; }
           await queries.invalidateQueries({ queryKey: ['customer', 'cart'] }); router.refresh();
         } catch (e) { setError((e as Error).message); }
       })}>Place order</button>
-      <button className="sw-btn-secondary ml-3" onClick={() => { if (discardBasket()) setError(null); }}>Discard this browser basket</button>
+      <button className="sw-btn sw-btn-md sw-btn-outline" onClick={() => { if (discardBasket()) setError(null); }}>Discard this browser basket</button></div>
     </>}{error ? <p role="alert">{error}</p> : null}
   </section>;
 }
