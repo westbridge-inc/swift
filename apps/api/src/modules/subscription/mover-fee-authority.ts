@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { billingEffectsReady } from '../billing/billing-cutover';
 import type { Prisma, PrismaClient, Subscription } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -311,7 +312,7 @@ export async function moverFeeOperability(
   const { subscriptionOperability } = await import('./operate-gate');
   const { activeDeadline, FULL_FEE_GRACE_MS } = await import('../billing/dunning-clock');
   const view = await readMoverFeeSubscription(db, payer);
-  if (!view) return subscriptionOperability(null, opts, now);
+  if (!view) return subscriptionOperability(null, opts, await readFeePause(db), now);
   const clock = await db.billingDunningClock.findUnique({ where: { subscriptionId: view.authority.canonicalSubscriptionId } });
   const ready = await billingEffectsReady(db);
   // A finance hold grants no permission and creates no new suspension. Every
@@ -322,7 +323,7 @@ export async function moverFeeOperability(
     const gated = { ...source, billingConfirmationPausedAt: pausedAt,
       billingEnforcementDueAt: clock && ready && !clock.pausedAt
         ? activeDeadline(clock, FULL_FEE_GRACE_MS, now) : null, gracePeriodEnd: null };
-    const result = subscriptionOperability(gated, opts, now);
+    const result = subscriptionOperability(gated, opts, await readFeePause(db, process.env, source.id), now);
     if (!result.operable) return result;
   }
   // Every source, including canonical, passed. FINANCE_HOLD cannot create a

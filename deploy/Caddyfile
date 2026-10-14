@@ -10,6 +10,12 @@
             }
         }
     }
+    # [CERT-ISSUER] The ONLY certificate issuer: Let's Encrypt's production
+    # ACME directory. The apps pin api.swiftgy.com to Let's Encrypt's roots
+    # (ISRG Root X1/X2; GTS Root R1 as backup), and Caddy's built-in issuers
+    # can fall back to a CA outside that pin set. Every site here (staging and
+    # production) uses this one issuer. caddy-cert-issuer.test.ts holds it.
+    cert_issuer acme https://acme-v02.api.letsencrypt.org/directory
 }
 
 # API_HOST is a single staging DNS name set in deploy/.env. A hostname site
@@ -76,6 +82,20 @@
 # spelt any way, before the query) is never open. The credential ends here
 # on the requests the gate checked; every other website request reaches the
 # catch-all exactly as it did without the gate.
+#
+# [WEB-GATE-SW] While the gate is on, two more answers on WEB_HOST alone.
+# 1. /sw.js is a retiring worker, sent without the password and never from
+#    the website. A phone that visited before the gate keeps the site's
+#    worker, which fetches pages itself; a worker's fetch never brings up the
+#    password box, so the page came back blank. The browser checks /sw.js on
+#    every visit; this one clears the site's caches and unregisters itself,
+#    and the next load asks for the password. It reloads nothing: the site
+#    registers /sw.js on every load, so a reload would never end. It is a
+#    fixed answer, so a path that climbs to it reaches nothing of the site.
+# 2. A refused request gets a short page saying so, not a blank one. The
+#    password box still comes up: the challenge header is kept.
+# Their `header` lines set only these two fixed answers; no response from the
+# website passes through them, so the website keeps its own headers.
 {$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {$ADMIN_HOST} {
     encode zstd gzip
     @admin host {$ADMIN_HOST} admin.invalid
@@ -93,6 +113,27 @@
         @metrics path /metrics
         respond @metrics 403
         reverse_proxy api:3000
+    }
+    handle_errors 401 {
+        @web_refused host {$WEB_HOST} web.invalid
+        handle @web_refused {
+            header Content-Type "text/html; charset=utf-8"
+            header Cache-Control no-store
+            header X-Content-Type-Options nosniff
+            header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
+            respond `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Swift test site</title></head><body style="margin:0;padding:48px 24px;font-family:-apple-system,system-ui,sans-serif;background:rgb(251,251,249);color:rgb(33,26,26)"><h1 style="font-size:22px;margin:0 0 8px">Swift test site</h1><p style="font-size:16px;line-height:1.5;margin:0;color:rgb(120,108,108)">This test site needs the tester password. Reload the page to sign in.</p></body></html>` 401
+        }
+    }
+    @web_retire_worker {
+        host {$WEB_HOST} web.invalid
+        expression `"{$WEB_BASIC_AUTH_USER}" != ""`
+        path /sw.js
+    }
+    handle @web_retire_worker {
+        header Content-Type "text/javascript; charset=utf-8"
+        header Cache-Control no-store
+        header X-Content-Type-Options nosniff
+        respond `self.addEventListener('install', () => self.skipWaiting()); self.addEventListener('activate', (event) => event.waitUntil(caches.keys().then((names) => Promise.all(names.filter((name) => name.startsWith('swift-')).map((name) => caches.delete(name)))).then(() => self.registration.unregister())));` 200
     }
     @web_gate {
         host {$WEB_HOST} web.invalid

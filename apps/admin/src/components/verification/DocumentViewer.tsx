@@ -3,6 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import { API_URL, getDocSignedUrl } from '@/lib/api';
 import { Modal } from '@/components/Modal';
 
+/** The API's own sentence for a missing document-reviewer grant (document-reviewer.ts), for the render path. */
+const DOCUMENT_REVIEWER_SENTENCE = 'You need the document-reviewer permission to open or decide documents. A super-admin grants it under Document reviewers at the top of the Review Center.';
+
 export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: string; label: string; onViewed: (_viewed: boolean) => void; onRejectMissing?: () => void }) {
   const [url, setUrl] = useState('');
   const [pdf, setPdf] = useState(false);
@@ -11,9 +14,13 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   const [error, setError] = useState('');
   const [missing, setMissing] = useState(false);
   const [pdfFailed, setPdfFailed] = useState(false);
+  const [pdfInlineLoaded, setPdfInlineLoaded] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [full, setFull] = useState(false);
+  // [Item 98] Face-matching is off: the server sends the applicant's own signup
+  // selfie with an identity document so the reviewer compares the faces by eye.
+  const [selfie, setSelfie] = useState<{ url: string; capturedAt: string } | null>(null);
   const generation = useRef(0);
   const evidenceViewport = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -25,7 +32,7 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   useEffect(() => () => { generation.current++; }, []);
   const view = async () => {
     const attempt = ++generation.current;
-    setLoading(true); setError(''); setMissing(false); setPdfFailed(false); setUrl(''); setLoaded(false); onViewed(false);
+    setLoading(true); setError(''); setMissing(false); setPdfFailed(false); setPdfInlineLoaded(false); setUrl(''); setLoaded(false); onViewed(false); setSelfie(null);
     setZoom(1); setRotation(0);
     try {
       const signed = await getDocSignedUrl(id);
@@ -37,6 +44,11 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
       const proxy = new URL(render.pathname + render.search, window.location.origin).toString();
       const response = await fetch(proxy, { cache: 'no-store', redirect: 'error' });
       if (!response.ok) {
+        // [VERIFY-DOCS V3] The grant can be revoked after the link was minted: the render refuses, and the
+        // same-origin proxy names the code in a header (it relays no body), so the page says why.
+        if (response.status === 403 && response.headers.get('X-Swift-Error-Code') === 'DOCUMENT_REVIEWER_REQUIRED') {
+          throw Object.assign(new Error(DOCUMENT_REVIEWER_SENTENCE), { code: 'DOCUMENT_REVIEWER_REQUIRED' });
+        }
         const unavailable = response.status === 404 || response.status === 410;
         throw Object.assign(new Error('The document could not be loaded.'), { code: response.status === 410 ? 'DOCUMENT_PURGED' : unavailable ? 'VERIFICATION_OBJECT_UNAVAILABLE' : 'RENDER_FAILED' });
       }
@@ -45,29 +57,44 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
       await response.body?.cancel();
       if (generation.current !== attempt) return;
       setPdf(isPdf); setUrl(proxy);
+      const sent = signed.data?.signupSelfie as { url?: unknown; capturedAt?: unknown } | null | undefined;
+      if (sent && typeof sent.url === 'string' && sent.url && typeof sent.capturedAt === 'string') {
+        // A path is relative to the API origin (local storage); a storage address is already signed.
+        setSelfie({ url: sent.url.startsWith('/') ? new URL(sent.url, API_URL).toString() : sent.url, capturedAt: sent.capturedAt });
+      }
     } catch (err) {
       if (generation.current === attempt) {
         const code = (err as { code?: string })?.code;
         const unavailable = code === 'VERIFICATION_OBJECT_UNAVAILABLE' || code === 'DOCUMENT_PURGED';
         setMissing(unavailable);
+        // [VERIFY-DOCS V3] Without the document-reviewer grant, trying again
+        // never works: say so in the server's words (who grants it, and where).
+        const message = (err as { message?: string })?.message;
+        if (code === 'DOCUMENT_REVIEWER_REQUIRED') { setError(message || 'You need the document-reviewer permission to open documents. Ask a super-admin.'); return; }
         setError(unavailable ? (code === 'DOCUMENT_PURGED' ? 'This document was removed under the retention policy. The applicant must re-submit it before it can be approved.' : 'The file is missing. The applicant must re-submit it before it can be approved.') : 'The document could not be loaded. Try View document again.');
       }
     } finally { if (generation.current === attempt) setLoading(false); }
   };
-  const failed = () => { setError('The document did not render. Retry the view before approving.'); setLoaded(false); setUrl(''); onViewed(false); };
+  const evidenceGeneration = generation.current;
+  const failed = () => { if (generation.current !== evidenceGeneration) return; setError('The document did not render. Retry the view before approving.'); setLoaded(false); setUrl(''); onViewed(false); };
+  const comparison = selfie && <figure className="rc-selfie">
+    {/* eslint-disable-next-line @next/next/no-img-element -- evidence is rendered directly, never optimized or cached */}
+    <img src={selfie.url} alt="Applicant signup selfie" referrerPolicy="no-referrer" />
+    <figcaption>Signup selfie, taken {new Date(selfie.capturedAt).toLocaleDateString()}. Compare the two faces yourself — Swift does not compare faces automatically.</figcaption>
+  </figure>;
   const evidence = <div ref={evidenceViewport} className="rc-evidence-viewport">
     {pdf ? <>
       <div className="rc-pdf-fallback">
         <p>{pdfFailed ? 'The inline PDF could not be displayed.' : 'If the PDF preview is blank or unreadable, open the document in a new tab.'}</p>
         <a href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Open document in a new tab</a>
       </div>
-      {!pdfFailed && <iframe title={`${label} evidence`} src={url} className="rc-pdf" sandbox="allow-same-origin" ref={(frame) => { if (frame) frame.onerror = () => { setPdfFailed(true); setLoaded(false); onViewed(false); }; }} />}
-      <label className="rc-check"><input type="checkbox" checked={loaded} onChange={(e) => { setLoaded(e.target.checked); onViewed(e.target.checked); }} />I can see and read the PDF in the preview or new tab</label>
-      <p className="rc-muted">If your browser cannot display this PDF, leave the check clear. Do not approve unreadable evidence.</p>
+      {!pdfFailed && <iframe title={`${label} evidence`} src={url} className="rc-pdf" sandbox="allow-same-origin" ref={(frame) => { if (frame) { frame.onload = () => { if (generation.current === evidenceGeneration) setPdfInlineLoaded(true); }; frame.onerror = () => { if (generation.current !== evidenceGeneration) return; setPdfFailed(true); setPdfInlineLoaded(false); setLoaded(false); onViewed(false); }; } }} />}
+      <label className="rc-check"><input type="checkbox" disabled={!pdfInlineLoaded || pdfFailed} checked={loaded} onChange={(e) => { const confirmed = e.target.checked && pdfInlineLoaded && !pdfFailed; setLoaded(confirmed); onViewed(confirmed); }} />I can see and read the PDF in the inline preview</label>
+      <p className="rc-muted">Approval requires a readable inline preview. Opening a new tab does not unlock approval.</p>
     </> :
       // next/image would persist optimized evidence. Direct no-store rendering is intentional.
       // eslint-disable-next-line @next/next/no-img-element
-      <img src={url} alt={`${label} evidence`} onLoad={() => { setLoaded(true); onViewed(true); }} onError={failed}
+      <img src={url} alt={`${label} evidence`} onLoad={() => { if (generation.current !== evidenceGeneration) return; setLoaded(true); onViewed(true); }} onError={failed}
         style={{ width: `${zoom * 100}%`, transform: `rotate(${rotation}deg)` }} className="rc-document-image" />}
   </div>;
   const controls = <div className="rc-viewer-tools" aria-label="Document view controls">
@@ -82,7 +109,7 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
     <div className="rc-viewer-heading"><span>Document evidence</span><button type="button" disabled={loading} onClick={() => void view()}>{loading ? 'Loading document…' : loaded ? 'View document again' : 'View document'}</button></div>
     {error && <p role="alert" className="rc-error">Document could not be displayed. {error}{missing && onRejectMissing && <> <button type="button" onClick={onRejectMissing}>Reject missing file</button></>}</p>}
     {!url && !error && <div className="rc-viewer-empty">Open the document before deciding — a decision without opening it is not a review.</div>}
-    {url && !full && <>{controls}{evidence}</>}
-    {full && <Modal title="Document full screen" onClose={() => setFull(false)} className="rc-fullscreen">{controls}{evidence}</Modal>}
+    {url && !full && <>{controls}{evidence}{comparison}</>}
+    {full && <Modal title="Document full screen" onClose={() => setFull(false)} className="rc-fullscreen">{controls}{evidence}{comparison}</Modal>}
   </section>;
 }

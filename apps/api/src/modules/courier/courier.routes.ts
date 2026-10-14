@@ -1,3 +1,4 @@
+import { assertRoadTripInMarket } from '../rides/road-trip-market';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
@@ -7,7 +8,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
 import { readCourierRates } from '../country/pricing-config';
-import { getMapsProvider } from '../../providers/maps/maps-provider';
+import { zMoneyWhole } from '../../utils/money-schema';
+import { assertRoadQuoteAvailable, getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { RIDER_PICKUP_FROM } from '../order/order-status';
@@ -23,6 +25,7 @@ import { redactCounterpartyPhone, redactLiveLocation, riderCounterpartySelect } 
 import { invalidateHomeCache } from '../user/home-cache';
 import { SupportService } from '../support/support.service';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
+import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -60,10 +63,16 @@ const orderSchema = z.object({
   packageSize: sizeSchema,
   packageDescription: z.string().trim().max(500).optional(),
   packagePhotoUrl: z.string().max(2048).optional(),
+  /** [GUARDRAILS §8 · owner #67] The sender's tick on "This parcel has no prohibited items". Absent from apps
+   *  before build 11; when sent, it is recorded on the order's own trail, and `false` books nothing. */
+  declaresNoProhibitedItems: z.boolean().optional(),
   speed: speedSchema,
   recipientName: z.string().trim().min(2).max(120),
   recipientPhone: z.string().trim().min(5).max(30),
   payer: z.enum(['SENDER', 'RECIPIENT']).default('SENDER'),
+  /** [PRICE-LOCK] The fee the sender was shown (POST /estimate totalFee). When
+   *  sent, the job is created only at it. Absent from apps before the lock. */
+  expectedFee: zMoneyWhole.optional(),
 });
 
 const cancelSchema = z.object({ reason: z.string().max(500).optional() });
@@ -160,8 +169,11 @@ async function quote(
   speed: DeliverySpeed,
   rates?: CourierRates,
 ) {
+  assertRoadTripInMarket({ pickup, dropoff });
   // Real road km when OSRM is configured; deterministic estimate otherwise.
-  const { km, source } = await courierMaps.routeKm(pickup, dropoff);
+  const route = await courierMaps.routeKm(pickup, dropoff);
+  assertRoadQuoteAvailable(route);
+  const { km, source } = route;
   // [ALG-18] Canonical BEFORE pricing: the fee and the frozen number are one number.
   const distanceKm = canonicalBillableKm(km);
   return { distanceKm, source, estimate: estimateCourierFee(distanceKm, size, speed, rates) };
@@ -210,7 +222,31 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Courier is disabled on this account after repeated failed payments. Contact support.');
     }
 
+    // [GUARDRAILS §8 · owner #67] Swift never delivers banned goods: the description is screened against the
+    // same list as the catalogue (disguises included) and refused in plain words, before anything is written.
+    if (body.declaresNoProhibitedItems === false) {
+      throw new AppError(409, 'PROHIBITED_PARCEL', 'Swift can\'t carry a parcel with a prohibited item in it.');
+    }
+    // A brand-first word ("Banks", "Corona", "Tiger") alone is not enough, but with a pack or a measure ("Banks 6
+    // pack", "Halls 9 pack") it is the goods. [DS1109 S4-1, DS1112 S4-2]
+    const prohibited = parcelProhibited(body.packageDescription);
+    if (prohibited) {
+      throw new AppError(409, 'PROHIBITED_PARCEL',
+        `Swift can't carry this parcel: Swift never delivers ${PROHIBITED_CLASS_LABELS[prohibited.prohibitedClass]}. If it's something else, describe it in other words.`,
+        { prohibitedClass: prohibited.prohibitedClass });
+    }
+
     const { distanceKm, source, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(userId));
+    // [PRICE-LOCK · owner: the price shown is the price charged] A fee that
+    // moved since the sender's quote (rates, the road) is shown to them again
+    // before anything is written; the job always stores the SERVER's fee. An
+    // app from before the lock sends none and books at the server fee.
+    if (body.expectedFee === undefined) {
+      request.log.info({ event: 'courier_order_unquoted' }, '[PRICE-LOCK] courier job requested without the fee the sender was shown (an app from before the lock); created at the server fee');
+    } else if (body.expectedFee !== estimate.totalFee) {
+      throw new AppError(409, 'PRICE_CHANGED', 'The fee for this parcel has changed. Check the new fee, then send it again.',
+        { expectedFee: body.expectedFee, fee: estimate.totalFee, currencyCode: estimate.currency });
+    }
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -260,7 +296,10 @@ export default async function courierRoutes(app: FastifyInstance) {
           estimatedDeliveryTime: estimate.estimatedMinutes,
           paymentMethod: 'CASH',
           statusHistory: {
-            create: { status: 'READY_FOR_PICKUP', changedBy: userId, note: `Courier requested — fee $${estimate.totalFee}` },
+            create: {
+              status: 'READY_FOR_PICKUP', changedBy: userId,
+              note: `Courier requested — fee $${estimate.totalFee}${body.declaresNoProhibitedItems ? '. The sender declared the parcel holds no prohibited items.' : ''}`,
+            },
           },
         },
       });

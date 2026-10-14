@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { MeiliSearch } from 'meilisearch';
 import type { PrismaClient } from '@prisma/client';
 import { VISIBLE_VENDOR, VISIBLE_VENDOR_REL, VISIBLE_VENDOR_SELECT, isVendorVisible } from '../vendor/vendor-visibility';
@@ -25,6 +26,21 @@ export interface SearchClientLike {
 
 /** One reconcile page: Meilisearch's getDocuments cap is 1000 per call. */
 const RECONCILE_PAGE = 1000;
+
+/**
+ * How forgiving the index is — written out, not left to the engine's
+ * defaults, so a settings edit (or an engine upgrade with other defaults)
+ * cannot quietly make customer search exact (owner, 13 Oct: search must find
+ * "similar words or words that are part of the item"). One slip from five
+ * letters, two from nine: the floors the database path (forgiving-text.ts
+ * MIN_TYPO_LENGTH) mirrors, so both engines forgive the same slips. Applied on
+ * every start by `initialize()` — updateSettings is idempotent and needs no
+ * migration of an existing index.
+ */
+export const TYPO_TOLERANCE = {
+  enabled: true,
+  minWordSizeForTypos: { oneTypo: 5, twoTypos: 9 },
+} as const;
 
 export class SearchService {
   private client: SearchClientLike;
@@ -64,6 +80,7 @@ export class SearchService {
       filterableAttributes: ['tenantId', 'entityId', 'vendorType', 'status', 'isCurrentlyOpen', 'cuisineTypes', 'averageRating', 'city', 'store_categories', 'derived_categories', 'top_rated'],
       sortableAttributes: ['averageRating', 'totalOrders', 'name', 'display_rating', 'rating_count'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
+      typoTolerance: TYPO_TOLERANCE,
     });
 
     const itemIndex = this.client.index(ITEM_INDEX);
@@ -72,6 +89,7 @@ export class SearchService {
       filterableAttributes: ['tenantId', 'entityId', 'vendorId', 'isAvailable', 'isPopular', 'dietaryTags', 'basePrice', 'categories'],
       sortableAttributes: ['basePrice', 'totalOrdered', 'name'],
       rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
+      typoTolerance: TYPO_TOLERANCE,
     });
   }
 
@@ -119,7 +137,7 @@ export class SearchService {
       // tenant.isActive, a shut-off operator's whole catalogue stayed
       // searchable until someone happened to re-sync after also suspending
       // the store itself.
-      where: VISIBLE_VENDOR,
+      where: VISIBLE_VENDOR(await readFeePause(this.prisma)),
       include: { categories: true },
     });
 
@@ -171,9 +189,9 @@ export class SearchService {
       // [B2] The vendor gate moves INTO the query and carries the full
       // predicate — the old post-fetch `status === 'ACTIVE'` filter let an
       // unverified or dead-tenant operator's dishes into the index.
-      where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL },
+      where: { isAvailable: true, vendor: VISIBLE_VENDOR_REL(await readFeePause(this.prisma)) },
       include: {
-        vendor: { select: { name: true, status: true, tenantId: true } },
+        vendor: { select: { name: true, status: true, tenantId: true, isCurrentlyOpen: true } },
         category: { select: { name: true } },
       },
     });
@@ -312,7 +330,7 @@ export class SearchService {
       return;
     }
 
-    if (isVendorVisible(vendor)) {
+    if (isVendorVisible(vendor, await readFeePause(this.prisma))) {
       const discovery = await this.vendorCategorySlugs([vendor.id]);
       const surface = (await ratingSurfaces(this.prisma, 'VENDOR', [vendor.id])).get(vendor.id);
       await this.client.index(VENDOR_INDEX).addDocuments([{
@@ -364,12 +382,13 @@ export class SearchService {
         // switched-off operator's DISHES stay searchable — the exact shape of
         // the #790 defect, where a deactivated operator's dish sat above the
         // fold while their store was already hidden.
-        vendor: { select: { name: true, tenantId: true, ...VISIBLE_VENDOR_SELECT } },
+        vendor: { select: { name: true, tenantId: true, isCurrentlyOpen: true, ...VISIBLE_VENDOR_SELECT } },
         category: { select: { name: true } },
       },
     });
 
-    const searchable = (i: (typeof items)[number]) => i.isAvailable && isVendorVisible(i.vendor);
+    const feePause = await readFeePause(this.prisma);
+    const searchable = (i: (typeof items)[number]) => i.isAvailable && isVendorVisible(i.vendor, feePause);
     const live = items.filter(searchable);
     const gone = items.filter((i) => !searchable(i));
 

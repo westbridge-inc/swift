@@ -4,6 +4,8 @@ import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { TenantKind } from '@prisma/client';
 import { enterTenant } from './prisma';
+import { runWithTenant } from './tenant-context';
+import { resolveIdentityById } from '../modules/auth/preauth-identity';
 import { AuthService } from '../modules/auth/auth.service';
 import {
   hasPrivilegedSessionAssurance,
@@ -79,6 +81,40 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   app.decorateRequest('tenantKind', null);
   const authService = new AuthService(app);
 
+  /**
+   * [L04 · R1 · OTA-016] The session behind an access token, and its account.
+   * Sessions carry no tenant and are not walled, so the session row is read
+   * directly; the account's tenant is not known until then, and the users
+   * table IS walled per tenant: the one pre-auth identity capability answers
+   * which account and which tenant, and the account is then read BOUND to
+   * that tenant. Null when the token has no live session or account (a
+   * verdict, not an outage).
+   */
+  async function readSessionPrincipal(token: string) {
+    const session = await app.prisma.session.findUnique({
+      where: { token },
+      select: { id: true, userId: true, expiresAt: true, authMethod: true },
+    });
+    if (!session) return null;
+    const identity = await resolveIdentityById(app.prisma, session.userId);
+    if (!identity) return null;
+    const user = await runWithTenant(identity.tenantId, () => app.prisma.user.findUnique({
+      where: { id: identity.id },
+      select: {
+        id: true,
+        tenantId: true,
+        tenant: { select: { kind: true } },
+        status: true,
+        roles: true,
+        activeRole: true,
+      },
+    }));
+    return user ? { id: session.id, expiresAt: session.expiresAt, authMethod: session.authMethod, user } : null;
+  }
+  /** The assurance logout, in the session's own tenant. */
+  const logoutInTenant = (session: { id: string; user: { id: string; tenantId: string } }) =>
+    runWithTenant(session.user.tenantId, () => authService.logout(session.id, session.user.id));
+
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
     let reviewTenant = false;
     try {
@@ -89,24 +125,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       // Logout/reset delete sessions, which kills the access token immediately.
       // [A-01 / W-01] a Bearer header, or — for a browser client from an allowed origin — the HttpOnly access cookie
       const token = bearerOrCookieToken(request);
-      const session = await app.prisma.session.findUnique({
-        where: { token },
-        select: {
-          id: true,
-          expiresAt: true,
-          authMethod: true,
-          user: {
-            select: {
-              id: true,
-              tenantId: true,
-              tenant: { select: { kind: true } },
-              status: true,
-              roles: true,
-              activeRole: true,
-            },
-          },
-        },
-      });
+      const session = await readSessionPrincipal(token);
       if (
         !session
         || session.expiresAt < new Date()
@@ -125,7 +144,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
         && !hasPrivilegedSessionAssurance(session.authMethod)
       ) {
-        await authService.logout(session.id, session.user.id);
+        await logoutInTenant(session);
         throw new AuthRefused('Privileged session assurance is insufficient');
       }
       // The JWT role is a short-lived transport hint, never current authority.
@@ -184,24 +203,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       const credentialSource = adoptCookieCredential(request); // [A-01 / W-01] a browser's HttpOnly cookie becomes the Bearer the JWT plugin verifies
       await request.jwtVerify();
       const token = bearerOrCookieToken(request);
-      const session = await app.prisma.session.findUnique({
-        where: { token },
-        select: {
-          id: true,
-          expiresAt: true,
-          authMethod: true,
-          user: {
-            select: {
-              id: true,
-              tenantId: true,
-              tenant: { select: { kind: true } },
-              status: true,
-              roles: true,
-              activeRole: true,
-            },
-          },
-        },
-      });
+      const session = await readSessionPrincipal(token);
       if (
         !session ||
         session.expiresAt < new Date() ||
@@ -217,7 +219,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         requiresPrivilegedSessionAssurance(session.user.activeRole, session.user.roles)
         && !hasPrivilegedSessionAssurance(session.authMethod)
       ) {
-        await authService.logout(session.id, session.user.id);
+        await logoutInTenant(session);
         request.authSessionId = null;
         request.authCredentialSource = null;
         (request as { user?: unknown }).user = undefined;

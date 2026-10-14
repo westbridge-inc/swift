@@ -1,5 +1,4 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { renderToString } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -34,7 +33,8 @@ const disconnect = vi.fn();
 const scrollIntoView = vi.fn();
 const page = () => <StorefrontExperience store={store} returnPath="/store/test-kitchen" />;
 const panel = () => screen.getByRole('complementary', { name: 'Your order and checkout' });
-const dock = () => screen.queryByRole('link', { name: /View your order/ });
+// [W4] The floating button is one tap to the one checkout page.
+const dock = () => screen.queryByRole('link', { name: /^Checkout · \d+ item/ });
 const reportIntersection = (isIntersecting: boolean) => act(() => {
   if (!intersect) throw new Error('Checkout observer was not installed');
   intersect([{ target: panel(), isIntersecting }]);
@@ -64,10 +64,18 @@ const tokenPx = (name: `--${string}`) => Number.parseFloat(String(swiftDesignVar
 
 beforeEach(() => {
   intersect = undefined;
+  // [W6] The one store page also watches its menu sections (to mark the chip
+  // being read). Only the observer watching the order panel is driven and
+  // counted here.
   vi.stubGlobal('IntersectionObserver', class {
-    constructor(callback: IntersectionReport) { intersect = callback; }
-    observe = observe;
-    disconnect = disconnect;
+    private watchesPanel = false;
+    private readonly report: IntersectionReport;
+    constructor(callback: IntersectionReport) { this.report = callback; }
+    observe = (target: Element) => {
+      observe(target);
+      if (target.id === 'checkout') { this.watchesPanel = true; intersect = this.report; }
+    };
+    disconnect = () => { if (this.watchesPanel) disconnect(); };
   });
   vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(scrollIntoView);
   vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: false } as MediaQueryList);
@@ -80,13 +88,28 @@ beforeEach(() => {
     items: [{ id: 'line', itemId: 'roti', name: 'Pumpkin roti', quantity: 1, customerPrice: 800, fulfillment: 'DELIVERY' }],
     subtotal: 800, totalAmount: 800,
   });
+  vi.spyOn(customer, 'addToCart').mockResolvedValue(undefined as never);
 });
 
+// [W6] The one store page sits inside the app's frame, so it has no store
+// top bar and no top-bar order link. The order has loaded once its line is in
+// the order panel.
 async function renderCart() {
   const view = render(page());
-  await waitFor(() => expect(screen.getByRole('link', { name: /Your order, 1 items/ })).toBeTruthy());
+  await waitFor(() => expect(within(panel()).getByText('1× Pumpkin roti')).toBeTruthy());
   return view;
 }
+
+// [W4] This page's other way to checkout (besides the floating button): the
+// "Checkout" link of the notice an Add shows.
+async function checkoutNoticeLink() {
+  const add = await screen.findByRole('button', { name: 'Add Soup' });
+  await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(add);
+  return screen.findByRole('link', { name: 'Checkout' });
+}
+// [W4] The order panel's own way on: its Checkout button.
+const panelCheckout = () => within(panel()).getByRole('button', { name: /^Checkout · / });
 
 describe('storefront mobile checkout access', () => {
   it('hides the dock until visibility is known, shows it off screen, hides it for any visible panel, and disconnects', async () => {
@@ -97,48 +120,23 @@ describe('storefront mobile checkout access', () => {
     expect(dock()).not.toBeNull();
     reportIntersection(true);
     expect(dock()).toBeNull();
-    expect(within(panel()).getByRole('button', { name: 'Place cash order' })).toBeTruthy();
+    expect(panelCheckout()).toBeTruthy();
     reportIntersection(false);
     expect(dock()).not.toBeNull();
     view.unmount();
     expect(disconnect).toHaveBeenCalledOnce();
   });
 
-  it.each([false, true])('both links scroll and focus the order heading on every tap (reduced motion: %s)', async reducedMotion => {
-    vi.mocked(window.matchMedia).mockReturnValue({ matches: reducedMotion } as MediaQueryList);
+  // [W4] The order is placed on the one checkout page, so the store page's
+  // links go there instead of scrolling to the order panel (#1590's scroll
+  // and focus on tap, and its reduced-motion scroll checks, have nothing to
+  // act on here).
+  it('both links go to the one checkout page', async () => {
     await renderCart();
-    if (intersect) reportIntersection(false);
-    const heading = within(panel()).getByRole('heading', { level: 2 });
-    const focus = vi.spyOn(heading, 'focus');
-    const basket = screen.getByRole('link', { name: /Your order, 1 items/ });
-    for (const link of [dock()!, basket, basket]) {
-      link.focus();
-      fireEvent.click(link);
-      // Reduced motion asks for 'auto': the page's own reduced-motion rule makes it a jump, and every
-      // engine accepts 'auto' (an engine that rejects 'instant' would throw before the focus moves).
-      expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
-      expect(scrollIntoView.mock.contexts.at(-1)).toBe(panel());
-      expect(document.activeElement).toBe(heading);
-      expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
-    }
-    expect(scrollIntoView).toHaveBeenCalledTimes(3);
-    expect(window.matchMedia).toHaveBeenCalledWith('(prefers-reduced-motion: reduce)');
-    if (intersect) reportIntersection(true);
-    basket.focus();
-    fireEvent.click(basket);
-    expect(scrollIntoView).toHaveBeenCalledTimes(4);
-    expect(document.activeElement).toBe(heading);
-  });
-
-  it('supports Enter from the basket link with the heading outside the tab order', async () => {
-    await renderCart();
-    const basket = screen.getByRole('link', { name: /Your order, 1 items/ });
-    basket.focus();
-    await userEvent.keyboard('{Enter}');
-    const heading = within(panel()).getByRole('heading', { level: 2 });
-    expect(document.activeElement).toBe(heading);
-    expect(heading.tabIndex).toBe(-1);
-    expect(scrollIntoView).toHaveBeenCalledOnce();
+    reportIntersection(false);
+    expect(dock()!.getAttribute('href')).toBe('/checkout');
+    expect((await checkoutNoticeLink()).getAttribute('href')).toBe('/checkout');
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 
   it('server-renders without browser observers and keeps checkout usable if the observer is unavailable', async () => {
@@ -146,8 +144,8 @@ describe('storefront mobile checkout access', () => {
     expect(renderToString(page())).toContain('id="checkout"');
     await renderCart();
     expect(dock()).toBeNull();
-    fireEvent.click(screen.getByRole('link', { name: /Your order, 1 items/ }));
-    expect(document.activeElement).toBe(within(panel()).getByRole('heading', { level: 2 }));
+    expect((panelCheckout() as HTMLButtonElement).disabled).toBe(false);
+    expect((await checkoutNoticeLink()).getAttribute('href')).toBe('/checkout');
   });
 
   it('retains measured clearance when the dock hides and updates it when text wraps', async () => {
@@ -162,7 +160,8 @@ describe('storefront mobile checkout access', () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ height }) as DOMRect);
     const view = await renderCart();
     reportIntersection(false);
-    const clearance = () => view.container.querySelector('main')!.style.getPropertyValue('--swift-order-dock-height');
+    // [W6] The app's frame owns <main>; the store page's own root carries the measurement.
+    const clearance = () => (view.container.firstElementChild as HTMLElement).style.getPropertyValue('--swift-order-dock-height');
     expect(clearance()).toBe('64px');
     height = 96;
     act(resize);
@@ -176,12 +175,32 @@ describe('storefront mobile checkout access', () => {
     expect(css).toMatch(/\.railTitle:focus\s*\{[^}]*outline:/);
   });
 
+  it('measures the dock again when it comes back after an item’s sheet closes', async () => {
+    let height = 64;
+    vi.stubGlobal('ResizeObserver', class {
+      observe = vi.fn();
+      disconnect = vi.fn();
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ height }) as DOMRect);
+    // [W6] A link that names an item opens its sheet; the dock waits while it is open.
+    const view = render(<StorefrontExperience store={store} returnPath="/store/test-kitchen" initialItemId="soup" />);
+    const sheet = await screen.findByRole('dialog', { name: 'Soup' });
+    const orderPanel = document.getElementById('checkout')!;
+    await waitFor(() => expect(orderPanel.textContent).toContain('1× Pumpkin roti'));
+    act(() => intersect!([{ target: orderPanel, isIntersecting: false }]));
+    expect(dock()).toBeNull();
+    height = 80;
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Close item options' }));
+    await waitFor(() => expect(dock()).not.toBeNull());
+    expect((view.container.firstElementChild as HTMLElement).style.getPropertyValue('--swift-order-dock-height')).toBe('80px');
+  });
+
   it('follows the latest crossing when one observer callback reports several, so the dock never sits over a visible panel', async () => {
     await renderCart();
     // Panel scrolled away and back before the callback ran: it is on screen now.
     reportCrossings(false, true);
     expect(dock()).toBeNull();
-    expect(within(panel()).getByRole('button', { name: 'Place cash order' })).toBeTruthy();
+    expect(panelCheckout()).toBeTruthy();
     // Scrolled in and out again: it is off screen now, so the dock returns.
     reportCrossings(true, false);
     expect(dock()).not.toBeNull();
@@ -189,39 +208,28 @@ describe('storefront mobile checkout access', () => {
     expect(dock()).toBeNull();
   });
 
-  it('still scrolls and focuses the order heading under reduced motion where the browser rejects the instant scroll value', async () => {
-    vi.mocked(window.matchMedia).mockReturnValue({ matches: true } as MediaQueryList);
-    // An engine without the 'instant' value throws a TypeError for it, as WebIDL requires.
-    scrollIntoView.mockImplementationOnce((options?: ScrollIntoViewOptions) => {
-      if (options?.behavior === 'instant') throw new TypeError("'instant' is not a valid ScrollBehavior value");
-    });
-    await renderCart();
-    const heading = within(panel()).getByRole('heading', { level: 2 });
-    fireEvent.click(screen.getByRole('link', { name: /Your order, 1 items/ }));
-    // The tap must never "do nothing": focus lands on the order heading.
-    expect(document.activeElement).toBe(heading);
-    expect(scrollIntoView).toHaveBeenCalledOnce();
-    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'auto', block: 'start' });
-    expect(scrollIntoView.mock.contexts.at(-1)).toBe(panel());
-  });
-
   it('lands the order panel below the phone header and the stuck category bar', () => {
     const css = readFileSync(`${process.cwd()}/src/components/storefront/storefront.module.css`, 'utf8');
-    const phone = mediaBlocks(css, '(max-width: 56.25em)').join('\n');
+    // [W6] One column (the phone layout) starts at 68.75em on the one store page.
+    const phone = mediaBlocks(css, '(max-width: 68.75em)').join('\n');
     const phoneRail = phone.match(/(?:^|\n)\s*\.rail\s*\{([^}]*)\}/)?.[1] ?? '';
-    // Same offset the menu sections use on a phone.
     expect(phoneRail).toMatch(/scroll-margin-block-start:\s*var\(--swift-section-scroll\);/);
-    expect(css).toMatch(/\.section\s*\{[^}]*scroll-margin-block-start:\s*var\(--swift-section-scroll\);/);
-    // The header bar (touch + lg) and the category bar stuck under it (touch link + sm above and below).
-    const stuckChrome = tokenPx('--swift-touch') + tokenPx('--swift-space-lg') + tokenPx('--swift-touch') + 2 * tokenPx('--swift-space-sm');
+    // [W6] Inside the app's frame nothing sits above the store's category bar
+    // on a phone (no store header; the app's tabs are at the bottom). The bar
+    // sticks at the top: a touch-size link, md padding above and below, a rule.
+    expect(css).toMatch(/\.categoryNav\s*\{[^}]*position:\s*sticky;[^}]*inset-block-start:\s*0;[^}]*padding-block:\s*var\(--swift-space-md\);/);
+    const stuckChrome = tokenPx('--swift-touch') + 2 * tokenPx('--swift-space-md') + 1;
     expect(tokenPx('--swift-section-scroll')).toBeGreaterThan(stuckChrome);
+    // And the panel never lands higher than the menu sections do.
+    const section = css.match(/(?:^|\n)\.section\s*\{[^}]*scroll-margin-block-start:\s*calc\(var\(--swift-touch\) \+ var\(--swift-space-2xl\)\);/);
+    expect(section).not.toBeNull();
+    expect(tokenPx('--swift-section-scroll')).toBeGreaterThanOrEqual(tokenPx('--swift-touch') + tokenPx('--swift-space-2xl'));
   });
 
-  it('announces the focused heading as the order panel to screen readers, with the visible title unchanged', async () => {
+  it('announces the order panel’s heading to screen readers as the order, with the visible title unchanged', async () => {
     await renderCart();
-    fireEvent.click(screen.getByRole('link', { name: /Your order, 1 items/ }));
     const heading = within(panel()).getByRole('heading', { level: 2, name: 'Your order, Test Kitchen' });
-    expect(document.activeElement).toBe(heading);
+    expect(heading.tabIndex).toBe(-1);
     const prefix = heading.querySelector('.sr-only');
     expect(prefix?.textContent).toBe('Your order, ');
     expect(heading.textContent?.slice(prefix?.textContent?.length ?? 0)).toBe('Test Kitchen');
@@ -233,9 +241,11 @@ describe('storefront item photo fallback', () => {
     await renderCart();
     const roti = screen.getByRole('heading', { name: 'Pumpkin roti' }).closest('article')!;
     const soup = screen.getByRole('heading', { name: 'Soup' }).closest('article')!;
-    // The row also has an add button icon; the tile is its decorative final child.
+    // The row also has an add button icon; the tile is its decorative final child
+    // ([W6] the app's shared photo placeholder: no text, and its pictogram is hidden).
     const tile = soup.lastElementChild!;
-    expect(tile.getAttribute('aria-hidden')).toBe('true');
+    expect(tile.textContent).toBe('');
+    expect(tile.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
     expect(tile.querySelector('svg path')).not.toBeNull();
     expect(soup.querySelector('img')).toBeNull();
     fireEvent.error(within(roti).getByRole('img', { name: 'Pumpkin roti' }));

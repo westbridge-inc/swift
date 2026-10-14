@@ -8,6 +8,8 @@ import { authApi } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { formatResendWait, OTP_RESEND_WINDOW_S, otpCooldownOf } from '../../lib/otpCooldown';
 import { useCountdown } from '../../hooks/useCountdown';
+import { accountBlockedOf, accountSupportMailto } from '../../lib/accountBlocked';
+import { openSupportMail } from '../../lib/accountBlockedAlert';
 import { Header, PillButton, Screen, T } from '../../kit';
 
 const CODE_LEN = 6;
@@ -67,8 +69,12 @@ export function OtpVerificationScreen() {
     if (clean.length === CODE_LEN && !verify.isPending) verify.mutate(clean);
   };
 
+  // [NO-DEAD-ENDS] A suspended, banned or closed account is refused here with
+  // nowhere to go: Get Help and the appeal need the session it was refused.
+  // Say which state it is in and open the one door that needs no session.
+  const blocked = verify.isError ? accountBlockedOf(verify.error) : null;
   const err = verify.isError
-    ? ((verify.error as any)?.response?.data?.error?.message ?? 'That code didn’t match. Try again.')
+    ? (blocked?.message ?? (verify.error as any)?.response?.data?.error?.message ?? 'That code didn’t match. Try again.')
     : undefined;
 
   return (
@@ -138,6 +144,17 @@ export function OtpVerificationScreen() {
           >
             {err}
           </T>
+        ) : null}
+        {blocked ? (
+          <PillButton
+            testID="otp-account-blocked-support"
+            label="Email Swift support"
+            variant="soft"
+            icon="mail"
+            size="md"
+            style={{ marginTop: space.md, alignSelf: 'flex-start' }}
+            onPress={() => openSupportMail(accountSupportMailto(blocked, phone), blocked.supportEmail)}
+          />
         ) : null}
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space['2xl'] }}>
