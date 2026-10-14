@@ -15,7 +15,9 @@ export type LinkDestination =
   | { kind: 'store'; slug: string; code: string | null }
   | { kind: 'short'; code: string };
 
-const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,79}$/;
+// A store address as the server mints it: the name plus a nanoid code
+// (capitals, digits, `-`, `_`). The same rule as the website's STORE_SLUG_RE.
+const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const CODE_RE = /^[23456789bcdfghjkmnpqrstvwxyz]{10}$/i;
 
 // ---------------------------------------------------------------------------

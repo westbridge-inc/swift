@@ -40,6 +40,15 @@ describe('the guest basket', () => {
   it('ignores corrupt storage and never accepts an unbounded or malformed price', () => {
     localStorage.setItem('swift_guest_basket_v1', '{broken'); expect(readGuestBasket().lines).toEqual([]);
     expect(() => addGuestLine({ ...soup, storeSlug: '../dashboard' })).toThrow();
+  });
+  it('accepts the store addresses the server really mints (name + mixed-case code with _ or -)', () => {
+    for (const storeSlug of ['green-bowl-MSFa7a', 'sample-kitchen-aaKL9_', 'store-x-Y_z-1']) {
+      clearGuestBasket();
+      expect(addGuestLine({ ...soup, storeSlug, returnPath: `/store/${storeSlug}` })).toBe('ADDED');
+    }
+    for (const storeSlug of ['bad.slug', 'a/b', '-leading', '_leading', 'x'.repeat(81)]) {
+      expect(() => addGuestLine({ ...soup, storeSlug })).toThrow();
+    }
     for (const unitPrice of [NaN, Infinity, -1]) expect(() => addGuestLine({ ...soup, unitPrice })).toThrow();
   });
 });
