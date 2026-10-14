@@ -646,6 +646,20 @@ describe('the price on screen is the price booked', () => {
     expect(sent('post /rides/queue/join').map((c) => bodyOf(c).expectedFare)).toEqual([2400, 2600]);
   });
 
+  it('nobody joins the queue without a fare on screen', async () => {
+    fx.routes['get /rides/supply'] = () => ok({ online: 0, busy: 0, level: 'NONE', nearestEtaMinutes: null });
+    fx.routes['get /rides/availability'] = () => ok({ level: 'NONE', nearestEtaMinutes: null, gate: true });
+    fx.routes['post /rides/estimate'] = () => refuse(503, 'ROUTE_UNAVAILABLE');
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    const join = byLabel('Join the queue');
+    expect(join?.hasAttribute('disabled')).toBe(true);
+    expect(byTestId('taxi-queue-needs-fare')?.textContent).toBe('You join the line at the fare you see — waiting for the fare.');
+    join?.click();
+    await settle();
+    expect(sent('post /rides/queue/join')).toHaveLength(0);
+  });
+
   it('courier sends the fee on the button, and a changed fee is quoted again before anything is sent', async () => {
     let fee = 1160;
     fx.routes['get /courier/orders'] = () => ok([]);
