@@ -22,11 +22,17 @@ describe('no cancellation fee is worded anywhere a customer cancels', () => {
   });
 });
 
+describe('[DS1141 S1] only the server says "free"', () => {
+  it.each([['DeliveryScreen', DELIVERY], ['TaxiScreen', TAXI]])('%s authors no "free" claim of its own', (_name, text) => {
+    expect(text).not.toMatch(/Cancelling is free|free right now/i);
+  });
+});
+
 describe('the server’s verdict, and who to contact', () => {
   it('the order screen shows the refusal in the server’s words with the store’s published number to call', () => {
     expect(DELIVERY).toMatch(/o\.cancelUnavailable\?\.message/);
     expect(DELIVERY).toMatch(/openExternal\(`tel:\$\{o\.cancelUnavailable\.contactPhone\}`\)/);
-    expect(DELIVERY).toMatch(/o\.cancellationMessage \?\?/);
+    expect(DELIVERY).toMatch(/cancelPreviewFresh && o\.cancellationMessage/);
   });
 
   it('the ride screen reads the server’s canCancel and shows its reason', () => {

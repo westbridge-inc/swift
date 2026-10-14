@@ -1477,14 +1477,15 @@ export function DeliveryScreen() {
               ? `Cancelling stops this ${cancelledNoun}. If you already sent the MMG payment, ${refundParty} refunds you directly.`
               : `Cancelling stops this ${cancelledNoun}. We’ll show the final result when cancellation is confirmed.`}
         </T>
-        {/* [owner #46/#50] Free, in the server's own words — never a fee. */}
-        {cancelPreviewFresh ? (
+        {/* [owner #46/#50] The server's own words — never a fee, and never a
+            "free" the app authored itself (DS1141 S1). */}
+        {cancelPreviewFresh && o.cancellationMessage ? (
           <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
             <DecorativeIcon>
               <Feather name="info" size={18} color={color.info} />
             </DecorativeIcon>
             <T variant="label" tone="info" style={{ flex: 1 }}>
-              {o.cancellationMessage ?? 'Cancelling is free. We’ll check again when you confirm.'}
+              {o.cancellationMessage}
             </T>
           </View>
         ) : null}

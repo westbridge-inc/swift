@@ -750,7 +750,8 @@ export default function OrderDetailPage() {
           {confirmingCancel && canOfferCancellation ? (
             <div className={styles.cancelConfirm}>
               <p id="cancellation-quote">
-                {`${order.cancellationMessage ?? 'Cancelling is free.'}${order.freeCancellationExpiresAt ? ` You can cancel until ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}.` : ''} ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift checks again before cancelling.`}
+                {/* [DS1141 S1] Only the server's own words say "free"; with none, the copy stays neutral. */}
+                {`${order.cancellationMessage ? `${order.cancellationMessage} ` : ''}${order.freeCancellationExpiresAt ? `You can cancel until ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}. ` : ''}${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift checks again before cancelling and shows the final result.`}
               </p>
               <div className={styles.confirmActions}>
                 <button ref={cancelConfirmButton} type="button" className={styles.primaryButton} aria-describedby="cancellation-quote" disabled={cancelling} onClick={() => void confirmCancellation()}>

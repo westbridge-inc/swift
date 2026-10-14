@@ -49,7 +49,7 @@ const NOT_EDITABLE_HERE: { title: string; body: string }[] = [
   },
   {
     title: 'Cancellation rule',
-    body: 'Product law shipped as code: no cancellation fee. A store order cancels free until the store accepts it; a ride, parcel or booking cancels free for 5 minutes; very late orders and orders with no mover found always cancel free. The app, the API and this dashboard can never disagree.',
+    body: 'Product law in the API\'s one cancel rule: a cancel is free or refused, never a fee. A store order cancels free until the store accepts it; a ride, parcel or booking cancels free for 5 minutes; very late orders and orders with no mover found cancel free. The apps show the API\'s verdict.',
   },
   {
     title: 'Dispatch offer timeout',

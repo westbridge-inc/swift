@@ -249,4 +249,15 @@ describe('[owner #46/#50] cancel: free, or contact the store — never a fee', (
     expect(screen.getByText(/You can cancel for free until the store accepts your order\./)).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/fee was recorded|cancellation fee|late-cancellation/i);
   });
+
+  it('[DS1141 S1] with no server message (an older server) the page never authors "free" itself', async () => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...cashOrder, status: 'DRIVER_ASSIGNED', canCancel: true, cancellationFee: 500,
+    } as never);
+    render(<OrderDetailPage />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Review cancellation' }));
+    const quote = document.getElementById('cancellation-quote');
+    expect(quote?.textContent).toMatch(/shows the final result/);
+    expect(quote?.textContent?.toLowerCase()).not.toContain('free');
+  });
 });

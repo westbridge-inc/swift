@@ -1732,14 +1732,16 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
           Cancel this ride?
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          {/* [owner #50] Never a fee: a cancel the server allows is free. */}
+          {/* [owner #50] Never a fee, and never a "free" the app authored itself
+              (DS1141 S1): the server's own words when it gives them. */}
           {d
             ? arrived
-              ? 'Your driver has arrived. Cancelling is free right now, and frees your driver for other rides.'
+              ? 'Your driver has arrived. Cancelling frees your driver for other rides.'
               : status === 'DRIVER_EN_ROUTE'
-                ? 'Your driver is already on the way. Cancelling is free right now, and frees your driver for other rides.'
-                : 'Your driver accepted the ride. Cancelling is free right now, and frees your driver for other rides.'
+                ? 'Your driver is already on the way. Cancelling frees your driver for other rides.'
+                : 'Your driver accepted the ride. Cancelling frees your driver for other rides.'
             : 'We’ll stop looking for a driver.'}
+          {typeof ride.cancellationMessage === 'string' ? ` ${ride.cancellationMessage}` : ''}
         </T>
         {cancelRideError ? (
           <T variant="body" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.lg }}>
