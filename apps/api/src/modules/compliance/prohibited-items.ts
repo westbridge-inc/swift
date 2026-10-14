@@ -613,12 +613,11 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
       const brand = BRAND_FIRST[first];
       if (brand) return { prohibitedClass: brand.prohibitedClass, term: first };
     }
-    // Further in, with a measure of its kind after it ("Pack of Camel 20s"), it is held for a person too. [DS1261 S2]
-    for (const part of undisguise(text).split(SEGMENT_BREAK)) {
-      for (const reading of readings(part, noSoftDrinks)) {
-        const hit = brandMeasuredAnywhere(reading.split(' '));
-        if (hit) return hit;
-      }
+    // Anywhere else, with a measure of its kind in either order ("Pack of Camel 20s", "20s Camel"), it is held for a
+    // person too. [DS1261 S2, DS1263 S3]
+    for (const reading of measureReadings(text, noSoftDrinks)) {
+      const hit = brandWithMeasure(reading.split(' '));
+      if (hit) return hit;
     }
   }
   return options.splitWords === false ? null : splitWordHit(text);
@@ -683,26 +682,38 @@ function afterLeadingCount(words: readonly string[]): readonly string[] {
   return words.slice(start);
 }
 
+/** "2o" for "20", "2os" for "20s": the letter o written for a zero in a number. [DS1263 S3] */
+function numberLeet(w: string): string {
+  return /^\d+(o+s?|[o\d]*\d)$/.test(w) ? w.replace(/o/g, '0') : w;
+}
+
+/** The text's readings for a measure: "20$" is read as "20s" (the dollar sign is a letter s, as in "Hennes$y"), and a
+ *  letter o in a number as a zero. [DS1263 S3] */
+function measureReadings(text: string, noSoftDrinks: boolean): string[] {
+  return readings(text.replace(/(\d)\$/g, '$1s'), noSoftDrinks).map((r) => r.split(' ').map(numberLeet).join(' '));
+}
+
 /**
- * A brand-first word anywhere in one part of the text, with a measure of its kind anywhere after it: "Pack of Camel
- * 20s", "Camel Blue 20 pack king size", "Bayer 100 tablets box". The catalogue holds it for a person; a parcel, which
- * no person reviews, is refused. A lozenge brand counts by any measure here: it is only ever held in the catalogue
- * (#58). [DS1261 S2]
+ * A brand-first word anywhere in the text with a measure of its kind anywhere else in it, in either order: "Pack of
+ * Camel 20s", "Camel Blue 20 pack king size", "20s Camel", "Camel, 20s". For a tobacco or medicine brand, a bare count
+ * right after it is its measure too ("Camel 20", "Bayer 30"). The catalogue holds it for a person; a parcel, which no
+ * person reviews, is refused. A lozenge brand counts by any measure here: it is only ever held in the catalogue (#58).
+ * An "empty" container is not let through either: held, as "Empty Hennessy bottle" is (DS1110 S3-4). [DS1261 S2,
+ * DS1263 S2/S3]
  */
-function brandMeasuredAnywhere(words: readonly string[]): { prohibitedClass: ProhibitedClass; term: string } | null {
-  // "Empty Camel 20s" is not let through either: an empty container is held for a person, like "Empty Hennessy
-  // bottle" (DS1110 S3-4), and a parcel has none.
+function brandWithMeasure(words: readonly string[]): { prohibitedClass: ProhibitedClass; term: string } | null {
   for (let i = 0; i < words.length; i += 1) {
     const brand = BRAND_FIRST[words[i]!];
     if (!brand) continue;
-    const rest = words.slice(i + 1);
+    const others = words.filter((_, j) => j !== i);
     const kind = brand.measure === 'none' ? 'any' : brand.measure ?? 'any';
-    const aged = brand.prohibitedClass === 'ALCOHOL' && rest.some((w) => AGE_STATEMENT.test(w));
-    const ofItsKind = kind === 'any' ? aged || rest.some((w) => DRINK_MEASURE.test(w))
-      : kind === 'liquid' ? aged || rest.some((w) => LIQUID_MEASURE.test(w))
-        : rest.some((w) => TOBACCO_MEASURE.test(w));
-    const dosed = brand.prohibitedClass === 'MEDICINE' && rest.some((w) => PILL_MEASURE.test(w));
-    if (ofItsKind || dosed) return { prohibitedClass: brand.prohibitedClass, term: words[i]! };
+    const aged = brand.prohibitedClass === 'ALCOHOL' && others.some((w) => AGE_STATEMENT.test(w));
+    const ofItsKind = kind === 'any' ? aged || others.some((w) => DRINK_MEASURE.test(w))
+      : kind === 'liquid' ? aged || others.some((w) => LIQUID_MEASURE.test(w))
+        : others.some((w) => TOBACCO_MEASURE.test(w));
+    const dosed = brand.prohibitedClass === 'MEDICINE' && others.some((w) => PILL_MEASURE.test(w));
+    const counted = (brand.prohibitedClass === 'TOBACCO' || brand.prohibitedClass === 'MEDICINE') && /^\d+$/.test(words[i + 1] ?? '');
+    if (ofItsKind || dosed || counted) return { prohibitedClass: brand.prohibitedClass, term: words[i]! };
   }
   return null;
 }
@@ -784,11 +795,6 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
       if (noun) return { prohibitedClass: CLASS_OF.get(noun)!, term: noun };
       const pack = brandPack(words, options);
       if (pack) return pack;
-      // No person reviews a parcel: a brand with a measure of its kind anywhere after it is the goods. [DS1261 S2]
-      if (options.noReviewer) {
-        const anywhere = brandMeasuredAnywhere(words);
-        if (anywhere) return anywhere;
-      }
     }
   }
   return null;
@@ -801,7 +807,17 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
  */
 export function parcelProhibited(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
-  return classifyText(text, { brandFirst: false }) ?? certainGoods(text, { noReviewer: true });
+  return classifyText(text, { brandFirst: false }) ?? certainGoods(text, { noReviewer: true }) ?? parcelBrandWithMeasure(text);
+}
+
+/** No person reviews a parcel: it is read whole, so a brand-first word with a measure of its kind anywhere in it, in
+ *  any part and either order, is the goods ("Camel, 20s", "20s Camel", "Camel 20$"). [DS1261 S2, DS1263 S2/S3] */
+function parcelBrandWithMeasure(text: string): { prohibitedClass: ProhibitedClass; term: string } | null {
+  for (const reading of measureReadings(text, true)) {
+    const hit = brandWithMeasure(reading.split(' '));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /** A platform (discovery) category, judged by its immutable slug and its name — never its aliases. */

@@ -397,7 +397,7 @@ describe('[§8 launch · DS1112] the fourth review', () => {
     expect(parcelProhibited(parcel)).not.toBeNull();
   });
   it.each(['Bounty paper towels 2 pack white', 'Davidoff Cool Water 125ml gift', 'Tiger prawns 500g frozen', 'Banks birthday card',
-    'Shoes for Ron', 'Gift for Ron, 2 bottles of pepper sauce', 'Halls', 'A Bounty bar'])('a parcel of %s is carried (no measure of its kind)', (parcel) => {
+    'Shoes for Ron', 'Halls', 'A Bounty bar'])('a parcel of %s is carried (no measure of its kind)', (parcel) => {
     expect(parcelProhibited(parcel)).toBeNull();
   });
   // A count before the brand is not a different product: "1 Camel 20s" is judged as "Camel 20s", as a name and an option.
@@ -415,5 +415,24 @@ describe('[§8 launch · DS1112] the fourth review', () => {
   );
   it.each(['Shoes for Ron', 'Cake for the Banks family', 'Paper towels for Ron'])('%s stays clear (a brand-first word that is not first, with no measure)', (name) => {
     expect(verdict(name).state).toBe('CLEAR');
+  });
+
+  // [DS1263 S2/S3] A parcel is read whole: the brand and its measure in different parts ("Camel, 20s", "Newport (20s)"),
+  // in either order ("20s Camel"), a count right after a tobacco or medicine brand ("Camel 20"), or a measure written
+  // with a dollar sign or the letter o ("20$", "2o"). The catalogue holds the same shapes for a person.
+  it.each(['Camel - 20s', 'Camel, 20s', 'Newport (20s)', 'Bayer / 30 tabs', 'Velo|20 pouches', 'Camel 20$', 'Camel 2o', 'Camel 2os',
+    'Camel 20', 'Camel - 20', '20s Camel', '20s of Camel', '20$ Camel', '6 pack Banks', '30 tabs Bayer', 'Bayer 30',
+    // A brand in one part and a measure in another is the same shape, whatever the brand word means there. (S4: the
+    // sender is told to describe it in other words.)
+    'Gift for Ron, 2 bottles of pepper sauce'])('a parcel of %s is refused', (parcel) => {
+    expect(parcelProhibited(parcel)).not.toBeNull();
+  });
+  it.each(['Bounty paper towels 2 pack', 'Bounty 2', 'Davidoff Cool Water 125ml', 'Tiger prawns 500g', 'Banks birthday card', '2 Tiger shirts',
+    'Tiger shirt size 12', 'Shoes for Ron', 'Banks 2 birthday cards'])('a parcel of %s is carried', (parcel) => {
+    expect(parcelProhibited(parcel)).toBeNull();
+  });
+  it.each(['Pack of Camel 20$', '20s Camel', '20s of Camel', '6 pack Banks', '30 tabs Bayer', 'Pack of Camel 2o'])('%s in the catalogue is held for a person', (name) => {
+    expect(verdict(name).state).toBe('WAITING');
+    expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('WAITING');
   });
 });
