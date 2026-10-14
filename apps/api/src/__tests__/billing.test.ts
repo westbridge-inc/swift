@@ -956,6 +956,28 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     await booksAgree(fx.subId);
   });
 
+  it('[owner ruling 14 Oct · Opus S4-2] the admin who asked for the set-aside may approve its release: nothing leaves Swift', async () => {
+    const fx = await storeWithCredit(6000);
+    // `admin` asks for the set-aside (headers() carries admin's token); the helper's second admin approves it.
+    expect((await setAside(fx.subId, 6000)).statusCode).toBe(200);
+    const askedAside = await app.prisma.privilegedApproval.findFirst({
+      where: { action: { contains: 'refund-credit/set-aside' }, entityId: fx.subId, status: 'APPLIED' }, select: { requestedBy: true },
+    });
+    expect(askedAside?.requestedBy).toBe(admin.userId);
+    // `other` asks for the release and `admin`, the set-aside's requester, approves it. Unlike the payout
+    // record (REFUND_SAME_PERSON), a release has no pair rule: the money goes back to the partner's fee credit.
+    const back = await twoPeople(other, admin, 'POST', url(fx.subId, 'release'), { amount: 6000, setAsideId: await openSetAsideIdOf(fx.subId) });
+    expect(back.statusCode, back.payload).toBe(200);
+    expect(back.json().data).toMatchObject({ amount: 6000, balance: 6000, refundSetAside: 0 });
+    const approvedRelease = await app.prisma.privilegedApproval.findFirst({
+      where: { action: { contains: 'refund-credit/release' }, entityId: fx.subId }, select: { requestedBy: true, approvedBy: true },
+    });
+    expect(approvedRelease).toMatchObject({ requestedBy: other.userId, approvedBy: admin.userId });
+    expect(await wallet(fx.subId)).toBe(6000);
+    expect(await events(fx.subId, 'PREPAID_REFUND_RELEASED')).toHaveLength(1);
+    await booksAgree(fx.subId);
+  });
+
   it('[Sol S1] one transfer reference records one refund across every account: a second account cannot use it, in any letter case', async () => {
     const a = await storeWithCredit(15000);
     const b = await storeWithCredit(15000);
