@@ -62,6 +62,7 @@ import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
 } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
+import { readFareBreakdown } from '../rides/taxi-waiting';
 import { createHash } from 'node:crypto';
 import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
@@ -74,6 +75,7 @@ import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
+import { readFeePause } from '../billing/mmg-pause';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { catalogueChecksFor, flaggedItemsInTenant, wordsFor } from '../compliance/prohibited-gate';
@@ -1492,7 +1494,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const goLive = await verification.vendorGoLive(id);
     if (!goLive) throw new NotFoundError('Vendor', id);
     const subscription = vendor.subscription ?? null;
-    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription }, goLive);
+    const feePause = await readFeePause(app.prisma, process.env, subscription?.id);
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription, feePause }, goLive);
     return {
       success: true,
       data: {
@@ -1502,7 +1505,7 @@ export async function adminRoutes(app: FastifyInstance) {
         suspensionSource: vendor.suspensionSource,
         ownerAccountStatus: vendor.owner.user.status,
         subscriptionStatus: subscription?.status ?? null,
-        feeOperable: feeOperable(subscription),
+        feeOperable: feeOperable(subscription, feePause),
         isVerified: vendor.isVerified,
         activationValidUntil: vendor.activationValidUntil,
         role: goLive.role,
@@ -1552,7 +1555,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const goLive = await verification.vendorGoLive(id);
     if (!goLive) throw new NotFoundError('Vendor', id);
-    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription: vendor.subscription ?? null }, goLive);
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription: vendor.subscription ?? null, feePause: await readFeePause(app.prisma, process.env, vendor.subscription?.id) }, goLive);
     const refused = vendorActivationRefusal(next, vendor.name, goLive);
     if (refused) throw refused;
 
@@ -1584,7 +1587,7 @@ export async function adminRoutes(app: FastifyInstance) {
         });
         const freshGoLive = await verification.vendorGoLive(id, tx);
         if (!freshGoLive) throw new NotFoundError('Vendor', id);
-        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null }, freshGoLive);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null, feePause: await readFeePause(tx, process.env, fresh.subscription?.id) }, freshGoLive);
         const refusedNow = again === 'CAN_REINSTATE' ? null
           : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
         if (refusedNow) throw refusedNow;
@@ -2460,7 +2463,12 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true, ridePinAttempts: true },
     });
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}) } };
+    // [TAXI waiting charge] A ride whose waiting charge was frozen shows it,
+    // itemised and read-only (route fare + waiting = total). Any other order
+    // gains no key.
+    const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), ...(fareBreakdown ? { fareBreakdown } : {}) } };
   });
 
   /**
@@ -5051,6 +5059,15 @@ export async function adminRoutes(app: FastifyInstance) {
       return updated;
     });
     return { success: true, data: { ingestionMode: row.value } };
+  });
+
+  // [PROD-PATH] The fee pause (billing/fee-pause.ts): whether partners'
+  // weekly fees are paused because no way to pay is live, since when, whether
+  // a resume is still being recorded, and how many of this tenant's fees the
+  // pause holds. Read-only; the pause itself follows the server's switches.
+  app.get('/billing/fee-pause', { preHandler: [adminGuard] }, async () => {
+    const { feePauseStatus } = await import('../billing/mmg-pause');
+    return { success: true, data: await feePauseStatus(app.prisma, subscriptionTenantScope(requireTenantId())) };
   });
 
   app.get('/billing/confirmations', { preHandler: [adminGuard] }, async () => {

@@ -19,12 +19,12 @@ function setup(failure: { status?: number; code?: string }) {
 }
 
 describe('[owner ruling 8 Oct] a checkout refused at the four-week limit', () => {
-  it('says the fee is paid ahead as far as Swift allows, opens nothing, and keeps the next tap fresh', async () => {
+  it('says the next weekly fee is already paid (one week at a time, owner #62), opens nothing, and keeps the next tap fresh', async () => {
     const { session, transport, views } = setup({ status: 409, code: 'PAY_AHEAD_LIMIT' });
     session.activate();
     await session.pay();
     expect(transport.open).not.toHaveBeenCalled();
-    expect(views.at(-1)?.error).toBe('Your weekly fee is already paid ahead as far as Swift allows (4 weeks). You can pay again once a week has been used.');
+    expect(views.at(-1)?.error).toBe('Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.');
   });
 
   it('any other refusal keeps its own words', async () => {

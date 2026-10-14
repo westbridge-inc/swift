@@ -1,3 +1,4 @@
+import { readFeePause } from '../modules/billing/mmg-pause';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -108,8 +109,8 @@ const withRelations = (id: string) => app.prisma.subscription.findUniqueOrThrow(
 /** The store gates at one instant: the in-memory rule and its SQL form agree. */
 async function storeGate(subId: string, at: Date) {
   const sub: Subscription = await row(subId);
-  const verdict = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' }, at);
-  const blockedInSql = await app.prisma.subscription.count({ where: { id: subId, ...inoperableSubscriptionWhere(at) } });
+  const verdict = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' }, await readFeePause(app.prisma), at);
+  const blockedInSql = await app.prisma.subscription.count({ where: { id: subId, ...inoperableSubscriptionWhere(await readFeePause(app.prisma), at) } });
   expect(blockedInSql, `SQL gate at ${at.toISOString()}`).toBe(verdict.operable ? 0 : 1);
   return verdict;
 }

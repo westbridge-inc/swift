@@ -47,7 +47,7 @@ async function fixture() {
   const tx: { client?: unknown } = {};
   const prisma = prismaDouble(orderStore([]), {
     vendor: { findMany: readVendors }, item: { findMany: readItems, count: async (q: Query) => (await readItems(q)).length },
-    actorRatingStat: { findMany: async () => [] }, platformConfig: { findMany: async () => [] },
+    actorRatingStat: { findMany: async () => [] }, platformConfig: { findUnique: async () => null, findMany: async () => [] },
     $executeRaw: async () => 1, $transaction: async (fn: (client: unknown) => unknown) => fn(tx.client),
   });
   tx.client = prisma;
