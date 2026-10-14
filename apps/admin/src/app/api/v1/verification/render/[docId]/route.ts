@@ -32,9 +32,12 @@ export async function GET(request: NextRequest, context: { params: Promise<{ doc
   const noStore = { 'Cache-Control': 'no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' };
   if (!res.ok) {
     // A refusal upstream (bad link, expired, purged) keeps its status so the
-    // page sees it; its body is not relayed.
-    await res.body?.cancel();
-    return new Response(null, { status: res.status, headers: noStore });
+    // page sees it; its body is not relayed. [VERIFY-DOCS V3] Only its error
+    // CODE may travel, as a header, when it is a plain code from a JSON
+    // refusal — so the page can say "you need the document-reviewer
+    // permission" when a grant was revoked after the link was minted.
+    const code = await refusalCode(res);
+    return new Response(null, { status: res.status, headers: { ...noStore, ...(code ? { 'X-Swift-Error-Code': code } : {}) } });
   }
   const type = (res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
   if (!INLINE_TYPES.has(type)) {
@@ -48,4 +51,15 @@ export async function GET(request: NextRequest, context: { params: Promise<{ doc
     status: 200,
     headers: { ...noStore, 'Content-Type': type, 'Content-Disposition': 'inline' },
   });
+}
+
+/** The upstream refusal's error code, only when it is a plain code (A-Z, _) from a JSON body; else null. */
+async function refusalCode(res: Response): Promise<string | null> {
+  if ((res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase() !== 'application/json') {
+    await res.body?.cancel();
+    return null;
+  }
+  const body = await res.json().catch(() => null) as { error?: { code?: unknown } } | null;
+  const code = body?.error?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z_]{0,63}$/.test(code) ? code : null;
 }
