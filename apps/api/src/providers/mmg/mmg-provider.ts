@@ -750,6 +750,8 @@ export function getMmgLookupProvider(env: Record<string, string | undefined> = p
  */
 export function getMmgReversalClient(env: Record<string, string | undefined> = process.env): MmgReversalClient {
   const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  // MMG fully off: the reversal and its lookups refuse explicitly (MMG_DISABLED).
+  if (driver === 'disabled') return new DisabledMmgProvider();
   if (isProduction(env) && driver === 'sandbox') {
     throw new Error('MMG_DRIVER=sandbox is forbidden in production');
   }

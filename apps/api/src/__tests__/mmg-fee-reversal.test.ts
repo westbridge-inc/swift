@@ -312,6 +312,30 @@ describe('[MMG REVERSAL] the admin action: two people, then MMG, then MMG\'s pro
     expect(await rowsFor(p.checkoutId)).toHaveLength(0);
   });
 
+  it('MMG fully off on this server (MMG_DRIVER=disabled): refused before any claim, MMG not asked, the page offers no return', async () => {
+    const p = await paidCheckout();
+    const driverBefore = process.env['MMG_DRIVER'];
+    process.env['MMG_DRIVER'] = 'disabled';
+    try {
+      await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'MMG_DISABLED' });
+      const page = await app.inject({ method: 'GET', url: `/api/v1/admin/billing/mmg-checkouts/${p.checkoutId}/reversal`, headers: { authorization: `Bearer ${admin.token}` } });
+      expect(page.statusCode, page.body).toBe(200);
+      expect(page.json().data).toMatchObject({ switchedOn: false });
+    } finally {
+      if (driverBefore === undefined) delete process.env['MMG_DRIVER']; else process.env['MMG_DRIVER'] = driverBefore;
+    }
+    expect(reversalCalls).toEqual([]);
+    expect(await rowsFor(p.checkoutId)).toHaveLength(0);
+    expect(await mmgSays(p.txn)).toBe('approved');
+  });
+
+  it('the reversal client under MMG_DRIVER=disabled refuses explicitly (never a sandbox answer, never an unknown-driver crash)', async () => {
+    const { getMmgReversalClient } = await import('../providers/mmg/mmg-provider');
+    const off = getMmgReversalClient({ MMG_DRIVER: 'disabled', NODE_ENV: 'production' });
+    await expect(off.reverseTransaction({ transactionId: 'T1' })).rejects.toMatchObject({ code: 'MMG_DISABLED' });
+    await expect(off.transactionLookupDetail('T1')).rejects.toMatchObject({ code: 'MMG_DISABLED' });
+  });
+
   it('the payment page shows whether it can be returned, and why not', async () => {
     const p = await paidCheckout();
     const res = await app.inject({ method: 'GET', url: `/api/v1/admin/billing/mmg-checkouts/${p.checkoutId}/reversal`, headers: { authorization: `Bearer ${admin.token}` } });

@@ -2,7 +2,7 @@ import { Prisma, type MmgCheckoutIntent, type MmgFeeReversal, type PrismaClient 
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { formatMoney } from '../../utils/currency-amount';
-import { getMmgReversalClient, type MmgReversalClient, type MmgTxResult } from '../../providers/mmg/mmg-provider';
+import { getMmgReversalClient, mmgDisabled, type MmgReversalClient, type MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { mmgFeeReversalsCounter } from '../../plugins/observability';
 import type { OnAudit } from '../../lib/audit-writer';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
@@ -271,6 +271,11 @@ export class MmgFeeReversalService {
   ): Promise<MmgFeeReversal> {
     if (!feeReversalEnabled()) {
       throw new AppError(503, 'REVERSAL_OFF', 'Returning MMG fee payments is switched off on this server until MMG\'s answers are proven in UAT. Nothing changed.');
+    }
+    // MMG fully off on this server (MMG_DRIVER=disabled): nothing can be returned through it, so
+    // nothing is claimed — a claim here could only end HELD and page someone for a call never made.
+    if (mmgDisabled()) {
+      throw new AppError(503, 'MMG_DISABLED', 'MMG is switched off on this server, so a payment cannot be returned through it. Nothing changed.');
     }
     const claim = await this.deps.prisma.$transaction(async (tx) => {
       const found = await tx.mmgCheckoutIntent.findFirst({ where: { id: input.checkoutId, tenantId: input.tenantId }, select: { subscriptionId: true } });
@@ -693,7 +698,7 @@ export class MmgFeeReversalService {
     return {
       checkoutId: intent.id,
       amountGyd: Number(intent.amount),
-      switchedOn: feeReversalEnabled(),
+      switchedOn: feeReversalEnabled() && !mmgDisabled(),
       canReverse: eligibility.ok,
       ...(eligibility.ok ? {} : { refusal: { code: eligibility.code, message: REFUSAL_COPY[eligibility.code] } }),
       reversals: reversals.map((r) => ({ ...r, amount: Number(r.amount) })),
