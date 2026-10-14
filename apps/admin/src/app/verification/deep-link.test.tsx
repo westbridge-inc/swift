@@ -46,3 +46,14 @@ describe('[MC-PR1] Review Center deep link', () => {
     expect((await screen.findByRole('status')).textContent).toMatch(/No documents from this applicant are waiting for review/);
   });
 });
+
+// [Owner 8 Oct 2026] the "what's missing" checklist links straight to each waiting document.
+describe('Review Center document deep link', () => {
+  it('opens the named document of the applicant, not their first one', async () => {
+    window.history.replaceState({}, '', '/verification?applicant=owner-2&document=d3');
+    mockApi(handler([doc('d2', 'owner-2', 'Second'), { ...doc('d3', 'owner-2', 'Second'), docType: 'business_registration' }]));
+    renderWithQuery(<VerificationPage />);
+    expect(await screen.findByRole('heading', { name: /Second Applicant/ })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 3, name: 'Business registration' })).toBeTruthy();
+  });
+});

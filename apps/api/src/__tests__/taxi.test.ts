@@ -1158,7 +1158,7 @@ describe('Driver location authority', () => {
       longitude: -58.153,
     }, secondDevice.token);
     expect(ownerSample.statusCode).toBe(200);
-    expect(ownerSample.json()).toEqual({ success: true });
+    expect(ownerSample.json()).toEqual({ success: true, data: { accepted: true } });
     const afterOwnerSample = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
     expect({ lat: afterOwnerSample.currentLat, lng: afterOwnerSample.currentLng })
       .toEqual({ lat: 6.803, lng: -58.153 });
@@ -1319,6 +1319,8 @@ describe('Driver location authority', () => {
       longitude: -58.17,
     }, active.token);
     expect(activeRes.statusCode).toBe(200);
+    // An active-ride fix is an explicit acceptance too: the app keeps tracking only on one.
+    expect(activeRes.json()).toEqual({ success: true, data: { accepted: true } });
     const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: active.driverId } });
     expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.83, lng: -58.17 });
   });

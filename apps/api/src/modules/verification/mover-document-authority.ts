@@ -58,6 +58,7 @@ export async function evaluateMoverDocuments(
   const types = [...new Set([...required, ...(hire ? [VEHICLE_INSURANCE_DOC_TYPE] : [])])];
   const vehicleTypes = types.filter((type) => BUCKET_OF[type] === 'VEHICLE');
   const target = vehicleTypes.length ? await currentVehicle(db, userId, user.countryCode, opts.kind) : null;
+  if (target?.subjectId && await db.subjectLink.count({ where: { accountId: userId, subjectId: target.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null } }) > 0) return denied('docs');
   const now = new Date();
   const rows = await approvedEvidenceFor(db, userId, types, now);
   const links = vehicleTypes.length ? await db.subjectLink.findMany({
