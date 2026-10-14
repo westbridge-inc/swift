@@ -66,6 +66,8 @@ import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
+import { assertOrderableNow, hiddenAmong } from '../compliance/prohibited-gate';
+import { classifyCategory, classifyText } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -477,13 +479,17 @@ async function buildCartResponse(
   // compatibility, but markup is always 0 and customerPrice === basePrice.
   const subtotalMarkup = 0;
   const unavailableItemIds: string[] = [];
+  // [GUARDRAILS §8] A prohibited line already in a cart (banned, or held for a check)
+  // is marked exactly like a sold-out one: every app blocks the order button and offers Remove.
+  const hiddenLines = await hiddenAmong(app.prisma, cart.items.map((ci) => ci.itemId));
 
   const itemDetails = cart.items.map((ci) => {
     const line = priceCartLine(ci);
     // [F4] A line is orderable only if its item AND its choices still are: a
     // sold-out choice marks the line the way a sold-out item does (every app
     // blocks the order button on it and offers Remove), with the reason.
-    const optionsIssue = ci.item.isAvailable ? lineOptionsIssue(ci.item, ci.selectedOptions) : null;
+    const prohibitedIssue = hiddenLines.has(ci.itemId) ? 'Not available on Swift — remove it to continue' : null;
+    const optionsIssue = prohibitedIssue ?? (ci.item.isAvailable ? lineOptionsIssue(ci.item, ci.selectedOptions) : null);
     const lineAvailable = ci.item.isAvailable && optionsIssue === null;
 
     if (!lineAvailable) unavailableItemIds.push(ci.id);
@@ -1219,11 +1225,15 @@ export async function customerRoutes(app: FastifyInstance) {
       const categorySet = new Map<string, { id: string; name: string; imageUrl: string | null }>();
       for (const v of allVendors) {
         for (const c of (v.categories ?? [])) {
+          // [GUARDRAILS §8] A section named for banned goods is not a Home chip.
+          if (classifyText(c.name)) continue;
           if (!categorySet.has(c.id)) categorySet.set(c.id, c);
         }
       }
 
-      const popularItems = popularItemRows.map((it) => ({
+      // [GUARDRAILS §8] A prohibited item (banned, or held for a check) is not on the rail.
+      const hiddenPopular = await hiddenAmong(app.prisma, popularItemRows.map((it) => it.id));
+      const popularItems = popularItemRows.filter((it) => !hiddenPopular.has(it.id)).map((it) => ({
         id: it.id,
         name: it.name,
         imageUrl: it.imageUrl,
@@ -1378,15 +1388,16 @@ export async function customerRoutes(app: FastifyInstance) {
         // [STA-1 RLS-N3 / DL-7] the caller's tenant's taxonomy — a reviewer browsing
         // by category sees the fiction's categories, not production's.
         where: { tenantId_slug: { tenantId: getTenantId() ?? 'swift-default', slug: category } },
-        select: { id: true, kind: true, status: true, mergedIntoId: true },
+        select: { id: true, kind: true, status: true, mergedIntoId: true, slug: true, name: true },
       });
       if (cat?.status === 'MERGED' && cat.mergedIntoId) {
         cat = await app.prisma.discoveryCategory.findFirst({
           where: { id: cat.mergedIntoId },
-          select: { id: true, kind: true, status: true, mergedIntoId: true },
+          select: { id: true, kind: true, status: true, mergedIntoId: true, slug: true, name: true },
         });
       }
-      if (!cat || cat.status !== 'ACTIVE') {
+      // [GUARDRAILS §8] A banned category (Pharmacy) browses to nothing, like a hidden one.
+      if (!cat || cat.status !== 'ACTIVE' || classifyCategory(cat)) {
         return { success: true, ...paginatedResponse([], 0, { page, limit, skip }) };
       }
       categoryRow = { id: cat.id, kind: cat.kind };
@@ -1488,11 +1499,14 @@ export async function customerRoutes(app: FastifyInstance) {
         where: { categoryId: categoryRow.id },
         select: { itemId: true },
       });
-      if (tagRows.length) {
+      // [GUARDRAILS §8] A prohibited item (banned, or held for a check) is not counted.
+      const hiddenTagged = await hiddenAmong(app.prisma, tagRows.map((t) => t.itemId));
+      const countable = tagRows.filter((t) => !hiddenTagged.has(t.itemId));
+      if (countable.length) {
         const grouped = await app.prisma.item.groupBy({
           by: ['vendorId'],
           where: {
-            id: { in: tagRows.map((t) => t.itemId) },
+            id: { in: countable.map((t) => t.itemId) },
             vendorId: { in: vendors.map((v) => v.id) },
             isAvailable: true,
           },
@@ -1589,7 +1603,16 @@ export async function customerRoutes(app: FastifyInstance) {
     // [Row 77] Field-by-field guest allowlist (storefront-projection.ts) —
     // never a spread of the raw category/item rows. A category the store has
     // switched off is not on its public page.
-    const categories = vendor.categories.filter((cat) => cat.isActive).map(publicStorefrontCategory);
+    // [GUARDRAILS §8] Prohibited items (banned, or held for a check) are not on the menu;
+    // a section they emptied goes with them (a section empty before stays as it was).
+    const hiddenOnMenu = await hiddenAmong(app.prisma, vendor.categories.flatMap((cat) => cat.items.map((i) => i.id)));
+    const categories = vendor.categories
+      .filter((cat) => cat.isActive)
+      .flatMap((cat) => {
+        const items = cat.items.filter((i) => !hiddenOnMenu.has(i.id));
+        return items.length === 0 && cat.items.length > 0 ? [] : [{ ...cat, items }];
+      })
+      .map(publicStorefrontCategory);
 
     // Distance & ETA
     let distanceKm: number | null = null;
@@ -1902,6 +1925,8 @@ export async function customerRoutes(app: FastifyInstance) {
       include: { optionGroups: { include: { options: true } } },
     });
     if (!item) throw new AppError(404, 'ITEM_NOT_FOUND', 'Item not found or unavailable');
+    // [GUARDRAILS §8] A prohibited item is refused in the sold-out shape (409 ITEM_UNAVAILABLE).
+    await assertOrderableNow(app.prisma, [{ id: item.id, name: item.name }]);
 
     // Inventory (§4.2): don't let the cart promise more than the shelf holds.
     // Checkout re-checks atomically; this is the early, friendly stop.
@@ -2005,6 +2030,11 @@ export async function customerRoutes(app: FastifyInstance) {
     });
     if (!cartItem || cartItem.cart.customerId !== userId) {
       throw new NotFoundError('CartItem', id);
+    }
+    // [GUARDRAILS §8] A prohibited line cannot be grown or edited — only removed.
+    if (body.quantity > 0) {
+      const lineItem = await app.prisma.item.findUniqueOrThrow({ where: { id: cartItem.itemId }, select: { id: true, name: true } });
+      await assertOrderableNow(app.prisma, [lineItem]);
     }
     // [M023] An edited selection passes the same validator as an added one.
     const editedSelection = body.selectedOptions === undefined || body.quantity <= 0

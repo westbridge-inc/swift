@@ -12,6 +12,14 @@
   align-items: start;
 }
 
+/* The rider, address and timeline cards and the receipt stack with the same
+   16 px gap as every other card; from 72rem the wrapper dissolves into the
+   page grid (display: contents below). */
+.detailGrid {
+  display: grid;
+  gap: 16px;
+}
+
 @media (min-width: 72rem) {
   .page {
     grid-template-columns: minmax(0, 1fr) 380px;
