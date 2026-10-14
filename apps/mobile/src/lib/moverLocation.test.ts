@@ -40,6 +40,10 @@ function locationApi(status: 'granted' | 'denied'): DeviceLocationApi {
     getCurrentPositionAsync: vi.fn().mockResolvedValue({
       coords: { latitude: 6.81234, longitude: -58.14321 },
     }),
+    // [GO-LOC-1] The fallbacks fail unless a test says otherwise, so a failed
+    // Balanced fix still means "unavailable" wherever that is what is tested.
+    getLastKnownPositionAsync: vi.fn().mockResolvedValue(null),
+    getHighAccuracyPositionAsync: vi.fn().mockRejectedValue(new Error('no GPS fix in this fake')),
     reverseGeocodeAsync: vi.fn().mockResolvedValue([
       { name: 'Regent Street', city: 'Georgetown' },
     ]),
