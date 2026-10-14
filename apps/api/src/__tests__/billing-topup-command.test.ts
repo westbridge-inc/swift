@@ -70,7 +70,8 @@ async function makeVendorSub(status: 'ACTIVE' | 'PAST_DUE' = 'ACTIVE') {
   vendorIds.push(vendor.id);
   const sub = await app.prisma.subscription.create({
     data: {
-      vendorId: vendor.id, type: 'RESTAURANT', status, weeklyRate: 2100, billingMethod: 'CASH',
+      // [owner #62] The fee is GY$5,000, so each payment recorded in this file is one week: one week at a time.
+      vendorId: vendor.id, type: 'RESTAURANT', status, weeklyRate: 5000, billingMethod: 'CASH',
       currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000),
     },
   });
@@ -231,13 +232,13 @@ describe('[M-08] a failpoint after the credit — the register’s second red te
     expect(drained.done).toBeGreaterThanOrEqual(1);
     command = await app.prisma.topUpCommand.findUniqueOrThrow({ where: { id: command.id } });
     expect(command.tailDoneAt).not.toBeNull();
-    // [OWNER RULING 8 Oct, NO "WALLET"] the notice says "fee paid ahead", never "top-up" or "balance".
-    expect(await app.prisma.notification.count({ where: { userId, title: 'Weekly fee paid ahead' } })).toBe(1);
+    // [OWNER RULING 8 Oct, NO "WALLET"; owner #62] the notice never says "top-up", "balance" or "paid ahead".
+    expect(await app.prisma.notification.count({ where: { userId, title: 'Weekly fee received' } })).toBe(1);
     const sub2 = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(sub2.status).toBe('ACTIVE'); // the owed re-bill reinstated the payer
     // Draining again does nothing: the tail is done.
     const again = await billing.drainTopUpTails({ olderThanMs: 0 });
-    expect(await app.prisma.notification.count({ where: { userId, title: 'Weekly fee paid ahead' } })).toBe(1);
+    expect(await app.prisma.notification.count({ where: { userId, title: 'Weekly fee received' } })).toBe(1);
     expect(again.retried).toBe(0);
   });
 });
@@ -259,27 +260,28 @@ describe('[M-08 · operations] rollback is hold-only', () => {
 
 
 // ---------------------------------------------------------------------------
-// [OWNER RULING 8 Oct, NO "WALLET" (2) + (4)] Weekly fees are paid at most four
-// weeks ahead, and production credits no fee by hand. A recorded payment that
-// would go past four weeks is refused with the most that can still be recorded
-// (the rest is refunded to the partner); nothing is written.
+// [OWNER #62 · 14 Oct (was four weeks, 8 Oct) + OWNER RULING 8 Oct (4)] Weekly
+// fees are paid one week at a time, and production credits no fee by hand. A
+// recorded payment that would go past one week ahead is refused with the most
+// that can still be recorded (the rest is refunded to the partner); nothing is
+// written.
 // ---------------------------------------------------------------------------
-describe('[owner ruling 8 Oct] a recorded fee payment never takes an account past four weeks paid ahead', () => {
-  it('names the most that can be recorded, records nothing over it, and refuses anything once four weeks are held', async () => {
+describe('[owner #62] a recorded fee payment never takes an account past one week ahead', () => {
+  it('names the most that can be recorded, records nothing over it, and refuses anything once the coming week is held', async () => {
     const { sub } = await makeVendorSub();
-    const over = await topup(sub.id, { amount: 8401, reference: refFor('CAP1') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    const over = await topup(sub.id, { amount: 5001, reference: refFor('CAP1') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
     expect(over.statusCode).toBe(409);
     expect(over.json().error).toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
-    expect(over.json().error.message).toContain('Record at most GY$8,400 now and refund the rest to the partner');
+    expect(over.json().error.message).toContain('Record at most GY$5,000 now and refund the rest to the partner');
     expect(await facts(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, audits: 0, commands: 0, balance: 0 });
 
-    const fits = await topup(sub.id, { amount: 8400, reference: refFor('CAP2') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    const fits = await topup(sub.id, { amount: 5000, reference: refFor('CAP2') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
     expect(fits.statusCode).toBe(200);
-    expect((await facts(sub.id)).balance).toBe(8400);
+    expect((await facts(sub.id)).balance).toBe(5000);
 
     const full = await topup(sub.id, { amount: 1, reference: refFor('CAP3') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
     expect(full.statusCode).toBe(409);
-    expect(full.json().error.message).toContain('already has 4 weeks of weekly fees paid ahead');
+    expect(full.json().error.message).toContain('The next weekly fee on this account is already paid');
     expect((await facts(sub.id)).credits).toBe(1);
   });
 
@@ -287,7 +289,7 @@ describe('[owner ruling 8 Oct] a recorded fee payment never takes an account pas
     const { sub } = await makeVendorSub();
     process.env['BILLING_TOPUP_HOLD'] = 'yes';
     try {
-      const held = await topup(sub.id, { amount: 2100, reference: refFor('HOLDYES') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+      const held = await topup(sub.id, { amount: 5000, reference: refFor('HOLDYES') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
       expect(held.statusCode).toBe(503);
       expect(held.json().error?.code ?? held.json().code).toBe('TOPUP_ON_HOLD');
     } finally {

@@ -250,8 +250,9 @@ describe('M-13 — live credit paths post balanced books in the same transaction
   it('recordTopUp posts CLEARING→WALLET once, replay-safe, receipt intact', async () => {
     const { sub } = await makeVendorSub();
     const clientKey = `ck-${run}`;
-    await billing.recordTopUp(sub.id, 5000, 'ledger-test-admin', 'MMG-REF-1', clientKey);
-    await billing.recordTopUp(sub.id, 5000, 'ledger-test-admin', 'MMG-REF-1', clientKey); // replay
+    // [owner #62] Within the one coming week a partner may hold (fee GY$2,100).
+    await billing.recordTopUp(sub.id, 2000, 'ledger-test-admin', 'MMG-REF-1', clientKey);
+    await billing.recordTopUp(sub.id, 2000, 'ledger-test-admin', 'MMG-REF-1', clientKey); // replay
 
     const txn = await app.prisma.ledgerTransaction.findUnique({
       where: { idempotencyKey: `ledger:topup:${sub.id}:${clientKey}` },
@@ -262,18 +263,19 @@ describe('M-13 — live credit paths post balanced books in the same transaction
     const debit = txn!.entries.find((e) => Number(e.debit) > 0)!;
     const credit = txn!.entries.find((e) => Number(e.credit) > 0)!;
     expect(debit.accountCode).toBe('CLEARING_MMG');
-    expect(Number(debit.debit)).toBe(5000);
+    expect(Number(debit.debit)).toBe(2000);
     expect(credit.accountCode).toBe('WALLET_LIABILITY');
     expect(credit.subledgerId).toBe(sub.id);
-    expect(Number(credit.credit)).toBe(5000);
+    expect(Number(credit.credit)).toBe(2000);
 
     const balance = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } });
-    expect(Number(balance.balance)).toBe(5000); // replay did not double-credit
+    expect(Number(balance.balance)).toBe(2000); // replay did not double-credit
   });
 
   it('a prepaid weekly charge consumes the wallet on the books; wallet == ledger end-to-end', async () => {
     const { sub } = await makeVendorSub({ nextBillingDate: new Date(Date.now() - 60_000), currentPeriodEnd: new Date(Date.now() - 60_000) });
-    await billing.recordTopUp(sub.id, 5000, 'ledger-test-admin', undefined, `charge-${run}`);
+    // [owner #62] The week due now plus the coming one: the most a partner may pay (fee GY$2,100).
+    await billing.recordTopUp(sub.id, 4000, 'ledger-test-admin', undefined, `charge-${run}`);
     const outcome = await billing.billSubscription(await subWithRelations(sub.id));
     expect(outcome).toBe('succeeded');
 
@@ -292,7 +294,7 @@ describe('M-13 — live credit paths post balanced books in the same transaction
 
     // The projection law: wallet balance == WALLET_LIABILITY subledger, exactly.
     const balance = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } });
-    expect(Number(balance.balance)).toBe(2900);
+    expect(Number(balance.balance)).toBe(1900);
     const report = await runBillingInvariants(app.prisma);
     expect(report.ledgerWalletMismatches.map((m) => m.subscriptionId)).not.toContain(sub.id);
     expect(report.walletMismatches.map((m) => m.subscriptionId)).not.toContain(sub.id);

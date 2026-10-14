@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { PAY_AHEAD_MAX_WEEKS, payAheadPosition, payAheadRefusal, weeksPaidAheadByDate, type PayAheadSub } from '../modules/billing/pay-ahead';
 import { manualFeeCreditHeld } from '../utils/fee-credit-hold';
 
-// [OWNER RULING 8 Oct, NO "WALLET" (2)] Weekly fees can be paid at most four
-// weeks ahead, counted the same way on every path: the fee paid ahead plus the
-// whole weeks already paid beyond the running one (never a free trial's weeks);
-// a week due now is not "ahead".
+// [OWNER #62 · 14 Oct, NO PAYING AHEAD] Partners pay only the current week's
+// fee: at most ONE week is held beyond the running week (was four, 8 Oct),
+// counted the same way on every path: money received for coming weeks plus the
+// whole weeks already paid beyond the running one (never a free trial's
+// weeks); a week due now is not "ahead".
 
 const DAY = 86_400_000;
 const NOW = new Date('2026-10-12T12:00:00Z');
@@ -34,44 +35,52 @@ describe('weeks already paid beyond the running week', () => {
   });
 });
 
-describe('the four-week cap', () => {
-  it('is four weekly fees', () => {
-    expect(PAY_AHEAD_MAX_WEEKS).toBe(4);
-    expect(payAheadPosition(sub(), 0, NOW)).toMatchObject({ cap: 32_000, heldAhead: 0, room: 32_000, excess: 0, due: false });
+describe('the one-week cap [owner #62]', () => {
+  it('is one weekly fee', () => {
+    expect(PAY_AHEAD_MAX_WEEKS).toBe(1);
+    expect(payAheadPosition(sub(), 0, NOW)).toMatchObject({ cap: FEE, heldAhead: 0, room: FEE, excess: 0, due: false });
   });
 
-  it('counts the fee paid ahead and the weeks paid by date together', () => {
-    const p = payAheadPosition(sub({ nextBillingDate: new Date(NOW.getTime() + 17 * DAY) }), 12_000, NOW);
-    expect(p).toMatchObject({ weeksAheadByDate: 2, heldAhead: 28_000, room: 4_000, excess: 0 });
+  it('while a week runs, the next one may be paid, and nothing after it', () => {
+    expect(payAheadPosition(sub(), 0, NOW).room, 'the coming week').toBe(FEE);
+    expect(payAheadPosition(sub(), FEE, NOW).room, 'the coming week is already paid').toBe(0);
+    expect(payAheadPosition(sub({ nextBillingDate: new Date(NOW.getTime() + 10 * DAY) }), 0, NOW).room, 'a card already paid the coming week').toBe(0);
+    expect(payAheadPosition(sub(), FEE / 2, NOW).room, 'part of the coming week paid').toBe(FEE / 2);
   });
 
-  it('three weeks paid ahead leave room for one more week; four leave none', () => {
-    expect(payAheadPosition(sub(), 3 * FEE, NOW).room).toBe(FEE);
-    expect(payAheadPosition(sub(), 4 * FEE, NOW).room).toBe(0);
+  it('counts the money received for coming weeks and the weeks paid by date together', () => {
+    const p = payAheadPosition(sub({ nextBillingDate: new Date(NOW.getTime() + 10 * DAY) }), 3_000, NOW);
+    expect(p).toMatchObject({ weeksAheadByDate: 1, heldAhead: FEE + 3_000, room: 0, excess: 3_000 });
   });
 
-  it('money for a week due now is allowed on top of the cap', () => {
+  it('a week due now is paid on top of the cap, and one week ahead stays the most', () => {
     const overdue = sub({ status: 'PAST_DUE', nextBillingDate: new Date(NOW.getTime() - DAY) });
-    expect(payAheadPosition(overdue, 4 * FEE, NOW)).toMatchObject({ due: true, room: FEE, excess: 0 });
+    expect(payAheadPosition(overdue, 0, NOW)).toMatchObject({ due: true, room: 2 * FEE, excess: 0 });
+    expect(payAheadPosition(overdue, FEE, NOW)).toMatchObject({ due: true, room: FEE, excess: 0 });
   });
 
-  it('names what is over the cap, so it can be refunded', () => {
-    expect(payAheadPosition(sub(), 5 * FEE + 500, NOW)).toMatchObject({ room: 0, excess: FEE + 500 });
+  it('weeks paid ahead before the change (staging only) are kept, and what is over the cap is named for a refund', () => {
+    expect(payAheadPosition(sub(), 4 * FEE, NOW)).toMatchObject({ heldAhead: 4 * FEE, room: 0, excess: 3 * FEE });
   });
 });
 
 describe('the refusal says what to do, in plain words', () => {
-  it('to a partner: paid ahead as far as Swift allows, pay again once a week is used', () => {
-    const e = payAheadRefusal(payAheadPosition(sub(), 4 * FEE, NOW), 'partner');
-    expect(e).toMatchObject({ statusCode: 409, code: 'PAY_AHEAD_LIMIT', details: { maxWeeks: 4, roomGyd: 0 } });
-    expect(e.message).toBe('Your weekly fee is already paid ahead as far as Swift allows (4 weeks). You can pay again once a week has been used.');
+  it('to a partner: the next weekly fee is already paid; pay again once that week starts', () => {
+    const e = payAheadRefusal(payAheadPosition(sub(), FEE, NOW), 'partner');
+    expect(e).toMatchObject({ statusCode: 409, code: 'PAY_AHEAD_LIMIT', details: { maxWeeks: 1, roomGyd: 0 } });
+    expect(e.message).toBe('Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.');
   });
 
   it('to an operator: the most that can still be recorded, and that the rest is refunded', () => {
-    expect(payAheadRefusal(payAheadPosition(sub(), 3 * FEE, NOW), 'admin').message)
-      .toBe('This would put more than 4 weeks of weekly fees paid ahead on this account. Record at most GY$8,000 now and refund the rest to the partner (finance procedure: weekly fees paid ahead).');
-    expect(payAheadRefusal(payAheadPosition(sub(), 4 * FEE, NOW), 'admin').message)
-      .toBe('This account already has 4 weeks of weekly fees paid ahead, the most Swift takes. Record nothing more: refund this payment to the partner (finance procedure: weekly fees paid ahead).');
+    expect(payAheadRefusal(payAheadPosition(sub(), FEE / 2, NOW), 'admin').message)
+      .toBe('This would pay more than one week ahead on this account. Record at most GY$4,000 now and refund the rest to the partner (finance procedure: weekly fee refunds).');
+    expect(payAheadRefusal(payAheadPosition(sub(), FEE, NOW), 'admin').message)
+      .toBe('The next weekly fee on this account is already paid, and Swift takes one week at a time. Record nothing more: refund this payment to the partner (finance procedure: weekly fee refunds).');
+  });
+
+  it('attaching an agent payment: whole or not at all, so it is refunded', () => {
+    expect(payAheadRefusal(payAheadPosition(sub(), FEE, NOW), 'attach').message)
+      .toBe('Attaching this agent payment would pay more than one week ahead on this account. It is attached whole or not at all: refund it to the partner instead (finance procedure: weekly fee refunds).');
   });
 });
 

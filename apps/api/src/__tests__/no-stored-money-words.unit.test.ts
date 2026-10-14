@@ -8,7 +8,7 @@ import { feeCoveredLine } from '../modules/billing/fee-notice-copy';
 // [OWNER RULING 8 Oct, NO "WALLET" · legal] Swift holds no money for anyone, so
 // nothing the server says to a person may call anything a "wallet", a "top up",
 // a money "balance", "banked" money or "stored value". Weekly fees paid before
-// they are due are "fee paid ahead"; a partner's MMG account is their "MMG
+// they are due are named as the next weekly fee being paid (owner #62: never "paid ahead"); a partner's MMG account is their "MMG
 // account". Owner: "change wording everywhere to save me legal trouble".
 //
 // What the server says to people: error messages (AppError, validation
@@ -48,14 +48,14 @@ function textsOf(node: ts.Node | undefined): string[] {
   return [];
 }
 
-/** Every string the server can say to a person in one module. */
-export function shownWords(fileName: string, code: string): { line: number; text: string }[] {
+/** Every string the server can say to a person in one module that the rule flags (default: stored-money words). */
+export function shownWords(fileName: string, code: string, flagged: (text: string) => boolean = said): { line: number; text: string }[] {
   const src = ts.createSourceFile(fileName, code, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const out: { line: number; text: string }[] = [];
   const keep = (node: ts.Node, texts: string[]) => {
     for (const raw of texts) {
       const text = raw.trim();
-      if (!text || CODE_SHAPED.test(text) || !said(text)) continue;
+      if (!text || CODE_SHAPED.test(text) || !flagged(text)) continue;
       out.push({ line: src.getLineAndCharacterOfPosition(node.getStart(src)).line + 1, text: text.slice(0, 160) });
     }
   };
@@ -92,8 +92,9 @@ describe('the server never says stored-money words [owner ruling 8 Oct]', () => 
     expect(PRIVACY).toContain('we do not collect card numbers or mobile-money credentials');
   });
 
-  it('a fee the partner already paid ahead is "fee paid ahead", never a balance', () => {
-    expect(feeCoveredLine(2100, 'GYD', { first: true })).toBe('Your fee paid ahead already covers your first weekly fee of GY$2,100.');
+  it('a fee the partner already paid says the fee is paid, never a balance (and, owner #62, never "paid ahead")', () => {
+    expect(feeCoveredLine(2100, 'GYD', { first: true })).toBe('Your first weekly fee of GY$2,100 is already paid.');
+    expect(feeCoveredLine(2100, 'GYD')).toBe('The weekly fee of GY$2,100 is already paid.');
   });
 
   it('the detector sees the words where a person reads them — not in logs, SQL, records or code names', () => {
@@ -107,5 +108,32 @@ describe('the server never says stored-money words [owner ruling 8 Oct]', () => 
     expect(probe("await tx.billingEvent.create({ data: { type: 'PREPAID_TOPUP', note: 'late MMG approval banked' } });")).toBe(false);
     expect(probe("throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The fee paid ahead is in a different currency');")).toBe(false);
     expect(probe("app.post('/subscriptions/:id/topup', h);")).toBe(false);
+  });
+});
+
+// [OWNER #62 · 14 Oct, NO PAYING AHEAD] "shouldn't they just pay the weekly
+// fee, no paying ahead": partners pay one week at a time, so nothing the server
+// says to a person offers or describes paying ahead or covering several weeks.
+// The published legal documents (modules/legal) change only through a legal
+// change with its own version bump, so they are outside this rule until then.
+const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\bweeks of weekly fees\b|\bcoming weekly fees\b/i;
+const LEGAL_DOCUMENTS = /[\\/]modules[\\/]legal[\\/]/;
+const offersPayingAhead = (text: string) => PAYING_AHEAD_WORDS.test(text);
+
+describe('[owner #62] the server never offers paying ahead', () => {
+  it('no error message, notification, operations page, fee reason or copy module says "paid ahead" or several weeks', () => {
+    const hits = files(SRC).filter((file) => !LEGAL_DOCUMENTS.test(file)).flatMap((file) => shownWords(file, readFileSync(file, 'utf8'), offersPayingAhead)
+      .map((hit) => `${relative(SRC, file)}:${hit.line} ${hit.text}`));
+    expect([...new Set(hits)]).toEqual([]);
+  }, 120_000);
+
+  it('the detector sees the words where a person reads them, not in logs or code names', () => {
+    const probe = (code: string) => shownWords('probe.ts', code, offersPayingAhead).length > 0;
+    expect(probe("throw new AppError(409, 'X', 'Your weekly fee is already paid ahead as far as Swift allows (4 weeks).');")).toBe(true);
+    expect(probe("send({ title: 'Weekly fee paid ahead', body: 'It pays your coming weekly fees.' });")).toBe(true);
+    expect(probe("export const FEE_COPY = { x: 'Fee paid ahead covers 3 weeks' };")).toBe(true);
+    expect(probe("log().warn({ n }, 'agent payment past the weeks paid ahead');")).toBe(false);
+    expect(probe("import { assertPayAheadRoom } from './pay-ahead';")).toBe(false);
+    expect(probe("throw new AppError(409, 'PAY_AHEAD_LIMIT', 'Your next weekly fee is already paid.');")).toBe(false);
   });
 });
