@@ -20,7 +20,7 @@ import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/ob
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
-import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion } from './staff-invites';
+import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -874,6 +874,16 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   // The person invited answers under /customer/team-invites (customer.routes):
   // they are not on a store team yet, so the /vendor prefix is not theirs.
+
+  /** POST /staff/invites/withdraw — take back every unanswered invite from
+   *  this store. [Row 55] Nothing pending is listed to the owner, so a mistyped
+   *  number is withdrawn with all the others; the reply is the same however
+   *  many there were, so it never counts which numbers are Swift accounts. */
+  app.post('/staff/invites/withdraw', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    await withdrawPendingStaffInvites(app.prisma, { vendorId, actorId: request.user.userId, now: new Date() });
+    return { success: true, data: { withdrawn: true, message: 'Any invites from this store that were not answered yet have been withdrawn.' } };
+  });
 
   /** PUT /staff/:id — change a member's role. */
   app.put<{ Params: IdParam }>('/staff/:id', auth, async (request) => {

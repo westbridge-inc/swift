@@ -23,6 +23,7 @@ import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-po
 
 export const STAFF_INVITE_KIND = 'staff_invite';
 const STAFF_INVITE_REVOKED = 'STAFF_INVITE_REVOKED';
+const STAFF_INVITES_WITHDRAWN = 'STAFF_INVITES_WITHDRAWN';
 const grantKey = (vendorId: string, userId: string) => JSON.stringify([vendorId, userId]);
 export const STAFF_INVITE_TTL_MS = 72 * 60 * 60 * 1000;
 
@@ -88,13 +89,28 @@ export async function lockStaffInviteGrant(tx: Prisma.TransactionClient, vendorI
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
 }
 
+/** A store-wide lock between invite delivery (shared) and the owner's
+ * "withdraw every pending invite" (exclusive). Taken after the account locks
+ * and before any grant lock, in that order everywhere. */
+async function lockStaffInviteStore(tx: Prisma.TransactionClient, vendorId: string, mode: 'shared' | 'exclusive') {
+  const key = JSON.stringify(['staff-invite-store', vendorId]);
+  if (mode === 'shared') await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtextextended(${key}, 0))`;
+  else await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+}
+
 /** Revocations live in the append-only audit trail. Capture this token on
- * the request path; a delayed delivery must still match it under the lock. */
+ * the request path; a delayed delivery must still match it under the lock.
+ * It counts removals of this person from this store AND the owner's
+ * store-wide withdrawals, so neither can be outrun by a delivery already
+ * requested. The same query runs for every number. */
 export async function staffInviteRevocationVersion(prisma: Pick<Prisma.TransactionClient, 'auditLog'>, vendorId: string, userId: string) {
-  // Count is monotonic under the grant lock even when transaction timestamps
-  // or clocks differ. Audit rows are append-only and cannot disappear.
+  // Count is monotonic under the grant and store locks even when transaction
+  // timestamps or clocks differ. Audit rows are append-only and cannot disappear.
   return prisma.auditLog.count({
-    where: { action: STAFF_INVITE_REVOKED, entity: 'VendorStaffGrant', entityId: grantKey(vendorId, userId) },
+    where: { OR: [
+      { action: STAFF_INVITE_REVOKED, entity: 'VendorStaffGrant', entityId: grantKey(vendorId, userId) },
+      { action: STAFF_INVITES_WITHDRAWN, entity: 'VendorStaffInvites', entityId: vendorId },
+    ] },
   });
 }
 
@@ -142,6 +158,7 @@ export async function deliverStaffInvite(
   if (await isReviewAccount(prisma, input.targetUserId)) return 'NOT_INVITABLE';
   const committed = await prisma.$transaction(async (tx) => {
     await lockStaffInviteAccounts(tx, input.inviterId, input.targetUserId);
+    await lockStaffInviteStore(tx, input.vendorId, 'shared');
     await lockStaffInviteGrant(tx, input.vendorId, input.targetUserId);
     if (await staffInviteRevocationVersion(tx, input.vendorId, input.targetUserId) !== input.revocationVersion) {
       return { result: 'NOT_INVITABLE' as const };
@@ -204,6 +221,48 @@ export async function listMyStaffInvites(prisma: PrismaClient, userId: string, n
 }
 
 /**
+ * The owner takes back every unanswered invite from one store. Nothing pending
+ * is ever listed to the owner (that would say which typed numbers are Swift
+ * accounts), so an owner who typed a wrong digit withdraws them all at once,
+ * and the caller answers the same however many there were.
+ *
+ * Under the store lock (exclusive) a delivery already in flight finishes first
+ * and its invite is closed here; one requested earlier but not yet written is
+ * refused afterwards, because the withdrawal is counted in the revocation
+ * version it captured. Each person's invites close under their grant lock, the
+ * same lock Accept holds, so Accept and the withdrawal have one winner.
+ * Only invites young enough to be accepted are looked for (an expired one is
+ * closed by Accept itself and grants nothing), which keeps the scan on the
+ * notifications' createdAt index.
+ */
+export async function withdrawPendingStaffInvites(
+  prisma: PrismaClient,
+  input: { vendorId: string; actorId: string; now: Date },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await lockStaffInviteStore(tx, input.vendorId, 'exclusive');
+    await tx.auditLog.create({ data: {
+      userId: input.actorId, action: STAFF_INVITES_WITHDRAWN, entity: 'VendorStaffInvites', entityId: input.vendorId,
+    } });
+    const rows = await tx.notification.findMany({
+      where: {
+        createdAt: { gte: new Date(input.now.getTime() - STAFF_INVITE_TTL_MS - 60 * 60 * 1000) },
+        AND: [
+          { data: { path: ['kind'], equals: STAFF_INVITE_KIND } },
+          { data: { path: ['state'], equals: 'PENDING' } },
+          { data: { path: ['vendorId'], equals: input.vendorId } },
+        ],
+      },
+      select: { userId: true },
+    });
+    for (const userId of [...new Set(rows.map((row) => row.userId))].sort()) {
+      await lockStaffInviteGrant(tx, input.vendorId, userId);
+      await closePendingStaffInvites(tx, input.vendorId, userId, input.now);
+    }
+  });
+}
+
+/**
  * Accept or decline one invite. The notification row is locked first, so a
  * double tap, or Accept racing Decline, has exactly one winner. Accepting
  * re-checks that the store still exists and that the person who invited is
@@ -212,6 +271,7 @@ export async function listMyStaffInvites(prisma: PrismaClient, userId: string, n
 export async function decideStaffInvite(
   prisma: PrismaClient,
   input: { inviteId: string; userId: string; decision: 'ACCEPT' | 'DECLINE'; now: Date },
+  sender?: InviteSender,
 ) {
   // [REVIEW-PARTNER] Accepting is a membership grant: never to a demo account.
   if (input.decision === 'ACCEPT') await refuseReviewAccountRoleGrant(prisma, input.userId);
@@ -266,17 +326,33 @@ export async function decideStaffInvite(
       where: { vendorId_userId: { vendorId: vendor.id, userId: input.userId } },
       select: { role: true },
     });
+    let ownerNoticeId: string | undefined;
     if (!existing) {
       await tx.vendorStaff.create({
         data: { vendorId: vendor.id, userId: input.userId, role: invite.role, invitedBy: invite.invitedBy },
       });
+      // The owner learns who joined only now, after the person said yes, and
+      // only their first name. Written with the membership; sent after commit.
+      const joiner = await tx.user.findUnique({ where: { id: input.userId }, select: { firstName: true } });
+      const notice = await tx.notification.create({ data: {
+        userId: vendor.owner.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'New team member',
+        body: `${joiner?.firstName?.trim() || 'Someone you invited'} joined ${vendor.name} as ${invite.role === 'MANAGER' ? 'a manager' : 'staff'}.`,
+        data: { kind: 'staff_joined', vendorId: vendor.id, audience: 'business' },
+      }, select: { id: true } });
+      ownerNoticeId = notice.id;
     }
     await closePendingStaffInvites(tx, vendor.id, input.userId, input.now, input.inviteId);
     await close('ACCEPTED');
-    return { decision: 'ACCEPTED' as const, storeName: vendor.name, role: (existing?.role ?? invite.role) as StaffInviteRole };
+    return { decision: 'ACCEPTED' as const, storeName: vendor.name, role: (existing?.role ?? invite.role) as StaffInviteRole, ownerNoticeId };
   });
   // Rejected-but-closed invitations must commit before returning the HTTP
   // error; throwing inside the transaction would resurrect the pending card.
   if ('error' in outcome) throw outcome.error;
+  if ('ownerNoticeId' in outcome) {
+    const { ownerNoticeId, ...answer } = outcome;
+    // The membership is committed; a failed push never undoes the answer.
+    if (ownerNoticeId && sender) await sender.publishPersisted(ownerNoticeId).catch(() => false);
+    return answer;
+  }
   return outcome;
 }
