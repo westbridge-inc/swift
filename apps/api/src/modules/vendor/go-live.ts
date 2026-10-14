@@ -18,7 +18,8 @@ import { safePublicPhone } from '../../utils/vendor-public-phone';
 /** A go-live requirement the store has not met yet, as the apps name it. */
 export type GoLiveMissing = 'PUBLISHED_PHONE';
 
-/** The notice kind that asks the owner for the number (routed to Account). */
+/** The notice kind that asks the owner for the number (its tap opens the
+ *  waiting store's own screen, where the number is entered). */
 export const NEEDS_PUBLIC_PHONE_KIND = 'vendor_needs_public_phone';
 
 /** What this store still lacks to go live (documents aside). Empty = nothing. */

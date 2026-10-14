@@ -1519,7 +1519,13 @@ export async function adminRoutes(app: FastifyInstance) {
     // [owner #51] A store's FIRST go-live also needs a published contact phone
     // (vendor/go-live.ts) — the same rule the activation projection applies. A
     // reinstated store (it has been live before) is never held for it.
-    if (awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
+    // [DS1142 S3] "Never live" is not only PENDING_APPROVAL: a pending store an
+    // admin suspended is still a store that has never been live. Every store
+    // that went live carries a subscription (its trial starts at activation),
+    // so one without any is held here too — suspend-then-approve cannot
+    // launder the gate.
+    const hasBeenLive = await app.prisma.subscription.findFirst({ where: { vendorId: id }, select: { id: true } }) != null;
+    if ((awaitingFirstGoLive(vendor) || !hasBeenLive) && goLiveMissing(vendor).length > 0) {
       throw new AppError(
         409,
         'PUBLISHED_PHONE_MISSING',

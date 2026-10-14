@@ -17,6 +17,7 @@ import { VerificationService } from '../modules/verification/verification.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { SubscriptionService } from '../modules/subscription/subscription.service';
 
 // ---------------------------------------------------------------------------
 // Owner decision 51 (14 Oct 2026): a store cannot go live without a published
@@ -210,11 +211,28 @@ describe('[owner #51] a store goes live only with a published contact phone', ()
     expect(held.json().error.code).toBe('PUBLISHED_PHONE_MISSING');
     expect((await storeRow(store.id)).status).toBe('PENDING_APPROVAL');
 
+    // A store that WAS live (it carries the subscription its activation started)
+    // and was suspended comes back without being asked for a number.
     const returning = await makeOwner();
     const suspended = await makeStore(returning.userId, { status: 'SUSPENDED', isVerified: true });
     await approvedDocs(returning.userId);
+    await new SubscriptionService(app.prisma).startTrialForVendor(suspended.id);
     const reinstated = await approve(suspended.id);
     expect(reinstated.statusCode, reinstated.body).toBe(200);
     expect((await storeRow(suspended.id)).status).toBe('ACTIVE');
+  });
+
+  it('[DS1142 S3] a never-live store an admin suspended is still held: suspend-then-approve cannot launder the gate', async () => {
+    const approve = (id: string) => app.inject({
+      method: 'PUT', url: `/api/v1/admin/vendors/${id}/approve`,
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}` }, payload: {},
+    });
+    const owner = await makeOwner();
+    const neverLive = await makeStore(owner.userId, { status: 'SUSPENDED' });
+    await approvedDocs(owner.userId);
+    const held = await approve(neverLive.id);
+    expect(held.statusCode, held.body).toBe(409);
+    expect(held.json().error.code).toBe('PUBLISHED_PHONE_MISSING');
+    expect((await storeRow(neverLive.id)).status).toBe('SUSPENDED');
   });
 });
