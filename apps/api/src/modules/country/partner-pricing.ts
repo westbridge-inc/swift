@@ -2,10 +2,8 @@ import type { VehicleType } from '@prisma/client';
 import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isVehicleOffered, moverRoleFor, type MoverFeeBand, type MoverRole } from '../../config/vehicle-classes';
 import {
   catalogueStepsFor,
-  franchiseRuleFor,
   partnerRateFor,
   PricingConfigError,
-  type FranchiseRule,
   type MoverTier,
   type SubscriptionTiers,
   type VendorRateReason,
@@ -52,20 +50,27 @@ export interface PartnerPriceList {
   movers: MoverQuote[];
   /** Services are flat; catalogue businesses step up by active items. */
   vendors: { service: number; catalogue: CatalogueBand[] };
-  /** The franchise rule — a discount on each location's own rate — exactly as
-   *  the biller applies it; null when the market has none. */
-  franchise: FranchiseRule | null;
+  /**
+   * @deprecated Always null. [Owner, 13 Oct 2026 — decision 49] Swift has no
+   * multi-store pricing: every store is its own account and pays its own tier.
+   * Kept as an explicit null so a client that reads the key (the web page and
+   * the app shipped it in their types) reads "no franchise pricing".
+   */
+  franchise: null;
   /**
    * @deprecated Compatibility for apps that predate `movers`/`vendors`. Each
    * legacy number is nonzero, and one an older app shows to several kinds of
    * partner at once is the HIGHEST of their bills — an older screen may
    * over-state a fee, never under-state one. Concretely, for the card those
-   * apps shipped: `mover` is shown to every mover, so it is the highest mover
-   * rate; `smallVendor` is shown to every business as its price, so it is the
-   * highest rate a store under 1,000 items can be billed; `largeVendor` is
-   * shown as "1000+ items", so it is the highest rate any store from 1,000
-   * items up can be billed — the department bill, where the market has one.
-   * New clients must not read it.
+   * apps shipped: `mover` is shown to every mover, so it is the highest rate
+   * of a vehicle a mover can register today (`offered`); `smallVendor` is
+   * shown to every business as its price, so it is the highest rate a store
+   * under 1,000 items can be billed; `largeVendor` is shown as "1000+ items",
+   * so it is the highest rate any store from 1,000 items up can be billed —
+   * the department bill, where the market has one. A vehicle Swift does not
+   * take on (heavy delivery at launch, owner 13 Oct 2026 — decision 48) has
+   * no door price, so its rate is in none of these figures. New clients must
+   * not read it.
    */
   weekly: {
     mover: number;
@@ -89,9 +94,9 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
     return { vehicleType, label: VEHICLE_CLASSES[vehicleType].label, role, band: feeBandFor(vehicleType), tier: tier as MoverTier, rate, offered: isVehicleOffered(vehicleType) };
   });
 
-  // One store, no franchise: the franchise rule is quoted as a rule below.
+  // Each store is priced on its own catalogue alone (owner, 13 Oct 2026).
   const vendorAt = (isService: boolean, activeListings: number) =>
-    partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings, ownedStores: 1 });
+    partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings });
   // The steps are the biller's own validated ladder; each is then priced
   // through the biller, so a quoted step is a billed step.
   const catalogue = catalogueStepsFor(tiers).map(({ minItems }): CatalogueBand => {
@@ -100,18 +105,14 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
   });
   const service = vendorAt(true, 0).rate;
 
-  // The quoted franchise rule must be billable at every step: price one chain
-  // store per step through the biller, which refuses a discount that leaves
-  // nothing to pay — so the list refuses it too, instead of quoting it.
-  const franchise = franchiseRuleFor(tiers);
-  if (franchise) {
-    const chainStore = { kind: 'VENDOR', ownedStores: franchise.minLocations } as const;
-    partnerRateFor(tiers, { ...chainStore, isService: true, activeListings: 0 });
-    for (const { minItems } of catalogue) partnerRateFor(tiers, { ...chainStore, isService: false, activeListings: minItems });
-  }
-
-  // Legacy figures: the highest bill each one can stand for (see `weekly`).
+  // Legacy figures: the highest bill each one can stand for (see `weekly`),
+  // over the vehicles a mover can register today. Every vehicle stays in
+  // `movers` with its `offered` flag — the app hides a vehicle by that flag,
+  // so dropping one would make an older app fall back to its own list.
   const highest = (rates: number[]) => Math.max(...rates);
+  const offered = movers.filter((q) => q.offered);
+  const quotable = offered.length > 0 ? offered : movers;
+  const heavyOffered = quotable.filter((q) => q.band === 'HEAVY');
   // Steps a store below `below` items can be on, and steps a store from `from` items up can be on.
   const stepsBelow = (below: number) => catalogue.filter((band) => band.minItems < below);
   const stepsFrom = (from: number) => catalogue.filter((_band, i) => (catalogue[i + 1]?.minItems ?? Number.POSITIVE_INFINITY) > from);
@@ -119,10 +120,10 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
   return {
     movers,
     vendors: { service, catalogue },
-    franchise,
+    franchise: null,
     weekly: {
-      mover: highest(movers.map((q) => q.rate)),
-      moverHeavy: tiers.moverHeavy != null ? highest(movers.filter((q) => q.band === 'HEAVY').map((q) => q.rate)) : null,
+      mover: highest(quotable.map((q) => q.rate)),
+      moverHeavy: tiers.moverHeavy != null && heavyOffered.length > 0 ? highest(heavyOffered.map((q) => q.rate)) : null,
       serviceVendor: tiers.serviceVendor != null ? service : null,
       smallVendor: highest(stepsBelow(LEGACY_LARGE_CATALOGUE_FROM).map((band) => band.rate)),
       largeVendor: highest(stepsFrom(LEGACY_LARGE_CATALOGUE_FROM).map((band) => band.rate)),

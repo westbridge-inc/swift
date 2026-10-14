@@ -144,7 +144,7 @@ vi.mock('../../../kit', async () => {
     CalmRadar: (p: any) => h('div', null, p.title),
     EmptyState: (p: any) => h('div', null, p.title),
     LoadingBlock: () => h('div', null, 'Loading'),
-    IconChip: () => null, Pictogram: () => null, PinGlyph: () => null, Stars: () => null, VehicleRender: () => null,
+    IconChip: () => null, DecorativeIcon: () => null, Pictogram: () => null, PinGlyph: () => null, Stars: () => null, VehicleRender: () => null,
     cardShadow: {},
   };
 });
@@ -176,7 +176,8 @@ vi.mock('../../../components/LocationPrimerCard', () => ({ LocationPrimerCard: (
 vi.mock('../../../lib/images', () => ({ mediaUrl: (x: unknown) => x }));
 vi.mock('../../../lib/haptics', () => ({ haptic: { success: vi.fn(), commit: vi.fn(), warn: vi.fn(), failure: vi.fn(), select: vi.fn() } }));
 vi.mock('../../../lib/openExternal', () => ({ openExternal: vi.fn() }));
-vi.mock('../../../services/emergencyPolicy', () => ({ currentMarketDial: () => ({ kind: 'manual' }), emergencyDialCopy: () => '', previewEmergencyDial: () => null }));
+// The live ride now hosts the SOS ceremony (TaxiScreen.sos.navigation.test.ts), which reads the market policy too.
+vi.mock('../../../services/emergencyPolicy', () => ({ currentMarketDial: () => ({ kind: 'manual' }), emergencyDialCopy: () => '', previewEmergencyDial: () => null, useEmergencyPolicy: () => ({ country: 'GY', dial: { kind: 'manual' } }), emergencyDialFor: () => ({ kind: 'manual' }) }));
 vi.mock('../taxiEntry', () => ({ signInForTaxi: vi.fn() }));
 vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null }) } }));
 vi.mock('../../../lib/storage', () => ({

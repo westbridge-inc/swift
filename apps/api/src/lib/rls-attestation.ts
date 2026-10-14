@@ -212,6 +212,18 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
   };
 }
 
+/** Which database, on which running server, a connection reached. Roles are
+ *  server-wide, so a login that is a bypass member is one on EVERY database of
+ *  the server: comparing this is how the boot check knows two logins reach the
+ *  same data (see boot/system-login.ts). Catalog only — no tenant data. */
+export interface DatabaseIdentity { database: string; serverStartedAt: string }
+
+export async function readDatabaseIdentity(db: RawDb): Promise<DatabaseIdentity | null> {
+  const [row] = await db.$queryRaw<Array<{ database: string; started: string }>>`
+    SELECT current_database()::text AS database, pg_postmaster_start_time()::text AS started`;
+  return row ? { database: row.database, serverStartedAt: row.started } : null;
+}
+
 /** [REPORT-111 P0.3] Has this deployment DECLARED that it runs wall-less?
  *
  *  Exactly `'1'`. A posture this consequential is not something to infer from
