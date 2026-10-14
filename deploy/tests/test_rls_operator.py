@@ -478,6 +478,18 @@ class OperatorUnits(unittest.TestCase):
         self.assertEqual(re.findall(r'\b(INSERT|UPDATE|DELETE|CREATE|ALTER|GRANT|REVOKE|DROP|TRUNCATE|COPY|SET ROLE|DO)\b', code), [])
         self.assertEqual(code.count(';'), 2)  # SET search_path; and the one SELECT
 
+    def test_the_acl_digest_is_default_explicit_and_order_free(self):
+        """A pg_dump/pg_restore copy leaves an ACL that equals its default as
+        NULL; the digest must read both alike (the rehearsal compares them)."""
+        census = (DEPLOY / 'wall' / 'census.sql').read_text()
+        acls = census[census.index('acls AS ('):census.index('SELECT json_build_object(')]
+        for default in ("coalesce(s.nspacl, acldefault('n',", 'coalesce(c.relacl, acldefault(',
+                        "coalesce(p.proacl, acldefault('f',", "coalesce(t.typacl, acldefault('T',",
+                        "coalesce(d.datacl, acldefault('d',"):
+            self.assertIn(default, acls)
+        self.assertNotIn("'-'", acls)
+        self.assertEqual(acls.count('aclexplode('), 7)
+
     def test_published_urls_parse_back_and_others_do_not(self):
         url = operator.published_url(APP, 'swift', 'a-b_c')
         self.assertEqual(operator.parse_published(url), (APP, 'a-b_c', 'postgres', 5432, 'swift'))

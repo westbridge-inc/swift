@@ -100,27 +100,53 @@ ownership AS (
   SELECT 'd|' || d.datname || '|' || pg_get_userbyid(d.datdba) FROM pg_database d WHERE d.datname = current_database()
 ),
 acls AS (
-  SELECT 'n|' || s.nspname || '|' || coalesce(s.nspacl::text, '-') AS line FROM schemas s
+  -- One line per privilege, defaults made explicit (acldefault) and order-free,
+  -- so an ACL a migration wrote out in full and the same ACL left at its
+  -- default (as a pg_dump/pg_restore copy leaves it) digest alike.
+  SELECT 'n|' || s.nspname || '|' || x.line AS line
+    FROM schemas s, LATERAL (SELECT CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(e.grantee) END || '|'
+                                    || pg_get_userbyid(e.grantor) || '|' || e.privilege_type || '|' || e.is_grantable::text AS line
+                               FROM aclexplode(coalesce(s.nspacl, acldefault('n', s.nspowner))) e) x
   UNION ALL
-  SELECT 'c|' || s.nspname || '|' || c.relname || '|' || coalesce(c.relacl::text, '-')
-    FROM pg_class c JOIN schemas s ON s.oid = c.relnamespace
+  SELECT 'c|' || s.nspname || '|' || c.relname || '|' || x.line
+    FROM pg_class c JOIN schemas s ON s.oid = c.relnamespace,
+         LATERAL (SELECT CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(e.grantee) END || '|'
+                         || pg_get_userbyid(e.grantor) || '|' || e.privilege_type || '|' || e.is_grantable::text AS line
+                    FROM aclexplode(coalesce(c.relacl, acldefault(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END::"char", c.relowner))) e) x
   UNION ALL
-  SELECT 'a|' || s.nspname || '|' || c.relname || '|' || a.attname || '|' || a.attacl::text
-    FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN schemas s ON s.oid = c.relnamespace
+  SELECT 'a|' || s.nspname || '|' || c.relname || '|' || a.attname || '|' || x.line
+    FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN schemas s ON s.oid = c.relnamespace,
+         LATERAL (SELECT CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(e.grantee) END || '|'
+                         || pg_get_userbyid(e.grantor) || '|' || e.privilege_type || '|' || e.is_grantable::text AS line
+                    FROM aclexplode(a.attacl) e) x
    WHERE a.attacl IS NOT NULL
   UNION ALL
-  SELECT 'p|' || p.oid::regprocedure::text || '|' || coalesce(p.proacl::text, '-')
-    FROM pg_proc p JOIN schemas s ON s.oid = p.pronamespace
+  SELECT 'p|' || p.oid::regprocedure::text || '|' || x.line
+    FROM pg_proc p JOIN schemas s ON s.oid = p.pronamespace,
+         LATERAL (SELECT CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(e.grantee) END || '|'
+                         || pg_get_userbyid(e.grantor) || '|' || e.privilege_type || '|' || e.is_grantable::text AS line
+                    FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) e) x
   UNION ALL
-  SELECT 't|' || s.nspname || '|' || t.typname || '|' || coalesce(t.typacl::text, '-')
-    FROM pg_type t JOIN schemas s ON s.oid = t.typnamespace
+  SELECT 't|' || s.nspname || '|' || t.typname || '|' || x.line
+    FROM pg_type t JOIN schemas s ON s.oid = t.typnamespace,
+         LATERAL (SELECT CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(e.grantee) END || '|'
+                         || pg_get_userbyid(e.grantor) || '|' || e.privilege_type || '|' || e.is_grantable::text AS line
+                    FROM aclexplode(coalesce(t.typacl, acldefault('T', t.typowner))) e) x
    WHERE t.typtype IN ('e', 'd', 'r', 'm')
   UNION ALL
   SELECT 'D|' || pg_get_userbyid(d.defaclrole) || '|' || coalesce(d.defaclnamespace::regnamespace::text, '*') || '|'
-         || d.defaclobjtype::text || '|' || d.defaclacl::text
-    FROM pg_default_acl d
+         || d.defaclobjtype::text || '|' || x.line
+    FROM pg_default_acl d,
+         LATERAL (SELECT CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(e.grantee) END || '|'
+                         || pg_get_userbyid(e.grantor) || '|' || e.privilege_type || '|' || e.is_grantable::text AS line
+                    FROM aclexplode(d.defaclacl) e) x
   UNION ALL
-  SELECT 'd|' || d.datname || '|' || coalesce(d.datacl::text, '-') FROM pg_database d WHERE d.datname = current_database()
+  SELECT 'd|' || d.datname || '|' || x.line
+    FROM pg_database d,
+         LATERAL (SELECT CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(e.grantee) END || '|'
+                         || pg_get_userbyid(e.grantor) || '|' || e.privilege_type || '|' || e.is_grantable::text AS line
+                    FROM aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) e) x
+   WHERE d.datname = current_database()
 )
 SELECT json_build_object(
   'cluster', (SELECT system_identifier::text FROM pg_control_system()),
