@@ -341,7 +341,7 @@ describe('Rider location authority', () => {
       headers: { authorization: `Bearer ${secondDevice.token}` },
     });
     expect(ownerSample.statusCode).toBe(200);
-    expect(ownerSample.json()).toEqual({ success: true });
+    expect(ownerSample.json()).toEqual({ success: true, data: { accepted: true } });
     const afterOwnerSample = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
     expect({ lat: afterOwnerSample.currentLat, lng: afterOwnerSample.currentLng })
       .toEqual({ lat: 6.803, lng: -58.153 });
@@ -629,6 +629,8 @@ describe('Rider location authority', () => {
       headers: { authorization: `Bearer ${active.token}` },
     });
     expect(activeRes.statusCode).toBe(200);
+    // An active-delivery fix is an explicit acceptance too: the app keeps tracking only on one.
+    expect(activeRes.json()).toEqual({ success: true, data: { accepted: true } });
     const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: active.riderId } });
     expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.83, lng: -58.17 });
   });
