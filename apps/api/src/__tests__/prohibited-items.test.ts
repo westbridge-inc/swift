@@ -435,6 +435,35 @@ describe('[§8] nobody sees a hidden item', () => {
     } finally { resetHiddenItemIdsCacheForTests(); }
   });
 
+  it('signed in, the database top-up of a short index answer never brings a hidden item back, even on a stale exclusion list', async () => {
+    // The index answers nothing here (it has not caught up yet, or cannot match
+    // inside a word), so every row on the page comes from the index path's
+    // database top-up — the control proves the top-up ran and found rows.
+    const { hiddenItemIds } = await import('../modules/compliance/prohibited-gate');
+    const indexAnswer = engine.itemHits;
+    engine.itemHits = [];
+    engine.fail = false;
+    const topUpIds = async () => {
+      const res = await inject('GET', `/api/v1/search?q=${RUN}&limit=50`, customer.token);
+      expect(res.statusCode).toBe(200);
+      const data = res.json().data as { items: Array<{ id: string }>; meta: { processingTimeMs?: number } };
+      expect(data.meta.processingTimeMs, 'the index path answered, not the database fallback').toBeTypeOf('number');
+      return ids(data.items);
+    };
+    try {
+      resetHiddenItemIdsCacheForTests();
+      await visibleOn(topUpIds, [control.id], hiddenIds());
+      // A stale list: only the exact last pass inside the top-up stands between a hidden row and the page.
+      resetHiddenItemIdsCacheForTests();
+      const nothingHidden = { item: { findMany: async () => [] }, itemDiscoveryCategory: { findMany: async () => [] }, discoveryCategory: { findMany: async () => [] }, $queryRaw: async () => [] };
+      expect(await hiddenItemIds(nothingHidden as never, TENANT)).toEqual([]);
+      await visibleOn(topUpIds, [control.id], hiddenIds());
+    } finally {
+      engine.itemHits = indexAnswer;
+      resetHiddenItemIdsCacheForTests();
+    }
+  });
+
   it('the category rail never offers Pharmacy', async () => {
     const row = await system(() => app.prisma.platformConfig.findUnique({ where: { key: CATEGORY_DISCOVERY_FLAG } }));
     priorPlatformFlag = row ? row.value : null;
