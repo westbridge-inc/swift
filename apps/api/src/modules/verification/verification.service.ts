@@ -1838,10 +1838,7 @@ export class VerificationService {
     for (const vendor of owner.vendors) {
       const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
       const verified = checklistOk && (!disclosureGate || (country != null && (await compileActivationDisclosure(db, vendor.id, { accountId: userId, tenantId: country.tenantId })).complete));
-      // [owner #51] A store's FIRST go-live also needs a published contact
-      // phone (vendor/go-live.ts): its documents are done, so it waits only for
-      // the number, and the owner is told once. A store that has been live is
-      // never held or taken down for it.
+      // [owner #51] A FIRST go-live also needs a published phone (vendor/go-live.ts).
       if (verified && awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
         await this.askForPublishedPhone(db, userId, vendor);
         continue;

@@ -8,6 +8,11 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
+import { adminRoutes } from '../modules/admin/admin.routes';
+import { authRoutes } from '../modules/auth/auth.routes';
+import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
+import { loginWithOtp } from './helpers/otp';
+import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
@@ -33,6 +38,7 @@ const KIND = 'vendor_needs_public_phone';
 
 let app: FastifyInstance;
 let svc: VerificationService;
+let adminToken: string;
 const marker = nanoid(6).toLowerCase();
 const userIds: string[] = [];
 let seq = 0;
@@ -66,7 +72,7 @@ async function approvedDocs(userId: string) {
   }
 }
 
-async function makeStore(ownerUserId: string, over: { status?: 'PENDING_APPROVAL' | 'ACTIVE'; isVerified?: boolean; acceptingOrders?: boolean; publicPhone?: string | null } = {}) {
+async function makeStore(ownerUserId: string, over: { status?: 'PENDING_APPROVAL' | 'ACTIVE' | 'SUSPENDED'; isVerified?: boolean; acceptingOrders?: boolean; publicPhone?: string | null } = {}) {
   seq += 1;
   const vo = await app.prisma.vendorOwner.upsert({ where: { userId: ownerUserId }, update: {}, create: { userId: ownerUserId } });
   return app.prisma.vendor.create({
@@ -98,13 +104,17 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
+  registerEmptyJsonBodyParser(app);
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
+  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+  adminToken = (await loginWithOtp(app, '+5926001000')).json().data.tokens.accessToken;
 });
 
 afterAll(async () => {
@@ -185,5 +195,26 @@ describe('[owner #51] a store goes live only with a published contact phone', ()
     expect(await notices(owner.userId)).toHaveLength(0);
     const profile = await inject('GET', '/api/v1/vendor/profile', owner.token, store.id);
     expect(profile.json().data.vendors.find((v: { id: string }) => v.id === store.id)).toMatchObject({ goLiveMissing: [] });
+  });
+
+  it('the admin approve button holds a never-live store with no published number; a store being reinstated is never held', async () => {
+    const approve = (id: string) => app.inject({
+      method: 'PUT', url: `/api/v1/admin/vendors/${id}/approve`,
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}` }, payload: {},
+    });
+    const owner = await makeOwner();
+    const store = await makeStore(owner.userId);
+    await approvedDocs(owner.userId);
+    const held = await approve(store.id);
+    expect(held.statusCode, held.body).toBe(409);
+    expect(held.json().error.code).toBe('PUBLISHED_PHONE_MISSING');
+    expect((await storeRow(store.id)).status).toBe('PENDING_APPROVAL');
+
+    const returning = await makeOwner();
+    const suspended = await makeStore(returning.userId, { status: 'SUSPENDED', isVerified: true });
+    await approvedDocs(returning.userId);
+    const reinstated = await approve(suspended.id);
+    expect(reinstated.statusCode, reinstated.body).toBe(200);
+    expect((await storeRow(suspended.id)).status).toBe('ACTIVE');
   });
 });

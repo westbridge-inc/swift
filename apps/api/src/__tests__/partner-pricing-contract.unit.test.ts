@@ -1060,7 +1060,9 @@ describe('activation — a market that cannot price a partner refuses to activat
     // The one projection that owns vendor activation prices a store before it flips it verified/ACTIVE.
     const projectionAt = verification.indexOf('private async projectVendorActivation(');
     expect(projectionAt).toBeGreaterThan(-1);
-    before(verification.slice(projectionAt, projectionAt + 4000), 'startTrialForVendor(vendor.id, db)', 'data: { isVerified: true');
+    // [owner #51, 14 Oct] The go-live phone gate added lines to the projection: the
+    // slice is a reading window, not the property — the ORDER is what is graded.
+    before(verification.slice(projectionAt, projectionAt + 6000), 'startTrialForVendor(vendor.id, db)', 'data: { isVerified: true');
     // The review decision prices inside its transaction, before the approval projects anything.
     const decisionAt = verification.indexOf('private async transitionPendingDocument(');
     expect(decisionAt).toBeGreaterThan(-1);

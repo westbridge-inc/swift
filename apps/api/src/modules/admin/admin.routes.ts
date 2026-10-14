@@ -8,6 +8,7 @@ import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
+import { awaitingFirstGoLive, goLiveMissing } from '../vendor/go-live';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
@@ -1513,6 +1514,16 @@ export async function adminRoutes(app: FastifyInstance) {
         409,
         'CHECKLIST_INCOMPLETE',
         `${vendor.name}'s required documents are not all approved and current — review them in the Verification queue first.`,
+      );
+    }
+    // [owner #51] A store's FIRST go-live also needs a published contact phone
+    // (vendor/go-live.ts) — the same rule the activation projection applies. A
+    // reinstated store (it has been live before) is never held for it.
+    if (awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
+      throw new AppError(
+        409,
+        'PUBLISHED_PHONE_MISSING',
+        `${vendor.name} has no published phone number yet. It goes live once the owner adds the number customers can call.`,
       );
     }
 
