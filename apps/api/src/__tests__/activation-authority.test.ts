@@ -30,8 +30,9 @@ import { readDunningClock } from '../modules/billing/dunning-clock';
 //             live gate, and can actually SUBMIT them (the old CAR-hard-coded
 //             list made road_service_licence unsubmittable).
 // SUPERMARKET checklist (GY): owner_national_id, business_registration,
-// tin_certificate, storefront_photo. MOTORCYCLE mover checklist: national_id,
-// police_clearance, drivers_licence, vehicle_registration, vehicle_insurance.
+// tin_certificate, storefront_photo. MOTORCYCLE mover checklist [VERIFY-DOCS, 6 Oct
+// 2026]: drivers_licence, vehicle_registration, vehicle_insurance (national ID and
+// police clearance are optional for a licence holder).
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -42,7 +43,7 @@ const userIds: string[] = [];
 let seq = 0;
 
 const SUPERMARKET_DOCS = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
-const MOTORCYCLE_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+const MOTORCYCLE_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
 
 async function makeUser(first: string) {
   seq += 1;
@@ -349,7 +350,7 @@ describe('EV-ACT-11 — admin vendor approve is checklist-gated and exactly-once
     expect(fresh.isVerified).toBe(false);
   });
 
-  it('[Fable #1481 S4-2] approving a billing-suspended store clears its suspension source (no stale BILLING for a later heal)', async () => {
+  it('[Fable #1481 S4-2] a grandfathered store with no subscription clears its stale billing suspension', async () => {
     const owner = await makeUser('Reinstate');
     const vendor = await makePendingVendor(owner.id, 'SUSPENDED');
     await app.prisma.vendor.update({ where: { id: vendor.id }, data: { suspensionSource: 'BILLING' } });
@@ -433,8 +434,8 @@ describe('STRAND-3 — commercial classes carry their own checklist', () => {
       data: { userId: user.id, vehicleType: 'BUS_9' as never, documentsVerified: false, vehicleMake: 'Toyota', vehicleModel: 'Hiace', vehicleYear: 2022, vehicleColor: 'White', licensePlate: `BUS-${marker}-1`, driverLicenseUrl: 'test/lic1', vehicleInsuranceUrl: 'test/ins1' },
     });
     // Everything a CAR taxi needs, including confirmed HIRE insurance…
-    const carDocs = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
-      'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'];
+    const carDocs = ['drivers_licence', 'vehicle_registration',
+      'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert'];
     for (const docType of carDocs) await approvedDoc(user.id, docType);
     await approvedDoc(user.id, 'vehicle_insurance', {
       insurerName: 'GY Assure', policyNumber: `P-${marker}`, coverageClass: 'HIRE',

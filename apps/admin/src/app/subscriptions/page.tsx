@@ -7,6 +7,7 @@ import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, setAsideSu
 import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
 import { StatusPill, gyd } from '@/components/detail';
 import { askReason, reasonTooShort } from '@/lib/ask-reason';
+import { label } from '@/lib/labels';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -30,7 +31,7 @@ function BillingEvents({ id }: { id: string }) {
       {events.map((e: any) => (
         <div key={e.id} className="flex items-center gap-3 text-xs">
           <span className="text-[var(--muted)] w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
-          <span>{String(e.type ?? e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
+          <span>{e.type ? label('BillingEventType', e.type) : String(e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
           {e.amount != null && <span className="ml-auto font-medium">{gyd(e.amount)}</span>}
         </div>
       ))}
@@ -147,6 +148,11 @@ export default function SubscriptionsPage() {
   const refundBusy = setAside.isPending || recordPaid.isPending || release.isPending;
 
   const rows: any[] = data?.data ?? [];
+  // [OWNER 8 Oct (4)] Partners pay the weekly fee only through the MMG checkout
+  // page; production holds recording a payment by hand (BILLING_TOPUP_HOLD),
+  // so the button is not offered while the server says the hold is on.
+  const recordingHeld = (data as any)?.manualFeeRecording === 'held';
+  const recordError = topup.error as { message?: string } | null;
 
   return (
     <div>
@@ -169,6 +175,14 @@ export default function SubscriptionsPage() {
       <p className="text-[var(--muted)] text-sm mb-6">
         The weekly flat fee is Swift&apos;s only revenue — this queue is the business.
       </p>
+      {recordingHeld ? (
+        <p className="text-[var(--muted)] text-xs -mt-4 mb-6">
+          Recording fee payments by hand is on hold: partners pay through the MMG checkout page. A payment that arrived another way is refunded.
+        </p>
+      ) : null}
+      {recordError?.message ? (
+        <p role="alert" className="text-red-400 text-xs -mt-4 mb-6">{recordError.message}</p>
+      ) : null}
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
@@ -218,9 +232,9 @@ export default function SubscriptionsPage() {
                           >
                             {openTrail === s.id ? 'Hide trail' : 'Billing trail'}
                           </button>
-                          <button
+                          {!recordingHeld && <button
                             onClick={() => {
-                              const amt = window.prompt(`Record a cash/bank top-up for ${h.name} (whole GYD):`);
+                              const amt = window.prompt(`Record a weekly-fee payment received by cash/bank for ${h.name} (whole GYD):`);
                               const n = Number(amt);
                               if (!amt || !Number.isInteger(n) || n <= 0) return;
                               const reference = window.prompt(
@@ -229,14 +243,14 @@ export default function SubscriptionsPage() {
                               if (!reference) return;
                               // The clause asks for a confirmation naming the TARGET and the DELTA.
                               if (!window.confirm(`Credit ${h.name} with GY$${n.toLocaleString()} against transfer ${reference}?`)) return;
-                              const reason = askReason({ action: 'record this top-up', subject: `${h.name} (${reference})` });
+                              const reason = askReason({ action: 'record this fee payment', subject: `${h.name} (${reference})` });
                               if (reason) topup.mutate({ id: s.id, amount: n, reference, reason });
                             }}
                             disabled={topup.isPending}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
-                            Top up
-                          </button>
+                            Record fee payment
+                          </button>}
                           {Number(s.refundSetAside ?? 0) > 0 ? (
                             <>
                               <button

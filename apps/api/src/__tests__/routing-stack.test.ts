@@ -44,12 +44,14 @@ describe('[routing] the stack is in the repository', () => {
   });
 
   it('pins every image — :latest is not a deployment', () => {
-    // Except photon, whose publisher ships no version tags. Named so the
-    // exception is a decision on the record rather than an oversight.
+    // No exception any more (#1448, 12 Oct): photon's publisher now ships
+    // version tags, and production starts it (PLACES_PROVIDER=osm), so it is
+    // pinned by version and digest like the rest.
     const images = [...COMPOSE.matchAll(/image:\s*(\S+)/g)].map((m) => m[1]!);
     expect(images.length).toBe(4);
-    const unpinned = images.filter((i) => i.endsWith(':latest'));
-    expect(unpinned).toEqual(['rtuszik/photon-docker:latest']);
+    const unpinned = images.filter((i) => i.endsWith(':latest') || !/:[^/]+$/.test(i));
+    expect(unpinned).toEqual([]);
+    expect(images.find((i) => i.startsWith('rtuszik/photon-docker:'))).toMatch(/^rtuszik\/photon-docker:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
   });
 });
 

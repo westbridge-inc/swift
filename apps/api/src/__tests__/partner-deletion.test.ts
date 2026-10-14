@@ -545,7 +545,8 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
     await refused(p.userId, 'FEE_CREDIT');
     // [Owner ruling 2026-10-07] The person is told the amount and that it is refunded.
     const error = await new AccountService(app).deleteAccount(p.userId).then(() => null, (e: unknown) => e as Error);
-    expect(error?.message).toContain('You have GY$1,500 of unused weekly-fee credit. Open Get help and we\u2019ll refund it, then your account can be deleted.');
+    // [OWNER RULING 8 Oct, NO "WALLET"; owner #62] named as money paid for weekly fees that have not started.
+    expect(error?.message).toContain('You have GY$1,500 paid for weekly fees that have not started. Open Get help and we\u2019ll refund it, then your account can be deleted.');
     await untouched(p.userId);
     await app.prisma.prepaidBalance.update({ where: { subscriptionId: sub.id }, data: { balance: 0 } });
     await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
@@ -571,7 +572,7 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
     await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND_RESERVED', amount: 1500, idempotencyKey: `credit-refund-reserve:test-${sub.id}` } });
     await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND_RELEASED', amount: 1500, idempotencyKey: `credit-refund-release:test-${sub.id}` } });
     const error = await new AccountService(app).deleteAccount(p.userId).then(() => null, (e: unknown) => e as Error);
-    expect(error?.message).toContain('unused weekly-fee credit. Open Get help');
+    expect(error?.message).toContain('paid for weekly fees that have not started. Open Get help');
     expect(error?.message).not.toContain('Swift is paying back');
   });
 });

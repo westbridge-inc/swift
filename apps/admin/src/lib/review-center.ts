@@ -8,6 +8,9 @@ export interface ReviewDocument {
   id: string; userId: string; docType: string; role: string; status: ReviewStatus;
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
+  reviewerTypes?: Array<'documentNumber' | 'issuedOn'>;
+  /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
+  reviewedBy?: string | null;
   user?: {
     id: string; firstName?: string; lastName?: string; phone?: string; countryCode?: string;
     driver?: { licensePlate?: string; vehicleMake?: string; vehicleModel?: string; vehicleType?: string } | null;
@@ -16,7 +19,7 @@ export interface ReviewDocument {
 export interface Applicant { id: string; name: string; phone: string; documents: ReviewDocument[]; oldest: number }
 // Shared vocabulary for the queue, facts, dialogs and custody timeline.
 const LABELS: Record<string, string> = {
-  national_id: 'National ID', owner_national_id: 'National ID', passport: 'Passport',
+  national_id: 'National ID', owner_national_id: 'National ID', passport: 'Passport', identity_l2: 'Customer ID',
   drivers_licence: "Driver's licence", gra_restaurant_licence: 'GRA restaurant licence',
   business_registration: 'Business registration', police_clearance: 'Police clearance',
   fitness_cert: 'Vehicle fitness certificate', vehicle_insurance: 'Vehicle insurance',
@@ -26,6 +29,8 @@ const LABELS: Record<string, string> = {
   trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
   self_declaration_unregistered: 'Unregistered business declaration',
+  // [MC-PR2] checklist photo types the queue and the activation checklist both name
+  storefront_photo: 'Storefront photo', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
   VENDOR_OWNER: 'Business owner', MOVER: 'Rider/Driver', CUSTOMER: 'Customer',
   RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
   CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',
@@ -73,6 +78,9 @@ export function timelineLabel(what: string): string {
       'AUDIT DSAR_RECTIFICATION_REQUESTED': 'Correction requested by the applicant',
       'AUDIT KYC_AUTO_APPROVE': 'Automatically approved',
       'AUDIT KYC_AUTO_REJECT': 'Automatically rejected',
+      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] the intake's two outcomes, in words that claim no review.
+      'AUDIT CUSTOMER_ID_ON_FILE': 'ID on file — the automatic checks found nothing to hold (no person reviewed it)',
+      'AUDIT CUSTOMER_ID_HELD': 'Held for a person by the automatic checks',
       'AUDIT VERIFICATION_SUBMIT': 'Document submitted',
     };
     if (decisionAudit[what]) return decisionAudit[what];
@@ -83,7 +91,33 @@ export function timelineLabel(what: string): string {
   }
   return 'Document activity recorded';
 }
-export interface ReviewTimelineEvent { at: string; actor: string | null; what: string; detail?: { reasonCode?: unknown } }
+/** Who in the custody timeline is not a person: no actor, the validator, an engine, or the server's
+ *  automatic markers (an ID on file, a processor's own verdict) — never looked up as a reviewer. */
+export function isSystemActor(actor: string | null): boolean {
+  return !actor || actor === 'validator' || actor.startsWith('engine:') || actor.startsWith('auto:') || actor.startsWith('kyc:');
+}
+export interface ReviewTimelineEvent { at: string; actor: string | null; what: string; detail?: { reasonCode?: unknown; reason?: unknown } }
+/** [Owner ruling 8 Oct 2026 — CUSTOMER ID] Why the automatic checks held a customer ID (server customer-id.ts codes). */
+export const CUSTOMER_ID_HOLD_WORDS: Record<string, string> = {
+  DUPLICATE_IMAGE: 'the same picture is on another account',
+  LINKED_ACCOUNT: 'a linked account already sent an ID',
+  OPEN_SUBMISSION: 'an earlier ID is still waiting',
+  PRIOR_HOLD: 'an earlier ID was held and never approved',
+  EARLIER_DECISION: 'an earlier ID was rejected or withdrawn',
+  VELOCITY: 'too many uploads in a day',
+  TOO_SMALL: 'the picture is too small to read',
+  NOT_MEASURABLE: 'the file could not be measured (for example a PDF)',
+  ACCOUNT_HOLD: 'the account is under an integrity hold',
+  IDENTITY_REVIEW: 'the identity graph needs a person',
+  STRIKES: 'the account is restricted after failed cash payments',
+  PROCESSOR_REFERRED: 'the document processor referred it',
+  CHECKS_UNAVAILABLE: 'the checks could not run',
+};
+function heldBecause(detail: ReviewTimelineEvent['detail']): string {
+  const reason = typeof detail?.reason === 'string' ? detail.reason : '';
+  const words = (reason.match(/[A-Z][A-Z_]{3,}/g) ?? []).map((code) => CUSTOMER_ID_HOLD_WORDS[code]).filter(Boolean);
+  return words.length ? `: ${words.join('; ')}` : '';
+}
 function sameEscalationTime(event: ReviewTimelineEvent, other: ReviewTimelineEvent): boolean {
   const audit = event.what === 'AUDIT ESCALATE_VERIFICATION_DOC' ? event : other;
   const decision = audit === event ? other : event;
@@ -100,6 +134,7 @@ export function reviewTimeline(events: ReviewTimelineEvent[]): Array<ReviewTimel
   return events.flatMap((event, index) => {
     if (consumed.has(index)) return [];
     let label = timelineLabel(event.what);
+    if (event.what === 'AUDIT CUSTOMER_ID_HELD') label += heldBecause(event.detail);
     // A decision and its audit row may describe the same escalation. Pair once,
     // only for the same reviewer and recorded second, retaining the reason.
     const escalation = (what: string) => {
@@ -132,6 +167,23 @@ export const applicantId = (doc: ReviewDocument) => doc.userId || doc.user?.id |
 export const maskedPhone = (phone?: string) => phone ? `••• ••• ${phone.slice(-4)}` : 'No phone on file';
 
 /** Follow the server's page metadata. No partial success if a later page fails. */
+/**
+ * [Owner report 8 Oct 2026] New uploads did not appear in an open Review Center until a reload. The counts are
+ * polled lightly; when the server holds more documents in this lane than the page loaded, the page says how many
+ * are new and offers a refresh — the list a reviewer is working through never shifts under them.
+ */
+export function newSinceLoaded(
+  counts: { byStatus?: Record<string, number>; byLane?: Record<string, { customer: number; operator: number }> } | undefined,
+  status: ReviewStatus, lane: ReviewLane, loaded: number,
+): number {
+  if (!counts) return 0;
+  const onServer = lane === 'customer' ? counts.byLane?.[status]?.customer
+    : lane === 'operator' ? counts.byLane?.[status]?.operator
+      : counts.byStatus?.[status];
+  return typeof onServer === 'number' && onServer > loaded ? onServer - loaded : 0;
+}
+/** How often the lane counts are re-read while the Review Center is open (cheap: one grouped count). */
+export const REVIEW_COUNTS_POLL_MS = 30_000;
 export async function loadReviewQueue(status: ReviewStatus, lane: ReviewLane): Promise<ReviewDocument[]> {
   const docs = new Map<string, ReviewDocument>();
   for (let page = 1; ; page++) {

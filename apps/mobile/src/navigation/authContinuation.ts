@@ -6,6 +6,8 @@ export interface MenuItemAddDraft {
   dayOffset: number;
   slot: string | null;
   visitMode: 'AT_BUSINESS' | 'MOBILE';
+  /** [row 70] The item note typed before signing in; omitted when empty. */
+  notes?: string;
 }
 
 export type AuthContinuationDestination = {

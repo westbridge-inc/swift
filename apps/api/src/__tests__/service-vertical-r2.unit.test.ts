@@ -76,7 +76,8 @@ function harness(rows: Row[]) {
     $queryRaw: async () => [],
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
     booking: { updateMany: async () => ({ count: 1 }) },
-    dispatchSearch: { updateMany: async () => ({ count: 0 }) },
+    // [Item 64] The dispatch journal holds no exhausted search for these fixtures.
+    dispatchSearch: { updateMany: async () => ({ count: 0 }), findFirst: async () => null },
     orderItem: { findMany: async () => [] },
     orderStatusLog: { create: async (args: { data: Row }) => args.data },
     vendor: {
@@ -93,7 +94,7 @@ function harness(rows: Row[]) {
     },
     subscription: { findFirst: async () => null },
     algoConfig: { findFirst: async () => null },
-    platformConfig: { findUnique: async () => null },
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
     alertDelivery: { updateMany: async () => ({ count: 0 }) },
     notification: { updateMany: async () => ({ count: 0 }) },
     user: { findUnique: async () => ({ countryCode: 'GY' }) },

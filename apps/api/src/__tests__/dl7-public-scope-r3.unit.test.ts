@@ -11,12 +11,21 @@ vi.mock('../modules/search/search.service', () => ({ SearchService: class { asyn
 vi.mock('../modules/verification/category-gate', () => ({
   hiddenOnlyItemIds: async () => [], listableItemsForVendors: async (_db: unknown, _tenant: string, rows: unknown[]) => rows,
 }));
+// [GUARDRAILS §8] The prohibited-items reads are proven against a real database
+// (prohibited-items.test.ts); this seam models none of their tables.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  hiddenAmong: async () => new Set<string>(),
+  hiddenItemIds: async () => [],
+  assertOrderableNow: async () => undefined,
+  withoutHidden: async <T,>(_db: unknown, rows: readonly T[]) => [...rows],
+}));
 afterEach(() => vi.restoreAllMocks());
 
 function store(id: string, tenant: Row): Row {
   return { id, tenantId: tenant['id'], tenant, status: 'ACTIVE', isVerified: true, subscription: null,
     name: `SENTINEL_${id}`, description: 'SENTINEL_DESCRIPTION', slug: id, vendorType: 'STORE', items: [{ isAvailable: true }],
-    isCurrentlyOpen: true, acceptingOrders: true, cuisineTypes: [], tags: [], latitude: 0, longitude: 0,
+    isCurrentlyOpen: true, acceptingOrders: true, cuisineTypes: [], tags: [], latitude: 6.8013, longitude: -58.1551,
     addressLine1: 'Fixture business address', logoUrl: null, coverImageUrl: null, city: 'Fixture city',
     estimatedPrepTime: 10, averageRating: 4, totalRatings: 1, minOrderAmount: 0, totalOrders: 1,
     deliveryRadius: 4, distanceKm: null };
@@ -36,13 +45,13 @@ async function fixture() {
   const readItems = vi.fn(async (q: Query) => items.map(i => queryRow(i, q)).filter(i => i !== null));
   const prisma = prismaDouble(orderStore([]), {
     vendor: { findMany: readVendors }, item: { findMany: readItems, count: async (q: Query) => (await readItems(q)).length },
-    actorRatingStat: { findMany: async () => [] }, platformConfig: { findMany: async () => [] },
+    actorRatingStat: { findMany: async () => [] }, platformConfig: { findUnique: async () => null, findMany: async () => [] },
   });
   const parts = { prisma, redis: recordingRedis(), io: recordingIo() };
   const search = await hostRoutes(searchRoutes, parts); const market = await hostRoutes(marketRoutes, parts);
   const customer = await hostRoutes(customerRoutes, parts);
   const callSearch = (path: string, publicMode: boolean) => runWithTenant(String(tenant['id']), () => search.call(`get ${path}`, {
-    ...(publicMode ? { publicTenantId: tenant['id'] } : { tenantId: tenant['id'] }), query: { q: 'SENTINEL', lat: '0', lng: '0' },
+    ...(publicMode ? { publicTenantId: tenant['id'] } : { tenantId: tenant['id'] }), query: { q: 'SENTINEL', lat: '6.8013', lng: '-58.1551' },
   }));
   const callMarket = (path: string) => runWithTenant(String(tenant['id']), () => market.call(`get ${path}`, { publicTenantId: tenant['id'] }));
   const ranked = (page = 1) => runAsSystem(PUBLIC_BROWSE_CAPABILITY, () => customer.call('get /vendors', { query: { sort: 'top_rated', page: String(page), limit: '2' } }));

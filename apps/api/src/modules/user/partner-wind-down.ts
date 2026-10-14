@@ -82,12 +82,14 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
   FEE_PAYMENT_PENDING:
     'A weekly-fee payment is still in progress or being confirmed with MMG. Wait for it to finish, or open Get help to have it resolved, then return here to delete your account.',
   // [Owner ruling 2026-10-07] Unused credit is refunded by support (recorded
-  // in the admin console), then the account can be deleted.
+  // in the admin console), then the account can be deleted. [Owner ruling
+  // 8 Oct, NO "WALLET"; owner #62, NO PAYING AHEAD] It is named as money
+  // paid for weekly fees that have not started.
   FEE_CREDIT:
-    'You have {amount} of unused weekly-fee credit. Open Get help and we\u2019ll refund it, then your account can be deleted.',
+    'You have {amount} paid for weekly fees that have not started. Open Get help and we\u2019ll refund it, then your account can be deleted.',
   // The refund is set aside and on its way: the person waits for it to arrive.
   FEE_REFUND_PENDING:
-    'Swift is paying back your unused weekly-fee credit. Once you have received it, return here to delete your account. Open Get help if it has not arrived.',
+    'Swift is paying back what you paid for weekly fees that have not started. Once you have received it, return here to delete your account. Open Get help if it has not arrived.',
 };
 
 /** The whole refusal, as one sentence a person can act on, with the amounts

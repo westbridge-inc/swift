@@ -1,9 +1,14 @@
+import { readFeePause } from '../billing/mmg-pause';
+import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
+import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
+import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
+import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
 import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
@@ -14,7 +19,7 @@ import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
+import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt, freeBecauseNoMoverFound, readNoMoverFound, NO_MOVER_FREE_CANCEL_MESSAGE } from '../order/cancel-policy';
 import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
@@ -34,13 +39,16 @@ import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
+import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
+import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
+import { searchTiers } from '../search/forgiving-text';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
@@ -59,6 +67,8 @@ import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
+import { assertOrderableNow, hiddenAmong } from '../compliance/prohibited-gate';
+import { classifyCategory, classifyText } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -91,6 +101,11 @@ const latLngQuerySchema = z.object({
   lng: z.coerce.number().min(-180).max(180).optional(),
 });
 
+/** The store columns the browse search reads: name and description as text, a
+ *  slip forgiven in the name only, and the cuisine list (an element equal to a
+ *  word, as `has: search` matched before). */
+const BROWSE_SEARCH_COLUMNS = { text: ['name', 'description'], typoText: ['name'], lists: ['cuisineTypes'] } as const;
+
 const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
   type: z.nativeEnum(VendorType).optional(),
   cuisine: z.string().max(50).optional(),
@@ -105,6 +120,16 @@ const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
 const itemSlotsQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
 });
+
+/** [M023] Cart add/update validation: the shared validator, refused as a 400 naming the reason. */
+function validatedSelection(item: Parameters<typeof validateSelectedOptions>[0], selected: unknown): OptionSelection {
+  try {
+    return validateSelectedOptions(item, selected).selection;
+  } catch (error) {
+    if (error instanceof OptionSelectionError) throw new ValidationError(error.message, { selectedOptions: [error.reason] });
+    throw error;
+  }
+}
 
 const addCartItemSchema = z.object({
   vendorId: z.string().min(1),
@@ -160,6 +185,17 @@ const checkoutSchema = z.object({
       }),
     )
     .max(10)
+    .optional(),
+  // [L09 · price lock] What the customer saw: the quote's total and each cart
+  // line's unit price. Optional: an older app sends neither.
+  expectedTotal: z.number().nonnegative().max(1_000_000_000).optional(),
+  // No count cap of its own: a cart has no line cap and the apps send every
+  // line, so a cap here would refuse a cart the customer can build. The
+  // request body limit bounds the list, and checkout only looks each entry up
+  // in the cart it already loaded (no query per entry).
+  expectedLines: z
+    .array(z.object({ lineId: z.string().min(1).max(64), unitPrice: z.number().nonnegative().max(1_000_000_000) }))
+    .refine((lines) => new Set(lines.map((line) => line.lineId)).size === lines.length, 'Expected-price line IDs must be unique')
     .optional(),
 });
 
@@ -334,8 +370,13 @@ async function buildCartResponse(
             select: {
               id: true, name: true, basePrice: true, imageUrl: true,
               isAvailable: true, vendorId: true, fulfillment: true,
+              // [F4] Everything the one option validator reads, so the quote
+              // marks a line whose choice sold out exactly as checkout refuses it.
               optionGroups: {
-                select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
+                select: {
+                  id: true, name: true, isRequired: true, minSelect: true, maxSelect: true,
+                  options: { select: { id: true, name: true, additionalPrice: true, isAvailable: true } },
+                },
               },
               // [E01] Each line prices against ITS OWN vendor — the tracked
               // `cart.vendor` is only the most recently added store.
@@ -402,9 +443,13 @@ async function buildCartResponse(
       where: { userId: cart.customerId, isDefault: true },
     });
   }
-  const promoCodeRecord = cart.promoCodeId
+  const storedPromoCode = cart.promoCodeId
     ? await app.prisma.promoCode.findUnique({ where: { id: cart.promoCodeId } })
     : null;
+  // Old carts can predate the attachment wall. Their saved pointer grants
+  // neither access to another tenant's terms nor a discount on this quote.
+  const promoCodeRecord = storedPromoCode && await promoBelongsToCallerTenant(app.prisma, storedPromoCode, userId)
+    ? storedPromoCode : null;
   // The fee is about where the order is GOING: the chosen delivery address
   // wins over device coords (those are only a fallback before an address is
   // set). Same routing source as checkout, so the quote equals the final fee.
@@ -440,11 +485,20 @@ async function buildCartResponse(
   // compatibility, but markup is always 0 and customerPrice === basePrice.
   const subtotalMarkup = 0;
   const unavailableItemIds: string[] = [];
+  // [GUARDRAILS §8] A prohibited line already in a cart (banned, or held for a check)
+  // is marked exactly like a sold-out one: every app blocks the order button and offers Remove.
+  const hiddenLines = await hiddenAmong(app.prisma, cart.items.map((ci) => ci.itemId));
 
   const itemDetails = cart.items.map((ci) => {
     const line = priceCartLine(ci);
+    // [F4] A line is orderable only if its item AND its choices still are: a
+    // sold-out choice marks the line the way a sold-out item does (every app
+    // blocks the order button on it and offers Remove), with the reason.
+    const prohibitedIssue = hiddenLines.has(ci.itemId) ? 'Not available on Swift — remove it to continue' : null;
+    const optionsIssue = prohibitedIssue ?? (ci.item.isAvailable ? lineOptionsIssue(ci.item, ci.selectedOptions) : null);
+    const lineAvailable = ci.item.isAvailable && optionsIssue === null;
 
-    if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
+    if (!lineAvailable) unavailableItemIds.push(ci.id);
 
     return {
       id: ci.id,
@@ -458,7 +512,8 @@ async function buildCartResponse(
       selectedOptionNames: line.options.map((o) => o.optionName),
       specialInstructions: ci.specialInstructions,
       lineTotal: line.lineTotal,
-      isAvailable: ci.item.isAvailable,
+      isAvailable: lineAvailable,
+      unavailableReason: optionsIssue,
       fulfillment: ci.item.fulfillment,
       // [E01] Which store's order this line joins at checkout.
       vendorId: ci.item.vendorId,
@@ -809,6 +864,11 @@ export async function customerRoutes(app: FastifyInstance) {
         // time — a private object's key is unrenderable by any client.
         avatar: await resolveAvatarUrl(user.avatar),
         selfieCapturedAt: user.selfieCapturedAt,
+        // [Owner ruling 8 Oct 2026 — CUSTOMER ID] What the app may say about the customer's ID,
+        // truthfully (additive): NONE · ON_FILE (unlocked, no person reviewed it) · CHECKED (a person
+        // approved it) · WAITING (held for a person) · NOT_ACCEPTED.
+        // Never fails the profile: an unreadable answer is left out, and the app then claims nothing.
+        idCheck: await customerIdCheck(app.prisma, userId, user.trustLevel).catch(() => undefined),
         role: user.activeRole,
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
@@ -1097,7 +1157,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // no tenant context, which the Prisma extension defines as an UNSCOPED
           // query — so without the relational predicate a deactivated operator's
           // whole catalog kept serving here after the platform shut them off.
-          where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
+          where: { ...visibleVendorForCaller(await readFeePause(app.prisma)), items: { some: { isAvailable: true } } },
           include: {
             // imageUrl was NOT selected, so Home had nothing to draw a category
             // chip with and every chip fell back to the same stock photograph —
@@ -1123,7 +1183,7 @@ export async function customerRoutes(app: FastifyInstance) {
           // DISH sat above the fold ([F-028-07] applies here identically: a
           // guest request is unscoped, so the relational predicate is the only
           // thing standing between a shut-off operator and the Home rail).
-          where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
+          where: { isAvailable: true, vendor: visibleVendorRelForCaller(await readFeePause(app.prisma)) },
           orderBy: { totalOrdered: 'desc' },
           take: 10,
           select: {
@@ -1171,11 +1231,15 @@ export async function customerRoutes(app: FastifyInstance) {
       const categorySet = new Map<string, { id: string; name: string; imageUrl: string | null }>();
       for (const v of allVendors) {
         for (const c of (v.categories ?? [])) {
+          // [GUARDRAILS §8] A section named for banned goods is not a Home chip.
+          if (classifyText(c.name)) continue;
           if (!categorySet.has(c.id)) categorySet.set(c.id, c);
         }
       }
 
-      const popularItems = popularItemRows.map((it) => ({
+      // [GUARDRAILS §8] A prohibited item (banned, or held for a check) is not on the rail.
+      const hiddenPopular = await hiddenAmong(app.prisma, popularItemRows.map((it) => it.id));
+      const popularItems = popularItemRows.filter((it) => !hiddenPopular.has(it.id)).map((it) => ({
         id: it.id,
         name: it.name,
         imageUrl: it.imageUrl,
@@ -1318,7 +1382,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
-    const where: Record<string, unknown> = { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } };
+    const where: Record<string, unknown> = { ...visibleVendorForCaller(await readFeePause(app.prisma)), items: { some: { isAvailable: true } } };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug
@@ -1330,15 +1394,16 @@ export async function customerRoutes(app: FastifyInstance) {
         // [STA-1 RLS-N3 / DL-7] the caller's tenant's taxonomy — a reviewer browsing
         // by category sees the fiction's categories, not production's.
         where: { tenantId_slug: { tenantId: getTenantId() ?? 'swift-default', slug: category } },
-        select: { id: true, kind: true, status: true, mergedIntoId: true },
+        select: { id: true, kind: true, status: true, mergedIntoId: true, slug: true, name: true },
       });
       if (cat?.status === 'MERGED' && cat.mergedIntoId) {
         cat = await app.prisma.discoveryCategory.findFirst({
           where: { id: cat.mergedIntoId },
-          select: { id: true, kind: true, status: true, mergedIntoId: true },
+          select: { id: true, kind: true, status: true, mergedIntoId: true, slug: true, name: true },
         });
       }
-      if (!cat || cat.status !== 'ACTIVE') {
+      // [GUARDRAILS §8] A banned category (Pharmacy) browses to nothing, like a hidden one.
+      if (!cat || cat.status !== 'ACTIVE' || classifyCategory(cat)) {
         return { success: true, ...paginatedResponse([], 0, { page, limit, skip }) };
       }
       categoryRow = { id: cat.id, kind: cat.kind };
@@ -1352,16 +1417,27 @@ export async function customerRoutes(app: FastifyInstance) {
     if (open === 'true') where['isCurrentlyOpen'] = true;
     if (minRating != null) where['averageRating'] = { gte: minRating };
     if (search) {
-      where['OR'] = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { cuisineTypes: { has: search } },
-      ];
+      // Owner, 13 Oct — search must forgive. This used to match ONE substring
+      // of the whole text, so a misspelt name, a plural, or the words in
+      // another order found no store (the website's search page and the app's
+      // Shops / Services chips read this list). The forgiving tiers
+      // (search/forgiving-text.ts), strictest first: the page uses the first
+      // tier that finds anything, so a correctly typed name never shares its
+      // page with slip matches, and the total and pages stay one tier's.
+      const tiers = searchTiers(search, BROWSE_SEARCH_COLUMNS);
+      let chosen: Record<string, unknown> = { id: { in: [] } }; // no searchable word: nothing matches
+      for (const { where: tierWhere } of tiers) {
+        chosen = tierWhere;
+        if (await app.prisma.vendor.count({ where: { AND: [where, tierWhere] } }) > 0) break;
+      }
+      where['AND'] = [chosen];
     }
 
     const orderBy: Record<string, string>[] = [];
     // Category feeds read open-first, closed under the divider (honest order).
-    if (categoryRow) orderBy.push({ isCurrentlyOpen: 'desc' });
+    // So does a search: it lists closed stores too, after the open ones (owner, 13 Oct).
+    const openFirstOrder = Boolean(categoryRow || search);
+    if (openFirstOrder) orderBy.push({ isCurrentlyOpen: 'desc' });
     switch (sort) {
       case 'rating': orderBy.push({ averageRating: 'desc' }); break;
       case 'popular': orderBy.push({ totalOrders: 'desc' }); break;
@@ -1383,7 +1459,7 @@ export async function customerRoutes(app: FastifyInstance) {
       const surfAll = await ratingSurfaces(app.prisma, 'VENDOR', idRows.map((r) => r.id));
       idRows.sort(
         (a, b) =>
-          (categoryRow ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
+          (openFirstOrder ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
           (surfAll.get(b.id)!.displayRating ?? -1) - (surfAll.get(a.id)!.displayRating ?? -1) ||
           b.averageRating - a.averageRating ||
           a.name.localeCompare(b.name),
@@ -1440,11 +1516,14 @@ export async function customerRoutes(app: FastifyInstance) {
         where: { categoryId: categoryRow.id },
         select: { itemId: true },
       });
-      if (tagRows.length) {
+      // [GUARDRAILS §8] A prohibited item (banned, or held for a check) is not counted.
+      const hiddenTagged = await hiddenAmong(app.prisma, tagRows.map((t) => t.itemId));
+      const countable = tagRows.filter((t) => !hiddenTagged.has(t.itemId));
+      if (countable.length) {
         const grouped = await app.prisma.item.groupBy({
           by: ['vendorId'],
           where: {
-            id: { in: tagRows.map((t) => t.itemId) },
+            id: { in: countable.map((t) => t.itemId) },
             vendorId: { in: vendors.map((v) => v.id) },
             isAvailable: true,
           },
@@ -1541,7 +1620,16 @@ export async function customerRoutes(app: FastifyInstance) {
     // [Row 77] Field-by-field guest allowlist (storefront-projection.ts) —
     // never a spread of the raw category/item rows. A category the store has
     // switched off is not on its public page.
-    const categories = vendor.categories.filter((cat) => cat.isActive).map(publicStorefrontCategory);
+    // [GUARDRAILS §8] Prohibited items (banned, or held for a check) are not on the menu;
+    // a section they emptied goes with them (a section empty before stays as it was).
+    const hiddenOnMenu = await hiddenAmong(app.prisma, vendor.categories.flatMap((cat) => cat.items.map((i) => i.id)));
+    const categories = vendor.categories
+      .filter((cat) => cat.isActive)
+      .flatMap((cat) => {
+        const items = cat.items.filter((i) => !hiddenOnMenu.has(i.id));
+        return items.length === 0 && cat.items.length > 0 ? [] : [{ ...cat, items }];
+      })
+      .map(publicStorefrontCategory);
 
     // Distance & ETA
     let distanceKm: number | null = null;
@@ -1831,7 +1919,18 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: cart };
   });
 
+  app.post('/cart/merge', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
+    const body = cartMergeSchema.parse(request.body);
+    const key = request.headers['idempotency-key'];
+    if (typeof key !== 'string') throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'A basket upload needs an Idempotency-Key.');
+    const result = await mergeGuestCart(app.prisma, request.user.userId, key, body);
+    await app.redis.del(`cart:${request.user.userId}`).catch(() => {});
+    return { success: true, data: { ...result, cart: await buildCartResponse(app, request.user.userId) } };
+  });
+
   app.post('/cart/items', async (request: AuthRequest, reply: FastifyReply) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const body = addCartItemSchema.parse(request.body);
 
@@ -1843,6 +1942,8 @@ export async function customerRoutes(app: FastifyInstance) {
       include: { optionGroups: { include: { options: true } } },
     });
     if (!item) throw new AppError(404, 'ITEM_NOT_FOUND', 'Item not found or unavailable');
+    // [GUARDRAILS §8] A prohibited item is refused in the sold-out shape (409 ITEM_UNAVAILABLE).
+    await assertOrderableNow(app.prisma, [{ id: item.id, name: item.name }]);
 
     // Inventory (§4.2): don't let the cart promise more than the shelf holds.
     // Checkout re-checks atomically; this is the early, friendly stop.
@@ -1863,24 +1964,9 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'VENDOR_UNAVAILABLE', 'This vendor is not currently available');
     }
 
-    // Validate selected options against option groups
-    const selectedOptions = body.selectedOptions ?? {};
-    for (const group of item.optionGroups) {
-      const raw = (selectedOptions as Record<string, unknown>)[group.id];
-      const chosen = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
-      const validIds = new Set(group.options.map((o) => o.id));
-      for (const id of chosen) {
-        if (typeof id !== 'string' || !validIds.has(id)) {
-          throw new ValidationError(`That option isn't available for "${group.name}"`);
-        }
-      }
-      if (group.isRequired && chosen.length < Math.max(1, group.minSelect)) {
-        throw new ValidationError(`Please choose an option for "${group.name}"`);
-      }
-      if (chosen.length > group.maxSelect) {
-        throw new ValidationError(`Choose at most ${group.maxSelect} for "${group.name}"`);
-      }
-    }
+    // [M023] The one option validator (cart add, cart update and checkout).
+    const selectedOptions = validatedSelection(item, body.selectedOptions);
+    const note = normalizeItemNote(body.specialInstructions);
 
     // Get or create cart. Multi-vendor carts are allowed: checkout
     // splits per vendor; cart.vendorId just tracks the most recent vendor.
@@ -1904,10 +1990,14 @@ export async function customerRoutes(app: FastifyInstance) {
       });
     }
 
-    // Merge if same item + same options already in cart
-    const optionsKey = JSON.stringify(selectedOptions);
+    // [row 70] A line is the item, its options AND its note: the same item
+    // with a different note is its own line (a second note is never dropped);
+    // the same item, options and note merges into the existing line.
+    const optionsKey = selectionKey(selectedOptions);
     const existing = cart.items.find(
-      (ci) => ci.itemId === body.itemId && JSON.stringify(ci.selectedOptions) === optionsKey,
+      (ci) => ci.itemId === body.itemId
+        && selectionKey(ci.selectedOptions) === optionsKey
+        && normalizeItemNote(ci.specialInstructions) === note,
     );
 
     if (existing) {
@@ -1922,7 +2012,7 @@ export async function customerRoutes(app: FastifyInstance) {
           itemId: body.itemId,
           quantity,
           selectedOptions: selectedOptions as never,
-          specialInstructions: body.specialInstructions,
+          specialInstructions: note,
         },
       });
     }
@@ -1945,6 +2035,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/items/:id', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { id } = request.params as { id: string };
     const { userId } = request.user;
     const body = updateCartItemSchema.parse(request.body);
@@ -1957,6 +2048,21 @@ export async function customerRoutes(app: FastifyInstance) {
     if (!cartItem || cartItem.cart.customerId !== userId) {
       throw new NotFoundError('CartItem', id);
     }
+    // [GUARDRAILS §8] A prohibited line cannot be grown or edited — only removed.
+    if (body.quantity > 0) {
+      const lineItem = await app.prisma.item.findUniqueOrThrow({ where: { id: cartItem.itemId }, select: { id: true, name: true } });
+      await assertOrderableNow(app.prisma, [lineItem]);
+    }
+    // [M023] An edited selection passes the same validator as an added one.
+    const editedSelection = body.selectedOptions === undefined || body.quantity <= 0
+      ? undefined
+      : validatedSelection(
+        await app.prisma.item.findUniqueOrThrow({
+          where: { id: cartItem.itemId },
+          select: { optionGroups: { include: { options: true } } },
+        }),
+        body.selectedOptions,
+      );
 
     if (body.quantity <= 0) {
       await app.prisma.cartItem.delete({ where: { id } });
@@ -1974,8 +2080,8 @@ export async function customerRoutes(app: FastifyInstance) {
         where: { id },
         data: {
           quantity,
-          ...(body.selectedOptions !== undefined && { selectedOptions: body.selectedOptions as never }),
-          ...(body.specialInstructions !== undefined && { specialInstructions: body.specialInstructions }),
+          ...(editedSelection !== undefined && { selectedOptions: editedSelection as never }),
+          ...(body.specialInstructions !== undefined && { specialInstructions: normalizeItemNote(body.specialInstructions) }),
         },
       });
     }
@@ -1988,6 +2094,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.delete('/cart/items/:id', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { id } = request.params as { id: string };
     const { userId } = request.user;
 
@@ -2015,6 +2122,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.delete('/cart', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     await app.prisma.cart.deleteMany({ where: { customerId: userId } });
     await app.redis.del(`cart:${userId}`).catch(() => {});
@@ -2022,6 +2130,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/address', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const { addressId } = cartAddressSchema.parse(request.body);
 
@@ -2057,6 +2166,7 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.put('/cart/tip', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const { amount } = cartTipSchema.parse(request.body);
 
@@ -2079,6 +2189,7 @@ export async function customerRoutes(app: FastifyInstance) {
   // charged full price, with no way back. This clears the stored pointer: the
   // quote re-prices without it and checkout stops receiving the code.
   app.delete('/cart/promo', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
 
     const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
@@ -2101,6 +2212,7 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   app.post('/checkout', async (request: AuthRequest) => {
+    assertOrderSchedulingAvailable(request.body);
     const { userId } = request.user;
     const body = checkoutSchema.parse(request.body ?? {});
 
@@ -2221,6 +2333,9 @@ export async function customerRoutes(app: FastifyInstance) {
         fulfillmentSelections: body.fulfillmentSelections,
         express: body.express,
         appointments: body.appointments,
+        ...(body.expectedTotal != null || body.expectedLines
+          ? { expectedPrices: { total: body.expectedTotal, lines: body.expectedLines } }
+          : {}),
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
         onCommitted: (committed) => { commit = committed; },
       });
@@ -2447,8 +2562,11 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'ORDER_NOT_COMPLETE', 'Receipts are issued once the order completes.');
     }
     const { renderReceiptHtml } = await import('../order/receipt');
+    // [TAXI waiting charge] A ride whose waiting charge was frozen itemises it.
+    const { readFareBreakdown } = await import('../rides/taxi-waiting');
+    const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml(order as never);
+    return renderReceiptHtml((fareBreakdown ? { ...order, fareBreakdown } : order) as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {
@@ -2548,7 +2666,10 @@ export async function customerRoutes(app: FastifyInstance) {
     // — the fee shown here and the marker recorded there can never drift
     // again. The hold exemption, the assignment guard and the scheduled-slot
     // branch all live inside it; this file no longer restates any of them.
-    const freeCancellation = canCancel && isFreeCancellation(order, previewNow);
+    // [Item 64] The dispatch journal's "no mover found" fact, read the same way
+    // the charge path reads it (there under the order lock).
+    const policyOrder = { ...order, noMoverFound: canCancel && await readNoMoverFound(app.prisma, order) };
+    const freeCancellation = canCancel && isFreeCancellation(policyOrder, previewNow);
 
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({
@@ -2685,8 +2806,11 @@ export async function customerRoutes(app: FastifyInstance) {
         // scheduled order is a countdown that expired hours before the window
         // it claims to describe.
         freeCancellationExpiresAt: canCancel
-          ? (freeCancellationExpiresAt(order, previewNow)?.toISOString() ?? null)
+          ? (freeCancellationExpiresAt(policyOrder, previewNow)?.toISOString() ?? null)
           : null,
+        // [Item 64] Why the cancel is free, in plain words — only when no
+        // mover was found (additive; older apps ignore it).
+        cancellationMessage: freeCancellation && freeBecauseNoMoverFound(policyOrder) ? NO_MOVER_FREE_CANCEL_MESSAGE : null,
       },
     };
   });
@@ -3139,6 +3263,13 @@ export async function customerRoutes(app: FastifyInstance) {
         orderId: id, customerId: userId, reason, refundKind: refund.kind, refundAmount: refund.amount, refundSentence: refund.sentence,
         refundBasis: refund.basis, refundInferredAmount: refund.inferredAmount, refundFunder: refund.funder,
       },
+    }).catch((error: unknown) => {
+      // The earlier read preserves the normal retry response; the database
+      // also arbitrates simultaneous requests that both observed no return.
+      if (isDuplicateOn(error, 'orderId')) {
+        throw new AppError(409, 'RETURN_EXISTS', 'A return has already been requested for this order');
+      }
+      throw error;
     });
     reply.code(201);
     return { success: true, data: created };
@@ -3359,7 +3490,12 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { code: code.toUpperCase().trim() },
     });
 
-    if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    // [L04] A code of another tenant (a platform code for anyone outside
+    // production, or another tenant's store code) is answered exactly as an
+    // unknown code — and is never attached to this cart.
+    if (!(await promoBelongsToCallerTenant(app.prisma, promo, userId)) || !promo) {
+      throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
 
     const now = new Date();

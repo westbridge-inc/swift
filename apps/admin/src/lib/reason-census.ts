@@ -48,6 +48,8 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
 
   // ── Moderation ─────────────────────────────────────────────────────────
   { route: 'PUT /moderation/reports/:id', helper: 'resolveModerationReport', args: ['rep_1', { status: 'ACTIONED' }], requiredBodyKeys: ['status'] },
+  { route: 'POST /catalogue-review/:id/approve', helper: 'approveCatalogueItem', args: ['itm_1', 'a'.repeat(64)], requiredBodyKeys: ['wordsHash'] },
+  { route: 'POST /catalogue-review/:id/remove', helper: 'removeCatalogueItem', args: ['itm_1', 'ALCOHOL'], requiredBodyKeys: ['prohibitedClass'] },
   { route: 'POST /ratings/:id/moderate', helper: 'moderateRating', args: ['rat_1', { action: 'publish' }], requiredBodyKeys: ['action'] },
   { route: 'POST /rating-reports/:id/resolve', helper: 'resolveRatingReport', args: ['rr_1', 'uphold'], requiredBodyKeys: ['action'] },
 
@@ -60,6 +62,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── Verification ───────────────────────────────────────────────────────
   { route: 'PUT /verification/:id/approve', helper: 'approveDoc', args: ['doc_1', undefined] },
   { route: 'PUT /verification/:id/reject', helper: 'rejectDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /staff/:userId/document-reviewer', helper: 'setDocumentReviewer', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
 
   // ── Compliance ─────────────────────────────────────────────────────────
   { route: 'POST /compliance/reviews/:id/decide', helper: 'decideComplianceReview', args: ['cre_1', true, undefined], requiredBodyKeys: ['pass'] },

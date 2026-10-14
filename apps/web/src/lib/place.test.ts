@@ -272,6 +272,9 @@ describe('[W-19 / W-20] the courier form enforces it', () => {
   });
 
   it('[W-20] the form asks who is receiving the parcel', () => {
-    for (const f of ['recipientName', 'recipientPhone', 'notes']) expect(code, f).toContain(f);
+    // [WEB-PIN] `packageDescription` is the server's field for what is inside;
+    // the old `notes` was not in its schema and was silently dropped.
+    for (const f of ['recipientName', 'recipientPhone', 'packageDescription']) expect(code, f).toContain(f);
+    expect(code, 'the stripped field is gone').not.toMatch(/\bnotes\b\s*[:,]/);
   });
 });

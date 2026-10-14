@@ -6,13 +6,15 @@ import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
 import { MutationError } from '@/components/MutationError';
 import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
+import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
+import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_STATUSES, applicantId, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
-  'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
+  'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
   'road_service_licence', 'food_handler_cert', 'gra_restaurant_licence',
   'drivers_licence', 'vehicle_registration',
   // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate
@@ -26,7 +28,7 @@ const LANES = [{ value: 'operator', label: 'Operators' }, { value: 'customer', l
 function Chip({ status }: { status: string }) { return <span className={`rc-chip rc-chip-${status.toLowerCase()}`}>{status}</span>; }
 
 function TimelineActor({ actor, applicant }: { actor: string | null; applicant: Applicant }) {
-  const system = !actor || actor === 'validator' || actor.startsWith('engine:');
+  const system = isSystemActor(actor);
   const isApplicant = actor === applicant.id;
   const person = useQuery({ queryKey: ['review-actor', actor], queryFn: () => fetchUserDetail(actor!), enabled: !system && !isApplicant });
   const name = [person.data?.data?.firstName, person.data?.data?.lastName].filter(Boolean).join(' ');
@@ -47,6 +49,8 @@ export default function VerificationPage() {
   const [selected, setSelected] = useState<ReviewDocument | null>(null);
   const [viewed, setViewed] = useState(false);
   const [expiresAt, setExpiresAt] = useState('');
+  const [documentNumber, setDocumentNumber] = useState('');
+  const [issuedOn, setIssuedOn] = useState('');
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
   const [decision, setDecision] = useState<'approve' | 'reject' | null>(null);
   const [reason, setReason] = useState('');
@@ -74,8 +78,11 @@ export default function VerificationPage() {
     observer.observe(footer);
     return () => observer.disconnect();
   }, [applicant?.id, selected?.status]);
-  const queue = useQuery({ queryKey: ['verification', status, lane], queryFn: () => loadReviewQueue(status, lane) });
-  const counts = useQuery({ queryKey: ['verification-counts'], queryFn: fetchVerificationCounts });
+  // [Owner report 8 Oct] the queue re-reads when the reviewer comes back to the tab; the counts are polled lightly
+  // and a banner offers the new documents without moving the list under the reviewer.
+  const queue = useQuery({ queryKey: ['verification', status, lane], queryFn: () => loadReviewQueue(status, lane), refetchOnWindowFocus: true });
+  const counts = useQuery({ queryKey: ['verification-counts'], queryFn: fetchVerificationCounts, refetchInterval: REVIEW_COUNTS_POLL_MS, refetchOnWindowFocus: true });
+  const newDocuments = queue.data ? newSinceLoaded(counts.data?.data, status, lane, queue.data.length) : 0;
   const profile = useQuery({ queryKey: ['review-profile', applicant?.id], queryFn: () => fetchUserDetail(applicant!.id), enabled: !!applicant });
   const history = useQuery({
     queryKey: ['verification-history', status, lane], enabled: !!applicant,
@@ -110,7 +117,7 @@ export default function VerificationPage() {
     documentList.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
   };
   const selectDocument = (doc: ReviewDocument) => {
-    setSelected(doc); setViewed(false); setExpiresAt(''); setInsurance(EMPTY_INSURANCE);
+    setSelected(doc); setViewed(false); setExpiresAt(''); setDocumentNumber(''); setIssuedOn(''); setInsurance(EMPTY_INSURANCE);
     setMutationError(null); setDecision(null); setReason(''); setReasonCode('');
   };
   const openApplicant = (next: Applicant | null) => {
@@ -123,13 +130,20 @@ export default function VerificationPage() {
   // nothing of theirs is waiting, the page says so instead of showing the
   // whole queue as if it were the answer.
   const deepLink = useRef<string | null | undefined>(undefined);
+  const deepDocument = useRef<string | null>(null);
   useEffect(() => {
-    if (deepLink.current === undefined) deepLink.current = new URLSearchParams(window.location.search).get('applicant');
+    if (deepLink.current === undefined) {
+      const params = new URLSearchParams(window.location.search);
+      deepLink.current = params.get('applicant');
+      deepDocument.current = params.get('document');
+    }
     const wanted = deepLink.current;
     if (!wanted || !queue.data) return;
     deepLink.current = null;
     const match = groupApplicants(queue.data).find((a) => a.id === wanted);
-    if (match) openApplicant(match);
+    // [Owner 8 Oct] &document=<id> opens that document of the applicant (the checklist's per-document link).
+    const named = match?.documents.find((d) => d.id === deepDocument.current);
+    if (match) { openApplicant(match); if (named) selectDocument(named); }
     else setNotice('No documents from this applicant are waiting for review. They may still need to upload one, or the decision is under Approved, Rejected or Expired.');
   }, [queue.data]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per queue load by design
   const needsExpiry = !!selected && (EXPIRING_DOC_TYPES as readonly string[]).includes(selected.docType);
@@ -137,7 +151,11 @@ export default function VerificationPage() {
   const isInsurance = selected?.docType === 'vehicle_insurance';
   const insuranceReady = insurance.insurerName.trim() && insurance.policyNumber.trim() &&
     (insurance.coverageClass !== 'HIRE' || (insurance.hireClassConfirmed && insurance.plateCrossChecked));
-  const approveBlocked = !viewed || !expiryOk || (isInsurance && !insuranceReady);
+  const needsNumber = selected?.reviewerTypes?.includes('documentNumber') ?? false;
+  const needsIssuedOn = selected?.reviewerTypes?.includes('issuedOn') ?? false;
+  const typedReady = (!needsNumber || documentNumber.replace(/[^a-z0-9]/gi, '').length >= 4)
+    && (!needsIssuedOn || (!!issuedOn && Number.isFinite(Date.parse(issuedOn)) && Date.parse(issuedOn) <= now));
+  const approveBlocked = !viewed || !expiryOk || !typedReady || (isInsurance && !insuranceReady);
   const currentIndex = filtered.findIndex((a) => a.id === applicant?.id);
   const move = (offset: number) => {
     const next = filtered[currentIndex + offset];
@@ -149,6 +167,8 @@ export default function VerificationPage() {
       return action === 'approve' ? approveDoc(doc.id, {
         ...(needsExpiry ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
         ...(isInsurance ? { insurance } : {}),
+        ...(needsNumber ? { documentNumber: documentNumber.trim() } : {}),
+        ...(needsIssuedOn ? { issuedOn: new Date(issuedOn).toISOString() } : {}),
       }, note) : rejectDoc(doc.id, note, code as RejectionReasonCode);
     },
     onError: (error) => setMutationError(error),
@@ -200,6 +220,7 @@ export default function VerificationPage() {
   return <div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
     <div inert={decision ? true : undefined}>
       <header className="rc-page-heading"><div><h1>Review Center</h1><p>Review the evidence. Record the decision. Keep applicants moving.</p></div><span className="rc-muted">Oldest submissions first</span></header>
+      {!applicant && <ReviewerAccess />}
       {notice && <p role="status" className="rc-notice">{notice}</p>}
       <div className="rc-queue-controls">
         <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{s}</button>)}</div>
@@ -219,6 +240,7 @@ export default function VerificationPage() {
           <button onClick={clearFilters}>Clear filters</button>
         </div>
         {queue.isLoading ? <div className="rc-skeleton" aria-label="Loading verification queue">Loading the complete queue…</div> : queue.isError ? <DataUnavailable what="the verification queue" notAnAllClear="This is not an empty queue — we could not read it." onRetry={() => void queue.refetch()} /> : <section className="rc-queue" aria-label="Applicants">
+          {newDocuments > 0 && <p className="rc-new-banner" role="status">{newDocuments} new {newDocuments === 1 ? 'document' : 'documents'} since this list loaded. <button onClick={() => void queue.refetch()} disabled={queue.isFetching}>Show {newDocuments === 1 ? 'it' : 'them'}</button></p>}
           <div className="rc-queue-summary"><strong>{filtered.length} applicants</strong><span>{queue.data?.length ?? 0} documents in this lane</span><button onClick={() => void queue.refetch()} disabled={queue.isFetching}>Refresh queue</button></div>
           {!filtered.length ? <p className="rc-empty"><span>{groups.length ? 'No applicants match these filters.' : 'No documents'}</span> {groups.length ? 'Clear a filter to see more applicants.' : 'This lane has no documents with the selected status.'}</p> :
             <table className="rc-queue-table"><thead><tr><th>Applicant</th><th>Role / documents</th><th>Waiting for</th><th><span className="sr-only">Action</span></th></tr></thead><tbody>{filtered.map((a) => <tr key={a.id}>
@@ -248,7 +270,19 @@ export default function VerificationPage() {
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
-            {selected.status === 'PENDING' && (needsExpiry || isInsurance) && <div className="rc-fields">
+            <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc, accountTrustLevel) => {
+              setNotice(withdrawNotice(applicant.name, accountTrustLevel));
+              await Promise.all([
+                client.invalidateQueries({ queryKey: ['verification'] }),
+                client.invalidateQueries({ queryKey: ['verification-history'] }),
+                client.invalidateQueries({ queryKey: ['verification-counts'] }),
+                client.invalidateQueries({ queryKey: ['document-custody', doc.id] }),
+              ]);
+              openApplicant(null);
+            }} />
+            {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn) && <div className="rc-fields">
+              {needsNumber && <label>Document number<input aria-label="Document number" autoComplete="off" maxLength={40} value={documentNumber} onChange={(e) => setDocumentNumber(e.target.value)} disabled={busy} /><small>Read the number from this document.</small></label>}
+              {needsIssuedOn && <label>Issue date printed on the document<input type="date" aria-label="Issue date printed on the document" max={new Date(now).toISOString().slice(0, 10)} value={issuedOn} onChange={(e) => setIssuedOn(e.target.value)} disabled={busy} /><small>Read its issue date. The server determines when it must be checked again.</small></label>}
               {needsExpiry && <label>Expiry printed on the document (required)<input type="date" aria-label="Expiry printed on the document" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} disabled={busy} />{!expiryOk && <small>{expiresAt ? 'That date has already passed; an expired document cannot be approved.' : 'This document type expires — key the date from the document.'}</small>}</label>}
               {isInsurance && <fieldset disabled={busy}><legend>Insurance 5-point check</legend>
                 <label>Insurer<input placeholder="Insurer" value={insurance.insurerName} onChange={(e) => setInsurance({ ...insurance, insurerName: e.target.value })} /></label>
