@@ -140,7 +140,9 @@ async function providerLists(prisma: ProviderVerificationDb, userId: string) {
  * [TRADES · owner 13 Oct 2026] A trade opened at launch also carries its legal
  * floor (identity, police clearance and its own licences), which no stored
  * edit can remove; and a profile that offers drone or aerial work must show
- * the GCAA's authorisation.
+ * the GCAA's authorisation. The provider gate reads the lists and the floor
+ * here, never the DOC-1 registry facade (registryChecklist); a change that
+ * moves providers onto the registry must carry SERVICE_TRADE_LAUNCH_FLOOR too.
  */
 export async function providerChecklist(prisma: ProviderVerificationDb, userId: string): Promise<string[]> {
   const found = await providerLists(prisma, userId);

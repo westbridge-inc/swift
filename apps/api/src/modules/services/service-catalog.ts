@@ -220,17 +220,27 @@ export function riskGuidance(trade: string): string {
 // checklist proves it (ICAG Act s.25; lawyers are held; medicines are banned).
 // ---------------------------------------------------------------------------
 
-const SUPPLY = String.raw`(?:sell(?:s|ing)?|sales?|refill(?:s|ing)?|deliver(?:s|y|ies|ing)?|supply|supplies|supplier|exchange|swap|transport(?:ing)?|carry(?:ing)?|fill(?:ing)?)`;
-const FUEL = String.raw`(?:lpg|cooking\s+gas|gas\s+(?:cylinders?|bottles?|tanks?)|cylinders?|propane|butane|fuel|gasoline|petrol|diesel|kerosene)`;
+// Supply verbs, and the gas or fuel they would act on. A word naming an appliance,
+// a fitting or a part right after the fuel word ("gas stove", "fuel pump", "diesel
+// engine") is the trade's ordinary work, not fuel, and never counts. [DS1130]
+const SUPPLY = String.raw`(?:sell(?:s|ing)?|sales?|refill(?:s|ing)?|top[\s-]?ups?|topping[\s-]up|deliver(?:s|y|ies|ing)?|suppl(?:y|ies|ying|ier|iers)|provid(?:e|es|ing)|distribut(?:e|es|ing|ion|ors?)|stock(?:s|ing|ists?)?|retail(?:er|ing)?|wholesale|exchange|swap|transport(?:ing)?|carry(?:ing)?|fill(?:s|ing)?)`;
+const GAS_PARTS = String.raw`(?:stoves?|cookers?|ovens?|ranges?|hobs?|appliances?|lines?|pipes?|piping|leaks?|regulators?|hoses?|fittings?|fitters?|burners?|heaters?|dryers?|grills?|connections?|installations?|valves?|meters?|detectors?|safety|boilers?|fireplaces?)\b`;
+const FUEL_PARTS = String.raw`(?:efficient|lines?|pumps?|filters?|injectors?|injection|tanks?|systems?|gauges?|caps?|economy|savings?|consumption|doors?|hoses?|rails?|engines?|motors?|vehicles?|cars?|generators?|trucks?|mechanics?|lamps?|stoves?|heaters?)\b`;
+const NOT_PART = (parts: string) => String.raw`(?![\s-]*${parts})`;
+const FUEL_WORDS = String.raw`(?:lpg|cooking\s+gas|gas)${NOT_PART(GAS_PARTS)}|gas\s+bottles?|cylinders?|propane|butane|(?:fuel|gasoline|petrol|diesel|kerosene)${NOT_PART(FUEL_PARTS)}`;
 const GAP = String.raw`\W+(?:\w+\W+){0,2}`;
-const FUEL_SUPPLY = new RegExp(String.raw`\b${SUPPLY}${GAP}${FUEL}\b|\b${FUEL}${GAP}${SUPPLY}\b|\b${FUEL}\s+for\s+sale\b`, 'i');
+const supplyPattern = (fuel: string) => new RegExp(String.raw`\b${SUPPLY}${GAP}(?:${fuel})\b|\b(?:${fuel})${GAP}${SUPPLY}\b`, 'i');
+const FUEL_SUPPLY = supplyPattern(FUEL_WORDS);
+/** A gas fitter's "tank" is a gas tank. */
+const GAS_FITTER_SUPPLY = supplyPattern(String.raw`${FUEL_WORDS}|tanks?`);
 const ACCOUNTANT_TITLES = /\b(?:chartered\s+accountants?|certified\s+(?:public\s+)?accountants?|cpa|acca)\b/i;
-const NEVER_TITLES = /\b(?:attorney[\s-]+at[\s-]+law|barrister|solicitor|pharmacists?|druggists?)\b/i;
+// Lawyers are held (Code of Conduct advertising rule; touting): no profile offers legal work.
+const NEVER_TITLES = /\b(?:attorney[\s-]+at[\s-]+law|barristers?|solicitors?|lawyers?|legal\s+(?:advice|services?|representation|counsel)|pharmacists?|druggists?)\b|(?<!power\s+of\s+)\battorneys?\b/i;
 
 /** Refuse profile wording Swift must never publish for a service provider. */
 export function assertProviderProfileWording(trade: ServiceTradeId, bio: string | null | undefined): void {
   if (!bio) return;
-  if (FUEL_SUPPLY.test(bio)) {
+  if ((trade === 'gas_fitter' ? GAS_FITTER_SUPPLY : FUEL_SUPPLY).test(bio)) {
     throw new AppError(400, 'PROHIBITED_SERVICE_WORDING', 'Swift does not allow selling, refilling or delivering cooking gas (LPG) or fuel. Remove it from your profile.');
   }
   if (NEVER_TITLES.test(bio) || (trade !== 'accountant' && ACCOUNTANT_TITLES.test(bio))) {
@@ -238,9 +248,14 @@ export function assertProviderProfileWording(trade: ServiceTradeId, bio: string 
   }
 }
 
+const DRONE_WORDS = String.raw`(?:drones?|aerial|uavs?|quad[\s-]?copters?|fpv)`;
+/** "No drone work", "drone-free", "without drones": a provider who says they do not fly. */
+const NO_DRONE = new RegExp(String.raw`\b(?:no|not|never|without|don['’]?t\s+(?:do|offer|fly|use))\s+(?:\w+\s+){0,2}?${DRONE_WORDS}\b|\b${DRONE_WORDS}[\s-]*free\b`, 'gi');
+const DRONE = new RegExp(String.raw`\b${DRONE_WORDS}\b`, 'i');
+
 /** [TRADES] A profile offering drone or aerial work needs the GCAA's authorisation (services.service). */
 export function profileOffersDroneWork(bio: string | null | undefined): boolean {
-  return !!bio && /\b(?:drones?|aerial|uavs?|quadcopters?)\b/i.test(bio);
+  return !!bio && DRONE.test(bio.replace(NO_DRONE, ' '));
 }
 
 /** A credential can only badge the exact trade selected when it was submitted.
