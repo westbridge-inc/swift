@@ -1,11 +1,12 @@
 import { Socket, type Server } from 'socket.io';
 
 /** Real namespace/adapter recipient, with only the engine transport replaced.
- * Tests observe packets delivered to an authorized customer, rather than
- * treating an invocation of io.to(orderRoom) as a delivery receipt. */
+ * Tests observe packets delivered to an authorized participant, rather than
+ * treating an invocation of io.to(room) as a delivery receipt. */
 export function orderSocketFixture(
   io: Server, order: { id: string; customerId: string; tenantId: string },
   received: (event: string, payload: unknown) => void,
+  room = `order:${order.id}`,
 ): () => void {
   const namespace = io.of('/');
   const record = (packet: { data?: unknown[] }) => {
@@ -25,6 +26,6 @@ export function orderSocketFixture(
   socket.connected = true;
   socket.data = { userId: order.customerId, tenantId: order.tenantId, authorizationExpiresAtMs: Date.now() + 3_600_000 };
   namespace.sockets.set(socket.id, socket);
-  socket.join([socket.id, `order:${order.id}`]);
+  socket.join([socket.id, room]);
   return () => { namespace.adapter.delAll(socket.id); namespace.sockets.delete(socket.id); socket.connected = false; };
 }
