@@ -206,6 +206,17 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
   fi
 fi
 
+# [BACKUP-ENC · Opus review 14 Oct, S3-2] Production backs up hourly (owner
+# ruling, 13 Oct). The timer is installed by hand (PILOT-RUNBOOK §4), and a
+# missing one is silent until the freshness alarm: say it here.
+if [ -f "$HERE/.env" ] && [ "$(grep -E '^PILOT_ENV=' "$HERE/.env" | head -1 | cut -d= -f2- || true)" = production ]; then
+  if systemctl is-enabled --quiet swift-backup-hourly.timer 2>/dev/null && systemctl is-active --quiet swift-backup-hourly.timer 2>/dev/null; then
+    ok "the hourly backup timer is enabled and active"
+  else
+    bad "production's hourly backup timer (swift-backup-hourly.timer) is not enabled and active: sudo systemctl enable --now swift-backup-hourly.timer (PILOT-RUNBOOK §4)"
+  fi
+fi
+
 # ── 5. The disk — the quietest killer on this machine's record ──────────────
 DISK=$(df -h / 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}')
 if [ -n "${DISK:-}" ]; then

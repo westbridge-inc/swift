@@ -532,9 +532,14 @@ backups. Before the first production backup:
 2. On the host, as root: copy ONLY the public key to a path outside the
    checkout, e.g. `install -m 0644 swift-backup-public.asc /etc/swift/backup-recipient.asc`,
    and set BACKUP_GPG_RECIPIENT_FILE (that path) and BACKUP_GPG_FINGERPRINT
-   (the printed fingerprint) in deploy/.env. pilot-up.sh refuses production
-   without both; backup.sh refuses a file that is not exactly that one public
-   key, and any file that carries a private key.
+   (the printed fingerprint) in deploy/.env, each on a plain line with no
+   comment after the value (systemd keeps a trailing comment as part of it).
+   pilot-up.sh refuses production without both, and runs `backup.sh
+   --check-key` before it changes anything: the file must exist and hold
+   exactly that one public key and no private key, the same proof every
+   dump makes. Also set `BACKUP_MAX_AGE_HOURS=3`: the backup freshness alarm
+   defaults to 26 hours (a nightly cadence), and pilot-up.sh requires 1–3 on
+   production.
 3. Install the HOURLY timer in place of the nightly one (staging keeps
    swift-backup.timer):
 
@@ -546,7 +551,10 @@ backups. Before the first production backup:
        systemctl list-timers swift-backup-hourly.timer
 
    The journal shows `encrypted → swift-<stamp>.dump.gpg … to the owner's key
-   <fingerprint> only`. Local copies are kept 2 days on production by default
+   <fingerprint> only`. A run is ended after 50 minutes (TimeoutStartSec), so
+   a hung dump fails visibly instead of silently skipping every later hour.
+   pilot-up.sh refuses a production stage that starts the API unless
+   swift-backup-hourly.timer is enabled and active, and doctor.sh reports it. Local copies are kept 2 days on production by default
    (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
    daily snapshots stay on as well.
 
@@ -581,7 +589,19 @@ the storage keys from the encrypted store), the owner's computer decrypts it
 on the way through, and the plain dump goes straight back into
 `restore.sh --compare-source -` on the host: a new scratch database, compared
 with the live one. Nothing plain is written on the owner's computer. Pass is
-the host's compare-source line and `RESTORE OK`, then `DRILL OK`.
+the host's compare-source line and `RESTORE OK`, then `DRILL OK`. Before
+anything is decrypted, the drill checks the object's first packets: public-key
+session keys for the owner's key, followed directly by the encrypted data.
+Anything else (a message with no encryption, one encrypted to a passphrase or
+to another key) is refused, and the host receives nothing. The host makes the
+same structural check before it streams an object out.
+
+The drill compares the scratch restore with the LIVE database, row for row,
+and the newest hourly object is up to an hour old. On a database that is
+taking orders the two always differ, so after launch the drill passes only in
+a quiet window: stop the API and worker (`docker compose -f deploy/docker-compose.yml stop api worker`),
+run `systemctl start swift-backup.service` for a fresh dump, drill that
+object, then start them again. Before launch (no API yet) it passes as is.
 
 The restore script accepts only a new lowercase scratch database name,
 refuses an existing or live database, and fails on archive or row-count

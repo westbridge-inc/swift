@@ -189,6 +189,43 @@ class BackupEncryption(unittest.TestCase):
             decrypt(uploaded[0], self.other_private)
         self.assertIn(f"to the owner's key {self.fpr} only", r.stdout)
 
+    # ── backup.sh --check-key: the proof pilot-up runs before it changes anything ──
+    def check_key(self, **extra):
+        env = self.env(**extra)
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+            env.pop(name, None)   # the check needs no storage keys
+        return subprocess.run(["bash", str(DEPLOY / "backup.sh"), "--check-key"], env=env, text=True, capture_output=True, timeout=60)
+
+    def test_check_key_accepts_exactly_the_pinned_public_key_and_dumps_nothing(self):
+        r = self.check_key()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"backup key OK: BACKUP_GPG_RECIPIENT_FILE holds exactly the pinned public key {self.fpr}", r.stdout)
+        self.assertEqual(self.log.read_text(), "", "no dump, no upload, no docker call")
+        self.assertFalse(self.dumps.exists())
+
+    def test_check_key_refuses_every_wrong_key_file_and_dumps_nothing(self):
+        two = self.tmp / "two.asc"
+        two.write_text(self.public.read_text() + self.other_public.read_text())
+        for over, said in (
+            ({"BACKUP_GPG_RECIPIENT_FILE": str(self.tmp / "missing.asc")}, "must be an absolute path to the owner's exported PUBLIC key"),
+            ({"BACKUP_GPG_RECIPIENT_FILE": f"{self.public}  # the owner's key"}, "must be an absolute path to the owner's exported PUBLIC key"),
+            ({"BACKUP_GPG_RECIPIENT_FILE": str(self.private)}, "holds a PRIVATE key"),
+            ({"BACKUP_GPG_RECIPIENT_FILE": str(self.other_public)}, "is not the pinned owner key"),
+            ({"BACKUP_GPG_RECIPIENT_FILE": str(two)}, "exactly one public key"),
+            ({"BACKUP_GPG_FINGERPRINT": f"{self.fpr} # pinned"}, "40-character fingerprint"),
+            ({"BACKUP_GPG_FINGERPRINT": None, "BACKUP_GPG_RECIPIENT_FILE": None}, "set BACKUP_GPG_RECIPIENT_FILE and BACKUP_GPG_FINGERPRINT"),
+        ):
+            with self.subTest(over=sorted(over)):
+                r = self.check_key(**over)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(said, r.stderr)
+                self.assertNotIn("backup key OK", r.stdout)
+                self.assertEqual(self.log.read_text(), "")
+        # Off production, with no key configured, there is nothing to prove: refused, never a false OK.
+        r = self.check_key(PILOT_ENV="staging", BACKUP_GPG_FINGERPRINT=None, BACKUP_GPG_RECIPIENT_FILE=None)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--check-key: no backup key is configured", r.stderr)
+
     def test_production_refuses_without_the_pinned_key_before_dumping(self):
         for over in ({"BACKUP_GPG_FINGERPRINT": None}, {"BACKUP_GPG_RECIPIENT_FILE": None},
                      {"BACKUP_GPG_FINGERPRINT": self.fpr.lower()}, {"BACKUP_GPG_RECIPIENT_FILE": "relative.asc"},
@@ -306,6 +343,50 @@ class BackupEncryption(unittest.TestCase):
         self.assertIn(b"PLAIN dump", r.stderr)
         self.assertEqual(r.stdout, b"")
 
+    # ── objects that are not a backup encrypted to the owner's key ─────────
+    def not_encrypted_to_a_key(self, kind: str) -> Path:
+        """A .dump.gpg object holding the fixture dump WITHOUT public-key
+        encryption (Opus review 14 Oct, S3-1: gpg --decrypt exits 0 on these):
+        'stored' is an OpenPGP message with no encryption at all (gpg --store),
+        'symmetric' is encrypted to a passphrase instead of a key, 'spliced' is a
+        real backup's public-key packet glued in front of a 'stored' message,
+        'other-key' is properly encrypted, but to another key."""
+        home = gpg_home()
+        out = self.tmp / f"{kind}.gpg"
+        try:
+            how = {"stored": ["--store"], "spliced": ["--store"],
+                   "symmetric": ["--pinentry-mode", "loopback", "--passphrase", "not-a-key", "--symmetric"],
+                   "other-key": ["--trust-model", "always", "--recipient-file", str(self.other_public), "--encrypt"]}[kind]
+            subprocess.run(["gpg", "--homedir", home, "--batch", "--yes", "--output", str(out), *how, str(self.fixture)],
+                           check=True, capture_output=True)
+        finally:
+            kill_agent(home)
+        if kind == "spliced":
+            before = set(self.bucket.rglob("*.dump.gpg"))
+            ok = self.backup()
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            [real] = [q for q in self.bucket.rglob("*.dump.gpg") if q not in before]
+            data = real.read_bytes()
+            self.assertEqual(data[0] & 0xC0, 0x80, "an old-format first packet, as GnuPG writes it")
+            length_bytes = {0: 1, 1: 2, 2: 4}[data[0] & 3]
+            first = 1 + length_bytes + int.from_bytes(data[1:1 + length_bytes], "big")
+            self.assertEqual((data[0] >> 2) & 0x0F, 1, "the first packet is a public-key session key")
+            out.write_bytes(data[:first] + out.read_bytes())
+            real.unlink()
+        return out
+
+    def test_fetch_encrypted_refuses_an_object_that_is_not_encrypted_to_a_key(self):
+        for kind in ("stored", "symmetric", "spliced"):
+            with self.subTest(kind=kind):
+                obj = self.not_encrypted_to_a_key(kind)
+                target = self.bucket / "db" / f"swift-20261014T0{len(kind)}0000Z.dump.gpg"
+                target.parent.mkdir(exist_ok=True)
+                shutil.copyfile(obj, target)
+                r = self.restore("--fetch-encrypted", f"s3://swift-backups/db/{target.name}")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(b"not encrypted to a key", r.stderr)
+                self.assertEqual(r.stdout, b"")
+
     def test_source_dash_restores_the_dump_piped_in(self):
         # The fake pg_restore refuses anything but a custom archive: what came in
         # on stdin is what it was given. A ciphertext piped in is refused there.
@@ -369,6 +450,22 @@ esac
                 self.assertIn("could not decrypt the backup", r.stderr)
                 self.assertFalse(received.exists() and received.read_bytes() == self.fixture.read_bytes())
 
+    def test_the_drill_refuses_an_object_not_encrypted_to_this_key_before_decrypting_and_the_host_gets_nothing(self):
+        # Opus review 14 Oct, S3-1: gpg --decrypt "decrypts" a message with no
+        # encryption (exit 0), so DRILL OK did not prove the object was encrypted.
+        # A real backup encrypted to someone else's key is named for what it is too.
+        for kind in ("stored", "symmetric", "spliced", "other-key"):
+            with self.subTest(kind=kind):
+                obj = self.not_encrypted_to_a_key(kind)
+                target = self.bucket / "db" / f"swift-20261014T1{len(kind)}0000Z.dump.gpg"
+                target.parent.mkdir(exist_ok=True)
+                shutil.copyfile(obj, target)
+                r, received, _ = self.drill(self.private.read_text(), PASSPHRASE, f"s3://swift-backups/db/{target.name}")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("is not a backup encrypted to this key", r.stderr)
+                self.assertNotIn("DRILL OK", r.stdout)
+                self.assertEqual(received.read_bytes() if received.exists() else b"", b"")
+
     def test_the_drill_refuses_shapes_that_could_reach_the_remote_shell(self):
         for obj, scratch in (("s3://swift-backups/db/x.dump.gpg'; rm -rf /'", "swift_drill_t"),
                              ("s3://swift-backups/db/swift.dump", "swift_drill_t"),
@@ -423,6 +520,20 @@ class BackupTimers(unittest.TestCase):
         self.assertIn("OnCalendar=*-*-* 02:15:00", nightly)
 
 
+class BackupUnitTimeout(unittest.TestCase):
+    """Opus review 14 Oct, S3-2: a oneshot unit has no start timeout by default,
+    so one hung run kept the unit active and every later hourly trigger was
+    skipped in silence."""
+
+    def test_a_hung_backup_run_ends_before_the_next_hourly_start(self):
+        unit = (DEPLOY / "swift-backup.service").read_text()
+        [value] = [l.split("=", 1)[1].strip() for l in unit.splitlines() if l.startswith("TimeoutStartSec=")]
+        minutes = int(value[:-3]) if value.endswith("min") else int(value) / 60
+        self.assertGreater(minutes, 10, "a real dump needs time")
+        self.assertLess(minutes, 60, "it must end before the next hourly run")
+        self.assertIn("Type=oneshot", unit)
+
+
 class BackupHostTools(unittest.TestCase):
     """DS1095 S3: every production backup needs gpg on the host; a freshly
     provisioned host must have it, not wait for a hand install."""
@@ -432,6 +543,40 @@ class BackupHostTools(unittest.TestCase):
         step = provision[provision.index("apt-get install -y"):]
         step = step[:step.index("\n#")]
         self.assertRegex(step, r"(?m)(^|\s)gpg(\s|$)")
+
+    def doctor(self, pilot_env: str, timer: str):
+        """doctor.sh in a scratch deploy folder; systemctl answers `timer`
+        (ok / off / inactive); curl, docker, gh and sudo find nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            here = Path(tmp) / "deploy"
+            here.mkdir()
+            shutil.copy(DEPLOY / "doctor.sh", here / "doctor.sh")
+            (here / ".env").write_text(f"PILOT_ENV={pilot_env}\nAPI_HOST=api.example.invalid\n")
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            calls = Path(tmp) / "calls"
+            shim(bin_dir, "systemctl", f'''echo "systemctl $*" >> "{calls}"
+case "$1:{timer}" in is-enabled:off|is-active:inactive) exit 1;; esac
+exit 0
+''')
+            for tool in ("curl", "docker", "gh", "sudo"):
+                shim(bin_dir, tool, "exit 7\n")
+            r = subprocess.run(["bash", str(here / "doctor.sh")], env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp},
+                               text=True, capture_output=True, timeout=60)
+            return r.stdout, (calls.read_text() if calls.exists() else "")
+
+    def test_the_doctor_fails_production_without_the_hourly_timer_enabled_and_active(self):
+        for timer in ("off", "inactive"):
+            with self.subTest(timer=timer):
+                out, calls = self.doctor("production", timer)
+                self.assertIn("FAIL  production's hourly backup timer (swift-backup-hourly.timer) is not enabled and active", out)
+                self.assertIn("swift-backup-hourly.timer", calls)
+        out, _ = self.doctor("production", "ok")
+        self.assertIn("ok    the hourly backup timer is enabled and active", out)
+        # Staging keeps its nightly timer; the doctor does not ask there.
+        out, calls = self.doctor("staging", "off")
+        self.assertNotIn("hourly backup timer", out)
+        self.assertEqual(calls, "")
 
     def test_the_doctor_points_production_at_the_owner_side_drill(self):
         doctor = (DEPLOY / "doctor.sh").read_text()

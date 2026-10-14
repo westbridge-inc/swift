@@ -68,6 +68,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# [S3-3, Opus review 14 Oct] --check-key runs only the owner-key proof below
+# (the same one every encrypted dump runs) and exits: no dump, no upload, no
+# storage keys. pilot-up.sh calls it before changing anything on production.
+CHECK_KEY=0
+if [ "${1:-}" = --check-key ]; then CHECK_KEY=1; shift; fi
 OUT_DIR="${1:-$HERE/backups}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 
@@ -124,7 +129,7 @@ for var in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_BUCKET AWS_S3_ENDPOINT AWS_REGION 
 done
 # The storage keys: environment, *_FILE or systemd's credentials directory.
 . "$HERE/secret-env.sh"
-load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
+[ "$CHECK_KEY" = 1 ] || load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
 BACKUP_PREFIX="${BACKUP_PREFIX:-db}"
 AWS_REGION="${AWS_REGION:-auto}"
 if [ "${PILOT_ENV:-}" = production ]; then RETAIN_DAYS="${BACKUP_RETAIN_DAYS:-2}"; else RETAIN_DAYS="${BACKUP_RETAIN_DAYS:-14}"; fi
@@ -170,6 +175,12 @@ if [ "${PILOT_ENV:-}" = production ] || [ -n "${BACKUP_GPG_RECIPIENT_FILE:-}" ] 
     { echo "FATAL: the key in BACKUP_GPG_RECIPIENT_FILE is not the pinned owner key (its fingerprint differs from BACKUP_GPG_FINGERPRINT). Refusing to encrypt to anyone else." >&2; exit 1; }
   # Every key id of that one key: the encrypted file must name only these.
   GPG_KEYIDS="$(printf '%s\n' "$KEY_LINES" | awk -F: '/^(pub|sub):/ { print $5 }' | sort -u)"
+fi
+if [ "$CHECK_KEY" = 1 ]; then
+  [ "$ENCRYPT" = 1 ] ||
+    { echo "FATAL: --check-key: no backup key is configured (BACKUP_GPG_RECIPIENT_FILE and BACKUP_GPG_FINGERPRINT)." >&2; exit 1; }
+  echo "backup key OK: BACKUP_GPG_RECIPIENT_FILE holds exactly the pinned public key $BACKUP_GPG_FINGERPRINT, and no private key"
+  exit 0
 fi
 
 [[ "$RETAIN_DAYS" =~ ^[0-9]+$ ]] || { echo "FATAL: BACKUP_RETAIN_DAYS must be a non-negative integer." >&2; exit 1; }

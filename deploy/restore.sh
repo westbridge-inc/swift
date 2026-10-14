@@ -120,6 +120,20 @@ if [[ "$SOURCE" == s3://* ]]; then
   if [ "$FETCH_ENCRYPTED" = 1 ]; then
     # Only ciphertext: an OpenPGP message, never a plain archive.
     if pg_restore --list "$DUMP" >/dev/null 2>&1; then die "the object is a PLAIN dump, not encrypted; refusing to stream it out"; fi
+    # [S3-1, Opus review 14 Oct] And positively an encrypted one: gpg also
+    # "decrypts" a message that carries no encryption (gpg --store) or only a
+    # passphrase. Its first packets must be public-key session keys, followed
+    # directly by the encrypted data. Read from the head only, never decrypted.
+    command -v gpg >/dev/null 2>&1 || die "gpg is required to check that the object is encrypted (apt-get install gnupg)"
+    mkdir -m 700 "$TMP_DIR/gnupg"
+    head -c 4096 -- "$DUMP" > "$TMP_DIR/head"
+    KINDS="$(gpg --homedir "$TMP_DIR/gnupg" --batch --no-autostart --list-only --list-packets "$TMP_DIR/head" 2>/dev/null |
+      sed -n 's/^:\([a-z ]*\):.*/\1/p' || true)"
+    printf '%s\n' "$KINDS" | awk '
+      $0 == "pubkey enc packet" { keys++; next }
+      { ok = keys > 0 && ($0 == "encrypted data packet" || $0 == "aead encrypted packet"); exit }
+      END { exit ok ? 0 : 1 }' ||
+      die "the object is not encrypted to a key (an OpenPGP message must start with public-key session keys, followed by the encrypted data); refusing to stream it out"
     cat -- "$DUMP"
     exit 0
   fi

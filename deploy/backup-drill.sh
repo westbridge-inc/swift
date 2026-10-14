@@ -70,6 +70,32 @@ printf 'Its passphrase (press Enter if it has none). Nothing is shown: ' >&2
 IFS= read -rs PASSPHRASE
 echo >&2
 
+# [S3-1, Opus review 14 Oct] Only a backup encrypted to THIS key reaches gpg.
+# `gpg --decrypt` also "decrypts" a message that carries no encryption at all
+# (gpg --store) and exits 0, so the drill could print DRILL OK for an object
+# that was never encrypted. The object's first packets must be public-key
+# session keys for this key, followed directly by the encrypted data; anything
+# else is refused before a byte is decrypted or sent to the host. The head is
+# read with gpg's own parser (--list-only never decrypts) and passed on intact.
+KEYIDS="$(gpg --batch --list-secret-keys --with-colons 2>/dev/null | awk -F: '/^(sec|ssb):/ { print $5 }')"
+only_encrypted_to_this_key() {
+  local head="$GNUPGHOME/head" listing keyids keyid
+  dd bs=1 count=4096 of="$head" 2>/dev/null
+  [ -s "$head" ] || exit 4
+  listing="$(gpg --batch --no-autostart --list-only --list-packets "$head" 2>/dev/null || true)"
+  printf '%s\n' "$listing" | sed -n 's/^:\([a-z ]*\):.*/\1/p' | awk '
+    $0 == "pubkey enc packet" { keys++; next }
+    { ok = keys > 0 && ($0 == "encrypted data packet" || $0 == "aead encrypted packet"); exit }
+    END { exit ok ? 0 : 1 }' || exit 3
+  keyids="$(printf '%s\n' "$listing" | sed -n 's/^:pubkey enc packet:.* keyid \([0-9A-F]\{16\}\).*/\1/p')"
+  [ -n "$keyids" ] || exit 3
+  for keyid in $keyids; do
+    printf '%s\n' "$KEYIDS" | grep -qx "$keyid" || exit 3
+  done
+  cat -- "$head"
+  exec cat
+}
+
 REMOTE_FETCH="sudo -n systemd-run --pipe --wait --collect --quiet --uid=swift-deploy --gid=swift-deploy \
 -p SupplementaryGroups=docker -p WorkingDirectory=$REMOTE_DIR \
 -p 'UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE' \
@@ -84,12 +110,15 @@ SSH_FETCH=(ssh -n -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes "$TARGET"
 echo "drill: $OBJECT → scratch database $SCRATCH on $TARGET (decrypted here, on the way through)" >&2
 set +e
 "${SSH_FETCH[@]}" "$REMOTE_FETCH" |
+  only_encrypted_to_this_key |
   gpg --batch --quiet --pinentry-mode loopback --passphrase-fd 3 --decrypt 3< <(printf '%s' "$PASSPHRASE") 2>/dev/null |
   "${SSH[@]}" "$REMOTE_RESTORE"
 STAGES=("${PIPESTATUS[@]}")
 set -e
 PASSPHRASE=""
+[ "${STAGES[1]}" != 3 ] || die "this computer could not decrypt the backup: the object is not a backup encrypted to this key (an OpenPGP message must start with public-key session keys for this key, followed by the encrypted data); nothing was decrypted and the host received nothing"
 [ "${STAGES[0]}" = 0 ] || die "the host could not stream the encrypted backup (exit ${STAGES[0]}); nothing was restored from it"
-[ "${STAGES[1]}" = 0 ] || die "this computer could not decrypt the backup (wrong key or passphrase, or it is not encrypted to this key); the host received nothing usable"
-[ "${STAGES[2]}" = 0 ] || die "the host's restore or comparison failed (exit ${STAGES[2]}); see its lines above. The scratch database, if created, is kept for inspection"
+[ "${STAGES[1]}" = 0 ] || die "nothing arrived from the host; nothing was restored"
+[ "${STAGES[2]}" = 0 ] || die "this computer could not decrypt the backup (wrong key or passphrase, or it is not encrypted to this key); the host received nothing usable"
+[ "${STAGES[3]}" = 0 ] || die "the host's restore or comparison failed (exit ${STAGES[3]}); see its lines above. The scratch database, if created, is kept for inspection"
 echo "DRILL OK: $OBJECT decrypted on this computer and restored on the host into $SCRATCH"
