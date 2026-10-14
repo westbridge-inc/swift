@@ -15,6 +15,9 @@ const QUEUE_KEY = ['payment-confirmations'] as const;
 const APPROVALS_KEY = ['confirmation-approvals'] as const;
 // Both reads decide whether a decision may be requested, so neither is ever served from the console's 30 s cache.
 const FRESH = { staleTime: 0, refetchOnMount: 'always' } as const;
+// The resolver resumes the clock only when no authority hold and no other active confirmation hold
+// remain, and the partner may be a store or a mover: never promise more, never say "store".
+const NOT_PAID_CLOCK = "The partner's billing clock resumes with its remaining grace only when no other payment check or hold is still open.";
 const SOURCE: Record<string, string> = { MMG_CHECKOUT: 'MMG checkout', CARD_SESSION: 'Card session', PAYMENT: 'Payment', OBLIGATION: 'Legacy obligation' };
 // Why a payment is held, in words. Two reasons mean the payment is already confirmed and being settled;
 // every other reason is a review code, shown as plain words (never the raw code) without guessing more.
@@ -146,7 +149,7 @@ function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: Paymen
   return <form aria-label="Resolve payment confirmation" onSubmit={submit} noValidate className="rounded-xl border border-[var(--border)] bg-[var(--panel)] p-5 space-y-4">
     <h2 className="font-semibold">{decision === 'UNPAID' ? 'Close as NOT PAID' : 'Mark PAID'} · {row.swiftReference ?? row.sourceId}</h2>
     <p>{decision === 'UNPAID'
-      ? mmg ? "Close as NOT PAID: the checkout becomes NOT_PAID, the store's billing clock resumes with its remaining grace; nothing is credited" : 'Close as NOT PAID: the payment becomes failed, the billing clock resumes with its remaining grace; nothing is credited.'
+      ? `Close as NOT PAID: ${mmg ? 'the checkout becomes NOT_PAID' : 'the payment becomes failed'}; nothing is credited. ${NOT_PAID_CLOCK}`
       : mmg ? "Mark PAID: only with MMG's transaction id; credits once" : 'Mark PAID: only with recorded settlement evidence; credits once.'}</p>
     {decision === 'PAID' && <p className="text-sm text-[var(--muted)]">Swift rechecks the existing settlement record before applying the decision. Entering a reference cannot create credit or credit a payment twice.</p>}
     {decision === 'PAID' && mmg && <label className="block text-sm">MMG transaction ID<select className={inputClass} value={paymentId} onChange={(e) => setPaymentId(e.target.value)} disabled={busy || stale}>

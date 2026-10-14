@@ -35,6 +35,9 @@ async function open(user: ReturnType<typeof renderWithQuery>['user'], decision =
   await user.type(within(form).getByLabelText('Reason'), REASON);
   return form;
 }
+// The resolver resumes the clock only when no authority hold and no other active confirmation hold remain,
+// and the partner may be a store or a mover: the words promise neither more nor a store.
+const NOT_PAID_CLOCK = "The partner's billing clock resumes with its remaining grace only when no other payment check or hold is still open.";
 const readsOf = (fetch: ReturnType<typeof mockApi>, path: string) =>
   requestsByMethod(fetch, 'GET').filter(([url]) => new URL(String(url)).pathname.endsWith(path)).length;
 const bodiesOf = (fetch: ReturnType<typeof mockApi>) => requestsByMethod(fetch, 'POST').map(([, init]) => JSON.parse(String(init?.body)));
@@ -143,7 +146,7 @@ describe('weekly-fee payment confirmations', () => {
     if (decision === 'PAID') {
       expect(form.textContent).toContain("Mark PAID: only with MMG's transaction id; credits once");
       await user.selectOptions(within(form).getByLabelText('MMG transaction ID'), 'provider-row-one');
-    } else expect(form.textContent).toContain("Close as NOT PAID: the checkout becomes NOT_PAID, the store's billing clock resumes with its remaining grace; nothing is credited");
+    } else expect(form.textContent).toContain(`Close as NOT PAID: the checkout becomes NOT_PAID; nothing is credited. ${NOT_PAID_CLOCK}`);
     await user.click(within(form).getByRole('button', { name: 'Request approval' }));
     expect(await screen.findByText(/Waiting for approval/)).toBeTruthy();
     const writes = requestsByMethod(fetch, 'POST');expect(writes).toHaveLength(1);
@@ -153,6 +156,12 @@ describe('weekly-fee payment confirmations', () => {
     expect((init?.headers as Record<string,string>)['x-swift-reason']).toBe(REASON);
     expect(screen.queryByRole('button', { name: `Close as NOT PAID ${row.swiftReference}` })).toBeNull();
     expect(screen.getByRole('link', { name: 'Open Approvals' }).getAttribute('href')).toBe('/approvals');
+  });
+  it.each([['MMG_CHECKOUT', 'the checkout becomes NOT_PAID'], ['PAYMENT', 'the payment becomes failed']] as const)('NOT PAID words for %s promise no unconditional resume and name no store', async (source, outcome) => {
+    serve(undefined, [{ ...row, source }]); const { user } = renderWithQuery(<Page />);
+    const form = await open(user);
+    expect(form.textContent).toContain(`Close as NOT PAID: ${outcome}; nothing is credited. ${NOT_PAID_CLOCK}`);
+    expect(form.textContent).not.toMatch(/store's billing clock|resumes with its remaining grace;/);
   });
   // The first request never reaches the resolver: the approval gate answers 202 before any handler runs,
   // so a changed confirmation is refused when the APPROVED request is applied (409 CONFLICT), not here.
