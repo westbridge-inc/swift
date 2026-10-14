@@ -717,7 +717,11 @@ export function MoverHomeScreen({ navigation }: any) {
               <T variant="caption" style={{ color: dk.muted, marginTop: 2 }}>
                 {online
                   ? demandLine ?? 'Watching for jobs near you'
-                  : 'Go online to receive jobs'}
+                  : preparingOnline && !goOnline.isPending
+                    // [GO-RELIABILITY] GO waits for a fix (up to the GPS
+                    // budget) instead of failing fast; say so while it does.
+                    ? 'Finding your location…'
+                    : 'Go online to receive jobs'}
               </T>
             </View>
             {online ? (
