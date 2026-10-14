@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import { applySeedPlan, buildSeedPlan, type ApplyOptions, type DesiredConfig, type SeedPlan } from './seed-plan';
+import { applySeedPlan, buildSeedPlan, type ApplyOptions, type ApplyResult, type DesiredConfig, type RequestContext, type SeedPlan } from './seed-plan';
 import { isProduction } from '../../utils/runtime-mode';
 import { DEFAULT_DELIVERY_RATES } from '../../utils/markup';
 import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
@@ -28,6 +28,8 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  */
 
 /** Bump when any value below changes; recorded with every apply.
+ *  2026-10-07.1: Guyana's police, fire and ambulance numbers verified by
+ *  the owner on 5 October; preserve that confirmation on every seed run.
  *  2026-10-01.1 (main): the owner's Georgetown fares — Guyana's taxiRates, and
  *  the delivery columns a fresh Georgetown Central zone is created with.
  *  2026-10-01.2 (main) [ZONE-FARES]: the CJIA and Ogle airport zones with their
@@ -46,8 +48,26 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  franchiseMinLocations / franchiseDiscountPct, so each store pays its own
  *  tier by its own catalogue. On top of 2026-10-06.1. Never reuse
  *  2026-10-07.1, 2026-10-07.2, 2026-10-13.1 or 2026-10-13.2: open branches
- *  carry those for other values. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-13.3';
+ *  carry those for other values.
+ *  2026-10-14.3: all of 2026-10-13.3 plus 2026-10-13.1 (this lane's earlier
+ *  version: Guyana's police, fire and ambulance numbers verified by the
+ *  owner on 5 October, preserved on every seed run, and the Market tab
+ *  always shown at launch — owner, 13 Oct: MARKET_MIN_ITEMS and
+ *  MARKET_MIN_VENDORS at 0), as merged. No earlier version describes these
+ *  values together, so none is reused; 2026-10-14.1 and 2026-10-14.2 are
+ *  claimed by other open branches for other values.
+ *  2026-10-14.4 [VERIFY-DOCS · ruling of 6 Oct ~21:25]: a service business opens on
+ *  its owner's ID; police clearance is a document it may add, and it is what
+ *  home-visit bookings need. Marketplace tradespeople keep it required. On top
+ *  of 2026-10-14.3 (this change carried 2026-10-07.1 and then 2026-10-14.1 on
+ *  bases without 2026-10-14.3, so neither label describes these values).
+ *  2026-10-14.5 [VERIFY-DOCS · rulings 7 and 8]: the taxi's seven documents (the
+ *  person's Hire Car Driver's Licence and the car's yearly hire licence replace
+ *  the single hire-car permit) and no TIN certificate on any store list — on top
+ *  of 2026-10-14.4 (both changes together; the two never share a value). This
+ *  change carried 2026-10-07.2 and then 2026-10-14.2 on older bases; neither
+ *  label describes these values. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-14.5';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -132,18 +152,30 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     MOVER_OPTIONAL: ['national_id', 'police_clearance'],
     MOVER_NO_LICENCE: ['national_id'],
     MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
-    MOVER_TAXI_EXTRA: ['hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert'],
+    // [VERIFY-DOCS · ruling 8] A taxi's seven: the licence, registration and insurance above, plus the
+    // PERSON's Hire Car Driver's Licence (s.80), the CAR's yearly hire licence (s.79), the car photo
+    // with the plate showing, and the certificate of fitness. The two licences replace the single
+    // hire-car permit; an approved permit counts as both for 60 days (verification/hire-permit-grace).
+    MOVER_TAXI_EXTRA: ['hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'],
     MOVER_COMMERCIAL: ['road_service_licence', 'fitness_cert'],
-    RESTAURANT: ['owner_national_id', 'business_registration', 'tin_certificate', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
-    SUPERMARKET: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
-    STORE: ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'],
+    // [VERIFY-DOCS · ruling 7] No TIN certificate: no law found requires Swift to hold it, and the image
+    // pairs a person's name and address with their tax-account login. A VAT-registered store may type its
+    // VAT registration number on its profile instead (vendor.vatRegistrationNumber, for VAT invoices).
+    RESTAURANT: ['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
+    SUPERMARKET: ['owner_national_id', 'business_registration', 'storefront_photo'],
+    STORE: ['owner_national_id', 'business_registration', 'storefront_photo'],
     // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
     // self-declaration, the storefront photo, and — never waived — the food handler permit for food.
     // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
     RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
     SUPERMARKET_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
     STORE_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
-    SERVICE: ['owner_national_id', 'police_clearance'],
+    // Service businesses (owner ruling, 6 Oct 2026 ~21:25 GYT): the store opens on the owner's ID;
+    // a police clearance is OPTIONAL for the store, and a HOME-VISIT booking needs the owner's
+    // approved, current one (modules/verification/home-visits) — in-shop bookings never do.
+    // Marketplace tradespeople keep it REQUIRED: their jobs are home visits.
+    SERVICE: ['owner_national_id'],
+    SERVICE_OPTIONAL: ['police_clearance'],
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
@@ -198,13 +230,12 @@ export function desiredPlatformConfig(): DesiredConfig {
     l3MinAccountAgeDays: 30,
     outlierMultiplier: 3,
   };
-  // [MOB-018] Per-market emergency numbers with a verification record. Only
-  // the number the launch market actually verified is marked verified; the
-  // rest are carried but flagged, so the SOS ceremony can say so.
+  // [MOB-018] All three Guyana numbers were verified by the owner on 5 Oct
+  // 2026. Keep the seed aligned with the emergency-policy confirmation.
   const guyanaEmergency = {
-    police: { number: '911', verified: true, verifiedAt: '2026-09-02T00:00:00.000Z', verifiedBy: 'launch-market' },
-    fire: { number: '912', verified: false },
-    ambulance: { number: '913', verified: false },
+    police: { number: '911', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+    fire: { number: '912', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
+    ambulance: { number: '913', verified: true, verifiedAt: '2026-10-05T00:00:00.000Z', verifiedBy: 'owner' },
   };
   const guyanaRegion = {
     taxiCredentialName: 'Hire Car Licence',
@@ -310,6 +341,11 @@ export function desiredPlatformConfig(): DesiredConfig {
     platformConfig: [
       { key: 'order_auto_reject_minutes', value: 5 },
       { key: 'delivery_base_fee', value: 500 },
+      // Owner ruling, 13 Oct: the Market tab ALWAYS shows at launch. The tab's
+      // depth gate (market/launch-depth.ts) reads these two; 0 is the explicit
+      // operator choice it honours ("open it, it is thin").
+      { key: 'MARKET_MIN_ITEMS', value: 0 },
+      { key: 'MARKET_MIN_VENDORS', value: 0 },
     ],
     countries: [
       {
@@ -394,6 +430,15 @@ export interface SpineOptions extends ApplyOptions {
   databaseUrl?: string;
   /** Called with the plan before it is applied — the preview a ceremony shows. */
   onPlan?: (plan: SeedPlan) => void | Promise<void>;
+  /** Called with what the apply did (including a first admin the signed plan minted). */
+  onApplied?: (result: ApplyResult) => void | Promise<void>;
+}
+
+/** [PROD-PATH] What the approvers of a spine plan see beside the changes: the
+ *  FX rate this very seed uses (the one the desired data was built with) and
+ *  the first admin's phone. Printing and applying both use this, so they agree. */
+export function spineRequestContext(adminPhone?: string | null, solo = false, adminEmail?: string | null): RequestContext {
+  return { fxGydPerUsd: seedFxRate(), adminPhone: adminPhone ?? null, ...(adminEmail ? { adminEmail } : {}), ...(solo ? { solo: true } : {}) };
 }
 
 /**
@@ -410,6 +455,7 @@ export async function seedPlatformSpine(prisma: PrismaClient, opts: SpineOptions
   const desired = desiredPlatformConfig();
   const plan = await buildSeedPlan(prisma, databaseUrl, desired);
   if (opts.onPlan) await opts.onPlan(plan);
-  await applySeedPlan(prisma, databaseUrl, desired, plan, opts);
+  const result = await applySeedPlan(prisma, databaseUrl, desired, plan, { ...opts, request: spineRequestContext(opts.request?.adminPhone, opts.request?.solo === true, opts.request?.adminEmail) });
+  if (opts.onApplied) await opts.onApplied(result);
   return plan;
 }

@@ -8,6 +8,7 @@ import { getTenantContext, tenantContext, type TenantMode } from './tenant-conte
 import { tenantUnscopedAccessCounter, tenantBindCounter } from './observability';
 import { poolRoleForApiProcess, resolveDatabaseUrl } from '../utils/db-pool';
 import { isDevelopment } from '../utils/runtime-mode';
+import { settleBackgroundReads } from '../lib/background-reads';
 
 // Multi-tenancy stage 2 — tenant scoping at the ORM layer. When a request has
 // bound a tenant (tenant-context), EVERY direct operation on a tenant-owned
@@ -111,9 +112,12 @@ const TENANT_QUERY_EXTENSIONS = {
   actorRatingStat: scoped, ratingReport: scoped, itemFeedback: scoped, ratingTagDef: scoped,
   // [STORE-002] Who a person refuses contact with is theirs and their
   // operator's; it must never be readable or writable through another's
-  // session. (ContentReport beside it carries no tenantId and is therefore not
-  // here — a pre-existing shape, not a decision made by this change.)
+  // session. (ContentReport, the report beside it, is walled below since
+  // DB-05 gave it a tenantId.)
   userBlock: scoped,
+  // [DB-05 EXPAND] Formerly PENDING_EXPAND: walled on the row (tenantId nullable; NULL =
+  // quarantined, visible to no tenant).
+  returnRequest: scoped, contentReport: scoped, collectionContact: scoped,
   // Growth / QR attribution.
   slugRedirect: scoped, pendingAttribution: scoped, attributionClaim: scoped, scanDailyRollup: scoped,
   // Batching + scheduling.
@@ -130,6 +134,8 @@ const TENANT_QUERY_EXTENSIONS = {
   taxiTripStop: scoped,
   // [AF-MOB-006] A custody recovery case belongs to its order's operator.
   custodyRecoveryCase: scoped,
+  // [TAXI waiting charge] A ride's waiting terms and frozen charge belong to its operator, like the ride.
+  taxiRideWaiting: scoped,
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
   supplyWatch: scoped,
@@ -741,6 +747,9 @@ export const prismaPlugin = fp(async (app: FastifyInstance) => {
   app.decorate('prisma', prisma as unknown as PrismaClient);
 
   app.addHook('onClose', async () => {
+    // A read a request started and did not wait for finishes first: a query in flight across
+    // $disconnect leaves this one shared client unable to answer the next caller. [#1678]
+    await settleBackgroundReads();
     await prisma.$disconnect();
   });
 });

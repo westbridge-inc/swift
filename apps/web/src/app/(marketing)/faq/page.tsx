@@ -118,13 +118,27 @@ const FAQ: QA[] = [
     q: 'I run a business. What do I need to sign up?',
     a: (
       <>
-        Owner ID, business registration, TIN and a photo of your storefront. A person reviews them —
+        Owner ID, business registration, a photo of your storefront, and any licence your kind of
+        business needs (a restaurant adds its GRA licence and food handler&apos;s permit). A person reviews them —
         most businesses clear within a day — and your free trial starts the day you are{' '}
         <i>approved</i>, so review time never eats into it. The{' '}
         <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/vendors">
           business page
         </Link>{' '}
         walks through the whole thing.
+      </>
+    ),
+  },
+  {
+    // [Owner rulings 11 Oct 2026] the two licences and the H plate, said plainly
+    q: 'I drive a taxi. What documents do I need?',
+    a: (
+      <>
+        Seven: your normal driver&apos;s licence; your separate <b>Hire Car Driver&apos;s Licence</b> from
+        GRA (your normal licence does not need to show a hire class); your car&apos;s Certificate of
+        Registration with an <b>H plate</b> (e.g. HC 1234); the car&apos;s yearly hire licence; its
+        certificate of fitness; insurance that covers carrying passengers for hire; and one photo of the car
+        with the plate clearly visible. A police clearance is optional.
       </>
     ),
   },

@@ -1,9 +1,35 @@
 #!/usr/bin/env bash
 # Restore a local or off-site custom dump into a NEW scratch database only.
 # The live database is never a target. Keep the scratch DB for inspection.
+#
+#   ./deploy/restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db]
+#   ./deploy/restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg > file
+#
+# [BACKUP-ENC] Production dumps are encrypted to the OWNER's key (backup.sh),
+# and this server never decrypts: an encrypted dump (.gpg) given here is
+# refused. The drill runs from the owner's computer (deploy/backup-drill.sh):
+# this script's --fetch-encrypted streams the encrypted object out on stdout,
+# the owner's computer decrypts it, and the plain dump comes back on stdin
+# (source `-`) into the same scratch restore and checks as any other dump.
+#
+# [PROD-PATH] --compare-source judges the restore against the LIVE database it
+# was dumped from, instead of fixed minimums (a new production database has no
+# user yet, so "at least one user" cannot prove anything there). In schemas
+# public and swift_qr the scratch copy must equal the source in every table's
+# row count AND content checksum, column definitions and defaults, the RLS
+# switches, policies, constraints, indexes, triggers, function definitions,
+# view definitions and options, grants and sequence positions (POSTURE_SQL
+# below). Use it on a quiet database, right after the backup: any row written
+# to the live database since the dump is a mismatch, reported by table. The
+# backup and rehearsal heartbeats in platform_config are left out — backup.sh
+# writes them after the dump by design.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+COMPARE_SOURCE=0
+FETCH_ENCRYPTED=0
+if [ "${1:-}" = "--compare-source" ]; then COMPARE_SOURCE=1; shift
+elif [ "${1:-}" = "--fetch-encrypted" ]; then FETCH_ENCRYPTED=1; shift; fi
 SOURCE="${1:-}"
 SCRATCH="${2:-swift_restore_$(date -u +%Y%m%d%H%M%S)}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
@@ -57,7 +83,13 @@ db_psql() {
 cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
 trap cleanup EXIT
 
-[ -n "$SOURCE" ] || die "usage: restore.sh <dump-file|s3://backup-bucket/key> [new-scratch-db]"
+[ -n "$SOURCE" ] || die "usage: restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db], or restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg"
+if [ "$FETCH_ENCRYPTED" = 1 ]; then
+  [[ "$SOURCE" == s3://*.dump.gpg ]] || die "--fetch-encrypted streams only an encrypted off-site dump (s3://…/….dump.gpg); a plain dump never leaves this way"
+  [ ! -t 1 ] || die "--fetch-encrypted writes the encrypted dump to stdout; redirect or pipe it (deploy/backup-drill.sh does)"
+elif [[ "$SOURCE" == *.gpg ]]; then
+  die "this dump is encrypted to the owner's key and this server never decrypts it: run deploy/backup-drill.sh on the owner's computer (it fetches, decrypts there, and restores through this script)"
+fi
 [[ "$SCRATCH" =~ ^[a-z][a-z0-9_]{0,62}$ ]] || die "scratch database name must be a lowercase SQL identifier"
 LIVE_DB="$(env_value POSTGRES_DB)"
 LIVE_DB="${LIVE_DB:-swift}"
@@ -85,6 +117,35 @@ if [[ "$SOURCE" == s3://* ]]; then
   aws_cli_image >/dev/null || die "off-site restore needs a pinned AWS_CLI_IMAGE"
   aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE" /data/restore.dump --only-show-errors
   chmod 600 "$DUMP"
+  if [ "$FETCH_ENCRYPTED" = 1 ]; then
+    # Only ciphertext: an OpenPGP message, never a plain archive.
+    if pg_restore --list "$DUMP" >/dev/null 2>&1; then die "the object is a PLAIN dump, not encrypted; refusing to stream it out"; fi
+    # [S3-1, Opus review 14 Oct] And positively an encrypted one: gpg also
+    # "decrypts" a message that carries no encryption (gpg --store) or only a
+    # passphrase. Its first packets must be public-key session keys, followed
+    # directly by the encrypted data. Read from the head only, never decrypted.
+    command -v gpg >/dev/null 2>&1 || die "gpg is required to check that the object is encrypted (apt-get install gnupg)"
+    mkdir -m 700 "$TMP_DIR/gnupg"
+    head -c 4096 -- "$DUMP" > "$TMP_DIR/head"
+    KINDS="$(gpg --homedir "$TMP_DIR/gnupg" --batch --no-autostart --list-only --list-packets "$TMP_DIR/head" 2>/dev/null |
+      sed -n 's/^:\([a-z ]*\):.*/\1/p' || true)"
+    printf '%s\n' "$KINDS" | awk '
+      $0 == "pubkey enc packet" { keys++; next }
+      { ok = keys > 0 && ($0 == "encrypted data packet" || $0 == "aead encrypted packet"); exit }
+      END { exit ok ? 0 : 1 }' ||
+      die "the object is not encrypted to a key (an OpenPGP message must start with public-key session keys, followed by the encrypted data); refusing to stream it out"
+    cat -- "$DUMP"
+    exit 0
+  fi
+elif [ "$SOURCE" = - ]; then
+  # The plain dump on stdin (backup-drill.sh decrypts it on the owner's
+  # computer), held only in this run's private temporary directory.
+  [ ! -t 0 ] || die "source - reads the dump from stdin; pipe it in (deploy/backup-drill.sh does)"
+  TMP_DIR="$(mktemp -d)"
+  chmod 700 "$TMP_DIR"
+  DUMP="$TMP_DIR/restore.dump"
+  (umask 077; cat > "$DUMP")
+  [ -s "$DUMP" ] || die "nothing arrived on stdin"
 else
   DUMP="$SOURCE"
 fi
@@ -110,11 +171,129 @@ check() {
   if [ "$count" -lt "$3" ]; then echo "$1: $count (below $3)"; FAILED=1
   else echo "$1: $count (ok)"; fi
 }
-check country_configs "SELECT count(*) FROM country_configs;" 1
-check users "SELECT count(*) FROM users;" 1
-check vendors "SELECT count(*) FROM vendors;" 0
-check orders "SELECT count(*) FROM orders;" 0
-[ "$FAILED" -eq 0 ] || die "restore failed sanity checks; scratch database retained"
+# [PROD-PATH] One read of a database's contents and shape, the same query on
+# both sides, over the schemas public and swift_qr. A line per:
+#   rows       table: row count and a content checksum (md5 over every row's
+#              text, in md5 order, so physical order does not matter);
+#   column     table column: position (among live columns), type, NOT NULL, default;
+#   rls        table: row-level security enabled, forced;
+#   policy     policy: command, roles, USING and WITH CHECK;
+#   constraint constraint: definition;   index    index: definition;
+#   trigger    user trigger: definition and enabled state;
+#   function   function: kind, language, security definer, settings, volatility,
+#              and a checksum of its body;
+#   view       view or materialized view: kind, options (security_invoker,
+#              security_barrier, check_option) and a checksum of its definition;
+#   grant      table, sequence, function and schema privileges, default privileges;
+#   sequence   sequence: last value;   extension  extension: version.
+# Sorted, so two equal databases give byte-equal snapshots. The session pins
+# its time zone, date and interval style and float digits, so a row's text
+# cannot differ by setting.
+POSTURE_SQL="-- posture-snapshot
+SET TIME ZONE 'UTC'; SET DateStyle TO 'ISO, YMD'; SET IntervalStyle TO 'postgres'; SET extra_float_digits TO 1;
+SELECT line FROM (
+  SELECT format('rows|%s.%s|%s|%s', t.table_schema, t.table_name,
+    (xpath('/row/c/text()', x))[1]::text, (xpath('/row/h/text()', x))[1]::text) AS line
+  FROM information_schema.tables t
+  CROSS JOIN LATERAL query_to_xml(format(
+    'SELECT count(*) AS c, md5(coalesce(string_agg(md5(r::text), '','' ORDER BY md5(r::text) COLLATE \"C\"), '''')) AS h FROM %I.%I r %s',
+    t.table_schema, t.table_name,
+    CASE WHEN t.table_schema = 'public' AND t.table_name = 'platform_config'
+      THEN 'WHERE r.key NOT IN (''last_backup_at'', ''last_backup_offsite'', ''last_restore_rehearsal_at'', ''last_restore_rehearsal_seconds'')'
+      ELSE '' END), false, true, '') AS x
+  WHERE t.table_schema IN ('public', 'swift_qr') AND t.table_type = 'BASE TABLE'
+  UNION ALL
+  SELECT format('column|%s.%s|%s|%s|%s|notnull=%s|default=%s', n.nspname, c.relname, a.attname,
+    row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum),
+    format_type(a.atttypid, a.atttypmod), a.attnotnull, coalesce(pg_get_expr(d.adbin, d.adrelid), ''))
+  FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+  WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+  UNION ALL
+  SELECT format('rls|%s.%s|enabled=%s|forced=%s', n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity)
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('r', 'p')
+  UNION ALL
+  SELECT format('policy|%s.%s|%s|%s|%s|%s|%s|%s', p.schemaname, p.tablename, p.policyname, p.permissive, p.roles::text, p.cmd, coalesce(p.qual, ''), coalesce(p.with_check, ''))
+  FROM pg_policies p WHERE p.schemaname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('constraint|%s|%s|%s', c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid))
+  FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('index|%s.%s|%s|%s', i.schemaname, i.tablename, i.indexname, i.indexdef)
+  FROM pg_indexes i WHERE i.schemaname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('trigger|%s|%s|enabled=%s|%s', tg.tgrelid::regclass::text, tg.tgname, tg.tgenabled, pg_get_triggerdef(tg.oid))
+  FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('public', 'swift_qr') AND NOT tg.tgisinternal
+  UNION ALL
+  SELECT format('function|%s.%s(%s)|kind=%s|lang=%s|definer=%s|config=%s|volatile=%s|body=%s', n.nspname, p.proname,
+    pg_get_function_identity_arguments(p.oid), p.prokind, l.lanname, p.prosecdef, coalesce(p.proconfig::text, ''), p.provolatile, md5(coalesce(p.prosrc, '')))
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+  WHERE n.nspname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('view|%s.%s|kind=%s|options=%s|definition=%s', n.nspname, c.relname, c.relkind,
+    coalesce(c.reloptions::text, ''), md5(pg_get_viewdef(c.oid, true)))
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('v', 'm')
+  UNION ALL
+  SELECT format('grant|relation|%s.%s|%s', n.nspname, c.relname, coalesce(c.relacl::text, ''))
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+  UNION ALL
+  SELECT format('grant|function|%s.%s(%s)|%s', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), coalesce(p.proacl::text, ''))
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('grant|schema|%s|%s', n.nspname, coalesce(n.nspacl::text, ''))
+  FROM pg_namespace n WHERE n.nspname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('grant|default|%s|%s|%s', coalesce(n.nspname, ''), d.defaclobjtype, d.defaclacl::text)
+  FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+  UNION ALL
+  SELECT format('sequence|%s.%s|last=%s', s.schemaname, s.sequencename, coalesce(s.last_value::text, 'unused'))
+  FROM pg_sequences s WHERE s.schemaname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('extension|%s|%s', e.extname, e.extversion) FROM pg_extension e
+) s ORDER BY line COLLATE \"C\";"
+compare_with_source() {
+  local live_snapshot scratch_snapshot
+  live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die "could not read the source database $LIVE_DB; scratch database retained"
+  scratch_snapshot="$(db_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die "could not read the scratch database; scratch database retained"
+  printf '%s\n' "$live_snapshot" | grep -q '^rows|' || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
+  summarize() {
+    printf '%s\n' "$1" | awk -F'|' -v who="$2" '
+      $1 == "rows" { tables++; rows += $3 }
+      $1 == "column" { columns++ }
+      $1 == "rls" && $3 == "enabled=t" { rls++ }
+      $1 == "rls" && $4 == "forced=t" { forced++ }
+      $1 == "policy" { policies++ }
+      $1 == "constraint" { constraints++ }
+      $1 == "index" { indexes++ }
+      $1 == "trigger" { triggers++ }
+      $1 == "function" { functions++ }
+      $1 == "view" { views++ }
+      $1 == "grant" { grants++ }
+      $1 == "sequence" { sequences++ }
+      END { printf "%s: %d tables, %d rows, %d columns, RLS enabled on %d, forced on %d, %d policies, %d constraints, %d indexes, %d triggers, %d functions, %d views, %d grant entries, %d sequences\n", who, tables, rows, columns, rls, forced, policies, constraints, indexes, triggers, functions, views, grants, sequences }'
+  }
+  summarize "$live_snapshot" "source ($LIVE_DB)"
+  summarize "$scratch_snapshot" "scratch ($SCRATCH)"
+  if [ "$live_snapshot" != "$scratch_snapshot" ]; then
+    echo "MISMATCH between the source and the scratch restore (first differences; < source, > scratch):"
+    diff <(printf '%s\n' "$live_snapshot") <(printf '%s\n' "$scratch_snapshot") | grep -E '^[<>]' | cut -c1-240 | head -40 || true
+    die "the restore does not match its source; scratch database retained"
+  fi
+  echo "compare-source: in schemas public and swift_qr the scratch restore equals its source in every table's row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, view definitions and options, grants and sequence positions"
+}
+if [ "$COMPARE_SOURCE" -eq 1 ]; then
+  compare_with_source
+else
+  check country_configs "SELECT count(*) FROM country_configs;" 1
+  check users "SELECT count(*) FROM users;" 1
+  check vendors "SELECT count(*) FROM vendors;" 0
+  check orders "SELECT count(*) FROM orders;" 0
+  [ "$FAILED" -eq 0 ] || die "restore failed sanity checks; scratch database retained"
+fi
 
 SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
 echo "RESTORE OK — ${SECONDS_TAKEN}s; scratch database retained for inspection"

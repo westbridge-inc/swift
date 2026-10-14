@@ -232,13 +232,14 @@ describe('[ADM-002] the sales digest', () => {
 });
 
 describe('[ADM-002] the top-up command', () => {
+  // [owner #62] One week at a time: each recorded payment here is the coming week's fee (GY$2,100).
   it('writes ONE canonical row inside the command transaction — no PREPAID_TOPUP duplicate', async () => {
     const v = await freshVendor(); const sub = await subscription(v.id);
-    const res = await call('POST', `/api/v1/admin/subscriptions/${sub.id}/topup`, { amount: 5000, reference: `MMG${RUN}A1` }, { 'idempotency-key': `arcb-${RUN}-topup-1` });
+    const res = await call('POST', `/api/v1/admin/subscriptions/${sub.id}/topup`, { amount: 2100, reference: `MMG${RUN}A1` }, { 'idempotency-key': `arcb-${RUN}-topup-1` });
     expect(res.statusCode, res.body).toBe(200);
     const rows = await rowsFor(sub.id);
     expect(rows.length).toBe(1);
-    expect(changesOf(rows[0]!)['amount']).toBe(5000);
+    expect(changesOf(rows[0]!)['amount']).toBe(2100);
     expect(typeof changesOf(rows[0]!)['billingEventId']).toBe('string');
     expect(rows.some((r) => r.action === 'PREPAID_TOPUP')).toBe(false);
   });
@@ -246,7 +247,7 @@ describe('[ADM-002] the top-up command', () => {
     const v = await freshVendor(); const sub = await subscription(v.id);
     await refuseAuditWhere(app, REFUSAL, { entityId: sub.id });
     try {
-      const res = await call('POST', `/api/v1/admin/subscriptions/${sub.id}/topup`, { amount: 5000, reference: `MMG${RUN}B1` }, { 'idempotency-key': `arcb-${RUN}-topup-2` });
+      const res = await call('POST', `/api/v1/admin/subscriptions/${sub.id}/topup`, { amount: 2100, reference: `MMG${RUN}B1` }, { 'idempotency-key': `arcb-${RUN}-topup-2` });
       expect(res.statusCode, res.body).toBe(500);
     } finally { await allowAuditAgain(app, REFUSAL); }
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id } })).toBe(0);

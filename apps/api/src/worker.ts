@@ -30,6 +30,8 @@ import { installProcessLifecycle } from './utils/process-lifecycle';
 import { isProduction } from './utils/runtime-mode';
 import { createScopedProcessClient } from './plugins/prisma';
 import { attestTenantWallAtBoot } from './boot/tenant-wall';
+import { attestSystemLoginAtBoot } from './boot/system-login';
+import { assertDeploymentIdentityMatchesMode } from './utils/deployment-identity';
 
 async function main() {
   assertSafeBootConfig();
@@ -53,6 +55,9 @@ async function main() {
   // append-only evidence, system-transaction routing) — never a raw client.
   const prisma = createScopedProcessClient({ datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], 'worker') });
   redis.on('error', (err) => log.error({ err }, 'Worker Redis connection error'));
+  // [S3-L1] Only on a database of this process's own kind (its
+  // deployment_identity), before any job runs; a refusal exits 1 (below).
+  await assertDeploymentIdentityMatchesMode(prisma);
 
   const io = new Server();
   const adapterConns: Redis[] = [];
@@ -127,8 +132,12 @@ async function main() {
   try {
     // [MASTER-075] The worker serves Swift's data like the API does, so it
     // attests the tenant wall the same way — and refuses the same postures —
-    // before a single job runs.
+    // before a single job runs. [L04 · R1] Under the enforced wall, system
+    // jobs (SOS escalation among them) read through the system login, so it
+    // must be reachable and a bypass member too. Both, always, in this order
+    // (system-login-boot.test.ts gates it).
     await attestTenantWallAtBoot(prisma, log);
+    await attestSystemLoginAtBoot(prisma, log);
     const startupTimeoutMs = positiveDurationMs(process.env['QUEUE_STARTUP_TIMEOUT_MS'], 15_000);
     await withTimeout(redis.ping(), startupTimeoutMs, 'Worker Redis startup');
     if (isProduction()) {

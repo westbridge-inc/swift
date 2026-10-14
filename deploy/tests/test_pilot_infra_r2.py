@@ -17,12 +17,21 @@ def fragment(path: Path, start: str, end: str) -> str:
 
 
 class PilotInfraR2Contract(unittest.TestCase):
+    GATE_REASON = {
+        "immediate_failure": "migrate-deploy exited with status 1",
+        "late_failure": "migrate-deploy exited with status 1",
+        "timeout": "migrate-deploy timed out without exiting",
+    }
+
     def run_migration(self, script: str, mode: str):
         if script == "pilot-up.sh":
+            # End where pilot-up branches on --no-public: the slice keeps the
+            # whole migration gate and the `up -d --no-deps ... api worker`
+            # restart after it, and never cuts a compound command in half.
             body = fragment(
                 DEPLOY / script,
                 '"${COMPOSE[@]}" stop api worker',
-                'for _ in $(seq 1 90); do',
+                'if [ "$NO_PUBLIC" -eq 1 ]; then',
             )
         else:
             body = fragment(
@@ -88,6 +97,12 @@ docker() {
                     else:
                         self.assertNotEqual(result.returncode, 0, f"{script} {mode}: {calls}")
                         self.assertNotIn("STARTED:", calls)
+                        # The refusal must be the migration gate itself. A slice
+                        # that no longer parses also exits non-zero and starts
+                        # nothing, so without these the three failure modes
+                        # would pass vacuously (#1448 review S3-A).
+                        self.assertIn(self.GATE_REASON[mode], result.stderr)
+                        self.assertIn("migration did not complete successfully", result.stderr)
                     self.assertGreaterEqual(polls, 1)
 
     def run_firewall(self, active: str, stored: str, fail_command: str = ""):

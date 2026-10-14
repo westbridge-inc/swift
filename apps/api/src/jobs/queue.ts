@@ -659,6 +659,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           break;
         }
         case 'poll-mmg-billing': {
+          // [PROD-PATH] No live way to pay (MMG off, no live card rail): hold
+          // every partner's billing deadline for the span (grace, retry, churn
+          // clock); a way to pay back: record the reactivations, then resume.
+          const { syncMmgPauseClock } = await import('../modules/billing/mmg-pause');
+          await syncMmgPauseClock(ctx.prisma);
           // §13 MMG rail: settle in-flight merchant-initiated weekly-fee
           // requests (approved → period advances; declined/expired → dunning).
           const polled = await billing.pollPendingMmgCharges();
@@ -1090,6 +1095,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           );
           throw err;
         }
+        // Run transition notices after retention so a failed reminder cannot skip the reaper.
+        await verification.hirePermitGraceSweep();
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
@@ -1500,16 +1507,29 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (promoted.length > 0) {
           ctx.log.warn({ promoted, count: promoted.length }, 'SOS grace backstop promoted pending alerts to ACTIVE (client never confirmed)');
         }
-        // [S-01] The escalation worker: drain what every ACTIVE alert owns
-        // (leased, once each, retried), backfill live alerts with no rows,
-        // and page the platform for any ACTIVE alert whose ops page is still
-        // undelivered past the threshold — the watchdog.
+        // [S-01] The escalation worker: backfill live alerts with no rows,
+        // page the platform for any ACTIVE alert whose ops page is still
+        // undelivered past the threshold (the watchdog), and drain what every
+        // ACTIVE alert owns (leased, once each, retried).
+        // [AUD-L4-016] The alarms run BEFORE the delivery batch: in an SMS
+        // outage the batch is up to 200 rows at the send timeout (minutes),
+        // and neither the failed-delivery page, the watchdog nor the ops-alert
+        // ladder may wait behind it.
         const { drainSosEscalations, backfillSosEscalations, scanSosEscalations, sosEscalationWorkerKilled } = await import('../modules/safety/sos-escalation');
-        if (!sosEscalationWorkerKilled()) {
+        const escalationWorkerLive = !sosEscalationWorkerKilled();
+        if (escalationWorkerLive) {
           const back = await backfillSosEscalations(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
           if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-01] live SOS alerts had no escalation rows — policy staged now');
-          const drained = await drainSosEscalations(ctx.prisma, ctx.io, { limit: 200 }).catch(() => null);
-          if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-01] SOS escalation deliveries failed this tick');
+        }
+        // [AUD-L4-016] A failed delivery is a page, never only a log line: ANY
+        // failed row of a live, real SOS (a contact's text, the ops page, the
+        // war room, the evidence) pages on-call operations once; the row keeps
+        // retrying. An alarm, not a delivery: it runs under the worker kill too.
+        {
+          const { pageFailedSosEscalations } = await import('../modules/safety/sos-escalation');
+          const { NotificationService: FailureNS } = await import('../modules/notification/notification.service');
+          await pageFailedSosEscalations(ctx.prisma, new FailureNS(ctx.prisma, ctx.io))
+            .catch((err) => ctx.log.error({ errName: err instanceof Error ? err.name : typeof err }, '[AUD-L4-016] the failed-delivery pager could not run this tick'));
         }
         const watchdog = await scanSosEscalations(ctx.prisma).catch(() => null);
         if (watchdog && watchdog.activeWithoutPage.length > 0) {
@@ -1553,6 +1573,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           }
           await scanOpsAlerts(ctx.prisma).catch(() => null);
           await runOpsAlertDrillIfDue(ctx.prisma, opsNotifications).catch(() => null);
+        }
+        // The SOS delivery batch, after every alarm above (the failed-delivery
+        // page, the watchdog, and the ops-alert ladder that re-pages an
+        // unacknowledged page): in an SMS outage it can take minutes.
+        if (escalationWorkerLive) {
+          const drained = await drainSosEscalations(ctx.prisma, ctx.io, { limit: 200 }).catch(() => null);
+          if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-01] SOS escalation deliveries failed this tick');
         }
         // [S-16 · operations] Every legacy plaintext trip-share token is a live
         // exposure: rotate (revoke + null + tell the sharer) until none is left.
