@@ -10,6 +10,12 @@
             }
         }
     }
+    # [CERT-ISSUER] The ONLY certificate issuer: Let's Encrypt's production
+    # ACME directory. The apps pin api.swiftgy.com to Let's Encrypt's roots
+    # (ISRG Root X1/X2; GTS Root R1 as backup), and Caddy's built-in issuers
+    # can fall back to a CA outside that pin set. Every site here (staging and
+    # production) uses this one issuer. caddy-cert-issuer.test.ts holds it.
+    cert_issuer acme https://acme-v02.api.letsencrypt.org/directory
 }
 
 # API_HOST is a single staging DNS name set in deploy/.env. A hostname site

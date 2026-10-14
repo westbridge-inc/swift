@@ -117,7 +117,9 @@ beforeAll(async () => {
 
   const adminUser = await runWithoutTenant(() => app.prisma.user.create({ data: {
     phone: `+${runBase + 7_999_000}`, firstName: 'Synthetic', lastName: 'Admin', roles: ['ADMIN'], activeRole: 'ADMIN',
-    isPhoneVerified: true, selfieCapturedAt: new Date(), admin: { create: { permissions: ['*'] } },
+    isPhoneVerified: true, selfieCapturedAt: new Date(),
+    // [VERIFY-DOCS V3 · #1525] Opening and deciding a document needs the explicit reviewer grant; `*` never implies it.
+    admin: { create: { permissions: ['*', 'documents.review'] } },
   } }));
   adminId = adminUser.id;
   ids.push(adminId);
