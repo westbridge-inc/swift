@@ -4737,7 +4737,6 @@ export class BillingService {
             owner: {
               select: {
                 user: { select: { countryCode: true, id: true } },
-                _count: { select: { vendors: true } },
               },
             },
           },
@@ -4758,15 +4757,17 @@ export class BillingService {
           where: { vendorId: sub.vendor.id, isAvailable: true },
         });
         // The threshold count itself qualifies: "1000+ items" is >= 1000.
+        // THIS store's catalogue alone: no multi-store discount (owner, 13 Oct
+        // 2026), so a store that was on one moves to its full tier here, as one
+        // recorded TIER_CHANGE — never a charge, never backdated.
         const target = this.retierTarget(sub.id, tiers, {
           kind: 'VENDOR',
           isService: sub.vendor.vendorType === 'SERVICE',
           activeListings,
-          ownedStores: sub.vendor.owner._count.vendors,
         });
         if (!target || Number(sub.weeklyRate) === target.rate) continue;
 
-        const note = `${activeListings} active listings, ${sub.vendor.owner._count.vendors} owned store(s) -> ${target.tier} tier${target.franchised ? ' (franchise discount)' : ''}`;
+        const note = `${activeListings} active listings -> ${target.tier} tier`;
         if (await this.applyTierChange(sub, target, note)) changed += 1;
       } catch (error) {
         this.holdTierChange(sub.id, error);

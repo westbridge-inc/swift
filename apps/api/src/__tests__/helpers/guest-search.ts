@@ -57,7 +57,9 @@ export function matches(row: Row, where: Row = {}): boolean {
 function select(row: Row, fields?: Row): Row {
   if (!fields) return row;
   return Object.fromEntries(Object.entries(fields).map(([key, spec]) => [key,
-    spec === true ? row[key] : row[key] == null ? null : select(row[key], spec.select),
+    spec === true ? row[key] : row[key] == null ? null
+      // A to-many relation selects each of its rows, as Prisma returns it: an array.
+      : Array.isArray(row[key]) ? row[key].map((r: Row) => select(r, spec.select)) : select(row[key], spec.select),
   ]));
 }
 
@@ -88,7 +90,7 @@ export async function guestSearchApp(max = 200) {
   const items: Row[] = vendors.map((vendor) => ({
     id: `item-${vendor['id']}`, tenantId: vendor['tenantId'], vendorId: vendor['id'], vendor,
     name: `Pepper dish ${vendor['id']}`, description: 'Pepper', isAvailable: true, basePrice: 1200,
-    imageUrl: null, createdAt: new Date(0), category: { name: 'Meals' }, totalOrdered: 50,
+    imageUrl: null, createdAt: new Date(0), category: { name: 'Meals' }, optionGroups: [], totalOrdered: 50,
     sku: 'private-sku', stockQuantity: 100,
   }));
   items.push({ ...items[0], id: 'hidden-item', name: 'Pepper hidden', isAvailable: false });
@@ -119,6 +121,9 @@ export async function guestSearchApp(max = 200) {
     categoryDocumentGate: { findMany: vi.fn(async () => [{ code: 'licence', categorySlug: 'licensed', categoryKind: null, enforcement: 'BLOCK_LISTING', requiredDocType: { legacyCode: 'LICENCE', displayName: 'Licence' } }]) },
     verificationDocument: { findFirst: vi.fn(async (): Promise<{ id: string } | null> => null) },
     itemDiscoveryCategory: delegate(tags),
+    // [GUARDRAILS §8] The prohibited-items pre-filter is one raw query; no fixture
+    // here names a banned good, so it finds no candidate rows.
+    $queryRaw: vi.fn(async () => []),
   };
   const app = Fastify({ logger: false });
   registerErrorHandler(app);
