@@ -35,6 +35,7 @@ import { inventorySummary } from '../../../lib/vendorInventory';
 import { mediaUrl } from '../../../lib/images';
 import { Switch as AvailabilitySwitch } from '../../../kit/switch';
 import { catalogueMeta, safeVendorRole, numericFact } from '../shared';
+import { catalogueCheckLine } from '../../../lib/catalogueCheck';
 
 function MenuItemRow({
   item,
@@ -127,6 +128,12 @@ function MenuItemRow({
               </T>
             ) : null}
           </View>
+          {/* [GUARDRAILS §8] Why customers cannot see this item: Swift does not allow it, or is checking it. */}
+          {catalogueCheckLine(item.catalogueCheck) ? (
+            <T variant="caption" weight="semibold" style={{ marginTop: space.xs, color: item.catalogueCheck?.status === 'NOT_ALLOWED' ? color.error : color.warning }}>
+              {catalogueCheckLine(item.catalogueCheck)}
+            </T>
+          ) : null}
         </View>
       </View>
 

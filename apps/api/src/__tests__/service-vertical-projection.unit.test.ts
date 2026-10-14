@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { customerRoutes } from '../modules/user/customer.routes';
 import {
   MINUTE,
@@ -11,6 +11,14 @@ import {
   serviceBooking,
   type Row,
 } from './helpers/service-vertical-doubles';
+// [GUARDRAILS §8 · #54] The store-level ban's reads are proven against a real database (prohibited-items.test.ts);
+// this seam models none of the category tables, and no fixture store is filed under a banned category.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
+}));
+
 
 // ---------------------------------------------------------------------------
 // THE CUSTOMER PROJECTIONS OF A SERVICE BOOKING.
@@ -36,6 +44,7 @@ import {
 async function customerHost(rows: Row[]) {
   const store = orderStore(rows);
   const prisma = prismaDouble(store, {
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
     customer: { findUnique: async () => ({ id: 'cust-1', userId: 'user-customer', referralCode: 'REF1' }) },
     // [owner #46/#50, 13–14 Oct] The business's PUBLISHED number, read only
     // for a refused cancel's "contact the provider".

@@ -92,7 +92,9 @@ async function makeSubscriber(name: string) {
   }));
   const sub = await sys(() => app.prisma.subscription.create({
     data: {
-      vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 2100, billingMethod: 'CASH',
+      // [owner #62 · 14 Oct] One week ahead at most: the fee is large enough that every row this file
+      // imports for one store stays within the one coming week a partner may hold.
+      vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 20000, billingMethod: 'CASH',
       currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * DAY), nextBillingDate: new Date(Date.now() + 7 * DAY),
     },
   }));
@@ -389,9 +391,9 @@ describe('GOLD-5 · ADMIN-04 — the settlement file: staged, processed, duplica
       .toEqual([{ by: ops.userId, reason: REASON['x-swift-reason'], status: 'STAGED' }]);
     expect((await sys(() => app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: published.approvalId } }))).status).toBe('APPLIED');
     // The partner is told the money arrived — once per row.
-    // [OWNER RULING 8 Oct, NO "WALLET"] the notice says "fee paid ahead", never "top-up" or "balance".
-    expect((await sys(() => app.prisma.notification.findMany({ where: { userId: store.owner.userId, title: 'Weekly fee paid ahead' } }))).map((n) => n.body).sort())
-      .toEqual(['$1,000 GYD received as fee paid ahead. It pays your coming weekly fees.', '$2,100 GYD received as fee paid ahead. It pays your coming weekly fees.']);
+    // [OWNER RULING 8 Oct, NO "WALLET"; owner #62] the notice never says "top-up", "balance" or "paid ahead".
+    expect((await sys(() => app.prisma.notification.findMany({ where: { userId: store.owner.userId, title: 'Weekly fee received' } }))).map((n) => n.body).sort())
+      .toEqual(['$1,000 GYD received. It goes toward your next weekly fee.', '$2,100 GYD received. It goes toward your next weekly fee.']);
   });
 
   it('DUPLICATE: the same file is the same import and moves nothing; a new file repeating a credited transaction credits only its new row', async () => {
@@ -631,7 +633,7 @@ describe('GOLD-5 · ADMIN-04 — G5-F6: a publication that dies at any row, at a
         expect({ status: closed.status, credited: closed.credited, rows: (closed.results as Array<{ txnId: string; status: string }>).map((r) => [r.txnId, r.status]) })
           .toEqual({ status: 'PUBLISHED', credited: 3, rows: ids.map((id) => [id, 'accepted']) });
         // The partner is told once per payment, not once per attempt.
-        expect(await sys(() => app.prisma.notification.count({ where: { userId: store.owner.userId, title: 'Weekly fee paid ahead' } }))).toBe(3);
+        expect(await sys(() => app.prisma.notification.count({ where: { userId: store.owner.userId, title: 'Weekly fee received' } }))).toBe(3);
       });
     }
   }

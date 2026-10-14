@@ -118,7 +118,7 @@ async function makeDriver(at = SPOT): Promise<DriverActor> {
     data: {
       userId: u.userId,
       vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020, vehicleColor: 'Silver',
-      licensePlate: `RACE-${seq}`, driverLicenseUrl: 'storage://race/dl.jpg', vehicleInsuranceUrl: 'storage://race/ins.jpg',
+      licensePlate: `HRACE-${seq}`, /* [owner 11 Oct] a taxi plate is H-series */ driverLicenseUrl: 'storage://race/dl.jpg', vehicleInsuranceUrl: 'storage://race/ins.jpg',
       documentsVerified: true,
       isOnline: true, isAvailable: true, locationSessionId: u.sessionId,
       currentLat: at.lat, currentLng: at.lng, lastLocationUpdate: new Date(),

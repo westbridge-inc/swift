@@ -1,3 +1,4 @@
+import { readFeePause } from '../billing/mmg-pause';
 import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
@@ -59,6 +60,7 @@ import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { newRidePin } from '../rides/ride-pin';
+import { freezeTaxiWaiting, frozenWaitingCharge } from '../rides/taxi-waiting';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   hasTaxiPassengerCustody,
@@ -70,7 +72,7 @@ import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
-import { assertOrderableNow, assertOrderMayProceed, hiddenAmong, movesTowardCustomer, refusalAudience } from '../compliance/prohibited-gate';
+import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
 
 interface CheckoutInput {
   userId: string;
@@ -906,6 +908,7 @@ export class OrderService {
       vendor: (typeof cart.items)[number]['item']['vendor'];
       fulfillment: FulfillmentType;
       appointmentSlot?: Date;
+      homeVisit?: { inShopAvailable: boolean };
       distanceKm: number;
       /** [ALG-18] Which engine priced `distanceKm`; frozen on the order with it. */
       distanceSource: RouteSource | null;
@@ -934,9 +937,9 @@ export class OrderService {
       const vendorSub = await this.prisma.subscription.findFirst({
         where: { vendorId: vendor.id },
         orderBy: { createdAt: 'desc' },
-        select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
+        select: { id: true, status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
       });
-      const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
+      const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' }, await readFeePause(this.prisma, process.env, vendorSub?.id));
       if (!vendorOperability.operable) {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
       }
@@ -1014,6 +1017,7 @@ export class OrderService {
       const fulfillment: FulfillmentType = planFulfillment(items, input.fulfillmentSelections?.[vendorId]);
       const appointmentItems = items.filter((ci) => ci.item.fulfillment === 'APPOINTMENT');
       let appointmentSlot: Date | undefined;
+      let homeVisit: { inShopAvailable: boolean } | undefined;
 
       if (fulfillment === 'APPOINTMENT') {
         if (appointmentItems.length !== items.length || items.length !== 1) {
@@ -1098,6 +1102,17 @@ export class OrderService {
         }
         const mobileVisit = requestedMode ? requestedMode === 'MOBILE' : offered === 'MOBILE' || offered === 'BOTH';
         if (mobileVisit) {
+          homeVisit = { inShopAvailable: offered === 'BOTH' };
+          // [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] A home visit is booked only while
+          // the owner holds an approved, current police clearance. Refused before anything else
+          // about the visit (an address would not change the answer); the owner is told once a
+          // day what unlocks it. In-shop bookings never reach this branch.
+          const owner = await this.prisma.vendorOwner.findUnique({ where: { id: vendor.ownerId }, select: { userId: true } });
+          const { homeVisitRefusal, homeVisitsCleared, tellOwnerHomeVisitsPaused } = await import('../verification/home-visits');
+          if (!owner || !(await homeVisitsCleared(this.prisma, owner.userId))) {
+            if (owner) await tellOwnerHomeVisitsPaused(this.prisma, this.notifications, owner.userId, vendor.name).catch(() => false);
+            throw homeVisitRefusal(vendor.name, offered === 'BOTH');
+          }
           if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
           const travel = await this.maps.routeKm(
             { lat: vendor.latitude, lng: vendor.longitude },
@@ -1137,7 +1152,7 @@ export class OrderService {
         throw new AppError(400, 'MIN_ORDER', `Minimum order at ${vendor.name} is $${Number(vendor.minOrderAmount).toLocaleString()} GYD`);
       }
 
-      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
+      plans.push({ vendor, fulfillment, appointmentSlot, homeVisit, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
     }
 
     // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
@@ -1340,7 +1355,7 @@ export class OrderService {
       for (const planVendorId of planVendorIds) {
         const lockedVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: planVendorId },
-          select: { name: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
+          select: { name: true, ownerId: true, status: true, isCurrentlyOpen: true, acceptingOrders: true, activationValidUntil: true },
         });
         if (
           lockedVendor.status !== 'ACTIVE'
@@ -1350,12 +1365,18 @@ export class OrderService {
         ) {
           throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
         }
+        const visit = plans.find((plan) => plan.vendor.id === planVendorId)?.homeVisit;
+        if (visit) {
+          const owner = await tx.vendorOwner.findUnique({ where: { id: lockedVendor.ownerId }, select: { userId: true } });
+          const { homeVisitRefusal, homeVisitsCleared } = await import('../verification/home-visits');
+          if (!owner || !(await homeVisitsCleared(tx, owner.userId))) throw homeVisitRefusal(lockedVendor.name, visit.inShopAvailable);
+        }
         const lockedSub = await tx.subscription.findFirst({
           where: { vendorId: planVendorId },
           orderBy: { createdAt: 'desc' },
-          select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
+          select: { id: true, status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
         });
-        const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
+        const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' }, await readFeePause(tx, process.env, lockedSub?.id));
         if (!lockedOperability.operable) {
           throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
         }
@@ -1911,10 +1932,7 @@ export class OrderService {
         note: 'Order cancelled before pickup',
       });
       if (restock.applied) {
-        await db.item.updateMany({
-          where: { id: restockItemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-          data: { isAvailable: true, autoHiddenAt: null },
-        });
+        await unhideRestocked(db, restockItemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
       }
     }
   }
@@ -2090,7 +2108,9 @@ export class OrderService {
     // [GUARDRAILS §8] An order holding a line Swift no longer allows does not
     // move toward the customer from this seam either (accept, prepare, ready,
     // rider legs before pickup, the store's own handover). Cancelling is never refused.
-    if (movesTowardCustomer(source.status, input.target)) await assertOrderMayProceed(tx, source.id, refusalAudience(input.target));
+    if (heldAtSeam(source, input.target)) {
+      await assertOrderMayProceed(tx, source.id, refusalAudience(input.target), { storeMayReject: storeMayReject(source, MMG_MONEY_MOVED) });
+    }
     // [owner #50] A customer's own cancel is the cancellation policy's to
     // decide, on this locked row and before anything is written — the same
     // verdict `cancelOrder` reads (the no-mover fact from the journal under
@@ -2191,6 +2211,19 @@ export class OrderService {
     }
     if (input.terminalMetadata?.courierProofPhotoUrl !== undefined) {
       data.courierProofPhotoUrl = input.terminalMetadata.courierProofPhotoUrl;
+    }
+    // [TAXI waiting charge] A ride's waiting is frozen HERE, once: on the way to
+    // DELIVERED (and nowhere else, so a no-show, a refusal or a cancellation is
+    // never charged), on the locked row, after the stop guard above proved every
+    // wait closed. Its charge joins the order's total in this same write, so the
+    // fare earning below, the receipt and the total all read one frozen number;
+    // a rolled-back completion leaves nothing frozen and nothing added, and the
+    // freeze answers nothing a second time.
+    if (input.target === 'DELIVERED' && source.orderType === 'TAXI') {
+      const waiting = await freezeTaxiWaiting(tx, source, now);
+      if (waiting && waiting.waitingCharge > 0) {
+        data.totalAmount = new Prisma.Decimal(source.totalAmount).plus(waiting.waitingCharge);
+      }
     }
     await tx.order.update({ where: { id: input.orderId }, data });
 
@@ -2984,7 +3017,11 @@ export class OrderService {
         // Zero-commission model: the driver keeps the whole fare. A taxi
         // order's money lives in taxiFareTotal — deliveryFee is 0 for rides,
         // which silently paid drivers $0 before this read the right field.
-        amount: Number(order.taxiFareTotal ?? order.deliveryFee),
+        // [TAXI waiting charge] Plus the waiting charge frozen at completion
+        // (0 for every ride without one): the driver collected it in cash with
+        // the fare, and keeps it all.
+        amount: Number(order.taxiFareTotal ?? order.deliveryFee)
+          + (order.orderType === 'TAXI' ? await frozenWaitingCharge(db, orderId) : 0),
         status: 'AVAILABLE',
       });
 
