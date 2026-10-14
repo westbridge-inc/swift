@@ -2,12 +2,12 @@ import type { AuditFacts, OnAudit } from '../../lib/audit-writer';
 import type { Prisma, PrismaClient, ReimbursementClaim, Order } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { assertClaimAmountAttested, isDuplicateReferenceError, normaliseClaimPaymentRef } from './claim-payout';
-import { NotificationService, notifyAdmins } from '../notification/notification.service';
+import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { OrderService, assertMmgFulfilmentAllowed } from '../order/order.service';
 import { handoverVersionMatches } from '../order/handover-authority';
-import { assertDoorCashOutcome, decideDoorCash, decideDoorCashReturn, recordedDoorCashReturn, shortHandoverPage, shortPaymentNote, type DoorCashDecision, type DoorCashReturnRecord } from './door-cash';
-import { doorCashHoldAudience, stageDoorCashHoldPage } from './door-cash-hold';
+import { assertDoorCashOutcome, decideDoorCash, decideDoorCashReturn, recordedDoorCashReturn, shortPaymentNote, type DoorCashDecision, type DoorCashReturnRecord } from './door-cash';
+import { doorCashHoldAudience, stageDoorCashHoldPage, stageDoorCashShortPage } from './door-cash-hold';
 import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
@@ -352,7 +352,12 @@ export class CashRulesService {
     // [L02 · row 34] The stated cash, checked on this read first so a refusal
     // (over, or short with the goods still in hand) spends no PIN attempt;
     // decided again on the LOCKED row inside the commit, which is what counts.
-    if (input.outcome === 'paid') decideDoorCash(order, input);
+    const previewCash = input.outcome === 'paid' ? decideDoorCash(order, input) : undefined;
+    // [review S3-1] A short handover's operations page commits WITH the
+    // handover, so its audience is resolved before the transaction opens.
+    const shortAudience = previewCash?.kind === 'SHORT_HANDED_OVER'
+      ? await doorCashHoldAudience(this.prisma, order.tenantId) : undefined;
+    let shortPageIds: string[] = [];
     let doorCash: DoorCashDecision | undefined;
     if (input.outcome === 'paid') {
       // [MKT-F057] The door proof for a GOODS delivery: the customer holds a
@@ -418,6 +423,14 @@ export class CashRulesService {
               : {}),
           },
         });
+        if (doorCash.kind === 'SHORT_HANDED_OVER') {
+          // The preview was not short but the locked row is: the total moved
+          // under the screen. Nothing is recorded without its page.
+          if (!shortAudience) {
+            throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
+          }
+          shortPageIds = await stageDoorCashShortPage(tx, lockedSource, doorCash, shortAudience);
+        }
         // The seam mints a delivery's earnings itself; this call is a no-op
         // when it already did and the minting call when the capture above
         // was what the earnings were waiting for (every cash ride). Either
@@ -459,19 +472,12 @@ export class CashRulesService {
       for (const notice of earningNotices) {
         await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type).catch(() => {});
       }
-      // [L02 · row 34] A short handover pages operations, after the commit (a
-      // lost page is a lost page, never a lost record: the held mismatch is
-      // on the order either way).
+      // [L02 · row 34 · review S3-1] The short handover's operations alert and
+      // inbox rows committed with it; only the push fanout happens now. A lost
+      // push loses nothing: the alert sweep escalates until a person acknowledges.
       const settled = doorCash as DoorCashDecision | undefined;
-      if (settled?.kind === 'SHORT_HANDED_OVER') {
-        const page = shortHandoverPage(order.orderNumber, settled);
-        await notifyAdmins(this.prisma, this.notifications, {
-          tenantId: order.tenantId ?? null,
-          title: page.title,
-          body: page.body,
-          // The kind is a literal on purpose: the mobile notification census scans for it.
-          data: { kind: 'ops_cash_door_short', orderId, due: settled.due, collected: settled.collected, shortfall: settled.shortfall },
-        }).catch((err) => log().warn({ err, orderId }, 'cash door short page failed'));
+      for (const id of shortPageIds) {
+        await this.notifications.publishPersisted(id).catch((err) => log().warn({ err, orderId }, 'cash door short page fanout failed after commit'));
       }
       await this.maybePromoteToL3(order.customer.id, order.customer.countryCode).catch(() => {});
       return { order: updated, claim: null, ...(settled ? { doorCash: settled } : {}) };

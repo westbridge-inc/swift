@@ -26,6 +26,7 @@ import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { lockFeeCollectionAuthority, moverFeeSourceSummary, resolveMoverFeeAuthority, resolveMoverFeeHold, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { CashRulesService } from '../cash/cash-rules.service';
+import { resolveHeldDoorCash } from '../cash/door-cash-hold';
 import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
@@ -2973,6 +2974,31 @@ export async function adminRoutes(app: FastifyInstance) {
         // [M066] Echo the obligation exactly as it was committed.
         refundOwed: refund ? String(cancellation.order.refundOwedAmount) : null,
       },
+    };
+  });
+
+  /**
+   * [L02 · row 34 · review S2-1] POST /orders/:id/door-cash-return/resolve —
+   * operations records partial cash a rider could not hand back at the door
+   * (HELD) as resolved: handed back later, or otherwise settled, as the stated
+   * reason says. RECORD ONLY: Swift moves, refunds and deducts nothing; the
+   * amount and the rider's original report stay as they were. C4 (a reason and
+   * a second admin, the approval gate above). Until this existed nothing could
+   * ever move HELD, so the rider holding the cash could never close their account.
+   */
+  app.post('/orders/:id/door-cash-return/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const resolved = await resolveHeldDoorCash(tenantPrisma as unknown as PrismaClient, {
+      orderId: id,
+      adminUserId: request.user.userId,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+    return {
+      success: true,
+      data: { orderId: resolved.orderId, doorCashReturn: { amount: resolved.amount, status: 'RESOLVED', resolvedAt: resolved.resolvedAt } },
     };
   });
 

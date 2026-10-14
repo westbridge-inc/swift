@@ -24,7 +24,8 @@ export interface PartnerObligations {
   committedFloat: number;
   /** Cash handovers neither the rider nor the store has closed out. */
   unsettledCashCount: number;
-  /** Customer cash still held by a rider, independently of goods/float return. */
+  /** A customer's partial cash still with this rider (HELD), independently of
+   *  goods/float return, until operations records it resolved. Rider only. */
   partialCashReturnCount?: number;
   /** Historical direct-payment earnings; not a Swift payout obligation. */
   earningsOwed: number;
@@ -111,15 +112,14 @@ export async function partnerObligations(
     tx.rider.findUnique({ where: { userId }, select: { id: true, committedFloat: true } }),
     tx.driver.findUnique({ where: { userId }, select: { id: true } }),
   ]);
-  // Count the customer's money before the partner-only shortcut. Returning
-  // goods, releasing vendor float or acknowledging an alert does not return
-  // this cash. Both the customer owed it and its rider must remain reachable.
-  const partialCashReturnCount = await tx.order.count({
-    where: {
-      doorCashReturnStatus: 'HELD',
-      OR: [{ customerId: userId }, ...(rider ? [{ riderId: rider.id }] : [])],
-    },
-  });
+  // A customer's partial cash still with this rider. Returning goods,
+  // releasing vendor float or acknowledging an alert does not return it; only
+  // operations recording it resolved does (resolveHeldDoorCash). It holds the
+  // RIDER only [review S2-1]: the customer is the person owed the cash, and
+  // their deletion request is honoured (the order row keeps the held record).
+  const partialCashReturnCount = rider
+    ? await tx.order.count({ where: { doorCashReturnStatus: 'HELD', riderId: rider.id } })
+    : 0;
   const claimants = [...(rider ? [{ riderId: rider.id }] : []), ...(driver ? [{ driverId: driver.id }] : [])];
   const openClaimCount = claimants.length === 0 ? 0 : await tx.reimbursementClaim.count({
     where: { OR: claimants, paidAt: null, status: { in: ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'] } },

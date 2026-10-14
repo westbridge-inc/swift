@@ -16,7 +16,8 @@ import { handoverAuthorityFor } from '../modules/order/handover-authority';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { doorCashHoldAudience, stageDoorCashHoldPage } from '../modules/cash/door-cash-hold';
+import { doorCashHoldAudience, resolveHeldDoorCash, stageDoorCashHoldPage } from '../modules/cash/door-cash-hold';
+import { renderReceiptHtml } from '../modules/order/receipt';
 import { AccountService } from '../modules/user/account.service';
 import { partnerObligations, verdictFor } from '../modules/user/partner-wind-down';
 
@@ -417,6 +418,54 @@ describe('[row 34] short cash: NO HANDOVER is the default (owner ruling, 5 Oct)'
     expect(pages).toHaveLength(1);
     expect(pages[0]!.body).toMatch(/2,800/);
     expect(pages[0]!.body).toMatch(/3,500/);
+    // [review S3-2] The customer's receipt says what the ledger proves: the
+    // cash actually taken and what was not collected, never "paid in full".
+    const html = renderReceiptHtml({ ...(f.order as never as Record<string, unknown>), vendor: null, customer: null, items: [] } as never);
+    expect(html).toMatch(/Paid [^<]*2,800[^<]* in cash on delivery \([^<]*700 not collected\)/);
+  });
+
+  // [review S3-1] "Held for a person and paged" must survive a lost page: the
+  // operations alert and its inbox rows commit WITH the short handover, and
+  // the alert sweep escalates until a person acknowledges it.
+  it('a short handover\'s operations page is a durable alert committed with the handover, even if fanout fails', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const notifications = new NotificationService(app.prisma, app.io);
+    const fanout = vi.spyOn(notifications, 'publishPersisted').mockRejectedValue(new Error('fanout-offline'));
+    const pushes = vi.spyOn(notifications, 'send').mockRejectedValue(new Error('push-offline'));
+    const cash = new CashRulesService(app.prisma, notifications, new OrderService(app.prisma, app.io));
+    const result = await cash.handover(order.id, holder.user.id, {
+      outcome: 'paid', collectedAmount: 2800, handedOverShort: true, gps: DOOR, handoverVersion: await shownVersion(order.id),
+    });
+    expect(result.doorCash).toMatchObject({ kind: 'SHORT_HANDED_OVER', shortfall: DUE - 2800 });
+    expect(fanout).toHaveBeenCalled();
+    pushes.mockRestore();
+    const pages = await adminPages(order.id, 'ops_cash_door_short');
+    expect(pages).toHaveLength(1);
+    const data = pages[0]!.data as { opsAlertId: string; due: number; collected: number; shortfall: number };
+    expect(data).toMatchObject({ due: DUE, collected: 2800, shortfall: DUE - 2800 });
+    const alert = await app.prisma.opsAlert.findUniqueOrThrow({ where: { id: data.opsAlertId }, include: { recipients: true } });
+    expect(alert.acknowledgedAt).toBeNull();
+    expect(alert.closedAt).toBeNull();
+    expect(alert.body).toMatch(new RegExp(order.orderNumber));
+    expect(alert.recipients.some((r) => r.userId === adminUserId && r.notificationId === pages[0]!.id)).toBe(true);
+  });
+
+  it('a short handover that fails to commit leaves no operations alert behind', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const observer = { afterTerminalFacts: vi.fn().mockRejectedValueOnce(new Error('short-cut')) };
+    const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), new OrderService(app.prisma, app.io), observer);
+    const input = { outcome: 'paid' as const, collectedAmount: 2800, handedOverShort: true, gps: DOOR };
+    await expect(cash.handover(order.id, holder.user.id, input)).rejects.toThrow('short-cut');
+    expect((await facts(order.id)).order['doorCashMismatchAt']).toBeNull();
+    expect(await app.prisma.opsAlert.count({ where: { body: { contains: order.orderNumber } } })).toBe(0);
+    expect(await adminPages(order.id, 'ops_cash_door_short')).toHaveLength(0);
+    await cash.handover(order.id, holder.user.id, input);
+    expect(await app.prisma.opsAlert.count({ where: { body: { contains: order.orderNumber } } })).toBe(1);
+    expect(await adminPages(order.id, 'ops_cash_door_short')).toHaveLength(1);
   });
 });
 
@@ -633,6 +682,9 @@ describe('[row 34] partial cash is returned at the door or held for operations (
     const pages = await adminPages(order.id, 'ops_cash_return_held');
     expect(pages).toHaveLength(1);
     expect(pages[0]!.body).toMatch(/2,000/);
+    // [review S4-3] Never reads as Swift holding the cash.
+    expect(pages[0]!.body).toMatch(/still with the rider/);
+    expect(pages[0]!.body).not.toMatch(/held for operations/);
   });
 
   it('keeps an unstated old request unchanged without inventing a cash-return record', async () => {
@@ -760,7 +812,10 @@ describe('[row 34] partial cash and its operations page are one durable generati
 
 
 describe('[row 34] cash-return retries and operations scope', () => {
-  it.each(['rider', 'customer'])('keeps the %s account open while partial cash remains held after goods return', async (role) => {
+  // [review S2-1] The rider holding a customer's partial cash stays open until
+  // operations records it resolved. The CUSTOMER is the person owed the cash:
+  // their deletion request is honoured (the order keeps the held record).
+  it.each(['rider'])('keeps the %s account open while partial cash remains held after goods return', async (role) => {
     const holder = await makeRider();
     const customer = await makeCustomer();
     const order = await orderAtDoor(holder.rider.id, customer.user.id);
@@ -782,7 +837,26 @@ describe('[row 34] cash-return retries and operations scope', () => {
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).doorCashReturnStatus).toBe('HELD');
   });
 
-  it.each(['rider', 'customer'])('keeps the %s account open when goods return between deletion reads', async (role) => {
+  it('the customer owed held partial cash can still delete their account; the order keeps the held record', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    await app.prisma.order.update({ where: { id: order.id }, data: {
+      status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(),
+    } });
+    await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
+    const obligations = await app.prisma.$transaction((tx) => partnerObligations(tx, customer.user.id));
+    expect(verdictFor(obligations).blockers).not.toContain('PARTIAL_CASH_RETURN');
+    await new AccountService(app).deleteAccount(customer.user.id);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: customer.user.id } })).status).not.toBe('ACTIVE');
+    const kept = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(kept.doorCashReturnStatus).toBe('HELD');
+    expect(Number(kept.doorCashReturnAmount)).toBe(2000);
+    // The rider still holds it, so the rider is still refused.
+    expect(verdictFor(await app.prisma.$transaction((tx) => partnerObligations(tx, holder.user.id))).blockers).toContain('PARTIAL_CASH_RETURN');
+  });
+
+  it.each(['rider'])('keeps the %s account open when goods return between deletion reads', async (role) => {
     const holder = await makeRider();
     const customer = await makeCustomer();
     const order = await orderAtDoor(holder.rider.id, customer.user.id);
@@ -820,7 +894,7 @@ describe('[row 34] cash-return retries and operations scope', () => {
     expect((await app.prisma.user.findUniqueOrThrow({ where: { id: userId } })).status).toBe('ACTIVE');
   });
 
-  it('counts held partial cash only for its customer and holder, until cash is returned', async () => {
+  it('counts held partial cash only against the rider holding it, until operations records it resolved', async () => {
     const holder = await makeRider();
     const customer = await makeCustomer();
     const unrelated = await makeCustomer();
@@ -831,15 +905,52 @@ describe('[row 34] cash-return retries and operations scope', () => {
     await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
     const census = (userId: string) => app.prisma.$transaction((tx) => partnerObligations(tx, userId));
     expect(verdictFor(await census(unrelated.user.id)).clear).toBe(true);
-    // No operations acknowledgement can settle this: the cash fact itself
-    // must show RETURNED. Goods status is already RETURNED throughout.
-    for (const userId of [holder.user.id, customer.user.id]) {
-      expect(verdictFor(await census(userId)).blockers).toContain('PARTIAL_CASH_RETURN');
+    expect(verdictFor(await census(customer.user.id)).clear).toBe(true);
+    // Acknowledging an alert settles nothing: only operations' recorded
+    // resolution of the cash fact itself clears the rider.
+    expect(verdictFor(await census(holder.user.id)).blockers).toContain('PARTIAL_CASH_RETURN');
+    const audited: unknown[] = [];
+    const resolved = await resolveHeldDoorCash(app.prisma, {
+      orderId: order.id, adminUserId, reason: 'The rider handed the GY$2,000 back to the customer at the store.',
+      audit: async (_tx, facts) => { audited.push(facts); },
+    });
+    expect(resolved).toMatchObject({ orderId: order.id, amount: 2000 });
+    expect(audited).toEqual([{ disposition: 'DOOR_CASH_RESOLVED', amount: 2000, previousStatus: 'HELD' }]);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.doorCashReturnStatus).toBe('RESOLVED');
+    expect(Number(after.doorCashReturnAmount)).toBe(2000);
+    expect(after.doorCashReturnResolvedById).toBe(adminUserId);
+    expect(after.doorCashReturnResolvedAt).toBeInstanceOf(Date);
+    expect(verdictFor(await census(holder.user.id)).clear).toBe(true);
+  });
+
+  it('resolving needs held cash and a reason, records nothing else, and happens once', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const audit = vi.fn(async () => {});
+    const resolve = (reason = 'Operations confirmed the cash went back to the customer.') =>
+      resolveHeldDoorCash(app.prisma, { orderId: order.id, adminUserId, reason, audit });
+    await expect(resolve()).rejects.toMatchObject({ code: 'NO_HELD_CASH' });
+    await app.prisma.order.update({ where: { id: order.id }, data: {
+      status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'RETURNED', doorCashReturnRecordedAt: new Date(),
+    } });
+    await expect(resolve()).rejects.toMatchObject({ code: 'NO_HELD_CASH' });
+    await app.prisma.order.update({ where: { id: order.id }, data: { doorCashReturnStatus: 'HELD' } });
+    await expect(resolve('   ')).rejects.toMatchObject({ code: 'REASON_REQUIRED' });
+    // The audit row commits with the resolution or neither does.
+    await expect(resolveHeldDoorCash(app.prisma, { orderId: order.id, adminUserId, reason: 'x reason', audit: async () => { throw new Error('audit-cut'); } }))
+      .rejects.toThrow('audit-cut');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).doorCashReturnStatus).toBe('HELD');
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    await resolve();
+    await expect(resolve()).rejects.toMatchObject({ code: 'NO_HELD_CASH' });
+    expect(audit).toHaveBeenCalledOnce();
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    for (const key of ['status', 'paymentStatus', 'totalAmount', 'refundOwedAmount', 'refundPaidAmount', 'doorCashReturnAmount', 'doorCashReturnRecordedAt', 'doorCashCollectedAmount'] as const) {
+      expect(after[key]).toEqual(before[key]);
     }
-    await app.prisma.order.update({ where: { id: order.id }, data: { doorCashReturnStatus: 'RETURNED' } });
-    for (const userId of [holder.user.id, customer.user.id]) {
-      expect(verdictFor(await census(userId)).clear).toBe(true);
-    }
+    expect(await app.prisma.earning.count({ where: { orderId: order.id } })).toBe(0);
   });
 
   it.each(['failed', 'missing'])('refuses to resolve a cash page when tenant classification is %s', async (state) => {
@@ -961,6 +1072,11 @@ describe('[row 34] the database refuses contradictory cash-return evidence', () 
     { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: null },
     { doorCashReturnAmount: 2000, doorCashReturnStatus: 'UNKNOWN', doorCashReturnRecordedAt: new Date() },
     { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(), doorCashCollectedAmount: 2000 },
+    // [review S2-1] A resolution carries when and who, and only on RESOLVED.
+    { doorCashReturnAmount: 2000, doorCashReturnStatus: 'RESOLVED', doorCashReturnRecordedAt: new Date() },
+    { doorCashReturnAmount: 2000, doorCashReturnStatus: 'RESOLVED', doorCashReturnRecordedAt: new Date(), doorCashReturnResolvedAt: new Date() },
+    { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(), doorCashReturnResolvedAt: new Date(), doorCashReturnResolvedById: 'ops' },
+    { doorCashReturnResolvedAt: new Date(), doorCashReturnResolvedById: 'ops' },
   ])('rejects invalid persisted evidence: %j', async (data) => {
     const holder = await makeRider();
     const customer = await makeCustomer();

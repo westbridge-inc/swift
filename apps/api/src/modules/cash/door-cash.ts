@@ -59,6 +59,14 @@ export function decideDoorCash(
     }
     return { kind: 'UNSTATED' };
   }
+  // [review S4-1] A ride's waiting charge joins its total inside the completion
+  // transition, after this reads the total, so a stated amount would be judged
+  // against the wrong figure (route + waiting would read as over). Until rides
+  // decide on the frozen total, a ride states no amount: it completes as before.
+  if (order.orderType === 'TAXI') {
+    throw new AppError(409, 'CASH_AMOUNT_NOT_AVAILABLE',
+      'A ride records its fare outcome without a cash amount. Choose the outcome the ride offers, or contact support.');
+  }
   const due = doorCashDue(order);
   const collected = stated.collectedAmount;
   assertCashAmount(collected);
@@ -100,7 +108,8 @@ export function assertGenuinelyShort(order: { totalAmount: unknown }, collected:
 
 export interface DoorCashReturnRecord {
   amount: number;
-  status: 'RETURNED' | 'HELD';
+  /** RESOLVED = operations later recorded HELD cash as settled (a record only). */
+  status: 'RETURNED' | 'HELD' | 'RESOLVED';
   heldForReview: boolean;
 }
 
@@ -135,7 +144,7 @@ export function recordedDoorCashReturn(order: {
   doorCashReturnAmount: unknown; doorCashReturnStatus: string | null;
 }): DoorCashReturnRecord | undefined {
   const status = order.doorCashReturnStatus;
-  if (status !== 'RETURNED' && status !== 'HELD') return undefined;
+  if (status !== 'RETURNED' && status !== 'HELD' && status !== 'RESOLVED') return undefined;
   return { amount: Number(order.doorCashReturnAmount), status, heldForReview: status === 'HELD' };
 }
 

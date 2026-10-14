@@ -26,11 +26,24 @@ describe('cash-door amounts remain exact whole money at the service boundary', (
       .toEqual({ kind: 'SHORT_HANDED_OVER', due: 3500, collected: 2800, shortfall: 700 });
   });
 
-  it.each(['TAXI', 'COURIER'])('does not extend the goods shortfall ruling to %s', (orderType) => {
+  it.each(['COURIER'])('does not extend the goods shortfall ruling to %s', (orderType) => {
     const order = { totalAmount: 3500, orderType };
     expect(() => decideDoorCash(order, { collectedAmount: 2800, handedOverShort: true }))
       .toThrow(expect.objectContaining({ code: 'SHORT_PAYMENT_NOT_AVAILABLE' }));
     expect(decideDoorCash(order, {})).toEqual({ kind: 'UNSTATED' });
+  });
+
+  // [review S4-1] A ride's waiting charge joins its total only inside the
+  // completion, after this decision reads it, so a stated amount would be
+  // compared with the wrong total (a passenger who paid route + waiting would
+  // be refused as over). Until rides decide on the frozen total, a ride states
+  // no cash amount at all: short, exact or over, it is refused; none = as before.
+  it('a ride states no cash amount (its total is final only at completion)', () => {
+    const ride = { totalAmount: 3500, orderType: 'TAXI' };
+    for (const stated of [{ collectedAmount: 2800, handedOverShort: true }, { collectedAmount: 3500 }, { collectedAmount: 4000 }]) {
+      expect(() => decideDoorCash(ride, stated)).toThrow(expect.objectContaining({ code: 'CASH_AMOUNT_NOT_AVAILABLE' }));
+    }
+    expect(decideDoorCash(ride, {})).toEqual({ kind: 'UNSTATED' });
   });
 
   it('cannot attest an unknown amount as a short handover', () => {

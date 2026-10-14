@@ -2135,8 +2135,13 @@ model Order {
   /// RETURNED = rider attests handing it back; HELD = still with the rider for
   /// operations. Separate from completed-delivery cash and rider shortfalls.
   doorCashReturnAmount     Decimal? @db.Decimal(12, 2)
+  /// RETURNED | HELD | RESOLVED. RESOLVED = operations recorded that HELD
+  /// cash is settled (admin action, reason in the audit row); a record only.
   doorCashReturnStatus     String?  @db.VarChar(16)
   doorCashReturnRecordedAt DateTime?
+  /// When operations recorded HELD partial cash as resolved, and who did.
+  doorCashReturnResolvedAt   DateTime?
+  doorCashReturnResolvedById String?
 
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])

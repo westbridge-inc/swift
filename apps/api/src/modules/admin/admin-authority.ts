@@ -186,6 +186,8 @@ const E = {
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
   // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
+  // [L02 · row 34] Partial cash a rider could not hand back at the door, and its resolution.
+  orderDoorCash: { model: 'order', fields: ['status', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'doorCashReturnResolvedById'] },
   moverFee: { model: 'moverFeeAuthority', routeParam: 'userId', uniqueField: 'userId', fields: ['state', 'holdReason', 'canonicalSubscriptionId', 'feeType', 'revision', 'decisionId'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
@@ -294,6 +296,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
+  // [L02 · row 34 · review S2-1] Record-only: operations records partial cash a
+  // rider could not hand back (HELD) as resolved. It claims settlement of a
+  // customer's money (like refund-settled), so: money class, reason, two admins.
+  'POST /orders/:id/door-cash-return/resolve': c('C4', 'order.refund.settle', E.orderDoorCash),
   // [AF-MOB-006] Custody recovery after pickup. Reading a case discloses rider
   // positions and phones (C1). Owning it is workflow (C2). Directing a return
   // or relay, naming the relay rider and confirming a return decide where
