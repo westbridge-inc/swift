@@ -30,7 +30,7 @@ import { join, relative } from 'node:path';
 type Role = 'INFRA' | 'REQUEST' | 'JOB' | 'JOB_PENDING' | 'SHARED';
 const CENSUS: Record<string, { sites: number; role: Role }> = {
   'app.ts': { sites: 1, role: 'INFRA' },
-  'lib/rls-attestation.ts': { sites: 2, role: 'INFRA' },
+  'lib/rls-attestation.ts': { sites: 4, role: 'INFRA' },
   'modules/admin/admin.routes.ts': { sites: 3, role: 'REQUEST' },
   'modules/ads/checkout-scan.ts': { sites: 2, role: 'SHARED' },
   'modules/ads/refund.service.ts': { sites: 3, role: 'SHARED' },
@@ -65,8 +65,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   // isFiction (store-review demo check): reached only from authenticated requests — document
   // submission (vendor, verification routes) and an admin's approval (admin routes).
   'modules/subscription/subscription.service.ts': { sites: 1, role: 'REQUEST' },
-  // Rating-outbox comment erasure: authenticated self/admin requests and the
-  // account-erasure retry worker (runWithTenant); rawTenantBinding scopes both.
+  // Account erasure and rating-outbox comment erasure run from authenticated
+  // self/admin requests and the tenant-bound retry worker (runWithTenant);
+  // rawTenantBinding scopes both.
   'modules/user/account.service.ts': { sites: 1, role: 'SHARED' },
   'modules/user/partner-wind-down.ts': { sites: 2, role: 'SHARED' },
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },

@@ -8,8 +8,7 @@ import './boot/secret-files';
 import { buildApp } from './app';
 import { attestSystemLoginAtBoot } from './boot/system-login';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
-import { attestationOf, attestationLine, readRlsFacts, assertTenantWall } from './lib/rls-attestation';
-import { rlsAttestationGauge } from './plugins/observability';
+import { attestTenantWallAtBoot } from './boot/tenant-wall';
 import { isProduction } from './utils/runtime-mode';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
@@ -26,10 +25,8 @@ async function start() {
     // credential, and refuse to serve a second tenant without it. 76 tables
     // carry a tenant policy; under an owner/BYPASSRLS role none of them bind,
     // and until now nothing measured which of those two worlds was running.
-    const rls = attestationOf(await readRlsFacts(app.prisma));
-    rlsAttestationGauge.labels(rls.enforced ? 'enforced' : 'bypassed').set(1);
-    app.log[rls.enforced ? 'info' : 'warn']({ rls: rls.facts, bypasses: rls.bypasses }, `tenant wall: ${attestationLine(rls)}`);
-    assertTenantWall(rls, await app.prisma.tenant.count({ where: { isActive: true } }));
+    // [MASTER-075] The same attestation the standalone worker runs.
+    await attestTenantWallAtBoot(app.prisma, app.log);
 
     // [L04 · R1] Under the enforced wall, sign-in reads accounts through the
     // system login: refuse to serve without a reachable bypass-member one.
