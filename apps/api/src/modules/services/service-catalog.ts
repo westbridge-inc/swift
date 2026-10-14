@@ -225,7 +225,7 @@ export function riskGuidance(trade: string): string {
 // right after the fuel word ("gas stove", "gas point", "fuel pump", "diesel engine",
 // "gas station") is the trade's ordinary work or a place, never fuel. [DS1130, DS1132]
 // A keyword rule is a first line, not a proof: reports and moderation stay the backstop.
-const SUPPLY = String.raw`(?:sell(?:s|ing|ers?)?|sold|sales?|refill(?:s|ed|ing|ers?)?|top(?:s|ped)?[\s-]?ups?|topping[\s-]up|deliver(?:s|ed|y|ies|ing|ers?)?|suppl(?:y|ies|ied|ying|iers?)|provid(?:e|es|ed|ing|ers?)|distribut(?:e|es|ed|ing|ion|ors?)|stock(?:s|ed|ing|ists?)?|retail(?:s|ed|ing|ers?)?|wholesal(?:e|ers?|ing)|exchang(?:e|es|ed|ing)|swap(?:s|ped|ping)?|transport(?:s|ed|ing|ers?)?|carr(?:y|ies|ied|ying|iers?)|fill(?:s|ed|ing)?|dealers?|vendors?|depots?|available|order(?:s|ed|ing)?|buy(?:s|ing)?|bought)`;
+const SUPPLY = String.raw`(?:sell(?:s|ing|ers?)?|sold|sales?|refill(?:s|ed|ing|ers?)?|top(?:s|ped)?[\s-]?ups?|topping[\s-]up|deliver(?:s|ed|y|ies|ing|ers?)?|suppl(?:y|ies|ied|ying|iers?)|provid(?:e|es|ed|ing|ers?)|distribut(?:e|es|ed|ing|ion|ors?)|stock(?:s|ed|ing|ists?)?|retail(?:s|ed|ing|ers?)?|wholesal(?:e|ers?|ing)|exchang(?:e|es|ed|ing)|swap(?:s|ped|ping)?|transport(?:s|ed|ing|ers?)?|carr(?:y|ies|ied|ying|iers?)|fill(?:s|ed|ing)?|dealers?|vendors?|depots?)`;
 const GAS_PARTS = String.raw`(?:stoves?|cookers?|ovens?|ranges?|hobs?|appliances?|lines?|pipes?|piping|leaks?|regulators?|hoses?|fittings?|fitters?|burners?|heaters?|dryers?|grills?|connections?|installations?|valves?|meters?|detectors?|safety|boilers?|fireplaces?|points?|outlets?|stations?|pumps?)\b`;
 const FUEL_PARTS = String.raw`(?:efficient|lines?|pumps?|filters?|injectors?|injection|tanks?|systems?|gauges?|caps?|economy|savings?|consumption|doors?|hoses?|rails?|engines?|motors?|vehicles?|cars?|generators?|trucks?|mechanics?|lamps?|stoves?|heaters?|stations?)\b`;
 const NOT_PART = (parts: string) => String.raw`(?![\s-]*${parts})`;
@@ -233,6 +233,9 @@ const FUEL_WORDS = String.raw`(?:lpg|cooking\s+gas|gas)${NOT_PART(GAS_PARTS)}|ga
 const GAP = String.raw`\W+(?:\w+\W+){0,2}`;
 const supplyPattern = (fuel: string) => new RegExp(String.raw`\b${SUPPLY}${GAP}(?:${fuel})\b|\b(?:${fuel})${GAP}${SUPPLY}\b`, 'i');
 const FUEL_SUPPLY = supplyPattern(FUEL_WORDS);
+/** Short sale phrases with no supply verb: "LPG available", "get your LPG here", "order your gas from
+ *  us", "diesel by the gallon". Narrow on purpose — "gas repairs available" is repair work. [DS1133] */
+const FUEL_SALE = new RegExp(String.raw`\b(?:${FUEL_WORDS})\s+(?:(?:is|are)\s+)?(?:now\s+)?available\b|\b(?:order|buy|get)\s+your\s+(?:${FUEL_WORDS})\b|\b(?:order|buy|get)\s+(?:${FUEL_WORDS})\s+(?:here|from\s+us|today|now)\b|\b(?:${FUEL_WORDS})\s+here\b|\b(?:${FUEL_WORDS})\s+by\s+the\s+(?:gallon|litre|liter|pound|lb|cylinder|tank|drum|barrel|bottle)s?\b`, 'i');
 /** A gas fitter's "tank" is a gas tank — unless it is a water, septic or fish tank. */
 const GAS_FITTER_SUPPLY = supplyPattern(String.raw`${FUEL_WORDS}|(?<!\b(?:water|septic|fish)\s)tanks?`);
 const ACCOUNTANT_TITLES = /\b(?:chartered\s+accountants?|certified\s+(?:public\s+)?accountants?|cpa|acca)\b/i;
@@ -242,8 +245,10 @@ const NEVER_TITLES = /\b(?:attorney[\s-]+at[\s-]+law|barristers?|solicitors?|law
 /** Refuse profile wording Swift must never publish for a service provider. */
 export function assertProviderProfileWording(trade: ServiceTradeId, bio: string | null | undefined): void {
   if (!bio) return;
-  if ((trade === 'gas_fitter' ? GAS_FITTER_SUPPLY : FUEL_SUPPLY).test(bio)) {
-    throw new AppError(400, 'PROHIBITED_SERVICE_WORDING', 'Swift does not allow selling, refilling or delivering cooking gas (LPG) or fuel. Remove it from your profile.');
+  // A disclaimer ("we do not sell gas") is refused too: reading negations is how "we don't only sell
+  // gas, we deliver it" would slip through, and the catalogue already says it is not allowed.
+  if ((trade === 'gas_fitter' ? GAS_FITTER_SUPPLY : FUEL_SUPPLY).test(bio) || FUEL_SALE.test(bio)) {
+    throw new AppError(400, 'PROHIBITED_SERVICE_WORDING', 'Swift does not allow selling, refilling or delivering cooking gas (LPG) or fuel, so a profile does not mention it, even to say you do not. Describe the installation or repair work you do.');
   }
   if (NEVER_TITLES.test(bio) || (trade !== 'accountant' && ACCOUNTANT_TITLES.test(bio))) {
     throw new AppError(400, 'PROTECTED_TITLE', 'Your profile uses a professional title that this service on Swift does not check. Remove the title from your profile.');
@@ -254,7 +259,8 @@ const DRONE_WORDS = String.raw`(?:drones?|aerial|uavs?|quad[\s-]?copters?|fpv)`;
 /** "No drone work", "we avoid drone jobs", "doesn't fly drones", "drone-free", "drone work not offered":
  *  a provider who says they do not fly. A negation elsewhere in the sentence does not count — when
  *  unsure, Swift asks for the authorisation. [DS1132] */
-const NEGATOR = String.raw`(?:no|not|never|without|avoid(?:s|ing)?|(?:do|does|did)\s+not|(?:don|doesn|didn)['’]?t)`;
+const NOT_JUST = String.raw`(?!\s+(?:just|only)\b)`; // "not just drone work" is drone work
+const NEGATOR = String.raw`(?:no|not${NOT_JUST}|never|without|avoid(?:s|ing)?|(?:do|does|did)\s+not${NOT_JUST}|(?:don|doesn|didn)['’]?t${NOT_JUST})`;
 const NO_DRONE = new RegExp(String.raw`\b${NEGATOR}\s+(?:\w+\s+){0,2}?${DRONE_WORDS}\b|\b${DRONE_WORDS}[\s-]*free\b|\b${DRONE_WORDS}(?:\s+\w+){0,2}\s+not\s+(?:offered|available|provided|done)\b`, 'gi');
 const DRONE = new RegExp(String.raw`\b${DRONE_WORDS}\b`, 'i');
 

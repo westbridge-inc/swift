@@ -114,7 +114,9 @@ describe('[TRADES] the 13 held trades open at launch with their own checks', () 
       expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual(BASE);
     }
     // a negation elsewhere in the sentence does not hide drone work: when unsure, Swift asks
-    expect(await providerChecklist(fakeDb('photographer', stored, 'Drone photos, not just stills'), 'synthetic-user')).toEqual([...BASE, 'drone_authorisation']);
+    for (const bio of ['Drone photos, not just stills', 'Not just drone work', 'We do not just drone work', 'We don’t only do drone shots']) {
+      expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual([...BASE, 'drone_authorisation']);
+    }
     // The authorisation is offered to every photographer as a document they MAY add first.
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER_TRADE_PHOTOGRAPHER_OPTIONAL']).toEqual(['drone_authorisation']);
   });
@@ -223,6 +225,9 @@ describe('[TRADES] profile wording rules', () => {
     'Cooking gas available now',
     'Order your gas from us',
     'Buy LPG here',
+    // [DS1133 S2]
+    'Get your LPG here',
+    'Diesel by the gallon',
   ])('refuses gas or fuel supply wording: %s', (bio) => {
     expect(() => assertProviderProfileWording('gas_fitter', bio)).toThrow(expect.objectContaining({ code: 'PROHIBITED_SERVICE_WORDING' }));
     expect(() => assertProviderProfileWording('plumber', bio)).toThrow(expect.objectContaining({ code: 'PROHIBITED_SERVICE_WORDING' }));
@@ -264,8 +269,28 @@ describe('[TRADES] profile wording rules', () => {
     'Generator fuel lines checked; parts ordered',
     'Buffet orders for gas station staff',
     'Gas stoves available to order',
+    // [DS1133 S3/S4] repair availability and buying parts or equipment are not selling fuel
+    'Emergency gas repairs available',
+    'Gas repairs available 24/7',
+    'Available for emergency gas repairs',
+    'Gas repair service available',
+    'We order gas parts weekly',
+    'We buy gas tanks for recycling',
+    'We bought a gas truck',
   ])('allows ordinary trade wording that names fuel parts: %s', (bio) => {
     expect(() => assertProviderProfileWording('mechanic', bio)).not.toThrow();
+    expect(() => assertProviderProfileWording('gas_fitter', bio)).not.toThrow();
+  });
+
+  it('asks a provider not to mention gas sales at all, even to say they do not sell it', () => {
+    // A negation reader is how "we don't only sell gas, we deliver it" would slip through; the
+    // catalogue already tells gas fitters it is installation and repair only.
+    for (const bio of ['We do not sell gas', 'We are not gas dealers']) {
+      expect(() => assertProviderProfileWording('gas_fitter', bio), bio).toThrow(expect.objectContaining({
+        code: 'PROHIBITED_SERVICE_WORDING',
+        message: expect.stringMatching(/even to say you do not/),
+      }));
+    }
   });
 
   it('keeps protected titles for the people who hold them', () => {
