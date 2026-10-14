@@ -157,15 +157,16 @@ export function catalogueVendorInTenant(tenantId: string, publicMode: boolean, f
 
 /**
  * [GUARDRAILS §8 · owner #54] Stores filed under a banned platform category
- * (Pharmacy, a liquor category) are not listed anywhere a customer browses.
- * Spread beside the visibility predicate on a vendor list:
+ * (Pharmacy, a liquor category), and stores whose own words are waiting for a
+ * person ("X Liquor Store"; owner, 14 Oct), are not listed anywhere a customer
+ * browses. Spread beside the visibility predicate on a vendor list:
  *
  *     where: { ...visibleVendorForCaller(feePause), ...notProhibitedStore(await prohibitedStoreIds(db, tenantId)) }
  *
  * The ids come from compliance/prohibited-gate (`prohibitedStoreIds`), which
  * decides what "banned" means; this only applies it. `NOT`, so a caller's own
  * `id` filter is never replaced. A storefront opened directly is judged exactly
- * (`prohibitedStoreCategory`).
+ * (`storeHiddenFromCustomers`).
  */
 export function notProhibitedStore(prohibitedIds: readonly string[]): Prisma.VendorWhereInput {
   return prohibitedIds.length > 0 ? { NOT: { id: { in: [...prohibitedIds] } } } : {};
