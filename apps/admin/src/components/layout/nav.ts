@@ -48,6 +48,8 @@ export const NAV_GROUPS: NavGroup[] = [
       // [ADM-005] A pending row means a colleague asked for something and it has not happened yet.
       { label: 'Approvals', href: '/approvals', icon: Stamp, blurb: 'Money and platform actions waiting for a second admin', keywords: 'second signature two person' },
       { label: 'Moderation', href: '/moderation', icon: Flag, blurb: 'Reports about reviews, messages, people and stores', keywords: 'reports abuse' },
+      // [GUARDRAILS §8] Items a banned word is holding hidden until a person checks them (#1650).
+      { label: 'Catalogue check', href: '/catalogue-check', icon: ShieldAlert, blurb: 'Items a banned word holds hidden until a person checks them', keywords: 'banned prohibited items hidden held' },
       { label: 'Custody cases', href: '/custody', icon: LifeBuoy, blurb: 'Goods a rider is holding that must be returned or handed over', keywords: 'recovery relay return' },
       { label: 'Returns', href: '/returns', icon: PackageOpen, blurb: 'Customer returns and refunds owed', keywords: 'refund' },
       { label: 'Claims', href: '/claims', icon: ShieldAlert, blurb: 'Reimbursement claims to decide and pay', keywords: 'guarantee reimbursement' },

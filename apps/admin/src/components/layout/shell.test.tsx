@@ -31,6 +31,18 @@ describe('[MC shell] the sidebar', () => {
     }
   });
 
+  // The other direction: a screen missing from the sidebar can only be found by
+  // typing its address. A merge that rewrites the sidebar must carry every screen.
+  it('every screen is in the sidebar — a merge cannot quietly drop one', () => {
+    const listed = new Set(NAV_GROUPS.flatMap((g) => g.items.map((item) => item.href)));
+    const screens = readdirSync(join(SRC, 'app'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(join(SRC, 'app', entry.name, 'page.tsx')))
+      .map((entry) => `/${entry.name}`)
+      .filter((href) => href !== '/login');
+    expect(screens.length).toBeGreaterThan(25);
+    expect(screens.filter((href) => !listed.has(href))).toEqual([]);
+  });
+
   it('marks the current screen (a store page is under Businesses) and names the role in plain words', () => {
     render(<Sidebar role="SUPER_ADMIN" />);
     const current = screen.getByRole('link', { current: 'page' });
