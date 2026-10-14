@@ -597,30 +597,47 @@ function routeSystemTransactions<C extends object>(client: C, system: () => Pris
   return client;
 }
 
-const extendedPrisma = new PrismaClient({
-  log: isDevelopment() ? ['query', 'warn', 'error'] : ['warn', 'error'],
-  // [P1 · WS-8.3] Size the pool explicitly instead of inheriting Prisma's
-  // CPU-derived default — five connections on a 2-vCPU instance. An explicit
-  // `connection_limit` already in DATABASE_URL is left exactly as the operator
-  // set it; see utils/db-pool.ts.
-  //
-  // The role is NOT hardcoded to 'api'. With `RUN_WORKERS` unset — the default
-  // single-process topology — this same client also serves all 19 job
-  // consumers, because server.ts hands the job runtime `app.prisma`. Sized at
-  // the API budget it stayed starved for exactly the workload this fix
-  // addresses. `poolRoleForApiProcess` reads the same variable server.ts reads,
-  // so the two cannot disagree about which topology is running.
-  datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], poolRoleForApiProcess()),
-}).$extends(orderStatusLogAppendOnly).$extends({
-  name: 'tenantScope',
-  query: TENANT_QUERY_EXTENSIONS,
-}).$extends(rawTenantBindingExtension(PROCESS_WIRING))
-  // [R048-001] In test mode a deleteMany/updateMany with no predicate and any
-  // raw DDL are refused unless the suite granted itself the capability: cleanup
-  // is namespace-owned or it does not run. Outside tests the extension is not
-  // installed at all.
-  .$extends(isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' });
-const prisma = routeSystemTransactions(extendedPrisma, systemPrismaClient);
+/** [MASTER-075] THE construction of a process's database client — every
+ *  composition root (the API here, the standalone worker in worker.ts) builds
+ *  its client with this, so none of them runs a raw client: the append-only
+ *  evidence rule, the tenant scoping (its binding batches on THIS client), the
+ *  test-target guard, and the system-transaction routing are all installed,
+ *  identically. Only the pool sizing differs, through the URL the caller
+ *  resolves for its role. */
+export function createScopedProcessClient(options: { datasourceUrl: string | undefined }): PrismaClient {
+  let self: PrismaClient | undefined;
+  const wiring: ScopeWiring = { batch: () => self as unknown as BatchClient, system: () => systemPrismaClient() };
+  const scoping = Object.fromEntries(
+    TENANT_MODEL_NAMES.map((name) => [name, { $allOperations: (params: ScopeParams) => tenantScope(params, 'request', wiring) }]),
+  ) as typeof TENANT_QUERY_EXTENSIONS;
+  const extended = new PrismaClient({
+    log: isDevelopment() ? ['query', 'warn', 'error'] : ['warn', 'error'],
+    datasourceUrl: options.datasourceUrl,
+  }).$extends(orderStatusLogAppendOnly).$extends({
+    name: 'tenantScope',
+    query: scoping,
+  }).$extends(rawTenantBindingExtension(wiring))
+    // [R048-001] In test mode a deleteMany/updateMany with no predicate and any
+    // raw DDL are refused unless the suite granted itself the capability: cleanup
+    // is namespace-owned or it does not run. Outside tests the extension is not
+    // installed at all.
+    .$extends(isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' });
+  self = routeSystemTransactions(extended, systemPrismaClient) as unknown as PrismaClient;
+  return self;
+}
+
+// [P1 · WS-8.3] Size the pool explicitly instead of inheriting Prisma's
+// CPU-derived default — five connections on a 2-vCPU instance. An explicit
+// `connection_limit` already in DATABASE_URL is left exactly as the operator
+// set it; see utils/db-pool.ts.
+//
+// The role is NOT hardcoded to 'api'. With `RUN_WORKERS` unset — the default
+// single-process topology — this same client also serves all 19 job
+// consumers, because server.ts hands the job runtime `app.prisma`. Sized at
+// the API budget it stayed starved for exactly the workload this fix
+// addresses. `poolRoleForApiProcess` reads the same variable server.ts reads,
+// so the two cannot disagree about which topology is running.
+const prisma = createScopedProcessClient({ datasourceUrl: resolveDatabaseUrl(process.env['DATABASE_URL'], poolRoleForApiProcess()) });
 /** The process's one extended client — the plugin decorates it; tests reach it here. */
 export const scopedPrisma = prisma;
 

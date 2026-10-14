@@ -508,13 +508,15 @@ function TaxiBooking({ navigation }: any) {
         }
       : null;
 
-  // [TAXI multi-stop] The request body: today's exactly when there are no
-  // stops; with stops, the stops in the passenger's order and the fare of the
-  // chosen class from the quote of exactly this itinerary (the server checks it).
+  // [TAXI multi-stop · PRICE-LOCK] The request body carries the fare of the
+  // chosen class from the quote on screen, so the server books only at the
+  // fare the passenger saw (409 FARE_CHANGED refetches the quote otherwise).
+  // With stops, the stops too, in the passenger's order; a ride with stops is
+  // never sent without its fare.
   const requestPayload = (): RideRequestBody | null => {
     const base = tripPayload();
     if (!base) return null;
-    if (stops.length === 0) return base;
+    if (stops.length === 0) return selectedTier ? { ...base, expectedFare: selectedTier.fare } : base;
     if (!selectedTier) return null;
     return { ...base, stops: stopsWire, expectedFare: selectedTier.fare };
   };
