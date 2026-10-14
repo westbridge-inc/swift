@@ -256,23 +256,23 @@ async function namesAKnownPayment(tx: Tx, reversalId: string, reference: string)
 }
 
 /**
- * [security review: census poisoning] The references MMG or Swift itself
- * recorded for money Swift RECEIVED (or a return's own MMG reference) —
- * never a column a partner, a customer or a reply can write into. A reference
- * MMG's own answer names is checked against THESE only: a reference someone
- * typed elsewhere (an order's payment claim, a reply candidate) can never
- * stop a real return from being proven and booked. Typed references keep the
- * full census (KNOWN_PAYMENT_REFERENCE_COLUMNS).
+ * [security review: census poisoning] Reference columns whose value can come
+ * from a customer, a partner, an agent or an MMG reply: an order's MMG payment
+ * claim and a vendor's attestation, refunds and claim payments an admin
+ * records for a customer or partner (often on their word), an agent's id.
+ * Reply candidates are left out too. A reference MMG's own answer names is
+ * checked against every OTHER census column (written by Swift's own systems,
+ * a provider, or Swift's finance staff for money Swift received or sent):
+ * nothing someone else typed can stop a real return from being proven and
+ * booked. Typed references keep the full census.
  */
-export const MMG_RECORDED_PAYMENT_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
-  ['provider_payments', 'providerTxnId'], ['provider_payment_aliases', 'aliasKey'],
-  ['mmg_agent_payments', 'mmgTxnId'],
-  ['mmg_checkout_intents', 'mmgTransactionId'], ['mmg_checkout_intents', 'merchantTransactionId'],
-  ['fee_receipts', 'mmgRef'], ['mmg_refund_sends', 'mmgRefundRef'],
+export const PARTNER_WRITABLE_REFERENCE_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
+  ['orders', 'customerPaymentRef'], ['orders', 'mmgAttestedRef'], ['orders', 'refundRef'],
+  ['return_requests', 'refundRef'], ['reimbursement_claims', 'paymentRef'], ['mmg_agent_payments', 'agentRef'],
 ];
 
 async function mmgNamedIsAPayment(tx: Tx, reversalId: string, reference: string): Promise<boolean> {
-  // One static subquery per MMG_RECORDED_PAYMENT_COLUMNS entry (a test keeps them identical).
+  // One static subquery per census column that is not partner-writable (a test keeps them identical).
   const [hit] = await tx.$queryRaw<Array<{ n: bigint }>>`
     SELECT (
         (SELECT count(*) FROM "provider_payments" WHERE mmg_txn_canon("providerTxnId") = mmg_txn_canon(${reference}))
@@ -280,8 +280,24 @@ async function mmgNamedIsAPayment(tx: Tx, reversalId: string, reference: string)
       + (SELECT count(*) FROM "mmg_agent_payments" WHERE mmg_txn_canon("mmgTxnId") = mmg_txn_canon(${reference}))
       + (SELECT count(*) FROM "mmg_checkout_intents" WHERE mmg_txn_canon("mmgTransactionId") = mmg_txn_canon(${reference}))
       + (SELECT count(*) FROM "mmg_checkout_intents" WHERE mmg_txn_canon("merchantTransactionId") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "subscription_payments" WHERE mmg_txn_canon("externalRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "subscription_refunds" WHERE mmg_txn_canon("externalRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "billing_events" WHERE mmg_txn_canon("paymentRef") = mmg_txn_canon(${reference}))
       + (SELECT count(*) FROM "fee_receipts" WHERE mmg_txn_canon("mmgRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "topup_commands" WHERE mmg_txn_canon("reference") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "topup_commands" WHERE mmg_txn_canon("providerRef") = mmg_txn_canon(${reference}))
       + (SELECT count(*) FROM "mmg_refund_sends" WHERE mmg_txn_canon("mmgRefundRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "payout_requests" WHERE mmg_txn_canon("externalRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "settlements" WHERE mmg_txn_canon("reference") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "settlement_batches" WHERE mmg_txn_canon("bankRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "deposit_confirmations" WHERE mmg_txn_canon("bankRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "transactions" WHERE mmg_txn_canon("reference") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "transactions" WHERE mmg_txn_canon("externalRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "card_sessions" WHERE mmg_txn_canon("providerTransactionRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "card_sessions" WHERE mmg_txn_canon("providerSessionRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "ad_invoices" WHERE mmg_txn_canon("providerRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "ad_refund_intents" WHERE mmg_txn_canon("providerRefundRef") = mmg_txn_canon(${reference}))
+      + (SELECT count(*) FROM "ad_refund_intents" WHERE mmg_txn_canon("manualPayoutRef") = mmg_txn_canon(${reference}))
       + (SELECT count(*) FROM mmg_fee_reversals r WHERE r.id <> ${reversalId}
           AND (mmg_txn_canon(r."providerReference") = mmg_txn_canon(${reference})
             OR mmg_txn_canon(r."resolutionNote") = mmg_txn_canon(${reference})))
@@ -301,8 +317,8 @@ async function lockReversalReference(tx: Tx, reference: string): Promise<void> {
 export class MmgFeeReversalService {
   constructor(private readonly deps: ReversalDeps) {}
 
-  /** [DS1124 S2 · census poisoning] For lookupProof: is a reference MMG named a payment MMG or
-   *  Swift recorded (this return's own row excluded)? Never the partner-writable columns. */
+  /** [DS1124 S2 · census poisoning] For lookupProof: is a reference MMG named on record as a
+   *  payment (this return's own row excluded)? Never the partner-writable columns. */
   private knownPaymentFor(reversalId: string): (reference: string) => Promise<boolean> {
     return (reference) => this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, reversalId, reference));
   }

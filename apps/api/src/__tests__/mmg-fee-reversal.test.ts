@@ -901,8 +901,8 @@ describe('[DS1118] a typed reference is checked against EVERY money reference Sw
     expect(new Set(inSql).size).toBe(inSql.length);
   });
 
-  it('[security review] the MMG-recorded subset is written out statically, matches its list, and is part of the full census', async () => {
-    const { KNOWN_PAYMENT_REFERENCE_COLUMNS, MMG_RECORDED_PAYMENT_COLUMNS } = await import('../modules/billing/mmg-fee-reversal');
+  it('[security review] an MMG-named reference is checked against every census column except the partner-writable ones, written out statically', async () => {
+    const { KNOWN_PAYMENT_REFERENCE_COLUMNS, PARTNER_WRITABLE_REFERENCE_COLUMNS } = await import('../modules/billing/mmg-fee-reversal');
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const source = readFileSync(join(__dirname, '../modules/billing/mmg-fee-reversal.ts'), 'utf8');
@@ -910,14 +910,16 @@ describe('[DS1118] a typed reference is checked against EVERY money reference Sw
     expect(start).toBeGreaterThan(0);
     const body = source.slice(start, source.indexOf('\n}\n', start));
     const inSql = [...body.matchAll(/FROM "([a-z_0-9]+)" WHERE mmg_txn_canon\("([A-Za-z0-9]+)"\)/g)].map((m) => `${m[1]}.${m[2]}`);
-    const listed = MMG_RECORDED_PAYMENT_COLUMNS.map(([t, c]) => `${t}.${c}`);
-    expect([...inSql].sort()).toEqual([...listed].sort());
-    const full = new Set(KNOWN_PAYMENT_REFERENCE_COLUMNS.map(([t, c]) => `${t}.${c}`));
-    expect(listed.filter((k) => !full.has(k))).toEqual([]);
-    // never a column a customer, a partner or a reply writes
-    for (const writable of ['orders.customerPaymentRef', 'orders.mmgAttestedRef', 'reimbursement_claims.paymentRef', 'return_requests.refundRef', 'mmg_agent_payments.agentRef']) {
-      expect(listed).not.toContain(writable);
+    const writable = PARTNER_WRITABLE_REFERENCE_COLUMNS.map(([t, c]) => `${t}.${c}`);
+    const full = KNOWN_PAYMENT_REFERENCE_COLUMNS.map(([t, c]) => `${t}.${c}`);
+    expect(writable.filter((k) => !full.includes(k))).toEqual([]);
+    expect([...inSql].sort()).toEqual(full.filter((k) => !writable.includes(k)).sort());
+    // never a column a customer, a partner, an agent or a reply writes, nor a reply candidate
+    for (const never of ['orders.customerPaymentRef', 'orders.mmgAttestedRef', 'orders.refundRef', 'reimbursement_claims.paymentRef', 'return_requests.refundRef', 'mmg_agent_payments.agentRef']) {
+      expect(inSql).not.toContain(never);
+      expect(writable).toContain(never);
     }
+    expect(body).not.toContain('candidates');
   });
 });
 
@@ -1047,17 +1049,67 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     expect(refused[0]!.reason).toMatchObject({ code: 'NOT_A_REVERSAL' });
   });
 
-  it('[security review: census poisoning] a reversal reference someone wrote into a reply candidate cannot stop MMG\'s real return from booking', async () => {
+  it('[security review: census poisoning] MMG\'s real reversal still books when its number was written into every partner-writable column and a reply candidate', async () => {
     const p = await paidCheckout();
     const reversal = `RVPZ${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
     sandboxAddHistory({ transactionId: reversal, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
-    // Another account's open checkout carries that number as a reply candidate (anyone's reply can name one).
+    // A reply candidate on another account's open checkout.
     const other = await makeSub();
     const { checkout } = await checkoutService.createCheckout({ subscriptionId: other.subId, userId: other.userId, platform: 'ios', clientKey: `rev-${nanoid(12)}` });
     await app.prisma.mmgCheckoutIntent.update({ where: { id: checkout.ref }, data: { candidates: { push: reversal } } });
-    const row = await askWith(serviceWith(namingClient(() => reversal)), p.checkoutId, p.amount);
-    expect(row).toMatchObject({ state: 'REVERSED', lookupStatus: 'REVERSAL_COMPLETED' });
-    expect(await reversalEvents(p.subId)).toHaveLength(1);
+    // Every partner-writable column, on an existing row of each table (restored afterwards).
+    const planted: string[] = ['mmg_checkout_intents.candidates'];
+    const restore: Array<() => Promise<unknown>> = [];
+    await runWithoutTenant(async () => {
+      const order = await app.prisma.order.findFirst({ select: { id: true, customerPaymentRef: true, mmgAttestedRef: true, refundRef: true } });
+      if (order) {
+        await app.prisma.order.update({ where: { id: order.id }, data: { customerPaymentRef: reversal, mmgAttestedRef: reversal, refundRef: reversal } });
+        restore.push(() => app.prisma.order.update({ where: { id: order.id }, data: { customerPaymentRef: order.customerPaymentRef, mmgAttestedRef: order.mmgAttestedRef, refundRef: order.refundRef } }));
+        planted.push('orders.customerPaymentRef', 'orders.mmgAttestedRef', 'orders.refundRef');
+      }
+      const claim = await app.prisma.reimbursementClaim.findFirst({ select: { id: true, paymentRef: true } });
+      if (claim) {
+        await app.prisma.reimbursementClaim.update({ where: { id: claim.id }, data: { paymentRef: reversal } });
+        restore.push(() => app.prisma.reimbursementClaim.update({ where: { id: claim.id }, data: { paymentRef: claim.paymentRef } }));
+        planted.push('reimbursement_claims.paymentRef');
+      }
+      const ret = await app.prisma.returnRequest.findFirst({ select: { id: true, refundRef: true } });
+      if (ret) {
+        await app.prisma.returnRequest.update({ where: { id: ret.id }, data: { refundRef: reversal } });
+        restore.push(() => app.prisma.returnRequest.update({ where: { id: ret.id }, data: { refundRef: ret.refundRef } }));
+        planted.push('return_requests.refundRef');
+      }
+      const agent = await app.prisma.mmgAgentPayment.findFirst({ select: { id: true, agentRef: true } });
+      if (agent) {
+        await app.prisma.mmgAgentPayment.update({ where: { id: agent.id }, data: { agentRef: reversal } });
+        restore.push(() => app.prisma.mmgAgentPayment.update({ where: { id: agent.id }, data: { agentRef: agent.agentRef } }));
+        planted.push('mmg_agent_payments.agentRef');
+      }
+    }, 'test-census-poisoning');
+    try {
+      expect(planted).toContain('orders.customerPaymentRef'); // the seeded database always has orders
+      const row = await askWith(serviceWith(namingClient(() => reversal)), p.checkoutId, p.amount);
+      expect(row, `planted in: ${planted.join(', ')}`).toMatchObject({ state: 'REVERSED', lookupStatus: 'REVERSAL_COMPLETED' });
+      expect(await reversalEvents(p.subId)).toHaveLength(1);
+    } finally {
+      await runWithoutTenant(async () => { for (const undo of restore) await undo(); }, 'test-census-poisoning');
+    }
+  });
+
+  it('[security review: control regression] MMG names a reference an admin recorded (a payout\'s) — still never proof: held, nothing deducted', async () => {
+    const p = await paidCheckout();
+    const recorded = `PAYZ${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    const payout = await app.prisma.payoutRequest.create({ data: { userId: admin.userId, amount: p.amount, netAmount: p.amount, method: 'MOBILE_MONEY', destination: {}, externalRef: recorded } });
+    try {
+      sandboxAddHistory({ transactionId: recorded, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+      const before = await walletOf(p.subId);
+      const row = await askWith(serviceWith(namingClient(() => recorded)), p.checkoutId, p.amount);
+      expect(row).toMatchObject({ state: 'HELD', heldReason: 'MMG_NAMED_A_PAYMENT' });
+      expect(await walletOf(p.subId)).toBe(before);
+      expect(await reversalEvents(p.subId)).toHaveLength(0);
+    } finally {
+      await app.prisma.payoutRequest.delete({ where: { id: payout.id } });
+    }
   });
 
   it('[security review: missed alert] a closed return whose MMG read keeps failing still rotates, so it never starves the watch', async () => {
