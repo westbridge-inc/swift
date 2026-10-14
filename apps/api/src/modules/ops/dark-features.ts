@@ -115,6 +115,16 @@ export const DARK_FEATURES: DarkFeature[] = [
       'An order shows up on the vendor board the instant it is placed, so the store can accept it within seconds of checkout while the app still promises the customer a five-minute free-cancel window: the hidden grace period never exists.',
     impact: 'product',
   },
+  {
+    key: 'mover_push_required',
+    setting: 'MOVER_PUSH_REQUIRED',
+    source: 'env',
+    enabledWhen: 'true',
+    title: 'Push before going online',
+    whileOff:
+      'A rider or driver whose phone has no push registration (notifications never granted, a new or reinstalled phone, an account ops created) still goes online, and learns of an offer or a cancellation only while the app is open. This is the deliberate launch posture: build 9 cannot ask for notifications or open Settings, so requiring push is an owner decision once a build that can is live in both stores.',
+    impact: 'ops',
+  },
 ];
 
 export interface DarkFeatureStatus extends DarkFeature {
