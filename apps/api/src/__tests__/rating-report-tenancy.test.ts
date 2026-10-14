@@ -1,3 +1,4 @@
+import { publicVendorReviewId } from '../modules/rating/vendor-review-visibility';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -202,6 +203,8 @@ describe('[R048-002] filing a report is inside one tenant', () => {
     const foreign = await inject('POST', `/api/v1/customer/ratings/${b.rating.id}/report`, a.customer.token, { reason: 'SPAM' });
     expect(foreign.statusCode).toBe(404);
     expect(await count('report_refused_foreign_rating')).toBe(before + 1);
+    const foreignOpaque = await inject('POST', `/api/v1/customer/ratings/${publicVendorReviewId(b.rating.id)}/report`, a.customer.token, { reason: 'SPAM' });
+    expect(foreignOpaque.statusCode).toBe(404);
     expect(await app.prisma.ratingReport.count({ where: { ratingId: b.rating.id, reporterId: a.customer.userId } })).toBe(rowsBefore);
     const reporter = await makeUser(['CUSTOMER'], DEFAULT_TENANT);
     const own = await inject('POST', `/api/v1/customer/ratings/${a.rating.id}/report`, reporter.token, { reason: 'OFFENSIVE' });

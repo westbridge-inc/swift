@@ -7,6 +7,7 @@ import { Card, LabeledInput, LinkText, PillButton, T, useLogoutConfirm } from '.
 import { BackToSwiftButton } from '../../../components/onboarding/BackToSwiftButton';
 import { BackToSwiftScreen, useBackToSwift } from '../../../components/onboarding/backToSwift';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
+import { TAXI_TWO_LICENCES } from '../../../components/onboarding/taxiDocumentCopy';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
 import { useStepUp, type MutationGuard } from '../../../hooks/useStepUp';
@@ -98,6 +99,9 @@ function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active
  * takes the mover offline and retires the old vehicle's papers. A verified
  * mover steps up first (`guard`).
  */
+/** Car and wagon car: the taxi checklist (buses are hidden at launch). */
+const TAXI_SIGNUP_KINDS: VehicleKind[] = ['CAR', 'WAGON_CAR'];
+
 export function VehicleSetup({
   vt, setVt, onDone, mode = 'join', current = null, guard,
 }: {
@@ -175,6 +179,8 @@ export function VehicleSetup({
       </View>
       {needsDetails ? (
         <View style={{ gap: space.md, marginTop: space.md }}>
+          {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
+          {TAXI_SIGNUP_KINDS.includes(vt) ? <T variant="label" tone="muted">{TAXI_TWO_LICENCES}</T> : null}
           <LabeledInput value={make} onChangeText={setMake} placeholder="Make (e.g. Toyota)" />
           <LabeledInput value={model} onChangeText={setModel} placeholder="Model (e.g. Allion)" />
           <View style={{ flexDirection: 'row', gap: space.md }}>

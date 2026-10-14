@@ -1135,6 +1135,9 @@ SEED_APPROVER_KEYS may then pin just the one approver's key.
    Plain ASCII letters, digits and . _ % + - only. The request shows it
    masked, with its full sha256; at b, seed-approve.sh asks the approver to
    type the address he expects (hidden) and signs only if it has that digest.
+   The request file and the signed line therefore carry the masked email and
+   its digest: personal data. Keep them with the owner's private stand-up
+   evidence only, never in tickets, chat, logs or the repository.
 
 4. SEED_PLAN_SECRET is no longer used (approvals are the approvers' own
    signatures). If the production store still holds it, from 5 Oct, remove

@@ -22,3 +22,21 @@ describe('review copy', () => {
     expect(labels.timelineLabel('V_PLATE_CLASS PASS [blocking]')).toBe('Plate class check: passed — blocking');
   });
 });
+
+// [Owner rulings 11 Oct 2026 — HIRE LICENCE and H-PLATE] the review screen says what to check on a taxi's papers.
+describe('taxi reviewer hints', () => {
+  it('never asks the reviewer to find an H class on the ordinary licence; the hire right is its own licence', async () => {
+    const { reviewerHint } = await import('./review-center');
+    expect(reviewerHint('drivers_licence')).toMatch(/Do not look for an H or hire class/);
+    expect(reviewerHint('hire_car_driver_licence')).toMatch(/its own document/);
+    expect(reviewerHint('vehicle_registration')).toMatch(/H-series \(e\.g\. HC 1234\)/);
+    expect(reviewerHint('national_id')).toBeUndefined();
+  });
+
+  it('the review screen shows the hint under the document heading', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const page = readFileSync(join(process.cwd(), 'src/app/verification/page.tsx'), 'utf8');
+    expect(page).toMatch(/reviewerHint\(selected\.docType\)/);
+  });
+});
