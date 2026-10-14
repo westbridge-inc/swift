@@ -8,6 +8,8 @@ import {
   STORE_MAP_START, STORE_PIN_OUTSIDE, mapPixel, pixelPoint, pinLookup,
   storePinAddress, storePinInMarket, storePinMoved, type StorePin, type StorePoint,
 } from '@/lib/store-pin';
+import { MAP_TILES_UNAVAILABLE, mapTileSource } from '@/lib/map-tiles';
+import { MapAttribution } from './map-attribution';
 import styles from './store-location-picker.module.css';
 
 /** A fixed entrance pin: drag the street map beneath it, as on the phone.
@@ -134,12 +136,16 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
   const top = pixel.y - size.height / 2;
   const tiles = [];
   const count = 2 ** zoom;
-  // Only the visible viewport is requested; browser caching and referrers
-  // follow the OSM tile policy. No third-party script, key or offline prefetch.
-  for (let y = Math.max(0, Math.floor(top / 256)); y <= Math.min(count - 1, Math.floor((top + size.height) / 256)); y++) {
-    for (let x = Math.floor(left / 256); x <= Math.floor((left + size.width) / 256); x++) {
-      const tileX = ((x % count) + count) % count;
-      tiles.push({ key: `${zoom}/${x}/${y}`, src: `https://tile.openstreetmap.org/${zoom}/${tileX}/${y}.png`, x: x * 256 - left, y: y * 256 - top });
+  const tileSource = mapTileSource();
+  // Only the visible viewport is requested, from the one tile source
+  // (lib/map-tiles.ts); the browser caches the rest. No third-party script or
+  // offline prefetch; the only key is MapTiler's public browser key. A built
+  // site without it has no tiles, so no entrance can be confirmed on this map.
+  if (tileSource) {
+    for (let y = Math.max(0, Math.floor(top / 256)); y <= Math.min(count - 1, Math.floor((top + size.height) / 256)); y++) {
+      for (let x = Math.floor(left / 256); x <= Math.floor((left + size.width) / 256); x++) {
+        tiles.push({ key: `${zoom}/${x}/${y}`, src: tileSource.tileUrl(zoom, x, y), x: x * 256 - left, y: y * 256 - top });
+      }
     }
   }
   const inMarket = storePinInMarket(point);
@@ -193,12 +199,14 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
         onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={() => { drag.current = null; }}>
         {tiles.map((tile) => (
           // Raster tiles must retain their exact 256px geometry and browser cache.
+          // The MapTiler key is restricted to the site's origins, read from the
+          // Referer: the origin only, pinned so a stricter page policy cannot strip it.
           // eslint-disable-next-line @next/next/no-img-element
-          <img key={`${tileAttempt}/${tile.key}`} src={tile.src} width={256} height={256} alt="" draggable={false} className={styles['tile']} style={{ left: tile.x, top: tile.y }} onLoad={() => setLoadedTiles((loaded) => new Set(loaded).add(tile.src))} onError={() => setMapFailed(true)} />
+          <img key={`${tileAttempt}/${tile.key}`} src={tile.src} width={256} height={256} alt="" draggable={false} referrerPolicy="strict-origin-when-cross-origin" className={styles['tile']} style={{ left: tile.x, top: tile.y }} onLoad={() => setLoadedTiles((loaded) => new Set(loaded).add(tile.src))} onError={() => setMapFailed(true)} />
         ))}
         <MapPin className={styles['pin']} aria-hidden="true" fill="currentColor" stroke="white" />
       </div>
-      <p className={styles['attribution']}>© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a></p>
+      <MapAttribution source={tileSource} className={styles['attribution']} />
       <div className={styles['controls']}>
         <button type="button" className={styles['button']} disabled={zoom >= 19} onClick={() => { revision.current++; setZoom(zoom + 1); }}>Zoom in</button>
         <button type="button" className={styles['button']} disabled={zoom <= 6} onClick={() => { revision.current++; setZoom(zoom - 1); }}>Zoom out</button>
@@ -210,7 +218,8 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
       </div>
       <p role="status" aria-live="polite" aria-atomic="true" className={styles['srOnly']}>{announcement}</p>
       {!inMarket && <p role="alert" className={styles['error']}>{STORE_PIN_OUTSIDE}</p>}
-      {!mapReady && !mapFailed && <p className={styles['copy']}>Loading map…</p>}
+      {!tileSource && <p role="alert" className={styles['error']}>{MAP_TILES_UNAVAILABLE} Your store’s entrance can’t be confirmed on it yet.</p>}
+      {tileSource && !mapReady && !mapFailed && <p className={styles['copy']}>Loading map…</p>}
       {mapFailed && <><p role="alert" className={styles['error']}>The map couldn’t load. Retry to check your store’s entrance before confirming.</p><button type="button" className={styles['button']} onClick={() => { setMapFailed(false); setLoadedTiles(new Set()); setTileAttempt(tileAttempt + 1); }}>Retry map</button></>}
       {basis === 'market' && !storePinMoved(point) && <p className={styles['copy']}>Move the map to your store</p>}
       <button type="button" className={`${styles['button']} ${styles['confirm']}`} disabled={!confirmable} onClick={() => { if (confirmable) onConfirm({ ...point, address: line }); }}>Confirm store location</button>

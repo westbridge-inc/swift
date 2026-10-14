@@ -1,7 +1,9 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
+import { MAP_TILES_UNAVAILABLE } from '@/lib/map-tiles';
+import { TEST_MAPTILER_KEY } from '@/test/map-tiles-fixture';
 
 const fx = vi.hoisted(() => ({
   send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(),
@@ -20,6 +22,8 @@ const DEVICE = { lat: 6.79, lng: -58.12 };
 const OUTSIDE = 'That pin is outside Guyana, where Swift works today. Move it to the entrance of your store.';
 const disabled = (name: string) => (screen.getByRole('button', { name }) as HTMLButtonElement).disabled;
 const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
+
+afterEach(() => { vi.unstubAllEnvs(); });
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -222,6 +226,33 @@ describe('Q8 website store pin', () => {
     expect(disabled('Confirm store location')).toBe(true);
     loadMap();
     expect(disabled('Confirm store location')).toBe(false);
+  });
+
+  // [WEB-TILES] The store map's tiles are MapTiler's, credited in its words, and
+  // each tells MapTiler the site (its key is restricted to the site's origins).
+  it('draws MapTiler tiles that send the site as Referer, credited to MapTiler and OpenStreetMap', async () => {
+    const user = await business();
+    await picker(user);
+    const tiles = [...screen.getByRole('application').querySelectorAll('img')];
+    expect(tiles.length).toBeGreaterThan(0);
+    for (const tile of tiles) {
+      expect(tile.getAttribute('src')!.startsWith('https://api.maptiler.com/maps/streets-v2/256/')).toBe(true);
+      expect(tile.getAttribute('src')!.endsWith(`.png?key=${TEST_MAPTILER_KEY}`)).toBe(true);
+      expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
+    }
+    expect(screen.getByText((_, el) => el?.tagName === 'P' && el.textContent === '© MapTiler © OpenStreetMap contributors')).toBeTruthy();
+  });
+
+  it('a built site without the MapTiler key draws no tiles, says so, and cannot confirm a pin', async () => {
+    vi.stubEnv('NEXT_PUBLIC_MAPTILER_KEY', '');
+    const user = await business();
+    await user.click(screen.getByRole('button', { name: 'Place your store on the map' }));
+    await user.click(await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ }));
+    expect(screen.getByRole('application').querySelectorAll('img')).toHaveLength(0);
+    expect(screen.getByText(new RegExp(MAP_TILES_UNAVAILABLE))).toBeTruthy();
+    expect(screen.queryByText('Loading map…')).toBeNull();
+    expect(screen.queryByText(/OpenStreetMap contributors/)).toBeNull();
+    expect(disabled('Confirm store location')).toBe(true);
   });
 
   it('closing the picker without confirming does not save the draft', async () => {

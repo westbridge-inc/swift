@@ -210,6 +210,12 @@ is exactly the API stack above.
    ({{LEGAL_ENTITY_NAME}}, {{COMPANY_ADDRESS}}, {{COMPANY_PHONE}}), the site's
    build refuses; `WEB_ALLOW_SITE_TOKENS=1` lets the staging site build and
    show them unfilled. That is an owner decision, and never for a public site.
+   The site's maps draw MapTiler's tiles with the owner's MapTiler browser key,
+   `WEB_MAPTILER_KEY` (a build argument, NEXT_PUBLIC_MAPTILER_KEY in the image).
+   It is public by design and restricted in MapTiler to the site's own names,
+   but the owner still enters it at a hidden prompt, never in chat. Without it
+   the built site draws no map tiles (it never falls back to OpenStreetMap's
+   servers), and no pin can be placed on its maps; the build log says so.
 3. Deploy as usual: `./deploy/pilot-up.sh "$APPROVED_SHA"`. With WEB_HOST set
    it builds `swift-web:<SHA>` from apps/web/Dockerfile for the same commit
    BEFORE anything is stopped (a site that fails to build leaves the running
