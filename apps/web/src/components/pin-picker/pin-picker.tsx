@@ -21,8 +21,9 @@ import {
 //
 // What it promises its caller (`onChange`):
 //   - a pin only once the customer could see it: every visible tile loaded;
-//   - never the Georgetown centre the map opens on, nor a rough device fix,
-//     until the customer has moved the map themselves (the phone's WR-015);
+//   - never the Georgetown centre the map opens on, a rough device fix, nor a
+//     delivery zone's centre from search, until the customer has moved the
+//     map themselves (the phone's WR-015);
 //   - never a point outside Guyana, which it refuses in plain words;
 //   - the address Swift's reverse lookup gives for THAT exact point, or null,
 //     and whether that lookup has answered yet (`named`).
@@ -74,7 +75,7 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
   const [point, setPoint] = useState<PinPoint>(start ?? STORE_MAP_START);
   // The start the customer must move away from before it is a pin: the town
   // centre, or a device fix too rough to be a door. null = this is a real pin.
-  const [anchor, setAnchor] = useState<{ point: PinPoint; reason: 'centre' | 'rough' } | null>(
+  const [anchor, setAnchor] = useState<{ point: PinPoint; reason: 'centre' | 'rough' | 'area' } | null>(
     start ? null : { point: STORE_MAP_START, reason: 'centre' },
   );
   const [zoom, setZoom] = useState(start ? NEAR_ZOOM : TOWN_ZOOM);
@@ -158,12 +159,14 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
     setNotice(null);
   }
 
-  /** Put the map on a real point: a search result, a saved address or the device. */
-  function jump(next: PinPoint, name: string | null, rough = false) {
+  /** Put the map on a point: a search result, a saved address or the device.
+   *  `vague` (a rough fix, or an area such as a delivery zone) starts the map
+   *  there, but only a move by the customer makes it a pin. */
+  function jump(next: PinPoint, name: string | null, vague: 'rough' | 'area' | null = null) {
     revision.current += 1;
     chosenName.current = name ? { point: next, line: name } : null;
     setPoint(next);
-    setAnchor(rough ? { point: next, reason: 'rough' } : null);
+    setAnchor(vague ? { point: next, reason: vague } : null);
     setZoom(NEAR_ZOOM);
     setSuggestions([]);
     setNotice(null);
@@ -194,7 +197,12 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
       const detail = place.lat != null && place.lng != null ? { lat: place.lat, lng: place.lng } : await pinLookup(placeDetails(place.placeId));
       if (!mounted.current || ticket !== revision.current) return;
       if (!detail || !Number.isFinite(detail.lat) || !Number.isFinite(detail.lng)) throw new Error('No point for that place');
-      jump({ latitude: detail.lat, longitude: detail.lng }, [place.primary, place.secondary].filter(Boolean).join(', '));
+      // [review S3] A delivery zone (the local provider's `zone:` results) is
+      // an area: its point is the polygon's centre, which can be far from any
+      // door. It starts the map; the customer moves the pin onto their spot.
+      const area = place.placeId.startsWith('zone:');
+      jump({ latitude: detail.lat, longitude: detail.lng }, area ? null : [place.primary, place.secondary].filter(Boolean).join(', '), area ? 'area' : null);
+      if (area) setNotice(`${place.primary} is an area, not a door. Move the map so the pin is on your spot.`);
       map.current?.focus();
     } catch {
       if (mounted.current && ticket === revision.current) setNotice('Swift couldn’t put that place on the map. Move the map to your spot instead.');
@@ -216,7 +224,7 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
       // A fix is only as good as the device says. Past this it is a
       // neighbourhood, not a door: start there, but the customer places the pin.
       const rough = fix.accuracyM === null || fix.accuracyM > MAX_ACCURACY_M;
-      jump(next, null, rough);
+      jump(next, null, rough ? 'rough' : null);
       setNotice(rough
         ? fix.accuracyM === null
           ? 'Your device didn’t say how accurate that is. Move the map so the pin is on your spot.'
@@ -339,6 +347,10 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
             height={256}
             alt=""
             draggable={false}
+            // OpenStreetMap's tile policy needs a Referer from browsers: the
+            // site's origin only, never the page's path (pinned here so a
+            // stricter page policy cannot strip it).
+            referrerPolicy="strict-origin-when-cross-origin"
             className="pointer-events-none absolute max-w-none select-none"
             style={{ left: tile.x, top: tile.y, width: 256, height: 256 }}
             onLoad={() => setLoadedTiles((loaded) => (loaded.has(tile.src) ? loaded : new Set(loaded).add(tile.src)))}

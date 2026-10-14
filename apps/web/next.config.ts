@@ -29,7 +29,11 @@ export default function createNextConfig(phase: string): NextConfig {
   // declares the staging channel (the self-hosted staging image does).
   const releaseChannel = resolveConfiguredReleaseChannel();
   const browserApiOrigin = resolveConfiguredBrowserApiOrigin(browserApiMode, releaseChannel);
-  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel);
+  // [CARD embed] The bank's card page shown inside the weekly-fee page (an iframe of the
+  // API's own card page). OFF unless the build sets SWIFT_WEB_CARD_FRAME=1: off, the CSP and
+  // the client bundle are exactly what they were, and the card page opens in the same tab.
+  const cardFrame = process.env['SWIFT_WEB_CARD_FRAME'] === '1';
+  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel, { cardFrame });
 
   // [Q11] apps/web/Dockerfile sets SWIFT_WEB_IMAGE_BUILD=1, and nothing else
   // does: Vercel and CI get exactly the config they had. The image runs Next's
@@ -57,6 +61,7 @@ export default function createNextConfig(phase: string): NextConfig {
     // so no consumer can fall back to localhost in a release by accident.
     env: {
       NEXT_PUBLIC_API_URL: browserApiOrigin,
+      ...(cardFrame ? { NEXT_PUBLIC_CARD_FRAME: '1' } : {}),
     },
     // Store photos bypass Next's stale-on-error image cache via photo() and
     // /media. The one-year minimum below applies ONLY to avatars and vehicles.

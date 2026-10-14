@@ -1100,6 +1100,12 @@ export class CardRailService {
     const ref = input.providerReference.trim();
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(ref)) throw new AppError(400, 'PROVIDER_REFERENCE_INVALID', 'Enter the card provider\'s transaction reference you checked.');
     if (!Number.isFinite(input.amount) || input.amount <= 0) throw new AppError(400, 'AMOUNT_INVALID', 'State the amount the provider shows was taken.');
+    // [Opus S3-3] A refund never sends more than the card payment took. A
+    // session has at most ONE refund (its durable claim below), so nothing was
+    // refunded before one can be sent: the cap is the session's own amount.
+    if (input.action === 'REFUND' && Math.round(input.amount * 100) > Math.round(Number(session.amount) * 100)) {
+      throw new AppError(409, 'REFUND_ABOVE_PAYMENT', 'A refund can never be more than this card payment took.');
+    }
     if (input.action === 'BOOK') {
       // A TEST system never books a week, whoever asks.
       if (session.environment !== 'live' && !cardTestSubscriptions().has(session.subscriptionId)) {
