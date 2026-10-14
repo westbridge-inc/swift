@@ -47,6 +47,40 @@ import {
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE' | 'SERVICE_PROVIDER';
 
+/** [MC-PR2] One required document, as the admin console's activation checklist shows it. No file reference, ever. */
+export interface ActivationChecklistItem {
+  docType: string;
+  /** APPROVED only when the gate's own evidence query counts it. */
+  state: 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | 'MISSING';
+  /** The newest submission of this type (absent for evidence held on a vehicle subject, or when nothing was sent). */
+  documentId: string | null;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  /** The reviewer's note on a rejection — what the applicant was told. */
+  note: string | null;
+  /** Approved, and a newer submission of the same type is waiting for review. */
+  renewalPending: boolean;
+}
+
+export interface ActivationChecklist {
+  checklist: string[];
+  items: ActivationChecklistItem[];
+  /** The gate's own verdict (isVerifiedForList) over the same checklist. */
+  complete: boolean;
+}
+
+/** [MC-PR2] Everything that decides whether a store may be live, read-only, in the projection's own terms. */
+export interface VendorGoLive {
+  ownerUserId: string;
+  role: ChecklistRole;
+  checklist: ActivationChecklist;
+  /** DOC-INV-27: engaged once the market's BUSINESS document types are active; when engaged, an incomplete block holds
+   *  the store. `complete` is null while the gate is not engaged (the block is not compiled: it decides nothing). */
+  disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
+  /** checklist complete AND (gate disengaged OR disclosure complete) — exactly the projection's `verified`. */
+  ready: boolean;
+}
+
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
 export const IDENTITY_DOC_TYPE = 'identity_l2';
 
@@ -420,13 +454,26 @@ export class VerificationService {
       // vehicle) and links the account to it — in the same transaction, so a submission
       // without a subject cannot exist (a mover without a plate has no vehicle subject).
       const subject = await resolveSubject(tx, { userId: data.userId, countryCode: alive[0]!.countryCode, docType: data.docType, tenantId: alive[0]!.tenantId, ...(review.authority && { vehicleProfile: review.authority.profile }) });
-      const created = await tx.verificationDocument.create({ data: { ...born, status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
+      const pendingVehicleReview = subject?.kind === 'VEHICLE' && await tx.subjectLink.count({ where: { id: subject.linkId, approvedAt: null, validTo: null } }) > 0;
+      const created = await tx.verificationDocument.create({ data: { ...born, ...(pendingVehicleReview ? { reviewedBy: null, reviewedAt: null } : {}), status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
       // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
       // a submission without its extraction ledger cannot exist.
       if (review.extraction) {
         await persistExtraction(tx, { submissionId: created.id, tenantId: alive[0]!.tenantId, plan: review.extraction });
       }
-      let doc = await walkSubmission(tx, created.id, verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING', review.extraction);
+      // [L06] An automatic approval stands only when nothing a reviewer would be asked holds it:
+      // a vehicle link still awaiting fresh review (#1551) or a stored-vehicle refusal (#1553)
+      // sends the submission to a person instead.
+      let finalVerdict = verdict === 'APPROVED' && pendingVehicleReview ? 'PENDING' as const : verdict === 'APPROVED' || verdict === 'REJECTED' ? verdict : 'PENDING' as const;
+      if (finalVerdict === 'APPROVED') {
+        try { await this.assertStoredVehicleApproval(tx, created); }
+        catch (error) {
+          if (!(error instanceof AppError) || !['VEHICLE_SUBJECT_REQUIRED', 'WRONG_PLATE_CLASS', 'MOVER_PROFILE_REQUIRED', 'INSURANCE_SCOPE_INSUFFICIENT'].includes(error.code)) throw error;
+          finalVerdict = 'PENDING';
+          await tx.verificationDocument.update({ where: { id: created.id }, data: { reviewedBy: null, reviewedAt: null } });
+        }
+      }
+      let doc = await walkSubmission(tx, created.id, finalVerdict, review.extraction);
       // [High #9 · DS109] An auto-rejection closes the PENDING vehicle link this submission
       // created on another account's subject — the impostor's link never survives a rejection,
       // and a later resubmission starts a fresh pending assignment.
@@ -599,6 +646,7 @@ export class VerificationService {
         userId,
         docType,
         status: 'APPROVED',
+        state: 'COMMITTED',
         OR: [{ expiresAt: null }, { expiresAt: { gt: renewalOpensAt } }],
       },
     });
@@ -1176,18 +1224,39 @@ export class VerificationService {
       vehicleType = vehicle.vehicleKind as VehicleType;
       plate = vehicle.registrationMark;
       taxi = isPassengerVehicle(vehicleType);
+      // [L06 · #1553 review] A mover who changed to a passenger vehicle but kept the plate reuses the
+      // subject recorded under the old class (a motorbike's private plate, say). Every vehicle the account
+      // holds on that plate counts — the Rider AND the Driver profile, whatever mode the applicant is in
+      // right now (Opus 12 Oct: switching to Rider mode before review must not bring back the motorbike's
+      // exemption) — so the H rule and the hire insurance apply when any of them is a passenger vehicle.
+      // Never a refusal by class alone: a car corrected to a wagon car on the same H plate stays approvable,
+      // and holding both profiles is never itself a reason to refuse the reviewer.
+      const mark = normalizeRegistrationMark(plate ?? '');
+      const [riderOnAccount, driverOnAccount] = await Promise.all([
+        tx.rider.findUnique({ where: { userId: doc.userId }, select: { vehicleType: true, licensePlate: true } }),
+        tx.driver.findUnique({ where: { userId: doc.userId }, select: { vehicleType: true, licensePlate: true } }),
+      ]);
+      const passengerOnPlate = [driverOnAccount, riderOnAccount].find((profile) => !!profile && mark !== ''
+        && normalizeRegistrationMark(profile.licensePlate ?? '') === mark
+        && profile.vehicleType in VEHICLE_CLASSES && isPassengerVehicle(profile.vehicleType as VehicleType));
+      if (!taxi && passengerOnPlate) { vehicleType = passengerOnPlate.vehicleType as VehicleType; taxi = true; }
     } else {
       // A legacy unbound row cannot acquire today's chosen role as historical authority.
       const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });
       const driver = await tx.driver.findUnique({ where: { userId: doc.userId } });
       if (rider && driver) throw moverProfileRequired();
-      const profile = driver ?? rider;
-      vehicleType = profile?.vehicleType ?? null;
-      plate = profile?.licensePlate ?? null;
-      taxi = driver !== null;
+      if (driver) {
+        throw new AppError(400, 'VEHICLE_SUBJECT_REQUIRED',
+          'This taxi document has no registered vehicle. Ask the applicant to submit it again so its H-series registration can be reviewed.');
+      }
+      // Non-taxi legacy delivery evidence keeps its exemption. A profile plate
+      // never supplies registration authority for a taxi approval.
+      vehicleType = rider?.vehicleType ?? null;
+      plate = null;
+      taxi = false;
     }
-    if (taxi && plate && plateClassOf(plate) !== 'H') {
-      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi must carry an H registration mark. Reject the document as WRONG_PLATE_CLASS.');
+    if (taxi && plateClassOf(plate ?? '') !== 'H') {
+      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi needs an H-series registration mark on its registered vehicle. A missing or different plate cannot be approved.');
     }
     if (doc.docType === 'vehicle_insurance' && vehicleType && isPassengerVehicle(vehicleType)
       && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
@@ -1293,10 +1362,25 @@ export class VerificationService {
       }
 
       const updated = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
+      if (requestedStatus === 'APPROVED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
+        const subject = await tx.subject.findUnique({ where: { id: updated.subjectId }, select: { createdById: true } });
+        const vehicle = await tx.vehicleProfile.findUnique({ where: { subjectId: updated.subjectId }, select: { registrationMark: true } });
+        // Any vehicle the registrant holds on that plate (Rider or Driver profile), whatever mode they are
+        // in right now: holding both profiles never blocks the reviewer's approval (Opus 12 Oct, S3-1).
+        const [riderOnAccount, driverOnAccount] = await Promise.all([
+          tx.rider.findUnique({ where: { userId: updated.userId }, select: { licensePlate: true } }),
+          tx.driver.findUnique({ where: { userId: updated.userId }, select: { licensePlate: true } }),
+        ]);
+        const mark = normalizeRegistrationMark(vehicle?.registrationMark ?? '');
+        const onPlate = mark !== '' && [riderOnAccount, driverOnAccount].some((profile) => !!profile && normalizeRegistrationMark(profile.licensePlate ?? '') === mark);
+        if (subject?.createdById === updated.userId && vehicle && onPlate) {
+          await tx.subjectLink.updateMany({ where: { accountId: updated.userId, subjectId: updated.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null }, data: { approvedAt: now } });
+        }
+      }
       // [High #9 · DS109] The PENDING vehicle link lifecycle rides the doc decision: rejecting
       // the submission that created a cross-account assignment closes the link, so it can
-      // never be approved later by anything else. An approved document does NOT approve the
-      // assignment — only the explicit, audited admin action (approveVehicleAssignment) does.
+      // never be approved later by anything else. A human decision can restore the registrant
+      // after an identity edit; cross-account assignments still need the explicit admin action.
       if (requestedStatus === 'REJECTED' && updated.subjectId && BUCKET_OF[updated.docType] === 'VEHICLE') {
         // Filter on the RAW stored subjectId on purpose: `resolveSubject` keys the link it
         // creates at the same root-of-moment value it stores on the document (one transaction),
@@ -1510,11 +1594,11 @@ export class VerificationService {
    * Driver is a taxi (CAR); a Rider carries its own vehicleType. Callers that
    * gate apply a stricter MOTORCYCLE default for the null case.
    */
-  private async getMoverVehicleType(userId: string): Promise<VehicleType | null> {
+  private async getMoverVehicleType(userId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VehicleType | null> {
     const [user, rider, driver] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
-      this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
-      this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      db.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
+      db.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      db.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
     ]);
     if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
     if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
@@ -1538,10 +1622,11 @@ export class VerificationService {
     countryCode: string,
     roleKey: ChecklistRole,
     vehicleHint?: VehicleType,
+    db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
-      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
-      return this.countryConfig.getMoverChecklist(countryCode, vehicleType);
+      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId, db)) ?? 'MOTORCYCLE';
+      return this.countryConfig.getMoverChecklist(countryCode, vehicleType, db);
     }
     if (roleKey === 'SERVICE_PROVIDER') {
       // The standalone services marketplace is not a SERVICE vendor. Its gate
@@ -1549,11 +1634,11 @@ export class VerificationService {
       // extension (for example Guyana's GEI electrician licence). Reuse the
       // exact projection that controls public listability.
       const { providerChecklist } = await import('../services/services.service');
-      return providerChecklist(this.prisma, userId);
+      return providerChecklist(db, userId);
     }
     // [DOC-1 §3.6 · P3-2] A store owner on the UNREGISTERED tier reads the role's
     // unregistered requirement set; everyone else the standard one.
-    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId));
+    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, db), db);
   }
 
   /**
@@ -1577,8 +1662,8 @@ export class VerificationService {
   }
 
   /** UNREGISTERED when any store the owner holds is on that tier; otherwise undefined (standard). */
-  private async vendorTierOf(userId: string): Promise<string | undefined> {
-    const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { tier: 'UNREGISTERED' }, select: { id: true }, take: 1 } } });
+  private async vendorTierOf(userId: string, db: Prisma.TransactionClient | PrismaClient): Promise<string | undefined> {
+    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { tier: 'UNREGISTERED' }, select: { id: true }, take: 1 } } });
     return owner && owner.vendors.length > 0 ? 'UNREGISTERED' : undefined;
   }
 
@@ -1682,7 +1767,7 @@ export class VerificationService {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
 
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
     return this.isVerifiedForList(userId, checklist, db);
   }
 
@@ -1739,7 +1824,7 @@ export class VerificationService {
   ): Promise<Date | null> {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return null;
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
     return this.evidenceValidUntilForList(userId, checklist, db);
   }
 
@@ -1774,6 +1859,117 @@ export class VerificationService {
   }
 
   /**
+   * [MC-PR2] The activation checklist, item by item, for the admin console.
+   *
+   * `complete` is the gate's own predicate over the same checklist, and an item
+   * reads APPROVED only when the gate's evidence query counts it — so the panel
+   * can never show "all approved" while the gate refuses (an approval whose
+   * image was purged, or whose retention ran out, is EXPIRED here as it is
+   * there). Read-only; returns no file reference.
+   */
+  async activationChecklist(
+    userId: string,
+    roleKey: ChecklistRole,
+    options: { vehicleType?: VehicleType; db?: Prisma.TransactionClient | PrismaClient } = {},
+  ): Promise<ActivationChecklist> {
+    const db = options.db ?? this.prisma;
+    const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    if (!user) return { checklist: [], items: [], complete: false };
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType, db);
+    const evidence = await this.approvedEvidence(db, userId, checklist, new Date());
+    const approved = new Set(evidence.map((e) => e.docType));
+    const approvedUntil = new Map<string, string | null>();
+    for (const docType of checklist) {
+      const ends = evidence.filter((e) => e.docType === docType).map((e) => {
+        if (!e.expiresAt) return e.retentionExpiresAt;
+        if (!e.retentionExpiresAt) return e.expiresAt;
+        return e.expiresAt < e.retentionExpiresAt ? e.expiresAt : e.retentionExpiresAt;
+      });
+      approvedUntil.set(docType, ends.length && ends.every((end) => end != null)
+        ? new Date(Math.max(...ends.map((end) => end!.getTime()))).toISOString() : null);
+    }
+    const submissions = (await db.verificationDocument.findMany({
+      where: { userId, docType: { in: [...checklist] } },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, docType: true, status: true, state: true, expiresAt: true, reviewNote: true, createdAt: true },
+    })).filter((d) => d.state !== 'SUPERSEDED');
+    const items = checklist.map((docType): ActivationChecklistItem => {
+      const latest = submissions.find((d) => d.docType === docType) ?? null;
+      const state: ActivationChecklistItem['state'] = approved.has(docType) ? 'APPROVED'
+        : !latest ? 'MISSING'
+          : latest.status === 'PENDING' ? 'PENDING'
+            : latest.status === 'REJECTED' ? 'REJECTED'
+              : 'EXPIRED'; // EXPIRED, or APPROVED but no longer counted (lapsed, purged, retention over)
+      return {
+        docType,
+        state,
+        documentId: latest?.id ?? null,
+        submittedAt: latest ? latest.createdAt.toISOString() : null,
+        expiresAt: state === 'APPROVED' ? approvedUntil.get(docType) ?? null : latest?.expiresAt ? latest.expiresAt.toISOString() : null,
+        note: state === 'REJECTED' ? latest?.reviewNote ?? null : null,
+        renewalPending: state === 'APPROVED' && latest?.status === 'PENDING',
+      };
+    });
+    return { checklist, items, complete: await this.isVerifiedForList(userId, checklist, db) };
+  }
+
+  /**
+   * [MC-PR2] The go-live verdict for one store, read-only, in the projection's
+   * own terms (projectVendorActivation): the owner's checklist for the store's
+   * type, and — once the market's BUSINESS document types are active — a
+   * complete storefront disclosure block. Returns the block's missing element
+   * names only, never its values.
+   */
+  async vendorGoLive(vendorId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VendorGoLive | null> {
+    const vendor = await db.vendor.findUnique({
+      where: { id: vendorId },
+      select: { vendorType: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
+    });
+    if (!vendor) return null;
+    const role = vendor.vendorType as ChecklistRole;
+    const ownerUserId = vendor.owner.userId;
+    const checklist = await this.activationChecklist(ownerUserId, role, { db });
+    const engaged = await disclosureGateEngaged(db, vendor.owner.user.countryCode);
+    // The projection's own compile, with the same payer and tenant authority it names — and only
+    // when the gate is engaged, as in the projection: a disengaged gate decides nothing, so no
+    // document field is opened (each open is audited) just to show a verdict that does not apply.
+    const block = engaged
+      ? await compileActivationDisclosure(db, vendorId, { accountId: ownerUserId, tenantId: vendor.owner.user.tenantId })
+      : null;
+    return {
+      ownerUserId,
+      role,
+      checklist,
+      disclosure: { engaged, complete: block ? block.complete : null, missing: block ? block.missing : [] },
+      ready: checklist.complete && (!block || block.complete),
+    };
+  }
+
+  /**
+   * [MC-PR2] Run the single vendor activation projection now, for ONE store —
+   * the console's "activate now" for a store whose documents are complete. It
+   * applies every go-live rule the document path applies (checklist, the
+   * disclosure gate, pricing and the trial, activation expiry, tier
+   * promotion); nothing here decides activation on its own. [DS816 S3] Only
+   * the named store is projected: the button names one store, so the owner's
+   * other stores are left to the document path and the daily belt.
+   */
+  async activateStore(userId: string, vendorId: string, onActivated?: (tx: Prisma.TransactionClient) => Promise<void>): Promise<void> {
+    await this.projectionTransaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR NO KEY UPDATE`;
+      await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${vendorId} FOR UPDATE`;
+      const before = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true, owner: { select: { user: { select: { status: true } } } } } });
+      if (before.status !== 'PENDING_APPROVAL' || before.owner.user.status !== 'ACTIVE') {
+        throw new AppError(409, 'ACTIVATION_HELD', 'The store or owner changed while approving. Refresh its checklist.');
+      }
+      await this.projectVendorActivation(tx, userId, { vendorId });
+      const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true } });
+      if (after.status !== 'ACTIVE') throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
+      await onActivated?.(tx);
+    });
+  }
+
+  /**
    * [PR1270-S2-03] Price BEFORE activating. Every partner this person's
    * approval could activate — their rider or driver record, every store they
    * own — is priced through the subscription service exactly as the trial
@@ -1794,12 +1990,13 @@ export class VerificationService {
   private async projectVendorActivation(
     db: Prisma.TransactionClient | PrismaClient,
     userId: string,
+    scope: { vendorId?: string } = {},
   ): Promise<void> {
     // A root client opens the one projection transaction. A client already inside one is used as is: a Prisma
     // transaction client has no `$transaction`, and a client this service is already projecting through is
     // registered in projectionNotices — so the projection can never re-enter itself, whatever the client shape.
     if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
-      return this.projectVendorActivation(tx, userId);
+      return this.projectVendorActivation(tx, userId, scope);
     });
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
@@ -1810,7 +2007,7 @@ export class VerificationService {
           // design, so document authority neither lights nor darkens them —
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
-          where: { tenant: { kind: { not: 'REVIEW' } } },
+          where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
           select: { id: true, vendorType: true, isVerified: true, status: true },
         },
       },
