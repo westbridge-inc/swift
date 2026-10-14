@@ -343,6 +343,9 @@ const AGE_STATEMENT = /^(year|years|yr|yrs|yo|anos|ano|\d+(yr|yrs|yo|y))$/;
  *  also names other things. [DS1111] */
 const LIQUID_MEASURE = /^(\d+(ml|cl|dl|l|lt|ltr|ltrs|oz|floz)|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|bottle|bottles|btl|nip|nips|pint|pints|magnum|flask|flasks)$/;
 const TOBACCO_MEASURE = /^(\d+s|\d+(pk|pack)|pk|pack|packs|carton|cartons|pouch|pouches)$/;
+/** A medicine's own measure: its pills and its dose ("Bayer 30 tabs", "Bayer 325mg", "Bayer 81 mg"). Not "caps" (hats)
+ *  nor a spray or a cream (Bayer also makes crop sprays). [regression guard] */
+const PILL_MEASURE = /^(\d*(tab|tabs|tablet|tablets|capsule|capsules|caplet|caplets|mg|mcg|iu))$/;
 /** The form a medicine is sold in, after its name ("Insulin 100 units", "Antibiotic cream 30g", "Insulin pen"). [DS1110 S3-1] */
 const MEDICINE_FORMS: ReadonlySet<string> = new Set([
   'cream', 'creams', 'ointment', 'ointments', 'gel', 'gels', 'drops', 'spray', 'sprays', 'syrup', 'syrups', 'tablet', 'tablets',
@@ -664,7 +667,19 @@ function brandPack(words: readonly string[]): { prohibitedClass: ProhibitedClass
   const spiritAge = brand.prohibitedClass === 'ALCOHOL' && aged;
   const ofItsKind = kind === 'any' ? measured || spiritAge : kind === 'liquid' ? liquid || spiritAge : kind === 'tobacco' ? tobacco : false;
   if (brand.certain || (core.length === 0 && ofItsKind)) return { prohibitedClass: brand.prohibitedClass, term: words[0]! };
+  // A medicine brand counted or dosed ("Bayer 30 tabs", "Bayer 325mg") is the medicine. Halls ('none') never is (#58).
+  if (brand.prohibitedClass === 'MEDICINE' && kind === 'any' && pillsOnly(words.slice(1))) return { prohibitedClass: 'MEDICINE', term: words[0]! };
   return null;
+}
+
+/** Only pill, dose, size and style words, and at least one pill or dose word. */
+function pillsOnly(rest: readonly string[]): boolean {
+  let dosed = false;
+  for (const w of rest) {
+    if (PILL_MEASURE.test(w)) dosed = true;
+    else if (!(TRAILING_SIZE.test(w) || TRAILING_STYLE.has(w) || DRINK_MEASURE.test(w))) return false;
+  }
+  return dosed;
 }
 
 /**

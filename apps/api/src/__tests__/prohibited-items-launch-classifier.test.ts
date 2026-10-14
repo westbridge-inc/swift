@@ -329,11 +329,16 @@ describe('[§8 launch · regression guard] sold-as-such stays refused, in a name
     'Weed 3.5g', 'Weed 1oz', 'Weed 3.5 grams', 'Weed ounce', 'Weed quarter', 'Ganja 1g', 'Kush 7g', 'Weed 2 joints', 'Weed pre-roll',
     'Pre-rolls 5 pack', 'Bounty 12 year old', 'Mead 10 years', 'Ron 7 años', 'Mead 3 pack', 'Ricard 6 pack', 'Ron 6 pack',
     'Camel 330ml', 'Newport 1L', 'Kool 12oz', 'Bayer 100ml', 'Velo 1L', 'Banks 330ml', 'Stag 6 pack', 'Corona 330ml', 'Bristol 20 pack',
+    // a medicine brand's count and dose are its measure
+    'Bayer 30 tabs', 'Bayer 100 tablets', 'Bayer 325mg', 'Bayer 81 mg', 'Bayer 20 caplets',
   ];
   it.each(MUST_REFUSE)('%s is refused as a name', (name) => {
     expect(verdict(name)).toMatchObject({ state: 'BANNED' });
   });
   it.each(MUST_REFUSE)('%s is refused as an option', (name) => {
     expect(verdict('Party combo', { optionNames: ['Add', name] })).toMatchObject({ state: 'BANNED', field: 'option' });
+  });
+  it.each(['Bayer Leverkusen jersey', 'Bayer caps', 'Bayer pool chlorine 20 tablets', 'Bayer crop spray 1L', 'Halls 20 tabs' /* #58 */])('%s is not refused', (name) => {
+    expect(verdict(name).state, name).not.toBe('BANNED');
   });
 });
