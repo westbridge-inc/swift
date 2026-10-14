@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -127,6 +127,36 @@ describe('a copy under a second review is never replaced', () => {
     expect(confirmed.legalHoldId).not.toBeNull();
     expect(await system(() => app.prisma.fraudCase.findFirst({ where: { subjectUserId: applicant.userId, submissionId: first.id } })))
       .toMatchObject({ confirmedBy: secondReviewerId, legalHoldId: confirmed.legalHoldId });
+  });
+});
+
+describe('the review-SLA watchdog never takes a copy out of its second review', () => {
+  // [DS1055 · DOC-1 §24.2] The watchdog reads the overdue cases, then moves the STANDARD ones to ESCALATED.
+  // A reviewer's escalation committing between that read and that write must not be clobbered back to
+  // ESCALATED: the copy would lose its second review (a new upload could replace it, and reviewer B's
+  // confirmation would no longer find a SECOND_REVIEW case).
+  it('an escalation that lands while the watchdog runs keeps its SECOND_REVIEW queue, and still blocks a replacement', async () => {
+    const m = await mover();
+    const first = await upload(m.userId);
+    await system(() => app.prisma.reviewCase.updateMany({ where: { submissionId: first.id, closedAt: null }, data: { slaDueAt: new Date(Date.now() - 3_600_000) } }));
+    const realFindMany = app.prisma.reviewCase.findMany.bind(app.prisma.reviewCase);
+    let escalated = false;
+    const spy = vi.spyOn(app.prisma.reviewCase, 'findMany').mockImplementation((async (args: { where?: { slaDueAt?: unknown } }) => {
+      const rows = await realFindMany(args as never);
+      if (!escalated && args?.where?.slaDueAt) {
+        // The watchdog has read this case as STANDARD; reviewer A escalates it before the watchdog writes.
+        escalated = true;
+        await service.rejectDocument(first.id, reviewerId, 'The photo looks edited', 'SUSPECTED_TAMPERING');
+      }
+      return rows;
+    }) as never);
+    try {
+      await system(() => service.alertReviewSlaBreaches());
+    } finally { spy.mockRestore(); }
+    expect(escalated).toBe(true);
+    expect((await openCasesFull(first.id)).map((c) => c.queue)).toEqual(['SECOND_REVIEW']);
+    await expect(upload(m.userId)).rejects.toMatchObject({ code: 'DOCUMENT_STILL_IN_REVIEW' });
+    expect(await read(first.id)).toMatchObject({ state: 'REVIEW_QUEUED', status: 'PENDING' });
   });
 });
 

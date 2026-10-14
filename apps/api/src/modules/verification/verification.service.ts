@@ -1403,8 +1403,10 @@ export class VerificationService {
       where: { id: { in: breachedCases.map((c) => c.id) } },
       data: { priority: 10 },
     });
+    // [DS1055 · DOC-1 §24.2] Compare-and-set: only a case that is STILL in STANDARD at the write goes to ESCALATED.
+    // A reviewer's escalation that committed after the read above has moved it to SECOND_REVIEW, and must keep it.
     await this.prisma.reviewCase.updateMany({
-      where: { id: { in: breachedCases.filter((c) => c.queue === 'STANDARD').map((c) => c.id) } },
+      where: { id: { in: breachedCases.filter((c) => c.queue === 'STANDARD').map((c) => c.id) }, queue: 'STANDARD' },
       data: { queue: 'ESCALATED' },
     });
     const oldest = breachedCases.reduce((a, c) => (c.createdAt < a ? c.createdAt : a), breachedCases[0]!.createdAt);
