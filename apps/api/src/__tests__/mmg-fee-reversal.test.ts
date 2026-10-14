@@ -1072,6 +1072,35 @@ describe('[Opus delta S3-N1] MMG no longer finds a payment it returned: a person
     expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(false);
   });
 
+  it('[DS1341 S3] a "money already used" hold whose payment MMG later stops finding closes on the not-found basis, never "try again" forever', async () => {
+    const p = await paidCheckout();
+    const reversal = `RVWS${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    let missing = false;
+    const client: MmgReversalClient = {
+      reverseTransaction: async (req) => { reversalCalls.push(req.transactionId); return { status: 'pending', transactionId: reversal }; },
+      transactionLookupDetail: async (id) => (missing && id === p.txn ? { outcome: 'not_found' as const } : mmg.transactionLookupDetail(id)),
+    };
+    const service = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => client });
+    const sent = await runWithTenant('swift-default', () => service.requestReversal({ tenantId: 'swift-default', checkoutId: p.checkoutId, amountGyd: p.amount, reason: REASON, actorId: admin.userId, approvalId: null }, async () => {}));
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxAddHistory({ transactionId: reversal, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    const short = await runWithTenant('swift-default', () => service.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    expect(short).toMatchObject({ state: 'HELD', heldReason: 'WALLET_NO_LONGER_HOLDS_IT' });
+    missing = true; // MMG's records stop finding the payment
+    const closed = await resolveAs(short.id, 'RETURNED_NOT_BOOKED', reversal, service);
+    expect(closed).toMatchObject({ state: 'FAILED', resolution: 'RETURNED_NOT_BOOKED', lookupStatus: 'PAYMENT_NOT_FOUND' });
+    expect(await reversalEvents(p.subId)).toHaveLength(0);
+  });
+
+  it('[DS1341 S4] the not-found close is refused when a read made since saw MMG find the payment standing again', async () => {
+    const { p, reversal, service, held } = await heldMissing('not_found');
+    await app.prisma.mmgFeeReversal.update({ where: { id: held.id }, data: { lookupStatus: 'STANDING' } });
+    await expect(resolveAs(held.id, 'RETURNED_NOT_BOOKED', reversal, service)).rejects.toMatchObject({ code: 'NOT_HELD' });
+    expect(await reversalRow(held.id)).toMatchObject({ state: 'HELD', resolution: null });
+    expect(await app.prisma.ledgerEntry.count({ where: { transaction: { idempotencyKey: `ledger:mmg-reversal-not-booked:${held.id}` } } })).toBe(0);
+    expect(p.subId).toBeTruthy();
+  });
+
   it('an error or a timeout is never "not found": the close is refused as "MMG unavailable" and the return stays held', async () => {
     const { reversal, service, held } = await heldMissing('error');
     expect(held.lookupStatus).toBe('UNREADABLE');

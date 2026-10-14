@@ -606,13 +606,20 @@ export class MmgFeeReversalService {
       //      reference MMG's lookup finds completed for this exact amount (the reason and the audit
       //      row are the C4 approval's). An error or a timeout is never this basis: it stays closed.
       const walletShort = (row.heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT');
-      let how: string;
-      let proofRef: string;
-      let mmgNamedProof: boolean;
-      let proving: boolean;
-      if (walletShort) {
-        const proof = await proofOf({ ...row, providerReference: row.providerReference ?? reference });
-        if (!proof.proven) throw proof.unreadable ? unavailable() : new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
+      let how = '';
+      let proofRef = reference;
+      let mmgNamedProof = false;
+      let proving = false;
+      // [DS1341 S3] A "money already used" hold whose payment MMG later stops finding takes the
+      // not-found basis too, never a permanent "try again".
+      let notFoundBasis = !walletShort;
+      const walletProof = walletShort ? await proofOf({ ...row, providerReference: row.providerReference ?? reference }) : null;
+      if (walletProof && !walletProof.proven) {
+        if (walletProof.paymentNotFound) notFoundBasis = true;
+        else throw walletProof.unreadable ? unavailable() : new AppError(409, 'NO_PROOF', RESOLVE_COPY.NO_PROOF);
+      }
+      if (walletProof?.proven) {
+        const proof = walletProof;
         // [review S2-2] Proven through the reversal MMG named: that reference is checked too.
         if (proof.how === 'REVERSAL_COMPLETED' && row.providerReference
           && await this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, row.id, row.providerReference!))) {
@@ -622,7 +629,7 @@ export class MmgFeeReversalService {
         proofRef = row.providerReference ?? reference;
         mmgNamedProof = proof.how === 'REVERSAL_COMPLETED' && row.providerReference !== null;
         proving = proof.how === 'REVERSAL_COMPLETED';
-      } else {
+      } else if (notFoundBasis) {
         const census = typed ? knownPayment : (ref: string) => this.deps.prisma.$transaction((tx) => mmgNamedIsAPayment(tx, row.id, ref));
         let verdict: Awaited<ReturnType<typeof returnedWhilePaymentNotFound>>;
         try {
@@ -658,14 +665,18 @@ export class MmgFeeReversalService {
               : await namesAKnownPayment(tx, row.id, ref);
           if (known) throw new AppError(409, 'NOT_A_REVERSAL', RESOLVE_COPY.NOT_A_REVERSAL);
         }
-        if (walletShort) {
+        if (walletShort && !notFoundBasis) {
           const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: row.subscriptionId }, select: { balance: true, currencyCode: true } });
           if (wallet && wallet.currencyCode === row.currencyCode && amountMinorOf(wallet.balance) >= amountMinorOf(row.amount)) {
             throw new AppError(409, 'RETURN_NOW_BOOKABLE', RESOLVE_COPY.RETURN_NOW_BOOKABLE);
           }
         }
         const moved = await tx.mmgFeeReversal.updateMany({
-          where: { id: row.id, state: 'HELD', resolution: null, ...(walletShort ? { heldReason: { startsWith: 'WALLET_NO_LONGER_HOLDS_IT' } } : {}) },
+          where: {
+            id: row.id, state: 'HELD', resolution: null, ...(walletShort ? { heldReason: { startsWith: 'WALLET_NO_LONGER_HOLDS_IT' } } : {}),
+            // [DS1341 S4] Not while a read made since has seen MMG find the payment standing again.
+            ...(notFoundBasis ? { OR: [{ lookupStatus: null }, { lookupStatus: { not: 'STANDING' } }] } : {}),
+          },
           data: { state: 'FAILED', failedAt: now, lastCheckedAt: now, lookupStatus: how, resolution: 'RETURNED_NOT_BOOKED', resolvedBy: input.actorId, resolutionNote: reference },
         });
         if (moved.count !== 1) throw new AppError(409, 'NOT_HELD', RESOLVE_COPY.NOT_HELD);
@@ -675,7 +686,7 @@ export class MmgFeeReversalService {
           description: `MMG returned payment ${row.mmgTransactionId} after it had paid for a week: that week's fee is owed again`,
           entries: returnedNotBookedPostings(row.subscriptionId, Number(row.amount)),
         });
-        await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'RETURNED_NOT_BOOKED', mmgReference: reference, basis: walletShort ? 'MONEY_ALREADY_USED' : 'PAYMENT_NOT_FOUND' });
+        await onAudit(tx, { reversalId: row.id, checkoutId: row.checkoutId, resolution: 'RETURNED_NOT_BOOKED', mmgReference: reference, basis: notFoundBasis ? 'PAYMENT_NOT_FOUND' : 'MONEY_ALREADY_USED' });
         return tx.mmgFeeReversal.findUniqueOrThrow({ where: { id: row.id } });
       });
       mmgFeeReversalsCounter.labels('resolved_returned_not_booked').inc();
