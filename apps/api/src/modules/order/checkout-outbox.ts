@@ -44,8 +44,16 @@ export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
  *  published row is consumed the moment its queue accepts the job, so a kind
  *  whose delivery must be CONFIRMED before the row may close (a direct-MMG
  *  claim notice stays owed until its recipients hold inbox rows) is drained in
- *  process by the same sweep instead — see `drainMmgClaimNotices`. */
-export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'handover-completed-notice'];
+ *  process by the same sweep instead — see `drainMmgClaimNotices`.
+ *  [RESCUE S1] `rescue-notice`: the food-age cutoff's notices, drained by
+ *  `drainRescueNotices` (dispatch/rescue.ts) on the same terms.
+ *  [L07] `rider-cancel-notice`: a customer's cancellation told to the rider
+ *  who held the delivery, drained by `drainRiderCancellationNotices`
+ *  (order/rider-cancel-notice.ts) until push confirms it.
+ *  [L07] `handover-completed-notice`: the customer's handover notice that
+ *  commits with the completion, drained by `drainHandoverNotices`
+ *  (handover/handover-notice.ts). */
+export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'rescue-notice', 'rider-cancel-notice', 'handover-completed-notice'];
 
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */

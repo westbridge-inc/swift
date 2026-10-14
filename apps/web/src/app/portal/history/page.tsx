@@ -23,9 +23,9 @@ function Pager({ page, setPage, meta }: { page: number; setPage: (_p: number) =>
   if (totalPages <= 1) return null;
   return (
     <div className="mt-3 flex items-center gap-3 text-sm">
-      <button onClick={() => setPage(page - 1)} disabled={page <= 1} className="rounded-lg border border-black/10 bg-white px-3 py-1.5 disabled:opacity-40">← Prev</button>
+      <button onClick={() => setPage(page - 1)} disabled={page <= 1} className="rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-1.5 disabled:opacity-40">← Prev</button>
       <span className="text-[var(--swift-muted)]">Page {page} of {totalPages}</span>
-      <button onClick={() => setPage(page + 1)} disabled={page >= totalPages} className="rounded-lg border border-black/10 bg-white px-3 py-1.5 disabled:opacity-40">Next →</button>
+      <button onClick={() => setPage(page + 1)} disabled={page >= totalPages} className="rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-1.5 disabled:opacity-40">Next →</button>
     </div>
   );
 }
@@ -37,11 +37,11 @@ function DeliveriesTable() {
   return (
     <>
     <div className="space-y-3 sm:hidden">
-      {q.isLoading && <p className="rounded-2xl bg-white p-4 text-sm text-[var(--swift-muted)]">Loading…</p>}
+      {q.isLoading && <p className="rounded-2xl bg-[var(--swift-card)] p-4 text-sm text-[var(--swift-muted)]">Loading…</p>}
       {q.isError && <DataUnavailable what="your deliveries" error={q.error} onRetry={() => void q.refetch()} />}
-      {q.isSuccess && rows.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-[var(--swift-muted)]">No deliveries yet.</p>}
+      {q.isSuccess && rows.length === 0 && <p className="rounded-2xl bg-[var(--swift-card)] p-4 text-sm text-[var(--swift-muted)]">No deliveries yet.</p>}
       {rows.map((o) => (
-        <article key={String(o['id'])} aria-label={`Delivery ${String(o['orderNumber'] ?? '')}`} className="min-w-0 rounded-2xl border border-black/5 bg-white p-4 text-sm sm:hidden">
+        <article key={String(o['id'])} aria-label={`Delivery ${String(o['orderNumber'] ?? '')}`} className="min-w-0 sw-card p-4 text-sm sm:hidden">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <strong>#{String(o['orderNumber'] ?? '')}</strong>
             {statusChip(String(o['status'] ?? ''))}
@@ -53,9 +53,9 @@ function DeliveriesTable() {
       ))}
       <Pager page={page} setPage={setPage} meta={q.data?.meta} />
     </div>
-    <div className="hidden max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white sm:block">
+    <div className="hidden max-w-full overflow-x-auto sw-card sm:block">
       <table className="min-w-[680px] w-full text-sm">
-        <thead className="border-b border-black/5 bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
+        <thead className="border-b border-[var(--swift-border)] bg-[var(--swift-subtle)] text-left text-xs  text-[var(--swift-muted)]">
           <tr>
             <th className="px-4 py-3">Order</th>
             <th className="px-4 py-3">Store</th>
@@ -75,7 +75,7 @@ function DeliveriesTable() {
           )}
           {!q.isLoading && !q.isError && rows.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--swift-muted)]">No deliveries yet.</td></tr>}
           {rows.map((o) => (
-            <tr key={String(o['id'])} className="border-b border-black/5 last:border-0">
+            <tr key={String(o['id'])} className="border-b border-[var(--swift-border)] last:border-0">
               <td className="px-4 py-3 font-medium">#{String(o['orderNumber'] ?? '')}</td>
               <td className="px-4 py-3 text-[var(--swift-muted)]">{(o['vendor'] as { name?: string } | null)?.name ?? '—'}</td>
               <td className="px-4 py-3">{statusChip(String(o['status'] ?? ''))}</td>
@@ -98,11 +98,11 @@ function RidesTable() {
   return (
     <>
     <div className="space-y-3 sm:hidden">
-      {q.isLoading && <p className="rounded-2xl bg-white p-4 text-sm text-[var(--swift-muted)]">Loading…</p>}
+      {q.isLoading && <p className="rounded-2xl bg-[var(--swift-card)] p-4 text-sm text-[var(--swift-muted)]">Loading…</p>}
       {q.isError && <DataUnavailable what="your rides" error={q.error} onRetry={() => void q.refetch()} />}
-      {q.isSuccess && rows.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-[var(--swift-muted)]">No rides yet.</p>}
+      {q.isSuccess && rows.length === 0 && <p className="rounded-2xl bg-[var(--swift-card)] p-4 text-sm text-[var(--swift-muted)]">No rides yet.</p>}
       {rows.map((r) => (
-        <article key={String(r['id'])} aria-label={`Ride ${String(r['orderNumber'] ?? '')}`} className="min-w-0 rounded-2xl border border-black/5 bg-white p-4 text-sm sm:hidden">
+        <article key={String(r['id'])} aria-label={`Ride ${String(r['orderNumber'] ?? '')}`} className="min-w-0 sw-card p-4 text-sm sm:hidden">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <strong>#{String(r['orderNumber'] ?? '')}</strong>
             {statusChip(String(r['status'] ?? ''))}
@@ -114,9 +114,9 @@ function RidesTable() {
       ))}
       <Pager page={page} setPage={setPage} meta={q.data?.meta} />
     </div>
-    <div className="hidden max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white sm:block">
+    <div className="hidden max-w-full overflow-x-auto sw-card sm:block">
       <table className="min-w-[680px] w-full text-sm">
-        <thead className="border-b border-black/5 bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
+        <thead className="border-b border-[var(--swift-border)] bg-[var(--swift-subtle)] text-left text-xs  text-[var(--swift-muted)]">
           <tr>
             <th className="px-4 py-3">Ride</th>
             <th className="px-4 py-3">Route</th>
@@ -136,7 +136,7 @@ function RidesTable() {
           )}
           {!q.isLoading && !q.isError && rows.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--swift-muted)]">No rides yet.</td></tr>}
           {rows.map((r) => (
-            <tr key={String(r['id'])} className="border-b border-black/5 last:border-0">
+            <tr key={String(r['id'])} className="border-b border-[var(--swift-border)] last:border-0">
               <td className="px-4 py-3 font-medium">#{String(r['orderNumber'] ?? '')}</td>
               <td className="max-w-72 px-4 py-3 text-[var(--swift-muted)]">
                 <span className="line-clamp-1">{String(r['taxiPickupAddress'] ?? '')} → {String(r['taxiDropoffAddress'] ?? '')}</span>
@@ -163,14 +163,14 @@ export default function HistoryPage() {
 
   return (
     <div className="space-y-5">
-      <h1 className="text-2xl font-extrabold">History</h1>
+      <h1 className="sw-title">History</h1>
       {both && (
         <div className="flex gap-2">
           {(['deliveries', 'rides'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`rounded-full px-4 py-2 text-sm font-semibold capitalize ${active === t ? 'bg-[var(--swift-red)] text-white' : 'border border-black/10 bg-white'}`}
+              className={`rounded-full px-4 py-2 text-sm font-semibold capitalize ${active === t ? 'bg-[var(--swift-red)] text-white' : 'border border-[var(--swift-border)] bg-[var(--swift-card)]'}`}
             >
               {t}
             </button>

@@ -4,7 +4,7 @@
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
 import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
-import { formatAmount } from './money';
+import { formatAmount, parseAmount } from './money';
 import type { StorefrontDetail } from './api';
 import { retailCategories } from './browse-keys';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
@@ -110,7 +110,7 @@ export interface VendorDetail extends Vendor {
   description?: string;
   categories: Array<{ id: string; name: string; items: MenuItem[] }>;
 }
-export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptionNames?: string[]; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
+export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptions?: Record<string, string | string[]> | null; selectedOptionNames?: string[]; specialInstructions?: string | null; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
 export interface Cart {
   items: CartLine[];
   subtotal?: number;
@@ -133,6 +133,8 @@ export interface Cart {
   };
   meetsMinimum?: boolean;
   minimumOrderAmount?: number;
+  /** [E01] One row per future order: each store's fulfilment, fee and total, as checkout writes it. */
+  vendors?: Array<{ vendorId: string; name: string; fulfillment: string; subtotal?: number; deliveryFee: number; totalAmount?: number; meetsMinimum?: boolean }>;
   paymentCapabilities?: {
     /** Changes when the vendor set or the validated MMG destination changes. */
     scope?: string;
@@ -201,8 +203,26 @@ export async function getPublicStorefront(slug: string): Promise<StorefrontDetai
   }
   return json.data as StorefrontDetail;
 }
-export async function searchVendors(q: string): Promise<Vendor[]> {
-  return (await apiFetch(`/api/v1/customer/vendors?search=${encodeURIComponent(q)}`)).data as Vendor[];
+/** A store as GET /search returns it — one wire shape whichever engine answered. */
+export interface SearchStore {
+  id: string; name: string; slug: string | null; vendorType: string;
+  logoUrl: string | null; coverImageUrl: string | null; cuisineTypes: string[];
+  city: string | null; estimatedPrepTime: number | null; isCurrentlyOpen: boolean;
+  displayRating: number | null; ratingCount: number; topRated: boolean;
+}
+export interface CatalogueResults { stores: SearchStore[]; items: MarketItem[] }
+/** How many stores and how many dishes one search shows. */
+export const SEARCH_PAGE = 30;
+/**
+ * [SEARCH 13 Oct] The search engine the phone app's Search tab uses: stores
+ * AND the dishes and products inside them, forgiving of a misspelling, a
+ * plural or the words in another order. The website searched store names and
+ * descriptions only (the store list's `?search=`), so "pepperpot" never found
+ * the stores that sell it.
+ */
+export async function searchCatalogue(q: string): Promise<CatalogueResults> {
+  const data = (await apiFetch(`/api/v1/search?q=${encodeURIComponent(q)}&limit=${SEARCH_PAGE}`)).data as { vendors?: SearchStore[]; items?: MarketItem[] } | undefined;
+  return { stores: data?.vendors ?? [], items: data?.items ?? [] };
 }
 
 // ── Market (goods across stores — the phone app's Market tab) ──────────────
@@ -212,6 +232,9 @@ export interface MarketDepth { visible: boolean; items: number; vendors: number 
 export interface MarketItem {
   id: string; name: string; basePrice: number; imageUrl: string | null;
   vendorId: string; vendorName: string; categoryName: string | null; isNew: boolean;
+  /** Is the item's store open now? Search shows closed stores' dishes too, marked
+   *  (owner, 13 Oct). Absent from an older server: read as open, as before. */
+  vendorIsCurrentlyOpen?: boolean;
 }
 export interface MarketCategory { slug: string; name: string; vertical: string }
 
@@ -315,7 +338,29 @@ export type CheckoutBody = {
   fulfillmentSelections?: Record<string, string>;
   promoCode?: string;
   appointments?: Array<{ itemId: string; slotStart: string; mode?: string }>;
+  /** [L09 · price lock] The total and line prices the customer saw. */
+  expectedTotal?: number;
+  expectedLines?: Array<{ lineId: string; unitPrice: number }>;
 };
+
+/**
+ * [L09 · price lock] What the customer saw, sent with Place order: the quote's
+ * total and each line's unit price, exactly as the server quote on screen
+ * priced them. The server refuses with PRICE_CHANGED (old → new) on any
+ * difference, so a price changed after the customer last looked is never
+ * charged unseen. Nothing is sent when the quote has no total it can stand
+ * behind (the same rule as the phone's).
+ */
+export function pricesAsSeen(cart: Pick<Cart, 'totalAmount' | 'items'> | null | undefined):
+  Pick<CheckoutBody, 'expectedTotal' | 'expectedLines'> {
+  const total = parseAmount(cart?.totalAmount);
+  if (!cart || total === null) return {};
+  const expectedLines = (cart.items ?? []).flatMap((line) => {
+    const unitPrice = parseAmount(line.customerPrice);
+    return typeof line.id === 'string' && unitPrice !== null ? [{ lineId: line.id, unitPrice }] : [];
+  });
+  return { expectedTotal: total, expectedLines };
+}
 
 export type CheckoutAttempt = { signature: string; key: string };
 const CHECKOUT_ATTEMPT_STORAGE_PREFIX = 'swift_web_checkout_attempt';
@@ -373,7 +418,8 @@ export function clearCheckoutAttempt(): void {
 export async function getAddresses(options?: { redirectOnExpired?: boolean }): Promise<any[]> {
   return (await apiFetch('/api/v1/customer/addresses', undefined, options)).data as any[];
 }
-export async function addAddress(body: { label: string; addressLine1: string; city: string; region: string; latitude: number; longitude: number; isDefault?: boolean }) {
+/** POST /customer/addresses — the server's own fields (region is optional there, and the phone never sends it). */
+export async function addAddress(body: { label: string; addressLine1: string; addressLine2?: string; city: string; region?: string; latitude: number; longitude: number; instructions?: string; isDefault?: boolean }) {
   return (await apiFetch('/api/v1/customer/addresses', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 
@@ -408,7 +454,9 @@ export async function watchRide(body: { lat: number; lng: number }) {
 export async function courierEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; packageSize: string }) {
   return (await apiFetch('/api/v1/courier/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
 }
-export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName?: string; recipientPhone?: string; notes?: string }) {
+/** POST /courier/order — the server's own fields: the recipient is required and what is inside is `packageDescription` (there is no `notes`).
+ *  `declaresNoProhibitedItems` is the sender's tick "This parcel has no prohibited items" [owner #67]. */
+export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName: string; recipientPhone: string; packageDescription?: string; expectedFee?: number; declaresNoProhibitedItems?: boolean }) {
   return (await apiFetch('/api/v1/courier/order', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 
@@ -429,7 +477,7 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
  * [WEB-REDESIGN] Customer prices read the way the phone app writes them
  * (apps/mobile/src/lib/money.ts): `$2,500`. Every price on Swift is in Guyana
  * dollars, which the footer states on every page ("Prices in GYD"); the
- * partner consoles keep their `GY$` (lib/money.ts formatMoney). Unparseable
+ * partner consoles print the same `$` (lib/money.ts formatMoney). Unparseable
  * money is still the em-dash, never a zero.
  */
 export const money = (n: unknown) => formatAmount(n, '$');
