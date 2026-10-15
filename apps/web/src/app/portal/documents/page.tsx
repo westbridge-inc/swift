@@ -139,7 +139,7 @@ export default function DocumentsPage() {
                     <span>
                       I consent to Swift processing this document for verification, per the{' '}
                       <a href={LEGAL_URL('privacy')} target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">privacy notice</a>.
-                      It is stored encrypted and never shared.
+                      It is stored encrypted and shared only as the Privacy Policy explains.
                     </span>
                   </label>
                   <button
