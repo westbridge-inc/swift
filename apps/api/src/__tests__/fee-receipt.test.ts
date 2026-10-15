@@ -6,7 +6,7 @@ import type { UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { issueReceipt } from '../modules/billing/receipts';
-import { COMPANY_TIN_KEY, NOT_A_VAT_INVOICE, VAT_REGISTRATION_KEY, feeReceiptDocument, feeReceiptsFor } from '../modules/billing/fee-receipt';
+import { COMPANY_TIN_KEY, NOT_A_VAT_INVOICE, PAID_TOWARD, VAT_REGISTRATION_KEY, feeReceiptDocument, feeReceiptsFor } from '../modules/billing/fee-receipt';
 import { OPERATOR } from '../modules/legal/operator';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
@@ -17,7 +17,7 @@ import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 // a partner sees a fee, and every receipt says "Not a VAT invoice". Every
 // receipt names Westbridge Inc. (trading as Swift), registration no. 17703,
 // the registered office, the company TIN once the owner sets it (never a
-// guess), the receipt number, the date, the partner, the week covered and the
+// guess), the receipt number, the date, the partner, what it paid and the
 // amount. A VAT line only once the "VAT registered" setting holds a number.
 // ---------------------------------------------------------------------------
 
@@ -86,7 +86,7 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('[R12] every weekly-fee receipt names the seller, the partner, the week and the amount', () => {
+describe('[R12] every weekly-fee receipt names the seller, the partner, what it paid and the amount', () => {
   it('unregistered for VAT and no TIN set: the plain receipt, ending "Not a VAT invoice"', async () => {
     const { receiptNumber, user } = await riderCredit();
     const doc = (await sys(() => feeReceiptDocument(app.prisma, receiptNumber)))!;
@@ -110,16 +110,29 @@ describe('[R12] every weekly-fee receipt names the seller, the partner, the week
     expect(doc.issuer.name).toBe(OPERATOR.name);
   });
 
-  it('the week covered is the week the money paid', async () => {
+  // [REVIEW-G #1771 S2-1] The week used to be inferred by comparing clocks
+  // (the first week paid at or after the receipt). On the checkout rail the
+  // week this money pays is booked at an instant taken BEFORE the receipt is
+  // written, so the receipt said "the coming week", then named the week after.
+  // A receipt states only what is true when it is issued.
+  it('[S2-1] names no week it cannot prove: paid toward the weekly fees in the order they fall due, even when its week is booked at an earlier instant', async () => {
     const { subId, receiptNumber } = await riderCredit();
+    const issuedAt = (await sys(() => app.prisma.feeReceipt.findUniqueOrThrow({ where: { receiptNumber } }))).issuedAt;
     const start = new Date('2026-10-12T04:00:00Z'); // Monday 12 Oct, midnight in Guyana
+    // The checkout rail: the week's paidAt is the confirm instant, before the receipt row.
     await sys(() => app.prisma.subscriptionPayment.create({ data: {
       subscriptionId: subId, amount: 6000, status: 'CAPTURED', paymentMethod: 'CASH', externalRef: 'prepaid',
-      periodStart: start, periodEnd: new Date(start.getTime() + 7 * DAY), paidAt: new Date(Date.now() + 60_000),
+      periodStart: start, periodEnd: new Date(start.getTime() + 7 * DAY), paidAt: new Date(issuedAt.getTime() - 400),
+    } }));
+    // The next week, paid later from other money.
+    await sys(() => app.prisma.subscriptionPayment.create({ data: {
+      subscriptionId: subId, amount: 6000, status: 'CAPTURED', paymentMethod: 'CASH', externalRef: 'prepaid',
+      periodStart: new Date(start.getTime() + 7 * DAY), periodEnd: new Date(start.getTime() + 14 * DAY), paidAt: new Date(issuedAt.getTime() + 7 * DAY),
     } }));
     const doc = (await sys(() => feeReceiptDocument(app.prisma, receiptNumber)))!;
-    expect(doc.weekCovered).toEqual({ from: start.toISOString(), to: new Date(start.getTime() + 7 * DAY).toISOString() });
-    expect(doc.lines).toContain('Week covered: 12 October 2026 to 18 October 2026');
+    expect(doc.lines.filter((l) => /week covered|coming week/i.test(l))).toEqual([]);
+    expect(doc.lines).toContain(PAID_TOWARD);
+    expect('weekCovered' in doc).toBe(false);
   });
 
   it('the company TIN prints once the owner sets it, and never a malformed one', async () => {

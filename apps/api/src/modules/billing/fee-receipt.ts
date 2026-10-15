@@ -26,13 +26,18 @@ import { formatGuyanaTime } from '../../utils/guyana-day';
 // ---------------------------------------------------------------------------
 
 export const NOT_A_VAT_INVOICE = 'Not a VAT invoice';
+/** [REVIEW-G #1771 S2-1] What the money paid, as known when the receipt is
+ *  issued: weekly-fee money pays the partner's weekly fees in the order they
+ *  fall due. No week is named: which week it pays is decided when it is spent,
+ *  and inferring it later by comparing clocks named the wrong week. */
+export const PAID_TOWARD = 'Paid toward: your Swift weekly fees, in the order they fall due';
 /** The company's GRA taxpayer number, set by the owner in the admin config (digits). */
 export const COMPANY_TIN_KEY = 'finance.company_tin';
 /** Set only once GRA registers the company for VAT: { vatNumber }. */
 export const VAT_REGISTRATION_KEY = 'finance.vat_registration';
 export const VAT_RATE = 0.14;
 
-type Db = Pick<PrismaClient | Prisma.TransactionClient, 'platformConfig' | 'feeReceipt' | 'billingEvent' | 'subscription' | 'subscriptionPayment'>;
+type Db = Pick<PrismaClient | Prisma.TransactionClient, 'platformConfig' | 'feeReceipt' | 'billingEvent' | 'subscription'>;
 
 const digits = (raw: unknown, min: number, max: number): string | null => {
   if (typeof raw !== 'string' && typeof raw !== 'number') return null;
@@ -59,8 +64,6 @@ export interface FeeReceiptDocument {
   issuedAt: string;
   issuer: { name: string; tradingAs: string; registrationNo: string; registeredOffice: string; tin: string | null };
   partnerName: string;
-  /** The week this payment paid, once it has paid one (a fee paid ahead pays the coming week when it starts). */
-  weekCovered: { from: string; to: string } | null;
   amount: number;
   currencyCode: string;
   vat: { vatNumber: string; rate: number; included: number } | null;
@@ -77,6 +80,8 @@ export async function feeReceiptDocument(
   db: Db,
   receiptNumber: string,
   scope?: { tenantId: string; subscriptionWhere: Prisma.SubscriptionWhereInput },
+  /** The company settings, read once by a caller printing a list. */
+  settings?: { tin: string | null; vat: { vatNumber: string } | null },
 ): Promise<FeeReceiptDocument | null> {
   const receipt = await db.feeReceipt.findFirst({ where: { receiptNumber, ...(scope ? { tenantId: scope.tenantId } : {}) } });
   if (!receipt) return null;
@@ -87,23 +92,15 @@ export async function feeReceiptDocument(
       where: { id: receipt.subscriptionId },
       select: { vendor: { select: { name: true } }, rider: { select: { user: { select: { firstName: true, lastName: true } } } }, driver: { select: { user: { select: { firstName: true, lastName: true } } } } },
     }),
-    companyTin(db),
-    vatRegistration(db),
+    settings ? settings.tin : companyTin(db),
+    settings ? settings.vat : vatRegistration(db),
   ]);
-  // The week this money paid: the first week paid at or after it arrived (a fee
-  // paid early is spent on the coming week when that week starts).
-  const week = await db.subscriptionPayment.findFirst({
-    where: { subscriptionId: receipt.subscriptionId, status: 'CAPTURED', paidAt: { gte: receipt.issuedAt } },
-    orderBy: [{ paidAt: 'asc' }, { periodStart: 'asc' }],
-    select: { periodStart: true, periodEnd: true },
-  });
   const person = sub?.rider?.user ?? sub?.driver?.user;
   const partnerName = sub?.vendor?.name ?? (person ? `${person.firstName} ${person.lastName}`.trim() : 'Partner');
   const currencyCode = event?.currencyCode ?? 'GYD';
   const amount = Number(receipt.amount);
   const included = vat ? Math.round((amount * VAT_RATE / (1 + VAT_RATE)) * 100) / 100 : 0;
   const issuer = { name: OPERATOR.name, tradingAs: OPERATOR.tradingAs, registrationNo: OPERATOR.registrationNo, registeredOffice: OPERATOR_ADDRESS, tin };
-  const weekCovered = week ? { from: week.periodStart.toISOString(), to: week.periodEnd.toISOString() } : null;
   const lines = [
     `${issuer.name} (trading as ${issuer.tradingAs})`,
     `Registration no. ${issuer.registrationNo}`,
@@ -113,14 +110,12 @@ export async function feeReceiptDocument(
     `Receipt ${receipt.receiptNumber}`,
     `Date: ${day(receipt.issuedAt)}`,
     `Partner: ${partnerName}`,
-    weekCovered
-      ? `Week covered: ${day(new Date(weekCovered.from))} to ${day(new Date(new Date(weekCovered.to).getTime() - 1))}`
-      : 'Week covered: the coming week (a weekly fee paid ahead pays its week when that week starts)',
+    PAID_TOWARD,
     `Weekly fee: ${formatMoney(amount, currencyCode, { whole: false })}`,
     ...(vat ? [`Price includes VAT at ${Math.round(VAT_RATE * 100)}%: ${formatMoney(included, currencyCode)}`] : [NOT_A_VAT_INVOICE]),
   ];
   return {
-    receiptNumber: receipt.receiptNumber, issuedAt: receipt.issuedAt.toISOString(), issuer, partnerName, weekCovered,
+    receiptNumber: receipt.receiptNumber, issuedAt: receipt.issuedAt.toISOString(), issuer, partnerName,
     amount, currencyCode, vat: vat ? { vatNumber: vat.vatNumber, rate: VAT_RATE, included } : null, lines,
   };
 }
@@ -128,6 +123,8 @@ export async function feeReceiptDocument(
 /** A subscription's receipts, newest first: what the weekly-fee screen lists. */
 export async function feeReceiptsFor(db: Db, subscriptionId: string, take = 10): Promise<FeeReceiptDocument[]> {
   const rows = await db.feeReceipt.findMany({ where: { subscriptionId }, orderBy: { issuedAt: 'desc' }, take, select: { receiptNumber: true } });
-  const docs = await Promise.all(rows.map((r) => feeReceiptDocument(db, r.receiptNumber)));
+  if (rows.length === 0) return [];
+  const settings = { tin: await companyTin(db), vat: await vatRegistration(db) };
+  const docs = await Promise.all(rows.map((r) => feeReceiptDocument(db, r.receiptNumber, undefined, settings)));
   return docs.filter((d): d is FeeReceiptDocument => d !== null);
 }
