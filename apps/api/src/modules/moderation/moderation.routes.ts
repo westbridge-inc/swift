@@ -86,7 +86,7 @@ export async function moderationRoutes(app: FastifyInstance) {
     // that fails to open is logged loudly and the moderation queue still floats CSAE to the top.
     if (body.reason === 'CSAE') {
       try {
-        await pageCsaeReport(app.prisma, new NotificationService(app.prisma, app.io), { tenantId: getTenantId() ?? null, contentReportId: report.id, targetType: body.targetType });
+        await pageCsaeReport(app.prisma, new NotificationService(app.prisma, app.io), { tenantId: request.tenantId ?? getTenantId() ?? null, contentReportId: report.id, targetType: body.targetType });
       } catch (err) {
         app.log.error({ err, contentReportId: report.id }, '[R19] CSAE report saved but the ops page did not open — moderation queue only');
       }

@@ -38,6 +38,12 @@ async function mkUser(roles: UserRole[], activeRole: UserRole) {
 const report = (body: Record<string, unknown>) =>
   app.inject({ method: 'POST', url: '/api/v1/reports', headers: { 'content-type': 'application/json', authorization: `Bearer ${reporter.token}` }, payload: body });
 
+/** Close (never delete) this run's pages at once: an open page would be swept and texted by any other suite that
+ *  runs the escalation sweep at the same time (safety-ops-alert-ack counts its on-call texts). */
+const closeOurPages = () => runWithoutTenant(() => app.prisma.opsAlert.updateMany({
+  where: { title: CSAE_PAGE_TITLE, createdAt: { gte: since }, closedAt: null }, data: { closedAt: new Date(), closeReason: 'test-cleanup' },
+}), 'test-cleanup:csae-page');
+
 const csaePages = () => runWithoutTenant(() => app.prisma.opsAlert.findMany({
   where: { title: CSAE_PAGE_TITLE, createdAt: { gte: since } },
   include: { recipients: { select: { userId: true, notificationId: true } } },
@@ -71,6 +77,7 @@ describe('a Child safety (CSAE) report pages operations at once', () => {
   it('a CSAE report opens one ops page addressed to the operators, naming the report and no person', async () => {
     const target = `user_${RUN}_a`;
     const res = await report({ targetType: 'USER', targetId: target, reason: 'CSAE' });
+    await closeOurPages();
     expect(res.statusCode, res.body).toBe(201);
     const reportId = res.json().data.id as string;
 
@@ -89,6 +96,7 @@ describe('a Child safety (CSAE) report pages operations at once', () => {
 
   it('reporting the same thing again pages nobody new (the report is already on record)', async () => {
     const again = await report({ targetType: 'USER', targetId: `user_${RUN}_a`, reason: 'CSAE' });
+    await closeOurPages();
     expect(again.statusCode).toBe(200);
     expect(again.json().alreadyReported).toBe(true);
     expect(await csaePages()).toHaveLength(1);
