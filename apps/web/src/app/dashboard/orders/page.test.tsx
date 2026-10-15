@@ -3,7 +3,7 @@ import type { UserEvent } from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import OrdersPage from './page';
 import { mockApi, renderWithQuery, stubAudioContext, type ApiRequest } from '@/test/test-utils';
-import { wireVendorOrder, wireVendorOrderDetail } from '@/test/vendor-wire-fixtures';
+import { wireVendorOrder, wireVendorOrderDetail, wireOrderLine } from '@/test/vendor-wire-fixtures';
 
 /**
  * S0 — the web vendor order board rendered the letters "$NaN" where a vendor's
@@ -533,6 +533,89 @@ describe('order detail stays dismissible while its request settles', () => {
     await user.click(screen.getByRole('button', { name: 'Retry order detail' }));
     await screen.findByText('Total (Cash)');
     expect(attempts).toBe(2);
+  });
+});
+
+// The API substitution vocabulary comes from the persisted line, not the order state.
+describe('store picking uses the server substitution status', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  async function openLine(subStatus: string, picked = false) {
+    const detail = wireVendorOrderDetail({
+      vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: false },
+      status: 'PREPARING',
+      items: [wireOrderLine({ subStatus, picked, substituteName: 'Replacement rice' })],
+    });
+    mockApi(boardHandler([detail], detail));
+    const { user, queryClient } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText('Total (Cash)');
+    return { user, queryClient, detail };
+  }
+
+  it('shows a PENDING swap and disables picking or proposing another swap', async () => {
+    await openLine('PENDING');
+    expect(screen.getByText('Waiting on customer: Replacement rice')).toBeTruthy();
+    expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Out of stock?' })).toBeNull();
+  });
+
+  it('a pending proposal on another device closes an already-open substitute panel', async () => {
+    const { user, queryClient, detail } = await openLine('NONE');
+    await user.click(screen.getByRole('button', { name: 'Out of stock?' }));
+    expect(screen.getByRole('button', { name: 'No substitute — remove line' })).toBeTruthy();
+    const pending = { ...detail, items: [wireOrderLine({ subStatus: 'PENDING', substituteName: 'Replacement rice' })] };
+    mockApi(boardHandler([pending], pending));
+    await queryClient.invalidateQueries({ predicate: (query) => query.queryKey.includes('order') });
+    await screen.findByText('Waiting on customer: Replacement rice');
+    expect(screen.queryByRole('button', { name: 'No substitute — remove line' })).toBeNull();
+  });
+
+  it('an APPROVED swap is picked and no longer waits on the customer', async () => {
+    await openLine('APPROVED', true);
+    expect(screen.queryByText(/Waiting on customer/)).toBeNull();
+    expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText('All picked ✓')).toBeTruthy();
+  });
+
+  it.each(['REFUNDED', 'REJECTED'])('%s lines cannot be picked or proposed again', async (status) => {
+    await openLine(status);
+    expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Out of stock?' })).toBeNull();
+    expect(screen.getByText('Nothing left to hand over — cancel this order')).toBeTruthy();
+  });
+});
+
+
+describe('pending and approved line removal remains available', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it.each(['PENDING', 'APPROVED'])('%s allows removal but never offers a second proposal', async (subStatus) => {
+    const detail = wireVendorOrderDetail({
+      vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: false }, status: 'PREPARING',
+      items: [wireOrderLine({ subStatus, picked: false, substituteName: 'Replacement rice' })],
+    });
+    const handler = boardHandler([detail], detail);
+    const fetchMock = mockApi((request) => {
+      if (request.method === 'POST' && request.url.pathname.endsWith('/refund-line')) {
+        return { body: { success: true, data: {} } };
+      }
+      return handler(request);
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText('Total (Cash)');
+    expect(screen.queryByRole('button', { name: 'Out of stock?' })).toBeNull();
+    if (subStatus === 'PENDING') {
+      expect(screen.getByText('Shelf picking — 1 waiting on customer')).toBeTruthy();
+      expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
+    } else {
+      expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(false);
+    }
+    await user.click(screen.getByRole('button', { name: 'Remove unavailable line' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).includes('/refund-line') && init?.method === 'POST')).toBe(true));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/substitute'))).toBe(false);
   });
 });
 

@@ -1,5 +1,7 @@
 import type { PrismaClient, Prisma } from '@prisma/client';
+import type Redis from 'ioredis';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { guyanaDayKey } from '../../utils/guyana-day';
 import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 
 // ---------------------------------------------------------------------------
@@ -32,6 +34,30 @@ type InviteState = 'PENDING' | 'ACCEPTED' | 'DECLINED' | 'CLOSED';
 /** The launch switch. Off until the app build with the Accept card is live. */
 export function staffInviteAcceptEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return env['STAFF_INVITE_ACCEPT'] === '1';
+}
+
+// While the switch is off, a known account is still added at once and the
+// team list then shows who it is. A daily cap on adds per owner account keeps
+// the add from being used as a bulk phone-number lookup. It is spent before
+// the number is looked up, for every add, so reaching it says nothing about
+// any number. It also bounds invites sent while the switch is on.
+const STAFF_ADD_DAILY_CAP_DEFAULT = 10;
+const STAFF_ADD_DAY_PREFIX = 'staff_add_day:';
+const STAFF_ADD_DAY_TTL_S = 86400;
+
+/** Team adds allowed per owner account per Guyana day (STAFF_ADD_DAILY_CAP). */
+export function staffAddDailyCap(env: Record<string, string | undefined> = process.env): number {
+  const v = Number(env['STAFF_ADD_DAILY_CAP']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : STAFF_ADD_DAILY_CAP_DEFAULT;
+}
+
+/** Spend one add from the caller's daily allowance; false once it is used up.
+ *  A refusal keeps its increment: a capped owner gets nothing back by retrying. */
+export async function spendStaffAddAllowance(redis: Pick<Redis, 'incr' | 'expire'>, userId: string, now: Date = new Date()): Promise<boolean> {
+  const key = `${STAFF_ADD_DAY_PREFIX}${guyanaDayKey(now)}:${userId}`;
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, STAFF_ADD_DAY_TTL_S);
+  return count <= staffAddDailyCap();
 }
 
 /** The one reply every add gets — known number, unknown number, already on
