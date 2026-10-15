@@ -11,7 +11,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 const seen = vi.hoisted(() => ({ options: [] as unknown[] }));
 vi.mock('sharp', async (importOriginal) => {
-  const real = (await importOriginal<{ default: (...args: unknown[]) => unknown }>()).default;
+  const real = (await importOriginal<{ default: (..._args: unknown[]) => unknown }>()).default;
   const wrapped = (...args: unknown[]) => { seen.options.push(args[1]); return real(...args); };
   return { default: Object.assign(wrapped, real) };
 });
@@ -21,7 +21,7 @@ let jpeg: Buffer;
 let GET: typeof import('./route').GET;
 
 beforeAll(async () => {
-  const sharp = (await import('sharp')).default as unknown as (options: object) => { jpeg: () => { toBuffer: () => Promise<Buffer> } };
+  const sharp = (await import('sharp')).default as unknown as (_options: object) => { jpeg: () => { toBuffer: () => Promise<Buffer> } };
   jpeg = await sharp({ create: { width: 64, height: 48, channels: 3, background: '#bc5935' } }).jpeg().toBuffer();
 });
 beforeEach(async () => {
