@@ -29,6 +29,7 @@ import { invalidateHomeCache } from '../user/home-cache';
 import { SupportService } from '../support/support.service';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
 import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
+import { POSTAL_REFUSAL, postalItem } from './postal-items';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -260,6 +261,10 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(409, 'PROHIBITED_PARCEL',
         `Swift can't carry this parcel: Swift never delivers ${PROHIBITED_CLASS_LABELS[prohibited.prohibitedClass]}. If it's something else, describe it in other words.`,
         { prohibitedClass: prohibited.prohibitedClass });
+    }
+    // [Legal research A10 · R1] Courier = goods only: letters, documents and mail are the Post Office's to carry.
+    if (postalItem(body.packageDescription)) {
+      throw new AppError(409, 'PROHIBITED_PARCEL', POSTAL_REFUSAL, { prohibitedClass: 'POSTAL' });
     }
 
     const { distanceKm, source, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(userId));

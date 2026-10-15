@@ -100,7 +100,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'What’s inside? (optional)' }), { target: { value: 'Documents' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'What’s inside? (optional)' }), { target: { value: 'A phone charger' } });
     declare();
     await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
     fireEvent.click(button('Request courier · $1,160'));
@@ -113,7 +113,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
       packageSize: 'SMALL',
       recipientName: 'Test Recipient',
       recipientPhone: '+592 600 0000',
-      packageDescription: 'Documents',
+      packageDescription: 'A phone charger',
       declaresNoProhibitedItems: true,
     });
     expect(order.dropoff.lat).toBeCloseTo(pin.latitude, 9);
@@ -261,7 +261,7 @@ describe('[owner #67] a parcel with no prohibited items', () => {
   it('no courier is requested until the sender ticks the box; the order carries the tick', async () => {
     await readyParcel();
     // The list the tick refers to is on screen, in the server's own words.
-    expect(screen.getByText(/Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas \(LPG\), fuel, 18\+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, or currency and payment cards\./)).toBeTruthy();
+    expect(screen.getByText(/Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas \(LPG\), fuel, 18\+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, currency and payment cards, or letters, documents and mail\./)).toBeTruthy();
     const box = screen.getByRole('checkbox', { name: 'This parcel has no prohibited items' }) as HTMLInputElement;
     expect(box.checked).toBe(false);
     expect(button('Tick “no prohibited items” to send').disabled).toBe(true);

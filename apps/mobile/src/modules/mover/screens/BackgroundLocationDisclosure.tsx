@@ -76,7 +76,8 @@ export function useBackgroundLocationDisclosure() {
 
       <View style={{ alignSelf: 'stretch', gap: space.sm, marginTop: space.lg }}>
         <DisclosureLine text="Where you are, while you are online" />
-        <DisclosureLine text="Sent only to Swift — never sold, never shared with advertisers" />
+        {/* [Legal research B3, in-app ¶18] where it goes, said truly: Swift's servers are run by a hosting provider */}
+        <DisclosureLine text="Sent only to Swift and kept with our hosting provider, as the Privacy Policy explains — never sold, never shared with advertisers" />
         <DisclosureLine text="Stops the moment you go offline" />
       </View>
 

@@ -17,7 +17,7 @@ import { earningsWindow } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
-import { makeDispatchService } from '../dispatch/dispatch.service';
+import { hireVehicleRefusal, makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { coarsePoint } from '../dispatch/board-privacy';
@@ -701,7 +701,8 @@ export async function driverRoutes(app: FastifyInstance) {
   app.get('/rides/available', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await getDriver(request.user.userId);
 
-    if (!driver.isOnline || !driver.isAvailable || !driver.locationSessionId) {
+    // [R9] A bus sees no rides: no hire is offered to a vehicle outside the hire seat limit.
+    if (!driver.isOnline || !driver.isAvailable || !driver.locationSessionId || !isVehicleOffered(driver.vehicleType)) {
       return { success: true, data: [] };
     }
 
@@ -846,6 +847,8 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver.isOnline || !driver.locationSessionId) {
       throw new AppError(400, 'OFFLINE', 'You must be online to accept rides');
     }
+    // [R9] A bus never takes a ride (the locked claim refuses it too).
+    if (!isVehicleOffered(driver.vehicleType)) throw hireVehicleRefusal();
     if (!driver.isAvailable || driver.currentRideId) {
       throw new AppError(400, 'UNAVAILABLE', 'You already have an active ride');
     }

@@ -5,6 +5,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { Card, Header, Screen, T } from '../../../kit';
 import { TAXI_DOCUMENTS_FAQ } from '../../../components/onboarding/taxiDocumentCopy';
+import { CANCEL_ORDER_FAQ_ANSWER } from '../../../lib/cancelPolicyCopy';
 
 // Kit FAQ (54): accordion rows. Static product truths — no invented data.
 const FAQS: { q: string; a: string }[] = [
@@ -31,7 +32,8 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: 'Can I cancel an order?',
-    a: 'Yes — within the first few minutes while the order is pending. Cash orders cancel free. If you already sent an MMG payment for the order, the store refunds you directly. After the store starts preparing, cancellation may not be available.',
+    // [Terms 2026-10-15 §7] free or refused, never a fee
+    a: CANCEL_ORDER_FAQ_ANSWER,
   },
   {
     q: 'How do refunds work with cash?',

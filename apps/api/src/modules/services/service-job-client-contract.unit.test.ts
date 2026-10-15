@@ -9,6 +9,8 @@ import {
   scheduleSchema,
   scheduledTransitionSchema,
   transitionGenerationSchema,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER as API_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION as API_CONTRACT_VERSION,
 } from './service-job-client-contract';
 import {
   SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
@@ -29,6 +31,11 @@ const previousMobileBodies = [
 const current = { [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION };
 
 describe('service-job lifecycle client contract', () => {
+  it('the API\'s own wire marker equals the one every first-party client sends (@swift/types)', () => {
+    expect(API_CONTRACT_HEADER).toBe(SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER);
+    expect(API_CONTRACT_VERSION).toBe(SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION);
+  });
+
   it.each(previousMobileBodies)(
     'serves the installed app\'s $command body as a legacy command (no upgrade wall)',
     ({ schema, legacy, body }) => {

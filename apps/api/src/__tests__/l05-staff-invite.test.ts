@@ -181,7 +181,7 @@ describe('[row 55] switch ON: invite, then the person accepts', () => {
     const invites = await waitForInvites(known.userId, 1);
     await settle();
     expect(await invitesOf(known.userId)).toHaveLength(1);
-    expect(invites[0]!.body).toBe(`${storeName} invited you to join their team as a manager. Open your notifications to accept or decline.`);
+    expect(invites[0]!.body).toBe(`${storeName} invited you to join their team as a manager. Open your notifications to accept or decline. Swift will use your number to send you this store's order alerts. See our Privacy Policy.`);
     expect(await memberOf(known.userId)).toBeNull();
 
     const listed = await inject('GET', '/api/v1/vendor/staff', owner.token);
