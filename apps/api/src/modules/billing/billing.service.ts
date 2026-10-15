@@ -19,7 +19,7 @@ import { consumeMmgReactivation, feePauseHoldsBilling, feePauseSpanOpen, mmgReac
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { restoreBillingAccess } from './billing-access';
-import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
+import { postLedger, topupPostings, chargeSuccessPostings, walletReversalPostings } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
@@ -2307,6 +2307,55 @@ export class BillingService {
     });
     if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
     return tx.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: opts.subscriptionId } });
+  }
+
+  /**
+   * [MMG REVERSAL · owner #11] The one wallet DEBIT for a payment MMG returned
+   * to the payer (a whole-payment reversal MMG's lookup has proven), inside the
+   * caller's transaction and in the same payer -> subscription -> wallet lock
+   * order as every credit: the balance decrement, a PREPAID_REVERSAL event
+   * (its unique key = exactly once) and the reversing ledger posting
+   * (Dr WALLET_LIABILITY / Cr CLEARING_MMG) — all-or-nothing. The balance never
+   * goes below zero: a wallet that no longer holds the amount answers `short`
+   * and nothing is written, so a person decides.
+   */
+  async debitWalletForReversalInTx(
+    tx: Prisma.TransactionClient,
+    opts: { subscriptionId: string; amount: number; currencyCode: string; eventKey: string; note: string; mmgRef: string },
+  ): Promise<{ eventId: string } | { short: true }> {
+    if (!(opts.amount > 0)) throw new AppError(400, 'INVALID_AMOUNT', 'A returned payment must be more than zero');
+    const payer = await lockSubscriptionPayer(tx, opts.subscriptionId);
+    if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
+    const already = await tx.billingEvent.findUnique({ where: { idempotencyKey: opts.eventKey }, select: { id: true, type: true } });
+    if (already) {
+      if (already.type !== 'PREPAID_REVERSAL') throw new Error(`reversal event key ${opts.eventKey} names another event`);
+      return { eventId: already.id };
+    }
+    const wallet = await this.lockWalletInTx(tx, opts.subscriptionId, opts.currencyCode);
+    if (wallet.currencyCode !== opts.currencyCode) {
+      throw new AppError(409, 'WALLET_CURRENCY_MISMATCH', 'The returned payment and the money received for the weekly fee are in different currencies; reconciliation is required');
+    }
+    const debited = await tx.prepaidBalance.updateMany({
+      where: { subscriptionId: opts.subscriptionId, currencyCode: opts.currencyCode, balance: { gte: opts.amount } },
+      data: { balance: { decrement: opts.amount } },
+    });
+    if (debited.count !== 1) return { short: true };
+    const event = await tx.billingEvent.create({
+      data: {
+        subscriptionId: opts.subscriptionId,
+        type: 'PREPAID_REVERSAL',
+        amount: opts.amount,
+        currencyCode: opts.currencyCode,
+        idempotencyKey: opts.eventKey,
+        note: opts.note,
+      },
+    });
+    await postLedger(tx, {
+      idempotencyKey: `ledger:${opts.eventKey}`,
+      description: `Wallet debit: MMG returned the payment (${opts.mmgRef})`,
+      entries: walletReversalPostings(opts.subscriptionId, opts.amount),
+    });
+    return { eventId: event.id };
   }
 
   private lockWalletInTx(tx: Prisma.TransactionClient, subscriptionId: string, currencyCode: string) {
