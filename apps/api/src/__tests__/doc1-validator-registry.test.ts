@@ -9,13 +9,13 @@
  * validator it depends on is a phantom, and no row names an implementation
  * that does not exist — production refuses to boot otherwise.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { prismaPlugin } from '../plugins/prisma';
 import { runWithoutTenant } from '../plugins/tenant-context';
-import { seedDocRegistry, registryCode, registryCompletenessGaps } from '../modules/verification/doc-registry';
+import { seedDocRegistry, registryCode, registryCompletenessGaps, enforceRegistryCompletenessAtBoot } from '../modules/verification/doc-registry';
 import { VALIDATOR_IMPLEMENTATIONS, resolvesImpl } from '../modules/verification/validators';
 import { planExtraction, type RegisteredValidator } from '../modules/verification/extraction-ledger';
 
@@ -139,11 +139,38 @@ describe('[DOC-1 P7-1] the validator registry (test_registry_completeness)', () 
     expect(plan.blockingFail).toBe(true);
   });
 
-  it('production refuses to boot past an incomplete registry for active types (the seed block names the gaps and throws only in production)', () => {
+  // [T2 · row 300] The boot refusal as BEHAVIOUR: the gate server.ts runs at boot, driven with
+  // an incomplete registry under production mode. (It was a text match on server.ts.)
+  it('production refuses to boot past an incomplete registry for active types: the boot gate throws naming the gaps; elsewhere it warns and boot goes on', async () => {
+    await system(() => app.prisma.docType.update({ where: { code: PROBE }, data: { isActive: true, legalFactsVerifiedAt: new Date() } }));
+    const warn = vi.fn();
+    try {
+      vi.stubEnv('NODE_ENV', 'production');
+      await expect(system(() => enforceRegistryCompletenessAtBoot(app.prisma, { warn }, resolvesImpl)))
+        .rejects.toThrow(new RegExp(`document registry incomplete for active types: .*${PROBE}:UNPROFILED`));
+      expect(warn).not.toHaveBeenCalled();
+
+      vi.stubEnv('NODE_ENV', 'test');
+      const gaps = await system(() => enforceRegistryCompletenessAtBoot(app.prisma, { warn }, resolvesImpl));
+      expect(gaps.filter((g) => g.docTypeCode === PROBE).map((g) => g.gap)).toEqual(expect.arrayContaining(['UNPROFILED', 'NO_FIELDS']));
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ gaps: expect.arrayContaining([expect.objectContaining({ docTypeCode: PROBE })]) }),
+        expect.stringMatching(/production refuses to boot like this/),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await resetProbe();
+    }
+  });
+
+  it('server.ts runs that gate at boot, after the registry is seeded and before the boot contract is marked complete', () => {
     const server = readFileSync(join(__dirname, '..', 'server.ts'), 'utf8');
-    const seedAt = server.indexOf('seedDocRegistry(app.prisma)');
-    const block = server.slice(seedAt, server.indexOf('app.markBootContractsComplete();', seedAt));
-    expect(block).toContain('registryCompletenessGaps(app.prisma, resolvesImpl)');
-    expect(block).toMatch(/if \(isProduction\(\)\) \{\s*throw new Error/);
+    const afterListen = server.split('app.listen(')[1] ?? '';
+    const seedAt = afterListen.indexOf('await seedDocRegistry(');
+    const gateAt = afterListen.indexOf('await enforceRegistryCompletenessAtBoot(app.prisma, app.log, resolvesImpl)');
+    const markAt = afterListen.indexOf('app.markBootContractsComplete();');
+    expect(seedAt).toBeGreaterThan(0);
+    expect(gateAt).toBeGreaterThan(seedAt);
+    expect(markAt).toBeGreaterThan(gateAt);
   });
 });
