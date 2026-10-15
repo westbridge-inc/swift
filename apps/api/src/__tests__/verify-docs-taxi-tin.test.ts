@@ -35,7 +35,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { VerificationService } from '../modules/verification/verification.service';
-import { evaluateMoverDocuments, lockMoverDocuments } from '../modules/verification/mover-document-authority';
+import { lockMoverDocuments } from '../modules/verification/mover-document-authority';
 import { NotificationService } from '../modules/notification/notification.service';
 import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
@@ -129,8 +129,6 @@ const statusOf = async (token: string) => (await app.inject({ method: 'GET', url
 };
 const live = async (userId: string) => service.getLiveOperationStatus(userId, { vehicleType: 'CAR', kind: 'DRIVER',
   legacyVerified: (await app.prisma.driver.findUniqueOrThrow({ where: { userId }, select: { documentsVerified: true } })).documentsVerified });
-/** The live verdict's deadline: the moment a job claim (checked again under lock) stops trusting it. */
-const validUntil = async (userId: string) => (await evaluateMoverDocuments(app.prisma, userId, { vehicleType: 'CAR', kind: 'DRIVER' })).validUntil;
 
 /** A taxi driver from before the split: every document of today's world approved, including the old permit. */
 async function legacyTaxi(permitDays = 300) {
