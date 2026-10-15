@@ -133,7 +133,8 @@ async function submit(m: { userId: string; token: string }, docType: string) {
 /** What a reviewer does in the console: key the printed expiry; for a taxi's insurance, the HIRE checks. */
 async function approve(docId: string, docType: string, taxi: boolean) {
   return service.approveDocument(docId, adminId, docTypeExpires(docType) ? new Date(Date.now() + 300 * DAY) : undefined,
-    taxi && docType === 'vehicle_insurance'
+    // [R13] every motor vehicle's insurance carries the reviewer's hire-or-reward decision, not only a taxi's
+    docType === 'vehicle_insurance'
       ? { insurerName: 'Synthetic Mutual', policyNumber: `HIRE-${nanoid(6)}`, coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true }
       : undefined);
 }

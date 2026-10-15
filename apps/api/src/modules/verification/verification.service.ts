@@ -25,7 +25,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
-import { isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
@@ -304,7 +304,8 @@ const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
   WRONG_DOCUMENT: 'This is not the document we asked for.',
   FACE_MISMATCH: FRAUD_GENERIC_TEXT,
   NAME_MISMATCH: 'The name on this document does not match your account.',
-  INSURANCE_NOT_HIRE: 'This policy does not cover hire/passenger use — taxi work needs HIRE-class insurance.',
+  // [R13] Riders see why: the policy's "limitations as to use" must allow paid work.
+  INSURANCE_NOT_HIRE: 'This policy does not permit use for hire or reward. Taxi work needs cover for passengers carried for hire; deliveries need cover for commercial use. Ask your insurer for it and upload the new certificate.',
   WRONG_PLATE_CLASS: 'A taxi must carry an H registration mark — this vehicle is not registered as a hire car.',
   // [DOC-1 §24.1 · §8.5] The fraud class reads IDENTICALLY and never names the
   // signal: Swift does not tell a person its system believes their document is
@@ -1299,10 +1300,16 @@ export class VerificationService {
     if (taxi && plateClassOf(plate ?? '') !== 'H') {
       throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi needs an H-series registration mark on its registered vehicle. A missing or different plate cannot be approved.');
     }
-    if (doc.docType === 'vehicle_insurance' && vehicleType && isPassengerVehicle(vehicleType)
+    // [R13 · owner 15 Oct 2026, research D6] EVERY motor vehicle, not only a taxi, needs insurance whose
+    // "Limitations as to use" permit use for hire or reward (taxi: passengers carried for hire; delivery:
+    // commercial use). A person reads the wording and records the decision; a private-use policy is
+    // rejected as INSURANCE_NOT_HIRE. Only a vehicle known to have no motor (a bicycle) is exempt; an
+    // insurance certificate whose vehicle cannot be told is treated as a motor vehicle's.
+    if (doc.docType === 'vehicle_insurance' && !(vehicleType && !isMotorVehicle(vehicleType))
       && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
-      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT',
-        'A passenger vehicle needs HIRE-class insurance with the hire class confirmed by the reviewer. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
+      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT', taxi || (vehicleType && isPassengerVehicle(vehicleType))
+        ? 'A passenger vehicle needs HIRE-class insurance: cover for passengers carried for hire, confirmed by the reviewer from the policy’s limitations as to use. Confirm it, or reject the document as INSURANCE_NOT_HIRE.'
+        : 'A motor vehicle that delivers needs insurance that permits use for hire or reward (commercial use), and the reviewer must confirm it from the policy’s limitations as to use. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
     }
   }
 
