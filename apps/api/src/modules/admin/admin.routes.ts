@@ -5612,6 +5612,22 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: row };
   });
 
+  // [Owner legal plan 15 Oct · R12] One weekly-fee receipt as the partner sees
+  // it (billing/fee-receipt.ts), by its number: support reads it out, the
+  // accountant checks it. Read only.
+  app.get('/billing/receipts/:receiptNumber', { preHandler: [adminGuard] }, async (request) => {
+    // Tenant-local like every billing read: only a receipt of this tenant's
+    // own subscriptions; another tenant's number reads as not found.
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { receiptNumber } = z.object({ receiptNumber: z.string().regex(/^[A-Z0-9-]{1,64}$/) }).parse(request.params);
+    const { feeReceiptDocument } = await import('../billing/fee-receipt');
+    const doc = await feeReceiptDocument(app.prisma, receiptNumber, { tenantId, subscriptionWhere: subscriptionTenantScope(tenantId) });
+    if (!doc) throw new NotFoundError('Receipt');
+    return { success: true, data: doc };
+  });
+
   /** Daily cash journal CSV [20.4] — the accountant's export. */
   app.get('/billing/cash-journal', { preHandler: [adminGuard] }, async (request, reply) => {
     const q = z.object({

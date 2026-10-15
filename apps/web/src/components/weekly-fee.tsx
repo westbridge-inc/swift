@@ -90,5 +90,10 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
         {checkoutReferences(shown).map((r) => <p key={r.label} className="text-sm text-[var(--swift-muted)]">{r.label}: <span className="font-mono">{r.value}</span></p>)}
       </div>;
     }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
+    <h2 className="text-lg font-bold">Receipts</h2>
+    {/* [owner legal plan R12] Printed by the API, line by line: the same receipt support and the accountant see. */}
+    {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <div key={r.receiptNumber} aria-label={`Receipt ${r.receiptNumber}`} className="space-y-1 rounded-2xl border border-black/5 bg-white p-5 text-sm">
+      {r.lines.map((line, i) => <p key={i} className={i === 0 ? 'font-semibold' : undefined}>{line}</p>)}
+    </div>) : <p className="text-sm text-[var(--swift-muted)]">No receipts yet.</p>}
   </section>;
 }
