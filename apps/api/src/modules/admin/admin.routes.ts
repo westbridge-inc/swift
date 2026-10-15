@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -3082,7 +3082,7 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
-    if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED' });
+    if (order.vendorId) await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
     // Told after the commit, each on its own key (a retry of the notice cannot
     // double it). Neither is told the refund happened — only who makes it.
     const words = mmgStoreCloseNotices(order.orderNumber, amount ?? 0, order.fulfillment === 'APPOINTMENT');
