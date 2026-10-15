@@ -23,7 +23,7 @@ import {
 export const LOCATION_BG_CONSENT_TYPE: ConsentDocumentType = 'location_bg_consent';
 export const LOCATION_BG_CONSENT_VERSION = 'v1';
 /** The disclosure, line by line as the phone shows it, then its two buttons. */
-export const LOCATION_BG_CONSENT_V1 = 'Swift needs your location in the background\nWhile you are online, Swift collects your location even when the app is closed or not in use — so jobs can reach you, and so the customer can watch their delivery move.\nWhere you are, while you are online\nSent only to Swift — never sold, never shared with advertisers\nStops the moment you go offline\nYou can go online either way. Without background access Swift tracks you only while the app is on screen.\n[Allow background location] [Only while app is open]';
+export const LOCATION_BG_CONSENT_V1 = 'Swift needs your location in the background\nWhile you are online, Swift collects your location even when the app is closed or not in use — so jobs can reach you, and so the customer can watch their delivery move.\nWhere you are, while you are online\nSent only to Swift and kept with our hosting provider, as the Privacy Policy explains — never sold, never shared with advertisers\nStops the moment you go offline\nYou can go online either way. Without background access Swift tracks you only while the app is on screen.\n[Allow background location] [Only while app is open]';
 
 export type BackgroundConsentOutcome = { granted: boolean; changed: boolean };
 

@@ -12,7 +12,7 @@ export const BG_DISCLOSURE = {
   body: 'While you are online, Swift collects your location even when the app is closed or not in use — so jobs can reach you, and so the customer can watch their delivery move.',
   lines: [
     'Where you are, while you are online',
-    'Sent only to Swift — never sold, never shared with advertisers',
+    'Sent only to Swift and kept with our hosting provider, as the Privacy Policy explains — never sold, never shared with advertisers',
     'Stops the moment you go offline',
   ],
   caption: 'You can go online either way. Without background access Swift tracks you only while the app is on screen.',

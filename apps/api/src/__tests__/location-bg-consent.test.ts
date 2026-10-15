@@ -36,7 +36,7 @@ async function makeUser(roles: UserRole[]) {
     },
   });
   createdUserIds.push(user.id);
-  const token = app.jwt.sign({ userId: user.id, role: roles[0], jti: nanoid(8) });
+  const token = app.jwt.sign({ userId: user.id, role: roles[0]!, jti: nanoid(8) });
   await app.prisma.session.create({
     data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'r18', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
   });
@@ -109,7 +109,7 @@ describe('[R18] background-location consent in the ledger', () => {
       'Swift needs your location in the background',
       'While you are online, Swift collects your location even when the app is closed or not in use — so jobs can reach you, and so the customer can watch their delivery move.',
       'Where you are, while you are online',
-      'Sent only to Swift — never sold, never shared with advertisers',
+      'Sent only to Swift and kept with our hosting provider, as the Privacy Policy explains — never sold, never shared with advertisers',
       'Stops the moment you go offline',
       'You can go online either way. Without background access Swift tracks you only while the app is on screen.',
       '[Allow background location] [Only while app is open]',
