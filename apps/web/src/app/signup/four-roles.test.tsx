@@ -40,6 +40,9 @@ async function throughName(tile: RegExp) {
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Test' } });
   fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Partner' } });
+  // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+  await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+  await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
   return user;
 }

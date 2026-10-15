@@ -54,7 +54,7 @@ function req(method: 'GET' | 'POST', url: string, token: string, payload?: unkno
 /** The code out of the confirmation SMS — what the contact reads back. */
 function codeFor(phone: string): string {
   const sms = [...devChannelLog].reverse().find((e) => e.channel === 'sms' && e.to === phone);
-  const m = sms?.body.match(/code (\d{6})/);
+  const m = sms?.body.match(/[Cc]ode (\d{6})/);
   if (!m) throw new Error(`no confirmation SMS for ${phone}`);
   return m[1]!;
 }

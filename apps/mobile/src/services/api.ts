@@ -276,6 +276,8 @@ export const authApi = {
     countryCode?: string;
     /** Server records consent + the legal version it covered [SWIFT-AUD-D9-03]. */
     acceptTerms?: boolean;
+    /** [Owner ruling 15 Oct 2026] the ticked "I am 18 or older" — recorded in the consent ledger. */
+    ageConfirmed?: boolean;
   }) => api.post('/auth/register', data),
   refresh: (refreshToken: string) => api.post('/auth/refresh', { refreshToken }),
   logout: () => api.post('/auth/logout'),

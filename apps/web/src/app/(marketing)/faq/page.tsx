@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { Section } from '@/components/site';
 import { BrowserOrderingNote } from '@/components/browser-ordering-note';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
+import { CANCEL_ORDER_ANSWER } from '@/lib/cancel-policy-copy';
 
 export const metadata: Metadata = {
   title: 'Questions',
@@ -91,15 +92,9 @@ const FAQ: QA[] = [
     ),
   },
   {
+    // [Terms 2026-10-15 §7] free or refused, never a fee
     q: 'Can I cancel an order?',
-    a: (
-      <>
-        Yes. After you place an order there is a short window where the store has not been told yet —
-        cancelling in that window is free, and the app shows the clock counting down. After the store
-        starts work a cancellation may carry a cost, and the app tells you the exact amount before
-        you confirm, never after.
-      </>
-    ),
+    a: <>{CANCEL_ORDER_ANSWER}</>,
   },
   {
     q: 'How do I delete my account and my data?',
