@@ -14,6 +14,7 @@ import { forgivingFilter } from '../../../lib/forgivingSearch';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
+import { SellerInfo } from '../../../components/SellerInfo';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
 import {
@@ -777,6 +778,9 @@ export function RestaurantScreen() {
               This store hasn’t published a menu yet.
             </T>
           ) : null}
+
+          {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule (the server's block; none from an older API). */}
+          {v.seller ? <SellerInfo seller={v.seller} gutter={GUTTER} /> : null}
         </View>
       </ScrollView>
 
