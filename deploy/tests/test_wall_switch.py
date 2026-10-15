@@ -754,6 +754,54 @@ class Rehearsal(unittest.TestCase):
 
 
 # ── doctor.sh ──────────────────────────────────────────────────────────────
+class RedactLog(unittest.TestCase):
+    """deploy/wall/redact-log.py on its own: what a kept copy log may never
+    carry, and what it must keep so a failure can still be read. Values are
+    built at run time so no secret-shaped literal sits in this source."""
+
+    def redact(self, lines):
+        result = subprocess.run(['python3', '-I', str(DEPLOY / 'wall' / 'redact-log.py')], input='\n'.join(lines) + '\n',
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_secret_names_personal_fields_bare_numbers_and_url_passwords_never_survive(self):
+        word = 'hunter' + '2' + 'secret'
+        cases = [
+            ('SMTP_' + 'PASS=' + word, word),
+            ('{"smtp' + 'Pass":"' + word + '"}', word),
+            ('MMG_' + 'MSECRET_' + 'PASS_FILE=' + word, word),
+            ('{"pass' + 'phrase":"' + word + '"}', word),
+            ('{"private' + 'Material":"' + word + '"}', word),
+            ('{"pin":"4821"}', '4821'),
+            ('delivery PIN: 4821 for the order', '4821'),
+            ('user phone 6123456 not found', '6123456'),
+            ('{"phone":"6123456"}', '6123456'),
+            ('{"msisdn":"5926123456"}', '6123456'),
+            ('{"name":"Jane Doe","address":"12 Main St"}', 'Jane Doe'),
+            ('{"name":"Jane Doe","address":"12 Main St"}', '12 Main St'),
+            ('{"firstName":"Jane","lastName":"Doe","street":"Main St"}', 'Doe'),
+            ('{"email":"jane.doe@example.gy"}', 'jane.doe'),
+            ('connect redis://:' + 'p@ss' + '@redis:6379 failed', 'ss@redis'),
+            ('connect redis://:' + 'p@ss' + '@redis:6379 failed', 'p@'),
+            ('connect postgresql://swift:' + 'ab/cd' + '@postgres:5432/swift failed', 'ab/cd'),
+        ]
+        for line, leak in cases:
+            with self.subTest(line=line):
+                self.assertNotIn(leak, self.redact([line]))
+
+    def test_what_failed_and_where_still_reads(self):
+        keep = ['api-1  | Failed to start server: Error: FATAL: MMG_CHECKOUT_PUBLIC_KEY is not a readable RSA public key (PEM). Refusing to start.',
+                'worker-1  | {"level":30,"msg":"tenant wall: enforced role=swift_app_login tenantTables=131 rlsDisabled=0 ownedUnforced=0"}',
+                'api-1  | {"level":30,"req":{"method":"GET","url":"/api/v1/customer/orders"},"msg":"incoming request"}',
+                'api-1  | FATAL: SMS_RECIPIENT_ALLOWLIST entry 1 is not an E.164 number (+ and digits). Refusing to start rather than texting no one by mistake.',
+                'api-1  | {"passengers":3,"shipping":"standard","statusCode":503}']
+        out = self.redact(keep).splitlines()
+        self.assertEqual(out, keep)
+        # A connection URL keeps its host and port, only the credential goes.
+        self.assertEqual(self.redact(['connect redis://:' + 'p@ss' + '@redis:6379 failed']).strip(), 'connect redis://[redacted]@redis:6379 failed')
+
+
 class DoctorWallPosture(unittest.TestCase):
     def run_doctor(self, settings, env_names, roles_hold=True):
         tmp = Path(tempfile.mkdtemp(prefix='swift-wall-doctor-'))

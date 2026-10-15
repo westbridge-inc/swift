@@ -1275,7 +1275,9 @@ Every provider secret the copy's processes are wired to read (as Compose
 renders their settings) gets a fresh throwaway stand-in in the shape the API's
 boot guards check (`deploy/wall/stand-in.sh`: PEM keys for MMG's checkout, one
 fictional number for the SMS allowlist, a GUID for the card gateway key, URLs
-on the `.invalid` domain); no real provider value is ever read. Once the copy's
+on the `.invalid` domain); no real provider value is ever read. The names are
+read from migrate, api and worker: a service that later reads its own `*_FILE`
+secret gets no stand-in and refuses to boot, loudly. Once the copy's
 API and worker have been started, their logs (the last 400 lines each,
 redacted by `deploy/wall/redact-log.py`: secrets, tokens, passwords, keys,
 phone numbers and e-mail addresses removed) are kept in
