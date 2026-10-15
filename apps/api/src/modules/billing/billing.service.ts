@@ -25,7 +25,7 @@ import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
-import { activePriceBook, bookAt, priceBookNoticeKey, rowFor, toldInTime, type PriceBookRow } from './price-book';
+import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -1715,30 +1715,37 @@ export class BillingService {
    *  latest effective rate was charged unconditionally while a swallowed send
    *  left the database saying "noticed". */
   private async priceEligibleFor(sub: Subscription, usd: UsdPricingCtx | null): Promise<ReturnType<BillingService['priceFor']>> {
-    let priced = this.priceFor(sub, usd);
-    if (!usd || !priced.usdTrio) return priced;
+    const inForcePrice = this.priceFor(sub, usd);
+    if (!usd || !inForcePrice.usdTrio) return inForcePrice;
+    let priced: { amount: Prisma.Decimal | number; usdTrio: NonNullable<typeof inForcePrice.usdTrio> } = { amount: inForcePrice.amount, usdTrio: inForcePrice.usdTrio };
     const last = await this.prisma.billingEvent.findFirst({
       where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: { not: null } },
       orderBy: { createdAt: 'desc' },
-      select: { amount: true, currencyCode: true, fxRateId: true, fxRateUsed: true, createdAt: true },
+      select: { amount: true, currencyCode: true, fxRateId: true, fxRateUsed: true, amountUsd: true, createdAt: true },
     });
     if (!last?.amount) return priced; // a first charge: nothing was announced before, nothing changed
-    // [F2 · GUARDRAILS §7] A price-book row that took effect since this partner's
-    // last charge is charged only if they were told 14 days before this week
-    // starts; otherwise the week keeps the price before it (a later week takes the new one).
+    // [F2 · GUARDRAILS §7 · REVIEW-G S2-1] A price-book price HIGHER than the one this
+    // partner last paid is charged only once they were told of that very row 14 days
+    // before the week starts, checked every week until it is charged (not only the
+    // first week after it takes effect); otherwise the week keeps the price reached
+    // before it. A lower price applies from the next week (coordinator ruling 15 Oct).
     if (usd.rows) {
       const role = SUB_TYPE_TRIAL_ROLE[sub.type] ?? 'VENDOR';
-      const row = rowFor(usd.rows, role, sub.type, sub.nextBillingDate);
-      if (row && row.effectiveFrom.getTime() > last.createdAt.getTime()) {
-        const notice = await this.prisma.billingEvent.findUnique({ where: { idempotencyKey: priceBookNoticeKey(sub.id, row.id) }, select: { deliveredAt: true } });
+      const lastPaid = { amountUsd: last.amountUsd === null ? null : Number(last.amountUsd), createdAt: last.createdAt };
+      const charge = await priceBookChargeFor(usd.rows, role, sub.type, sub.nextBillingDate, lastPaid, async (entryId) =>
+        (await this.prisma.billingEvent.findUnique({ where: { idempotencyKey: priceBookNoticeKey(sub.id, entryId) }, select: { deliveredAt: true } }))?.deliveredAt);
+      if (charge && charge.via !== 'IN_FORCE') {
         // Told in time about this very price: the change is the one they were told of.
-        if (toldInTime(notice?.deliveredAt, sub.nextBillingDate)) return priced;
-        const before = rowFor(usd.rows, role, sub.type, new Date(row.effectiveFrom.getTime() - 1));
-        if (before) {
-          log().warn({ subscriptionId: sub.id, entryId: row.id, delivered: notice?.deliveredAt ?? null, weekStart: sub.nextBillingDate }, '[F2] price-book change not told 14 days before this week — the week keeps the price before it');
-          const converted = convertUsdToLocal(before.amountUsd, usd.rate, usd.increment);
-          priced = { amount: converted.amountLocal, usdTrio: { amountUsd: before.amountUsd, fxRateId: usd.rateId, fxRateUsed: usd.rate } };
+        if (charge.via === 'TOLD' && charge.amountUsd === priced.usdTrio.amountUsd) return priced;
+        const inForce = priced.usdTrio.amountUsd;
+        const converted = convertUsdToLocal(charge.amountUsd, usd.rate, usd.increment);
+        priced = { amount: converted.amountLocal, usdTrio: { amountUsd: charge.amountUsd, fxRateId: usd.rateId, fxRateUsed: usd.rate } };
+        if (charge.amountUsd !== inForce) {
+          log().warn({ subscriptionId: sub.id, entryId: charge.row.id, inForceUsd: inForce, chargedUsd: charge.amountUsd, weekStart: sub.nextBillingDate }, '[F2] a higher price-book price not told 14 days before this week — the week keeps the price reached before it');
         }
+        // A lower price than last time (no more in local money either): nothing to be told first.
+        if (charge.via === 'LOWER' && last.currencyCode === usd.currency && Number(priced.amount) <= Number(last.amount)) return priced;
+        if (charge.via === 'TOLD') return priced;
       }
     }
     if (!noticeRequired(Number(last.amount), Number(priced.amount))) return priced;

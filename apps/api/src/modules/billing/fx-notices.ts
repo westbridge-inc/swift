@@ -5,7 +5,7 @@ import { convertUsdToLocal, noticeRequired, formatMoney, resolveRateForRun, reso
 import { fxNoticesUndeliveredGauge, fxChargesWithoutNoticeGauge } from '../../plugins/observability';
 import { log } from '../../utils/logger';
 import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
-import { activePriceBook, bookAt, earliestPriceChange, priceBookNoticeKey, PRICE_BOOK_NOTICE_DAYS } from './price-book';
+import { activePriceBook, bookAt, bookRowsAt, earliestPriceChange, priceBookKey, priceBookNoticeKey, PRICE_BOOK_NOTICE_DAYS } from './price-book';
 
 // System 2 Part 12 — the >2% notice rule: when a fee payer's NEXT local
 // amount will differ >2% from their LAST charged amount (an FX move), they
@@ -79,7 +79,11 @@ export async function runFxChangeNotices(
   // partner it changes (a partner who joined since, or whose notice failed, is
   // told now; the charge gate counts the notice only from its delivery).
   if (!opts.subscriptionIds) {
-    const upcoming = (await activePriceBook(prisma)).filter((row) => row.effectiveFrom.getTime() > now.getTime());
+    // Scheduled rows, lower ones that started in the last week (told as well), and
+    // rows in force now (a notice not yet delivered is retried; REVIEW-G S2-1).
+    const book = await activePriceBook(prisma);
+    const inForce = new Set([...bookRowsAt(book, now).values()].map((row) => row.id));
+    const upcoming = book.filter((row) => row.effectiveFrom.getTime() > now.getTime() - 7 * DAY_MS || inForce.has(row.id));
     for (const row of upcoming) await announcePriceBookEntry(prisma, io, row.id, now);
   }
 
@@ -279,15 +283,31 @@ export async function announcePriceBookEntry(prisma: PrismaClient, io: Server, e
   const tenant = await prisma.tenantBillingCurrency.findUnique({ where: { tenantId: 'swift-default' } });
   if (!tenant?.usdPricingEnabled) return out;
   const entry = await prisma.priceBookEntry.findUnique({ where: { id: entryId } });
-  if (!entry || !entry.active || entry.effectiveFrom.getTime() <= now.getTime()) return out;
+  if (!entry || !entry.active) return out;
+  const rows = await activePriceBook(prisma);
+  const amountUsd = Number(entry.amountUsd);
+  // [coordinator ruling 15 Oct] A LOWER price may start the next billing week (no
+  // 14-day wait) and is still told; it is told for a week after it starts too.
+  const previous = bookRowsAt(rows, new Date(entry.effectiveFrom.getTime() - 1)).get(priceBookKey(entry.role, entry.tier));
+  const lower = !!previous && amountUsd < previous.amountUsd;
+  // [REVIEW-G S2-1] Once a HIGHER price is in force, a notice not yet delivered is
+  // still retried while it is the price in force (the charge keeps the price last
+  // paid until 14 days after it is); nobody new is told then.
+  const started = entry.effectiveFrom.getTime() <= now.getTime();
+  const retryOnly = started && !lower && bookRowsAt(rows, now).get(priceBookKey(entry.role, entry.tier))?.id === entry.id;
+  if (started && !retryOnly && !(lower && entry.effectiveFrom.getTime() > now.getTime() - 7 * DAY_MS)) return out;
+  // Retry-only: just the partners whose notice of this row was written but not delivered.
+  const pending = retryOnly
+    ? (await prisma.billingEvent.findMany({ where: { idempotencyKey: { startsWith: 'pricebook-notice:', endsWith: `:${entry.id}` }, deliveredAt: null }, select: { subscriptionId: true } })).map((e) => e.subscriptionId)
+    : null;
+  if (pending && pending.length === 0) return out;
   const rate = await resolveRateForRun(prisma, tenant.settlementCurrency);
   const notifications = new NotificationService(prisma, io);
-  const amountUsd = Number(entry.amountUsd);
   const types = Object.entries(SUB_ROLE).filter(([, role]) => role === entry.role).map(([type]) => type);
-  const rows = await activePriceBook(prisma);
   const subs = await prisma.subscription.findMany({
     where: {
       autoRenew: true, customRate: null, status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE'] },
+      ...(pending ? { id: { in: pending } } : {}),
       type: { in: (entry.tier ? types.filter((t) => t === entry.tier) : types) as never },
     },
     include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
@@ -301,7 +321,7 @@ export async function announcePriceBookEntry(prisma: PrismaClient, io: Server, e
     if (!userId) continue;
     const key = priceBookNoticeKey(sub.id, entry.id);
     const existing = await prisma.billingEvent.findUnique({ where: { idempotencyKey: key }, select: { id: true, deliveredAt: true } });
-    if (existing?.deliveredAt) continue;
+    if (existing?.deliveredAt || (retryOnly && !existing)) continue;
     const local = rate ? convertUsdToLocal(amountUsd, Number(rate.rate), Number(tenant.roundingIncrement)).amountLocal : null;
     let eventId = existing?.id;
     if (!eventId) {
@@ -319,14 +339,14 @@ export async function announcePriceBookEntry(prisma: PrismaClient, io: Server, e
       }
       out.notified += 1;
     }
-    const appliesFrom = firstFeeOnOrAfter(sub.nextBillingDate, new Date(Math.max(entry.effectiveFrom.getTime(), earliestPriceChange(now).getTime())));
+    const appliesFrom = firstFeeOnOrAfter(sub.nextBillingDate, new Date(Math.max(entry.effectiveFrom.getTime(), lower ? now.getTime() : earliestPriceChange(now).getTime())));
     const day = appliesFrom.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', weekday: 'long', day: 'numeric', month: 'long' });
     let inboxId = '';
     try {
       inboxId = await notifications.send({
         userId, type: 'SYSTEM_ANNOUNCEMENT', audience: sub.vendor ? 'business' : 'earner',
-        title: 'Your weekly fee is changing',
-        body: `From your weekly fee due ${day}, your Swift weekly fee will be ${formatMoney(amountUsd, 'USD')}${local !== null ? ` (about ${formatMoney(local, tenant.settlementCurrency)} at today's exchange rate)` : ''}. Until then nothing changes, and any week you have already paid keeps the price you paid.`,
+        title: lower ? 'Your weekly fee is going down' : 'Your weekly fee is changing',
+        body: `From your weekly fee due ${day}, your Swift weekly fee will be ${formatMoney(amountUsd, 'USD')}${local !== null ? ` (about ${formatMoney(local, tenant.settlementCurrency)} at today's exchange rate)` : ''}. ${lower ? 'A week you have already paid keeps the price you paid.' : 'Until then nothing changes, and any week you have already paid keeps the price you paid.'}`,
         data: { kind: 'billing_rate_change', change: 'PRICE_BOOK', subscriptionId: sub.id, priceBookEntryId: entry.id, amountUsd, appliesFrom: appliesFrom.toISOString() },
         dedupeKey: key,
       });

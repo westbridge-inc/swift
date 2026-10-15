@@ -115,12 +115,58 @@ describe('[F2] a week is priced by the book in force when it starts, and only af
     expect(priced.amount).toBe(6000);
   });
 
+  it('[coordinator ruling 15 Oct] a LOWER price applies from the next week without waiting for a notice', async () => {
+    const lowerRow = row(20, new Date(now.getTime() + DAY), 'lower-row');
+    const sub = await vendorSub(new Date(now.getTime() + 2 * DAY));
+    const priced = await price({ ...sub }, [old, lowerRow]);
+    expect(priced.usdTrio?.amountUsd).toBe(20);
+    expect(priced.amount).toBe(4000);
+  });
+
   it('not told (or told too late): that week keeps the price before it', async () => {
     const untold = await vendorSub(new Date(effective.getTime() + DAY));
     expect((await price({ ...untold }, [old, next])).usdTrio?.amountUsd).toBe(25);
     const late = await vendorSub(new Date(effective.getTime() + DAY));
     await app.prisma.billingEvent.create({ data: { subscriptionId: late.id, type: 'REMINDER', currencyCode: 'GYD', idempotencyKey: priceBookNoticeKey(late.id, next.id), deliveredAt: new Date(effective.getTime() - 5 * DAY) } });
     expect((await price({ ...late }, [old, next])).usdTrio?.amountUsd).toBe(25);
+  });
+
+  // [REVIEW-G #1769 S2-1] The gate used to run only for a row newer than the
+  // last charge: once week 1 was charged (the old price, after the change took
+  // effect), week 2 skipped it and charged the new price with no notice.
+  const chargedAt = (subscriptionId: string, amountUsd: number, createdAt: Date) => app.prisma.billingEvent.create({ data: {
+    subscriptionId, type: 'CHARGE_SUCCESS', amount: amountUsd * 200, currencyCode: 'GYD', amountUsd, fxRateId: 'fx-test', fxRateUsed: 200,
+    idempotencyKey: `book-test:${subscriptionId}:${createdAt.getTime()}`, createdAt,
+  } });
+
+  it('[S2-1] not told: week 2 keeps the old price too; the new price starts with the first week 14 days after the notice reaches them, then stays', async () => {
+    const weekOne = new Date(effective.getTime() + DAY);
+    const weekTwo = new Date(weekOne.getTime() + 7 * DAY);
+    const sub = await vendorSub(weekOne);
+    expect((await price({ ...sub }, [old, next])).usdTrio?.amountUsd).toBe(25);
+    await chargedAt(sub.id, 25, new Date(weekOne.getTime() + 60_000)); // week 1 charged the old price, after the change
+    const atWeekTwo = { ...sub, nextBillingDate: weekTwo };
+    expect(await price(atWeekTwo, [old, next])).toMatchObject({ amount: 5000, usdTrio: { amountUsd: 25 } });
+    // Told late (3 days before week 2): week 2 still keeps the old price ...
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'REMINDER', currencyCode: 'GYD', idempotencyKey: priceBookNoticeKey(sub.id, next.id), deliveredAt: new Date(weekTwo.getTime() - 3 * DAY) } });
+    expect((await price(atWeekTwo, [old, next])).usdTrio?.amountUsd).toBe(25);
+    expect((await price({ ...sub, nextBillingDate: new Date(weekTwo.getTime() + 7 * DAY) }, [old, next])).usdTrio?.amountUsd).toBe(25);
+    // ... and the first week starting 14 days after the notice takes the new one.
+    const weekFour = new Date(weekTwo.getTime() + 14 * DAY);
+    expect(await price({ ...sub, nextBillingDate: weekFour }, [old, next])).toMatchObject({ amount: 6000, usdTrio: { amountUsd: 30 } });
+    await chargedAt(sub.id, 30, new Date(weekFour.getTime() + 60_000));
+    expect((await price({ ...sub, nextBillingDate: new Date(weekFour.getTime() + 7 * DAY) }, [old, next])).usdTrio?.amountUsd).toBe(30);
+  });
+
+  it('[S2-1 · ruling 15 Oct] a rise is measured against the price last paid: an untold 27 after an untold 30 keeps 25; a cut below it applies at once', async () => {
+    const after = new Date(effective.getTime() + 10 * DAY);
+    const toTwentySeven = row(27, after, 'rise-27');
+    const toTwentyTwo = row(22, after, 'cut-22');
+    const sub = await vendorSub(new Date(effective.getTime() + DAY));
+    await chargedAt(sub.id, 25, new Date(effective.getTime() + DAY + 60_000));
+    const later = { ...sub, nextBillingDate: new Date(after.getTime() + DAY) };
+    expect((await price(later, [old, next, toTwentySeven])).usdTrio?.amountUsd).toBe(25);
+    expect(await price(later, [old, next, toTwentyTwo])).toMatchObject({ amount: 4400, usdTrio: { amountUsd: 22 } });
   });
 });
 
@@ -153,5 +199,30 @@ describe('[F2] every partner a scheduled price changes is told when it is set', 
       await app.prisma.tenantBillingCurrency.update({ where: { tenantId: 'swift-default' }, data: { usdPricingEnabled: tenant.usdPricingEnabled } });
     }
     expect((await activePriceBook(app.prisma)).some((r) => r.id === entry.id)).toBe(true);
+  });
+
+  it('[REVIEW-G S2-1] once a higher price is in force, a notice not yet delivered is still retried (dated 14 days on); nobody else is told', async () => {
+    const now = new Date();
+    const prior = await app.prisma.priceBookEntry.create({ data: { role: 'VENDOR', tier: TIER, amountUsd: 24, effectiveFrom: new Date(now.getTime() - 60 * DAY) } });
+    const entry = await app.prisma.priceBookEntry.create({ data: { role: 'VENDOR', tier: TIER, amountUsd: 34, effectiveFrom: new Date(now.getTime() - 2 * DAY) } });
+    entryIds.push(prior.id, entry.id);
+    const pending = await vendorSub(new Date(now.getTime() + 3 * DAY));
+    const pendingUser = userIds[userIds.length - 1]!;
+    await app.prisma.billingEvent.create({ data: { subscriptionId: pending.id, type: 'REMINDER', currencyCode: 'GYD', idempotencyKey: priceBookNoticeKey(pending.id, entry.id), amountUsd: 34 } });
+    const other = await vendorSub(new Date(now.getTime() + 3 * DAY));
+    const tenant = await app.prisma.tenantBillingCurrency.findUnique({ where: { tenantId: 'swift-default' } });
+    if (!tenant) return; // no tenant billing row in this database
+    try {
+      await app.prisma.tenantBillingCurrency.update({ where: { tenantId: 'swift-default' }, data: { usdPricingEnabled: true } });
+      await announcePriceBookEntry(app.prisma, app.io, entry.id, now);
+      const event = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: priceBookNoticeKey(pending.id, entry.id) } });
+      expect(event.deliveredAt).not.toBeNull();
+      const notices = await app.prisma.notification.findMany({ where: { userId: pendingUser, data: { path: ['kind'], equals: 'billing_rate_change' } } });
+      expect(notices).toHaveLength(1);
+      expect(notices[0]!.data).toMatchObject({ priceBookEntryId: entry.id, appliesFrom: new Date(pending.nextBillingDate.getTime() + 14 * DAY).toISOString() });
+      expect(await app.prisma.billingEvent.findUnique({ where: { idempotencyKey: priceBookNoticeKey(other.id, entry.id) } })).toBeNull();
+    } finally {
+      await app.prisma.tenantBillingCurrency.update({ where: { tenantId: 'swift-default' }, data: { usdPricingEnabled: tenant.usdPricingEnabled } });
+    }
   });
 });

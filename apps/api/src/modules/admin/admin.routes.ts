@@ -4770,11 +4770,13 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   /** Schedule a plan price (append semantics: every row is kept; the book is
-   *  USD-only by law). [Owner legal plan · F2 · GUARDRAILS §7] A price never
-   *  changes at once: it takes effect no sooner than 14 days from now (an
-   *  earlier effectiveFrom is refused), the price in force stays in force until
-   *  then, a week is priced by the book in force when it starts, and every
-   *  partner it changes is told now (billing/price-book.ts, fx-notices.ts). */
+   *  USD-only by law). [Owner legal plan · F2 · GUARDRAILS §7] A HIGHER price
+   *  (or a first price for a plan) takes effect no sooner than 14 days from
+   *  now (an earlier effectiveFrom is refused); a LOWER one may take effect
+   *  from now, the next billing week (coordinator ruling 15 Oct). The price in
+   *  force stays in force until then, a week is priced by the book in force
+   *  when it starts, and every partner it changes is told now
+   *  (billing/price-book.ts, fx-notices.ts). */
   app.put('/billing/price-book', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       role: z.enum(['VENDOR', 'RIDER', 'DRIVER', 'SERVICE']),
@@ -4782,11 +4784,16 @@ export async function adminRoutes(app: FastifyInstance) {
       amountUsd: z.number().positive().max(10_000),
       effectiveFrom: z.string().datetime(),
     }).parse(request.body ?? {});
-    const { earliestPriceChange, PRICE_BOOK_NOTICE_DAYS } = await import('../billing/price-book');
+    const { activePriceBook, earliestPriceChange, PRICE_BOOK_NOTICE_DAYS, priceBookKey, bookRowsAt } = await import('../billing/price-book');
+    const now = new Date();
     const effectiveFrom = new Date(body.effectiveFrom);
-    const earliest = earliestPriceChange(new Date());
-    if (effectiveFrom.getTime() < earliest.getTime()) {
-      throw new AppError(400, 'PRICE_CHANGE_TOO_SOON', `A weekly price changes no sooner than ${PRICE_BOOK_NOTICE_DAYS} days after it is set, so every partner it changes is told first. Set effectiveFrom to ${earliest.toISOString()} or later. Nothing changed.`, { earliestEffectiveFrom: earliest.toISOString() });
+    if (effectiveFrom.getTime() < now.getTime() - 60_000) throw new AppError(400, 'PRICE_CHANGE_IN_PAST', 'A price never takes effect in the past. Nothing changed.');
+    // Compared with the price that would otherwise be in force on that date.
+    const before = bookRowsAt(await activePriceBook(app.prisma), effectiveFrom).get(priceBookKey(body.role, body.tier ?? null));
+    const lower = !!before && body.amountUsd < before.amountUsd;
+    const earliest = earliestPriceChange(now);
+    if (!lower && effectiveFrom.getTime() < earliest.getTime()) {
+      throw new AppError(400, 'PRICE_CHANGE_TOO_SOON', `A higher weekly price (or a first price for a plan) changes no sooner than ${PRICE_BOOK_NOTICE_DAYS} days after it is set, so every partner it changes is told first. Set effectiveFrom to ${earliest.toISOString()} or later. Nothing changed.`, { earliestEffectiveFrom: earliest.toISOString() });
     }
     const updated = await app.prisma.$transaction(async (tx) => {
       // The price in force stays in force until effectiveFrom: nothing is deactivated here.
