@@ -1096,8 +1096,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           );
           throw err;
         }
-        // Run transition notices after retention so a failed reminder cannot skip the reaper.
-        await verification.hirePermitGraceSweep();
+        // Run the hire-licence sweep after retention so a failed notice cannot skip the reaper.
+        // [Owner ruling 15 Oct 2026 · no grace] It takes permit-only taxi drivers offline and asks for both licences.
+        await verification.hireLicenceSweep();
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
