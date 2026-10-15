@@ -949,7 +949,7 @@ describe('[MMG REVERSAL · Opus S3 pattern] the rollback guard cannot be blinded
   it('switches row security off for its transaction before it looks for reversal rows', async () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
-    const sql = readFileSync(join(__dirname, '../../prisma/migrations/20261014214500_mmg_fee_reversals/rollback.sql'), 'utf8');
+    const sql = readFileSync(join(__dirname, '../../prisma/migrations/20261015010000_mmg_fee_reversals/rollback.sql'), 'utf8');
     const begin = sql.indexOf('BEGIN;');
     const off = sql.indexOf('SET LOCAL row_security = off;');
     expect(begin).toBeGreaterThanOrEqual(0);
