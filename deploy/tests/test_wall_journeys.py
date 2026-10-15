@@ -66,6 +66,8 @@ with open(os.environ['CALL_LOG'], 'a') as log:
 env = os.environ.get
 if argv[:2] == ['context', 'show']:
     print('default'); sys.exit(0)
+if argv[:1] == ['info']:
+    print('/var/lib/docker'); sys.exit(0)
 copy = argv[:3] == ['compose', '-p', 'swift-rehearsal']
 if argv[:1] == ['compose'] and 'ps' in argv and '-aq' in argv:
     print(env('FAKE_REHEARSAL_PS', '')); sys.exit(0)
@@ -78,6 +80,9 @@ if argv[:1] == ['compose'] and 'exec' in argv and 'postgres' in argv and argv[-1
         print(env('FAKE_COPY_IDENTITY', 'staging')); sys.exit(0)
     if env('FAKE_LIVE_FAIL'): sys.exit(1)
     print(env('FAKE_LIVE_IDENTITY', 'staging')); sys.exit(0)
+if argv[:1] == ['compose'] and 'exec' in argv and 'postgres' in argv and argv[-1].startswith('SELECT pg_database_size'):
+    if copy: sys.exit(5)
+    print(env('FAKE_DB_BYTES', str(300 * 1048576))); sys.exit(0)
 if argv[:1] == ['compose'] and 'up' in argv and 'api-journeys' in argv:
     sys.exit(0)
 if argv[:1] == ['compose'] and 'logs' in argv:
@@ -146,6 +151,13 @@ class JourneysHost:
              'case "$1" in test) [ -n "$FAKE_STORE_EXISTS" ] && exit 0; exit 1 ;; esac\nexit 0')
         shim(self.bin, 'id', 'if [ "$1" = "-u" ]; then echo "${FAKE_UID:-1000}"; elif [ "$1" = "-g" ]; then echo 1000; else exec /usr/bin/id "$@"; fi')
         shim(self.bin, 'sleep', 'exit 0')
+        # Host headroom: `free -m` (available = column 7) and `df -Pm` of Docker's data directory.
+        shim(self.bin, 'free', 'echo "               total        used        free      shared  buff/cache   available"\n'
+             'echo "Mem:            7951        2650         512          40        4788  ${FAKE_MEM_MB:-5000}"\n'
+             'echo "Swap:              0           0           0"')
+        shim(self.bin, 'df', '[ "$1" = -Pm ] && [ "$2" = /var/lib/docker ] || exit 2\n'
+             'echo "Filesystem 1048576-blocks  Used Available Capacity Mounted on"\n'
+             'echo "/dev/vda1  80000 40000 ${FAKE_DISK_MB:-30000} 58% /"')
         self.calls = self.tmp / 'calls.jsonl'
         self.results = self.tmp / 'results'
 
@@ -198,12 +210,14 @@ class JourneysOnCopy(unittest.TestCase):
         self.assertIn(f'--only={JOURNEYS}', calls[runner]['argv'])
         self.assertEqual(calls[jobs]['argv'][-2:], ['compliance-sample', 'expiry-sweep'])
         self.assertIn('verification-jobs', ' '.join(calls[jobs]['argv']))
-        # The live staging stack is only READ: one identity query, nothing else.
+        # The live staging stack is only READ: its identity and its size, nothing else.
         docker = [c['argv'] for c in calls if c['tool'] == 'docker' and c['argv'][:1] == ['compose']]
         live = [a for a in docker if a[:2] != ['compose', '-p']]
-        self.assertEqual(len(live), 1)
-        self.assertIn('exec', live[0])
-        self.assertTrue(live[0][-1].startswith('SELECT environment FROM deployment_identity'))
+        self.assertEqual([a[-1] for a in live], ["SELECT environment FROM deployment_identity WHERE id = 'singleton'",
+                                                 'SELECT pg_database_size(current_database())'])
+        self.assertTrue(all('exec' in a and 'postgres' in a for a in live))
+        self.assertIn('journeys-on-copy: headroom: 5000 MiB memory available, 30000 MiB disk free (database 300 MiB)', result.stdout)
+        self.assertIn('before the hold on staging lifts: the live /health and the build-9 smoke', result.stderr)
         for argv in docker:
             if argv[:2] == ['compose', '-p']:
                 self.assertEqual(argv[2], 'swift-rehearsal')
@@ -227,6 +241,15 @@ class JourneysOnCopy(unittest.TestCase):
         cases = [
             ({'.env': 'PILOT_ENV=production\nNODE_ENV=production\n'}, 'STAGING host only'),
             ({'.env': 'PILOT_ENV=staging\nNODE_ENV=production\n'}, 'NODE_ENV=production here'),
+            ({'.env': 'PILOT_ENV=staging\nNODE_ENV="production"\n'}, 'NODE_ENV=production here'),
+            ({'.env': 'PILOT_ENV=staging\nNODE_ENV=development\nexport NODE_ENV=production\n'}, 'NODE_ENV=production here'),
+            ({'.env': 'PILOT_ENV=staging\n  NODE_ENV = production # later\n'}, 'NODE_ENV=production here'),
+            # Room for the copy beside the live stack the reviewers use.
+            ({'FAKE_MEM_MB': '1500'}, 'only 1500 MiB of memory available; the copy needs 2048 MiB'),
+            ({'FAKE_MEM_MB': 'n/a'}, "could not read this host's available memory"),
+            ({'FAKE_DB_BYTES': str(20000 * 1048576)}, 'only 30000 MiB of disk free for Docker; the copy needs 42048 MiB'),
+            ({'FAKE_DISK_MB': '2500', 'FAKE_DB_BYTES': str(300 * 1048576)}, 'the copy needs 2648 MiB'),
+            ({'FAKE_DB_BYTES': 'ERROR'}, "could not read the database's size"),
             ({'.env': 'NODE_ENV=development\n'}, 'STAGING host only'),
             ({'LIVETEST_ADMIN_PHONE': '+5926001234'}, "fictional seed admin"),
             ({'LIVETEST_ADMIN_PHONE': ''}, "fictional seed admin"),
@@ -247,6 +270,7 @@ class JourneysOnCopy(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
                 self.assertEqual([c for c in calls if c['tool'] == 'rehearsal.sh'], [], 'nothing built, nothing removed')
+                self.assertNotIn('JOURNEYS FAILED', result.stderr)
                 self.assertFalse([c for c in calls if c['tool'] == 'docker' and ('up' in c['argv'] or 'run' in c['argv'])])
         result, calls = self.host.run('main')
         self.assertIn('full 40-character SHA', result.stderr)

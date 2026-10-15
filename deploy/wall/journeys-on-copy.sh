@@ -8,8 +8,11 @@
 # LIVETEST_ADMIN_PHONE is staging's fictional seed admin (as journeys-run.sh).
 #
 #   1. Refuses before anything changes unless deploy/.env says PILOT_ENV=staging
-#      (and not NODE_ENV=production), the live staging database's deployment
-#      identity says staging (a read-only query), the admin phone is a +5920…
+#      (and NODE_ENV=production in no spelling), the live staging database's
+#      deployment identity says staging (a read-only query), the host has room
+#      for a second stack beside the live one Apple reviews (2 GiB of memory
+#      available; Docker's disk: twice the database plus 2 GiB free), the admin
+#      phone is a +5920…
 #      number, and no rehearsal copy is already there.
 #   2. ./deploy/wall/rehearsal.sh up <sha>: the isolated copy (its own project,
 #      an internal network with no route out, its own volumes and freshly
@@ -72,7 +75,9 @@ SHA="$1"
 setting() { grep -E "^$1=" "$DEPLOY/.env" | tail -1 | cut -d= -f2- || true; }
 [ "$(setting PILOT_ENV)" = staging ] ||
   die "this runs on the STAGING host only (deploy/.env must say PILOT_ENV=staging): production's rehearsal is ./deploy/wall/rehearsal.sh, with no journeys on a copy of production's data"
-[ "$(setting NODE_ENV)" != production ] || die "NODE_ENV=production here: the journeys instance signs synthetic accounts in with the dev code, which production mode refuses"
+# Any line that sets NODE_ENV to production, however it is spelled (quoted, export …).
+! grep -qE '^([^#]*[^A-Za-z0-9_#])?NODE_ENV[[:space:]]*[=:][^#]*production' "$DEPLOY/.env" ||
+  die "NODE_ENV=production here: the journeys instance signs synthetic accounts in with the dev code, which production mode refuses"
 [[ "${LIVETEST_ADMIN_PHONE:-}" =~ ^\+5920[0-9]{6,}$ ]] || die "LIVETEST_ADMIN_PHONE must be staging's fictional seed admin (+5920…)"
 for name in DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES COMPOSE_ENV_FILES; do
   [ -z "${!name+set}" ] || die "$name is set in this shell; run from a clean shell"
@@ -84,11 +89,31 @@ REH=(docker compose -p "$PROJECT" --project-directory "$DEPLOY" -f "$DEPLOY/dock
      -f "$DEPLOY/docker-compose.wall.yml" -f "$DEPLOY/docker-compose.rehearsal.yml")
 JRN=("${REH[@]}" -f "$DEPLOY/docker-compose.journeys-copy.yml" --profile journeys-copy)
 IDENTITY_SQL="SELECT environment FROM deployment_identity WHERE id = 'singleton'"
-identity_of() {  # identity_of <compose argv…>: the database's own word, read-only
-  "$@" exec -T postgres sh -c 'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -tA -v ON_ERROR_STOP=1 -c "$1"' sh "$IDENTITY_SQL" 2>/dev/null
+SIZE_SQL="SELECT pg_database_size(current_database())"
+read_one() {  # read_one <sql> <compose argv…>: one answer from that database, read-only
+  local sql="$1"; shift
+  "$@" exec -T postgres sh -c 'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -tA -v ON_ERROR_STOP=1 -c "$1"' sh "$sql" 2>/dev/null
 }
+identity_of() { read_one "$IDENTITY_SQL" "$@"; }  # the database's own word
 LIVE_IDENTITY="$(identity_of "${LIVE[@]}")" || die "could not read this host's database identity; is the staging stack up?"
 [ "$LIVE_IDENTITY" = staging ] || die "this host's database says '$LIVE_IDENTITY', not staging: journeys run only on a copy of staging's synthetic data"
+# Headroom: the copy is a second stack on the host Apple reviews. Hold unless
+# it fits beside the live one with room to spare.
+MIN_MEM_MB=2048
+command -v free >/dev/null 2>&1 || die "free is required (the memory headroom check)"
+mem_mb="$(free -m | awk '/^Mem:/ {print $7}')"
+[[ "$mem_mb" =~ ^[0-9]+$ ]] || die "could not read this host's available memory"
+[ "$mem_mb" -ge "$MIN_MEM_MB" ] ||
+  die "only ${mem_mb} MiB of memory available; the copy needs ${MIN_MEM_MB} MiB beside the live staging stack: hold"
+db_bytes="$(read_one "$SIZE_SQL" "${LIVE[@]}")" || die "could not read the database's size"
+[[ "$db_bytes" =~ ^[0-9]+$ ]] || die "could not read the database's size"
+docker_root="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null)" || die "could not read Docker's data directory"
+disk_mb="$(df -Pm "$docker_root" 2>/dev/null | awk 'NR == 2 {print $4}')"
+[[ "$disk_mb" =~ ^[0-9]+$ ]] || die "could not read the free disk under Docker's data directory"
+need_mb=$(( 2 * db_bytes / 1048576 + 2048 ))
+[ "$disk_mb" -ge "$need_mb" ] ||
+  die "only ${disk_mb} MiB of disk free for Docker; the copy needs ${need_mb} MiB (twice the database plus 2 GiB): hold"
+say "headroom: ${mem_mb} MiB memory available, ${disk_mb} MiB disk free (database $(( db_bytes / 1048576 )) MiB)"
 [ -z "$("${REH[@]}" ps -aq 2>/dev/null)" ] || die "a rehearsal copy is already there; remove it first (./deploy/wall/rehearsal.sh down)"
 ! sudo -n test -e "$STORE_DIR" || die "a rehearsal store already exists; remove it first (./deploy/wall/rehearsal.sh down)"
 ! sudo -n test -e "$RUN_DIR" || die "rehearsal secrets already exist; remove them first (./deploy/wall/rehearsal.sh down)"
@@ -106,6 +131,7 @@ cleanup() {
   rm -rf "$WORK"
   "$HERE/rehearsal.sh" down >/dev/null 2>&1 || echo "journeys-on-copy: the copy could not be removed; run ./deploy/wall/rehearsal.sh down" >&2
   if [ "$rc" -ne 0 ]; then echo "JOURNEYS FAILED at step: $STEP (exit $rc). The copy was removed." >&2; fi
+  echo "journeys-on-copy: before the hold on staging lifts: the live /health and the build-9 smoke (PILOT-RUNBOOK §13)" >&2
 }
 trap cleanup EXIT
 

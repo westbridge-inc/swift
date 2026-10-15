@@ -1280,8 +1280,15 @@ posture, once pilot-up has built the API image for `$SHA`:
 
     LIVETEST_ADMIN_PHONE=+5920400000 ./deploy/wall/journeys-on-copy.sh "$SHA"
 
-It refuses unless `deploy/.env` says `PILOT_ENV=staging` (and not
-`NODE_ENV=production`) and the live database says staging; then
+Staging is what the store reviewers use, and the copy is a second stack on
+the same host. Run it only inside an announced hold on staging, never while
+the owner is testing, and lift the hold only after the copy is gone, the
+live staging `/health` answers and the build-9 compatibility smoke passes.
+
+It refuses unless `deploy/.env` says `PILOT_ENV=staging` (and sets
+`NODE_ENV=production` in no spelling), the live database says staging, and
+the host has room for the copy beside the live stack (2 GiB of memory
+available, and twice the database plus 2 GiB free on Docker's disk); then
 `rehearsal.sh up` builds the walled copy (which must say staging too), the
 copy's worker stops, and a private `api-journeys`
 (`deploy/docker-compose.journeys-copy.yml`: both logins, `TENANT_RLS_BIND=1`,
@@ -1297,7 +1304,9 @@ step-up the copy cannot do). Then the system jobs `compliance-sample` and
 request time within 1 s, no query waiting for a pool connection, tenant and
 non-tenant bindings ran, and `nontenant_system_in_tx` = 0. The copy is removed
 however the run ends, and `JOURNEYS PASSED` is printed only when every step
-held. The live staging API and database are only read. Any failure is a stop:
+held. The live staging API and database are only read. The copy has its own
+freshly generated secrets, so staging rows encrypted under the live key do not
+read on it; the journeys make their own accounts. Any failure is a stop:
 Phase C does not go ahead, and the cause is fixed in code, never by loosening
 the wall.
 
