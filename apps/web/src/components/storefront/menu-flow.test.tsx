@@ -7,6 +7,7 @@ import { CustomerSessionProvider, type CustomerSession } from '@/components/cust
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 import type { StorefrontDetail } from '@/lib/api';
+import { axeViolations } from '@/test/axe';
 
 // ---------------------------------------------------------------------------
 // [W6] The one store page's menu: one tap for an item that needs no choice,
@@ -318,5 +319,15 @@ describe('[W6] a guest at Add', () => {
     await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/checkout'));
     expect(ensureSignedIn).toHaveBeenCalledOnce(); expect(customer.addToCart).not.toHaveBeenCalled();
     expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1')!).lines[0].itemId).toBe('soup');
+  });
+});
+
+// [Row 111 · W8] The item sheet (choices, quantity, Add) is a dialog a keyboard and a screen reader can use.
+describe('[W8] the item sheet is accessible', () => {
+  it('the open sheet has no accessibility violations axe can find', async () => {
+    await start();
+    fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
+    expect(await axeViolations(sheet)).toEqual([]);
   });
 });

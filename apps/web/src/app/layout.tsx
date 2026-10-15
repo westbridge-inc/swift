@@ -75,6 +75,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en-GY" style={swiftDesignVariables}>
       <body>
+        {/* [Row 111 · W8] A keyboard or screen-reader user can jump past the navigation to the content. */}
+        <a href="#main" className="sw-skip-link">Skip to main content</a>
         <ServiceWorkerRegistrar />
         {children}
       </body>

@@ -58,6 +58,20 @@ afterEach(() => {
 
 // ── 1. The hold-release tick tells the provider, not the riders ─────────────
 
+// [Owner ruling #15] Store-room events reach the CURRENT team of the store
+// only (emitToStoreRoom): the provider socket is seated in its room and
+// addressed by its id, and the team read answers with the provider as owner.
+const providerSocket = () => ({
+  id: 'provider-socket',
+  data: { userId: 'user-provider', tenantId: 'swift-default', authorizationExpiresAtMs: Date.now() + 60 * 60 * 1000 },
+  leave: async () => {},
+});
+const providerTeam = {
+  findUnique: async (args: { where: { id: string } }) => (args.where.id === 'vendor-svc'
+    ? { tenantId: 'swift-default', status: 'ACTIVE', isCurrentlyOpen: true, owner: { userId: 'user-provider', user: { status: 'ACTIVE', tenantId: 'swift-default' } }, staff: [] }
+    : null),
+};
+
 describe('OrderService.releaseDueHeldOrders — a released booking goes to its provider', () => {
   function releaseHarness(rows: Row[]) {
     const store = orderStore(rows);
@@ -78,7 +92,7 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
         inTransaction = true;
         try { return await fn(self.prisma); } finally { inTransaction = false; }
       },
-      vendor: counter('vendor'),
+      vendor: { ...counter('vendor'), ...providerTeam },
       item: counter('item'),
       orderOutbox: {
         createMany: async (args: { data: Array<Record<string, unknown>>; skipDuplicates?: boolean }) => {
@@ -90,7 +104,9 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
       stockMovement: { findMany: async () => [] },
     });
     self.prisma = prisma;
-    const io = recordingIo();
+    const io = Object.assign(recordingIo(), {
+      in: (room: string) => ({ fetchSockets: async () => (room === 'vendor:vendor-svc' ? [providerSocket()] : []) }),
+    });
     const svc = new OrderService(prisma, io);
     const vendorAlert = vi.spyOn(NotificationService.prototype, 'newOrderForVendor').mockResolvedValue('notification-1');
     const enqueueDispatch = vi.fn(async (_orderId: string) => {});
@@ -103,7 +119,7 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     expect(res.released).toEqual(['bk-held']);
     expect(h.store.rows[0]).toMatchObject({ holdExpiresAt: null });
     expect(h.store.rows[0]!['releasedToVendorAt']).toBeInstanceOf(Date);
-    expect(h.io.emits).toEqual([{ room: 'vendor:vendor-svc', event: 'order:new', payload: { orderId: 'bk-held', vendorId: 'vendor-svc', orderNumber: 'ORD-BK-HELD' } }]);
+    expect(h.io.emits).toEqual([{ room: ['provider-socket'], event: 'order:new', payload: { orderId: 'bk-held', vendorId: 'vendor-svc', orderNumber: 'ORD-BK-HELD' } }]);
     expect(h.vendorAlert).toHaveBeenCalledTimes(1);
     expect(h.vendorAlert).toHaveBeenCalledWith('user-provider', 'ORD-BK-HELD', 1, 2000, 'bk-held', expect.any(Date));
     // [Q10] ...carrying the booking's own response deadline, which its alert
@@ -288,6 +304,7 @@ describe('OrderService.updateStatus → ACCEPTED — the customer is told a book
       user: { findUnique: async () => ({ countryCode: 'GY' }) },
       // [L05] The order-room gate re-reads the audience and re-gates the order's chat rooms.
       chatRoom: { findMany: async () => [] },
+      vendor: providerTeam,
     });
     // [L05] Order-room events reach the order's CURRENT people only: the
     // customer's socket is seated in the order room and addressed by its id.
@@ -297,7 +314,7 @@ describe('OrderService.updateStatus → ACCEPTED — the customer is told a book
       leave: async () => {},
     };
     const io = Object.assign(recordingIo(), {
-      in: (room: string) => ({ fetchSockets: async () => (room === `order:${String(row['id'])}` ? [customerSocket] : []) }),
+      in: (room: string) => ({ fetchSockets: async () => (room === `order:${String(row['id'])}` ? [customerSocket] : room === 'vendor:vendor-svc' ? [providerSocket()] : []) }),
     });
     const svc = new OrderService(prisma, io);
     vi.spyOn(OrderService.prototype, 'transitionOrderAtomically').mockResolvedValue({ order: row as never, sourceStatus: 'PENDING', cancelledSearches: 0, earningNotices: [] });
@@ -313,8 +330,9 @@ describe('OrderService.updateStatus → ACCEPTED — the customer is told a book
     await h.svc.updateStatus('bk-1', 'ACCEPTED', 'user-provider', 'Accepted by vendor');
     expect(confirmed).toHaveBeenCalledWith('user-customer', 'ORD-BK-1', 'Kim’s Barbershop', 'bk-1');
     expect(h.accepted).not.toHaveBeenCalled();
-    // The customer's socket in order:bk-1 hears the confirmation (addressed by id), then the provider's room.
-    expect(h.io.emits.map((e) => e.room)).toEqual([['customer-socket'], 'vendor:vendor-svc']);
+    // The customer's socket in order:bk-1 hears the confirmation (addressed by id), then the provider's
+    // socket in its store room (addressed by id too: the store-room gate, owner ruling #15).
+    expect(h.io.emits.map((e) => e.room)).toEqual([['customer-socket'], ['provider-socket']]);
     expect(h.io.emits[0]).toMatchObject({ event: 'order:status_changed', payload: { orderId: 'bk-1' } });
   });
 
