@@ -9,6 +9,7 @@ import { verificationRoutes } from '../../modules/verification/verification.rout
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { partnerRoutes } from '../../modules/partner/partner.routes';
 import { type Actor, createGolden } from './gold-7-helpers';
+import { uniquePng } from '../helpers/real-image';
 
 // Same local encrypted-storage boundary as GOLD-5. Runtime-generated test
 // material stays in memory; no credential or document bytes enter the log.
@@ -37,7 +38,8 @@ export function documentHarness(h: ReturnType<typeof createGolden>, name: string
     ]), headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, authorization: `Bearer ${actor.token}` } });
   }
   return { start, upload, storage: getStorageProvider,
-    bytes: () => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), randomBytes(80)]),
+    // [Row 108] A real photo, unique per call: the upload route reads every photo with the real decoder.
+    bytes: () => uniquePng(`gold7-${randomBytes(16).toString('hex')}`),
     close: async () => {
       try { await h.close(); } finally {
         vi.unstubAllEnvs(); resetKeyProviderForTests();
