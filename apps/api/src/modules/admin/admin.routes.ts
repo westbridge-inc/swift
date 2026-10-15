@@ -4769,21 +4769,29 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: entries.map((e) => ({ ...e, amountUsd: Number(e.amountUsd) })) };
   });
 
-  /** Set a plan price (append semantics: deactivate + create keeps history;
-   *  the book is USD-only by law). */
+  /** Schedule a plan price (append semantics: every row is kept; the book is
+   *  USD-only by law). [Owner legal plan · F2 · GUARDRAILS §7] A price never
+   *  changes at once: it takes effect no sooner than 14 days from now (an
+   *  earlier effectiveFrom is refused), the price in force stays in force until
+   *  then, a week is priced by the book in force when it starts, and every
+   *  partner it changes is told now (billing/price-book.ts, fx-notices.ts). */
   app.put('/billing/price-book', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       role: z.enum(['VENDOR', 'RIDER', 'DRIVER', 'SERVICE']),
       tier: z.string().trim().max(40).optional(),
       amountUsd: z.number().positive().max(10_000),
+      effectiveFrom: z.string().datetime(),
     }).parse(request.body ?? {});
+    const { earliestPriceChange, PRICE_BOOK_NOTICE_DAYS } = await import('../billing/price-book');
+    const effectiveFrom = new Date(body.effectiveFrom);
+    const earliest = earliestPriceChange(new Date());
+    if (effectiveFrom.getTime() < earliest.getTime()) {
+      throw new AppError(400, 'PRICE_CHANGE_TOO_SOON', `A weekly price changes no sooner than ${PRICE_BOOK_NOTICE_DAYS} days after it is set, so every partner it changes is told first. Set effectiveFrom to ${earliest.toISOString()} or later. Nothing changed.`, { earliestEffectiveFrom: earliest.toISOString() });
+    }
     const updated = await app.prisma.$transaction(async (tx) => {
-      await tx.priceBookEntry.updateMany({
-        where: { role: body.role, tier: body.tier ?? null, active: true },
-        data: { active: false },
-      });
+      // The price in force stays in force until effectiveFrom: nothing is deactivated here.
       const created = await tx.priceBookEntry.create({
-        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd },
+        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd, effectiveFrom },
       });
       // [ADM-002] The route already owned this transaction — the audit row
       // simply joins it, and names the entry it made (a create declares no
@@ -4791,7 +4799,10 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: created.id });
       return created;
     });
-    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd) } };
+    // Tell every partner it changes, now (the daily notice job retries any undelivered).
+    const { announcePriceBookEntry } = await import('../billing/fx-notices');
+    const told = await announcePriceBookEntry(app.prisma, app.io, updated.id, new Date());
+    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd), noticesQueued: told.notified } };
   });
 
   /** Part 13 reporting — one truth, two columns: USD (management view) and
@@ -4887,7 +4898,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const tenant = await app.prisma.tenantBillingCurrency.findFirst({ where: { settlementCurrency: q.quote } });
     const inc = tenant ? Number(tenant.roundingIncrement) : 1;
     const previous = await app.prisma.fxRate.findFirst({ where: { quote: q.quote }, orderBy: { effectiveFrom: 'desc' } });
-    const entries = await app.prisma.priceBookEntry.findMany({ where: { active: true }, orderBy: { role: 'asc' } });
+    // The plans in force today (a scheduled price shows once it is in force).
+    const { activePriceBook, bookRowsAt } = await import('../billing/price-book');
+    const entries = [...bookRowsAt(await activePriceBook(app.prisma), new Date()).values()].sort((a, b) => a.role.localeCompare(b.role));
     return {
       success: true,
       data: {
