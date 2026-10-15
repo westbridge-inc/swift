@@ -499,18 +499,21 @@ function rawTenantBindingExtension(wiring: ScopeWiring) {
  *  the batch cannot be formed; the query then runs on that transaction,
  *  which must have been bound with `bindTenantTransaction` — under a
  *  NOBYPASSRLS login an unbound transaction sees ZERO rows (fail closed).
- *  `kind` names the counter label: a tenant model, or [W0] a model without a
+ *  `label` names the counter label: a tenant model, or [W0] a model without a
  *  tenantId bound only so its walled relations are read in the tenant. */
-async function bindTenant(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, tenantId: string, client: BatchClient, kind: 'tenant' | 'nontenant' = 'tenant'): Promise<unknown> {
+type BindLabel = 'tenant' | 'nontenant';
+/** The counter label of a query re-issued on the system client. */
+type SystemLabel = 'system' | 'nontenant_system';
+async function bindTenant(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, tenantId: string, client: BatchClient, label: BindLabel = 'tenant'): Promise<unknown> {
   try {
     const bind = client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)` as unknown as Record<symbol, boolean>;
     bind[TENANT_BIND_STATEMENT] = true;
     const [, result] = await client.$transaction([bind as never, query(args) as never]);
-    tenantBindCounter.labels(kind).inc();
+    tenantBindCounter.labels(label).inc();
     return result;
   } catch (err) {
     if (err instanceof Error && /transaction/i.test(err.message) && /(PrismaPromise|same client|batch)/i.test(err.message)) {
-      tenantBindCounter.labels(`${kind}_fallback_in_tx`).inc();
+      tenantBindCounter.labels(`${label}_fallback_in_tx`).inc();
       return query(args);
     }
     throw err;
@@ -589,9 +592,9 @@ function nonTenantBindingExtension(wiring: ScopeWiring) {
  *  unbound and the database shows ZERO rows — fail closed, never a leak.
  *  [MASTER-019] Only for a query that is NOT part of a transaction: a
  *  transaction's queries never move connection (see tenantScope). */
-async function onSystemClient(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, model: string, operation: string, sys: PrismaClient | null, kind: 'system' | 'nontenant_system' = 'system'): Promise<unknown> {
+async function onSystemClient(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, model: string, operation: string, sys: PrismaClient | null, label: SystemLabel = 'system'): Promise<unknown> {
   if (!sys) { tenantBindCounter.labels('system_no_client').inc(); return query(args); }
-  tenantBindCounter.labels(kind).inc();
+  tenantBindCounter.labels(label).inc();
   const delegate = (sys as unknown as Record<string, Record<string, (a: Record<string, unknown>) => Promise<unknown>>>)[model.charAt(0).toLowerCase() + model.slice(1)];
   const op = delegate?.[operation];
   if (!op) { tenantBindCounter.labels('system_no_client').inc(); return query(args); }
