@@ -92,6 +92,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'MmgAgentPayment', field: 'amount', unit: 'MAJOR_WHOLE' },
   // [MMG checkout 2/6] What a partner was asked to pay on the MMG page: whole GYD.
   { model: 'MmgCheckoutIntent', field: 'amount', unit: 'MAJOR_WHOLE' },
+  // [MMG REVERSAL] A returned payment: always the whole checkout amount.
+  { model: 'MmgFeeReversal', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'Option', field: 'additionalPrice', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'deliveryFee', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'discount', unit: 'MAJOR_WHOLE' },

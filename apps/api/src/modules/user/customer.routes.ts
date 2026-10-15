@@ -728,7 +728,8 @@ export async function customerRoutes(app: FastifyInstance) {
     undefined,
     // §2 checkout gate reads the SAME supply dispatch would search — including
     // the cash-float requirement, so the probe and the real dispatch agree.
-    (point, floatRequired) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired),
+    // [owner #20] …and, for an order too big for a bike, only the movers whose vehicle can carry it.
+    (point, floatRequired, packageSize) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired, undefined, packageSize),
     app.redis,
   );
   const picking = new PickingService(app.prisma, app.io);
@@ -809,10 +810,15 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    const referrer = await app.prisma.customer.findFirst({
-      where: { referralCode: { equals: code, mode: 'insensitive' } },
+    // [B-1] A code belongs to one operator: the referrer is looked up inside the
+    // caller's own tenant only (the caller's account says which). A code from
+    // another tenant reads exactly like an unknown one — nobody named, nothing
+    // linked, no count raised.
+    const caller = await app.prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } });
+    const referrer = caller ? await app.prisma.customer.findFirst({
+      where: { referralCode: { equals: code, mode: 'insensitive' }, user: { tenantId: caller.tenantId } },
       include: { user: { select: { firstName: true } } },
-    });
+    }) : null;
     if (!referrer) {
       throw new AppError(404, 'INVALID_REFERRAL', 'That referral code wasn’t found');
     }
@@ -3397,7 +3403,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const result = await decideStaffInvite(app.prisma, {
       inviteId: id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
-    });
+    }, notificationService);
     return { success: true, data: result };
   });
   app.post('/team-invites/:id/decline', async (request: AuthRequest) => {
