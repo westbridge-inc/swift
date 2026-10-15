@@ -1,0 +1,122 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { nanoid } from 'nanoid';
+import type { UserRole } from '@prisma/client';
+import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
+import { redisPlugin } from '../plugins/redis';
+import { authPlugin } from '../plugins/auth';
+import { socketPlugin } from '../plugins/socket';
+import { authRoutes } from '../modules/auth/auth.routes';
+import { registerErrorHandler } from '../middleware/error-handler';
+import { LEGAL_VERSION } from '../modules/legal/legal.routes';
+import { MATERIAL_CHANGES, acceptanceStatus, materialVersion } from '../modules/legal/reaccept';
+
+// ---------------------------------------------------------------------------
+// [Legal research G2 · R26 · Terms "Changes": "We announce material changes in the app … and ask you to accept
+// them in the app"] "Continued use" is no longer acceptance. A material change is shown in short and accepted
+// with a fresh tick; the tick is recorded in the consent ledger for the Terms, the Privacy Policy and the
+// person's partner agreements, at the served version. Phone builds 9-11 never call this and are never blocked.
+// ---------------------------------------------------------------------------
+
+describe('who must accept, and what they are shown', () => {
+  it('a material version takes effect only once it is the served version', () => {
+    expect(materialVersion('2026-10-15')).toBeNull();
+    expect(materialVersion('2026-10-16')).toBe('2026-10-16');
+    expect(materialVersion('2026-12-01')).toBe(MATERIAL_CHANGES[MATERIAL_CHANGES.length - 1]!.version);
+  });
+
+  it('someone who never accepted any version must accept the current one (no change summary: it is all new to them)', () => {
+    expect(acceptanceStatus({ tosVersion: null, roles: ['CUSTOMER'] as UserRole[] }, '2026-10-16')).toMatchObject({ needsAcceptance: true, summary: [] });
+  });
+
+  it('someone who accepted before a material version is asked again, with the summary; at or after it, not', () => {
+    const before = acceptanceStatus({ tosVersion: '2026-10-15', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-16');
+    expect(before.needsAcceptance).toBe(true);
+    expect(before.summary.join(' ')).toMatch(/Westbridge Inc\./);
+    expect(before.summary.join(' ')).toMatch(/letters, documents or mail/);
+    expect(acceptanceStatus({ tosVersion: '2026-10-16', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-16').needsAcceptance).toBe(false);
+    // A later non-material version (not listed) asks nobody who accepted the material one.
+    expect(acceptanceStatus({ tosVersion: '2026-10-16', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-20').needsAcceptance).toBe(false);
+  });
+
+  it('partners re-accept their agreement with the Terms', () => {
+    expect(acceptanceStatus({ tosVersion: null, roles: ['MOVER', 'CUSTOMER'] as UserRole[] }).agreements).toEqual(['driver_agreement']);
+    expect(acceptanceStatus({ tosVersion: null, roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[] }).agreements).toEqual(['vendor_agreement']);
+    expect(acceptanceStatus({ tosVersion: null, roles: ['CUSTOMER'] as UserRole[] }).agreements).toEqual([]);
+  });
+});
+
+let app: FastifyInstance;
+const userIds: string[] = [];
+
+async function mkUser(roles: UserRole[], tosVersion: string | null) {
+  const u = await app.prisma.user.create({
+    data: { phone: `+59200${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Re', lastName: `Accept${nanoid(5)}`, roles, activeRole: roles[0]!, isPhoneVerified: true, tosVersion },
+  });
+  userIds.push(u.id);
+  const token = app.jwt.sign({ userId: u.id, role: roles[0]!, jti: nanoid(8) });
+  await app.prisma.session.create({ data: { authMethod: 'OTP', userId: u.id, token, refreshToken: nanoid(48), deviceId: 'reaccept', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
+  return { id: u.id, token };
+}
+const call = (method: 'GET' | 'POST', token: string, payload?: Record<string, unknown>) =>
+  app.inject({ method, url: '/api/v1/auth/legal-acceptance', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(payload ? { payload } : {}) });
+const rows = (userId: string) => runWithoutTenant(() => app.prisma.consentRecord.findMany({
+  where: { subjectId: userId }, orderBy: { documentType: 'asc' }, select: { documentType: true, documentVersion: true, action: true, subjectType: true, evidence: true },
+}), 'test-read:reaccept');
+
+beforeAll(async () => {
+  app = Fastify({ logger: false });
+  registerErrorHandler(app);
+  await app.register(prismaPlugin);
+  await app.register(redisPlugin);
+  await app.register(authPlugin);
+  await app.register(socketPlugin);
+  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await app.ready();
+});
+
+afterAll(async () => {
+  await runWithoutTenant(async () => {
+    await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
+  }, 'test-cleanup:reaccept');
+  await app.close();
+});
+
+describe('GET/POST /auth/legal-acceptance', () => {
+  it('a person who never accepted is asked; the fresh tick records the Terms, the Privacy Policy and their agreement, at the served version', async () => {
+    const mover = await mkUser(['MOVER', 'CUSTOMER'] as UserRole[], null);
+    const status = await call('GET', mover.token);
+    expect(status.statusCode, status.body).toBe(200);
+    expect(status.json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: null, needsAcceptance: true, agreements: ['driver_agreement'] });
+
+    const accepted = await call('POST', mover.token, { version: LEGAL_VERSION, accept: true });
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    expect(accepted.json().data).toMatchObject({ acceptedVersion: LEGAL_VERSION, needsAcceptance: false });
+    expect((await rows(mover.id)).map((r) => [r.documentType, r.documentVersion, r.action, r.subjectType])).toEqual([
+      ['driver_agreement', LEGAL_VERSION, 'granted', 'driver'],
+      ['privacy_policy', LEGAL_VERSION, 'granted', 'customer'],
+      ['terms_of_service', LEGAL_VERSION, 'granted', 'customer'],
+    ]);
+    expect((await rows(mover.id))[0]!.evidence).toMatchObject({ control: 'reaccept_checkbox', path: 'auth/legal-acceptance' });
+
+    // A double tap records once.
+    expect((await call('POST', mover.token, { version: LEGAL_VERSION, accept: true })).statusCode).toBe(200);
+    expect(await rows(mover.id)).toHaveLength(3);
+  });
+
+  it('accepting words that are no longer served is refused (they changed while the person read them); no tick, no row', async () => {
+    const person = await mkUser(['CUSTOMER'] as UserRole[], null);
+    const stale = await call('POST', person.token, { version: '2026-01-01', accept: true });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error).toMatchObject({ code: 'LEGAL_VERSION_CHANGED', details: { currentVersion: LEGAL_VERSION } });
+    const unticked = await call('POST', person.token, { version: LEGAL_VERSION, accept: false });
+    expect(unticked.statusCode).toBe(400);
+    expect(await rows(person.id)).toHaveLength(0);
+  });
+
+  it('a person already at the served version is not asked', async () => {
+    const person = await mkUser(['CUSTOMER'] as UserRole[], LEGAL_VERSION);
+    expect((await call('GET', person.token)).json().data).toMatchObject({ needsAcceptance: false, acceptedVersion: LEGAL_VERSION });
+  });
+});
