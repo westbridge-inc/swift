@@ -21,7 +21,7 @@ import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/ob
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
-import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites } from './staff-invites';
+import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -830,6 +830,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     await requireStepUp(app, request); // [ALG-34] a grant hands the store's board to a phone
     const body = addStaffSchema.parse(request.body);
+    // [Row 55] A daily allowance per owner account, spent BEFORE the number is
+    // looked up: reaching it reads the same for every number and grants nothing.
+    if (!(await spendStaffAddAllowance(app.redis, request.user.userId))) {
+      throw new AppError(429, 'STAFF_ADD_DAILY_LIMIT', `You can add up to ${staffAddDailyCap()} team members a day. Try again tomorrow.`);
+    }
 
     const target = await app.prisma.user.findUnique({
       where: { phone: body.phone },
