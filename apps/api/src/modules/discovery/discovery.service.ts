@@ -4,7 +4,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { CAT_MAX_ITEM_TAGS, suggestCategories, type MatchableCategory } from './matcher';
 import { reconcileVendorDerived } from './derivation';
 import { assertCategoryAllowed } from '../compliance/prohibited-gate';
-import { classifyCategory } from '../compliance/prohibited-items';
+import { classifyCategory, storeCategoryReason } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Discovery service (#17) — vendor picks, item tags, suggestions, requests.
@@ -82,6 +82,14 @@ export class DiscoveryService {
     for (const slug of secondarySlugs) secondaries.push(await this.requireActiveCategory(slug, tenantId));
     // [GUARDRAILS §8] A store is never filed under a banned category.
     for (const category of [primary, ...secondaries]) assertCategoryAllowed(category, 'store');
+    // [GUARDRAILS §8 · #54] Nor does a partner file itself OUT of one: a store under a banned category is hidden and
+    // its items are banned, and only Swift lifts that (as with an item's banned tag, Opus S3-5).
+    const chosen = await this.prisma.vendorDiscoveryCategory.findMany({ where: { vendorId, source: { in: ['VENDOR', 'ADMIN'] } }, select: { categoryId: true } });
+    if (chosen.length > 0) {
+      const current = await this.prisma.discoveryCategory.findMany({ where: { id: { in: chosen.map((c) => c.categoryId) } }, select: { slug: true, name: true } });
+      const banned = current.find((c) => classifyCategory(c) !== null);
+      if (banned) throw new AppError(409, 'PROHIBITED_ITEM', storeCategoryReason(banned.name), { categorySlug: banned.slug });
+    }
 
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -147,6 +155,10 @@ export class DiscoveryService {
       where: { tenantId_slug: { tenantId, slug } },
     });
     if (!category) throw new NotFoundError('Category', slug);
+    // [GUARDRAILS §8 · Opus S3-5] A banned category's tag is a certain ban; removing it would lift the ban. Only Swift does.
+    if (classifyCategory(category)) {
+      throw new AppError(409, 'PROHIBITED_ITEM', `This item is filed under ${category.name}, which Swift doesn't allow. Ask Swift support to check it.`, { categorySlug: category.slug });
+    }
     await this.prisma.$transaction(async (tx) => {
       const removed = await tx.itemDiscoveryCategory.deleteMany({ where: { itemId, categoryId: category.id } });
       if (removed.count === 0) throw new NotFoundError('Tag', slug);
@@ -201,7 +213,8 @@ export class DiscoveryService {
    */
   async pendingSuggestionsForVendor(vendorId: string, limit = 200) {
     const items = await this.prisma.item.findMany({
-      where: { vendorId },
+      // [Item 62] A deleted (archived) listing has nothing left to tag.
+      where: { vendorId, archivedAt: null },
       select: { id: true, name: true, imageUrl: true },
     });
     if (items.length === 0) return [];

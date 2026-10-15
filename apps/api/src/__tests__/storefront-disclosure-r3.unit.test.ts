@@ -8,6 +8,16 @@ import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { PUBLIC_BROWSE_CAPABILITY, runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { hostRoutes, orderStore, prismaDouble, project, recordingIo, recordingRedis, type Row } from './helpers/service-vertical-doubles';
 import { PUBLIC_DISCLOSURE_TTL_MS, resetPublicDisclosureCacheForTests } from '../modules/verification/storefront-disclosure';
+// [GUARDRAILS §8 · #54] The store-level ban's reads are proven against a real database (prohibited-items.test.ts);
+// this seam models none of the category tables, and no fixture store is filed under a banned category.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
+  // [owner 14 Oct, store names] nor the store's own words (no fixture store's name holds it)
+  storeHiddenFromCustomers: async () => false,
+}));
+
 
 const crypto = vi.hoisted(() => ({ unwrap: vi.fn(), decrypt: vi.fn() }));
 vi.mock('../providers/storage/envelope', () => ({ getKeyProvider: () => ({ unwrapDek: crypto.unwrap }) }));
@@ -241,6 +251,8 @@ describe('R3 actual activation projection', () => {
   it('a pending store with a complete lawful block activates without PERSONAL extraction', async () => {
     const h = await fixture('PENDING_APPROVAL');
     h.vendor['isVerified'] = false;
+    // [owner #51, 14 Oct] A first go-live also needs a published contact phone.
+    h.vendor['publicPhone'] = '+5926001234';
     await h.activate();
     expect(h.vendor).toMatchObject({ status: 'ACTIVE', isVerified: true, acceptingOrders: true });
     expect(h.extracted).not.toHaveBeenCalled();

@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from './order-room-emission.service';
 import type { Prisma, PrismaClient, SubstitutionStatus } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
@@ -6,7 +7,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
-import { hiddenAmong } from '../compliance/prohibited-gate';
+import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -251,7 +252,7 @@ export class PickingService {
       });
     });
     // Only the committed winner speaks.
-    this.io.to(`order:${orderId}`).emit('order:substitution', {
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:substitution', {
       orderId,
       lineId,
       originalName: line.name,
@@ -548,7 +549,7 @@ export class PickingService {
     });
     if (!closed) return false;
     this.emitPickState(line.order.vendorId, line.order.id, line.id, { subStatus });
-    this.io.to(`order:${line.order.id}`).emit('order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
+    await emitToOrderRoom(this.prisma, this.io, line.order.id, 'order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
     return true;
   }
 
@@ -568,10 +569,7 @@ export class PickingService {
       note: `picking: ${note}`,
     });
     if (restock.applied) {
-      await db.item.updateMany({
-        where: { id: line.itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-        data: { isAvailable: true, autoHiddenAt: null },
-      });
+      await unhideRestocked(db, line.itemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
       await db.stockAdjustment.create({
         data: { itemId: line.itemId, delta: line.quantity, reason: 'RETURN', note: `picking: ${note}` },
       });

@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -8,6 +9,8 @@ import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
+import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
@@ -33,6 +36,7 @@ import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
 import { reviewerTypedFields } from '../verification/identity-signal-policy';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
+import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
 import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
@@ -83,8 +87,8 @@ import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY
 import { readFeePause } from '../billing/mmg-pause';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
-import { catalogueChecksFor, flaggedItemsInTenant, wordsFor } from '../compliance/prohibited-gate';
-import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, type CatalogueCheck } from '../compliance/prohibited-items';
+import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
+import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -717,7 +721,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // [VERIFY-DOCS V3] The document reviewer grant is refused in EVERY mode:
     // shadow mode exists to watch capability decisions before enforcing them,
     // never to open a person's identity documents to an operator without it.
-    if (decision.reason === 'missing-explicit-grant') throw documentReviewerRequired();
+    if (decision.reason === 'missing-explicit-grant') {
+      throw decision.capability === CATALOGUE_APPROVER_CAPABILITY ? catalogueApproverRequired() : documentReviewerRequired();
+    }
     if (capabilityMode() === 'shadow') {
       adminCapabilityCounter.labels('shadow_denied', decision.cls ?? 'none').inc();
       app.log.warn({ userId, routeUrl, method: request.method, capability: decision.capability, reason: decision.reason },
@@ -1348,7 +1354,7 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.vendor.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(vendors, total, { page, limit, skip }) };
+    return { success: true, ...paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip }) };
   });
 
   app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
@@ -1359,7 +1365,7 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       orderBy: { createdAt: 'asc' },
     });
-    return { success: true, data: vendors };
+    return { success: true, data: vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })) };
   });
 
   /** One business, whole story: profile, owner, sibling stores, subscription,
@@ -1377,7 +1383,8 @@ export async function adminRoutes(app: FastifyInstance) {
           },
         },
         subscription: true,
-        _count: { select: { items: true, orders: true } },
+        // [Item 62] "Menu items" counts the live menu, not archived history.
+        _count: { select: { items: { where: { archivedAt: null } }, orders: true } },
       },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
@@ -1402,8 +1409,11 @@ export async function adminRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...vendor,
+        vatRegistrationNumber: undefined,
         recentOrders: recentOrders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
         prohibitedItems,
+        // [owner 14 Oct, store names] Whether the store's own words are held for a person (or were approved).
+        storeCheck: storeCheckOf(vendor),
       },
     };
   });
@@ -1422,7 +1432,8 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/catalogue-review', { preHandler: [adminGuard] }, async () => {
     const tenantId = requireTenantId();
-    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING');
+    // An item held only because its STORE waits is checked through its store (below), not one by one.
+    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING' && check.field !== 'store');
     // A bounded page: the first CATALOGUE_REVIEW_PAGE held items, and how many are held in all.
     const flagged = waiting.slice(0, CATALOGUE_REVIEW_PAGE);
     const words = await wordsFor(app.prisma, flagged.map(([id]) => id));
@@ -1437,7 +1448,24 @@ export async function adminRoutes(app: FastifyInstance) {
         wordsHash: judgedWordsHash(w),
       }];
     });
-    return { success: true, data: { items, total: waiting.length } };
+    // [owner 14 Oct, store names] Stores whose own words are held: approve shows the store (and lets its items be
+    // judged by their own words again) for exactly the words on screen.
+    const heldStores = [...(await storesHeldInTenant(app.prisma, tenantId))];
+    const storeRows = await app.prisma.vendor.findMany({
+      where: { id: { in: heldStores.slice(0, CATALOGUE_REVIEW_PAGE).map(([id]) => id) } },
+      select: { id: true, status: true, ...STORE_WORDS_SELECT },
+    });
+    const byId = new Map(storeRows.map((r) => [r.id, r]));
+    const stores = heldStores.slice(0, CATALOGUE_REVIEW_PAGE).flatMap(([id, check]) => {
+      const row = byId.get(id);
+      if (!row) return [];
+      return [{
+        vendorId: id, name: row.name, description: row.description ?? null, tags: [...row.tags, ...row.cuisineTypes], status: row.status,
+        state: check.state, prohibitedClass: check.prohibitedClass, label: PROHIBITED_CLASS_LABELS[check.prohibitedClass], field: check.field, term: check.term,
+        wordsHash: storeWordsHash(row),
+      }];
+    });
+    return { success: true, data: { items, total: waiting.length, stores, storesTotal: heldStores.length } };
   });
 
   const approveCatalogueItemSchema = z.object({ wordsHash: z.string().regex(/^[0-9a-f]{64}$/), reason: z.string().optional() });
@@ -1457,13 +1485,49 @@ export async function adminRoutes(app: FastifyInstance) {
         throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. ${notAllowedMessage(check.prohibitedClass)}`, { prohibitedClass: check.prohibitedClass });
       }
       if (!check || check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This item has nothing waiting for a check.');
+      // Its store's own words hold it: approving the item would show nothing, so the store is checked first.
+      if (check.state === 'WAITING' && check.field === 'store') {
+        throw new AppError(409, 'STORE_WAITING', 'This item\'s store is waiting for a check. Check the store first.');
+      }
       const words = (await wordsFor(tx, [id])).get(id);
       if (!words || judgedWordsHash(words) !== body.wordsHash) {
         throw new AppError(409, 'ITEM_CHANGED', 'This item changed — review it again.');
       }
       await tx.item.update({ where: { id }, data: { reviewApprovedHash: body.wordsHash, reviewApprovedAt: new Date() } });
+      // [Opus S3-9] The record is written in the same transaction as the approval: no approval without its record.
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { approvedWordsHash: body.wordsHash } });
     });
     return { success: true, data: { itemId: id, state: 'APPROVED' } };
+  });
+
+  // [GUARDRAILS §8 · owner 14 Oct 2026: store names about banned goods are HELD for a person automatically]
+  // Approve shows the store for exactly the words the reviewer saw — the same explicit catalogue-approver grant,
+  // reason and record as an item. A store that sells banned goods is not approved: it is suspended (Stores) or filed
+  // under a banned category, which approval never lifts.
+  const approveCatalogueStoreSchema = z.object({ wordsHash: z.string().regex(/^[0-9a-f]{64}$/), reason: z.string().optional() });
+  app.post('/catalogue-review/stores/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = approveCatalogueStoreSchema.parse(request.body ?? {});
+    const tenantId = requireTenantId();
+    const store = await tenantPrisma.vendor.findUnique({ where: { id }, select: { id: true } });
+    if (!store) throw new NotFoundError('Vendor', id);
+    await app.prisma.$transaction(async (tx) => {
+      // Judged and written under the store's row lock: a rename after the reviewer read the words is never approved.
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE`;
+      const filed = await prohibitedStoreCategory(tx, id);
+      if (filed) {
+        throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. Swift doesn't allow this category: ${PROHIBITED_CLASS_LABELS[filed.prohibitedClass]}.`, { prohibitedClass: filed.prohibitedClass });
+      }
+      const row = await tx.vendor.findUnique({ where: { id }, select: STORE_WORDS_SELECT });
+      if (!row) throw new NotFoundError('Vendor', id);
+      const check = storeCheckOf(row);
+      if (check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This store has nothing waiting for a check.');
+      if (storeWordsHash(row) !== body.wordsHash) throw new AppError(409, 'STORE_CHANGED', 'This store changed — review it again.');
+      await tx.vendor.update({ where: { id }, data: { nameReviewApprovedHash: body.wordsHash, nameReviewApprovedAt: new Date() } });
+      // The record is written in the same transaction as the approval: no approval without its record.
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { approvedWordsHash: body.wordsHash } });
+    });
+    return { success: true, data: { vendorId: id, state: 'APPROVED' } };
   });
 
   const removeCatalogueItemSchema = z.object({ prohibitedClass: z.enum(PROHIBITED_CLASSES as [string, ...string[]]), reason: z.string().optional() });
@@ -1537,6 +1601,10 @@ export async function adminRoutes(app: FastifyInstance) {
    *  - suspended with every rule met → reinstated by CAS, carrying the same
    *    expiry the projection would write [Fable #1481 S4-2: the suspension
    *    source is cleared, so no stale BILLING survives for a later heal];
+   *  - never live and no published phone [owner #51]: waiting → refused 409
+   *    PUBLISHED_PHONE_MISSING (it goes live by itself once the owner adds
+   *    one); suspended → lifted back to waiting, where the owner can add it
+   *    [DS1145 S3];
    *  - suspended while its subscription cannot operate (the vendor gate's
    *    rule: fee unpaid or billing stopped) → refused 409 FEE_UNPAID [MC-AD2]:
    *    only a confirmed payment (or billing's own heal) lifts a fee hold, and
@@ -1577,6 +1645,36 @@ export async function adminRoutes(app: FastifyInstance) {
       if (updated.status !== 'ACTIVE') {
         throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
+    } else if (next === 'CAN_LIFT_TO_WAITING') {
+      // [owner #51 · DS1145 S3] Suspended before it was ever live, every other rule met, no published phone. It
+      // cannot go live without one, and a suspended store cannot add one in the app — so approving lifts the
+      // suspension back to waiting for approval: the owner adds the number there and the activation projection
+      // makes the store live by itself. No subscription is created (that is the activation's), so the store still
+      // reads as never live. Decided again under the same locks as a reinstatement.
+      updated = await app.prisma.$transaction(async (tx) => {
+        await bindTenantTransaction(tx);
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-lift-to-waiting-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-lift-to-waiting-store */`;
+        const fresh = await tx.vendor.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, suspensionSource: true, owner: { select: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+        });
+        const freshGoLive = await verification.vendorGoLive(id, tx);
+        if (!freshGoLive) throw new NotFoundError('Vendor', id);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null, feePause: await readFeePause(tx, process.env, fresh.subscription?.id) }, freshGoLive);
+        const refusedNow = again === 'CAN_LIFT_TO_WAITING' ? null
+          : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        if (refusedNow) throw refusedNow;
+        const won = await tx.vendor.updateMany({
+          where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
+          data: { status: 'PENDING_APPROVAL', suspensionSource: null },
+        });
+        if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+          extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },
+        });
+        return tx.vendor.findUniqueOrThrow({ where: { id } });
+      });
     } else {
       // CAN_REINSTATE. [PR1270-S2-03] Price BEFORE the activation write: a
       // market that cannot price this store refuses here and it stays suspended.
@@ -1618,14 +1716,24 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
-      body: next === 'CAN_REINSTATE'
-        ? `${vendor.name} has been reinstated and can take orders again once you open it.`
-        : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
-      data: { vendorId: id },
+      ...(next === 'CAN_LIFT_TO_WAITING'
+        ? {
+            title: 'Add the number customers can call',
+            body: `${vendor.name} is no longer suspended. Add the phone number customers can call in Account, and your store goes live.`,
+          }
+        : {
+            title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
+            body: next === 'CAN_REINSTATE'
+              ? `${vendor.name} has been reinstated and can take orders again once you open it.`
+              : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
+          }),
+      // [DS1321 S4] The lift's notice IS the one "add the number" notice: its tap opens the waiting store's screen,
+      // and the activation projection, which asks once per store, does not ask again.
+      data: next === 'CAN_LIFT_TO_WAITING' ? { kind: 'vendor_needs_public_phone', vendorId: id } : { vendorId: id },
     });
 
-    return { success: true, data: updated };
+    // [VERIFY-DOCS V5] The owner's VAT billing number never rides an admin store reply.
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   app.put('/vendors/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
@@ -1655,7 +1763,7 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { vendorId: id },
     });
 
-    return { success: true, data: updated };
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   app.put('/vendors/:id/feature', { preHandler: [adminGuard] }, async (request) => {
@@ -1676,7 +1784,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     await audit(request.user.userId, 'TOGGLE_FEATURED_VENDOR', 'Vendor', id, { isFeatured }, request);
 
-    return { success: true, data: updated };
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   // ─── Riders ────────────────────────────────────────────────────────────
@@ -2259,7 +2367,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** [hold v3 · N-01] The held-for-review queue: paid MMG orders the food-age
    *  cutoff would have cancelled, held for a person instead. Tenant-scoped by
-   *  the request like every admin read. */
+   *  the request like every admin read.
+   *  [REVIEW-B #1699 S3-1] Classed C0 (writes no access record), so it carries
+   *  no customer identity and no store phone: the Orders page polls it every
+   *  minute and shows only the store's name. Who the customer is lives on
+   *  GET /orders/:id, which is C1 and records the read. */
   app.get('/orders/held', { preHandler: [adminGuard] }, async () => {
     const rows = await app.prisma.order.findMany({
       where: { foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...FOOD_AGE_WAITING] } },
@@ -2268,8 +2380,7 @@ export async function adminRoutes(app: FastifyInstance) {
       select: {
         id: true, orderNumber: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true,
         totalAmount: true, readyAt: true, foodAgeHeldAt: true, placedAt: true,
-        vendor: { select: { id: true, name: true, phone: true } },
-        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        vendor: { select: { id: true, name: true } },
       },
     });
     const now = Date.now();
@@ -2873,7 +2984,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // log + customer notification below. (Wallet credit is a Part C / fintech-phase
     // concern — see the dormant walletBalance/Transaction schema notes.)
 
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: newStatus });
 
     // [REPORT-010 F-03] Unattested MMG gets the direct-refund guidance — the
     // customer may have already paid the store's link before this cancel.
@@ -3014,7 +3125,7 @@ export async function adminRoutes(app: FastifyInstance) {
       return tx.order.findUniqueOrThrow({ where: { id } });
     });
     orderRefundCounter.labels('settled').inc();
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'REFUNDED' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'REFUNDED' });
     return { success: true, data: updated };
   });
 
@@ -3310,7 +3421,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const configs = await app.prisma.platformConfig.findMany({
       orderBy: { key: 'asc' },
     });
-    return { success: true, data: configs };
+    // Launch switches set in the server environment (read-only here), so the
+    // console shows what this API is actually running with.
+    return { success: true, data: configs, switches: { staffInviteAccept: staffInviteAcceptEnabled() } };
   });
 
   app.put('/config/:key', { preHandler: [platformControlGuard] }, async (request) => {
@@ -5649,7 +5762,7 @@ export async function adminRoutes(app: FastifyInstance) {
       documents,
       (earlierWhere) => tenantPrisma.verificationDocument.findMany({
         where: earlierWhere,
-        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+        select: { id: true, userId: true, role: true, subjectId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
       }),
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
@@ -5736,7 +5849,7 @@ export async function adminRoutes(app: FastifyInstance) {
       });
       markReplayAudited(request as unknown as AuditRequestLike, decisionRow?.id);
     } else {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });
@@ -5916,6 +6029,7 @@ export async function adminRoutes(app: FastifyInstance) {
         role: u.roles.includes('SUPER_ADMIN') ? 'SUPER_ADMIN' : 'ADMIN',
         active: u.status === 'ACTIVE',
         documentReviewer: holdsDocumentReviewerGrant(u.admin?.permissions),
+        catalogueApprover: holdsCatalogueApproverGrant(u.admin?.permissions),
         you: u.id === request.user.userId,
       })),
     };
@@ -5945,6 +6059,40 @@ export async function adminRoutes(app: FastifyInstance) {
         await tx.auditLog.create({ data: {
           userId: request.user.userId,
           action: body.grant ? 'DOCUMENT_REVIEWER_GRANTED' : 'DOCUMENT_REVIEWER_REVOKED',
+          entity: 'Admin',
+          entityId: target.id,
+          changes: { targetUserId: target.id, self, reason },
+          ipAddress: request.ip,
+          userAgent: request.headers['user-agent'] ?? null,
+        } });
+      }
+      return change;
+    });
+    return { success: true, data: result };
+  });
+
+  // [GUARDRAILS §8 · Opus S3-9] The catalogue approver grant: who may SHOW an item a banned word is holding.
+  // The same founder door as the document reviewer, a reason (C3), the Admin row before and after, and a named row.
+  app.put('/staff/:userId/catalogue-approver', { preHandler: [founderGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { userId } = request.params as { userId: string };
+    const body = z.object({ grant: z.boolean() }).passthrough().parse(request.body ?? {});
+    const target = await app.prisma.user.findFirst({ where: { id: userId, tenantId }, select: { id: true, roles: true, status: true } });
+    if (!target) throw new NotFoundError('Admin', userId);
+    if (!target.roles.some((r) => r === 'ADMIN' || r === 'SUPER_ADMIN') || target.status !== 'ACTIVE') {
+      throw new AppError(409, 'NOT_ACTIVE_STAFF', 'Only an active admin of this team can hold the catalogue-approver permission.');
+    }
+    const reason = reasonOf(request.body, request.headers as never);
+    const self = target.id === request.user.userId;
+    const result = await app.prisma.$transaction(async (tx) => {
+      const change = await setCatalogueApproverGrant(tx, target.id, body.grant);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        extra: { catalogueApprover: change.catalogueApprover, grantChanged: change.changed, self },
+      });
+      if (change.changed) {
+        await tx.auditLog.create({ data: {
+          userId: request.user.userId,
+          action: body.grant ? 'CATALOGUE_APPROVER_GRANTED' : 'CATALOGUE_APPROVER_REVOKED',
           entity: 'Admin',
           entityId: target.id,
           changes: { targetUserId: target.id, self, reason },

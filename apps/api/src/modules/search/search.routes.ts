@@ -8,12 +8,14 @@ import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';
 import { bindBrowseTenant, requireRequestTenant } from './search-scope';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { customerPoint } from '../discovery/customer-point';
-import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
+import { catalogueVendorInTenant, notProhibitedStore } from '../vendor/vendor-visibility';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
-import { hiddenItemIds, withoutHidden } from '../compliance/prohibited-gate';
+import { hiddenItemIds, prohibitedStoreIds, withoutHidden } from '../compliance/prohibited-gate';
+import { trackBackgroundRead } from '../../lib/background-reads';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
 import { fillFromTiers, nameMatcher, searchTiers, type Tier } from './forgiving-text';
+import { SEARCH_DB_BUDGET_MS, boundedRead, isOutOfTime } from './search-budget';
 
 // [B2] ONE wire contract whichever engine answered. The route used to hand
 // clients raw Meilisearch hits on the fast path and raw Prisma rows on the
@@ -161,7 +163,8 @@ export async function searchRoutes(app: FastifyInstance) {
     if (lastWarmAttempt !== 0 && Date.now() - lastWarmAttempt < SEARCH_WARM_RETRY_MS) return;
     warming = true;
     lastWarmAttempt = Date.now();
-    void runAsSystem(SEARCH_WARM_CAPABILITY, async () => {
+    // Tracked: a server closing waits for its reads before the database disconnects. [#1678 · DS1260 S4]
+    void trackBackgroundRead(runAsSystem(SEARCH_WARM_CAPABILITY, async () => {
       try {
         const svc = new SearchService(app.prisma);
         await svc.initialize();
@@ -174,7 +177,7 @@ export async function searchRoutes(app: FastifyInstance) {
       } finally {
         warming = false;
       }
-    });
+    }));
   };
   warm();
 
@@ -182,6 +185,16 @@ export async function searchRoutes(app: FastifyInstance) {
   // and invalid/expired credential refusals included); guests bind the public
   // catalogue's tenant — the one browse binding, shared with the Home rail.
   const browseSearch = bindBrowseTenant(app);
+
+  // [Review S2-1 · time bound] Every forgiving database read is bounded in
+  // time (search-budget.ts): the database stops a read at the fill's deadline
+  // and the door answers with what the stricter tiers found. Logged without
+  // the query text.
+  const timed = (door: string) => ({
+    budgetMs: SEARCH_DB_BUDGET_MS,
+    outOfTime: isOutOfTime,
+    onOutOfTime: () => app.log.warn({ door }, 'search read ran out of time; answered with what the stricter tiers found'),
+  });
 
   /** The database search of stores: the tiers of forgiving-text.ts, strictest
    *  first, every live gate applied before a row counts toward the page. */
@@ -197,6 +210,8 @@ export async function searchRoutes(app: FastifyInstance) {
       // dropped tenant.isActive, so a shut-off operator's store surfaced
       // whenever Meilisearch was down.
       ...catalogueVendorInTenant(ctx.tenantId, ctx.publicMode, await readFeePause(app.prisma)),
+      // [GUARDRAILS §8 · #54] A store filed under a banned category: never in the database fallback or the top-up.
+      ...notProhibitedStore(await prohibitedStoreIds(app.prisma, ctx.tenantId)),
       // Empty stores stay out; CLOSED ones are found, marked closed (owner, 13 Oct).
       ...(ctx.publicMode && { items: { some: { isAvailable: true } } }),
       ...(ctx.type && { vendorType: ctx.type }),
@@ -205,7 +220,8 @@ export async function searchRoutes(app: FastifyInstance) {
     const byName = nameFirst(ctx.q);
     const rows = await fillFromTiers({
       tiers: tiersFor(ctx.q, VENDOR_COLUMNS, ctx.slips),
-      fetch: (where, take) => app.prisma.vendor.findMany({
+      ...timed('search.vendors'),
+      fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.vendor.findMany({
         where: { AND: [base, where] },
         select: {
           id: true, name: true, slug: true, vendorType: true, logoUrl: true, coverImageUrl: true,
@@ -214,7 +230,7 @@ export async function searchRoutes(app: FastifyInstance) {
         take,
         // open stores enter the window first, so a closed one never takes an open one's place on the page
         orderBy: [{ isCurrentlyOpen: 'desc' }, { averageRating: 'desc' }, { id: 'asc' }],
-      }),
+      })),
       // [DS982] A store whose committed pin lies outside the launch market is never found.
       keep: (found) => found.filter(inLaunchMarket),
       // With the customer's point, the nearest first inside each tier's window
@@ -280,14 +296,15 @@ export async function searchRoutes(app: FastifyInstance) {
     const byName = nameFirst(ctx.q);
     const rows = await fillFromTiers({
       tiers: tiersFor(ctx.q, ITEM_COLUMNS, ctx.slips),
-      fetch: (where, take) => app.prisma.item.findMany({
+      ...timed('search.items'),
+      fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.item.findMany({
         where: { AND: [base, where] },
         // The shared select, so this path cannot quietly serve fewer fields
         // than the index path and make the engine visible to the client.
         select: ITEM_HIT_PIN_SELECT,
         take,
         orderBy: [{ vendor: { isCurrentlyOpen: 'desc' } }, { totalOrdered: 'desc' }, { id: 'asc' }],
-      }),
+      })),
       keep: async (found) => {
         const marketItems = found.filter((item) => inLaunchMarket(item.vendor));
         // [§8 · review S2-PRE] the shared listing gate, for EVERY caller (it was guests only)
@@ -364,7 +381,8 @@ export async function searchRoutes(app: FastifyInstance) {
         const prohibited = await hiddenItemIds(app.prisma, tenantId);
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
-            where: { ...catalogueVendorInTenant(tenantId, false, await readFeePause(app.prisma)), id: { in: vendorHits.map((v) => v.id) } },
+            // [GUARDRAILS §8 · #54] Nor to publish a store filed under a banned category.
+            where: { ...catalogueVendorInTenant(tenantId, false, await readFeePause(app.prisma)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), id: { in: vendorHits.map((v) => v.id) } },
             select: { id: true, latitude: true, longitude: true, isCurrentlyOpen: true },
           }),
           app.prisma.item.findMany({
@@ -457,7 +475,8 @@ export async function searchRoutes(app: FastifyInstance) {
     ];
     const tiers = searchTiers(q, NAME_COLUMNS);
     // Closed stores and their dishes are suggested too, marked closed (owner, 13 Oct).
-    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode, await readFeePause(app.prisma)), ...(publicMode && { items: { some: { isAvailable: true } } }) };
+    // [GUARDRAILS §8 · #54] Nor does a store filed under a banned category autocomplete.
+    const vendorBase = { ...catalogueVendorInTenant(tenantId, publicMode, await readFeePause(app.prisma)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), ...(publicMode && { items: { some: { isAvailable: true } } }) };
     const itemBase = {
       isAvailable: true,
       // [B2] This query had NO vendor predicate at all — a banned store's
@@ -469,26 +488,28 @@ export async function searchRoutes(app: FastifyInstance) {
     const [vendors, items] = await Promise.all([
       fillFromTiers({
         tiers,
-        fetch: (where, take) => app.prisma.vendor.findMany({
+        ...timed('suggestions.vendors'),
+        fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.vendor.findMany({
           where: { AND: [vendorBase, where] },
           select: { id: true, name: true, vendorType: true, latitude: true, longitude: true, isCurrentlyOpen: true },
           orderBy: [{ isCurrentlyOpen: 'desc' }, { averageRating: 'desc' }, { id: 'asc' }],
           take,
-        }),
+        })),
         // [DS982] A store outside the launch market never autocompletes, nor do its dishes.
         keep: (found) => found.filter(inLaunchMarket),
         limit: 5,
       }),
       fillFromTiers({
         tiers,
-        fetch: (where, take) => app.prisma.item.findMany({
+        ...timed('suggestions.items'),
+        fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.item.findMany({
           where: { AND: [itemBase, where] },
           select: { id: true, vendorId: true, name: true, vendor: { select: { latitude: true, longitude: true, isCurrentlyOpen: true } } },
           // [DS233 F8] A stable window: open stores' dishes, then the most-ordered
           // matches first, never whatever order the heap scan happens to return.
           orderBy: [{ vendor: { isCurrentlyOpen: 'desc' } }, { totalOrdered: 'desc' }, { id: 'asc' }],
           take,
-        }),
+        })),
         keep: async (found) => {
           const marketItems = found.filter((i) => inLaunchMarket(i.vendor));
           // [GUARDRAILS §8] The exact last pass, before a row counts toward the five:
@@ -588,6 +609,7 @@ export async function searchRoutes(app: FastifyInstance) {
     const vendors = await app.prisma.vendor.findMany({
       where: {
         ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId), await readFeePause(app.prisma)),
+        ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)), // [GUARDRAILS §8 · #54]
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.
         items: { some: { isAvailable: true } },

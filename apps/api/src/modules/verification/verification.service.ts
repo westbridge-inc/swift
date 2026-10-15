@@ -8,7 +8,8 @@ import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClass
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
-import { approvedEvidenceFor, type EvidenceRow } from './evidence';
+import { approvedEvidenceFor, recordEvidenceFor, hirePermitGraceUntil, type EvidenceRow } from './evidence';
+import { HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPES, hirePermitGraceEnd, hireSplitStartedAt } from './hire-permit-grace';
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
@@ -23,6 +24,7 @@ import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, Ide
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
+import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
 import { isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
@@ -79,6 +81,9 @@ export interface VendorGoLive {
   disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
   /** checklist complete AND (gate disengaged OR disclosure complete) — exactly the projection's `verified`. */
   ready: boolean;
+  /** [owner #51] The store has a published number customers can call (vendor/go-live.ts). A store's FIRST
+   *  go-live needs one; the projection holds a waiting store without it. Never the number itself. */
+  publishedPhone: boolean;
 }
 
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
@@ -1157,6 +1162,13 @@ export class VerificationService {
    */
   private async escalateToSecondReview(docId: string, adminId: string, reasonCode: RejectionReasonCode, note?: string): Promise<VerificationDocument> {
     return this.projectionTransaction(async (tx) => {
+      // [DS1054 S3 · DS1064 S3] Lock the paper's open case, then the paper itself, BEFORE reading either: the
+      // locks a vehicle edit takes, in the same order, before it decides what to withdraw (vehicle-retirement.ts,
+      // partner.service.ts). Whichever holds them first wins: an edit that got there first has already withdrawn
+      // the paper (refused below as not pending); an edit that comes second waits, then sees SECOND_REVIEW and
+      // keeps the paper. The paper lock matters when it has no open case (a case lock on no row holds nothing).
+      await tx.$queryRaw`SELECT id FROM review_case WHERE "submissionId" = ${docId} AND "closedAt" IS NULL ORDER BY id FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM verification_documents WHERE id = ${docId} FOR UPDATE`;
       const doc = await tx.verificationDocument.findUnique({ where: { id: docId } });
       if (!doc) throw new NotFoundError('VerificationDocument', docId);
       if (doc.status !== 'PENDING') throw new AppError(409, 'NOT_PENDING', 'Only a pending document can be escalated');
@@ -1734,6 +1746,18 @@ export class VerificationService {
         .filter((d) => d.status === 'APPROVED' && (!d.expiresAt || d.expiresAt > new Date()))
         .map((d) => d.docType),
     );
+    // [VERIFY-DOCS · hire-car permit split] While an approved permit stands in for the two new
+    // licences, the checklist shows them as done (build 9 keeps the driver on the home screen) and
+    // says until when; uploading the new licences stays open the whole time.
+    let hirePermitGrace: { until: Date } | undefined;
+    const splitPending = HIRE_SPLIT_DOC_TYPES.filter((docType) => checklist.includes(docType) && !approved.has(docType));
+    if (splitPending.length > 0) {
+      const until = await hirePermitGraceUntil(this.prisma, userId, new Date());
+      if (until) {
+        for (const docType of splitPending) approved.add(docType);
+        hirePermitGrace = { until };
+      }
+    }
     const missing = checklist.filter((docType) => !approved.has(docType));
     const gateMissing = gate.filter((docType) => !approved.has(docType));
 
@@ -1778,6 +1802,7 @@ export class VerificationService {
       // the one evidence rule, so the flag survives the image being deleted after review.
       // Only asked where this person's lists name the document at all.
       policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
+      ...(hirePermitGrace ? { hirePermitGrace } : {}),
       // [VERIFY-DOCS] Service businesses only: whether a listing comes to the customer, and whether
       // the owner's clearance lets those visits be booked.
       ...(homeVisits ? { homeVisits } : {}),
@@ -1958,7 +1983,7 @@ export class VerificationService {
   async vendorGoLive(vendorId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VendorGoLive | null> {
     const vendor = await db.vendor.findUnique({
       where: { id: vendorId },
-      select: { vendorType: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
+      select: { vendorType: true, publicPhone: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
     });
     if (!vendor) return null;
     const role = vendor.vendorType as ChecklistRole;
@@ -1977,6 +2002,7 @@ export class VerificationService {
       checklist,
       disclosure: { engaged, complete: block ? block.complete : null, missing: block ? block.missing : [] },
       ready: checklist.complete && (!block || block.complete),
+      publishedPhone: goLiveMissing(vendor).length === 0,
     };
   }
 
@@ -2043,7 +2069,7 @@ export class VerificationService {
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
           where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
-          select: { id: true, vendorType: true, isVerified: true, status: true },
+          select: { id: true, name: true, vendorType: true, isVerified: true, status: true, publicPhone: true },
         },
       },
     });
@@ -2069,6 +2095,11 @@ export class VerificationService {
     for (const vendor of owner.vendors) {
       const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
       const verified = checklistOk && (!disclosureGate || (country != null && (await compileActivationDisclosure(db, vendor.id, { accountId: userId, tenantId: country.tenantId })).complete));
+      // [owner #51] A FIRST go-live also needs a published phone (vendor/go-live.ts).
+      if (verified && awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
+        await this.askForPublishedPhone(db, userId, vendor);
+        continue;
+      }
       if (verified) {
         // [PR1270-S2-03] This projection is the one authority that makes a
         // store live, on every path (review, auto-approval, the reconcile
@@ -2099,6 +2130,38 @@ export class VerificationService {
         });
       }
     }
+  }
+
+  /** [owner #51] The one notice that tells an owner whose documents are done
+   *  that the store goes live once it publishes a number customers can call.
+   *  Once per store: the projection runs again on every decision and on the
+   *  daily belt, and must not repeat it. Delivered after the projection commits. */
+  private async askForPublishedPhone(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    vendor: { id: string; name: string },
+  ): Promise<void> {
+    const already = await db.notification.findFirst({
+      where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
+      select: { id: true },
+    });
+    if (already) return;
+    const notice = await db.notification.create({ data: {
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Add the number customers can call',
+      body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
+      // The literal keeps the kind visible to the cross-app notification census.
+      data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
+    } });
+    this.projectionNotices.get(db)?.push(notice.id);
+  }
+
+  /** [owner #51] Re-run the activation projection for one owner — after a
+   *  store publishes its contact number, so a store that was waiting only for
+   *  it goes live at once instead of at the next daily belt. */
+  async reprojectVendorActivation(userId: string): Promise<void> {
+    await this.projectVendorActivation(this.prisma, userId);
   }
 
   /**
@@ -2234,7 +2297,9 @@ export class VerificationService {
         title: 'Document expired',
         body: optional
           ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
-          : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+          : doc.docType === HIRE_PERMIT_DOC_TYPE
+            ? 'Your hire-car permit has expired. Upload your Hire Car Driver’s Licence and your car’s hire licence in Documents to keep operating.'
+            : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expired', docId: doc.id },
       });
@@ -2249,6 +2314,11 @@ export class VerificationService {
     if (role !== 'MOVER' && role !== 'RIDER' && role !== 'DRIVER') return false;
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
+    // [VERIFY-DOCS · ruling 8] The retired permit is optional only once BOTH replacement licences are on record.
+    if (docType === HIRE_PERMIT_DOC_TYPE) {
+      const replacement = await recordEvidenceFor(this.prisma, userId, HIRE_SPLIT_DOC_TYPES, new Date());
+      return HIRE_SPLIT_DOC_TYPES.every((type) => replacement.some((row) => row.docType === type && row.subjectId !== null));
+    }
     const [rider, driver] = await Promise.all([
       this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
       this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
@@ -2280,7 +2350,7 @@ export class VerificationService {
         title: n.daysLeft <= 1 ? 'Document expires tomorrow' : 'Document expiring soon',
         body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${n.expiresOn.toISOString().slice(0, 10)} — ${n.daysLeft} day${n.daysLeft === 1 ? '' : 's'} left. ${optional
           ? (doc.docType === POLICE_CLEARANCE_DOC_TYPE ? 'Renew it to stay recorded as police-cleared. It is optional and does not affect your work.' : 'It is optional and does not affect your work.')
-          : 'Renew it to avoid suspension.'}`,
+          : doc.docType === HIRE_PERMIT_DOC_TYPE ? 'Upload your Hire Car Driver’s Licence and your car’s hire licence to keep operating after this permit expires.' : 'Renew it to avoid suspension.'}`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expiry_reminder', docId: n.documentId, daysLeft: n.daysLeft },
       });
@@ -2288,6 +2358,56 @@ export class VerificationService {
       sent += 1;
     }
     return sent;
+  }
+
+  /**
+   * [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] The hire-car permit split's 60 days, run by the
+   * daily document sweep. A taxi driver whose approved permit is standing in for the two new licences
+   * is told what to upload — when the window opens, and again with 30 and 7 days left (once each) —
+   * and when the window has closed, taken offline if the permit was all they had (GO refuses them from
+   * then on anyway). A permit that expires first is the ordinary expiry sweep's work.
+   */
+  async hirePermitGraceSweep(now = new Date()): Promise<number> {
+    const started = await hireSplitStartedAt(this.prisma);
+    if (!started) return 0;
+    const end = hirePermitGraceEnd(started);
+    const permits = await this.prisma.documentRecord.findMany({
+      where: { docType: HIRE_PERMIT_DOC_TYPE, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }],
+        submission: { purgedAt: null, OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] } },
+      select: { accountId: true, submissionId: true, expiresOn: true, submission: { select: { retentionExpiresAt: true } } },
+      orderBy: { approvedAt: 'desc' },
+    });
+    const seen = new Set<string>();
+    let touched = 0;
+    for (const permit of permits) {
+      if (seen.has(permit.accountId)) continue;
+      seen.add(permit.accountId);
+      if (!(await this.prisma.driver.findUnique({ where: { userId: permit.accountId }, select: { id: true } }))) continue;
+      const held = await recordEvidenceFor(this.prisma, permit.accountId, HIRE_SPLIT_DOC_TYPES, now);
+      if (HIRE_SPLIT_DOC_TYPES.every((docType) => held.some((r) => r.docType === docType))) continue;
+      if (now.getTime() >= end.getTime()) {
+        if (await this.forceMoverOfflineIfNotLive(permit.accountId,
+          'Your hire-car permit no longer counts on its own. Upload your Hire Car Driver’s Licence and your car’s hire licence in Documents to go back online.')) touched += 1;
+        continue;
+      }
+      const effectiveEnd = new Date(Math.min(end.getTime(), permit.expiresOn?.getTime() ?? Infinity, permit.submission.retentionExpiresAt?.getTime() ?? Infinity));
+      const daysLeft = Math.max(1, Math.ceil((effectiveEnd.getTime() - now.getTime()) / 86_400_000));
+      const stage = daysLeft <= 7 ? '7' : daysLeft <= 30 ? '30' : 'start';
+      const title = stage === 'start' ? 'Add your new hire-car licences' : `Add your hire-car licences within ${daysLeft} days`;
+      const already = await this.prisma.notification.findFirst({ where: { userId: permit.accountId, title, createdAt: { gte: started } }, select: { id: true } });
+      if (already) continue;
+      await this.notifications.send({
+        userId: permit.accountId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title,
+        body: `Swift now asks taxi drivers for two licences instead of the hire-car permit: your Hire Car Driver’s Licence and your car’s hire licence (the yearly one shown on the car). Upload both in Documents by ${effectiveEnd.toISOString().slice(0, 10)}. Until then your permit still counts, so you can keep working.`,
+        audience: 'earner',
+        data: { kind: 'verification_expiry_reminder', docId: permit.submissionId, daysLeft },
+        dedupeKey: `hire-licence-transition:${started.toISOString()}:${stage}`,
+      });
+      touched += 1;
+    }
+    return touched;
   }
 
   // -------------------------------------------------------------------------

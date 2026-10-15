@@ -1,3 +1,5 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
@@ -19,7 +21,10 @@ import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt, freeBecauseNoMoverFound, readNoMoverFound, NO_MOVER_FREE_CANCEL_MESSAGE } from '../order/cancel-policy';
+import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
+import { readTooLateToDeliver } from '../dispatch/rescue';
+import { ORDER_TRANSITIONS } from '../order/order-status';
+import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
 import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
@@ -37,7 +42,7 @@ import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
+import { notProhibitedStore, visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
@@ -66,10 +71,11 @@ import { consentSurfaceOf } from '../legal/consent-surface';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
-import { safePublicPhone } from '../../utils/vendor-public-phone';
+import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
-import { assertOrderableNow, hiddenAmong } from '../compliance/prohibited-gate';
+import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
+import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
@@ -307,9 +313,9 @@ const referralRedeemSchema = z.object({
 // ---------------------------------------------------------------------------
 
 const MAX_DELIVERY_RADIUS_KM = 25;
-// Cancel window/fee now import from the ONE policy module [UG-CRAFT-01] —
+// The cancel rule is imported from the ONE policy module [UG-CRAFT-01] —
 // the "must match order.service" comment era is over: the preview and the
-// charge read the same constants by construction.
+// cancel read the same verdict by construction.
 const MAX_ADDRESSES = 10;
 // SWIFT-163: the Home discovery scan is bounded so an ever-growing catalogue
 // can't load every ACTIVE vendor into memory per request. The feed only ever
@@ -696,6 +702,14 @@ function enrichVendor<T extends { latitude: number; longitude: number; estimated
     distanceKm = Math.round(exactKm * 10) / 10;
   }
   return { ...vendor, distanceKm, etaMin, deliveryFee };
+}
+
+/** [owner #46] The store contact on an order the customer can no longer
+ *  cancel: the storefront's published-number rule, read only when needed (the
+ *  order's own vendor select deliberately carries no phone at all). */
+async function publishedStorePhoneOf(prisma: FastifyInstance['prisma'], vendorId: string): Promise<string | null> {
+  const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { status: true, publicPhone: true } });
+  return vendor ? publishedStorePhone(vendor) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1136,8 @@ export async function customerRoutes(app: FastifyInstance) {
       if (cached) return cached;
 
       if (userId) await resolveCustomer(app, userId);
+      // [GUARDRAILS §8 · #54] A store filed under a banned category is on no Home rail.
+      const prohibitedStores = await prohibitedStoreIds(app.prisma, getTenantId() ?? null);
       const [allVendors, favoriteIds, popularItemRows] = await Promise.all([
         // All active, document-verified vendors with at least one orderable item
         // (unverified stores AND empty stores stay out of discovery — a vendor
@@ -1132,13 +1148,13 @@ export async function customerRoutes(app: FastifyInstance) {
           // no tenant context, which the Prisma extension defines as an UNSCOPED
           // query — so without the relational predicate a deactivated operator's
           // whole catalog kept serving here after the platform shut them off.
-          where: { ...visibleVendorForCaller(await readFeePause(app.prisma)), items: { some: { isAvailable: true } } },
+          where: { ...visibleVendorForCaller(await readFeePause(app.prisma)), ...notProhibitedStore(prohibitedStores), items: { some: { isAvailable: true } } },
           include: {
             // imageUrl was NOT selected, so Home had nothing to draw a category
             // chip with and every chip fell back to the same stock photograph —
             // "Popular", "Produce" and "Rice & Grains" were one identical image.
             // The column has been on Category the whole time.
-            categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
+            categories: { where: { archivedAt: null }, select: { id: true, name: true, imageUrl: true }, take: 5 },
           },
           orderBy: { averageRating: 'desc' },
           take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
@@ -1191,7 +1207,8 @@ export async function customerRoutes(app: FastifyInstance) {
         const card = vendorCardView(v);
         return {
           ...enrichVendor(card, lat, lng, homeDeliveryRates),
-          categories: (v.categories ?? []).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
+          // [GUARDRAILS §8 · Opus S3-8] A section named for banned goods ("Beers & Wines") is not on a card either.
+          categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
           isFavorite: favoriteIds.has(v.id),
           ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
         };
@@ -1357,7 +1374,11 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
-    const where: Record<string, unknown> = { ...visibleVendorForCaller(await readFeePause(app.prisma)), items: { some: { isAvailable: true } } };
+    // [GUARDRAILS §8 · #54] A store filed under a banned category is never browsed.
+    const where: Record<string, unknown> = {
+      ...visibleVendorForCaller(await readFeePause(app.prisma)), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, getTenantId() ?? null)),
+      items: { some: { isAvailable: true } },
+    };
     if (type) where['vendorType'] = type;
 
     // Category feed (#17): membership = chosen + derived rows. A MERGED slug
@@ -1559,6 +1580,8 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { id, ...vendorTenantForCaller() },
       include: {
         categories: {
+          // [Item 62] A deleted (archived) category is not on the storefront.
+          where: { archivedAt: null },
           orderBy: { sortOrder: 'asc' },
           include: {
             items: {
@@ -1574,6 +1597,9 @@ export async function customerRoutes(app: FastifyInstance) {
     });
 
     if (!vendor) throw new NotFoundError('Vendor', id);
+    // [GUARDRAILS §8 · #54] A store filed under a banned category, or held for a person by its own words, has no
+    // storefront, even by a direct link.
+    if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     // Live promotions the store is running (§4.2) — shown on the storefront.
     const activePromos = await app.prisma.promoCode.findMany({
@@ -1665,9 +1691,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // number (a customer asking "when do you reopen?" is exactly who this
         // serves), but a store the PLATFORM has suspended, or one it has not yet
         // approved, must not have Swift advertising a way to reach it.
-        publicPhone: vendor.status === 'SUSPENDED' || vendor.status === 'PENDING_APPROVAL'
-          ? null
-          : safePublicPhone(vendor.publicPhone),
+        publicPhone: publishedStorePhone(vendor),
         averageRating: vendor.averageRating,
         totalRatings: vendor.totalRatings,
         ...ratingSurface,
@@ -1696,22 +1720,40 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const vendor = await app.prisma.vendor.findFirst({
       where: { id, ...vendorTenantForCaller() },
-      select: { id: true, averageRating: true, totalRatings: true },
+      select: { id: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
+    // [GUARDRAILS §8 · #54 · DS1109 S4-3] Nor its reviews: no page of a store filed under a banned category, or held
+    // for a person by its own words, resolves.
+    if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
-    const result = await ratingService.getVendorReviews(id, limit, skip);
+    const result = await ratingService.getVendorReviews(
+      id,
+      limit,
+      skip,
+      request.user?.userId && request.tenantId
+        ? { userId: request.user.userId, tenantId: request.tenantId }
+        : undefined,
+    );
 
     return {
       success: true,
       data: {
-        vendor: { id: vendor.id, averageRating: vendor.averageRating, totalRatings: vendor.totalRatings },
+        // The profile's materialized score also includes unreleased ratings.
+        // Keep this page's headline consistent with its published anonymous
+        // rows and distribution; other storefront surfaces
+        // retain the platform-wide vendor score.
+        vendor: {
+          id: vendor.id,
+          averageRating: result.averageRating,
+          totalRatings: result.total,
+        },
         reviews: result.reviews.map((r) => ({
           id: r.id,
           score: r.score,
           comment: r.comment,
           tags: r.tags,
-          reviewer: r.rater,
+          reviewer: { firstName: 'Customer', avatar: null },
           createdAt: r.createdAt,
           // The store's public reply (§4.1)
           response: r.response,
@@ -1735,7 +1777,8 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { userId },
       include: {
         favoriteVendors: {
-          where: { status: 'ACTIVE', ...vendorTenantForCaller() },
+          // [GUARDRAILS §8 · #54] Nor among a customer's favourites.
+          where: { status: 'ACTIVE', ...vendorTenantForCaller(), ...notProhibitedStore(await prohibitedStoreIds(app.prisma, getTenantId() ?? null)) },
           orderBy: { name: 'asc' },
         },
       },
@@ -2640,17 +2683,56 @@ export async function customerRoutes(app: FastifyInstance) {
     // [E17 · DS202 D3] A parcel on its way back (RETURNING) is in the mover's
     // custody like the forward leg, and RETURNED is closed: neither offers a
     // Cancel the locked cancel path would refuse.
-    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING', 'RETURNED'].includes(order.status)
-      && !(order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus));
+    // [owner #46/#50 · DS1140 S3] The statuses the locked cancel path accepts
+    // are the state machine's own (ORDER_TRANSITIONS.CANCELLED) minus a taxi
+    // with its passenger aboard — read from there, never a hand-kept list, so
+    // a FAILED or in-progress order is never promised a free cancel the
+    // server then refuses.
+    const mmgPaidToStore = order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus);
+    const cancellableStage = ORDER_TRANSITIONS.CANCELLED.includes(order.status)
+      && !(order.orderType === 'TAXI' && hasTaxiPassengerCustody(order));
+    const cancellableState = cancellableStage && !mmgPaidToStore;
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
-    // — the fee shown here and the marker recorded there can never drift
-    // again. The hold exemption, the assignment guard and the scheduled-slot
-    // branch all live inside it; this file no longer restates any of them.
-    // [Item 64] The dispatch journal's "no mover found" fact, read the same way
-    // the charge path reads it (there under the order lock).
-    const policyOrder = { ...order, noMoverFound: canCancel && await readNoMoverFound(app.prisma, order) };
-    const freeCancellation = canCancel && isFreeCancellation(policyOrder, previewNow);
+    // — the outcome shown here and the one the locked cancel commits can never
+    // drift again. The hold, the five-minute window, the store rule (owner
+    // #46), the ride/parcel/booking rule (#50) and the very-late exits (#52)
+    // all live inside it; this file restates none of them.
+    // [Item 64] The dispatch journal's "no mover found" fact, and [owner #46]
+    // the rescue cutoff's "too late to deliver", read the same way the charge
+    // path reads them (there under the order lock).
+    const policyOrder = {
+      ...order,
+      noMoverFound: cancellableState && await readNoMoverFound(app.prisma, order),
+      tooLateToDeliver: cancellableState && await readTooLateToDeliver(app.prisma, order, previewNow),
+      // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
+      assignedAt: cancellableState ? await readAssignedAt(app.prisma, order) : null,
+    };
+    // [owner #46/#50] A cancel the customer may no longer make is not offered
+    // at all — builds 9/10 already hide the button on `canCancel: false` — and
+    // the customer is told who to contact instead (`cancelUnavailable`).
+    // Every allowed cancel is free: there is no fee.
+    const cancelView = cancellableState ? customerCancelView(policyOrder, previewNow) : null;
+    const canCancel = cancelView?.canCancel === true;
+    // [owner #46 · Opus S3-1] An MMG order already paid to the store is the
+    // store's to cancel and refund (the locked path refuses it with
+    // MMG_CANCEL_UNAVAILABLE) — and every accepted MMG order is paid (the
+    // payment-first gate). The customer still gets the store's contact, the
+    // one rail where it matters most.
+    const refusal = cancelView?.cancelUnavailable
+      ?? (cancellableStage && mmgPaidToStore && order.vendorId
+        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: MMG_PAID_STORE_CANCELS_MESSAGE }
+        : null);
+    const cancelUnavailable = refusal
+      ? {
+          ...refusal,
+          // The store's (or the booked provider's) contact: only the number
+          // the business chose to PUBLISH, by the storefront's own rule —
+          // never `vendor.phone` (the account/OTP line). A ride or a parcel
+          // has no business; the driver or rider is reached from their card.
+          contactPhone: order.vendorId ? await publishedStorePhoneOf(app.prisma, order.vendorId) : null,
+        }
+      : null;
 
     // Timeline
     const timeline = order.statusHistory.map((sh) => ({
@@ -2773,25 +2855,24 @@ export async function customerRoutes(app: FastifyInstance) {
         scheduledFor: order.scheduledFor,
         hasBeenRated,
         canCancel,
-        freeCancellationWindow: freeCancellation,
-        // What a cancel would cost right now (0 inside the free window) — so
-        // the app shows the fee BEFORE the customer confirms.
-        cancellationFee: canCancel && !freeCancellation ? LATE_CANCEL_FEE : 0,
-        // Held orders: the free window IS the hold; otherwise the legacy clock.
-        // Only promised while the cancel is ACTUALLY free right now — a mover
-        // assignment or a committed vendor voids the promise, so it must never
-        // be minted for those states.
+        freeCancellationWindow: canCancel,
+        // [owner #46/#50] Always 0 — there is no cancellation fee. Kept only
+        // because builds 9 and 10 refuse to open the cancel confirmation
+        // unless this is a number.
+        cancellationFee: 0,
         holdExpiresAt: order.holdExpiresAt,
-        // ONE implementation, shared with the predicate [cancel-policy.ts] —
-        // built inline this used to promise `placedAt + 5min`, which on a
-        // scheduled order is a countdown that expired hours before the window
-        // it claims to describe.
-        freeCancellationExpiresAt: canCancel
-          ? (freeCancellationExpiresAt(policyOrder, previewNow)?.toISOString() ?? null)
-          : null,
-        // [Item 64] Why the cancel is free, in plain words — only when no
-        // mover was found (additive; older apps ignore it).
-        cancellationMessage: freeCancellation && freeBecauseNoMoverFound(policyOrder) ? NO_MOVER_FREE_CANCEL_MESSAGE : null,
+        // ONE implementation, shared with the predicate [cancel-policy.ts]:
+        // the moment the five-minute window of a ride, parcel or booking
+        // closes; null when there is no countdown (refused, or free for as
+        // long as nobody accepts / nobody was found / the order stays late).
+        freeCancellationExpiresAt: cancelView?.freeCancellationExpiresAt ?? null,
+        // [Item 64] Why the cancel is free, in plain words (additive; older
+        // apps ignore it). [owner #46/#52] Also for a store order waiting for
+        // the store, or for any order running very late.
+        cancellationMessage: cancelView?.cancellationMessage ?? null,
+        // [owner #46/#50] Why there is no Cancel, and who to contact instead —
+        // the server's verdict, so no client re-derives the rule (additive).
+        cancelUnavailable,
       },
     };
   });
@@ -2924,7 +3005,7 @@ export async function customerRoutes(app: FastifyInstance) {
       .catch(() => {});
 
     // Both sides hear it now.
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: statusAtConvert, fulfillment: 'PICKUP',
     });
     if (order.vendor) {
@@ -2979,7 +3060,7 @@ export async function customerRoutes(app: FastifyInstance) {
     }));
     const facts = outcome.facts;
     if (!outcome.replayed) {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });
@@ -3143,8 +3224,9 @@ export async function customerRoutes(app: FastifyInstance) {
       note: z.string().trim().max(300).optional(),
     }).parse(request.body);
 
+    const canonicalId = await resolveVendorReviewId(app.prisma, id);
     const rating = await app.prisma.rating.findFirst({
-      where: { id, type: { in: ['CUSTOMER_TO_VENDOR', 'CUSTOMER_TO_PROVIDER'] }, isPublic: true },
+      where: { id: canonicalId, type: { in: ['CUSTOMER_TO_VENDOR', 'CUSTOMER_TO_PROVIDER'] }, isPublic: true },
       select: { id: true, orderId: true, rater: { select: { tenantId: true } } },
     });
     if (!rating) throw new NotFoundError('Review', id);
@@ -3159,13 +3241,13 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new NotFoundError('Review', id);
     }
 
-    const existing = await app.prisma.ratingReport.findFirst({ where: { ratingId: id, reporterId: userId } });
-    if (existing) return { success: true, data: existing }; // calm idempotence
+    const existing = await app.prisma.ratingReport.findFirst({ where: { ratingId: rating.id, reporterId: userId } });
+    if (existing) return { success: true, data: { ...existing, ratingId: publicVendorReviewId(existing.ratingId) } }; // calm idempotence
 
     const report = await app.prisma.ratingReport.create({
-      data: { ratingId: id, reporterId: userId, reason, note: note ?? null },
+      data: { ratingId: rating.id, reporterId: userId, reason, note: note ?? null },
     });
-    return { success: true, data: report };
+    return { success: true, data: { ...report, ratingId: publicVendorReviewId(report.ratingId) } };
   });
 
   /** POST /orders/:id/tip — post-delivery tipping FAILS CLOSED
@@ -3281,6 +3363,30 @@ export async function customerRoutes(app: FastifyInstance) {
     ]);
 
     return { success: true, ...paginatedResponse(notifications, total, { page, limit, skip }) };
+  });
+
+  /** [Row 55] GET /team-invites — the caller's own live store-team invites.
+   *  The person invited is not on a store team yet, so these live here, under
+   *  the inbox, not under the /vendor prefix. */
+  app.get('/team-invites', async (request: AuthRequest) => {
+    return { success: true, data: await listMyStaffInvites(app.prisma, request.user.userId, new Date()) };
+  });
+
+  /** [Row 55] POST /team-invites/:id/accept | /decline — answer one invite. */
+  app.post('/team-invites/:id/accept', async (request: AuthRequest) => {
+    if (!staffInviteAcceptEnabled()) throw new AppError(404, 'NOT_FOUND', 'Invite not found');
+    const { id } = request.params as { id: string };
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
+    });
+    return { success: true, data: result };
+  });
+  app.post('/team-invites/:id/decline', async (request: AuthRequest) => {
+    const { id } = request.params as { id: string };
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: id, userId: request.user.userId, decision: 'DECLINE', now: new Date(),
+    });
+    return { success: true, data: result };
   });
 
   /** PUT /notifications/prefs — per-user channel switches. */

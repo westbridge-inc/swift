@@ -1572,6 +1572,17 @@ model Vendor {
   /// read, exactly as mmgPayUrl is, because a stored row is untrusted until the
   /// boundary that hands it to a customer's dialler.
   publicPhone String?
+  /// [VERIFY-DOCS · owner ruling 7, 6 Oct 2026] OPTIONAL: the store's VAT registration number, typed by the
+  /// owner only if the business is VAT-registered — for VAT tax invoices (VAT Act s.28, Sch. III). Digits
+  /// only, format-checked, never looked up; no TIN certificate image is ever asked for. Never public.
+  vatRegistrationNumber String?
+  /// [GUARDRAILS §8 · owner 14 Oct 2026] A store whose own words (name, description, tags) mention goods Swift never
+  /// carries ("X Liquor Store", "Rum Shop") is held for a person: hidden from customers, with every item it sells,
+  /// until someone holding the catalogue-approver grant approves exactly those words. This is the fingerprint they
+  /// approved (compliance/prohibited-items `storeWordsHash`): any later change to the words no longer matches it, so
+  /// the check comes back. Null = never approved. The verdict itself is never stored; it is read from the words.
+  nameReviewApprovedHash String?
+  nameReviewApprovedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1586,6 +1597,8 @@ model Vendor {
   @@index([tenantId])
   @@index([isSynthetic])
   @@index([mmgPayUrlApplyAt])
+  /// [SEARCH] Trigram GIN index on the store name (pg_trgm), see Item.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "vendors_name_trgm_idx")
   @@map("vendors")
 }
 
@@ -1654,6 +1667,10 @@ model Category {
   imageUrl    String?
   sortOrder   Int      @default(0)
   isActive    Boolean  @default(true)
+  /// [Item 62 · owner 11 Oct] When the store deleted this category. Like a
+  /// deleted listing it is archived, not removed: its listings are archived
+  /// with it and stay attached to the orders and bookings that hold them.
+  archivedAt  DateTime?
   items       Item[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -1686,6 +1703,11 @@ model Item {
   bookings          Booking[]
   optionGroups      OptionGroup[]
   isAvailable       Boolean           @default(true)
+  /// [Item 62] When the store deleted this listing. The row stays: orders
+  /// reference it (their lines are snapshots) and bookings hold it by key, so
+  /// a delete archives instead. Archived = off every menu and editor, never
+  /// available again (CHECK items_archived_unavailable), history kept.
+  archivedAt        DateTime?
   isPopular         Boolean           @default(false)
   sku               String?
   barcode           String?
@@ -1744,6 +1766,11 @@ model Item {
   @@index([isAvailable, createdAt])
   @@index([isAvailable, basePrice])
   @@index([tenantId])
+  /// [SEARCH] Trigram GIN indexes (pg_trgm, owner decision 26, 13 Oct): customer
+  /// search matches pieces of a name or description (ILIKE '%..%' and the
+  /// one-slip patterns); without them every search reads every item.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "items_name_trgm_idx")
+  @@index([description(ops: raw("gin_trgm_ops"))], type: Gin, map: "items_description_trgm_idx")
   @@map("items")
 }
 
@@ -1864,6 +1891,8 @@ model Order {
   vendorId               String?
   vendor                 Vendor?                 @relation(fields: [vendorId], references: [id])
   riderId                String?
+  /// Advances whenever the assigned rider changes, including release/reassignment.
+  riderAssignmentVersion Int @default(0)
   rider                  Rider?                  @relation(fields: [riderId], references: [id])
   driverId               String?
   driver                 Driver?                 @relation(fields: [driverId], references: [id])
@@ -4657,8 +4686,9 @@ model ChatMessage {
   messageType     String   @default("text")
   mediaUrl        String?
   isRead          Boolean  @default(false)
-  /// Off-platform contact signal (spec §2): phone number / "WhatsApp me"
-  /// detected at send. The message still delivers — this feeds risk scoring.
+  /// Off-platform contact signal (spec §2) on admitted text, used for risk scoring.
+  /// With the launch content filter on, phone numbers, outside links and
+  /// abusive text are refused before storage.
   offPlatformFlag Boolean  @default(false)
   createdAt       DateTime @default(now())
 

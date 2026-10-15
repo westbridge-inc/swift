@@ -296,6 +296,7 @@ class StgDWorkerProbe(unittest.TestCase):
 
 class SeedProductionScript(unittest.TestCase):
     SHA = "a" * 40
+    OWNER_EMAIL = "owner.seed@example.invalid"
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swift-seed-test-"))
@@ -322,6 +323,8 @@ class SeedProductionScript(unittest.TestCase):
             "CALL_LOG": str(self.log),
             "GIT_HEAD": self.SHA,
             "IDENTITY": "1",
+            # The production seed's owner email (typed at its hidden prompt on a terminal).
+            "SEED_ADMIN_EMAIL": self.OWNER_EMAIL,
         })
         env.update(extra)
         return subprocess.run(
@@ -437,6 +440,136 @@ class SeedBreakGlassCeremony(SeedProductionScript):
         self.assertNotIn("SEED_APPROVER_KEYS=", (DEPLOY / "seed-production.sh").read_text())
 
 
+class SeedSoloCeremony(SeedBreakGlassCeremony):
+    """[SOLO SEED] Owner ruling 13 Oct: while there is no second admin, the
+    production seed that mints the first SUPER_ADMIN may be approved by ONE
+    pinned person after a 12-hour cooling-off (enforced by the seed itself,
+    seed-solo.test.ts). The script passes SEED_SOLO through, exactly 1 or
+    unset, and only on the production host."""
+
+    def production(self):
+        (self.deploy / ".env").write_text("PILOT_ENV=production\nNODE_ENV=production\n")
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in "context show") echo default;; *"exec -T postgres"*) echo "1:production"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV solo=[$SEED_SOLO] plan=[$SEED_PLAN_APPROVALS] email=[$SEED_ADMIN_EMAIL]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
+
+    def test_solo_reaches_the_seed_container_on_production(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV solo=[1] plan=[]", self.log.read_text())
+
+    def test_without_solo_the_container_sees_none(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV solo=[] plan=[]", self.log.read_text())
+
+    def test_solo_is_the_production_ceremony_only(self):
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SOLO="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_SOLO is for the production seed ceremony only", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_solo_is_exactly_1_or_unset(self):
+        self.production()
+        for value in ("yes", "true", "0", " 1", "2"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_SOLO must be exactly 1", result.stderr)
+                self.assertNotIn("run --rm", self.log.read_text())
+
+    # [OWNER EMAIL] Opus money review 14 Oct, S2-L: the app's solo approval
+    # emails the owner and no shipped client can add an admin email, so the
+    # production seed takes it (personal data: a hidden prompt, never an
+    # argument, never printed) and hands it to the seed through the environment.
+    def test_production_hands_the_owner_email_to_the_seed_and_never_prints_it(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text()
+        self.assertIn(f"email=[{self.OWNER_EMAIL}]", calls)   # the container's environment
+        argv = "\n".join(l for l in calls.splitlines() if l.startswith("docker "))
+        self.assertNotIn(self.OWNER_EMAIL, argv)                # never on a command line
+        self.assertNotIn(self.OWNER_EMAIL, result.stdout + result.stderr)
+
+    def test_production_without_the_owner_email_refuses_before_anything_runs(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the production seed needs the owner's admin email", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_a_value_that_is_not_an_email_is_refused_and_not_shown(self):
+        self.production()
+        for bad in ("owner", "owner@example", "own er@example.invalid", "@example.invalid"):
+            with self.subTest(bad=bad):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_ADMIN_EMAIL is not an email address (it is not shown)", result.stderr)
+                self.assertNotIn(bad, result.stdout + result.stderr)
+                self.assertNotIn("docker", self.log.read_text())
+
+    def test_an_address_outside_plain_ascii_is_refused_and_not_shown(self):
+        # [SECREVIEW 14 Oct] The approver reads the domain exactly: nothing
+        # invisible, right-to-left or look-alike may pass, and no second line.
+        self.production()
+        for bad in ("owner@exa\u200bmple.invalid", "owner@\u202ednalavni.elpmaxe", "owner@ex\u0430mple.invalid",
+                    "own\u00e9r@example.invalid", "owner@example.invalid\nx@example.invalid"):
+            with self.subTest(bad=bad):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_ADMIN_EMAIL is not an email address (it is not shown)", result.stderr)
+                self.assertNotIn("docker", self.log.read_text())
+
+    def test_on_a_terminal_the_email_is_typed_at_a_hidden_prompt(self):
+        import pty
+        self.production()
+        import threading
+        main, sub = pty.openpty()
+        self.addCleanup(os.close, main)
+        # `read -s` resets the terminal and may drop input typed before it, so
+        # the "owner" keeps typing the line until the script has finished.
+        done = threading.Event()
+        def type_it():
+            while not done.wait(0.3):
+                try:
+                    os.write(main, f"{self.OWNER_EMAIL}\n".encode())
+                except OSError:
+                    return
+        typist = threading.Thread(target=type_it, daemon=True)
+        typist.start()
+        self.addCleanup(done.set)
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
+                    "SEED_ADMIN_PHONE": "+5920400001", "SEED_FX_GYD_PER_USD": "209"})
+        env.pop("SEED_ADMIN_EMAIL", None)
+        try:
+            result = subprocess.run(["bash", str(self.deploy / "seed-production.sh"), self.SHA], env=env, stdin=sub,
+                                    text=True, capture_output=True, timeout=20)
+        finally:
+            os.close(sub)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("The owner's admin email (typed, not shown): ", result.stderr)
+        self.assertIn(f"email=[{self.OWNER_EMAIL}]", self.log.read_text())
+        self.assertNotIn(self.OWNER_EMAIL, result.stdout + result.stderr)
+
+    def test_staging_never_asks_and_hands_the_seed_no_email(self):
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) echo "1:staging";; *"run --rm --no-TTY seed"*) echo "ENV email=[$SEED_ADMIN_EMAIL]" >> "$CALL_LOG";; esac\nexit 0')
+        result = self.run_script(SEED_ADMIN_PHONE="+5925559001")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("admin email", result.stderr)
+        self.assertIn("ENV email=[]", self.log.read_text())
+
+    def test_the_compose_override_passes_the_owner_email_with_an_empty_default(self):
+        self.assertIn("SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
+
+    def test_the_compose_override_passes_solo_with_an_empty_default(self):
+        self.assertIn("SEED_SOLO: ${SEED_SOLO:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
+
+
 
 # ===========================================================================
 # [Q11] The staging website (apps/web), optional behind WEB_HOST. A stack
@@ -494,6 +627,86 @@ def dockerfile_stages(path: Path) -> dict:
         if head:
             stages[head.group(1)] = chunk
     return stages
+
+
+class SeedApproveTypedEmail(unittest.TestCase):
+    """[SECREVIEW S4 · 14 Oct] deploy/seed-approve.sh on the approver's own
+    terminal: the admin email he types decides. SEED_APPROVE_EMAIL (the test
+    suites' stand-in) never overrides what is typed on a terminal."""
+
+    EMAIL = "owner.seed@example.invalid"
+
+    def setUp(self):
+        if shutil.which("ssh-keygen") is None:
+            self.skipTest("ssh-keygen is needed to sign")
+        self.tmp = Path(tempfile.mkdtemp(prefix="swift-approve-tty-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.key = self.tmp / "owner"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key), "-C", "owner"], check=True)
+        digest = __import__("hashlib").sha256(self.EMAIL.encode()).hexdigest()
+        self.request = "\n".join([
+            "swift-seed-approval v2", "kind: plan", "target: " + "a" * 64, "subject: " + "b" * 64,
+            "admin: phone-sha256:" + "c" * 64, "issued: 2026-10-14T00:00:00.000Z", "expires: 2026-10-16T00:00:00.000Z",
+            "nonce: " + "d" * 32, "database: swift on postgres, deployment dep-x (production)",
+            "config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD",
+            "admin phone: ending 0001 becomes the first SUPER_ADMIN if there is none",
+            f"admin email: o\u2026@example.invalid (sha256 {digest}) is set on that account if it has no email",
+            "end"]) + "\n"
+
+    def approve_on_a_terminal(self, typed_email, **env_extra):
+        import fcntl, pty, select, signal
+        req = self.tmp / "request.txt"
+        req.write_text(self.request)
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.tmp), **env_extra}
+        pid, fd = pty.fork()
+        if pid == 0:  # the approver's shell: the request on stdin, the terminal for typing
+            os.execvpe("bash", ["bash", "-c", 'exec bash "$0" owner "$1" < "$2"', str(DEPLOY / "seed-approve.sh"), str(self.key), str(req)], env)
+        fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NONBLOCK)  # never block on a full terminal
+        out, said_yes, typed, next_type, deadline = b"", False, 0, 0.0, time.monotonic() + 30
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.3)
+            if ready:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            try:
+                if not said_yes and b"Type yes to sign: " in out:
+                    os.write(fd, b"yes\n")
+                    said_yes = True
+                elif b"Type the admin email" in out and typed < 5 and time.monotonic() >= next_type:
+                    # read -s may drop what was typed before it switched echo
+                    # off: type a moment after the prompt, and again if unread.
+                    if typed or next_type:
+                        os.write(fd, typed_email.encode() + b"\n")
+                        typed += 1
+                    next_type = time.monotonic() + (2.0 if typed else 0.5)
+            except OSError:
+                pass
+        for _ in range(50):
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        return os.waitstatus_to_exitcode(status), out.decode("utf-8", "replace")
+
+    def test_the_typed_address_decides_even_with_the_stand_in_set(self):
+        code, out = self.approve_on_a_terminal("other.person@example.invalid", SEED_APPROVE_EMAIL=self.EMAIL)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("not the address you typed; nothing signed", out)
+        self.assertNotIn('{"approver":', out)
+
+    def test_the_right_address_typed_on_the_terminal_signs(self):
+        code, out = self.approve_on_a_terminal(self.EMAIL)
+        self.assertEqual(code, 0, out)
+        self.assertIn('{"approver":"owner"', out)
 
 
 class Q11WebsiteCompose(unittest.TestCase):

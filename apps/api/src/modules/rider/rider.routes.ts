@@ -1,8 +1,10 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
+import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
@@ -189,7 +191,7 @@ async function getOwnedOrder(app: FastifyInstance, orderId: string, riderId: str
  * rider disagree, and a log that records a claim as a fact is worse than one
  * that records nothing.
  */
-const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string; note: string }> = {
+const STATUS_TRANSITIONS: Record<string, { from: OrderStatus[]; to: OrderStatus; note: string }> = {
   'en-route-pickup': { from: ['RIDER_ASSIGNED'], to: 'RIDER_EN_ROUTE_PICKUP', note: 'Rider started the run to pickup' },
   'arrived-pickup':  { from: ['RIDER_EN_ROUTE_PICKUP'], to: 'RIDER_ARRIVED_PICKUP', note: 'Rider reported arriving at pickup' },
   'picked-up':       { from: [...RIDER_PICKUP_FROM], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
@@ -925,11 +927,14 @@ export async function riderRoutes(app: FastifyInstance) {
 
       // Authorization above and the live emit cannot be one unguarded read /
       // publish pair: another device may win GO while ETA is being computed.
-      // Take a shared lock only for this final synchronous publication
-      // checkpoint (never for maps/cache work). Concurrent pings can still
-      // publish together, while GO/offline updates wait. GO therefore
-      // linearizes either before this check and suppresses the stale sample,
-      // or after the emit has already completed.
+      // Take a shared lock only for this final authority checkpoint (never for
+      // maps/cache work, and never for the publish: the audience gate reads
+      // the room's sockets across nodes and takes its own DB connection, which
+      // must not happen while these rows are locked). Concurrent pings still
+      // run together, while GO/offline updates wait. GO therefore linearizes
+      // either before this check and suppresses the stale sample, or after it;
+      // a sample authorized here goes out right after commit, only while this
+      // rider is still the leg's mover, and the device's next ping is refused.
       const publication = await app.prisma.$transaction(async (tx) => {
         // User -> Session -> profile matches the authority writers' outer lock
         // order. The shared mode keeps concurrent authorized pings concurrent
@@ -982,32 +987,34 @@ export async function riderRoutes(app: FastifyInstance) {
             select: { id: true },
           })).map((o) => o.id),
         );
-        for (const leg of legEtas) {
-          if (!stillLive.has(leg.orderId)) continue;
-          app.io.to(`order:${leg.orderId}`).emit('rider:location', {
-            // [MOB-024] The event NAMES its order. It is emitted into that
-            // order's room, so the server already knows — and without it the
-            // customer's screen had nothing to check a fix against, so a
-            // coordinate from another room (a retained subscription, a
-            // reconnect that rejoined an old room) moved the courier marker
-            // and the ETA on the wrong customer's delivery.
-            orderId: leg.orderId,
-            riderId: rider.id,
-            lat: latitude,
-            lng: longitude,
-            heading: heading ?? null,
-            speed: speed ?? null,
-            etaMinutes: leg.etaMinutes,
-            // 'direct' for the leg the rider is on; 'after_current' for a leg
-            // behind another delivery. The screen labels it honestly.
-            etaBasis: leg.basis,
-            ts: now.toISOString(),
-          });
-        }
-        return { accepted: true as const };
+        return { accepted: true as const, stillLive };
       });
       if (!publication.accepted) {
         return { success: true, data: publication };
+      }
+      const { stillLive } = publication;
+      // Published after the commit, never under the lock (see above).
+      for (const leg of legEtas) {
+        if (!stillLive.has(leg.orderId)) continue;
+        await emitToOrderRoom(app.prisma, app.io, leg.orderId, 'rider:location', {
+          // [MOB-024] The event NAMES its order. It is emitted into that
+          // order's room, so the server already knows — and without it the
+          // customer's screen had nothing to check a fix against, so a
+          // coordinate from another room (a retained subscription, a
+          // reconnect that rejoined an old room) moved the courier marker
+          // and the ETA on the wrong customer's delivery.
+          orderId: leg.orderId,
+          riderId: rider.id,
+          lat: latitude,
+          lng: longitude,
+          heading: heading ?? null,
+          speed: speed ?? null,
+          etaMinutes: leg.etaMinutes,
+          // 'direct' for the leg the rider is on; 'after_current' for a leg
+          // behind another delivery. The screen labels it honestly.
+          etaBasis: leg.basis,
+          ts: now.toISOString(),
+        }, { fromMover: { riderId: rider.id } });
       }
     }
 
@@ -1088,7 +1095,7 @@ export async function riderRoutes(app: FastifyInstance) {
             addressLine1: true, city: true,
           },
         },
-        items: { select: { name: true, quantity: true } },
+        items: { select: { quantity: true } },
       },
       orderBy: { createdAt: 'asc' },
       take: 50,
@@ -1120,14 +1127,18 @@ export async function riderRoutes(app: FastifyInstance) {
         // empty, and nothing about the system says why.
         const pickupLat = order.pickupLat != null ? Number(order.pickupLat) : Number(order.vendor?.latitude ?? NaN);
         const pickupLng = order.pickupLng != null ? Number(order.pickupLng) : Number(order.vendor?.longitude ?? NaN);
-        const hasPickup = Number.isFinite(pickupLat) && Number.isFinite(pickupLng);
+        const privatePickup = order.orderType === 'COURIER' ? coarsePoint(pickupLat, pickupLng) : null;
+        const boardPickupLat = order.orderType === 'COURIER' ? privatePickup?.lat ?? NaN : pickupLat;
+        const boardPickupLng = order.orderType === 'COURIER' ? privatePickup?.lng ?? NaN : pickupLng;
+        const destination = coarsePoint(order.deliveryLat, order.deliveryLng);
+        const hasPickup = Number.isFinite(boardPickupLat) && Number.isFinite(boardPickupLng);
 
         // No usable pickup point is NOT a job 6,494 km away — it is a job whose
         // distance we do not know. Infinity keeps it off the radius-filtered
         // board without pretending we measured something.
-        const pickupDistance = hasPickup ? haversineDistance(riderLat, riderLng, pickupLat, pickupLng) : Infinity;
-        const deliveryDistance = hasPickup
-          ? haversineDistance(pickupLat, pickupLng, Number(order.deliveryLat), Number(order.deliveryLng))
+        const pickupDistance = hasPickup ? haversineDistance(riderLat, riderLng, boardPickupLat, boardPickupLng) : Infinity;
+        const deliveryDistance = hasPickup && destination
+          ? haversineDistance(boardPickupLat, boardPickupLng, destination.lat, destination.lng)
           : Infinity;
         return {
           id: order.id,
@@ -1135,10 +1146,6 @@ export async function riderRoutes(app: FastifyInstance) {
           orderType: order.orderType,
           status: order.status,
           vendor: order.vendor,
-          pickupAddress: order.pickupAddress,
-          deliveryAddress: order.deliveryAddress,
-          deliveryInstructions: order.deliveryInstructions,
-          items: order.items,
           itemCount: order.items.reduce((s, i) => s + i.quantity, 0),
           estLoad: estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0)),
           deliveryFee: Number(order.deliveryFee),
@@ -1211,13 +1218,13 @@ export async function riderRoutes(app: FastifyInstance) {
     }
 
     const order = await app.prisma.order.findUnique({
-      where: { id: rider.currentOrderId },
+      where: { id: rider.currentOrderId, riderId: rider.id },
       // [F-0011] The response spreads this row wholesale — omit at the source.
       omit: HANDOVER_SECRETS_OMIT,
       include: ACTIVE_ORDER_INCLUDE,
     });
 
-    if (!order) {
+    if (!order || (order.orderType === 'COURIER' && TERMINAL_ORDER_STATUSES.includes(order.status))) {
       // Stale pointer — heal it through the seam: it re-points to any other
       // live leg rather than nulling under one, and settles availability from
       // the count instead of declaring the rider free.
@@ -1530,11 +1537,12 @@ export async function riderRoutes(app: FastifyInstance) {
         }
       }
 
-      const updated = await orderService.updateStatus(
+      const updated = await orderService.updateRiderStatus(
         id,
         to,
         request.user.userId,
         evidence ? `${note} — ${evidence}` : note,
+        { riderId: rider.id, assignmentVersion: order.riderAssignmentVersion, allowedFrom: from },
       );
 
       return {
@@ -1726,7 +1734,7 @@ export async function riderRoutes(app: FastifyInstance) {
       vendor: o.vendor,
       items: o.items,
       itemCount: o.items.reduce((s, i) => s + i.quantity, 0),
-      deliveryAddress: o.deliveryAddress,
+      deliveryAddress: o.orderType === 'COURIER' ? null : o.deliveryAddress,
       deliveryFee: Number(o.deliveryFee),
       tipAmount: Number(o.tipAmount),
       totalEarning: Number(o.deliveryFee) + Number(o.tipAmount),
@@ -2019,7 +2027,7 @@ export async function riderRoutes(app: FastifyInstance) {
     const handbackDeclinedKey = dispatchDeclinedKey(id, outcome.order.fulfillmentModeVersion);
     await app.redis.sadd(handbackDeclinedKey, rider.id).catch(() => {});
     await app.redis.expire(handbackDeclinedKey, 3600).catch(() => {});
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: outcome.reopenStatus, reason: 'rider_handback' });
     await new NotificationService(app.prisma, app.io).send({
       userId: outcome.customerId,
       type: 'ORDER_UPDATE',

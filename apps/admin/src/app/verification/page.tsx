@@ -7,16 +7,19 @@ import { MutationError } from '@/components/MutationError';
 import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
+import { CatalogueApproverAccess } from '@/components/verification/CatalogueApproverAccess';
 import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
   'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
+  // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences that replace the permit
+  'hire_car_driver_licence', 'hire_car_vehicle_licence',
   'road_service_licence', 'food_handler_cert', 'gra_restaurant_licence',
-  'drivers_licence', 'vehicle_registration',
+  'drivers_licence',
   // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate
   'liquor_licence', 'sanitary_certificate', 'trade_licence',
   // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
@@ -221,6 +224,7 @@ export default function VerificationPage() {
     <div inert={decision ? true : undefined}>
       <header className="rc-page-heading"><div><h1>Review Center</h1><p>Review the evidence. Record the decision. Keep applicants moving.</p></div><span className="rc-muted">Oldest submissions first</span></header>
       {!applicant && <ReviewerAccess />}
+      {!applicant && <CatalogueApproverAccess />}
       {notice && <p role="status" className="rc-notice">{notice}</p>}
       <div className="rc-queue-controls">
         <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{s}</button>)}</div>
@@ -245,7 +249,9 @@ export default function VerificationPage() {
           {!filtered.length ? <p className="rc-empty"><span>{groups.length ? 'No applicants match these filters.' : 'No documents'}</span> {groups.length ? 'Clear a filter to see more applicants.' : 'This lane has no documents with the selected status.'}</p> :
             <table className="rc-queue-table"><thead><tr><th>Applicant</th><th>Role / documents</th><th>Waiting for</th><th><span className="sr-only">Action</span></th></tr></thead><tbody>{filtered.map((a) => <tr key={a.id}>
               <td><strong>{a.name}</strong><small>{maskedPhone(a.phone)}</small></td>
-              <td><span>{[...new Set(a.documents.map((d) => roleLabel(d.role)))].join(', ')}</span><small>{a.documents.length} {a.documents.length === 1 ? 'document' : 'documents'} · {a.documents.map((d) => docLabel(d.docType)).join(', ')}</small></td>
+              <td><span>{[...new Set(a.documents.map((d) => roleLabel(d.role)))].join(', ')}</span><small>{a.documents.length} {a.documents.length === 1 ? 'document' : 'documents'} · {a.documents.map((d) => docLabel(d.docType)).join(', ')}</small>
+                {/* [MC-AD1] a re-submission or a renewal is marked; a first upload is not */}
+                {a.documents.filter((d) => d.previousDecision).map((d) => <span key={d.id} className={`rc-chip rc-chip-${d.previousDecision?.kind === 'RENEWAL' ? 'renewal' : 'resubmitted'}`}>{resubmissionLabel(d)}{d.previousDecision?.kind === 'RESUBMITTED_AFTER_REJECTION' && `: ${d.previousDecision.reviewNote || 'No reason recorded'}`}</span>)}</td>
               <td><time dateTime={a.oldest ? new Date(a.oldest).toISOString() : undefined}>{waitingSince(a.oldest, now)}</time></td>
               <td><button className="rc-primary" onClick={() => openApplicant(a)}>Review</button></td>
             </tr>)}</tbody></table>}
@@ -268,6 +274,12 @@ export default function VerificationPage() {
           </nav>
           <div className="rc-review-body">
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
+            {selected.previousDecision && <aside role="note" aria-label="Earlier decision" className="rc-previous">
+              <strong>{resubmissionLabel(selected)}</strong>
+              <span>{previousDecisionLine(selected.previousDecision)}</span>
+              {selected.previousDecision.reviewNote && <span>Last time: {selected.previousDecision.reviewNote}</span>}
+            </aside>}
+            {reviewerHint(selected.docType) ? <p className="rc-reviewer-hint">{reviewerHint(selected.docType)}</p> : null}
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
             <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc, accountTrustLevel) => {

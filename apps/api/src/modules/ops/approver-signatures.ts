@@ -35,6 +35,19 @@ export const APPROVAL_END = 'end';
 export const APPROVAL_CLOCK_SKEW_MS = 5 * 60 * 1000;
 export const APPROVAL_MAX_LIFETIME_MS = 72 * 60 * 60 * 1000;
 export const APPROVAL_DEFAULT_LIFETIME_MS = 24 * 60 * 60 * 1000;
+/**
+ * [SOLO SEED] Owner ruling 13 Oct (#13), coordinator ruling: while there is
+ * no second admin, the production seed that mints the FIRST SUPER_ADMIN may
+ * be approved by ONE pinned person, mirroring the in-app solo rule. Only that
+ * seed (none exists, the signed plan names the phone); a mandatory cooling-off
+ * of 12 hours from the request's signed issue time before it may run; the
+ * signer reads this line in the request itself, so a two-person request never
+ * passes as solo nor the reverse. Everything else keeps two people.
+ */
+export const SOLO_COOLING_OFF_MS = 12 * 60 * 60 * 1000;
+/** A solo request stays usable 36 hours after its cooling-off ends. */
+export const SOLO_DEFAULT_LIFETIME_MS = 48 * 60 * 60 * 1000;
+export const SOLO_SHOW_LINE = 'approval: one person (solo mode, there is no second admin yet); it runs no earlier than 12 hours after it was issued';
 /** An approver's name as it is pinned: short, lowercase, no spaces. */
 export const APPROVER_NAME = /^[a-z][a-z0-9-]{1,31}$/;
 
@@ -54,8 +67,10 @@ export interface SignedApproval { approver: string; request: string; signature: 
 export interface RequestFacts { change: ApprovalKind; target: string; subject: string; admin: string; shows: string[] }
 export interface ApprovalRequest extends RequestFacts { issued: string; expires: string; nonce: string }
 /** Each line an approver reads names its fact; nothing else may be signed,
- *  and no control character (one could hide a line on a terminal). */
-const SHOW_LINE = /^(database|config|admin phone|change|promote): \P{Cc}+$/u;
+ *  and no control character (one could hide a line on a terminal) nor any
+ *  Unicode format character (right-to-left overrides and isolates, zero-width
+ *  marks, a byte-order mark: one could reorder or hide text) [SECREVIEW S4]. */
+const SHOW_LINE = /^(database|config|admin phone|admin email|approval|change|promote): [^\p{Cc}\p{Cf}]+$/u;
 
 export interface PinnedApprover { name: string; keyBlob: Buffer; fingerprint: string }
 
@@ -73,6 +88,10 @@ export function canonicalRequest(r: ApprovalRequest): string {
 
 /** What the server prints for the approvers to sign: issued now, valid for `lifetimeMs`. */
 export function approvalRequest(facts: RequestFacts, now = new Date(), lifetimeMs = APPROVAL_DEFAULT_LIFETIME_MS): string {
+  // Never print words the approver could misread: parseRequest refuses them at apply anyway.
+  if (!facts.shows.every((l) => SHOW_LINE.test(l))) {
+    throw new ApprovalRefused('REQUEST_MALFORMED', 'a line of this request holds a control, invisible or direction-changing character; nothing printed');
+  }
   return canonicalRequest({
     ...facts, issued: now.toISOString(), expires: new Date(now.getTime() + lifetimeMs).toISOString(), nonce: randomBytes(16).toString('hex'),
   });
@@ -182,7 +201,48 @@ export function verifySshSig(signatureB64: string, message: Buffer, namespace = 
   return publicKey;
 }
 
-export interface VerifiedApproval { approver: string; fingerprint: string; consumption: string; admin: string; issued: string; expires: string; nonce: string }
+export interface VerifiedApproval {
+  approver: string; fingerprint: string; consumption: string; admin: string; issued: string; expires: string; nonce: string;
+  /** The signed record itself (the request and signature as given; not
+   *  secrets). A solo approval is never consumed without it (consumeApprovals). */
+  signed?: { request: string; signature: string };
+}
+
+/** One approval over exactly this change by the person pinned under its name
+ *  (see verifyApprovals for what "exactly" means). */
+function verifyOne(a: SignedApproval, pinned: Map<string, PinnedApprover>, expect: RequestFacts, now: Date): VerifiedApproval {
+  const who = pinned.get(a.approver);
+  if (!who) throw new ApprovalRefused('APPROVER_UNKNOWN', `${a.approver || '?'} is not a pinned approver`);
+  const requestText = Buffer.from(a.request, 'base64').toString('utf8');
+  const req = parseRequest(requestText);
+  if (req.change !== expect.change || req.target !== expect.target || req.subject !== expect.subject) {
+    throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} is for another ${req.change === expect.change ? 'database or subject' : 'kind of change'}`);
+  }
+  if (req.admin !== expect.admin) throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} names another first admin`);
+  // What the approver read must be what the server describes now, line for
+  // line (database, configuration and FX rate, admin phone, every change).
+  if (canonicalRequest({ ...req, shows: expect.shows }) !== requestText) {
+    throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} was signed over another description of this change; sign the request printed now`);
+  }
+  const issuedAt = Date.parse(req.issued);
+  const expiresAt = Date.parse(req.expires);
+  if (issuedAt > now.getTime() + APPROVAL_CLOCK_SKEW_MS) throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} claims to be issued in the future (${req.issued})`);
+  if (expiresAt <= now.getTime()) throw new ApprovalRefused('APPROVAL_EXPIRED', `approval by ${a.approver} expired at ${req.expires}`);
+  // Measured from issue, not from use: a request is never good for more
+  // than 72 hours after the server printed it, however late it is used.
+  if (expiresAt - issuedAt > APPROVAL_MAX_LIFETIME_MS) throw new ApprovalRefused('APPROVAL_TOO_LONG', `approval by ${a.approver} is valid for more than 72 hours from when it was issued`);
+  const signer = verifySshSig(a.signature, Buffer.from(requestText, 'utf8'));
+  if (!signer.equals(who.keyBlob)) throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} is not signed with ${a.approver}'s pinned key`);
+  // Single use is keyed on WHAT was approved and BY WHOM — the signer's
+  // pinned key and the exact request (which carries its random nonce) —
+  // never on the text the operator pasted: an armored, re-wrapped or
+  // re-hashed (sha256 vs sha512) form of the same approval is the same
+  // approval, and is consumed once.
+  return {
+    approver: who.name, fingerprint: who.fingerprint, consumption: `approval:${sha256hex(`${who.fingerprint}\n${requestText}`)}`,
+    admin: req.admin, issued: req.issued, expires: req.expires, nonce: req.nonce, signed: { request: a.request, signature: a.signature },
+  };
+}
 
 /**
  * Two (or more) approvals by DIFFERENT pinned people over exactly this change:
@@ -199,41 +259,36 @@ export function verifyApprovals(
 ): VerifiedApproval[] {
   if (pinned.size < 2) throw new ApprovalRefused('APPROVERS_NOT_PINNED', 'SEED_APPROVER_KEYS must pin at least two approvers, each with their own key');
   if (approvals.length < 2) throw new ApprovalRefused('APPROVALS_REQUIRED', 'this change needs two approvals by two different people');
-  const out: VerifiedApproval[] = [];
-  for (const a of approvals) {
-    const who = pinned.get(a.approver);
-    if (!who) throw new ApprovalRefused('APPROVER_UNKNOWN', `${a.approver || '?'} is not a pinned approver`);
-    const requestText = Buffer.from(a.request, 'base64').toString('utf8');
-    const req = parseRequest(requestText);
-    if (req.change !== expect.change || req.target !== expect.target || req.subject !== expect.subject) {
-      throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} is for another ${req.change === expect.change ? 'database or subject' : 'kind of change'}`);
-    }
-    if (req.admin !== expect.admin) throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} names another first admin`);
-    // What the approver read must be what the server describes now, line for
-    // line (database, configuration and FX rate, admin phone, every change).
-    if (canonicalRequest({ ...req, shows: expect.shows }) !== requestText) {
-      throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} was signed over another description of this change; sign the request printed now`);
-    }
-    const issuedAt = Date.parse(req.issued);
-    const expiresAt = Date.parse(req.expires);
-    if (issuedAt > now.getTime() + APPROVAL_CLOCK_SKEW_MS) throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} claims to be issued in the future (${req.issued})`);
-    if (expiresAt <= now.getTime()) throw new ApprovalRefused('APPROVAL_EXPIRED', `approval by ${a.approver} expired at ${req.expires}`);
-    // Measured from issue, not from use: a request is never good for more
-    // than 72 hours after the server printed it, however late it is used.
-    if (expiresAt - issuedAt > APPROVAL_MAX_LIFETIME_MS) throw new ApprovalRefused('APPROVAL_TOO_LONG', `approval by ${a.approver} is valid for more than 72 hours from when it was issued`);
-    const signer = verifySshSig(a.signature, Buffer.from(requestText, 'utf8'));
-    if (!signer.equals(who.keyBlob)) throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} is not signed with ${a.approver}'s pinned key`);
-    // Single use is keyed on WHAT was approved and BY WHOM — the signer's
-    // pinned key and the exact request (which carries its random nonce) —
-    // never on the text the operator pasted: an armored, re-wrapped or
-    // re-hashed (sha256 vs sha512) form of the same approval is the same
-    // approval, and is consumed once.
-    out.push({ approver: who.name, fingerprint: who.fingerprint, consumption: `approval:${sha256hex(`${who.fingerprint}\n${requestText}`)}`, admin: req.admin, issued: req.issued, expires: req.expires, nonce: req.nonce });
-  }
+  const out: VerifiedApproval[] = approvals.map((a) => verifyOne(a, pinned, expect, now));
   if (new Set(out.map((v) => v.fingerprint)).size < 2 || new Set(out.map((v) => v.approver)).size < 2) {
     throw new ApprovalRefused('APPROVERS_NOT_DISTINCT', 'the approvals must come from two different people (two different pinned keys)');
   }
   return out;
+}
+
+/**
+ * [SOLO SEED] Exactly ONE approval by a pinned person over exactly this
+ * change, whose words include SOLO_SHOW_LINE (the caller's `expect` carries
+ * it, so a two-person request never passes here), and only once the
+ * cooling-off has passed: an early run is refused and told when it may run.
+ * The caller decides that the change is one solo may cover (the seed that
+ * mints the first SUPER_ADMIN while none exists).
+ */
+export function verifySoloApproval(
+  approvals: SignedApproval[],
+  pinned: Map<string, PinnedApprover>,
+  expect: RequestFacts,
+  now = new Date(),
+): VerifiedApproval[] {
+  if (pinned.size < 1) throw new ApprovalRefused('APPROVERS_NOT_PINNED', 'SEED_APPROVER_KEYS must pin the approver\'s own key');
+  if (approvals.length !== 1) throw new ApprovalRefused('SOLO_ONE_APPROVAL', 'a solo approval is exactly one signed line; two people use the two-person ceremony (without SEED_SOLO)');
+  if (!expect.shows.includes(SOLO_SHOW_LINE)) throw new ApprovalRefused('SOLO_NOT_ALLOWED', 'this change is not described as a solo approval');
+  const verified = verifyOne(approvals[0]!, pinned, expect, now);
+  const runsFrom = Date.parse(verified.issued) + SOLO_COOLING_OFF_MS;
+  if (now.getTime() < runsFrom) {
+    throw new ApprovalRefused('COOLING_OFF', `this solo approval was issued at ${verified.issued}; it may run from ${new Date(runsFrom).toISOString()} (a 12-hour cooling-off), until ${verified.expires}`);
+  }
+  return [verified];
 }
 
 /**
@@ -245,11 +300,13 @@ export async function consumeApprovals(
   tx: Prisma.TransactionClient,
   verified: VerifiedApproval[],
   context: { action: string; target: Prisma.InputJsonValue; actor?: string },
+  mode: 'two-person' | 'solo' = 'two-person',
 ): Promise<void> {
   // Fail closed whatever the caller verified: a change gated on two people
-  // never proceeds on fewer than two distinct consumed approvals.
-  if (verified.length < 2 || new Set(verified.map((v) => v.fingerprint)).size < 2) {
-    throw new ApprovalRefused('APPROVALS_REQUIRED', 'this change needs two approvals by two different people');
+  // never proceeds on fewer than two distinct consumed approvals, and a solo
+  // change on anything but exactly one.
+  if (mode === 'solo' ? verified.length !== 1 || !verified[0]!.signed : (verified.length < 2 || new Set(verified.map((v) => v.fingerprint)).size < 2)) {
+    throw new ApprovalRefused('APPROVALS_REQUIRED', mode === 'solo' ? 'a solo change is exactly one approval, kept with its signed record' : 'this change needs two approvals by two different people');
   }
   for (const v of verified) {
     const used = await tx.privilegedChangeAudit.findFirst({ where: { action: 'SEED_APPROVAL_CONSUMED', planDigest: v.consumption }, select: { id: true } });
@@ -259,7 +316,10 @@ export async function consumeApprovals(
     await tx.privilegedChangeAudit.create({
       data: {
         action: 'SEED_APPROVAL_CONSUMED', planDigest: v.consumption, event: 'CONSUMED', target: context.target,
-        detail: { for: context.action, approver: v.approver, fingerprint: v.fingerprint, issued: v.issued, expires: v.expires, nonce: v.nonce },
+        // [SOLO SEED] A solo approval keeps its signed record (request and
+        // signature, not secrets) with the seed, verifiable later against the
+        // pinned key.
+        detail: { for: context.action, approver: v.approver, fingerprint: v.fingerprint, issued: v.issued, expires: v.expires, nonce: v.nonce, ...(mode === 'solo' && v.signed ? { mode, request: v.signed.request, signature: v.signed.signature } : {}) },
         actor: context.actor ?? null,
       },
     });

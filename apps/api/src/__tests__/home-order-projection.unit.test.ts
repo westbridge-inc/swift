@@ -15,6 +15,10 @@ vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
   hiddenAmong: async () => new Set<string>(),
   hiddenItemIds: async () => [],
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
+  // [owner 14 Oct, store names] nor the store's own words (no fixture store's name holds it)
+  storeHiddenFromCustomers: async () => false,
   assertOrderableNow: async () => undefined,
 }));
 

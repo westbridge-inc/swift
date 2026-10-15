@@ -19,6 +19,9 @@
 #     is the current checkout (the exact revision pilot-up.sh deployed);
 #   - the target database already carries its deployment_identity row;
 #   - SEED_ADMIN_PHONE (E.164) is set in the environment.
+#   - on production, the owner's admin email: typed at the script's hidden
+#     prompt (or SEED_ADMIN_EMAIL exported after `read -rs`); written on the
+#     first SUPER_ADMIN's account (the app's solo approval emails it).
 #
 # [PROD-PATH] PILOT_ENV is staging or production, and the database must say
 # the same thing: a production host seeds only a database whose
@@ -33,6 +36,15 @@
 #   3. the operator applies with both printed lines:
 #        SEED_PLAN_APPROVALS='[<first>,<second>]' ./deploy/seed-production.sh <sha>
 # A break-glass promotion works the same way (exit 3, SEED_PROMOTION_APPROVALS).
+# [SOLO SEED] While there is no second admin (owner ruling 13 Oct), the seed
+# that mints the FIRST SUPER_ADMIN may be approved by ONE pinned person:
+#   1. SEED_SOLO=1 ./deploy/seed-production.sh <sha>  prints a solo request
+#      (the words signed say it is one person) and exits 2;
+#   2. the approver signs it with seed-approve.sh;
+#   3. no earlier than 12 hours after the request was issued (the seed refuses
+#      an early run and says when it may run), and within its 48 hours:
+#        SEED_SOLO=1 SEED_PLAN_APPROVALS='[<the line>]' ./deploy/seed-production.sh <sha>
+# Solo never covers anything else (a later change, or a second admin).
 # Approvals expire and are single-use. The pinned keys reach the seed container
 # only as a file from the encrypted store.
 set -euo pipefail
@@ -84,6 +96,13 @@ if [ "$PILOT_ENV" = production ]; then
   [[ "${SEED_FX_GYD_PER_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "${SEED_FX_GYD_PER_USD}" =~ [1-9] ]] ||
     die "set SEED_FX_GYD_PER_USD (today's GYD per USD, a positive number) in the environment: production records the rate the operator observed, never a constant"
 fi
+# [SOLO SEED] Exactly 1, or unset/empty; solo is the production ceremony only.
+case "${SEED_SOLO:-}" in
+  "") ;;
+  1) [ "$PILOT_ENV" = production ] ||
+       die "SEED_SOLO is for the production seed ceremony only (a staging seed applies without approvals)" ;;
+  *) die "SEED_SOLO must be exactly 1 (one approver, 12-hour cooling-off) or unset" ;;
+esac
 SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 [ -n "$SEED_ADMIN_PHONE" ] || die "set SEED_ADMIN_PHONE (the first SUPER_ADMIN's E.164 phone) in the environment"
 # +592600 is DEMO_PHONE_PREFIX (apps/api/src/modules/ops/purge-plan.ts): the
@@ -92,6 +111,33 @@ SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 # the ceremony refuses it. The phone value itself is never printed.
 [[ "$SEED_ADMIN_PHONE" != +592600* ]] ||
   die "SEED_ADMIN_PHONE must not start with +592600 — that range is the demo-seed/purge classification, never a real admin"
+# [OWNER EMAIL · Opus money review 14 Oct, S2-L] Solo approval in the apps
+# emails the owner (it refuses an admin with no email), and no shipped client
+# can add an admin email, so the production seed writes it with the first
+# SUPER_ADMIN. Personal data: typed at a hidden prompt (or exported after
+# `read -rs`), never an argument, never printed or logged. The signed request
+# shows it masked and binds its digest, so print and apply must get the same.
+if [ "$PILOT_ENV" = production ]; then
+  if [ -z "${SEED_ADMIN_EMAIL:-}" ] && [ -t 0 ]; then
+    printf "The owner's admin email (typed, not shown): " >&2
+    IFS= read -rs SEED_ADMIN_EMAIL
+    echo >&2
+  fi
+  [ -n "${SEED_ADMIN_EMAIL:-}" ] ||
+    die "the production seed needs the owner's admin email: type it at the prompt, or run read -rs SEED_ADMIN_EMAIL; export SEED_ADMIN_EMAIL first"
+  # Plain ASCII letters, digits and . _ % + - only, one line, as seed-plan.ts
+  # requires: the approver reads the domain exactly, so nothing invisible,
+  # right-to-left or look-alike may pass. The value goes through a pipe (printf
+  # is a builtin), never an argument; grep runs in the C locale (bytes).
+  case "$SEED_ADMIN_EMAIL" in *$'\n'* | *$'\r'*) die "SEED_ADMIN_EMAIL is not an email address (it is not shown)" ;; esac
+  [ "${#SEED_ADMIN_EMAIL}" -le 254 ] && printf '%s\n' "$SEED_ADMIN_EMAIL" |
+    LC_ALL=C grep -Eq '^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+$' ||
+    die "SEED_ADMIN_EMAIL is not an email address (it is not shown)"
+  export SEED_ADMIN_EMAIL
+else
+  SEED_ADMIN_EMAIL=""
+  export SEED_ADMIN_EMAIL
+fi
 for tool in git docker; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 if [ "$PILOT_ENV" = production ]; then
   [ "$(docker context show 2>/dev/null || true)" = default ] ||

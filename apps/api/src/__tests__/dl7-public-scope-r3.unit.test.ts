@@ -17,6 +17,10 @@ vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
   hiddenAmong: async () => new Set<string>(),
   hiddenItemIds: async () => [],
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
+  // [owner 14 Oct, store names] nor the store's own words (no fixture store's name holds it)
+  storeHiddenFromCustomers: async () => false,
   assertOrderableNow: async () => undefined,
   withoutHidden: async <T,>(_db: unknown, rows: readonly T[]) => [...rows],
 }));
@@ -43,10 +47,14 @@ async function fixture() {
     return rows;
   });
   const readItems = vi.fn(async (q: Query) => items.map(i => queryRow(i, q)).filter(i => i !== null));
+  // [S2-1 time bound] search reads run in a short transaction that first sets a local statement timeout.
+  const tx: { client?: unknown } = {};
   const prisma = prismaDouble(orderStore([]), {
     vendor: { findMany: readVendors }, item: { findMany: readItems, count: async (q: Query) => (await readItems(q)).length },
     actorRatingStat: { findMany: async () => [] }, platformConfig: { findUnique: async () => null, findMany: async () => [] },
+    $executeRaw: async () => 1, $transaction: async (fn: (client: unknown) => unknown) => fn(tx.client),
   });
+  tx.client = prisma;
   const parts = { prisma, redis: recordingRedis(), io: recordingIo() };
   const search = await hostRoutes(searchRoutes, parts); const market = await hostRoutes(marketRoutes, parts);
   const customer = await hostRoutes(customerRoutes, parts);

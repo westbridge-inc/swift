@@ -514,6 +514,50 @@ weakened). Pin the reviewed image digest as AWS_CLI_IMAGE in deploy/.env
 (see .env.deploy.example); backup.sh refuses to run while it is unset or still
 a placeholder.
 
+**Production (PILOT_ENV=production): hourly, encrypted to the owner's key.**
+Every production dump is encrypted on the host (gpg; provision-ubuntu.sh
+installs it, on an older host `apt-get install -y --no-install-recommends gpg`)
+to the owner's OpenPGP public key before it is kept or uploaded; the plain dump exists only between pg_dump
+and the encryption and is removed right after (and on any failure). The
+owner's private key is never on any server, so the host cannot read its own
+backups. Before the first production backup:
+
+1. On the OWNER's own computer, once: `./deploy/backup-keygen.sh <folder>`.
+   It asks for a passphrase at a hidden prompt (twice), prints the
+   fingerprint, and writes `swift-backup-public.asc` (for the host) and
+   `swift-backup-PRIVATE.asc`. The owner prints the private key, stores its
+   text in the password manager (two offline copies), deletes the file and
+   keeps the passphrase separately. Without it no production backup can be
+   restored.
+2. On the host, as root: copy ONLY the public key to a path outside the
+   checkout, e.g. `install -m 0644 swift-backup-public.asc /etc/swift/backup-recipient.asc`,
+   and set BACKUP_GPG_RECIPIENT_FILE (that path) and BACKUP_GPG_FINGERPRINT
+   (the printed fingerprint) in deploy/.env, each on a plain line with no
+   comment after the value (systemd keeps a trailing comment as part of it).
+   pilot-up.sh refuses production without both, and runs `backup.sh
+   --check-key` before it changes anything: the file must exist and hold
+   exactly that one public key and no private key, the same proof every
+   dump makes. Also set `BACKUP_MAX_AGE_HOURS=3`: the backup freshness alarm
+   defaults to 26 hours (a nightly cadence), and pilot-up.sh requires 1–3 on
+   production.
+3. Install the HOURLY timer in place of the nightly one (staging keeps
+   swift-backup.timer):
+
+       install -m 0644 /opt/swift/deploy/swift-backup.service /etc/systemd/system/swift-backup.service
+       install -m 0644 /opt/swift/deploy/swift-backup-hourly.timer /etc/systemd/system/swift-backup-hourly.timer
+       systemctl daemon-reload
+       systemctl start swift-backup.service
+       systemctl enable --now swift-backup-hourly.timer
+       systemctl list-timers swift-backup-hourly.timer
+
+   The journal shows `encrypted → swift-<stamp>.dump.gpg … to the owner's key
+   <fingerprint> only`. A run is ended after 50 minutes (TimeoutStartSec), so
+   a hung dump fails visibly instead of silently skipping every later hour.
+   pilot-up.sh refuses a production stage that starts the API unless
+   swift-backup-hourly.timer is enabled and active, and doctor.sh reports it. Local copies are kept 2 days on production by default
+   (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
+   daily snapshots stay on as well.
+
 ## 5. Restore drill, with no live overwrite
 
 Take a fresh backup through the unit (it holds the storage keys) and copy the
@@ -531,6 +575,33 @@ scratch database through a transient unit that receives the same two keys:
       -p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
       -p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
       /opt/swift/deploy/restore.sh "$OFFSITE_OBJECT" "$SCRATCH_DB"
+
+On production the off-site objects are `.dump.gpg` and the host cannot
+decrypt them: restore.sh refuses an encrypted dump. The drill runs from the
+OWNER's computer instead:
+
+    ./deploy/backup-drill.sh swift-deploy@<host> <ssh-key-file> 's3://<backup-bucket>/<prefix>/swift-<stamp>.dump.gpg'
+
+It asks for the private key (paste the armored block) and its passphrase at
+hidden prompts and keeps them only in a throwaway keyring for the run. The
+host streams the encrypted object out (`restore.sh --fetch-encrypted`, with
+the storage keys from the encrypted store), the owner's computer decrypts it
+on the way through, and the plain dump goes straight back into
+`restore.sh --compare-source -` on the host: a new scratch database, compared
+with the live one. Nothing plain is written on the owner's computer. Pass is
+the host's compare-source line and `RESTORE OK`, then `DRILL OK`. Before
+anything is decrypted, the drill checks the object's first packets: public-key
+session keys for the owner's key, followed directly by the encrypted data.
+Anything else (a message with no encryption, one encrypted to a passphrase or
+to another key) is refused, and the host receives nothing. The host makes the
+same structural check before it streams an object out.
+
+The drill compares the scratch restore with the LIVE database, row for row,
+and the newest hourly object is up to an hour old. On a database that is
+taking orders the two always differ, so after launch the drill passes only in
+a quiet window: stop the API and worker (`docker compose -f deploy/docker-compose.yml stop api worker`),
+run `systemctl start swift-backup.service` for a fresh dump, drill that
+object, then start them again. Before launch (no API yet) it passes as is.
 
 The restore script accepts only a new lowercase scratch database name,
 refuses an existing or live database, and fails on archive or row-count
@@ -1000,7 +1071,9 @@ this host's PILOT_ENV), runs step 3, and reads step 4 back: it ends with
 `BILLING CUTOVER READY …`, or fails naming the state and the missing count.
 It is restartable: an interrupted run leaves BLOCKED and is run again.
 
-Back up and rehearse the restore (sections 4 and 5, with `--compare-source`:
+Back up and rehearse the restore (sections 4 and 5: the owner's key, the
+hourly timer and deploy/backup-drill.sh from the owner's computer, which
+restores with `--compare-source`:
 in schemas public and swift_qr it compares every table's row count and
 content checksum, column definitions and defaults, RLS switches, policies,
 constraints, indexes, triggers, function definitions, view definitions and
@@ -1032,6 +1105,40 @@ must be pinned first (section 6b, step 1).
        SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' \
        SEED_PLAN_APPROVALS='[<first line>,<second line>]' ./deploy/seed-production.sh "$SHA"
 
+**Solo mode (owner ruling, 13 Oct): one approver while there is no second
+admin.** Only for the seed that mints the FIRST SUPER_ADMIN (none exists, and
+SEED_ADMIN_PHONE is set); anything else on production keeps two people.
+SEED_APPROVER_KEYS may then pin just the one approver's key.
+
+   a. Request: `SEED_SOLO=1` with the same command as step 1. The request says,
+      in the words signed, that it is a one-person approval; it is valid for
+      48 hours from issue, and the run prints from when it may be applied.
+   b. The approver signs it on their own computer (section 6b, step 3).
+   c. No earlier than 12 hours after the request was issued (the seed refuses
+      an early run and says when it may run), and before it expires:
+
+          SEED_SOLO=1 SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' \
+          SEED_PLAN_APPROVALS='[<the one line>]' ./deploy/seed-production.sh "$SHA"
+
+      The approval is single-use, and its signed record (the request and the
+      signature) is kept in the append-only audit with the seed; keep the
+      request file and the line with the stand-up evidence too. If a
+      SUPER_ADMIN appears before it runs, nothing lands and the approval is
+      not used up.
+
+   The owner's admin email (production): solo approval in the apps emails
+   the owner, so the seed writes his email on the first SUPER_ADMIN's account
+   (only if it has none; never over a different one, never one another
+   account uses). It is personal data: at a and c the script asks for it at a
+   hidden prompt on the terminal (or run `read -rs SEED_ADMIN_EMAIL; export
+   SEED_ADMIN_EMAIL` first), and the same address must be used both times.
+   Plain ASCII letters, digits and . _ % + - only. The request shows it
+   masked, with its full sha256; at b, seed-approve.sh asks the approver to
+   type the address he expects (hidden) and signs only if it has that digest.
+   The request file and the signed line therefore carry the masked email and
+   its digest: personal data. Keep them with the owner's private stand-up
+   evidence only, never in tickets, chat, logs or the repository.
+
 4. SEED_PLAN_SECRET is no longer used (approvals are the approvers' own
    signatures). If the production store still holds it, from 5 Oct, remove
    it, then confirm the list no longer names it:
@@ -1062,3 +1169,43 @@ Once the owner's provider secrets are stored and wired (TWILIO_*,
 SMTP_PASS_FILE, OPS_ONCALL_PHONES) and DNS points at this host, run
 `./deploy/pilot-up.sh "$APPROVED_SHA"`. It ends with `PRODUCTION READY at
 exact SHA …`. Then follow section 9 for the certificate chain.
+
+## 13. The least-privilege database logins (TA-S0-003)
+
+The API and worker can run on two runtime logins instead of the database
+owner: `swift_app_login` (member of `swift_app` only; the tenant wall binds
+it) and `swift_system_login` (`swift_app` and `swift_bypass_rls`; audited
+system work only). Both are LOGIN, never superuser, BYPASSRLS, CREATEDB,
+CREATEROLE or REPLICATION, and own nothing. `deploy/rls-logins.sh` creates
+them on the host that runs the stack, as the deploy user, with Postgres up:
+
+    ./deploy/rls-logins.sh fingerprint > ~/rls-target.json    # review it: cluster, database, migration, owner, two digests
+    ./deploy/rls-logins.sh plan   --approved-target-file ~/rls-target.json
+    ./deploy/rls-logins.sh apply  --approved-target-file ~/rls-target.json
+    ./deploy/rls-logins.sh verify --approved-target-file ~/rls-target.json   # twice; identical output
+
+- Every command prints one JSON line of names, counts, digests and a
+  constant reason code. It never prints a password, and none travels in an
+  argument or an environment variable.
+- `apply` refuses before writing anything unless the database is exactly
+  the approved target and every catalogue invariant holds (row security on
+  and forced, the private QR schema closed to the app, the migrations' own
+  revocations in place, no extra default grants, the two groups unchanged
+  and owning nothing). It never repairs an existing role.
+- The passwords are generated inside the tool, kept in the encrypted store
+  (`RLS_LOGIN_SWIFT_APP_LOGIN`, `RLS_LOGIN_SWIFT_SYSTEM_LOGIN`) before either
+  login exists, and the database receives only a SCRAM verifier. Each login
+  must then sign in on a new connection (a wrong password refused first)
+  before `DATABASE_URL` and `SYSTEM_DATABASE_URL` are written to the store.
+  A run that stops halfway is finished by running `apply` again, with the
+  same credentials; a re-run that finds everything done writes nothing.
+- `verify` checks the approved target, so it holds only until the next
+  migration. Later deploys run `./deploy/rls-logins.sh roles`: the same role
+  and catalogue contract with both logins present, without the target pin.
+- One run at a time (a lock). Rotation is not part of this tool.
+- The store goes with the stack. Production's project (the commands above,
+  with no `--project-name` or extra compose file) uses production's store
+  and nothing else. Any other project (the Phase C rehearsal) must name a
+  store of its own with both `--store-dir` and `--run-dir`, neither of them
+  production's, and its own `--project-name` (never production's `swift`);
+  the tool refuses any other pairing before it touches anything.
