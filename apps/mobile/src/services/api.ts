@@ -1317,6 +1317,8 @@ export const vendorApi = {
   addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),
   updateStaff: (id: string, role: 'MANAGER' | 'STAFF') => api.put(`/vendor/staff/${id}`, { role }),
   removeStaff: (id: string) => api.delete(`/vendor/staff/${id}`),
+  /** [Row 55] Take back every unanswered team invite from this store (none is ever listed). */
+  withdrawStaffInvites: () => api.post('/vendor/staff/invites/withdraw', {}),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging

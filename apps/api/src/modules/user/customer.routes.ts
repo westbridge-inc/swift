@@ -3397,7 +3397,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const result = await decideStaffInvite(app.prisma, {
       inviteId: id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
-    });
+    }, notificationService);
     return { success: true, data: result };
   });
   app.post('/team-invites/:id/decline', async (request: AuthRequest) => {
