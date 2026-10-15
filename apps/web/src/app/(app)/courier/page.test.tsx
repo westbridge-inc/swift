@@ -100,7 +100,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'What’s inside? (optional)' }), { target: { value: 'Documents' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'What’s inside? (optional)' }), { target: { value: 'A phone charger' } });
     declare();
     await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
     fireEvent.click(button('Request courier · $1,160'));
@@ -113,7 +113,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
       packageSize: 'SMALL',
       recipientName: 'Test Recipient',
       recipientPhone: '+592 600 0000',
-      packageDescription: 'Documents',
+      packageDescription: 'A phone charger',
       declaresNoProhibitedItems: true,
     });
     expect(order.dropoff.lat).toBeCloseTo(pin.latitude, 9);
