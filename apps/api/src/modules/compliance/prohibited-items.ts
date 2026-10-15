@@ -303,7 +303,7 @@ export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
   'thermometer gun', 'price gun', 'tag gun', 'label gun', 'rivet gun', 'rivet guns', 'blow gun', 'air blow gun', 'foam gun',
   'silicone gun', 'sealant gun', 'washer gun', 'pressure washer gun', 'impact gun', 'inflator gun', 'tyre inflator gun',
   'tire inflator gun', 'air duster gun', 'sandblasting gun', 'sand blasting gun', 'nerf gun', 'nerf guns', 'water pistol',
-  'water pistols', 'squirt pistol', 'spray pistol', 'glue pistol', 'pistol grip', 'gun metal', 'gun grey', 'gun gray', 'top gun',
+  'water pistols', 'squirt pistol', 'spray pistol', 'glue pistol', 'pistol grip', 'gun metal', 'gun grey', 'gun gray',
   'shotgun microphone', 'shotgun mic',
   'bullion cube', 'bullion cubes', 'bullion fringe', 'bullion embroidery',
   'parrot fish', 'parrot fishes', 'shark fin antenna',
@@ -320,8 +320,7 @@ export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
   'power of attorney', 'no solicitors',
   // [R4 · REVIEW-F S3-1] toy ammunition, empty ammunition boxes, money-counting and collecting supplies
   'nerf bullets', 'nerf bullet', 'gel bullets', 'gel bullet', 'gel blaster', 'gel blasters', 'gel blaster bullets', 'water bullets',
-  'water bullet', 'foam bullets', 'foam bullet', 'toy bullets', 'toy bullet', 'ammo box', 'ammo boxes', 'ammo can', 'ammo cans',
-  'ammunition box', 'ammunition boxes', 'ammunition can', 'ammunition cans', 'banknote counter', 'banknote counters',
+  'water bullet', 'foam bullets', 'foam bullet', 'toy bullets', 'toy bullet', 'banknote counter', 'banknote counters',
   'bank note counter', 'bank note counters', 'banknote counting', 'bank note counting', 'banknote album', 'banknote albums',
   'bank note album', 'bank note albums', 'banknote holder', 'banknote holders', 'banknote sleeve', 'banknote sleeves',
   'banknote detector', 'banknote detectors',
@@ -913,6 +912,8 @@ function headGoods(words: readonly string[]): string | null {
       if (SIZED_ONLY.has(noun) && !measured) return null;
       // [R4 · REVIEW-F S3-1] "Semi precious stones" are craft beads as often as raw stones: held, never refused.
       if (PRECIOUS_STONE_NOUNS.has(noun) && candidate[start - 1] === 'semi') return null;
+      // [R4 · security review] "Ammo can", "Ammo box 2-pack": storage, held for a person (see isAmmunitionContainer).
+      if (noun === 'ammo' && AMMUNITION_CONTAINERS.has(words[candidate.length] ?? '')) return null;
       if (AMBIGUOUS_ALONE.has(noun) && start === 0 && !measured) return null;
       if (ALONE_ONLY.has(noun) && start !== 0) return null;
       if (GRAMS_ONLY.has(noun) && !grams) return null;
@@ -1043,6 +1044,9 @@ function pillsOnly(rest: readonly string[]): boolean {
 export interface GoodsOptions {
   /** No person reviews this text (a parcel's description): a measured brand held elsewhere for a person is refused. */
   noReviewer?: boolean;
+  /** [R4 · security review] Words this caller does not judge at all (a parcel: the legal-services words): skipped, so
+   *  the goods beside them are still found — never answered and then dropped. */
+  skipTerms?: ReadonlySet<string>;
 }
 
 /**
@@ -1061,8 +1065,8 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
   const present = new Set(parts.flat(2));
   for (const prohibitedClass of CLASS_ORDER) {
     for (const term of PROHIBITED_TERMS[prohibitedClass]) {
-      if (!NEVER_APPROVABLE.has(term) || !present.has(TERM_HEAD.get(term)!)) continue;
-      const carriers = parts.flat().filter((words) => hasPhrase(words.join(' '), term) && !words.includes('empty'));
+      if (!NEVER_APPROVABLE.has(term) || !present.has(TERM_HEAD.get(term)!) || options.skipTerms?.has(term)) continue;
+      const carriers = parts.flat().filter((words) => hasPhrase(words.join(' '), term) && !words.includes('empty') && !isAmmunitionContainer(words, term));
       if (carriers.length === 0) continue;
       if (prohibitedClass === 'ALCOHOL' && carriers.every((words) => isDish(stripTrailing(words).core))) continue;
       return { prohibitedClass, term };
@@ -1079,6 +1083,14 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
   return null;
 }
 
+/** [R4 · security review] "Ammunition box", "Ammunition cans x2": storage that may be empty — or not. Never certain by
+ *  the word alone, never cleared either: the hold word keeps it for a person. "Box of ammunition" is the goods. */
+const AMMUNITION_CONTAINERS: ReadonlySet<string> = new Set(['box', 'boxes', 'can', 'cans', 'case', 'cases', 'crate', 'crates', 'tin', 'tins']);
+function isAmmunitionContainer(words: readonly string[], term: string): boolean {
+  if (term !== 'ammunition') return false;
+  return words.some((w, i) => w === 'ammunition' && AMMUNITION_CONTAINERS.has(words[i + 1] ?? ''));
+}
+
 /**
  * A parcel's description (owner #67): no reviewer stands behind it, so any listed word refuses it, and so does a
  * brand-first word with a measure — a lozenge brand's too ("Halls 9 pack": #58 holds it for a person, and a parcel
@@ -1088,7 +1100,9 @@ export function parcelProhibited(text: string | null | undefined): { prohibitedC
   if (!text) return null;
   // [R4] Legal services are a listing rule, not goods: "Papers for my lawyer" is judged by the goods words alone.
   const goods = (hit: { prohibitedClass: ProhibitedClass; term: string } | null) => (hit && !PARCEL_EXEMPT_CLASSES.has(hit.prohibitedClass) ? hit : null);
-  return goods(classifyText(text, { brandFirst: false, skipTerms: PARCEL_SKIPPED_HOLD_WORDS })) ?? goods(certainGoods(text, { noReviewer: true })) ?? parcelBrandWithMeasure(text);
+  // [R4 · security review] The legal-services words are SKIPPED (not answered and then dropped): an answer of that class
+  // would end the search before the goods beside it ("lawyer gift: v0dka for dad") were read.
+  return goods(classifyText(text, { brandFirst: false, skipTerms: PARCEL_SKIPPED_TERMS })) ?? goods(certainGoods(text, { noReviewer: true, skipTerms: PARCEL_SKIPPED_TERMS })) ?? parcelBrandWithMeasure(text);
 }
 /** Classes that judge listings only: never a reason to refuse a parcel. */
 const PARCEL_EXEMPT_CLASSES: ReadonlySet<ProhibitedClass> = new Set(['LEGAL_SERVICES']);
@@ -1110,6 +1124,8 @@ const PARCEL_SKIPPED_HOLD_WORDS: ReadonlySet<string> = new Set([
   // Kept refusing in a parcel on purpose: 'gun', 'rifle' (a firearm is described that way and no person reads a parcel),
   // payment cards ('credit card', 'debit card') and currency ('us dollars'): carrying them is the risk itself.
 ]);
+/** Everything a parcel does not judge: the legal-services words (a listing rule) and the hold words above. */
+const PARCEL_SKIPPED_TERMS: ReadonlySet<string> = new Set([...PROHIBITED_TERMS.LEGAL_SERVICES, ...PARCEL_SKIPPED_HOLD_WORDS]);
 /**
  * [R4 · REVIEW-F S3-2] Payment wording is not goods: "We accept US dollars and credit cards", "Gift cards available".
  * A store's own words are not judged for it (its items still are).

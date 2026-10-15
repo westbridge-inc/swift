@@ -124,7 +124,7 @@ describe('[§8 · R4] ordinary goods that share a word stay clear', () => {
     'Bullion cubes', 'Lemon pepper seasoning', 'Seaweed snacks',
     // [REVIEW-F S3-1] office, collector and toy goods
     'Banknote counter', 'Bank note counting machine', 'Banknote album', 'Nerf bullets refill 100pcs', 'Gel blaster bullets 10000pcs',
-    'Water bullets', 'Ammunition box', 'Ammo can', 'Bauxite',
+    'Water bullets', 'Bauxite',
   ])('%s is clear', (name) => {
     expect(checkItem({ name }), name).toEqual({ state: 'CLEAR' });
   });
@@ -159,6 +159,28 @@ describe('[§8 · R4] ordinary goods that share a word stay clear', () => {
   it('with a pack or another word in front they are the goods again', () => {
     for (const name of ['Sparklers 10 pack', 'Firecrackers 20 pack', 'Cake sparklers']) {
       expect(checkItem({ name }), name).toMatchObject({ state: 'BANNED', prohibitedClass: 'EXPLOSIVES' });
+    }
+  });
+});
+
+// [R4 · security review of #1772] an exemption or a hold word must never hide the goods beside it
+describe('[§8 · R4] no exemption or skipped word hides the goods', () => {
+  it.each([
+    ['lawyer gift: v0dka for dad', 'ALCOHOL'], ['Legal services: v0dka for dad', 'ALCOHOL'],
+    ['attorney at law, r4t poison for the yard', 'PESTICIDES'], ['Legal advice; f1reworks for the party', 'EXPLOSIVES'],
+    ['Gift card for my niece: h3nnessy for dad', 'ALCOHOL'],
+  ] as const)('the parcel %s is refused for the goods (%s), not let through for the service word', (text, cls) => {
+    expect(parcelProhibited(text)).toMatchObject({ prohibitedClass: cls });
+  });
+
+  // An ammunition box or can is held for a person (it may be empty storage — or not), never cleared or refused by name.
+  it.each(['Ammunition box', 'Ammo can', 'Ammunition box 500 rounds', 'Ammo can full of 9mm', 'Ammunition cans x2', 'Top gun 9mm'])('%s is held for a person', (name) => {
+    expect(checkItem({ name })).toMatchObject({ state: 'WAITING', prohibitedClass: 'WEAPONS' });
+  });
+
+  it('ammunition itself is still refused', () => {
+    for (const name of ['Box of ammunition', 'Ammunition', '9mm ammo', 'Ammo can of ammo']) {
+      expect(checkItem({ name }), name).toMatchObject({ state: 'BANNED', prohibitedClass: 'WEAPONS' });
     }
   });
 });
