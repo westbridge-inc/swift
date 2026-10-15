@@ -8,7 +8,7 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthSessionSnapshot } from '../lib/authSession';
+import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthRefreshOutcome, type AuthSessionSnapshot } from '../lib/authSession';
 import { explainSessionEnded } from '../lib/accountBlockedAlert';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
@@ -184,6 +184,12 @@ const refreshCoordinator = new AuthRefreshCoordinator(
     && (error.response?.status === 401 || error.response?.status === 403),
   explainSessionEnded,
 );
+
+/** [PERF #9] The same one refresh the 401 path below uses, started before
+ *  the access token lapses (lib/sessionRefreshAhead.ts). */
+export function refreshSessionAhead(session: AuthSessionSnapshot): Promise<AuthRefreshOutcome | null> {
+  return refreshCoordinator.resolve(session);
+}
 
 api.interceptors.response.use(
   (response) => response,
