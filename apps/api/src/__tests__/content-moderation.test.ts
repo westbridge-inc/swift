@@ -2,13 +2,21 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
-import { prismaPlugin } from '../plugins/prisma';
+import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { CSAE_PAGE_TITLE } from '../modules/moderation/csae-page';
+
+/** [R19] A CSAE report now pages operations; close (never delete) this suite's pages at once, so a concurrent
+ *  escalation sweep in another suite never texts on-call for them. */
+const suiteStart = new Date();
+const closeCsaePages = () => runWithoutTenant(() => app.prisma.opsAlert.updateMany({
+  where: { title: CSAE_PAGE_TITLE, createdAt: { gte: suiteStart }, closedAt: null }, data: { closedAt: new Date(), closeReason: 'test-cleanup' },
+}), 'test-cleanup:content-moderation-csae');
 
 // ---------------------------------------------------------------------------
 // STORE-001: UGC reporting + moderation queue (store-compliance §5.4). Apple
@@ -121,6 +129,7 @@ describe('POST /reports — the in-app report action (STORE-001)', () => {
 
   it('CSAE is a first-class reason (the store-mandated category)', async () => {
     const res = await report(reporterToken, { targetType: 'CHAT_MESSAGE', targetId: chatMessageId, reason: 'CSAE' });
+    await closeCsaePages();
     expect(res.statusCode).toBe(201);
     expect(res.json().data.status).toBe('PENDING');
   });
@@ -200,6 +209,7 @@ describe('admin moderation queue (STORE-001)', () => {
 async function csaeReport() {
   const target = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
   const filed = await report(reporterToken, { targetType: 'USER', targetId: target.id, reason: 'CSAE', detail: 'child safety' });
+  await closeCsaePages();
   expect(filed.statusCode).toBe(201);
   return filed.json().data.id as string;
 }

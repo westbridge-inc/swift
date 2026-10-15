@@ -39,6 +39,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { LEGAL_VERSION, TERMS, PRIVACY, CHILD_SAFETY } from '../../api/src/modules/legal/legal.routes';
+import { OPERATOR } from '../../api/src/modules/legal/operator';
 import { sanitizeLegalHtml } from '../src/legal/legal-html';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -122,6 +123,10 @@ export const PRIVACY_BODY = ${JSON.stringify(privacy.body)};
 
 /** [STORE-003] Play requires this published at a public, stable URL. */
 export const CHILD_SAFETY_BODY = ${JSON.stringify(childSafety.body)};
+
+/** [Owner 15 Oct 2026 · legal research A11] Swift's operator and the seller of the partners' weekly fee, as the
+ *  legal texts name it (source: apps/api/src/modules/legal/operator.ts). The site's company facts read it from here. */
+export const OPERATOR = ${JSON.stringify(OPERATOR, null, 2)} as const;
 
 /** [W-42] SHA-256 of each canonical body above — the provenance a signoff, a
  *  consent record or an incident review names. Regenerating changes these only

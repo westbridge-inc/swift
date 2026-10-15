@@ -8,8 +8,18 @@ import type { DispatchPool } from './dispatch.service';
 import type { PrismaClient } from '@prisma/client';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { algoValue } from '../algo/algo-config';
+import { carriesGoods } from '../../config/vehicle-classes';
+import { AppError } from '../../utils/errors';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
+
+/** [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] The code and words a taxi car is refused goods
+ *  work in, at the grab and at every claim, while the CAR_DELIVERIES switch is off (config/vehicle-classes). */
+export const VEHICLE_PASSENGERS_ONLY = 'VEHICLE_PASSENGERS_ONLY';
+export function passengersOnlyRefusal(): AppError {
+  return new AppError(403, VEHICLE_PASSENGERS_ONLY,
+    'Taxi cars carry passengers only on Swift for now, so this vehicle cannot take deliveries or parcels.');
+}
 
 /**
  * [B1] How many live legs one mover may hold at once — in ONE place.
@@ -132,6 +142,10 @@ export async function reserveRiderLeg(
   const rider = await tx.rider.findUnique({ where: { id: riderId }, select: { userId: true } });
   if (!rider) return false;
   const documents = await lockMoverDocuments(tx, rider.userId, 'RIDER');
+  // [Owner ruling 15 Oct 2026] Every goods claim (offer accept, board grab, relay) passes here: a taxi car
+  // takes no goods while CAR_DELIVERIES is off. Read under the profile lock lockMoverDocuments just took.
+  const locked = await tx.rider.findUniqueOrThrow({ where: { id: riderId }, select: { vehicleType: true } });
+  if (!carriesGoods(locked.vehicleType)) throw passengersOnlyRefusal();
   assertMoverDocuments(documents);
   const rows = await tx.$executeRaw`
     UPDATE "riders" r SET

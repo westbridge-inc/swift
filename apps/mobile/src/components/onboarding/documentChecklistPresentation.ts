@@ -12,11 +12,18 @@ export function emptyChecklistCopy(status: { categoryUnavailable?: boolean }): {
 }
 
 /**
+ * [Legal research G4, in-app ¶17 · owner 15 Oct 2026] What the documents screen says happens to the documents:
+ * a person checks them (identity checks are human-only; face-matching is off), and the daily expiry sweep
+ * (jobs/queue.ts 'expiry-sweep', 06:00 daily) re-checks their dates.
+ */
+export const DOCUMENT_REVIEW_PROMISE = 'A person on our team checks your documents and re-checks expiry dates daily.';
+
+/**
  * [Owner, 1 Oct · truth] The documents the server compares with the profile
  * selfie right now — GET /verification/status's `faceMatchDocTypes`. Empty
- * while face-matching is off. The card's "Face-matched" line is a claim about
- * what the server does, so only the server's own list can make it: anything
- * that is not a list of document types names none.
+ * while face-matching is off. Kept as the reading of the server's contract; since the legal research (G4)
+ * no screen claims a face was matched, whatever this returns. Anything that is not a list of document
+ * types names none.
  */
 export function faceMatchedDocTypes(status: { faceMatchDocTypes?: unknown } | null | undefined): ReadonlySet<string> {
   const named = status?.faceMatchDocTypes;
