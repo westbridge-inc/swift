@@ -168,6 +168,14 @@ const PUBLISHED: Record<
     driver_agreement: 'b148daa56ef00e9325cd364e90b7c5f19bc262ee260c557237bcd4d517c3b4d8',
     vendor_agreement: '89b9d5525e22546b9102b56421436bb7970e66ae63192bc5e31a5886de3e8c99',
   },
+  // [V1b batch · owner 15 Oct 2026 · legal research Part 4] the operator named (reg. 17703, address, phone; one constant),
+  // the research's Terms/Privacy/Mover/Business/Child Safety wording, letters or documents never carried, the 18+ box.
+  '2026-10-16': {
+    terms: 'f9edd1cd9c5d4818226af3cb3500d200b90b0205466a69a10be5ce6db0b2a5a9',
+    privacy: '5abf3fc0bc88d5c2ea39df75b61384f6b3d3940c5c7d05081412a14388b729ed',
+    driver_agreement: 'ec16841b718b6469eb4fcc980bf7a913c1ba32f6449580a87001a3cf9efaa35a',
+    vendor_agreement: 'c3e89ace0ff86e0101462ed5df0a6805e7643b5330d550113b6a58fe081b30ae',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -186,7 +194,7 @@ describe('legal version binding [F-035-08]', () => {
   ])('%s states one week at a time (no paying ahead) and the refund of an unstarted week at closing [owner #62, 14 Oct]', (_name, agreement) => {
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
     expect(feeParagraph).toContain('You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you.');
-    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, records the refund, and then deletes the account; a week that has started is not refunded.');
+    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from, records the refund, and then deletes the account; a week that has started is not refunded.');
     expect(feeParagraph, 'the four-week limit is gone [owner #62]').not.toMatch(/four weeks|paid ahead|pay ahead/i);
   });
 
