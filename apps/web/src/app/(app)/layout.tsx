@@ -18,11 +18,12 @@ import { OfflineNotice } from '@/components/offline-notice';
 import { useGuestBasket } from '@/lib/basket-state';
 import { framesOrderingContext } from '@/lib/ordering-paths';
 import { InstallPrompt } from '@/components/install-prompt';
-import { LegalAcceptanceGate } from '@/components/legal-acceptance-gate';
 
 // Upload code is needed only after sign-in with a browser basket.
 const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
 const GuestBasketSync = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestBasketSync })));
+// [R26 · perf-budget] The fresh-acceptance gate is its own chunk, fetched after the page: the pages stay inside their budgets.
+const LegalAcceptanceGate = lazy(() => import('@/components/legal-acceptance-gate').then(module => ({ default: module.LegalAcceptanceGate })));
 
 // The customer ordering app. Opening swiftgy.com lands here, on Home.
 //
@@ -41,7 +42,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     <Providers>
       <CustomerShell>{children}</CustomerShell>
       {/* [Legal research G2 · R26] a material change to the Terms is accepted with a fresh tick */}
-      <LegalAcceptanceGate />
+      <Suspense fallback={null}><LegalAcceptanceGate /></Suspense>
     </Providers>
   );
 }

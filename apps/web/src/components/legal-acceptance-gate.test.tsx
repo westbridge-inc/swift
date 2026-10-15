@@ -95,5 +95,9 @@ describe('the fresh acceptance tick on the website', () => {
     for (const layout of [app('(app)', 'layout.tsx'), app('portal', 'layout.tsx'), app('dashboard', 'layout.tsx')]) {
       expect(layout).toMatch(/<LegalAcceptanceGate \/>/);
     }
+    // [perf-budget] the customer app's pages sit at their first-load ceilings: the gate loads as its own chunk after
+    // the page, so it costs those pages (cart, checkout, browse) nothing up front.
+    expect(app('(app)', 'layout.tsx')).toMatch(/const LegalAcceptanceGate = lazy\(\(\) => import\('@\/components\/legal-acceptance-gate'\)\.then\(module => \(\{ default: module\.LegalAcceptanceGate \}\)\)\);/);
+    expect(app('(app)', 'layout.tsx')).toMatch(/<Suspense fallback=\{null\}><LegalAcceptanceGate \/><\/Suspense>/);
   });
 });
