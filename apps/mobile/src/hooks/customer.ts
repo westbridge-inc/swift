@@ -932,18 +932,23 @@ export function useTipOrder(orderId: string) {
 }
 
 /** Approve/reject the store's out-of-stock substitution, live (§5.3). */
-export function useDecideSubstitution(orderId: string) {
+export function useDecideSubstitution() {
   const qc = useQueryClient();
+  // [review of #1565 S2] The order is part of the decision, never the render's
+  // closure: a screen React Navigation reuses for another order (opened from a
+  // notification while the request is in flight) must refresh the order the
+  // decision was for, not the one now on screen. Same rule as useClaimMmgPayment.
   return useMutation({
     // A 409 means the swap moved on (the store withdrew it, or another device
     // decided first): show the line as it is now instead of a stale card.
-    onError: (error: { response?: { status?: number } } | null | undefined) => {
+    onError: (error: { response?: { status?: number } } | null | undefined, { orderId }: { orderId: string }) => {
       if (error?.response?.status === 409) return qc.invalidateQueries({ queryKey: customerKeys.order(orderId) });
       return undefined;
     },
-    mutationFn: ({ lineId, approve }: { lineId: string; approve: boolean }) =>
+    mutationFn: ({ orderId, lineId, approve }: { orderId: string; lineId: string; approve: boolean }) =>
       customerApi.decideSubstitution(orderId, lineId, approve),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
+    // The order screen reads customerKeys.order; a decision refreshes that key.
+    onSuccess: (_data, { orderId }) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
   });
 }
 

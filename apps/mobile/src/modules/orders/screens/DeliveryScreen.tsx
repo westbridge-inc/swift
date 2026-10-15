@@ -398,7 +398,7 @@ export function DeliveryScreen() {
       void order.refetch();
     },
   });
-  const decideSub = useDecideSubstitution(orderId);
+  const decideSub = useDecideSubstitution();
   // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
   // their only first-party door to "I didn't pay". That statement can pause
   // the order, so it is confirmed first; the order refetches either way.
@@ -1063,7 +1063,7 @@ export function DeliveryScreen() {
                     style={{ flex: 1 }}
                     loading={decideSub.isPending}
                     disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: true })}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
                   />
                   <PillButton
                     label="No thanks"
@@ -1071,7 +1071,7 @@ export function DeliveryScreen() {
                     size="md"
                     style={{ flex: 1 }}
                     disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: false })}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: false })}
                   />
                 </View>
               </View>

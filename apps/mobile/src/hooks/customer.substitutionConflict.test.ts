@@ -58,18 +58,21 @@ afterAll(() => {
   else process.env['EXPO_PUBLIC_API_URL'] = env.previousApiUrl;
 });
 
+// [TRANSFORMED after the review of #1565 (S2): the order travels in the mutation
+// variables, so the hook takes no order and the handlers read it from them. The
+// request and navigation lifecycle is graded in customer.substitutionConflict.navigation.test.ts.]
 describe('a substitution decision conflict refreshes the order', () => {
   it.each([true, false])('a 409 for approve=%s refreshes the order query the screen reads', async (approve) => {
-    useDecideSubstitution('order-7');
+    useDecideSubstitution();
     const mutation = env.mutation!;
     const error = { response: { status: 409, data: { error: { code: 'NOT_PENDING' } } } };
-    await mutation['onError']?.(error, { lineId: 'line-1', approve }, undefined);
+    await mutation['onError']?.(error, { orderId: 'order-7', lineId: 'line-1', approve }, undefined);
     expect(env.invalidated).toEqual([{ queryKey: customerKeys.order('order-7') }]);
   });
 
   it('an ordinary request refusal does not change the local order snapshot', async () => {
-    useDecideSubstitution('order-7');
-    await env.mutation!['onError']?.({ response: { status: 400 } }, { lineId: 'line-1', approve: true }, undefined);
+    useDecideSubstitution();
+    await env.mutation!['onError']?.({ response: { status: 400 } }, { orderId: 'order-7', lineId: 'line-1', approve: true }, undefined);
     expect(env.invalidated).toEqual([]);
   });
 });
