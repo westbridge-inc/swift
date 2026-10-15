@@ -8,7 +8,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
 import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
 import { createHash } from 'node:crypto';
-import { assertImageWithinPixelCap, looksLikeDocument } from '../../utils/images';
+import { inspectImage, looksLikeDocument, sniffImageType } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 
@@ -133,8 +133,13 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (!looksLikeDocument(buffer, file.mimetype)) {
       throw new AppError(400, 'BAD_CONTENT', 'File content does not match its declared format');
     }
-    // [Row 108] Checked here because the storage seam only ever sees this file encrypted.
-    assertImageWithinPixelCap(buffer, file.mimetype);
+    // [Row 108] Read by the real decoder here, because the storage seam only ever sees this file encrypted.
+    // What the bytes ARE decides it (a PDF passed the sniff above as a PDF).
+    if (file.mimetype !== 'application/pdf') {
+      const sniffed = sniffImageType(buffer);
+      if (!sniffed) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
+      await inspectImage(buffer, sniffed);
+    }
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the

@@ -1,94 +1,100 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { MAX_IMAGE_PIXELS, assertImageWithinPixelCap, imageDimensions } from '../utils/images';
+import { crc32 } from 'node:zlib';
+import sharp from 'sharp';
+import { MAX_IMAGE_PIXELS, inspectImage } from '../utils/images';
 import { LocalStorageProvider } from '../providers/storage/storage-provider';
-import { AppError } from '../utils/errors';
 
 // ---------------------------------------------------------------------------
-// [Row 108] A photo's pixel count is capped at ~40 megapixels before it is stored.
+// [Row 108] Every stored photo is checked by a real decoder, and refused unless
+// it passes. Fail closed.
 //
-// A 5 MB upload can declare a huge canvas (a decompression bomb, or a 100 MP
-// camera mode) that every later decode (the website's resizer, a reviewer's
-// screen) must expand. The API reads the width and height from the image's own
-// header (JPEG frame, PNG IHDR, WebP VP8/VP8L/VP8X), never decoding pixels, and
-// refuses anything over the cap at the one storage seam every photo passes
-// through. A header it cannot read is left to the existing checks.
+// The check reads the bytes with sharp (libvips), the same decoder that later
+// resizes them, never with a separate lightweight header parser a crafted file
+// could disagree with. It runs on the bytes that are actually stored (after the
+// camera metadata is stripped). A photo is refused when:
+//   - the decoder cannot read it (a truncated or corrupt header) → 400 IMAGE_UNREADABLE;
+//   - its width or height is missing or zero → 400 IMAGE_UNREADABLE;
+//   - what it really is differs from what it claims to be (a polyglot, a renamed
+//     file) → 400 IMAGE_TYPE_MISMATCH;
+//   - it declares more than about 40 megapixels → 413 IMAGE_TOO_LARGE;
+//   - its bytes are far more than its declared size could need (small dimensions
+//     over a huge payload) → 400 IMAGE_UNREADABLE.
 // ---------------------------------------------------------------------------
 
-/** A real 1×1 PNG (the same fixture as image-metadata-strip). */
-const BASE_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA3fxQ8AAAAABJRU5ErkJggg==', 'base64');
-/** A real 1×1 JPEG. */
-const BASE_JPEG = Buffer.from(
-  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigD//2Q==',
-  'base64',
-);
+let PNG: Buffer;
+let JPEG: Buffer;
+let WEBP: Buffer;
+beforeAll(async () => {
+  const source = sharp({ create: { width: 2, height: 2, channels: 3, background: '#bc5935' } });
+  PNG = await source.clone().png().toBuffer();
+  JPEG = await source.clone().jpeg().toBuffer();
+  WEBP = await source.clone().webp().toBuffer();
+});
 
-/** The PNG with its IHDR declaring width × height (bytes 16–23). */
-function png(width: number, height: number): Buffer {
-  const out = Buffer.from(BASE_PNG);
+/** A PNG chunk with a correct CRC, so the decoder reads it as genuine. */
+function chunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body) >>> 0, 0);
+  return Buffer.concat([len, body, crc]);
+}
+/** The real PNG with its IHDR declaring width × height (CRC recomputed). */
+function pngSized(width: number, height: number): Buffer {
+  const out = Buffer.from(PNG);
   out.writeUInt32BE(width, 16);
   out.writeUInt32BE(height, 20);
+  out.writeUInt32BE(crc32(out.subarray(12, 29)) >>> 0, 29);
   return out;
 }
-/** The JPEG with its baseline frame (SOF0) declaring width × height. */
-function jpeg(width: number, height: number): Buffer {
-  const out = Buffer.from(BASE_JPEG);
+/** The real JPEG with its frame header declaring width × height. */
+function jpegSized(width: number, height: number): Buffer {
+  const out = Buffer.from(JPEG);
   const sof = out.indexOf(Buffer.from([0xff, 0xc0]));
   out.writeUInt16BE(height, sof + 5);
   out.writeUInt16BE(width, sof + 7);
   return out;
 }
-function riff(chunk: string, data: Buffer): Buffer {
-  const size = Buffer.alloc(4);
-  size.writeUInt32LE(data.length, 0);
-  const body = Buffer.concat([Buffer.from(chunk, 'ascii'), size, data, data.length % 2 ? Buffer.alloc(1) : Buffer.alloc(0)]);
-  const header = Buffer.alloc(12);
-  header.write('RIFF', 0, 'ascii');
-  header.writeUInt32LE(body.length + 4, 4);
-  header.write('WEBP', 8, 'ascii');
-  return Buffer.concat([header, body]);
-}
-/** Extended WebP: the canvas is width-1 / height-1 as 24-bit little-endian. */
-function webpVp8x(width: number, height: number): Buffer {
-  const data = Buffer.alloc(10);
-  data.writeUIntLE(width - 1, 4, 3);
-  data.writeUIntLE(height - 1, 7, 3);
-  return riff('VP8X', data);
-}
-/** Lossless WebP: signature 0x2f, then width-1 and height-1 as 14-bit fields. */
-function webpVp8l(width: number, height: number): Buffer {
-  const bits = (width - 1) | ((height - 1) << 14);
-  const data = Buffer.alloc(5);
-  data[0] = 0x2f;
-  data.writeUInt32LE(bits >>> 0, 1);
-  return riff('VP8L', data);
-}
-/** Lossy WebP: frame tag, start code 9d 01 2a, then 14-bit width and height. */
-function webpVp8(width: number, height: number): Buffer {
-  const data = Buffer.alloc(10);
-  data[3] = 0x9d; data[4] = 0x01; data[5] = 0x2a;
-  data.writeUInt16LE(width & 0x3fff, 6);
-  data.writeUInt16LE(height & 0x3fff, 8);
-  return riff('VP8 ', data);
+async function refusal(promise: Promise<unknown>): Promise<{ statusCode?: number; code?: string } | null> {
+  try { await promise; return null; } catch (error) { return error as { statusCode?: number; code?: string }; }
 }
 
-describe('[row 108] image dimensions from the header alone', () => {
-  it('reads PNG, JPEG and the three WebP forms', () => {
-    expect(imageDimensions(BASE_PNG, 'image/png')).toEqual({ width: 1, height: 1 });
-    expect(imageDimensions(BASE_JPEG, 'image/jpeg')).toEqual({ width: 1, height: 1 });
-    expect(imageDimensions(png(4032, 3024), 'image/png')).toEqual({ width: 4032, height: 3024 });
-    expect(imageDimensions(jpeg(8000, 6000), 'image/jpeg')).toEqual({ width: 8000, height: 6000 });
-    expect(imageDimensions(webpVp8x(9000, 7000), 'image/webp')).toEqual({ width: 9000, height: 7000 });
-    expect(imageDimensions(webpVp8l(4000, 3000), 'image/webp')).toEqual({ width: 4000, height: 3000 });
-    expect(imageDimensions(webpVp8(1600, 1200), 'image/webp')).toEqual({ width: 1600, height: 1200 });
+describe('[row 108] the decoder reads every photo, and only real photos pass', () => {
+  it('accepts real JPEG, PNG and WebP photos declared as what they are', async () => {
+    await expect(inspectImage(JPEG, 'image/jpeg')).resolves.toMatchObject({ format: 'jpeg', width: 2, height: 2 });
+    await expect(inspectImage(PNG, 'image/png')).resolves.toMatchObject({ format: 'png', width: 2, height: 2 });
+    await expect(inspectImage(WEBP, 'image/webp')).resolves.toMatchObject({ format: 'webp', width: 2, height: 2 });
+    await expect(inspectImage(JPEG, 'image/jpg')).resolves.toMatchObject({ format: 'jpeg' });
   });
 
-  it('answers null for what it cannot read, and for non-images', () => {
-    expect(imageDimensions(Buffer.from('not an image at all'), 'image/png')).toBeNull();
-    expect(imageDimensions(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]), 'image/jpeg')).toBeNull();
-    expect(imageDimensions(Buffer.from('%PDF-1.7'), 'application/pdf')).toBeNull();
+  it('a truncated header is refused, never passed through', async () => {
+    expect(await refusal(inspectImage(PNG.subarray(0, 20), 'image/png'))).toMatchObject({ statusCode: 400, code: 'IMAGE_UNREADABLE' });
+    expect(await refusal(inspectImage(JPEG.subarray(0, 12), 'image/jpeg'))).toMatchObject({ statusCode: 400, code: 'IMAGE_UNREADABLE' });
+    expect(await refusal(inspectImage(Buffer.from('not an image at all'), 'image/png'))).toMatchObject({ statusCode: 400, code: 'IMAGE_UNREADABLE' });
+  });
+
+  it('missing or zero dimensions are refused', async () => {
+    expect(await refusal(inspectImage(pngSized(0, 0), 'image/png'))).toMatchObject({ statusCode: 400 });
+  });
+
+  it('a PNG/JPEG polyglot or a renamed file is refused: the declared type must be what the decoder finds', async () => {
+    const polyglot = Buffer.concat([JPEG, PNG]);
+    expect(await refusal(inspectImage(polyglot, 'image/png'))).toMatchObject({ statusCode: 400, code: 'IMAGE_TYPE_MISMATCH' });
+    expect(await refusal(inspectImage(PNG, 'image/jpeg'))).toMatchObject({ statusCode: 400, code: 'IMAGE_TYPE_MISMATCH' });
+    expect(await refusal(inspectImage(WEBP, 'image/png'))).toMatchObject({ statusCode: 400, code: 'IMAGE_TYPE_MISMATCH' });
+    expect(await refusal(inspectImage(PNG, 'image/gif'))).toMatchObject({ statusCode: 400, code: 'IMAGE_TYPE_MISMATCH' });
+  });
+
+  it('small declared dimensions over a huge payload are refused', async () => {
+    const iend = PNG.length - 12;
+    const padded = Buffer.concat([PNG.subarray(0, iend), chunk('zzZz', Buffer.alloc(2 * 1024 * 1024, 7)), PNG.subarray(iend)]);
+    expect(await refusal(inspectImage(padded, 'image/png'))).toMatchObject({ statusCode: 400, code: 'IMAGE_UNREADABLE' });
+    const trailing = Buffer.concat([JPEG, Buffer.alloc(2 * 1024 * 1024, 7)]);
+    expect(await refusal(inspectImage(trailing, 'image/jpeg'))).toMatchObject({ statusCode: 400, code: 'IMAGE_UNREADABLE' });
   });
 });
 
@@ -97,25 +103,23 @@ describe('[row 108] the 40-megapixel cap', () => {
     expect(MAX_IMAGE_PIXELS).toBe(40_000_000);
   });
 
-  it('refuses a photo over the cap with a plain 413, in every format', () => {
-    for (const [bytes, mime] of [[png(8000, 6000), 'image/png'], [jpeg(8000, 6000), 'image/jpeg'], [webpVp8x(9000, 7000), 'image/webp']] as const) {
-      let error: unknown;
-      try { assertImageWithinPixelCap(bytes, mime); } catch (caught) { error = caught; }
-      expect(error, mime).toBeInstanceOf(AppError);
-      expect((error as AppError).statusCode, mime).toBe(413);
-      expect((error as AppError).code, mime).toBe('IMAGE_TOO_LARGE');
-    }
+  it('refuses a photo over the cap with a plain 413, as the decoder reads it', async () => {
+    expect(await refusal(inspectImage(pngSized(8000, 6000), 'image/png'))).toMatchObject({ statusCode: 413, code: 'IMAGE_TOO_LARGE' });
+    expect(await refusal(inspectImage(jpegSized(8000, 6000), 'image/jpeg'))).toMatchObject({ statusCode: 413, code: 'IMAGE_TOO_LARGE' });
   });
 
-  it('accepts a phone photo (12 MP), a photo exactly at the cap, unreadable headers and non-images', () => {
-    expect(() => assertImageWithinPixelCap(png(4032, 3024), 'image/png')).not.toThrow();
-    expect(() => assertImageWithinPixelCap(png(8000, 5000), 'image/png')).not.toThrow();
-    expect(() => assertImageWithinPixelCap(Buffer.from('not an image at all'), 'image/png')).not.toThrow();
-    expect(() => assertImageWithinPixelCap(Buffer.from('%PDF-1.7'), 'application/pdf')).not.toThrow();
+  it('accepts a phone photo (12 MP) and a photo exactly at the cap', async () => {
+    await expect(inspectImage(pngSized(4032, 3024), 'image/png')).resolves.toMatchObject({ width: 4032, height: 3024 });
+    await expect(inspectImage(pngSized(8000, 5000), 'image/png')).resolves.toMatchObject({ width: 8000, height: 5000 });
+  });
+
+  it('leaves non-images alone (a PDF, an encrypted envelope)', async () => {
+    await expect(inspectImage(Buffer.from('%PDF-1.7\n'), 'application/pdf')).resolves.toBeNull();
+    await expect(inspectImage(Buffer.alloc(64, 9), 'application/octet-stream')).resolves.toBeNull();
   });
 });
 
-describe('[row 108] the storage seam refuses an oversized photo before writing it', () => {
+describe('[row 108 · S3-1/S3-2] the storage seam: what the bytes ARE decides everything (fixes a privacy gap on main)', () => {
   let dir: string;
   let previous: string | undefined;
   beforeAll(async () => {
@@ -129,13 +133,51 @@ describe('[row 108] the storage seam refuses an oversized photo before writing i
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('an oversized photo is refused and nothing lands on disk; a normal one is stored', async () => {
+  const GPS = 'GPS 6.80448,-58.15527 IMG_0421';
+  /** The real PNG with an eXIf chunk (valid CRC) carrying a location, just after IHDR. */
+  const pngWithGps = () => Buffer.concat([PNG.subarray(0, 33), chunk('eXIf', Buffer.from(GPS, 'ascii')), PNG.subarray(33)]);
+  const files = async () => (await readdir(dir, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => path.join(entry.parentPath, entry.name));
+  const stored = async (url: string) => readFile(path.join(dir, url.replace(/^\/uploads\//, '')));
+
+  it('a PNG carrying a location, declared image/jpeg, is stripped as the PNG it is: no location is stored', async () => {
     const storage = new LocalStorageProvider();
-    await expect(storage.upload({ buffer: png(8000, 6000), filename: 'big.png', mimeType: 'image/png', folder: 'vendor-media' }))
-      .rejects.toMatchObject({ statusCode: 413, code: 'IMAGE_TOO_LARGE' });
-    const listed = async () => (await readdir(dir, { recursive: true })).filter((name) => name.endsWith('.png'));
-    expect(await listed()).toEqual([]);
-    await storage.upload({ buffer: png(1, 1), filename: 'small.png', mimeType: 'image/png', folder: 'vendor-media' });
-    expect(await listed()).toHaveLength(1);
+    const { url } = await storage.upload({ buffer: pngWithGps(), filename: 'photo.jpg', mimeType: 'image/jpeg', folder: 'vendor-media' });
+    const bytes = await stored(url);
+    expect(bytes.includes(GPS)).toBe(false);
+    expect(bytes.equals(PNG)).toBe(true);
+  });
+
+  it('a 400-megapixel PNG declared image/jpeg is refused by its real size, and nothing is written', async () => {
+    const storage = new LocalStorageProvider();
+    const before = (await files()).length;
+    await expect(storage.upload({ buffer: pngSized(20000, 20000), filename: 'huge.jpg', mimeType: 'image/jpeg', folder: 'vendor-media' })).rejects.toMatchObject({ statusCode: 413, code: 'IMAGE_TOO_LARGE' });
+    await expect(storage.upload({ buffer: pngSized(8000, 6000), filename: 'big.png', mimeType: 'image/png', folder: 'vendor-media' })).rejects.toMatchObject({ statusCode: 413, code: 'IMAGE_TOO_LARGE' });
+    expect((await files()).length).toBe(before);
+  });
+
+  it('a truncated header, or bytes no decoder recognises declared as a photo, is refused; nothing is written', async () => {
+    const storage = new LocalStorageProvider();
+    const before = (await files()).length;
+    for (const [buffer, mimeType] of [[PNG.subarray(0, 20), 'image/png'], [JPEG.subarray(0, 12), 'image/jpeg'], [Buffer.from('not an image at all'), 'image/png']] as const) {
+      await expect(storage.upload({ buffer, filename: 'cut.png', mimeType, folder: 'vendor-media' }), mimeType).rejects.toMatchObject({ statusCode: 400, code: 'IMAGE_UNREADABLE' });
+    }
+    expect((await files()).length).toBe(before);
+  });
+
+  it('a JPEG/PNG polyglot is stored as its real type only: the appended part, and its location, are dropped', async () => {
+    const storage = new LocalStorageProvider();
+    const jpegFirst = await stored((await storage.upload({ buffer: Buffer.concat([JPEG, pngWithGps()]), filename: 'poly.png', mimeType: 'image/png', folder: 'vendor-media' })).url);
+    expect(jpegFirst.includes(GPS)).toBe(false);
+    expect(jpegFirst.equals(JPEG)).toBe(true);
+    const pngFirst = await stored((await storage.upload({ buffer: Buffer.concat([PNG, JPEG]), filename: 'poly.jpg', mimeType: 'image/jpeg', folder: 'vendor-media' })).url);
+    expect(pngFirst.equals(PNG)).toBe(true);
+  });
+
+  it('non-photos pass untouched: a PDF, an encrypted envelope', async () => {
+    const storage = new LocalStorageProvider();
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n', 'ascii'), Buffer.alloc(64, 3)]);
+    expect((await stored((await storage.upload({ buffer: pdf, filename: 'a.pdf', mimeType: 'application/pdf', folder: 'docs' })).url)).equals(pdf)).toBe(true);
+    const sealed = Buffer.alloc(64, 0x5a);
+    expect((await stored((await storage.upload({ buffer: sealed, filename: 'v.enc', mimeType: 'application/octet-stream', folder: 'docs' })).url)).equals(sealed)).toBe(true);
   });
 });

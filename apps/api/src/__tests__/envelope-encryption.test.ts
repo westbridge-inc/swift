@@ -14,6 +14,7 @@ import {
 } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
 import crypto from 'node:crypto';
+import { uniquePng } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // Envelope encryption (onboarding spec §5): the bucket only ever holds
@@ -28,11 +29,8 @@ let userId: string;
 // document reviewer grant; the render route re-checks it on every load.
 let reviewerId: string;
 const marker = nanoid(6).toLowerCase();
-// Real PNG magic at offset 0 — the upload route magic-byte-sniffs content now.
-const PLAINTEXT = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  Buffer.from(`swift-envelope-test-${marker}`),
-]);
+// [Row 108] A real PNG, unique to this run: the upload route reads every photo with the real decoder.
+const PLAINTEXT = uniquePng(`swift-envelope-test-${marker}`);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -276,7 +274,7 @@ describe('duplicate-document detection [SWIFT-078 / MASTER-055]', () => {
     await app.prisma.session.create({ data: { userId: userB.id, token: tokenB, refreshToken: nanoid(48), deviceId: 't', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
 
     // A distinct valid PNG so this test doesn't collide with the others' hash.
-    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`dup-${marker}`)]);
+    const bytes = uniquePng(`dup-${marker}`);
 
     const a = await uploadAs(token, bytes); // applicant A
     expect(a.statusCode).toBe(200);

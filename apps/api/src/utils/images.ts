@@ -4,6 +4,7 @@
  * smuggle scripts/PDFs into publicly served folders.
  */
 
+import sharp from 'sharp';
 import { AppError } from './errors';
 
 export const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -19,81 +20,81 @@ export function looksLikeImage(buffer: Buffer): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// [Row 108] THE PIXEL CAP. A 5 MB upload can declare a huge canvas (a
-// decompression bomb, or a 100 MP camera mode) that every later decode must
-// expand: the website's resizer, a reviewer's screen. The width and height
-// are read from the image's own header (JPEG frame, PNG IHDR, WebP
-// VP8/VP8L/VP8X) without decoding a pixel, and the storage seam refuses
-// anything over about 40 megapixels. A header this cannot read is left to the
-// magic-byte sniff and the size limit, as before.
+// [Row 108] EVERY STORED PHOTO IS READ BY A REAL DECODER, AND REFUSED UNLESS IT PASSES.
+//
+// A 5 MB upload can declare a huge canvas (a decompression bomb, a 100 MP camera
+// mode), hide one format inside another, or carry a header nothing can read. The
+// photo is read with sharp (libvips), the decoder the website's resizer uses, never
+// with a separate lightweight header parser a crafted file could disagree with,
+// and it FAILS CLOSED:
+//   - unreadable, or no width/height → 400 IMAGE_UNREADABLE;
+//   - what the decoder finds is not the declared type → 400 IMAGE_TYPE_MISMATCH;
+//   - more than about 40 megapixels → 413 IMAGE_TOO_LARGE;
+//   - far more bytes than its size could need (small dimensions over a huge
+//     payload) → 400 IMAGE_UNREADABLE.
+// Non-image types (PDFs, encrypted envelopes) are not photos and pass.
 // ---------------------------------------------------------------------------
 
-export const MAX_IMAGE_PIXELS = 40_000_000;
-
-const JPEG_FRAME_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
-
-function jpegDimensions(buffer: Buffer): { width: number; height: number } | null {
-  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
-  let at = 2;
-  while (at + 4 <= buffer.length) {
-    if (buffer[at] !== 0xff) return null;
-    let marker = buffer[at + 1]!;
-    while (marker === 0xff && at + 2 < buffer.length) { at += 1; marker = buffer[at + 1]!; }
-    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { at += 2; continue; }
-    if (marker === 0xd9 || marker === 0xda) return null; // end of image, or scan data before any frame header
-    const length = buffer.readUInt16BE(at + 2);
-    if (length < 2) return null;
-    if (JPEG_FRAME_MARKERS.has(marker)) {
-      if (at + 9 > buffer.length) return null;
-      return { height: buffer.readUInt16BE(at + 5), width: buffer.readUInt16BE(at + 7) };
-    }
-    at += 2 + length;
-  }
+/** What the bytes ARE (magic number), never what the upload claims. Null for anything else. */
+export function sniffImageType(buffer: Buffer): 'image/jpeg' | 'image/png' | 'image/webp' | null {
+  if (buffer.length < 12) return null;
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.readUInt32BE(0) === 0x89504e47 && buffer.readUInt32BE(4) === 0x0d0a1a0a) return 'image/png';
+  if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
   return null;
 }
 
-function pngDimensions(buffer: Buffer): { width: number; height: number } | null {
-  if (buffer.length < 24 || buffer.readUInt32BE(0) !== 0x89504e47 || buffer.toString('ascii', 12, 16) !== 'IHDR') return null;
-  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
-}
-
-function webpDimensions(buffer: Buffer): { width: number; height: number } | null {
-  // 25 bytes hold the smallest header (lossless); a read past the end throws and reads as null.
-  if (buffer.length < 25 || buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WEBP') return null;
-  const chunk = buffer.toString('ascii', 12, 16);
-  const data = 20;
-  if (chunk === 'VP8X') return { width: buffer.readUIntLE(data + 4, 3) + 1, height: buffer.readUIntLE(data + 7, 3) + 1 };
-  if (chunk === 'VP8L') {
-    if (buffer[data] !== 0x2f) return null;
-    const bits = buffer.readUInt32LE(data + 1);
-    return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
-  }
-  if (chunk === 'VP8 ') {
-    if (buffer[data + 3] !== 0x9d || buffer[data + 4] !== 0x01 || buffer[data + 5] !== 0x2a) return null;
-    return { width: buffer.readUInt16LE(data + 6) & 0x3fff, height: buffer.readUInt16LE(data + 8) & 0x3fff };
-  }
-  return null;
-}
-
-/** Width and height from the header alone; null when it cannot be read or the type is not a raster image. */
-export function imageDimensions(buffer: Buffer, mimeType: string): { width: number; height: number } | null {
+/**
+ * The metadata strip, FAILING CLOSED: null when the photo cannot be parsed (where
+ * stripImageMetadata hands back the original bytes, location and all). For the
+ * storage seam, which refuses rather than store a photo it could not clean.
+ */
+export function stripImageMetadataStrict(buffer: Buffer, sniffedType: 'image/jpeg' | 'image/png' | 'image/webp'): Buffer | null {
   try {
-    const found = mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? jpegDimensions(buffer)
-      : mimeType === 'image/png' ? pngDimensions(buffer)
-        : mimeType === 'image/webp' ? webpDimensions(buffer)
-          : null;
-    return found && found.width > 0 && found.height > 0 ? found : null;
+    const stripped = sniffedType === 'image/jpeg' ? stripJpeg(buffer) : sniffedType === 'image/png' ? stripPng(buffer) : stripWebp(buffer);
+    return stripped && stripped.length <= buffer.length ? stripped : null;
   } catch {
     return null;
   }
 }
 
-/** Refuses (413 IMAGE_TOO_LARGE) a photo whose header declares more than MAX_IMAGE_PIXELS. */
-export function assertImageWithinPixelCap(buffer: Buffer, mimeType: string): void {
-  const size = imageDimensions(buffer, mimeType);
-  if (size && size.width * size.height > MAX_IMAGE_PIXELS) {
-    throw new AppError(413, 'IMAGE_TOO_LARGE', 'This photo is larger than 40 megapixels. Take it again or choose a smaller photo.');
+export const MAX_IMAGE_PIXELS = 40_000_000;
+
+const DECLARED_FORMAT: Record<string, 'jpeg' | 'png' | 'webp'> = { 'image/jpeg': 'jpeg', 'image/jpg': 'jpeg', 'image/png': 'png', 'image/webp': 'webp' };
+
+/** The most bytes a photo of this size could need: 8 a pixel (16-bit RGBA, incompressible) plus 64 KiB of headers. */
+function plausibleBytes(width: number, height: number): number {
+  return width * height * 8 + 64 * 1024;
+}
+
+const unreadable = () => new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
+
+/**
+ * Reads a photo with the real decoder and refuses it unless it is exactly what it
+ * claims to be, within the size cap. Returns the decoder's format and size, or
+ * null for a non-image type.
+ */
+export async function inspectImage(buffer: Buffer, declaredMimeType: string): Promise<{ format: string; width: number; height: number } | null> {
+  if (!declaredMimeType.startsWith('image/')) return null;
+  const expected = DECLARED_FORMAT[declaredMimeType];
+  if (!expected) throw new AppError(400, 'IMAGE_TYPE_MISMATCH', 'Upload a JPEG, PNG or WebP photo.');
+  let meta: Awaited<ReturnType<ReturnType<typeof sharp>['metadata']>>;
+  try {
+    meta = await sharp(buffer, { limitInputPixels: MAX_IMAGE_PIXELS, failOn: 'error' }).metadata();
+  } catch (error) {
+    if (/pixel limit/i.test(String((error as Error)?.message))) throw tooLarge();
+    throw unreadable();
   }
+  if (meta.format !== expected) throw new AppError(400, 'IMAGE_TYPE_MISMATCH', 'This file is not the kind of photo it says it is.');
+  const { width, height } = meta;
+  if (!width || !height) throw unreadable();
+  if (width * height > MAX_IMAGE_PIXELS) throw tooLarge();
+  if (buffer.length > plausibleBytes(width, height)) throw unreadable();
+  return { format: meta.format, width, height };
+}
+
+function tooLarge() {
+  return new AppError(413, 'IMAGE_TOO_LARGE', 'This photo is larger than 40 megapixels. Take it again or choose a smaller photo.');
 }
 
 /**
@@ -168,7 +169,16 @@ function stripJpeg(buf: Buffer): Buffer | null {
       continue;
     }
     if (marker === 0xd9) { out.push(buf.subarray(i)); return Buffer.concat(out); } // EOI
-    if (marker === 0xda) { out.push(buf.subarray(i)); return Buffer.concat(out); } // SOS → entropy data to the end
+    if (marker === 0xda) {
+      // SOS → the scans run to the end-of-image marker. Entropy-coded data never contains FF D9
+      // (an FF there is stuffed as FF 00, or is a restart marker), so the first FF D9 is the end.
+      // Anything after it is not this image ([Row 108] a polyglot's appended part, and whatever
+      // location it carries) and is dropped; no end marker at all means a truncated photo.
+      const eoi = buf.indexOf(JPEG_EOI, i + 2);
+      if (eoi < 0) return null;
+      out.push(buf.subarray(i, eoi + 2));
+      return Buffer.concat(out);
+    }
     if (m + 2 >= buf.length) return null;
     const len = buf.readUInt16BE(m + 1);
     if (len < 2) return null;
@@ -179,6 +189,8 @@ function stripJpeg(buf: Buffer): Buffer | null {
   }
   return Buffer.concat(out);
 }
+
+const JPEG_EOI = Buffer.from([0xff, 0xd9]);
 
 function stripPng(buf: Buffer): Buffer | null {
   const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
