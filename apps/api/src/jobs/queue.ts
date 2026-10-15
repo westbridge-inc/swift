@@ -1400,6 +1400,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (handovers.pending > 0) ctx.log.warn(handovers, 'handover notices remain pending');
           else if (handovers.expired > 0) ctx.log.warn(handovers, 'handover pushes closed unconfirmed; the inbox notices remain');
         });
+        await drain('driver-pickup-notice', async () => {
+          // [L07] The passenger's "driver on the way / arrived" notice commits with
+          // the assignment-bound pickup advance; whatever its own post-commit
+          // attempt could not deliver is delivered here, in process.
+          const { drainDriverPickupNotices } = await import('../modules/rides/driver-pickup');
+          const pickups = await drainDriverPickupNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
+          if (pickups.pending > 0) ctx.log.warn(pickups, 'driver pickup notices remain pending');
+        });
         if (drainFailure !== undefined) throw drainFailure;
         return;
       }

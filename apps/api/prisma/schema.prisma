@@ -1895,6 +1895,7 @@ model Order {
   riderAssignmentVersion Int @default(0)
   rider                  Rider?                  @relation(fields: [riderId], references: [id])
   driverId               String?
+  driverAssignmentVersion Int                    @default(0)
   driver                 Driver?                 @relation(fields: [driverId], references: [id])
   status                 OrderStatus             @default(PENDING)
   statusHistory          OrderStatusLog[]
