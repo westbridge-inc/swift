@@ -242,6 +242,11 @@ model OrderOutbox {
   claimedAt   DateTime?
   processedAt DateTime?
   lastError   String?
+  /// [row 267 · AUD-L4-021] A row is retried at most this many times; then it is a
+  /// dead letter: never claimed again, paged (ops_dlq_non_empty) and listed on the
+  /// admin Background jobs page, until an operator requeues it.
+  maxAttempts    Int       @default(20)
+  deadLetteredAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -336,6 +341,11 @@ model MoverRevocationOutbox {
   claimedAt   DateTime?
   processedAt DateTime?
   lastError   String?
+  /// [row 267 · AUD-L4-021] A row is retried at most this many times; then it is a
+  /// dead letter: never claimed again, paged (ops_dlq_non_empty) and listed on the
+  /// admin Background jobs page, until an operator requeues it.
+  maxAttempts    Int       @default(20)
+  deadLetteredAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -7283,6 +7293,11 @@ model RatingOutbox {
   claimedAt   DateTime?
   processedAt DateTime?
   lastError   String?
+  /// [row 267 · AUD-L4-021] A row is retried at most this many times; then it is a
+  /// dead letter: never claimed again, paged (ops_dlq_non_empty) and listed on the
+  /// admin Background jobs page, until an operator requeues it.
+  maxAttempts    Int       @default(25)
+  deadLetteredAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
