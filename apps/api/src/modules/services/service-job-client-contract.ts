@@ -1,10 +1,13 @@
-import {
-  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
-  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
-} from '@swift/types';
 import { z } from 'zod';
 import { AppError } from '../../utils/errors';
 import { serviceQuoteAmountSchema } from './service-job-transition';
+
+// The wire marker shared with every first-party client (packages/types/src/service-job.ts).
+// Declared here, not imported: @swift/types ships TypeScript source, and the compiled API
+// cannot `require` a runtime value from it (the production boot failed on that, 15 Oct).
+// service-job-client-contract.unit.test.ts pins both values to the shared ones.
+export const SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER = 'x-swift-service-job-contract';
+export const SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION = '2';
 
 export const transitionGenerationSchema = z.object({ expectedUpdatedAt: z.coerce.date() });
 export const quoteSchema = transitionGenerationSchema.extend({ amount: serviceQuoteAmountSchema });
