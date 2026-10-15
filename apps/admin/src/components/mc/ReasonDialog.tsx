@@ -154,6 +154,8 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
   const [values, setValues] = useState<Record<string, string>>({});
   const [shown, setShown] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
+  // [MC shell] Set synchronously: two clicks in one frame both see `busy === false`
+  // (state lands on the next render), and a money action would be asked for twice.
   const inFlight = useRef(false);
   const [refusal, setRefusal] = useState<Outcome | null>(null);
 
