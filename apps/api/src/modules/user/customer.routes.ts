@@ -809,10 +809,15 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    const referrer = await app.prisma.customer.findFirst({
-      where: { referralCode: { equals: code, mode: 'insensitive' } },
+    // [B-1] A code belongs to one operator: the referrer is looked up inside the
+    // caller's own tenant only (the caller's account says which). A code from
+    // another tenant reads exactly like an unknown one — nobody named, nothing
+    // linked, no count raised.
+    const caller = await app.prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } });
+    const referrer = caller ? await app.prisma.customer.findFirst({
+      where: { referralCode: { equals: code, mode: 'insensitive' }, user: { tenantId: caller.tenantId } },
       include: { user: { select: { firstName: true } } },
-    });
+    }) : null;
     if (!referrer) {
       throw new AppError(404, 'INVALID_REFERRAL', 'That referral code wasn’t found');
     }
