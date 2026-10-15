@@ -306,6 +306,19 @@ describe('[W0] transactions: a model without a tenantId never leaves the transac
     expect(row?.user.id).toBe(ids.driverUser);
   });
 
+  it('system work inside a caller\'s transaction stays in that transaction: its rollback undoes it (MASTER-019)', async () => {
+    const jobs = () => owner.rider.findUnique({ where: { id: ids.rider }, select: { totalCourierJobs: true } }).then((r) => r!.totalCourierJobs);
+    const before = await jobs();
+    await expect(tenant.runWithTenant(PRODUCTION, () => prismaModule.scopedPrisma.$transaction(async (tx) => {
+      await tenant.runAsSystem('test-w0-system-in-tx', () => (tx as unknown as PrismaClient).rider.update({
+        where: { id: ids.rider }, data: { totalCourierJobs: { increment: 7 } }, select: { id: true },
+      }));
+      throw new Error('W0_ROLLBACK');
+    }))).rejects.toThrow('W0_ROLLBACK');
+    // Re-issued on the system login it would have committed outside the transaction and survived the rollback.
+    expect(await jobs()).toBe(before);
+  });
+
   it('a flow that asks for ANOTHER tenant inside a transaction bound to one is refused by name (never read in the wrong tenant)', async () => {
     await expect(tenant.runWithTenant(PRODUCTION, () => prismaModule.scopedPrisma.$transaction(async (tx) =>
       tenant.runWithTenant(REVIEW, () => (tx as unknown as PrismaClient).vendorOwner.findUnique({
