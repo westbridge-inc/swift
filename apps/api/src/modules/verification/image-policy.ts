@@ -19,7 +19,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { VerificationService } from './verification.service';
 import {
-  configuredDays, DAY_MS, DEFAULT_PERSONAL_IMAGE_DAYS, NON_PERSONAL_DOC_TYPES, PARTNER_DOCUMENT_ROLES, PERSONAL_IMAGE_DAYS_KEY,
+  configuredDays, DAY_MS, DEFAULT_PERSONAL_IMAGE_DAYS, NON_PERSONAL_DOC_TYPES, PARTNER_DOCUMENT_WHERE, PERSONAL_IMAGE_DAYS_KEY,
 } from './retention-rules';
 
 export interface ImagePolicyRun { candidates: number; purged: number; probeFailed: number; skipped: number }
@@ -47,7 +47,7 @@ export async function applyImagePolicy(
   const decidedBefore = new Date(now.getTime() - personalDays * DAY_MS);
   const personal = await prisma.verificationDocument.findMany({
     where: {
-      state: 'COMMITTED', role: { in: [...PARTNER_DOCUMENT_ROLES] }, docType: { notIn: [...NON_PERSONAL_DOC_TYPES] },
+      state: 'COMMITTED', AND: [PARTNER_DOCUMENT_WHERE], docType: { notIn: [...NON_PERSONAL_DOC_TYPES] },
       reviewedAt: { lte: decidedBefore }, imagePurgedAt: null, purgedAt: null, legalHoldId: null, fileUrl: { not: '' },
     },
     select: { id: true }, orderBy: { reviewedAt: 'asc' }, take: batch,

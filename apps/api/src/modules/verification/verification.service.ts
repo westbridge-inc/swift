@@ -17,7 +17,7 @@ import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-rec
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
-import { configuredDays, DAY_MS, DEFAULT_REJECTED_DOCUMENT_DAYS, isPersonalDocType, PARTNER_DOCUMENT_ROLES, REJECTED_DOCUMENT_DAYS_KEY } from './retention-rules';
+import { configuredDays, DAY_MS, DEFAULT_REJECTED_DOCUMENT_DAYS, isPersonalDocType, PARTNER_DOCUMENT_WHERE, REJECTED_DOCUMENT_DAYS_KEY } from './retention-rules';
 import { assertNotRecused } from './recusal';
 import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
@@ -2496,7 +2496,8 @@ export class VerificationService {
    * This only sets the retention clock — never later than one it already has, never for an AML
    * record (its own law keeps it), never under a legal hold — and the reaper below deletes it
    * when the clock falls due. A revoked approval is not a rejection (its record is evidence
-   * history), and a customer's documents follow the customer-ID rule, not this one.
+   * history), and a customer's own ID follows the customer-ID rule, not this one (an individual
+   * service provider's documents, stored with role CUSTOMER, are partner documents: PARTNER_DOCUMENT_WHERE).
    * Continues the VERIFY-DOCS PR-V2 work (fix/verify-docs-retention).
    */
   async scheduleRejectedDocumentRetention(batch = 500): Promise<number> {
@@ -2504,7 +2505,7 @@ export class VerificationService {
     const rejected = await this.prisma.verificationDocument.findMany({
       where: {
         OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
-        role: { in: [...PARTNER_DOCUMENT_ROLES] }, reviewedAt: { not: null }, purgedAt: null, legalHoldId: null,
+        AND: [PARTNER_DOCUMENT_WHERE], reviewedAt: { not: null }, purgedAt: null, legalHoldId: null,
       },
       select: { id: true, docType: true, role: true, reviewedAt: true, retentionExpiresAt: true, user: { select: { countryCode: true } } },
       orderBy: { reviewedAt: 'asc' }, take: batch,

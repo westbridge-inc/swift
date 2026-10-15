@@ -40,7 +40,7 @@ it('a failed rejected-document schedule does not prevent the daily retention pur
     sendExpiryReminders: async () => { effects.push('remind'); return 0; },
     scheduleRejectedDocumentRetention: async () => { effects.push('schedule-rejected'); throw new Error('synthetic schedule unavailable'); },
     purgeExpiredDocuments: async () => { effects.push('purge'); return 0; },
-    hirePermitGraceSweep: async () => { effects.push('grace'); return 0; },
+    hireLicenceSweep: async () => { effects.push('grace'); return 0; },
   };
   const ctx = { log: { error: () => effects.push('logged') } };
   await run(verification, ctx);

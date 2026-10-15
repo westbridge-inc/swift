@@ -29,6 +29,23 @@ export const DAY_MS = 86_400_000;
 /** The roles whose documents are partner documents. A customer's ID is kept while the account is open. */
 export const PARTNER_DOCUMENT_ROLES: readonly UserRole[] = ['RIDER', 'DRIVER', 'MOVER', 'VENDOR_OWNER'];
 
+/** The customer's own ID (verification.service IDENTITY_DOC_TYPE; a test holds the two equal). */
+export const CUSTOMER_ID_DOC_TYPE = 'identity_l2';
+
+/**
+ * Which documents are a partner's. An individual SERVICE PROVIDER's documents (national ID,
+ * police clearance for home visits, trade licence) are stored with role CUSTOMER: the provider
+ * lives inside the customer account (verification.service roleKeyToUserRole). So a CUSTOMER row
+ * is a partner document too, unless it is the customer's own ID, which is kept while the account
+ * is open. Every partner selector uses this one predicate.
+ */
+export const PARTNER_DOCUMENT_WHERE: Prisma.VerificationDocumentWhereInput = {
+  OR: [
+    { role: { in: [...PARTNER_DOCUMENT_ROLES] } },
+    { role: 'CUSTOMER', docType: { not: CUSTOMER_ID_DOC_TYPE } },
+  ],
+};
+
 export async function configuredDays(db: Db, key: string, fallback: number): Promise<number> {
   const row = await db.platformConfig.findUnique({ where: { key }, select: { value: true } });
   const value = row?.value;

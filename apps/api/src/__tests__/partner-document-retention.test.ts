@@ -23,7 +23,8 @@ import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
-import { VerificationService } from '../modules/verification/verification.service';
+import { IDENTITY_DOC_TYPE, VerificationService } from '../modules/verification/verification.service';
+import { CUSTOMER_ID_DOC_TYPE } from '../modules/verification/retention-rules';
 import { NotificationService } from '../modules/notification/notification.service';
 import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { applyImagePolicy } from '../modules/verification/image-policy';
@@ -90,7 +91,7 @@ async function rejected(userId: string, role: UserRole, docType: string, daysAgo
   } }));
 }
 const docOf = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id } }));
-const setDays = (key: string, value: number | null) => system(() => value === null
+const setDays = (key: string, value: number | null) => system<unknown>(async () => value === null
   ? app.prisma.platformConfig.deleteMany({ where: { key } })
   : app.prisma.platformConfig.upsert({ where: { key }, create: { key, value }, update: { value } }));
 const holdOn = (userId: string) => system(() => app.prisma.docLegalHold.create({ data: {
@@ -170,6 +171,20 @@ describe('[R24] a partner\'s personal image goes 30 days after the decision; the
     }
   });
 
+  // [REVIEW-F S3-1] An individual service provider's documents are stored with role CUSTOMER
+  // (roleKeyToUserRole). They are a partner's documents all the same; only the customer's own ID
+  // (identity_l2) is kept while the account is open.
+  it('an individual service provider (role CUSTOMER): police clearance and ID images go after 30 days; their own customer ID stays', async () => {
+    const provider = await person('CUSTOMER');
+    const clearance = await decided(provider, 'CUSTOMER', 'police_clearance', 31);
+    const nationalId = await decided(provider, 'CUSTOMER', 'national_id', 45);
+    const ownCustomerId = await decided(provider, 'CUSTOMER', CUSTOMER_ID_DOC_TYPE, 400);
+    await system(() => applyImagePolicy(scoped(), service));
+    for (const d of [clearance, nationalId]) expect((await docOf(d.id)).imagePurgedAt, d.docType).not.toBeNull();
+    expect((await docOf(ownCustomerId.id)).imagePurgedAt).toBeNull();
+    expect((await docOf(ownCustomerId.id)).fileUrl).not.toBe('');
+  });
+
   it('the window is a setting: at 60 days a 40-day-old decision stays; a nonsense value falls back to 30', async () => {
     await setDays('documents.personal_image_days', 60);
     try {
@@ -213,6 +228,24 @@ describe('[R24] a partner\'s rejected document is deleted after its window', () 
     expect((await docOf(soon.id)).retentionExpiresAt?.getTime()).toBe(sooner.getTime());
     expect((await docOf(heldDoc.id)).retentionExpiresAt).toBeNull();
     expect((await docOf(customer.id)).retentionExpiresAt).toBeNull();
+  });
+});
+
+describe('[R24] REVIEW-F S3-1: the service provider\'s rejected documents and the one customer-ID constant', () => {
+  it('a service provider\'s rejected police clearance is deleted 30 days after the rejection; their rejected customer ID is never scheduled', async () => {
+    const provider = await person('CUSTOMER');
+    const clearance = await rejected(provider, 'CUSTOMER', 'police_clearance', 31);
+    const ownCustomerId = await rejected(provider, 'CUSTOMER', CUSTOMER_ID_DOC_TYPE, 45);
+    await system(() => service.scheduleRejectedDocumentRetention());
+    expect((await docOf(clearance.id)).retentionExpiresAt?.getTime()).toBe(clearance.reviewedAt!.getTime() + 30 * DAY);
+    expect((await docOf(ownCustomerId.id)).retentionExpiresAt).toBeNull();
+    await system(() => service.purgeExpiredDocuments());
+    expect((await docOf(clearance.id)).purgedAt).not.toBeNull();
+    expect((await docOf(ownCustomerId.id)).purgedAt).toBeNull();
+  });
+
+  it('the customer-ID type the selectors exclude is the one the customer-ID upload writes', () => {
+    expect(CUSTOMER_ID_DOC_TYPE).toBe(IDENTITY_DOC_TYPE);
   });
 });
 
