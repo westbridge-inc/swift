@@ -261,7 +261,7 @@ describe('[owner #67] a parcel with no prohibited items', () => {
   it('no courier is requested until the sender ticks the box; the order carries the tick', async () => {
     await readyParcel();
     // The list the tick refers to is on screen, in the server's own words.
-    expect(screen.getByText(/Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas \(LPG\), fuel or 18\+ items\./)).toBeTruthy();
+    expect(screen.getByText(/Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas \(LPG\), fuel, 18\+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, or currency and payment cards\./)).toBeTruthy();
     const box = screen.getByRole('checkbox', { name: 'This parcel has no prohibited items' }) as HTMLInputElement;
     expect(box.checked).toBe(false);
     expect(button('Tick “no prohibited items” to send').disabled).toBe(true);

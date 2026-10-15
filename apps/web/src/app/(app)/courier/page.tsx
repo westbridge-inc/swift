@@ -223,7 +223,7 @@ export default function CourierPage() {
             <input type="checkbox" checked={declared} onChange={(e) => setDeclared(e.target.checked)} aria-label="This parcel has no prohibited items" aria-describedby="parcel-banned-goods" className="mt-1 h-4 w-4 accent-[var(--swift-red)]" />
             <span className="flex flex-col">
               <span className="font-semibold">This parcel has no prohibited items</span>
-              <span id="parcel-banned-goods" className="text-[13px] leading-[18px] text-[var(--swift-muted)]">Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.</span>
+              <span id="parcel-banned-goods" className="text-[13px] leading-[18px] text-[var(--swift-muted)]">Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel, 18+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, or currency and payment cards.</span>
             </span>
           </label>
         </div>

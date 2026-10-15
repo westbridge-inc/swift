@@ -32,7 +32,7 @@ describe('customer words', () => {
   // [owner #67] The one sentence that names the goods only to refuse them, beside the parcel tick. It is exempt only
   // as the WHOLE text of an element (">…<"), exactly as written: a sentence that goes on ("…, but our partners
   // deliver beer"), is negated or quoted, or differs by a word is checked like any other line.
-  const REFUSAL = 'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.';
+  const REFUSAL = 'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel, 18+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, or currency and payment cards.';
   const REFUSALS: readonly string[] = [REFUSAL];
   /** The lines of a page's source that name the goods, after removing only exact, whole-element refusals. */
   const promisingLines = (text: string): string[] => withoutComments(text).split('\n')

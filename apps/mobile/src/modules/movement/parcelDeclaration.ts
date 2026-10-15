@@ -11,7 +11,7 @@ export const PARCEL_DECLARATION = 'This parcel has no prohibited items';
 
 /** What the tick refers to: the server's banned classes, in plain words. */
 export const PARCEL_BANNED_GOODS =
-  'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.';
+  'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel, 18+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, or currency and payment cards.';
 
 /** Why the send button is waiting, in the sender's words; null when nothing is left for the sender to do. */
 export function courierWaitingCaption(s: {

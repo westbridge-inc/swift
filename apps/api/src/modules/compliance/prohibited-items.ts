@@ -11,6 +11,15 @@
  * offence; a druggist's licence is needed even for over-the-counter medicines;
  * LPG and fuel need a GEA licence.)
  *
+ * Owner, 15 Oct 2026 (research A6/A8, R4): the same permanent rule for
+ * fireworks, squibs and other explosives (Explosives Act s.13), pesticides and
+ * toxic chemicals (Cap. 68:09), raw gold, diamonds and precious stones (a GGMC
+ * trading licence), firearms, ammunition and replicas, protected wildlife,
+ * counterfeit goods, currency and payment cards — and legal services (Rule VI
+ * of the Legal Practitioners' Code: advertising them is barred to "any person
+ * whatsoever"). Lottery and gambling products and adult material were already
+ * the 18+ class.
+ *
  * TWO KINDS OF EVIDENCE, TWO ANSWERS (owner, 13 Oct; #55/#56, 14 Oct):
  *
  *   · CERTAIN — refused outright: "Swift doesn't allow this item: <what>."
@@ -45,11 +54,16 @@
 import { createHash } from 'node:crypto';
 import { normalize } from '../discovery/matcher';
 
-export type ProhibitedClass = 'ALCOHOL' | 'TOBACCO' | 'VAPES' | 'DRUGS' | 'MEDICINE' | 'AGE_RESTRICTED' | 'LPG' | 'FUEL';
+export type ProhibitedClass = 'ALCOHOL' | 'TOBACCO' | 'VAPES' | 'DRUGS' | 'MEDICINE' | 'AGE_RESTRICTED' | 'LPG' | 'FUEL'
+  // [R4 · owner 15 Oct, research A6/A8] the expanded permanent list
+  | 'EXPLOSIVES' | 'PESTICIDES' | 'PRECIOUS_MINERALS' | 'WEAPONS' | 'WILDLIFE' | 'COUNTERFEIT' | 'CURRENCY' | 'LEGAL_SERVICES';
 /** Where a word was found: the item's own text, or ('store') its STORE's own words, which hold every item it sells. */
 export type JudgedField = 'name' | 'description' | 'section' | 'option' | 'store';
 
-export const PROHIBITED_CLASSES: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
+export const PROHIBITED_CLASSES: readonly ProhibitedClass[] = [
+  'ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL',
+  'EXPLOSIVES', 'PESTICIDES', 'PRECIOUS_MINERALS', 'WEAPONS', 'WILDLIFE', 'COUNTERFEIT', 'CURRENCY', 'LEGAL_SERVICES',
+];
 
 /** Plain words for each class — the end of "Swift doesn't allow this item: …". */
 export const PROHIBITED_CLASS_LABELS: Readonly<Record<ProhibitedClass, string>> = {
@@ -61,6 +75,14 @@ export const PROHIBITED_CLASS_LABELS: Readonly<Record<ProhibitedClass, string>> 
   AGE_RESTRICTED: '18+ items',
   LPG: 'cooking gas (LPG)',
   FUEL: 'fuel',
+  EXPLOSIVES: 'fireworks and explosives',
+  PESTICIDES: 'pesticides and toxic chemicals',
+  PRECIOUS_MINERALS: 'raw gold, diamonds and precious stones',
+  WEAPONS: 'firearms, ammunition and replicas',
+  WILDLIFE: 'protected wildlife',
+  COUNTERFEIT: 'counterfeit goods',
+  CURRENCY: 'currency and payment cards',
+  LEGAL_SERVICES: 'legal services',
 };
 
 /**
@@ -156,6 +178,11 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'lottery', 'lotto', 'lottery ticket', 'lottery tickets', 'lotto ticket', 'lotto tickets', 'betting', 'gambling', 'casino',
     'sex toy', 'sex toys', 'adult toy', 'adult toys', 'vibrator', 'vibrators', 'dildo', 'dildos', 'porn', 'pornographic',
     'erotic', 'adults only', 'xxx',
+    // [R4 · research A6] more lottery, gambling and adult goods by name
+    'raffle ticket', 'raffle tickets', 'scratch off', 'scratch offs', 'slot machine', 'slot machines', 'sports betting',
+    'bet slip', 'bet slips', 'pornography', 'porno', 'sex doll', 'sex dolls', 'adult magazine', 'adult magazines',
+    'adult movie', 'adult movies', 'adult video', 'adult videos', 'adult dvd', 'adult dvds', 'butt plug', 'butt plugs',
+    'cock ring', 'cock rings', 'fleshlight', 'escort service', 'escort services',
   ],
   LPG: [
     'lpg', 'gas', 'cooking gas', 'gas cylinder', 'gas cylinders', 'gas bottle', 'gas bottles', 'gas refill', 'gas refills',
@@ -165,6 +192,80 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
   FUEL: [
     'fuel', 'fuels', 'gasoline', 'petrol', 'diesel', 'kerosene', 'kero', 'kero oil', 'paraffin', 'lamp oil', 'avgas', 'jet fuel',
     'lighter fluid', 'methylated spirit', 'methylated spirits',
+  ],
+  // ── [R4 · owner 15 Oct, research A6/A8] The expanded permanent list. Left out because they mean something ordinary
+  // far more often than not: bomb (bath bombs), flare (jeans), cartridge (ink, filters), magazine (reading), silencer
+  // (an exhaust), mercury alone (outboard engines), ivory alone (a colour, a soap), turtle alone (a neckline), monkey
+  // (bread, wrench), poison alone (a perfume), gold and diamond alone (jewellery), coin (chocolate, purses), fake
+  // (flowers, lashes), imitation (costume jewellery), dupe, prepaid card (phone credit). Jewellery made of gold or
+  // set with stones is not "raw" gold or stones; a store's own gift card is held for a person, not refused.
+  EXPLOSIVES: [
+    'firework', 'fireworks', 'firecracker', 'firecrackers', 'fire cracker', 'fire crackers', 'squib', 'squibs',
+    'explosive', 'explosives', 'dynamite', 'gunpowder', 'gun powder', 'blasting powder',
+    'detonator', 'detonators', 'blasting cap', 'blasting caps', 'tnt', 'm80', 'pyrotechnic', 'pyrotechnics',
+    'roman candle', 'roman candles', 'skyrocket', 'skyrockets', 'sky rocket', 'sky rockets', 'bottle rocket', 'bottle rockets',
+    'cherry bomb', 'cherry bombs', 'smoke bomb', 'smoke bombs', 'sparkler', 'sparklers',
+  ],
+  PESTICIDES: [
+    'pesticide', 'pesticides', 'insecticide', 'insecticides', 'herbicide', 'herbicides', 'fungicide', 'fungicides',
+    'rodenticide', 'rodenticides', 'termiticide', 'termiticides', 'larvicide', 'larvicides', 'acaricide', 'acaricides',
+    'miticide', 'miticides', 'nematicide', 'nematicides', 'weedkiller', 'weedkillers', 'weed killer', 'weed killers',
+    'weed spray', 'weed control', 'weed preventer', 'weed and feed', 'rat poison', 'rat poisons', 'rat bait', 'rodent bait',
+    'mouse poison', 'roach poison', 'ant poison', 'poison bait', 'insect killer', 'insect spray', 'bug spray', 'bug killer',
+    'roach killer', 'ant killer', 'fly spray', 'mosquito coil', 'mosquito coils', 'toxic chemical', 'toxic chemicals',
+    // the active ingredients and brands on Guyanese farm and shop shelves
+    'paraquat', 'gramoxone', 'glyphosate', 'diquat', 'atrazine', 'malathion', 'cypermethrin', 'deltamethrin',
+    'lambda cyhalothrin', 'chlorpyrifos', 'diazinon', 'carbofuran', 'furadan', 'methomyl', 'lannate', 'mancozeb', 'dithane',
+    'ddt', 'fipronil', 'imidacloprid', 'abamectin', 'aldicarb', 'temik', 'phostoxin', 'roundup', 'aluminium phosphide',
+    'aluminum phosphide', 'zinc phosphide', 'brodifacoum', 'bromadiolone', 'klerat', 'racumin', 'baygon', 'mortein',
+    'cyanide', 'sodium cyanide', 'arsenic', 'strychnine', 'liquid mercury', 'elemental mercury', 'metallic mercury',
+  ],
+  PRECIOUS_MINERALS: [
+    'raw gold', 'gold dust', 'gold nugget', 'gold nuggets', 'gold bar', 'gold bars', 'gold bullion', 'bullion', 'gold ore',
+    'alluvial gold', 'unrefined gold', 'scrap gold', 'gold scrap', 'gold concentrate', 'raw diamond', 'raw diamonds',
+    'rough diamond', 'rough diamonds', 'uncut diamond', 'uncut diamonds', 'loose diamond', 'loose diamonds',
+    'precious stone', 'precious stones', 'semi precious stones', 'gemstone', 'gemstones', 'raw gemstone', 'raw gemstones',
+    'rough gemstone', 'rough gemstones', 'uncut gemstone', 'uncut gemstones', 'loose gemstone', 'loose gemstones',
+    'raw emerald', 'raw emeralds', 'rough emerald', 'rough emeralds', 'uncut emerald', 'uncut emeralds', 'raw minerals',
+    'mineral ore', 'manganese ore', 'bauxite',
+  ],
+  WEAPONS: [
+    'firearm', 'firearms', 'gun', 'guns', 'handgun', 'handguns', 'pistol', 'pistols', 'revolver', 'revolvers', 'rifle', 'rifles',
+    'shotgun', 'shotguns', 'ammunition', 'ammo', 'bullets', 'shotgun shell', 'shotgun shells', 'shotgun cartridge',
+    'shotgun cartridges', 'rifle cartridge', 'rifle cartridges', 'airsoft', 'bb gun', 'bb guns', 'pellet gun', 'pellet guns',
+    'air gun', 'air guns', 'air rifle', 'air rifles', 'air pistol', 'air pistols', 'replica gun', 'replica guns',
+    'replica pistol', 'replica pistols', 'replica firearm', 'replica firearms', 'imitation firearm', 'imitation firearms',
+    'toy gun', 'toy guns', 'stun gun', 'stun guns', 'taser', 'tasers', 'pepper spray', 'gun parts', 'gun barrel', 'gun silencer',
+  ],
+  WILDLIFE: [
+    'protected wildlife', 'wild animal', 'wild animals', 'exotic pet', 'exotic pets', 'exotic animal', 'exotic animals',
+    'exotic bird', 'exotic birds', 'wild bird', 'wild birds', 'songbird', 'songbirds', 'twa twa', 'twatwa', 'towa towa',
+    'seed finch', 'seed finches', 'bullfinch', 'bullfinches', 'picolet', 'picolets', 'parrot', 'parrots', 'macaw', 'macaws',
+    'toucan', 'toucans', 'harpy eagle', 'ocelot', 'ocelots', 'manatee', 'manatees', 'arapaima', 'giant otter', 'giant otters',
+    'sea turtle', 'sea turtles', 'turtle egg', 'turtle eggs', 'turtle meat', 'turtle shell', 'caiman', 'caimans', 'sloth',
+    'sloths', 'anteater', 'anteaters', 'jaguar skin', 'jaguar pelt', 'jaguar teeth', 'jaguar tooth', 'jaguar claw',
+    'jaguar claws', 'elephant ivory', 'ivory tusk', 'ivory tusks', 'raw ivory', 'rhino horn', 'shark fin', 'shark fins',
+    'live monkey', 'pet monkey', 'baby monkey',
+  ],
+  COUNTERFEIT: [
+    'counterfeit', 'counterfeits', 'knockoff', 'knockoffs', 'knock off', 'knock offs', 'bootleg', 'bootlegs', 'pirated',
+    'pirate copy', 'first copy', 'master copy', 'super copy', 'mirror quality', 'aaa replica', 'replica', 'replicas',
+  ],
+  CURRENCY: [
+    'banknote', 'banknotes', 'bank note', 'bank notes', 'foreign currency', 'currency exchange', 'money exchange',
+    'foreign exchange', 'cambio', 'us dollars', 'us dollar', 'usd cash', 'prop money', 'fake money', 'counterfeit money',
+    'credit card', 'credit cards', 'debit card', 'debit cards', 'prepaid visa', 'prepaid mastercard', 'visa gift card',
+    'visa gift cards', 'mastercard gift card', 'mastercard gift cards', 'prepaid debit card', 'prepaid credit card',
+    'virtual card', 'virtual cards', 'cloned card', 'cloned cards', 'gift card', 'gift cards', 'money order', 'money orders',
+    'bitcoin', 'bitcoins', 'cryptocurrency', 'crypto',
+  ],
+  // A service, not goods: "Swift doesn't allow this item: legal services." A parcel is never refused for these words.
+  LEGAL_SERVICES: [
+    'legal service', 'legal services', 'legal advice', 'legal consultation', 'legal consultations', 'legal representation',
+    'legal aid', 'law firm', 'law firms', 'law office', 'attorney at law', 'attorneys at law', 'attorney services',
+    'lawyer services', 'lawyer consultation', 'attorney consultation', 'hire a lawyer', 'hire an attorney', 'notary public',
+    'conveyancing', 'conveyancer', 'solicitor', 'solicitors', 'barrister', 'barristers', 'lawyer', 'lawyers', 'attorney',
+    'attorneys',
   ],
 };
 
@@ -189,8 +290,34 @@ export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
   'bristol board', 'bristol boards', 'bristol paper',
   // [DS1109] a non-alcoholic malt; empty fuel containers are hardware
   'malta guinness', 'guinness malta', 'gas can', 'gas cans', 'fuel can', 'fuel cans', 'jerry can', 'jerry cans',
-  'weed killer', 'weed killers', 'weed eater', 'weed eaters', 'weed whacker', 'weed wacker', 'weed trimmer',
-  'weed control', 'weed spray', 'weed barrier', 'weed preventer', 'weed puller', 'weed and feed', 'weed block',
+  // [R4] weed killers, sprays and preventers are herbicides now (PESTICIDES); the tools and the fabric stay ordinary
+  'weed eater', 'weed eaters', 'weed whacker', 'weed wacker', 'weed trimmer',
+  'weed barrier', 'weed puller', 'weed block', 'weed control fabric', 'weed control mat', 'weed control membrane',
+  // [R4] dishes, teas, tools, toys, fittings and payment wording named after a word of the expanded list
+  'gunpowder tea', 'gunpowder green tea', 'gun powder tea', 'firecracker chicken', 'firecracker shrimp', 'dynamite shrimp',
+  'dynamite roll', 'dynamite rolls',
+  'glue gun', 'glue guns', 'hot glue gun', 'hot glue guns', 'glue gun stick', 'glue gun sticks', 'nail gun', 'nail guns',
+  'staple gun', 'staple guns', 'heat gun', 'heat guns', 'spray gun', 'spray guns', 'paint gun', 'paint guns', 'paint spray gun',
+  'caulking gun', 'caulking guns', 'caulk gun', 'caulk guns', 'grease gun', 'grease guns', 'massage gun', 'massage guns',
+  'water gun', 'water guns', 'squirt gun', 'squirt guns', 'bubble gun', 'bubble guns', 'soldering gun', 'temperature gun',
+  'thermometer gun', 'price gun', 'tag gun', 'label gun', 'rivet gun', 'rivet guns', 'blow gun', 'air blow gun', 'foam gun',
+  'silicone gun', 'sealant gun', 'washer gun', 'pressure washer gun', 'impact gun', 'inflator gun', 'tyre inflator gun',
+  'tire inflator gun', 'air duster gun', 'sandblasting gun', 'sand blasting gun', 'nerf gun', 'nerf guns', 'water pistol',
+  'water pistols', 'squirt pistol', 'spray pistol', 'glue pistol', 'pistol grip', 'gun metal', 'gun grey', 'gun gray', 'top gun',
+  'shotgun microphone', 'shotgun mic',
+  'bullion cube', 'bullion cubes', 'bullion fringe', 'bullion embroidery',
+  'parrot fish', 'parrot fishes', 'shark fin antenna',
+  'counterfeit detector', 'counterfeit detector pen', 'counterfeit pen', 'counterfeit money detector', 'counterfeit bill detector',
+  'anti counterfeit', 'bootleg jeans', 'bootleg pants', 'bootleg trousers', 'bootleg leggings', 'bootleg cut',
+  'credit card holder', 'credit card holders', 'credit card wallet', 'credit card wallets', 'credit card case',
+  'credit card cases', 'credit card sleeve', 'credit card sleeves', 'credit card reader', 'credit card readers',
+  'credit card machine', 'credit card size', 'credit card sized', 'credit card knife', 'credit card tool', 'debit card holder',
+  'gift card holder', 'gift card holders', 'gift card box', 'gift card boxes', 'gift card envelope', 'gift card envelopes',
+  'accept credit cards', 'accept credit card', 'accept debit cards', 'accept debit card', 'accepts credit cards',
+  'accepts debit cards', 'credit cards accepted', 'debit cards accepted', 'credit card accepted', 'debit card accepted',
+  'pay by credit card', 'pay by debit card', 'pay with credit card', 'pay with debit card', 'credit card payment',
+  'credit card payments', 'debit card payment', 'debit card payments',
+  'power of attorney', 'no solicitors',
 ];
 
 /**
@@ -288,6 +415,39 @@ export const PROHIBITED_NEVER_APPROVABLE: readonly string[] = [
   'cough syrup', 'cough mixture', 'cough medicine', 'cold and flu', 'flu tablets', 'sleeping pills', 'morning after pill',
   'headache tablets', 'headache pills', 'fever reducer', 'cough and cold', 'gripe water', 'deep heat', 'bengay', 'icy hot',
   'liver salts', 'milk of magnesia', 'tiger balm',
+  // [R4] adult goods by name
+  'sex doll', 'sex dolls', 'pornography', 'porno', 'butt plug', 'butt plugs', 'cock ring', 'cock rings', 'fleshlight',
+  // [R4] explosives that are nothing else
+  'squib', 'squibs', 'detonator', 'detonators', 'blasting cap', 'blasting caps', 'blasting powder', 'm80',
+  // [R4] pesticides and poisons by name (a household insect spray or coil is held for a person — see PESTICIDES)
+  'paraquat', 'gramoxone', 'glyphosate', 'diquat', 'atrazine', 'malathion', 'cypermethrin', 'deltamethrin', 'lambda cyhalothrin',
+  'chlorpyrifos', 'diazinon', 'carbofuran', 'furadan', 'methomyl', 'lannate', 'mancozeb', 'dithane', 'ddt', 'fipronil',
+  'imidacloprid', 'abamectin', 'aldicarb', 'temik', 'phostoxin', 'aluminium phosphide', 'aluminum phosphide', 'zinc phosphide',
+  'brodifacoum', 'bromadiolone', 'klerat', 'racumin', 'cyanide', 'sodium cyanide', 'strychnine', 'rat poison', 'rat poisons',
+  'weedkiller', 'weedkillers', 'weed killer', 'weed killers',
+  // [R4] raw gold, raw stones and ores (jewellery is not here)
+  'raw gold', 'gold ore', 'alluvial gold', 'unrefined gold', 'scrap gold', 'gold scrap', 'gold concentrate', 'gold bullion',
+  'raw diamond', 'raw diamonds', 'rough diamond', 'rough diamonds', 'uncut diamond', 'uncut diamonds', 'loose diamond',
+  'loose diamonds', 'raw gemstone', 'raw gemstones', 'rough gemstone', 'rough gemstones', 'uncut gemstone', 'uncut gemstones',
+  'loose gemstone', 'loose gemstones', 'raw emerald', 'raw emeralds', 'rough emerald', 'rough emeralds', 'uncut emerald',
+  'uncut emeralds', 'manganese ore', 'mineral ore',
+  // [R4] firearms, ammunition and replicas by name ("air gun" is also a workshop blow gun: held, not here)
+  'firearm', 'firearms', 'handgun', 'handguns', 'ammunition', 'airsoft', 'bb gun', 'bb guns', 'pellet gun', 'pellet guns',
+  'air rifle', 'air rifles', 'air pistol', 'air pistols', 'replica gun', 'replica guns', 'replica pistol', 'replica pistols',
+  'replica firearm', 'replica firearms', 'imitation firearm', 'imitation firearms', 'stun gun', 'stun guns', 'taser', 'tasers',
+  'shotgun shell', 'shotgun shells', 'shotgun cartridge', 'shotgun cartridges', 'rifle cartridge', 'rifle cartridges', 'gun silencer',
+  // [R4] parts of protected animals
+  'turtle egg', 'turtle eggs', 'turtle meat', 'jaguar skin', 'jaguar pelt', 'jaguar teeth', 'jaguar tooth', 'jaguar claw',
+  'jaguar claws', 'elephant ivory', 'ivory tusk', 'ivory tusks', 'raw ivory', 'rhino horn',
+  // [R4] counterfeits that say so
+  'counterfeit', 'counterfeits', 'knockoff', 'knockoffs', 'first copy', 'super copy', 'aaa replica', 'pirated', 'pirate copy',
+  // [R4] currency and payment cards
+  'banknote', 'banknotes', 'bank note', 'bank notes', 'foreign currency', 'prop money', 'fake money', 'counterfeit money',
+  'prepaid visa', 'prepaid mastercard', 'visa gift card', 'visa gift cards', 'mastercard gift card', 'mastercard gift cards',
+  'prepaid debit card', 'prepaid credit card', 'cloned card', 'cloned cards',
+  // [R4 · A8] legal services offered as such
+  'legal service', 'legal services', 'legal advice', 'legal consultation', 'legal consultations', 'legal representation',
+  'attorney services', 'lawyer services', 'lawyer consultation', 'attorney consultation', 'conveyancing',
   // (No gas or fuel word is here: hardware stores sell "LPG regulators", "gas stoves" and "fuel cans" — held for a person.)
 ];
 const NEVER_APPROVABLE: ReadonlySet<string> = new Set(PROHIBITED_NEVER_APPROVABLE);
@@ -326,6 +486,20 @@ export const PROHIBITED_GOODS_NOUNS: readonly string[] = [
   'tabaco', 'cigarro', 'cigarros', 'cigarrillo', 'cigarrillos',
   // [DS1109] sold with a size only ("Marsala 750ml"; "Chicken Marsala" and "Madeira cake" are dishes) — see SIZED_ONLY
   'rosewines', 'cider', 'ciders', 'madeira', 'marsala', 'amaretto', 'limoncello', 'pisco', 'irish cream',
+  // [R4] the expanded list, sold as such ("Fireworks 10 pack", "Insecticide 1L", "Toy pistol", "Twa twa"); elsewhere
+  // they hold ("Firecracker popsicle", "Rifle scope", "Pistol grip" is ordinary)
+  'pornography', 'porno', 'sex doll', 'sex dolls', 'adult magazine', 'adult magazines', 'adult movie', 'adult movies',
+  'adult video', 'adult videos', 'adult dvd', 'adult dvds', 'slot machine', 'slot machines',
+  'firework', 'fireworks', 'firecracker', 'firecrackers', 'fire cracker', 'fire crackers', 'squib', 'squibs', 'explosives',
+  'dynamite', 'gunpowder', 'gun powder', 'detonator', 'detonators', 'blasting caps', 'tnt', 'pyrotechnics', 'roman candle',
+  'roman candles', 'skyrocket', 'skyrockets', 'sky rocket', 'sky rockets', 'bottle rocket', 'bottle rockets', 'cherry bomb',
+  'cherry bombs', 'sparklers', 'smoke bomb', 'smoke bombs',
+  'pesticide', 'pesticides', 'insecticide', 'insecticides', 'herbicide', 'herbicides', 'fungicide', 'fungicides', 'rodenticide',
+  'rodenticides', 'termiticide', 'termiticides', 'larvicide', 'larvicides', 'weedkiller', 'weedkillers', 'weed killer',
+  'weed killers', 'rat poison', 'rat poisons', 'rat bait', 'rodent bait', 'poison bait', 'toxic chemicals',
+  'gold nugget', 'gold nuggets', 'precious stone', 'precious stones', 'semi precious stones',
+  'pistol', 'pistols', 'revolver', 'revolvers', 'rifle', 'rifles', 'shotgun', 'shotguns', 'ammo', 'bullets',
+  'twa twa', 'twatwa', 'towa towa', 'seed finch', 'seed finches', 'picolet', 'picolets',
 ];
 /** Goods nouns that are also a colour or a cut ("Dress — Wine", "Heels - Champagne", a "Stout" fit): certain only with
  *  another word in front ("Red wine", "House wine") or a size after ("Wine 750ml"); alone they hold. */
@@ -382,6 +556,13 @@ const isDish = (words: readonly string[]) => {
     || ends(words, ['ice', 'cream']);
 };
 const GOODS_LONGEST_FIRST = [...PROHIBITED_GOODS_NOUNS].sort((a, b) => b.split(' ').length - a.split(' ').length).map((p) => p.split(' '));
+/** [R4] The same list by its LAST word, in the same order: a noun that ends a name ends with the name's last word, so
+ *  headGoods only tries those. */
+const GOODS_BY_LAST: ReadonlyMap<string, ReadonlyArray<readonly string[]>> = GOODS_LONGEST_FIRST.reduce((m, phrase) => {
+  const last = phrase[phrase.length - 1]!;
+  m.set(last, [...(m.get(last) ?? []), phrase]);
+  return m;
+}, new Map<string, Array<readonly string[]>>());
 
 /** Words that follow a goods noun without changing what it is: sizes, packs, strengths, ages, styles. */
 const TRAILING_SIZE = /^(\d+[a-z]{0,6}(\d+[a-z]{0,6})?|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|fl|lb|lbs|kg|g|gm|mg|mcg|gal|gallon|gallons|pint|pints|quart|quarts|pk|pack|packs|ct|count|pc|pcs|piece|pieces|x|s|case|cases|carton|cartons|crate|crates|bottle|bottles|btl|can|cans|tin|tins|nip|nips|flask|flasks|mini|minis|miniature|magnum|jumbo|single|singles|each|puff|puffs|pouch|pouches|refill|refills|no|number|anos|ano|year|years|yr|yrs|yo|old|aged|proof|abv|percent|pct|vol|alc|zero|free|non|alcoholic|alcohol|by|per|the|a|an|of|in|only)$/;
@@ -395,12 +576,22 @@ const TRAILING_STYLE: ReadonlySet<string> = new Set([
 const SEGMENT_BREAK = /\s+[-–—|]\s+|[,;:|/()[\]{}]/u;
 
 /** The order a mixed text reports its classes in. */
-const CLASS_ORDER: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
+// [R4] PESTICIDES reads before DRUGS: a "weed killer" is a herbicide, not cannabis. WEAPONS before COUNTERFEIT: a
+// "replica gun" is a replica firearm. LEGAL_SERVICES last: a service, never a reason to refuse a parcel.
+const CLASS_ORDER: readonly ProhibitedClass[] = [
+  'ALCOHOL', 'TOBACCO', 'VAPES', 'PESTICIDES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL',
+  'EXPLOSIVES', 'WEAPONS', 'PRECIOUS_MINERALS', 'WILDLIFE', 'COUNTERFEIT', 'CURRENCY', 'LEGAL_SERVICES',
+];
 const CLASS_OF: ReadonlyMap<string, ProhibitedClass> = new Map(
   [...CLASS_ORDER].reverse().flatMap((c) => PROHIBITED_TERMS[c].map((t): [string, ProhibitedClass] => [t, c])),
 );
 
 const hasPhrase = (haystack: string, phrase: string): boolean => ` ${haystack} `.includes(` ${phrase} `);
+/** [R4] A phrase can only be in a text whose words include the phrase's first word: the term loops below skip every
+ *  term whose first word the text does not carry, so their cost no longer grows with the length of the list. The
+ *  verdict is the same — this only skips a search that cannot match. */
+const TERM_HEAD: ReadonlyMap<string, string> = new Map(CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).map((t) => [t, t.split(' ')[0]!]));
+const wordsOf = (texts: readonly string[]): ReadonlySet<string> => new Set(texts.flatMap((t) => t.split(' ')));
 const EXEMPT_LONGEST_FIRST = [...PROHIBITED_EXEMPT_PHRASES].sort((a, b) => b.length - a.length).map((p) => p.split(' '));
 
 /**
@@ -493,7 +684,10 @@ function qualifiesSoftDrinks(text: string): boolean {
 
 function stripExempt(normalized: string, noSoftDrinks: boolean): string {
   let words = normalized.split(' ').filter(Boolean);
+  // [R4] Cutting only ever removes words, so a phrase whose first word the text never carried cannot be cut.
+  const carried = new Set(words);
   for (const phrase of EXEMPT_LONGEST_FIRST) {
+    if (!carried.has(phrase[0]!)) continue;
     if (noSoftDrinks && SOFT_DRINK_EXEMPTIONS.has(phrase.join(' '))) continue;
     const kept: string[] = [];
     for (let i = 0; i < words.length;) {
@@ -639,8 +833,10 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
   // The spelling as written names the term first ("rolling papers"); the other readings only when it names none.
   const asWritten = new Set(labelSpellings(undisguise(text)).map((sp) => stripExempt(normalize(sp), noSoftDrinks)));
   for (const pool of [judged.filter((j) => asWritten.has(j)), judged]) {
+    const present = wordsOf(pool);
     for (const prohibitedClass of CLASS_ORDER) {
       for (const term of PROHIBITED_TERMS[prohibitedClass]) {
+        if (!present.has(TERM_HEAD.get(term)!)) continue;
         if (pool.some((j) => hasPhrase(j, term))) return { prohibitedClass, term };
       }
     }
@@ -691,7 +887,7 @@ function headGoods(words: readonly string[]): string | null {
   if (words.includes('empty')) return null;
   const { core, measured, grams } = stripTrailing(words);
   const match = (candidate: readonly string[], medicineOnly: boolean): string | null => {
-    for (const phrase of GOODS_LONGEST_FIRST) {
+    for (const phrase of GOODS_BY_LAST.get(candidate[candidate.length - 1] ?? '') ?? []) {
       const start = candidate.length - phrase.length;
       if (start < 0 || !ends(candidate, phrase)) continue;
       const noun = phrase.join(' ');
@@ -842,9 +1038,10 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
   const sameText = STATES_A_STRENGTH.test(text);
   const parts = undisguise(text).split(SEGMENT_BREAK).map((part) => readings(part, sameText || STATES_A_STRENGTH.test(part)).map((r) => r.split(' ')));
   // A brand or product phrase: certain — unless an ALCOHOL one names a dish ("Hennessy wings"). [DS1109 S2-3]
+  const present = new Set(parts.flat(2));
   for (const prohibitedClass of CLASS_ORDER) {
     for (const term of PROHIBITED_TERMS[prohibitedClass]) {
-      if (!NEVER_APPROVABLE.has(term)) continue;
+      if (!NEVER_APPROVABLE.has(term) || !present.has(TERM_HEAD.get(term)!)) continue;
       const carriers = parts.flat().filter((words) => hasPhrase(words.join(' '), term) && !words.includes('empty'));
       if (carriers.length === 0) continue;
       if (prohibitedClass === 'ALCOHOL' && carriers.every((words) => isDish(stripTrailing(words).core))) continue;
@@ -869,8 +1066,12 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
  */
 export function parcelProhibited(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
-  return classifyText(text, { brandFirst: false }) ?? certainGoods(text, { noReviewer: true }) ?? parcelBrandWithMeasure(text);
+  // [R4] Legal services are a listing rule, not goods: "Papers for my lawyer" is judged by the goods words alone.
+  const goods = (hit: { prohibitedClass: ProhibitedClass; term: string } | null) => (hit && !PARCEL_EXEMPT_CLASSES.has(hit.prohibitedClass) ? hit : null);
+  return goods(classifyText(text, { brandFirst: false })) ?? goods(certainGoods(text, { noReviewer: true })) ?? parcelBrandWithMeasure(text);
 }
+/** Classes that judge listings only: never a reason to refuse a parcel. */
+const PARCEL_EXEMPT_CLASSES: ReadonlySet<ProhibitedClass> = new Set(['LEGAL_SERVICES']);
 
 /** No person reviews a parcel: it is read whole, so a brand-first word with a measure of its kind anywhere in it, in
  *  any part and either order, is the goods ("Camel, 20s", "20s Camel", "Camel 20$"). [DS1261 S2, DS1263 S2/S3] */
@@ -880,6 +1081,20 @@ function parcelBrandWithMeasure(text: string): { prohibitedClass: ProhibitedClas
     if (hit) return hit;
   }
   return null;
+}
+
+/**
+ * [R4 · research A8] Words that OFFER legal services. Advertising legal services is barred to "any person whatsoever"
+ * (Rule VI, Legal Practitioners Act), so a service provider's own profile may not offer them, whatever trade it
+ * names. The bare titles ("lawyer", "attorney") are left out: a profile may mention one without offering a service
+ * ("my brother is a lawyer"); the catalogue still holds them for a person.
+ */
+const LEGAL_SERVICE_OFFERS: readonly string[] = PROHIBITED_TERMS.LEGAL_SERVICES
+  .filter((t) => !['lawyer', 'lawyers', 'attorney', 'attorneys', 'solicitor', 'solicitors', 'barrister', 'barristers', 'conveyancer'].includes(t));
+export function offersLegalServices(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const judged = readings(text, false);
+  return LEGAL_SERVICE_OFFERS.find((term) => judged.some((j) => hasPhrase(j, term))) ?? null;
 }
 
 /** A platform (discovery) category, judged by its immutable slug and its name — never its aliases. */
@@ -1107,6 +1322,11 @@ const ORDINARY_WORDS: ReadonlySet<string> = new Set([
   'paper', 'papers', 'throat', 'lemonade', 'mall', 'e', 'roll', 'rolls',
   'black', 'martin', 'old', 'lost', 'tablets', 'pills', 'relief', 'reducer', 'refill', 'cylinder', 'lighter', 'sapphire',
   'friend', 'crown', 'famous', 'balm',
+  // [R4] the ordinary half of the expanded list's phrases
+  'gold', 'raw', 'rough', 'loose', 'uncut', 'scrap', 'concentrate', 'mineral', 'cracker', 'crackers', 'candle', 'candles',
+  'rocket', 'rockets', 'bottle', 'cherry', 'killer', 'spray', 'aluminium', 'aluminum', 'zinc', 'sodium', 'giant', 'ivory',
+  'copy', 'first', 'quality', 'gift', 'card', 'cards', 'service', 'services', 'advice', 'office', 'machine', 'machines',
+  'doll', 'dolls', 'magazine', 'magazines', 'movie', 'movies', 'video', 'videos', 'dvd', 'dvds', 'pepper',
 ]);
 const SINGLE_WORD_TERMS: ReadonlySet<string> = new Set(CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).filter((t) => !t.includes(' ')));
 const longest = (words: readonly string[]): string => words.reduce((a, b) => (b.length > a.length ? b : a));
