@@ -40,7 +40,11 @@ function routesRequiringReason(): Set<string> {
 
 /** Does api.ts contain a call to this route template (params → `[^/]+`)? */
 function consoleCalls(route: string): boolean {
-  const pattern = route
+  // The authority key is "<METHOD> <path>"; api.ts writes only the path (the
+  // method sits in the request options), so match the path alone. Keeping the
+  // "POST " prefix in the pattern matched 1 of 94 reasoned routes.
+  const path = route.slice(route.indexOf(' ') + 1);
+  const pattern = path
     .split('/')
     .map((segment) => (segment.startsWith(':') ? '[^/]+' : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     .join('/');
@@ -69,13 +73,18 @@ describe('[DS110-14] the reason census', () => {
     }
   });
 
+  // The census below is only as strong as its matcher: a matcher that sees no
+  // caller passes it by matching nothing. Every registered caller is a known
+  // console caller, so the matcher must see each one.
+  it('the matcher sees every registered caller in api.ts — the census cannot pass by matching nothing', () => {
+    const unseen = REASONED_CALLERS.map((entry) => entry.route).filter((route) => !consoleCalls(route));
+    expect(unseen, 'registered callers the census matcher cannot find in api.ts').toEqual([]);
+  });
+
   it('every console caller of a reasoned route is registered — nothing is quietly omitted', () => {
     const registered = new Set(REASONED_CALLERS.map((entry) => entry.route));
-    for (const route of routesRequiringReason()) {
-      if (consoleCalls(route)) {
-        expect(registered.has(route), `admin console calls ${route} but no caller is registered`).toBe(true);
-      }
-    }
+    const missing = [...routesRequiringReason()].filter((route) => consoleCalls(route) && !registered.has(route));
+    expect(missing, 'admin console calls these reasoned routes but no caller is registered').toEqual([]);
   });
 
   it('every registered caller sends a reason of at least the server floor — at the wire', async () => {
@@ -83,7 +92,7 @@ describe('[DS110-14] the reason census', () => {
       let captured: ApiRequest | undefined;
       mockApi((request) => {
         captured = request;
-        return { body: { success: true, data: {} } };
+        return { body: { success: true, data: entry.reply ?? {} } };
       });
       const helper = (api as unknown as Record<string, (..._args: unknown[]) => Promise<unknown>>)[entry.helper];
       expect(helper, `${entry.helper} is not exported from lib/api.ts`).toBeTypeOf('function');
