@@ -422,7 +422,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
 const RESOLUTION_WORDS: Record<string, string> = {
   NOT_RETURNED: 'Closed by a person: MMG shows the payment was not returned.',
   RETURNED_BY_REFERENCE: "Closed by a person: MMG's records showed the return they named.",
-  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after the money had already paid for a week. Nothing was deducted; that week\'s fee is owed again (on the books as fee owed) and finance collects it.',
+  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after its money had been used. Whatever the weekly-fee payments still held of it was taken out once; the rest of that week\'s fee is owed again (on the books as fee owed) and finance collects it.',
 };
 
 /**
@@ -460,12 +460,12 @@ function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversa
       {moneyUsed ? (
         <label className="flex items-center gap-2 text-xs">
           <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
-          MMG returned it, but the money had already paid for a week (close it; that week&apos;s fee is then owed again and finance collects it)
+          MMG returned it, but the money had already paid for a week (close it: whatever the weekly-fee payments still hold of it is taken out once, and the rest of that week&apos;s fee is owed again; finance collects it)
         </label>
       ) : paymentNotFound ? (
         <label className="flex items-center gap-2 text-xs">
           <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
-          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: while the partner&apos;s weekly-fee payments still hold the amount it is deducted once; otherwise nothing is deducted and that week&apos;s fee is owed again)
+          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: whatever the partner&apos;s weekly-fee payments still hold of it is deducted once, and only the rest of that week&apos;s fee is owed again)
         </label>
       ) : null}
       <input

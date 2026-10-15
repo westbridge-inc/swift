@@ -26,6 +26,7 @@ import {
 } from './browser-session';
 import { browserSessionCounter } from '../../plugins/observability';
 import { isPublicLaunchCountry, PUBLIC_LAUNCH_COUNTRY_CODES } from './launch-market';
+import { AGE_CONFIRMATION_MESSAGE, ageConfirmationRequired } from './age-declaration';
 
 const sendOtpSchema = z.object({
   phone: zPhone,
@@ -47,6 +48,9 @@ const registerSchema = z.object({
   /// SWIFT-AUD-D9-03: recorded consent. Optional so shipped clients keep
   /// working; CONSENT_REQUIRED=1 enforces it once updated clients are out.
   acceptTerms: z.boolean().optional(),
+  /// [Owner ruling 15 Oct 2026] the "I am 18 or older" tick. Required from the website and from any
+  /// client that sends it (phone build 12+); builds 9-11 omit it (auth/age-declaration.ts).
+  ageConfirmed: z.boolean().optional(),
 });
 
 const refreshSchema = z.object({
@@ -154,6 +158,10 @@ export async function authRoutes(app: FastifyInstance) {
     // staged old-client window. Missing/typo'd config = enforcement ON.
     if (process.env['CONSENT_REQUIRED'] !== '0' && body.acceptTerms !== true) {
       throw new AppError(400, 'CONSENT_REQUIRED', 'You must accept the Terms of Service and Privacy Policy to create an account');
+    }
+    // [Owner ruling 15 Oct 2026] refused before the one-use signup proof is spent, so ticking and retrying works.
+    if (ageConfirmationRequired(request, body) && body.ageConfirmed !== true) {
+      throw new AppError(400, 'AGE_CONFIRMATION_REQUIRED', AGE_CONFIRMATION_MESSAGE);
     }
     const registrationProof = signupContinuationOf(request);
     if (!registrationProof) {
