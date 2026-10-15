@@ -29,19 +29,30 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { SITE_DOMAIN, SITE_ORIGIN } from './site.domain';
+import { OPERATOR } from './legal/generated';
 
 export const site = {
-  /** Exact D&B spelling. Appears on /about, /contact and every footer. */
-  legalEntityName: 'Westbridge Inc.',
+  // [Owner 15 Oct 2026 · legal research A11, R2] The company's identity has ONE source, shared with the Terms
+  // and the Privacy Policy: apps/api/src/modules/legal/operator.ts, through the legal:sync snapshot. To change
+  // a fact, change it there (a legal-text change: new LEGAL_VERSION) and run legal:sync.
 
-  /** Exact D&B address, one line. Apple matches this against the D&B record. */
-  address: 'Lot 165 New Trafalgar Building Waterloo Street Georgetown Guyana',
+  /** The operator's legal name. Appears on /about, /contact and every footer. */
+  legalEntityName: OPERATOR.name,
+
+  /** Registration number of the company (Guyana). */
+  registrationNo: OPERATOR.registrationNo,
+
+  /** The registered address, one line. */
+  address: `${OPERATOR.registeredAddress}, ${OPERATOR.registeredIn}`,
 
   /** The number the founder actually answers. Apple may call it. */
-  phone: '+592 7163534',
+  phone: OPERATOR.phone,
 
   /** Support inbox. Already live on the domain's mail — do not change. */
-  supportEmail: 'support@swiftgy.com',
+  supportEmail: OPERATOR.supportEmail,
+
+  /** [Owner 15 Oct 2026] When support answers, and what to do in an emergency. No page may promise faster. */
+  supportHours: 'Monday to Saturday, 8:00–20:00 Guyana time (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.',
 
   /** Canonical apex host. www 301s here; AASA resolves here with no redirect.
    *  Declared in site.domain.ts so next.config can read it without tripping
