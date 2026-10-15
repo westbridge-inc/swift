@@ -26,7 +26,7 @@ import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
-import { vehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { hireVehicleTypes, isVehicleOffered, vehicleTypesForPackageSize, VEHICLE_CLASSES, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
@@ -75,6 +75,11 @@ declare module 'fastify' {
 // ---------------------------------------------------------------------------
 
 export const OFFER_TIMEOUT_SECONDS = 20;
+
+/** [R9] The words a bus (or any vehicle outside the hire seat limit) is refused a ride in. */
+export function hireVehicleRefusal(): AppError {
+  return new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking buses for rides. Change your vehicle to take rides.');
+}
 /** Express really IS faster at the dispatch layer, not just a badge: each
  *  offer expires sooner, so the cascade burns through non-responders and
  *  reaches a willing mover earlier. (The bigger fee is the accept incentive;
@@ -1126,6 +1131,9 @@ export class DispatchService {
             ${tenantFilter}
             ${selfFilter}
             AND d."rideClass"::text = ANY(${eligibleClasses})
+            -- [R9] Only a vehicle a hire may use: a bus driver online from before
+            -- buses were hidden is never offered a ride.
+            AND d."vehicleType"::text = ANY(${hireVehicleTypes()})
             ${passengerCount != null ? Prisma.sql`AND d."vehicleCapacity" >= ${passengerCount}` : Prisma.empty}
             AND d."currentLat" IS NOT NULL
             AND d."currentLng" IS NOT NULL
@@ -2632,9 +2640,11 @@ export class DispatchService {
       // Re-read this profile after acquiring User and Order: the JOIN used to
       // find its User may have waited behind a vehicle change.
       const driverDocuments = pool === 'DRIVER' ? await lockMoverDocuments(tx, moverAuthority.userId, 'DRIVER') : null;
-      if (driverDocuments) assertMoverDocuments(driverDocuments);
       const currentDriver = pool === 'DRIVER'
         ? await tx.driver.findUniqueOrThrow({ where: { id: moverId }, select: { vehicleType: true } }) : null;
+      // [R9] A hire is claimed only with a vehicle a hire may use (never a bus), read under the profile lock.
+      if (currentDriver && !isVehicleOffered(currentDriver.vehicleType)) throw hireVehicleRefusal();
+      if (driverDocuments) assertMoverDocuments(driverDocuments);
       // [REPORT-014 F-014-01] PHYSICAL capacity is authoritative at the claim:
       // discovery/board filters are conveniences — a 14-passenger GROUP ride
       // must never commit to a 9-seat bus (or a default 4-seat profile that
