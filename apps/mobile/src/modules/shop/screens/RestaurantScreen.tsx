@@ -10,6 +10,7 @@ import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
 import { requestAuthContinuation } from '../../../navigation/authContinuation';
 import { distanceLabel } from '../../../lib/geo';
+import { STORE_REPORT_REASONS } from '../../../lib/reportReasons';
 import { forgivingFilter } from '../../../lib/forgivingSearch';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
@@ -847,18 +848,13 @@ export function RestaurantScreen() {
         open={reportOpen}
         onClose={() => setReportOpen(false)}
         title="Report this store"
-        actions={[
-          { key: 'SPAM', label: 'Misleading or spam' },
-          { key: 'ILLEGAL_GOODS', label: 'Selling something it shouldn’t' },
-          { key: 'HATE_SPEECH', label: 'Hateful content' },
-          { key: 'SEXUAL_CONTENT', label: 'Sexual content' },
-          { key: 'OTHER', label: 'Something else' },
-        ].map((reason) => ({
+        // [R19] the shared list, Child safety (CSAE) included
+        actions={STORE_REPORT_REASONS.map((reason) => ({
           label: reason.label,
           onPress: () => {
             setReportOpen(false);
             reportContent.mutate(
-              { targetType: 'VENDOR', targetId: vendorId, reason: reason.key as never },
+              { targetType: 'VENDOR', targetId: vendorId, reason: reason.key },
               {
                 onSuccess: () => toast.success('Thanks — our team will look', 'Reports are reviewed by a human.'),
                 onError: () => toast.error('Couldn’t send that report', 'Check your connection and try again.'),
