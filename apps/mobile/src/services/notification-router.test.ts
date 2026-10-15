@@ -31,6 +31,11 @@ describe('destinationFor — the tap table', () => {
     expect(destinationFor({ kind: 'ride_sos_ack' })).toEqual({ screen: 'Taxi' });
   });
 
+  it('an unavailable queue notice opens the ride picker without retry parameters', () => {
+    expect(destinationFor({ kind: 'ride_queue_unavailable', audience: 'customer' }))
+      .toEqual({ screen: 'Taxi' });
+  });
+
   it('an OFFER ping lands the earner on their mover home, never the customer screen [E36 / danger #22]', () => {
     // Pre-fix, the generic orderId branch dropped an earner mid-countdown on
     // the CUSTOMER Delivery screen — a dead end with the clock running.
@@ -141,9 +146,11 @@ describe('booking + service-job pushes land on the job [S0]', () => {
       // The request itself — the rung that had no notification at all, so the
       // provider never learned there was anything to quote on.
       'booking_requested',
+      'booking_quoted',
       'booking_to_confirm',
       'booking_confirmed',
       'booking_slot_declined',
+      'booking_started',
       'booking_completed',
       'booking_cancelled',
     ]) {
@@ -295,6 +302,7 @@ const CENSUS: Case[] = [
   // ── Rides: the taxi screen reads the active ride itself.
   { k: 'ride_queue_matched', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — a driver took their queued ride' },
   { k: 'ride_queue_expired', d: { audience: 'customer', rideClass: 'STANDARD' }, to: { screen: 'Taxi' }, why: 'customer — queue timed out, request again' },
+  { k: 'ride_queue_unavailable', d: { audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — the queued class is no longer offered; choose an available class without retrying the retired trip' },
   { k: 'ride_released_no_drivers', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — ride released' },
   { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1', expiresAt: '2026-09-24T20:00:20.000Z' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
   { k: 'custody_handoff_code', d: { ...O, caseId: 'c1' }, to: { screen: 'ActiveJob' }, why: 'RIDER holding the goods — [AF-MOB-006] a relay rider is coming; the handoff code is on their live job, which MoverStack mounts' },
@@ -305,9 +313,11 @@ const CENSUS: Case[] = [
 
   // ── Bookings + service jobs [the S0 this pass closed].
   { k: 'booking_requested', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — a customer asked them to quote; the first rung of the ladder, and the one that used to send nothing at all' },
+  { k: 'booking_quoted', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — a durable quote is ready to review' },
   { k: 'booking_to_confirm', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — accept or move the customer’s slot' },
   { k: 'booking_confirmed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider took the slot' },
   { k: 'booking_slot_declined', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — pick another time' },
+  { k: 'booking_started', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider asserted commencement at the agreed time' },
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
   { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },

@@ -155,7 +155,7 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // [VERIFY-DOCS · ruling 8] A taxi's seven: the licence, registration and insurance above, plus the
     // PERSON's Hire Car Driver's Licence (s.80), the CAR's yearly hire licence (s.79), the car photo
     // with the plate showing, and the certificate of fitness. The two licences replace the single
-    // hire-car permit; an approved permit counts as both for 60 days (verification/hire-permit-grace).
+    // hire-car permit; [owner 15 Oct 2026] the permit never counts as either (no grace: verification/hire-permit-grace).
     MOVER_TAXI_EXTRA: ['hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'],
     MOVER_COMMERCIAL: ['road_service_licence', 'fitness_cert'],
     // [VERIFY-DOCS · ruling 7] No TIN certificate: no law found requires Swift to hold it, and the image

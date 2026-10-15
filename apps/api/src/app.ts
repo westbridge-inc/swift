@@ -49,7 +49,7 @@ import { marketRoutes } from './modules/market/market.routes';
 import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 import { installProcessLifecycle } from './utils/process-lifecycle';
-import { resolveCorsOrigins } from './utils/cors-origin';
+import { corsPluginOptions, resolveCorsOrigins } from './utils/cors-origin';
 import { asFastifyTrustProxy } from './config/trust-proxy';
 import { isDevelopment, isProduction } from './utils/runtime-mode';
 import { getMapsProvider } from './providers/maps/maps-provider';
@@ -135,10 +135,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   // Core plugins
   const corsOrigin = resolveCorsOrigins(process.env['CORS_ORIGIN'], process.env['NODE_ENV']);
-  await app.register(cors, {
-    origin: corsOrigin,
-    credentials: true,
-  });
+  // Same allowlist + credentials as before; the browser may now reuse a
+  // preflight answer for 2 h instead of 5 s (see corsPluginOptions).
+  await app.register(cors, corsPluginOptions(corsOrigin));
   await app.register(helmet, helmetOptions);
   // SWIFT-AUD-D6-02: back the limiter with Redis IN PRODUCTION so the ceiling is
   // shared across all API instances. An in-memory store gives each instance its
@@ -400,6 +399,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // Decorate so routes can enqueue jobs
     app.decorate('queues', queues);
     app.decorate('dispatchQueue', queues.dispatchQueue);
+    app.decorate('offerQueue', queues.offerQueue);
   } catch (err) {
     if (isProduction()) {
       app.log.fatal({ err }, 'Background jobs failed to initialize — refusing production boot');
