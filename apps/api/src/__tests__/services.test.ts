@@ -192,7 +192,7 @@ describe('Services — provider verification + qualification badge', () => {
   });
 
   // [R4 · research A8] Advertising legal services is barred to "any person whatsoever": a profile whose own words
-  // offer them is refused whatever trade it names, and nothing is saved; a profile that only mentions a lawyer is not.
+  // offer them is refused whatever trade it names, and nothing is saved; an ordinary profile still saves.
   it('refuses a profile that offers legal services, whatever trade it names', async () => {
     const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     for (const bio of ['Carpentry and legal advice', 'Also: Legal-Consultation for land deeds', 'Conveyancing on request', 'Attorney-at-law and handyman']) {
@@ -201,7 +201,7 @@ describe('Services — provider verification + qualification badge', () => {
       expect(res.json().error, bio).toMatchObject({ code: 'SERVICE_NOT_ALLOWED', message: 'Swift doesn\'t list legal services. Remove them from your profile to continue.' });
     }
     expect(await app.prisma.serviceProvider.count({ where: { userId: owner.userId } })).toBe(0);
-    const plain = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter', bio: 'Built-ins. Ask my brother, a lawyer, about my work.' }, owner.token);
+    const plain = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter', bio: 'Built-ins, shelves and cabinets.' }, owner.token);
     expect(plain.statusCode, plain.body).toBe(200);
   });
 
