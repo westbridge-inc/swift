@@ -77,6 +77,9 @@ async function waitForInvites(userId: string, count: number) {
 const settle = () => new Promise((r) => setTimeout(r, 400));
 
 beforeAll(async () => {
+  // One owner makes about twenty adds here to exercise the invite protocol;
+  // the daily add cap has its own suite (l05-staff-add-cap.test.ts).
+  process.env['STAFF_ADD_DAILY_CAP'] = '1000';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -118,6 +121,7 @@ afterAll(async () => {
   await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
+  delete process.env['STAFF_ADD_DAILY_CAP'];
 });
 
 describe('[row 55] one reply for every number', () => {
