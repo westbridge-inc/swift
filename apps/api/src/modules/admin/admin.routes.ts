@@ -3081,7 +3081,7 @@ export async function adminRoutes(app: FastifyInstance) {
       audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
     });
 
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED' });
     // Told after the commit, each on its own key (a retry of the notice cannot
     // double it). Neither is told the refund happened — only who makes it.
