@@ -17,6 +17,7 @@ const REFUNDS = page('legal', 'refunds', 'page.tsx');
 const DELIVERY = page('legal', 'delivery', 'page.tsx');
 const DELETION = page('(marketing)', 'account', 'delete', 'page.tsx');
 const CONTACT = page('(marketing)', 'contact', 'page.tsx');
+const ABOUT = page('(marketing)', 'about', 'page.tsx');
 
 describe('company facts come from the legal texts’ operator', () => {
   it('name, registration no., address, phone, e-mail and the owner’s hours', () => {
@@ -31,6 +32,8 @@ describe('company facts come from the legal texts’ operator', () => {
     expect(CONTACT).toContain('Registration no. {site.registrationNo}');
     expect(CONTACT).toContain('(registration no.{\' \'} {site.registrationNo}).');
     expect(CONTACT).toContain('{site.supportHours}');
+    // [Legal research R2] the company page the card bank and Apple read names the registration number too
+    expect(ABOUT).toMatch(/Operated by<\/dt>\s*<dd>\{site\.legalEntityName\}<\/dd>\s*<dt[^>]*>Registration no\.<\/dt>\s*<dd>\{site\.registrationNo\}<\/dd>/);
     expect(CONTACT).not.toMatch(/Business hours/);
     expect(CONTACT).not.toMatch(/\{site\.legalEntityName\}<\/b>\./);
   });
