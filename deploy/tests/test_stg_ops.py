@@ -370,6 +370,33 @@ class SeedProductionScript(unittest.TestCase):
         self.assertNotIn("DATABASE_URL", result.stdout + result.stderr)
         self.assertNotIn("DATABASE_URL", calls)
 
+    def test_stdout_carries_only_the_seeds_own_text(self):
+        """The request run's stdout is what the operator saves and the signers
+        read (`> ~/seed-request.txt`): exactly the seed's own text. The image
+        build talks on stderr, where the operator still sees it (14 Oct: 87
+        build lines in front of the request block made the signer refuse it)."""
+        block = ("swift-seed-approval v2\n"
+                 "request: cmVxdWVzdA==\n"
+                 "end of request\n")
+        (self.tmp / "block.txt").write_text(block)
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\n'
+                'case "$*" in\n'
+                '  *"exec -T postgres"*) echo "1:staging"; exit 0;;\n'
+                '  *"config --quiet"*) echo "WARN the attribute version is obsolete"; exit 0;;\n'
+                '  *" build seed"*) i=0; while [ $i -lt 87 ]; do echo "#$i [build 2/9] RUN pnpm install"; i=$((i+1)); done; echo "build progress" >&2; exit 0;;\n'
+                '  *"run --rm --no-TTY seed"*) cat "$BLOCK"; echo "Container seed-run Creating" >&2; exit 2;;\n'
+                '  *) exit 0;;\n'
+                'esac')
+        sh_shim(self.bin, "git", 'echo "git $*" >> "$CALL_LOG"\ncase "$*" in *"rev-parse HEAD"*) echo "$GIT_HEAD";; '
+                '*fetch*) echo "From github.com:example/swift";; esac\nexit 0')
+        result = self.run_script(SEED_ADMIN_PHONE="+5925559001", BLOCK=str(self.tmp / "block.txt"))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, block)
+        self.assertIn("[build 2/9] RUN pnpm install", result.stderr)
+        self.assertEqual(result.stderr.count("[build 2/9]"), 87)
+        self.assertIn("From github.com:example/swift", result.stderr)
+        self.assertIn("attribute version is obsolete", result.stderr)
+
     def test_the_script_and_its_compose_override_never_carry_database_url(self):
         script = (DEPLOY / "seed-production.sh").read_text()
         override = (DEPLOY / "docker-compose.seed.yml").read_text()
