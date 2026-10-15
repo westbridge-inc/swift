@@ -1,6 +1,6 @@
 import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
 import { authorizeHandover, preflightHandoverDoor, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
-import { emitToOrderRoom } from './order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from './order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
@@ -811,7 +811,7 @@ export class OrderService {
     try {
       await emitToOrderRoom(this.prisma, this.io, order.id, 'order:status_changed', statusEvent);
       if (order.vendorId) {
-        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', statusEvent);
       }
     } catch (err) {
       log().warn({ err, orderId: order.id }, 'rider assignment socket publication failed');
@@ -1864,10 +1864,8 @@ export class OrderService {
       // order, by its release [Q12].
       try {
         const held = isHeld(order);
-        if (!held) {
-          this.io
-            .to(`vendor:${order.vendorId}`)
-            .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        if (!held && order.vendorId) {
+          await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         }
         const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
         if (vendorOwner) {
@@ -2725,7 +2723,7 @@ export class OrderService {
     // A held order was never shown to the vendor — telling them about a
     // cancellation of something they never saw would only confuse the board.
     if (order.vendorId && !heldNow) {
-      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+      await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', { orderId, status: 'CANCELLED' });
     }
     // [L07] The rider's notice committed with the cancel; this is only its
     // first delivery attempt, started after the emits and never awaited.
@@ -2856,7 +2854,7 @@ export class OrderService {
     // The vendor board listens on its own room so it sees every transition
     // live without subscribing to each order individually.
     if (order.vendorId) {
-      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+      await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', statusEvent);
     }
 
     } catch (err) {
@@ -2992,9 +2990,7 @@ export class OrderService {
       }
 
       if (order.vendorId && order.vendor) {
-        this.io
-          .to(`vendor:${order.vendorId}`)
-          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         try {
           const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
           if (vendorOwner) {
