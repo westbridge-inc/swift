@@ -35,7 +35,8 @@ type Agreement = { documentType: ConsentDocumentType; subjectType: ConsentSubjec
 /** The partner agreements a person re-accepts with the Terms, by the roles they hold. */
 function agreementsFor(roles: readonly UserRole[]): Agreement[] {
   const out: Agreement[] = [];
-  if (roles.includes('MOVER' as UserRole)) out.push({ documentType: 'driver_agreement', subjectType: 'driver', renderedText: DRIVER_AGREEMENT });
+  // [REVIEW-F S3-1 on #1763] legacy RIDER / DRIVER accounts are movers too
+  if (roles.some((r) => r === 'MOVER' || r === 'RIDER' || r === 'DRIVER')) out.push({ documentType: 'driver_agreement', subjectType: 'driver', renderedText: DRIVER_AGREEMENT });
   if (roles.includes('VENDOR_OWNER' as UserRole)) out.push({ documentType: 'vendor_agreement', subjectType: 'vendor_user', renderedText: VENDOR_AGREEMENT });
   return out;
 }

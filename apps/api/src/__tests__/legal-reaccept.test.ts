@@ -41,6 +41,9 @@ describe('who must accept, and what they are shown', () => {
 
   it('partners re-accept their agreement with the Terms', () => {
     expect(acceptanceStatus({ tosVersion: null, roles: ['MOVER', 'CUSTOMER'] as UserRole[] }).agreements).toEqual(['driver_agreement']);
+    // [REVIEW-F S3-1] legacy rider/driver roles re-accept the Mover Agreement too
+    expect(acceptanceStatus({ tosVersion: null, roles: ['RIDER', 'CUSTOMER'] as UserRole[] }).agreements).toEqual(['driver_agreement']);
+    expect(acceptanceStatus({ tosVersion: null, roles: ['DRIVER'] as UserRole[] }).agreements).toEqual(['driver_agreement']);
     expect(acceptanceStatus({ tosVersion: null, roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[] }).agreements).toEqual(['vendor_agreement']);
     expect(acceptanceStatus({ tosVersion: null, roles: ['CUSTOMER'] as UserRole[] }).agreements).toEqual([]);
   });
