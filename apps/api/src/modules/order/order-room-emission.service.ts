@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { resolveRoomAuthority } from '../chat/chat-authority';
 import { cancelledWhileHeld } from './hold-visibility';
+import { storeTeam } from '../notification/store-team';
 
 type Audience = { tenantId: string; users: Set<string>; senderAllowed?: boolean; publisherAllowed?: boolean };
 
@@ -92,4 +93,24 @@ export async function emitToChatRoom(
     if (!authority) return null;
     return { tenantId: authority.tenantId, users: new Set(authority.participants.keys()), senderAllowed: authority.writable };
   }, event, payload, opts);
+}
+
+/** [Owner ruling #15 · continues #1367] The live room of a store (vendor:<id>):
+ * every new order and every change on its board. Its audience is the team of
+ * the store as read NOW (store-team.ts: the ACTIVE same-tenant owner, managers
+ * and staff), the same rule the subscription door applies, so a member removed
+ * or deactivated after joining receives nothing more and is evicted at the next
+ * publication. `onlyWhileOpen` marks a ringing event (order:new, which raises
+ * the takeover on the phone): a closed or suspended store publishes it to
+ * nobody. Payloads are unchanged. */
+export async function emitToStoreRoom(
+  db: Pick<PrismaClient, 'vendor'>, io: Server,
+  vendorId: string, event: string, payload: unknown,
+  opts: { onlyWhileOpen?: boolean } = {},
+): Promise<boolean> {
+  return publishToAudience(io, `vendor:${vendorId}`, async () => {
+    const team = await storeTeam(db, vendorId);
+    if (!team) return null;
+    return { tenantId: team.tenantId, users: new Set(team.userIds), publisherAllowed: !opts.onlyWhileOpen || team.ringing };
+  }, event, payload);
 }

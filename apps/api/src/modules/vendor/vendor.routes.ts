@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { confirmReturn } from '../custody/custody-recovery';
@@ -914,6 +914,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       await closePendingStaffInvites(tx, vendorId, current.userId, new Date());
       await tx.vendorStaff.delete({ where: { id: current.id } });
     });
+    // [Owner ruling #15] Out of the live room of the store at once, on every
+    // API node: a removed member stops hearing it now, not at the next event
+    // (the store-room gate would refuse them then anyway).
+    app.io?.in(`user:${existing.userId}`).socketsLeave(`vendor:${vendorId}`);
     return { success: true, data: { deleted: true } };
   });
 
@@ -1835,7 +1839,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:prep_update', evt);
-    if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
+    if (order.vendorId) await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:prep_update', evt);
     // The rider on the FRESH row is the one who needs "it's ready" — never the
     // rider the stale screen read. Re-check after commit and push only while
     // that rider still owns the order, so a cancellation landing right after
@@ -2451,7 +2455,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', rejectEvent);
     if (order.vendorId) {
-      app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
+      await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:status_changed', rejectEvent);
     }
 
     // Tell the CUSTOMER, with the reason — parity with the admin-cancel path

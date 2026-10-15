@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../modules/order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../modules/order/order-room-emission.service';
 import { Queue, Worker, UnrecoverableError, type Job, type ConnectionOptions } from 'bullmq';
 import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
@@ -327,7 +327,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   }
 
   await emitToOrderRoom(ctx.prisma, ctx.io, orderId, 'order:status_changed', { orderId, status: 'CANCELLED' });
-  if (order.vendorId) ctx.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+  if (order.vendorId) await emitToStoreRoom(ctx.prisma, ctx.io, order.vendorId, 'order:status_changed', { orderId, status: 'CANCELLED' });
 
   const { NotificationService } = await import('../modules/notification/notification.service');
   const notifications = new NotificationService(ctx.prisma, ctx.io);

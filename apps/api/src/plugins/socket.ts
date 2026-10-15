@@ -26,6 +26,7 @@ import { warRoomsForSocket } from '../modules/safety/war-room';
 import { isProduction } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
 import { vendorVisibleFilter } from '../modules/order/hold-visibility';
+import { STORE_TEAM_SELECT, teamOf } from '../modules/notification/store-team';
 import { resolveIdentityById } from '../modules/auth/preauth-identity';
 import { bindTenantTransaction, runWithTenant } from './prisma';
 
@@ -662,16 +663,20 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     socket.on('chat:typing', relayTyping('chat:typing'));
     socket.on('chat:stop-typing', relayTyping('chat:stop-typing'));
 
-    // Vendor order feed — only if the authenticated user owns the vendor
+    // Vendor order feed — only for a member of the store team: its owner, or
+    // one of its managers or staff [owner ruling #15 · continues #1367]. The
+    // rule is the one every store-room publication re-applies (store-team.ts),
+    // so a member removed or deactivated after joining hears nothing more.
     socket.on('vendor:subscribe', async (raw: unknown) => {
       const parsed = vendorEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
-        const vendor = await inSocketTenant(() => app.prisma.vendor.findFirst({
-          where: { id: parsed.data.vendorId, owner: { userId } },
-          select: { id: true },
+        const row = await inSocketTenant(() => app.prisma.vendor.findUnique({
+          where: { id: parsed.data.vendorId },
+          select: STORE_TEAM_SELECT,
         }));
-        if (vendor) {
+        const team = row ? teamOf(row) : null;
+        if (team && team.tenantId === tenantId && team.userIds.includes(userId)) {
           socket.join(`vendor:${parsed.data.vendorId}`);
         }
       } catch {

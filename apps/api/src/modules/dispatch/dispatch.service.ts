@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { assertDispatchPairEligible, safetyExcludedMovers } from './pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -2820,7 +2820,7 @@ export class DispatchService {
     try {
       await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', assignedEvent);
       if (order.vendorId) {
-        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', assignedEvent);
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', assignedEvent);
       }
     } catch (err) {
       warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch socket publication failed after claim commit');

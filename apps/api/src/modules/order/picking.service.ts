@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from './order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from './order-room-emission.service';
 import type { Prisma, PrismaClient, SubstitutionStatus } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
@@ -577,6 +577,7 @@ export class PickingService {
   }
 
   private emitPickState(vendorId: string | null, orderId: string, lineId: string, patch: object) {
-    if (vendorId) this.io.to(`vendor:${vendorId}`).emit('order:pick_state', { orderId, lineId, ...patch });
+    // Fire-and-forget like before; the store-room gate never throws.
+    if (vendorId) void emitToStoreRoom(this.prisma, this.io, vendorId, 'order:pick_state', { orderId, lineId, ...patch });
   }
 }
