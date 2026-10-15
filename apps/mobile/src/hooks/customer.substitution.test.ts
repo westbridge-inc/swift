@@ -60,9 +60,10 @@ afterAll(() => {
 
 describe('[L09 · M028] deciding a substitute refreshes the order the screen shows', () => {
   it.each([true, false])('approve=%s is sent for that line, then the order screen\'s own query is refreshed', async (approve) => {
-    useDecideSubstitution('order-7');
+    // [TRANSFORMED after #1707: the hook takes no order; the order is part of the decision.]
+    useDecideSubstitution();
     const mutation = env.mutation!;
-    const vars = { lineId: 'line-1', approve };
+    const vars = { orderId: 'order-7', lineId: 'line-1', approve };
     const data = await mutation['mutationFn'](vars);
     expect(seen.map((c) => `${c.method} ${c.url}`)).toEqual(['post /customer/orders/order-7/items/line-1/substitution']);
     expect(JSON.parse(String(seen[0]!.data))).toEqual({ approve });

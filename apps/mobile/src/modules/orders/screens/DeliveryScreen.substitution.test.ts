@@ -35,7 +35,10 @@ describe('the order screen follows a substitution as it happens', () => {
   it('the customer reads what approving changes before the buttons, and decides through the hook bound to this order', () => {
     expect(SCREEN).toContain("import { swapChangeText, swapDecisionPermissions } from '../substitutionCopy';");
     expect(CARD.indexOf('swapChangeText(it.substitution, o.paymentMethod)')).toBeGreaterThan(CARD.indexOf('Rejecting removes the item and lowers your total.'));
-    expect(SCREEN).toContain('const decideSub = useDecideSubstitution(orderId);');
+    // [TRANSFORMED after #1707: the order travels with each decision, never the render's closure.]
+    expect(SCREEN).toContain('const decideSub = useDecideSubstitution();');
+    expect(SCREEN).toContain('decideSub.mutate({ orderId, lineId: it.id, approve: true })');
+    expect(SCREEN).toContain('decideSub.mutate({ orderId, lineId: it.id, approve: false })');
   });
 });
 
