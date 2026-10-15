@@ -1836,7 +1836,7 @@ export class OrderService {
       try {
         const held = isHeld(order);
         if (!held && order.vendorId) {
-          await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileOpen: true });
+          await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         }
         const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
         if (vendorOwner) {
@@ -2912,7 +2912,7 @@ export class OrderService {
       }
 
       if (order.vendorId && order.vendor) {
-        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileOpen: true });
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         try {
           const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
           if (vendorOwner) {

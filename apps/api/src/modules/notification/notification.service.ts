@@ -8,7 +8,7 @@ import { pushOptionsFor } from '../../providers/notifications/alert-class';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter } from '../../plugins/observability';
-import { storeTeam } from './store-team';
+import { ringRecipients, storeTeam } from './store-team';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -80,10 +80,12 @@ export interface NotificationPayload {
  *    sent "still waiting" pushes and then an SMS to the owner;
  *  - the alert was acknowledged (its unread row is the banner state).
  *
- * [Owner ruling #15 · continues #1367] The re-alert rings the whole team of
- * the store as it is NOW (store-team.ts): a closed or suspended store rings
- * nobody, a member removed or deactivated since the first alert is not rung,
- * and any current member having read their alert means someone saw it, so the
+ * [Owner ruling #15 · continues #1367] The re-alert rings the team of the
+ * store as it is NOW (store-team.ts ringRecipients): a store suspended or
+ * closed down by Swift rings nobody (closing for the day does not silence the
+ * orders it already has), a member removed or deactivated since the first
+ * alert is not rung, managers and staff only while invites need acceptance,
+ * and any of those having read their alert means someone saw it, so the
  * ladder stops for everyone. The SMS fallback stays on the owner phone only.
  */
 export async function escalateVendorAlert(
@@ -96,7 +98,8 @@ export async function escalateVendorAlert(
   const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true, vendorId: true } });
   if (order?.status !== 'PENDING') return 'stopped'; // handled, cancelled or gone: nobody is waiting
   const team = order.vendorId ? await storeTeam(prisma, order.vendorId) : null;
-  if (team && !team.ringing) return 'stopped'; // closed or suspended: the store rings nobody
+  if (team && !team.ringing) return 'stopped'; // suspended or closed down: the store rings nobody
+  const ringing = team ? ringRecipients(team) : null;
 
   const rows = await prisma.notification.findMany({
     where: {
@@ -108,7 +111,7 @@ export async function escalateVendorAlert(
     include: { user: { select: { id: true, phone: true } } },
     orderBy: { createdAt: 'asc' },
   });
-  const current = team ? rows.filter((row) => team.userIds.includes(row.userId)) : rows;
+  const current = ringing ? rows.filter((row) => ringing.includes(row.userId)) : rows;
   // Acknowledged by someone on the team (or never sent to anyone current): done.
   if (current.length === 0 || current.some((row) => row.isRead)) return 'stopped';
 
@@ -748,9 +751,9 @@ export class NotificationService {
    * and the store copy is tagged audience business, like the re-alert.
    */
   async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string, respondBy?: Date | null): Promise<string> {
-    // [Owner ruling #15 · continues #1367] The alert rings the whole team of
-    // the store (owner, managers, staff), each with the same row, push and
-    // event the owner always had, while the store is open.
+    // [Owner ruling #15 · continues #1367] The alert rings the team of the
+    // store (owner, managers, staff), each with the same row, push and event
+    // the owner always had (store-team.ts ringRecipients).
     let ownerNotificationId = '';
     let firstNotificationId = '';
     for (const userId of await this.newOrderRecipients(orderId, vendorOwnerId)) {
@@ -788,14 +791,13 @@ export class NotificationService {
   }
 
   /** [Owner ruling #15] Who a new order rings: the team of its store as read
-   *  now (store-team.ts), and nobody while the store is closed or suspended.
-   *  A call naming an order with no store row (legacy callers) rings the named
-   *  owner, as it always did. */
+   *  now (store-team.ts ringRecipients). A call naming an order with no store
+   *  row (legacy callers) rings the named owner, as it always did. */
   private async newOrderRecipients(orderId: string, vendorOwnerId: string): Promise<string[]> {
     const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { vendorId: true } });
     if (!order?.vendorId) return [vendorOwnerId];
     const team = await storeTeam(this.prisma, order.vendorId);
-    return team?.ringing ? team.userIds : [];
+    return team ? ringRecipients(team) : [];
   }
 
   async newDeliveryForRider(riderId: string, orderNumber: string, vendorName: string, deliveryFee: number, orderId: string): Promise<void> {

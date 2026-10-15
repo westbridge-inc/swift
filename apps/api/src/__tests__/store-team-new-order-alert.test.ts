@@ -30,7 +30,12 @@ import { getChannels, devChannelLog } from '../providers/notifications/channels'
 //    reaches them at once, like the owner's;
 //  - the "still waiting" re-alert rings the same team; the SMS fallback stays
 //    on the owner's phone only;
-//  - a closed or suspended store rings nobody;
+//  - managers and staff ring only while STAFF_INVITE_ACCEPT is on (every
+//    member then accepted an invite); while it is off only the owner rings
+//    (coordinator ruling on review S3-1: consent);
+//  - closing for the day keeps ringing the orders the store already has
+//    (ruling on review S4-1); a store Swift has suspended rings nobody, while
+//    its board still hears status changes;
 //  - a member who is removed, or whose account is no longer ACTIVE, stops
 //    hearing the store at once; a team row pointing at another tenant's
 //    account carries nothing across the tenant wall.
@@ -40,6 +45,7 @@ import { getChannels, devChannelLog } from '../providers/notifications/channels'
 
 const DAY = 24 * 60 * 60 * 1000;
 const PHONE_PREFIX = '+5920471';
+const priorInviteAccept = process.env['STAFF_INVITE_ACCEPT'];
 const TENANT_B = `team-alert-b-${nanoid(6).toLowerCase()}`;
 
 let app: FastifyInstance;
@@ -190,6 +196,9 @@ async function purgeFixtures() {
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
+  // Team members are rung only once invites need acceptance (S3-1 ruling);
+  // the consent case below turns it off on purpose.
+  process.env['STAFF_INVITE_ACCEPT'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);
@@ -220,6 +229,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (priorInviteAccept === undefined) delete process.env['STAFF_INVITE_ACCEPT']; else process.env['STAFF_INVITE_ACCEPT'] = priorInviteAccept;
   for (const s of sockets) s.disconnect();
   await purgeFixtures();
   await app.close();
@@ -296,16 +306,54 @@ describe('[#15] an OPEN store rings its whole active team', () => {
   });
 });
 
-describe('[#15] a closed or suspended store rings nobody', () => {
-  it.each([
-    ['closed', { status: 'ACTIVE', isCurrentlyOpen: false }],
-    ['suspended', { status: 'SUSPENDED', isCurrentlyOpen: true }],
-  ] as const)('%s: no row, no push, no re-alert and no SMS, for the owner either', async (_label, state) => {
+describe('[#15 · S3-1 ruling] consent: managers and staff ring only once invites need acceptance', () => {
+  it('with STAFF_INVITE_ACCEPT off only the owner is rung, first alert and re-alert; with it on an accepted member is', async () => {
+    await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
+    delete process.env['STAFF_INVITE_ACCEPT'];
+    try {
+      const order = await pendingOrder();
+      const before = new Map([owner, manager, staff].map((a) => [a.userId, pushesTo(a).length]));
+      await notifications.newOrderForVendor(owner.userId, order.orderNumber, 1, 1500, order.id, respondBy());
+      expect(await recipientsOf(order.id)).toEqual(new Set([owner.userId]));
+      expect(await escalateVendorAlert(app.prisma, app.io, getChannels(), order.id, 0)).toBe('realerted');
+      expect(pushesTo(owner).slice(before.get(owner.userId)).map((p) => p.title)).toEqual(['New Order!', 'Order still waiting!']);
+      for (const member of [manager, staff]) expect(pushesTo(member), member.userId).toHaveLength(before.get(member.userId)!);
+    } finally {
+      process.env['STAFF_INVITE_ACCEPT'] = '1';
+    }
+    const order = await pendingOrder();
+    const before = pushesTo(staff).length;
+    await notifications.newOrderForVendor(owner.userId, order.orderNumber, 1, 1500, order.id, respondBy());
+    expect(pushesTo(staff).slice(before).map((p) => p.title)).toEqual(['New Order!']);
+  });
+});
+
+describe('[#15 · S4-1 ruling] closing for the day keeps ringing the orders the store already has', () => {
+  it('a store closed after an order was placed: the team is still rung and re-alerted, the owner texted, the board told', async () => {
     await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
     const board = await boardOpen(owner);
     await expect.poll(async () => (await roomSocketIds()).has(board.socket.id!), { timeout: 3000 }).toBe(true);
     const order = await pendingOrder(-1000);
-    await setStore(state);
+    await setStore({ status: 'ACTIVE', isCurrentlyOpen: false });
+    const texts = smsTo(owner).length;
+    await orders.releaseDueHeldOrders(async () => {});
+    expect(await recipientsOf(order.id)).toEqual(new Set([owner.userId, manager.userId, staff.userId]));
+    await expect.poll(() => board.got('order:new', order.id), { timeout: 3000 }).toBe(true);
+    expect(await escalateVendorAlert(app.prisma, app.io, getChannels(), order.id, 0)).toBe('realerted');
+    expect(await escalateVendorAlert(app.prisma, app.io, getChannels(), order.id, 1)).toBe('sms_sent');
+    expect(smsTo(owner)).toHaveLength(texts + 1);
+    board.socket.disconnect();
+    await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
+  });
+});
+
+describe('[#15] a store Swift has suspended rings nobody', () => {
+  it('no row, no push, no re-alert, no SMS and no order:new, for the owner either', async () => {
+    await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
+    const board = await boardOpen(owner);
+    await expect.poll(async () => (await roomSocketIds()).has(board.socket.id!), { timeout: 3000 }).toBe(true);
+    const order = await pendingOrder(-1000);
+    await setStore({ status: 'SUSPENDED', isCurrentlyOpen: true });
     const pushes = new Map([owner, manager, staff].map((a) => [a.userId, pushesTo(a).length]));
     const texts = smsTo(owner).length;
     await orders.releaseDueHeldOrders(async () => {});
@@ -316,7 +364,21 @@ describe('[#15] a closed or suspended store rings nobody', () => {
     for (const member of [owner, manager, staff]) expect(pushesTo(member), member.userId).toHaveLength(pushes.get(member.userId)!);
     expect(smsTo(owner)).toHaveLength(texts);
     await new Promise((r) => setTimeout(r, 200));
-    expect(board.got('order:new', order.id), 'no order:new takeover for a store that is not open').toBe(false);
+    expect(board.got('order:new', order.id), 'no order:new takeover for a suspended store').toBe(false);
+    board.socket.disconnect();
+    await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
+  });
+
+  it('[review S3-2 · P7] its board still hears a status change on an order it already has', async () => {
+    await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
+    const board = await boardOpen(owner);
+    await expect.poll(async () => (await roomSocketIds()).has(board.socket.id!), { timeout: 3000 }).toBe(true);
+    const order = await pendingOrder();
+    await setStore({ status: 'SUSPENDED', isCurrentlyOpen: false });
+    // A real board change: the store accepts the order (OrderService.updateStatus
+    // publishes order:status_changed to the store room through the gate).
+    await orders.updateStatus(order.id, 'ACCEPTED', owner.userId, 'accepted (test)');
+    await expect.poll(() => board.got('order:status_changed', order.id), { timeout: 3000 }).toBe(true);
     board.socket.disconnect();
     await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
   });
@@ -362,6 +424,26 @@ describe('[#15] who stops hearing the store, at once', () => {
     board.socket.disconnect();
   });
 
+  it('[review S3-2 · P6] the re-alert never reaches a member removed or suspended after the first alert', async () => {
+    await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
+    const leaving = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const suspending = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const row = await addMember(leaving, 'STAFF');
+    await addMember(suspending, 'STAFF');
+    const order = await pendingOrder();
+    await notifications.newOrderForVendor(owner.userId, order.orderNumber, 1, 1500, order.id, respondBy());
+    expect((await recipientsOf(order.id)).has(leaving.userId) && (await recipientsOf(order.id)).has(suspending.userId)).toBe(true);
+
+    const removed = await call('DELETE', `/api/v1/vendor/staff/${row.id}`, owner.token);
+    expect(removed.statusCode, removed.body).toBe(200);
+    await app.prisma.user.update({ where: { id: suspending.userId }, data: { status: 'SUSPENDED' } });
+    const before = new Map([owner, leaving, suspending].map((a) => [a.userId, pushesTo(a).length]));
+    expect(await escalateVendorAlert(app.prisma, app.io, getChannels(), order.id, 0)).toBe('realerted');
+    expect(pushesTo(owner).slice(before.get(owner.userId)).map((p) => p.title)).toEqual(['Order still waiting!']);
+    expect(pushesTo(leaving), 'removed member').toHaveLength(before.get(leaving.userId)!);
+    expect(pushesTo(suspending), 'suspended member').toHaveLength(before.get(suspending.userId)!);
+  });
+
   it('another tenant account on the team row, a suspended member and another store owner are refused the room', async () => {
     await setStore({ status: 'ACTIVE', isCurrentlyOpen: true });
     const refused = await Promise.all([foreignStaff, suspendedStaff, stranger].map((a) => connect(a.token).then((socket) => {
@@ -378,6 +460,23 @@ describe('[#15] who stops hearing the store, at once', () => {
   });
 });
 
+/** True when `arg` is a store-room literal (vendor:...), an array holding one,
+ *  or an identifier whose declaration in the same file initializes it to one
+ *  (mirrors the order-room census). */
+function namesStoreRoom(arg: ts.Expression, ast: ts.SourceFile): boolean {
+  if (/^[`'"]vendor:/.test(arg.getText(ast))) return true;
+  if (ts.isArrayLiteralExpression(arg)) return arg.elements.some((el) => namesStoreRoom(el, ast));
+  if (!ts.isIdentifier(arg)) return false;
+  let found = false;
+  const visit = (n: ts.Node) => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === arg.text
+      && n.initializer && namesStoreRoom(n.initializer, ast)) found = true;
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(ast);
+  return found;
+}
+
 describe('[#15] every publication to a store room goes through the team gate', () => {
   it('no direct to()/in()/except() on a vendor: room remains; the gate has every publisher', () => {
     const sources = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -393,8 +492,9 @@ describe('[#15] every publication to a store room goes through the team gate', (
       const visit = (n: ts.Node) => {
         if (ts.isCallExpression(n)) {
           if (n.expression.getText(ast) === 'emitToStoreRoom') publishers++;
+          // [review S4-4] Written inline, in an array, or held in a variable first.
           if (ts.isPropertyAccessExpression(n.expression) && ['to', 'in', 'except'].includes(n.expression.name.text)
-            && n.arguments.some((arg) => /^[`'"]vendor:/.test(arg.getText(ast)))) {
+            && n.arguments.some((arg) => namesStoreRoom(arg, ast))) {
             bypasses.push(file + ':' + (ast.getLineAndCharacterOfPosition(n.getStart(ast)).line + 1));
           }
         }

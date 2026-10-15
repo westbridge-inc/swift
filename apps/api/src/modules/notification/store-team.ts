@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
+import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling 13 Oct #15 · continues #1367 (loud alerts 2/4)] WHO hears a
@@ -14,10 +15,18 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 // added; nobody twice.
 //
 // RINGING (owner, 15 Oct: "on duty" = the whole active team of an OPEN store):
-// a store rings its team only while it is ACTIVE and open. A closed or
-// suspended store rings nobody, the owner included. A store paused for NEW
-// orders (acceptingOrders off) is still open, so the orders it already has
-// still ring until they are answered.
+// an order is placed only while its store is open (checkout refuses a closed,
+// paused or suspended store). Closing the store later stops NEW orders, not
+// the alerts for the orders it already has: those keep ringing until they are
+// handled (coordinator ruling on review S4-1: an unattended paid order is
+// worse). A store that Swift has suspended or closed down (status not ACTIVE)
+// rings nobody, the owner included.
+//
+// CONSENT (coordinator ruling on review S3-1): managers and staff are rung only
+// while STAFF_INVITE_ACCEPT is on, when every team member is someone who
+// accepted an invite. While it is off, an owner can add an account directly,
+// without its consent, so only the owner is rung, as before. The store room
+// still admits the whole team: a member opens the board themselves.
 // ---------------------------------------------------------------------------
 
 /** The one read of the team of a store. Callers that must keep the read inline
@@ -25,7 +34,6 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 export const STORE_TEAM_SELECT = {
   tenantId: true,
   status: true,
-  isCurrentlyOpen: true,
   owner: { select: { userId: true, user: { select: { status: true, tenantId: true } } } },
   staff: {
     orderBy: { createdAt: 'asc' },
@@ -41,7 +49,7 @@ export interface StoreTeam {
   ownerUserId: string | null;
   /** Owner first, then managers and staff in the order they were added. */
   userIds: string[];
-  /** The store is ACTIVE and open: its new orders ring the team. */
+  /** The store is ACTIVE (not suspended or closed down by Swift): its orders ring. */
   ringing: boolean;
 }
 
@@ -52,10 +60,19 @@ export function teamOf(row: StoreTeamRow): StoreTeam {
   for (const member of row.staff) {
     if (onTeam(member.user) && !userIds.includes(member.userId)) userIds.push(member.userId);
   }
-  return { tenantId: row.tenantId, ownerUserId, userIds, ringing: row.status === 'ACTIVE' && row.isCurrentlyOpen };
+  return { tenantId: row.tenantId, ownerUserId, userIds, ringing: row.status === 'ACTIVE' };
 }
 
 export async function storeTeam(db: Pick<PrismaClient, 'vendor'>, vendorId: string): Promise<StoreTeam | null> {
   const row = await db.vendor.findUnique({ where: { id: vendorId }, select: STORE_TEAM_SELECT });
   return row ? teamOf(row) : null;
+}
+
+/** Who a store order RINGS (alert, re-alert): nobody while the store is not
+ *  ACTIVE; the whole team while staff invites need acceptance (consent); the
+ *  owner alone while they do not. */
+export function ringRecipients(team: StoreTeam, env: Record<string, string | undefined> = process.env): string[] {
+  if (!team.ringing) return [];
+  if (staffInviteAcceptEnabled(env)) return team.userIds;
+  return team.ownerUserId ? [team.ownerUserId] : [];
 }

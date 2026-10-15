@@ -100,17 +100,19 @@ export async function emitToChatRoom(
  * the store as read NOW (store-team.ts: the ACTIVE same-tenant owner, managers
  * and staff), the same rule the subscription door applies, so a member removed
  * or deactivated after joining receives nothing more and is evicted at the next
- * publication. `onlyWhileOpen` marks a ringing event (order:new, which raises
- * the takeover on the phone): a closed or suspended store publishes it to
- * nobody. Payloads are unchanged. */
+ * publication. `onlyWhileActive` marks a ringing event (order:new, which
+ * raises the takeover on the phone): a store suspended or closed down by Swift
+ * publishes it to nobody, while its board still hears every other change
+ * (a status change, a cancellation). Closing for the day does not stop it:
+ * the orders a store already has keep ringing. Payloads are unchanged. */
 export async function emitToStoreRoom(
   db: Pick<PrismaClient, 'vendor'>, io: Server,
   vendorId: string, event: string, payload: unknown,
-  opts: { onlyWhileOpen?: boolean } = {},
+  opts: { onlyWhileActive?: boolean } = {},
 ): Promise<boolean> {
   return publishToAudience(io, `vendor:${vendorId}`, async () => {
     const team = await storeTeam(db, vendorId);
     if (!team) return null;
-    return { tenantId: team.tenantId, users: new Set(team.userIds), publisherAllowed: !opts.onlyWhileOpen || team.ringing };
+    return { tenantId: team.tenantId, users: new Set(team.userIds), publisherAllowed: !opts.onlyWhileActive || team.ringing };
   }, event, payload);
 }
