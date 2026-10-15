@@ -476,21 +476,41 @@ describe('Services — risk-tiered browse', () => {
     }
   });
 
-  it('marks high-risk trades and recommends a licensed provider', async () => {
+  // [R7 · GUARDRAILS §7(4) · owner 15 Oct 2026] The browse page says only what a person on our team checked: the ID and
+  // the current police clearance every listed provider needs, and a licence only with the date a person checked it.
+  // Never "police-cleared" or "background-checked", never a promise of "licensed (Certified)" providers.
+  const HIGH_RISK_GUIDANCE = 'Higher-risk work — every provider here has their ID and a current police clearance on file, checked by a person on our team. A licence shows on a provider only after a person on our team checked it, and those providers are listed first.';
+  const LOW_RISK_GUIDANCE = 'Every provider here has their ID and a current police clearance on file, checked by a person on our team — choose by ratings and reviews.';
+
+  it('marks high-risk trades, says only what a person checked, and dates the licence check', async () => {
     const p = await makeVerifiedProvider('electrician');
     const submitted = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-90011' }, p.token);
+    const checkedAt = new Date('2026-10-12T15:30:00.000Z');
     await app.prisma.serviceQualification.update({
       where: { id: submitted.json().data.id },
-      data: { status: 'VERIFIED', verifiedAt: new Date() },
+      data: { status: 'VERIFIED', verifiedAt: checkedAt },
     }); // trusted-review authority is emulated directly; applicants cannot do this
 
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const res = await inject('GET', '/api/v1/services/providers?trade=electrician', undefined, customer.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.riskTier).toBe('HIGH');
-    expect(res.json().data.guidance).toMatch(/licensed|certified/i);
+    expect(res.json().data.guidance).toBe(HIGH_RISK_GUIDANCE);
+    expect(res.json().data.guidance).not.toMatch(/police-cleared|background|licensed \(Certified\)/i);
     expect(res.json().data.providers.length).toBeGreaterThanOrEqual(1);
     expect(res.json().data.providers[0].certified).toBe(true); // licensed listed first
+    // The licence label carries the day a person checked it ("licence on file, checked on [date]").
+    expect(res.json().data.providers[0].licenceCheckedOn).toBe(checkedAt.toISOString());
+  });
+
+  it('a low-risk trade says the same checked facts, and a provider with no checked licence carries no licence date', async () => {
+    await makeVerifiedProvider('cleaner');
+    const res = await inject('GET', '/api/v1/services/providers?trade=cleaner');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.riskTier).toBe('LOW');
+    expect(res.json().data.guidance).toBe(LOW_RISK_GUIDANCE);
+    expect(res.json().data.providers.length).toBeGreaterThanOrEqual(1);
+    for (const row of res.json().data.providers) expect(row.licenceCheckedOn).toBeNull();
   });
 
   it('the verified-first promise holds mechanically: unverified never list, a CLAIM is not a badge, real certs outrank ratings', async () => {
