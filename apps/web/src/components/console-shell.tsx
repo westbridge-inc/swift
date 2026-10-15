@@ -72,7 +72,7 @@ export function ConsoleShell({ children, home, title, description, navigation, s
           {navigationContent(true)}
         </div>
       </div>}
-      <main id="main" tabIndex={-1} key={contentKey} className="sw-page sw-partner pb-6">{children}</main>
+      <main key={contentKey} id="main" tabIndex={-1} className="sw-page sw-partner pb-6">{children}</main>
       <footer className="sw-caption px-6 pb-[calc(88px_+_env(safe-area-inset-bottom))] pt-6 wide:px-10 wide:pb-8">Prices in GYD</footer>
     </div>
     <nav aria-label={`${title} tabs`} className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--swift-border)] bg-[var(--swift-card)] pb-[env(safe-area-inset-bottom)] wide:hidden">
