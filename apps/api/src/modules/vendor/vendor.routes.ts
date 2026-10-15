@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { confirmReturn } from '../custody/custody-recovery';
@@ -667,6 +668,12 @@ export async function vendorRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const analytics = new VendorAnalyticsService(app.prisma);
   const menu = new VendorMenuService(app.prisma);
+  /** [Item 62] A listing archived between an editor's read and its guarded
+   *  write is gone: 404, never a 500 (Prisma's P2025 "record not found"). */
+  const goneIfArchived = (id: string) => (err: unknown): never => {
+    if (typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2025') throw new NotFoundError('Item', id);
+    throw err;
+  };
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
   const custodyDeps = { prisma: app.prisma, io: app.io, notifications };
@@ -1063,8 +1070,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: {
         operatingHours: { orderBy: { dayOfWeek: 'asc' } },
         subscription: true,
-        categories: { orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: true } } } },
-        _count: { select: { orders: true, items: true } },
+        categories: { where: { archivedAt: null }, orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: { where: { archivedAt: null } } } } } },
+        _count: { select: { orders: true, items: { where: { archivedAt: null } } } },
       },
     });
     // Legacy rows predate the MMG destination validator. Never reflect an
@@ -1837,7 +1844,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:prep_update', evt);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:prep_update', evt);
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
     // The rider on the FRESH row is the one who needs "it's ready" — never the
     // rider the stale screen read. Re-check after commit and push only while
@@ -2056,7 +2063,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       note: z.string().max(300).optional(),
     }).parse(request.body);
 
-    const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds } } });
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds }, archivedAt: null } });
     if (!item) throw new NotFoundError('Item', request.params.id);
     if (item.stockQuantity == null) {
       throw new AppError(400, 'UNTRACKED', 'This item does not track stock — set a quantity on it first');
@@ -2108,6 +2115,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       WHERE "vendorId" = ANY(${access.vendorIds})
         AND "stockQuantity" IS NOT NULL AND "lowStockThreshold" IS NOT NULL
         AND "stockQuantity" <= "lowStockThreshold"
+        AND "archivedAt" IS NULL
       ORDER BY "stockQuantity" ASC
       LIMIT 200
     `;
@@ -2252,7 +2260,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
     });
@@ -2451,7 +2459,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', rejectEvent);
     if (order.vendorId) {
       app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
     }
@@ -2509,12 +2517,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: category };
   });
 
-  /** DELETE /categories/:id — Delete a category (and its items) */
+  /** DELETE /categories/:id — Delete a category: [owner 11 Oct] it and its
+   *  listings are ARCHIVED (see VendorMenuService.deleteCategory). */
   app.delete<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { itemsRemoved, removedItemIds } = await menu.deleteCategory(vendorId, request.params.id);
 
-    // hard delete: no sweep could find these rows later [SWIFT-UG-SRCH-01]
+    // Evict the archived listings' search docs now [SWIFT-UG-SRCH-01].
     const search = new SearchService(app.prisma);
     for (const itemId of removedItemIds) search.removeItemDoc(itemId).catch(() => {});
     scheduleVendorSearchSync(app, vendorId);
@@ -2540,7 +2549,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const query = vendorItemsQuerySchema.parse(request.query);
 
-    const where: Record<string, unknown> = { vendorId };
+    // [Item 62] A deleted (archived) listing is history, not menu.
+    const where: Record<string, unknown> = { vendorId, archivedAt: null };
     if (query.categoryId) where['categoryId'] = query.categoryId;
     if (query.isAvailable === 'true') where['isAvailable'] = true;
     if (query.isAvailable === 'false') where['isAvailable'] = false;
@@ -2583,7 +2593,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     // Verify category belongs to this vendor
     const category = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
-    if (!category || category.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
+    if (!category || category.vendorId !== vendorId || category.archivedAt) throw new NotFoundError('Category', body.categoryId);
     // [GUARDRAILS §8 · #55] A name or an option that IS banned goods is refused, never held.
     assertNotBannedGoods([body.name, ...(body.optionGroups ?? []).flatMap((g) => [g.name, ...g.options.map((o) => o.name)])]);
     // [#54] A store filed under a banned category lists nothing new: every item it carries is banned.
@@ -2909,7 +2919,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     // Categories resolve by name (case-insensitive), created on demand
-    const categories = await app.prisma.category.findMany({ where: { vendorId } });
+    // [owner 11 Oct] An archived category never takes new rows: a row naming
+    // it files into a new live category of the same name.
+    const categories = await app.prisma.category.findMany({ where: { vendorId, archivedAt: null } });
     const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
 
     let imported = 0;
@@ -2981,7 +2993,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const file = await request.file();
@@ -3003,10 +3015,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     const item = await app.prisma.item.update({
-      where: { id: request.params.id },
+      where: { id: request.params.id, archivedAt: null },
       data: { imageUrl: url },
       select: { id: true, name: true, imageUrl: true },
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     scheduleVendorSearchSync(app, vendorId);
 
@@ -3016,7 +3028,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /items/:id — Update an item */
   app.put<{ Params: IdParam }>('/items/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
     // [GUARDRAILS §8] An item Swift does not allow is never edited back to life (one banned only by
     // its own words may be renamed out of them — the new name is judged before it is written).
@@ -3028,7 +3040,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // If moving to a different category, verify ownership
     if (body.categoryId && body.categoryId !== existing.categoryId) {
       const cat = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
-      if (!cat || cat.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
+      if (!cat || cat.vendorId !== vendorId || cat.archivedAt) throw new NotFoundError('Category', body.categoryId);
     }
 
     // Inventory: restocking above zero undoes an AUTO-hide (the engine hid it
@@ -3058,7 +3070,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // renamed to "Coconut cake" may come on, and a restock never switches a banned item back on (its count is saved).
     const item = await app.prisma.$transaction(async (tx) => {
       const updated = await tx.item.update({
-        where: { id: request.params.id },
+        where: { id: request.params.id, archivedAt: null },
         data: {
           ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
           ...(body.name !== undefined && { name: body.name.trim() }),
@@ -3083,7 +3095,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (!unhide) return updated;
       const banned = (await catalogueChecksFor(tx, [updated.id])).get(updated.id)?.state === 'BANNED';
       return banned ? updated : tx.item.update({ where: { id: updated.id }, data: { isAvailable: true, autoHiddenAt: null }, include: itemInclude });
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     // [MKT-2] THE STOCK COUNT, through the single writer.
     //
@@ -3129,17 +3141,29 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: { ...withBulkWord(saved), catalogueCheck: partnerView(check) } };
   });
 
-  /** DELETE /items/:id — Delete an item and its option groups/options */
+  /** DELETE /items/:id — [Item 62] Delete a listing from the menu: the row is
+   *  ARCHIVED, not removed. Orders hold a loose reference to it (their lines
+   *  are snapshots) and bookings a real one (a hard delete cascaded and erased
+   *  the customer's reservation); an open order must still cancel and restock
+   *  against it. Archived means: off every menu, search and cart (it can never
+   *  be available again — the items_archived_unavailable check), refused by
+   *  every editor, and its option history kept. The response is unchanged. */
   app.delete<{ Params: IdParam }>('/items/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
-    await app.prisma.option.deleteMany({ where: { optionGroup: { itemId: request.params.id } } });
-    await app.prisma.optionGroup.deleteMany({ where: { itemId: request.params.id } });
-    await app.prisma.item.delete({ where: { id: request.params.id } });
+    // One compare-and-set: a concurrent delete or editor finds it archived.
+    // autoHiddenAt is cleared so a later cancellation restock (which re-shows
+    // only auto-hidden rows) can never put a deleted listing back on sale.
+    const archived = await app.prisma.item.updateMany({
+      where: { id: request.params.id, vendorId, archivedAt: null },
+      data: { archivedAt: new Date(), isAvailable: false, autoHiddenAt: null },
+    });
+    if (archived.count !== 1) throw new NotFoundError('Item', request.params.id);
 
-    // hard delete: no sweep could find this row later [SWIFT-UG-SRCH-01]
+    // Evict the search doc now [SWIFT-UG-SRCH-01]; the sync that follows sees
+    // an unavailable row and leaves it out.
     new SearchService(app.prisma).removeItemDoc(request.params.id).catch(() => {});
     scheduleVendorSearchSync(app, vendorId);
 
@@ -3149,7 +3173,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /items/:id/availability — Quick toggle availability */
   app.put<{ Params: IdParam }>('/items/:id/availability', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const body = itemAvailabilitySchema.parse(request.body ?? {});
@@ -3158,10 +3182,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (newAvailability) await assertNotBanned(app.prisma, existing.id);
 
     const item = await app.prisma.item.update({
-      where: { id: request.params.id },
+      where: { id: request.params.id, archivedAt: null },
       data: { isAvailable: newAvailability },
       select: { id: true, name: true, isAvailable: true },
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     scheduleVendorSearchSync(app, vendorId);
 
@@ -3175,7 +3199,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/:itemId/option-groups — Add an option group to an item */
   app.post<{ Params: ItemIdParam }>('/items/:itemId/option-groups', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const item = await app.prisma.item.findFirst({ where: { id: request.params.itemId, vendorId } });
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.itemId, vendorId, archivedAt: null } });
     if (!item) throw new NotFoundError('Item', request.params.itemId);
 
     const body = addOptionGroupSchema.parse(request.body);
@@ -3224,9 +3248,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
     await assertNotBanned(app.prisma, existing.itemId, { wordBanEditable: true });
 
     const body = updateOptionGroupSchema.parse(request.body);
@@ -3252,9 +3276,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
 
     await app.prisma.option.deleteMany({ where: { optionGroupId: request.params.id } });
     await app.prisma.optionGroup.delete({ where: { id: request.params.id } });
@@ -3271,9 +3295,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const group = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.groupId },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!group || group.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.groupId);
+    if (!group || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
     await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
 
     const body = addOptionSchema.parse(request.body);
@@ -3308,9 +3332,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
+      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
+    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
     await assertNotBanned(app.prisma, existing.optionGroup.itemId, { wordBanEditable: true });
 
     const body = updateOptionSchema.parse(request.body);
@@ -3335,9 +3359,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
+      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
+    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
 
     await app.prisma.option.delete({ where: { id: request.params.id } });
 
@@ -3447,7 +3471,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       .parse(request.body);
 
     if (body.itemId) {
-      const item = await app.prisma.item.findFirst({ where: { id: body.itemId, vendorId }, select: { id: true } });
+      const item = await app.prisma.item.findFirst({ where: { id: body.itemId, vendorId, archivedAt: null }, select: { id: true } });
       if (!item) throw new NotFoundError('Listing', body.itemId);
     }
     const [y, m, d] = body.date.split('-').map(Number);
@@ -3502,7 +3526,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** The caller must own the item — every item-tag surface goes through this. */
   async function requireOwnItem(vendorId: string, itemId: string) {
-    const item = await app.prisma.item.findFirst({ where: { id: itemId, vendorId }, select: { id: true, name: true, description: true } });
+    const item = await app.prisma.item.findFirst({ where: { id: itemId, vendorId, archivedAt: null }, select: { id: true, name: true, description: true } });
     if (!item) throw new NotFoundError('Listing', itemId);
     return item;
   }

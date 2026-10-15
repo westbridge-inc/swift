@@ -132,6 +132,22 @@ describe('the held-for-review queue', () => {
     expect(row.paymentStatus).toBe('CAPTURED');
     expect(row.vendor.name).toBe('Held Kitchen');
   });
+
+  // [REVIEW-B #1699 S3-1] The queue is classed C0 (discloses nothing sensitive),
+  // so it writes no access record. It must then carry no customer identity and
+  // no store phone: the admin Orders page polls it every minute and shows only
+  // the store's name.
+  it('discloses no customer identity and no store phone, matching its C0 class', async () => {
+    const order = await heldOrder();
+    const res = await call('GET', '/orders/held');
+    expect(res.statusCode).toBe(200);
+    const row = (res.json().data as Array<Record<string, unknown>>).find((r) => r['id'] === order.id)!;
+    expect(row).toBeDefined();
+    expect(row).not.toHaveProperty('customer');
+    expect(row['vendor']).toEqual({ id: vendorId, name: 'Held Kitchen' });
+    expect(res.body).not.toContain(PHONE_PREFIX);
+    for (const key of ['"phone"', '"firstName"', '"lastName"']) expect(res.body).not.toContain(key);
+  });
 });
 
 describe('the release door', () => {

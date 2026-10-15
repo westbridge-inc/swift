@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -625,9 +626,13 @@ export async function driverRoutes(app: FastifyInstance) {
         : await cachedLegEta(app, authorized.currentRideId);
 
       // ETA work yields long enough for a second device to rotate GO. Take a
-      // short shared row lock only around the final authority check +
-      // synchronous socket publication. Concurrent pings do not block one
-      // another, but no old-generation sample can emit after a GO commits.
+      // short shared row lock only around the final authority check.
+      // Concurrent pings do not block one another; a GO that commits first
+      // refuses this sample. The publish runs after commit, never under the
+      // lock: the audience gate reads the room's sockets across nodes and takes
+      // its own DB connection. A sample authorized here goes out only while
+      // this driver is still the ride's driver, and the device's next ping is
+      // refused.
       const publication = await app.prisma.$transaction(async (tx) => {
         const users = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT "id"
@@ -667,21 +672,22 @@ export async function driverRoutes(app: FastifyInstance) {
           };
         }
 
-        if (current.currentRideId === authorized.currentRideId) {
-          app.io.to(`order:${authorized.currentRideId}`).emit('driver:location', {
-            driverId: driver.id,
-            orderId: authorized.currentRideId,
-            latitude,
-            longitude,
-            heading: heading || null,
-            etaMinutes,
-            timestamp: new Date().toISOString(),
-          });
-        }
-        return { accepted: true as const };
+        return { accepted: true as const, stillOnRide: current.currentRideId === authorized.currentRideId };
       });
       if (!publication.accepted) {
         return { success: true, data: publication };
+      }
+      // Published after the commit, never under the lock (see above).
+      if (publication.stillOnRide) {
+        await emitToOrderRoom(app.prisma, app.io, authorized.currentRideId, 'driver:location', {
+          driverId: driver.id,
+          orderId: authorized.currentRideId,
+          latitude,
+          longitude,
+          heading: heading || null,
+          etaMinutes,
+          timestamp: new Date().toISOString(),
+        }, { fromMover: { driverId: driver.id } });
       }
     }
 
@@ -877,7 +883,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // best-effort. A socket/push outage cannot tell the driver a durable winner
     // failed (a retry would only meet their already-owned ride).
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id,
         status: 'DRIVER_ASSIGNED',
         driver: {
@@ -1061,7 +1067,7 @@ export async function driverRoutes(app: FastifyInstance) {
     await app.redis.expire(cancelledDeclinedKey, 3600).catch(() => {});
 
     // Tell the rider honestly, then re-dispatch so their ride survives.
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',
@@ -1112,7 +1118,7 @@ export async function driverRoutes(app: FastifyInstance) {
       etaMinutes = estimateDeliveryMinutes(dist);
     }
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'DRIVER_EN_ROUTE',
       eta: etaMinutes,
@@ -1189,7 +1195,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     const updatedOrder = await app.prisma.order.findUniqueOrThrow({ where: { id }, omit: HANDOVER_SECRETS_OMIT });
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'DRIVER_ARRIVED',
     });
@@ -1266,7 +1272,7 @@ export async function driverRoutes(app: FastifyInstance) {
     }
     const updatedOrder = verification.order;
 
-    app.io.to(`order:${id}`).emit('ride:pin_verified', { orderId: id });
+    await emitToOrderRoom(app.prisma, app.io, id, 'ride:pin_verified', { orderId: id });
 
     return { success: true, data: updatedOrder, message: 'PIN verified successfully. You may now start the ride.' };
   });
@@ -1302,7 +1308,7 @@ export async function driverRoutes(app: FastifyInstance) {
     });
     const updatedOrder = order;
 
-    app.io.to(`order:${id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
       orderId: id,
       status: 'RIDE_IN_PROGRESS',
       estimatedDuration: previous.taxiDuration,
@@ -1400,7 +1406,7 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!replayed) {
       const finished = await finishedFare(order, data.status, request.log);
       try {
-        app.io.to(`order:${id}`).emit('order:status_changed', {
+        await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
           orderId: id,
           status: data.status,
           fare: finished.fare,
@@ -1461,7 +1467,7 @@ export async function driverRoutes(app: FastifyInstance) {
 
     const finished = await finishedFare(order, 'DELIVERED', request.log);
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id,
         status: 'DELIVERED',
         fare: finished.fare,

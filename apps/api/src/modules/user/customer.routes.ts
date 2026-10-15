@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
@@ -1153,7 +1154,7 @@ export async function customerRoutes(app: FastifyInstance) {
             // chip with and every chip fell back to the same stock photograph —
             // "Popular", "Produce" and "Rice & Grains" were one identical image.
             // The column has been on Category the whole time.
-            categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
+            categories: { where: { archivedAt: null }, select: { id: true, name: true, imageUrl: true }, take: 5 },
           },
           orderBy: { averageRating: 'desc' },
           take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
@@ -1579,6 +1580,8 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { id, ...vendorTenantForCaller() },
       include: {
         categories: {
+          // [Item 62] A deleted (archived) category is not on the storefront.
+          where: { archivedAt: null },
           orderBy: { sortOrder: 'asc' },
           include: {
             items: {
@@ -3002,7 +3005,7 @@ export async function customerRoutes(app: FastifyInstance) {
       .catch(() => {});
 
     // Both sides hear it now.
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: statusAtConvert, fulfillment: 'PICKUP',
     });
     if (order.vendor) {
@@ -3057,7 +3060,7 @@ export async function customerRoutes(app: FastifyInstance) {
     }));
     const facts = outcome.facts;
     if (!outcome.replayed) {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });

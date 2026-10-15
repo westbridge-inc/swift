@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import type { PrismaClient, Prisma } from '@prisma/client';
 import type { Redis } from 'ioredis';
 import type { Server } from 'socket.io';
@@ -384,7 +385,7 @@ export async function deliverRescueNotice(deps: RescueDeps, notice: RescueNotice
     await withdrawOfferOfClosedOrder(deps, order.id);
     await deps.redis.del(...dispatchKeys(order.id, notice.deliveryAuthorityVersion)).catch(() => {});
     // A hint for open screens: they re-read the order, so a repeat is harmless.
-    deps.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: order.status, timestamp: (order.cancelledAt ?? new Date()).toISOString() });
+    await emitToOrderRoom(deps.prisma, deps.io, order.id, 'order:status_changed', { orderId: order.id, status: order.status, timestamp: (order.cancelledAt ?? new Date()).toISOString() });
 
     const attempt = async (role: 'customer' | 'business' | 'admin', deliver: () => Promise<boolean>) => {
       try {
