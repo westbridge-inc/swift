@@ -32,11 +32,11 @@ import { recordDispatchQueue } from './helpers/dispatch-queue';
 // The switch's names are read through a lookup so that on the old code each
 // case fails on its own assertion, not on an import.
 //
-// Fixtures: Lethem, far from every other suite, so only this file's movers are
+// Fixtures: Mahdia, far from every other suite, so only this file's movers are
 // ever candidates.
 // ---------------------------------------------------------------------------
 
-const SPOT = { lat: 3.3803, lng: -59.7969 }; // Lethem
+const SPOT = { lat: 5.2667, lng: -59.1500 }; // Mahdia
 const DAY = 24 * 60 * 60 * 1000;
 const FIXTURE = 'taxi-cars-passengers-only-fixture';
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
@@ -94,8 +94,8 @@ async function makeReadyOrder(customerId: string, bulky: boolean) {
     data: {
       orderNumber: `TAXI-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
       customerId, vendorId, status: 'READY_FOR_PICKUP', readyAt: new Date(),
-      pickupAddress: 'Lethem Store', pickupLat: SPOT.lat, pickupLng: SPOT.lng,
-      deliveryAddress: 'Lethem homes', deliveryLat: SPOT.lat + 0.004, deliveryLng: SPOT.lng + 0.004,
+      pickupAddress: 'Mahdia Store', pickupLat: SPOT.lat, pickupLng: SPOT.lng,
+      deliveryAddress: 'Mahdia homes', deliveryLat: SPOT.lat + 0.004, deliveryLng: SPOT.lng + 0.004,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500,
       paymentMethod: 'CASH',
       items: {
@@ -145,8 +145,8 @@ beforeAll(async () => {
     const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
     const vendor = await app.prisma.vendor.create({
       data: {
-        ownerId: vo.id, name: 'Lethem Store', slug: `lethem-store-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT', phone: '+5927728877',
-        addressLine1: '1 Lethem Road', city: 'Lethem', region: 'Upper Takutu-Upper Essequibo', latitude: SPOT.lat, longitude: SPOT.lng,
+        ownerId: vo.id, name: 'Mahdia Store', slug: `mahdia-store-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT', phone: '+5927728877',
+        addressLine1: '1 Mahdia Road', city: 'Mahdia', region: 'Potaro-Siparuni', latitude: SPOT.lat, longitude: SPOT.lng,
         status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, minOrderAmount: 0,
       },
     });
@@ -251,7 +251,7 @@ describe('[owner 15 Oct] switch OFF: a taxi car gets no delivery or courier work
     expect(quote.statusCode, quote.body).toBe(409);
     expect(quote.json().error.code).toBe('PARCEL_TOO_BIG');
     const order = await call('POST', '/api/v1/courier/order', sender.token, {
-      ...trip, pickupAddress: '1 Lethem Road', dropoffAddress: '9 Lethem Road', packageSize: 'EXTRA_LARGE', packageDescription: 'A wardrobe',
+      ...trip, pickupAddress: '1 Mahdia Road', dropoffAddress: '9 Mahdia Road', packageSize: 'EXTRA_LARGE', packageDescription: 'A wardrobe',
       recipientName: 'Synthetic Recipient', recipientPhone: `+${phoneBase + 900}`,
     });
     expect(order.statusCode, order.body).toBe(409);
@@ -264,7 +264,7 @@ describe('[owner 15 Oct + owner #20] checkout never accepts a bulky delivery no 
   it('with a taxi car right there, a bulky delivery is refused before placing (whatever the availability flag); an ordinary one is placed', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await sys(() => app.prisma.address.create({
-      data: { userId: customer.userId, label: 'Home', addressLine1: '2 Lethem Road', city: 'Lethem', region: 'Upper Takutu-Upper Essequibo', latitude: SPOT.lat + 0.004, longitude: SPOT.lng, isDefault: true },
+      data: { userId: customer.userId, label: 'Home', addressLine1: '2 Mahdia Road', city: 'Mahdia', region: 'Potaro-Siparuni', latitude: SPOT.lat + 0.004, longitude: SPOT.lng, isDefault: true },
     }));
     await makeRider('CAR', 100);
     await makeRider('MOTORCYCLE', 300);
@@ -291,7 +291,7 @@ describe('[owner 15 Oct] the checkout supply probe counts only vehicles that car
     process.env['DISPATCH_AVAILABILITY'] = '1';
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await sys(() => app.prisma.address.create({
-      data: { userId: customer.userId, label: 'Home', addressLine1: '3 Lethem Road', city: 'Lethem', region: 'Upper Takutu-Upper Essequibo', latitude: SPOT.lat + 0.004, longitude: SPOT.lng, isDefault: true },
+      data: { userId: customer.userId, label: 'Home', addressLine1: '3 Mahdia Road', city: 'Mahdia', region: 'Potaro-Siparuni', latitude: SPOT.lat + 0.004, longitude: SPOT.lng, isDefault: true },
     }));
     await makeRider('CAR', 100);
     const add = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId: plainItemId, quantity: 1 });
