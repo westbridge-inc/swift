@@ -297,6 +297,11 @@ services:
         # company detail is still a {{TOKEN}}; WEB_ALLOW_SITE_TOKENS=1 in
         # deploy/.env lets the staging site build with them (PILOT-RUNBOOK.md).
         NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}
+        # [WEB-TILES] The MapTiler browser key for the site's maps: WEB_MAPTILER_KEY
+        # in deploy/.env (the owner enters it at a hidden prompt). Public by design
+        # and restricted in MapTiler to the site's origins. Empty: the built site
+        # draws no map tiles (apps/web/src/lib/map-tiles.ts), never OpenStreetMap's.
+        NEXT_PUBLIC_MAPTILER_KEY: ${WEB_MAPTILER_KEY:-}
     image: swift-web:${SWIFT_TAG:-local}
     restart: unless-stopped
     environment:
