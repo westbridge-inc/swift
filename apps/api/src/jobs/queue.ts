@@ -687,11 +687,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           break;
         }
         case 'tier-recalc': {
-          const changed = await billing.recalculateVendorTiers();
-          // Movers re-tier on the same cadence: a vendor's basis is catalogue
-          // size, a mover's is the vehicle they currently have registered.
-          const moversChanged = await billing.recalculateMoverTiers();
-          ctx.log.info({ changed, moversChanged }, 'Tier recalculation complete');
+          // [R27] OFF until the 14-day price-change notice ships (weekly-retier.ts).
+          const result = await billing.runWeeklyRetier();
+          ctx.log.info(result, 'Tier recalculation complete');
           break;
         }
         case 'convert-trials': {
