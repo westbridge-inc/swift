@@ -116,8 +116,24 @@ const ORDER_CLAIMED = Prisma.sql`(
   OR EXISTS (SELECT 1 FROM mmg_refund_obligations x WHERE x."orderId" = o.id)
   OR EXISTS (SELECT 1 FROM support_tickets x WHERE x."orderId" = o.id)
   OR EXISTS (SELECT 1 FROM "IncidentCase" x WHERE x."orderId" = o.id)
-  OR EXISTS (SELECT 1 FROM "SosAlert" x WHERE x."orderId" = o.id))`;
+  OR EXISTS (SELECT 1 FROM "SosAlert" x WHERE x."orderId" = o.id)
+  -- an open money question recorded on the order itself (REVIEW-F S3-1): the MMG disagreement
+  -- latch (cleared on resolution), cash a rider could not hand back, a door-cash mismatch
+  OR o."mmgClaimMismatchAt" IS NOT NULL
+  -- (IS NOT DISTINCT FROM: a NULL status must read as not held, never as unknown, or NOT (...) drops every row)
+  OR (o."doorCashReturnStatus" IS NOT DISTINCT FROM 'HELD' AND o."doorCashReturnResolvedAt" IS NULL)
+  OR (o."doorCashMismatchAt" IS NOT NULL AND o."doorCashReturnResolvedAt" IS NULL))`;
 const JOB_CLAIMED = Prisma.sql`EXISTS (SELECT 1 FROM "SosAlert" x WHERE x."serviceJobId" = j.id)`;
+
+/** [S-09] While any legal hold is partial (or the freeze is on), Swift cannot tell what a hold
+ *  covers: every R23 clock deletes nothing, like the evidence sweep. */
+async function legalHoldFrozen(tx: Prisma.TransactionClient, clock: string): Promise<boolean> {
+  const holds = await scanLegalHolds(tx as unknown as PrismaClient);
+  if (holds.deletionFrozen) {
+    log().error({ clock, partial: holds.partial.slice(0, 20) }, '[R23] retention frozen: a legal hold is partial or the freeze is on; nothing deleted');
+  }
+  return holds.deletionFrozen;
+}
 
 const CHAT_BATCH = 500;
 /** Photo deletes are network calls inside the receipt transaction (timeout 120 s): one run stops
@@ -131,6 +147,7 @@ const CHAT_RUN_BUDGET_MS = 60_000;
  * for the next sweep, so no object is ever orphaned.
  */
 async function enforceOrderChat(tx: Prisma.TransactionClient, cutoff: Date): Promise<number> {
+  if (await legalHoldFrozen(tx, 'chat')) return 0;
   const storage = getStorageProvider();
   const started = Date.now();
   let total = 0;
@@ -160,7 +177,10 @@ async function enforceOrderChat(tx: Prisma.TransactionClient, cutoff: Date): Pro
       LIMIT ${CHAT_BATCH}`);
     if (rows.length === 0) return total;
     const deletable: string[] = [];
+    let spent = false;
     for (const row of rows) {
+      // The budget is checked per photo too: one slow batch must not outlive the transaction.
+      if (Date.now() - started > CHAT_RUN_BUDGET_MS) { spent = true; break; }
       if (row.mediaUrl && isServerIssuedMediaId(row.mediaUrl, row.chatRoomId)) {
         try {
           await storage.delete(row.mediaUrl);
@@ -176,7 +196,7 @@ async function enforceOrderChat(tx: Prisma.TransactionClient, cutoff: Date): Pro
     }
     // Rows kept for a failed photo delete would be selected again: stop after one partial batch.
     if (rows.length < CHAT_BATCH || deletable.length < rows.length) return total;
-    if (Date.now() - started > CHAT_RUN_BUDGET_MS) {
+    if (spent || Date.now() - started > CHAT_RUN_BUDGET_MS) {
       log().warn({ deleted: total }, '[R23] chat retention: run budget spent; the next sweep continues');
       return total;
     }
@@ -186,6 +206,7 @@ async function enforceOrderChat(tx: Prisma.TransactionClient, cutoff: Date): Pro
 /** [R23] Resolved, non-safety support tickets, 3 years after resolution; never one a refund points at
  *  or whose person is under a legal hold. */
 async function enforceSupportTickets(tx: Prisma.TransactionClient, cutoff: Date): Promise<number> {
+  if (await legalHoldFrozen(tx, 'tickets')) return 0;
   return drain(() => tx.$executeRaw(Prisma.sql`
     DELETE FROM support_tickets WHERE id IN (
       SELECT t.id FROM support_tickets t
@@ -204,11 +225,7 @@ async function enforceSupportTickets(tx: Prisma.TransactionClient, cutoff: Date)
  * a document legal hold is kept; an alert a case was opened from is kept while the case is.
  */
 async function enforceSafetyRecords(tx: Prisma.TransactionClient, cutoff: Date): Promise<number> {
-  const holds = await scanLegalHolds(tx as unknown as PrismaClient);
-  if (holds.deletionFrozen) {
-    log().error({ partial: holds.partial.slice(0, 20) }, '[R23] safety retention frozen — a legal hold is partial or the freeze is on; nothing deleted');
-    return 0;
-  }
+  if (await legalHoldFrozen(tx, 'safety')) return 0;
   const cases = await drain(() => tx.$executeRaw(Prisma.sql`
     DELETE FROM "IncidentCase" WHERE id IN (
       SELECT c.id FROM "IncidentCase" c
@@ -226,6 +243,13 @@ async function enforceSafetyRecords(tx: Prisma.TransactionClient, cutoff: Date):
         AND NOT EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."sosAlertId" = a.id)
         AND NOT EXISTS (SELECT 1 FROM "EvidenceBundle" b WHERE b."sosAlertId" = a.id)
         AND NOT EXISTS (SELECT 1 FROM doc_legal_hold h WHERE h."subjectUserId" = a."actorUserId" AND h."releasedAt" IS NULL)
+        -- a hold on the other party of the alert's order keeps it too (REVIEW-F S4-2)
+        AND NOT EXISTS (
+          SELECT 1 FROM orders o JOIN doc_legal_hold h ON h."releasedAt" IS NULL AND h."subjectUserId" IN (
+            o."customerId",
+            (SELECT d."userId" FROM drivers d WHERE d.id = o."driverId"),
+            (SELECT r."userId" FROM riders r WHERE r.id = o."riderId"))
+          WHERE o.id = a."orderId")
       LIMIT ${BATCH})`));
   // The operations page an alert raised names the person and the place: it goes with the alert.
   const pages = await drain(() => tx.$executeRaw(Prisma.sql`

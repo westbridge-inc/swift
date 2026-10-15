@@ -187,6 +187,13 @@ describe('[R23] order chat: 1 year after the order ended, unless linked to a cla
       subjectUserId: heldPerson, reason: `hold ${RUN}`, ownerId: heldPerson, placedBy: heldPerson, reviewBy: new Date(Date.now() + 30 * DAY),
     } }));
     const held = await chat(await order(customer, 'DELIVERED', 400), [customer, heldPerson], 401);
+    // REVIEW-F S3-1: an open money question recorded on the order row itself
+    const mmgOrder = await order(customer, 'DELIVERED', 400);
+    await system(() => app.prisma.$executeRaw`UPDATE orders SET "mmgClaimMismatchAt" = ${ago(400)} WHERE id = ${mmgOrder}`);
+    const mmgDispute = await chat(mmgOrder, [customer, driver], 401);
+    const cashOrder = await order(customer, 'DELIVERED', 400);
+    await system(() => app.prisma.$executeRaw`UPDATE orders SET "doorCashReturnStatus" = 'HELD', "doorCashReturnAmount" = 1500, "doorCashReturnRecordedAt" = ${ago(400)} WHERE id = ${cashOrder}`);
+    const cashHeld = await chat(cashOrder, [customer, driver], 401);
 
     await system(() => runRetentionSweep(app.prisma));
     expect(await messagesIn(recent.roomId)).toBe(2);
@@ -196,6 +203,8 @@ describe('[R23] order chat: 1 year after the order ended, unless linked to a cla
     // only the reported message is kept; its unreported neighbour goes
     expect(await system(() => app.prisma.chatMessage.findMany({ where: { chatRoomId: reported.roomId }, select: { id: true } }))).toEqual([{ id: reported.messageIds[0] }]);
     expect(await messagesIn(held.roomId)).toBe(2);
+    expect(await messagesIn(mmgDispute.roomId)).toBe(2);
+    expect(await messagesIn(cashHeld.roomId)).toBe(2);
   });
 });
 
@@ -242,25 +251,41 @@ describe('[R23] safety records: 7 years after closing', () => {
     const keptCase = await incident(u, 2000);
     await system(() => app.prisma.incidentCase.update({ where: { id: keptCase }, data: { sosAlertId: caseAlert } }));
     const youngTicket = await ticket(u, { category: 'SAFETY', status: 'RESOLVED', daysAgo: 2000 });
+    // REVIEW-F S4-2: a hold on the other party of the alert's order keeps the alert
+    const otherParty = await person();
+    await system(() => app.prisma.docLegalHold.create({ data: {
+      subjectUserId: otherParty, reason: `hold ${RUN}`, ownerId: otherParty, placedBy: otherParty, reviewBy: new Date(Date.now() + 30 * DAY),
+    } }));
+    const heldOrder = await order(otherParty, 'DELIVERED', 2600);
+    const otherPartyAlert = await sosAlert(u, 2600);
+    await system(() => app.prisma.sosAlert.update({ where: { id: otherPartyAlert }, data: { orderId: heldOrder } }));
     await system(() => runRetentionSweep(app.prisma));
-    for (const id of [young, withEvidence, caseAlert]) expect(await alertExists(id), id).toBe(true);
+    for (const id of [young, withEvidence, caseAlert, otherPartyAlert]) expect(await alertExists(id), id).toBe(true);
     expect(await caseExists(heldCase)).toBe(true);
     expect(await caseExists(keptCase)).toBe(true);
     expect(await ticketExists(youngTicket)).toBe(true);
   });
 
-  it('deletes nothing while any legal hold is partial (the S-09 freeze)', async () => {
-    const u = await person();
+  it('deletes nothing on any clock while a legal hold is partial (the S-09 freeze)', async () => {
+    const u = await person(); const other = await person();
     const due = await sosAlert(u, 2600);
+    const dueChat = await chat(await order(u, 'DELIVERED', 400), [u, other], 401);
+    const dueTicket = await ticket(u, { category: 'ORDER_ISSUE', status: 'RESOLVED', daysAgo: 1200 });
     const partial = await incident(u, 10, { legalHold: true }); // held case with no hold row -> partial
     try {
       const results = await system(() => runRetentionSweep(app.prisma));
-      expect(results.find((r) => r.dataClass === 'safety.records')!.deleted).toBe(0);
+      for (const c of ['safety.records', 'chat.order_messages', 'support_tickets.resolved']) {
+        expect(results.find((r) => r.dataClass === c)!.deleted, c).toBe(0);
+      }
       expect(await alertExists(due)).toBe(true);
+      expect(await messagesIn(dueChat.roomId)).toBe(2);
+      expect(await ticketExists(dueTicket)).toBe(true);
     } finally {
       await system(() => app.prisma.incidentCase.update({ where: { id: partial }, data: { legalHold: false } }));
     }
     await system(() => runRetentionSweep(app.prisma));
     expect(await alertExists(due)).toBe(false);
+    expect(await messagesIn(dueChat.roomId)).toBe(0);
+    expect(await ticketExists(dueTicket)).toBe(false);
   });
 });
