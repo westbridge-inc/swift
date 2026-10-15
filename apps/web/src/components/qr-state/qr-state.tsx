@@ -19,12 +19,13 @@ export function QrState({
   storeSlug?: string;
   retryAction?: () => void;
   /** [W6] Drawn inside the customer app's frame (a store page's error or
-   *  not-found state), which already holds the page's one <main id="main" tabIndex={-1}>. */
+   *  not-found state), which already holds the page's one main region. */
   embedded?: boolean;
 }) {
   const Frame = embedded ? 'div' : 'main';
   return (
-    <Frame className={embedded ? styles.embedded : styles.page}>
+    // [Row 111 · W8] On its own page this is the main region: the skip link's target.
+    <Frame {...(embedded ? {} : { id: 'main', tabIndex: -1 })} className={embedded ? styles.embedded : styles.page}>
       <section className={styles.card}>
         <SwiftLogo />
         <span className={styles.icon} aria-hidden="true"><QrCode size={28} /></span>

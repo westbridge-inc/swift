@@ -32,6 +32,11 @@ describe('[W8] skip to main content', () => {
     expect(mains.filter((m) => !/\bid="main"/.test(m.tag) || !/tabIndex=\{-1\}/.test(m.tag))).toEqual([]);
   });
 
+  it('no main region hides behind a variable tag the census above cannot read (each has its own render test)', () => {
+    const dynamic = sources().filter((path) => /['"]main['"]\s*[;:)]/.test(readFileSync(path, 'utf8'))).map((path) => relative(SRC, path).split(sep).join('/'));
+    expect(dynamic).toEqual(['components/qr-state/qr-state.tsx']);
+  });
+
   it('the link is out of sight until it has keyboard focus', () => {
     const css = read('app/globals.css');
     expect(css).toMatch(/\.sw-skip-link\s*\{[^}]*position:\s*absolute[^}]*\}/);
