@@ -13,6 +13,7 @@ import { HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPES, hirePermitGraceEnd, hireSpl
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
+import { configuredDays, DAY_MS, DEFAULT_REJECTED_DOCUMENT_DAYS, isPersonalDocType, PARTNER_DOCUMENT_ROLES, REJECTED_DOCUMENT_DAYS_KEY } from './retention-rules';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -2488,6 +2489,46 @@ export class VerificationService {
     const flagged = { ...result, collided: true };
     if (result.status !== 'approved') return flagged;
     return { ...flagged, status: 'pending_manual', reason: 'Duplicate of a document already on another account — second review required' };
+  }
+
+  /**
+   * [R24 · research C4] A partner's REJECTED document is not needed once the decision stands:
+   * a PERSONAL one is deleted the configured number of days after the rejection (30 unless the
+   * lawyer's number is set); a vehicle or business one after its registry window (90 days).
+   * This only sets the retention clock — never later than one it already has, never for an AML
+   * record (its own law keeps it), never under a legal hold — and the reaper below deletes it
+   * when the clock falls due. A revoked approval is not a rejection (its record is evidence
+   * history), and a customer's documents follow the customer-ID rule, not this one.
+   * Continues the VERIFY-DOCS PR-V2 work (fix/verify-docs-retention).
+   */
+  async scheduleRejectedDocumentRetention(batch = 500): Promise<number> {
+    const personalDays = await configuredDays(this.prisma, REJECTED_DOCUMENT_DAYS_KEY, DEFAULT_REJECTED_DOCUMENT_DAYS);
+    const rejected = await this.prisma.verificationDocument.findMany({
+      where: {
+        OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
+        role: { in: [...PARTNER_DOCUMENT_ROLES] }, reviewedAt: { not: null }, purgedAt: null, legalHoldId: null,
+      },
+      select: { id: true, docType: true, role: true, reviewedAt: true, retentionExpiresAt: true, user: { select: { countryCode: true } } },
+      orderBy: { reviewedAt: 'asc' }, take: batch,
+    });
+    let scheduled = 0;
+    for (const doc of rejected) {
+      const config = await this.countryConfig.getByCode(doc.user.countryCode);
+      const ruling = await retentionDaysFor(this.prisma, { countryCode: doc.user.countryCode, docType: doc.docType, role: doc.role, countryDefaultDays: config.dataRetentionDays });
+      if (ruling.amlRecord) continue;
+      const days = isPersonalDocType(doc.docType) ? personalDays : ruling.days;
+      const due = new Date(doc.reviewedAt!.getTime() + days * DAY_MS);
+      if (doc.retentionExpiresAt && doc.retentionExpiresAt.getTime() <= due.getTime()) continue;
+      const set = await this.prisma.verificationDocument.updateMany({
+        where: {
+          id: doc.id, purgedAt: null, legalHoldId: null, OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
+          AND: [{ OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: due } }] }],
+        },
+        data: { retentionExpiresAt: due },
+      });
+      scheduled += set.count;
+    }
+    return scheduled;
   }
 
   /** Purge documents whose retention window elapsed: delete the stored object,

@@ -1081,6 +1081,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
+        // [R24] A partner's rejected document gets its clock first (30 days after the rejection
+        // for an ID-type document, the registry window otherwise), so the reaper below deletes
+        // the ones already due in the same run. A failure here never stops the reaper.
+        try {
+          await verification.scheduleRejectedDocumentRetention();
+        } catch (err) {
+          ctx.log.error({ err }, 'rejected-document retention scheduling failed; the reaper still runs');
+        }
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
         try {
@@ -2411,7 +2419,8 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   });
 
   // [DOC-1 §1.3 · P1-3] The image-policy sweep: after the expiry sweep, purge the images of
-  // committed PERSONAL documents whose type is active and whose extraction succeeded.
+  // committed PERSONAL documents whose type is active and whose extraction succeeded, and
+  // [R24] every partner PERSONAL image 30 days after its decision.
   await queues.verificationQueue.add('image-policy-sweep', {}, {
     repeat: { pattern: '20 6 * * *' },
     removeOnComplete: 30,
