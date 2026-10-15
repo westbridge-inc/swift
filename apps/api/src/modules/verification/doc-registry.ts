@@ -740,6 +740,14 @@ export const ISSUE_DATE_DOC_TYPES: ReadonlySet<string> = new Set(['police_cleara
 /** [DOC-1 Part XIX · P19] Licence-class types disclosed on the storefront while VALID (number when read, else "on file"). Registry text (DOC-INV-2). */
 /** [DOC-1 §3.6 · P3-2] The registration records that promote an UNREGISTERED store, and the declaration that puts it there. */
 export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration'];
+/**
+ * [R16 · owner 15 Oct 2026, research D7] What a business registration certificate is, decided by the
+ * reviewer who reads it: a business NAME registered by a sole trader or a partnership (Business Names
+ * Act: renewed every year — recorded by its YEAR and checked again every January, like the certificate-year
+ * documents), or a COMPANY's certificate of incorporation, which never expires.
+ */
+export const REGISTRATION_KINDS = ['BUSINESS_NAME', 'COMPANY'] as const;
+export type RegistrationKind = (typeof REGISTRATION_KINDS)[number];
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
 /** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
 export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';

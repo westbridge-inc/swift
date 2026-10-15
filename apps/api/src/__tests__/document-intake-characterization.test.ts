@@ -192,7 +192,8 @@ describe('test_characterization_legacy_upload_paths', () => {
     });
     it('a non-expiring type approves without a date and stores none', async () => {
       const d = await pendingDoc('business_registration');
-      const res = await approve(d.id, {});
+      // [R16] a company's certificate of incorporation: its kind is the only thing typed
+      const res = await approve(d.id, { registrationKind: 'COMPANY' });
       expect(res.statusCode, res.body).toBe(200);
       const fresh = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } });
       expect(fresh.status).toBe('APPROVED');

@@ -22,7 +22,7 @@ export interface ReviewDocument {
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
   previousDecision?: PreviousDecision | null;
-  reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear'>;
+  reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind'>;
   /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
   reviewedBy?: string | null;
   user?: {

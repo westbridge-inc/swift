@@ -9,7 +9,8 @@ import {
 } from '../modules/services/service-catalog';
 import { providerChecklist, providerOptionalDocuments } from '../modules/services/services.service';
 import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../modules/ops/platform-config';
-import { ALWAYS_REVIEW_LEGACY_CODES, AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES } from '../modules/verification/doc-registry';
+import { ALWAYS_REVIEW_LEGACY_CODES, AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, REGISTRATION_KINDS } from '../modules/verification/doc-registry';
+import { dueRenewalNotices, isJanuaryRecheck, JANUARY_RECHECK_FIRST_NOTICE_DAYS, noticeTimesFor } from '../modules/verification/renewal-schedule';
 import { certificateYearRecheck, resolveApprovalExpiry } from '../modules/verification/verification.service';
 import { reviewerTypedFields } from '../modules/verification/identity-signal-policy';
 
@@ -214,6 +215,37 @@ describe('[R15] licences and food certificates are checked again every January',
   it('other expiring documents keep their own rule (a driver’s licence is not capped at January)', () => {
     const later = new Date('2028-06-30T04:00:00.000Z');
     expect(resolveApprovalExpiry('drivers_licence', later, null, OCT)).toEqual(later);
+  });
+});
+
+describe('[R16] a business name is checked every January; a company’s incorporation never expires', () => {
+  it('the reviewer says what a business registration is, and types the year of a business name', () => {
+    expect(REGISTRATION_KINDS).toEqual(['BUSINESS_NAME', 'COMPANY']);
+    expect(reviewerTypedFields('business_registration')).toEqual(['registrationKind', 'certificateYear']);
+  });
+
+  it('a January re-check is reminded from 1 December as well as at T-30/14/7/1', async () => {
+    const expiresOn = new Date('2027-01-16T04:00:00.000Z');
+    expect(isJanuaryRecheck(expiresOn)).toBe(true);
+    expect(isJanuaryRecheck(new Date('2027-01-16T05:00:00.000Z'))).toBe(false);
+    expect(isJanuaryRecheck(new Date('2027-03-16T04:00:00.000Z'))).toBe(false);
+    const row = { id: 's1', documentId: 'd1', subjectId: 'u1', expiresOn, notifyAt: noticeTimesFor(expiresOn), lastNotified: null as Date | null };
+    const db = { renewalSchedule: { findMany: async () => [row] } } as never;
+    const firstDecember = new Date('2026-12-01T04:00:00.000Z'); // 1 Dec 2026, 00:00 Guyana time
+    expect(await dueRenewalNotices(db, new Date('2026-11-30T23:00:00.000Z'))).toEqual([]);
+    const due = await dueRenewalNotices(db, new Date('2026-12-01T12:00:00.000Z'));
+    expect(due).toEqual([expect.objectContaining({ documentId: 'd1', noticeAt: firstDecember, daysLeft: JANUARY_RECHECK_FIRST_NOTICE_DAYS })]);
+    // once sent, the T-30 notice (17 Dec) comes next — never a burst, never a repeat
+    row.lastNotified = firstDecember;
+    expect(await dueRenewalNotices(db, new Date('2026-12-10T12:00:00.000Z'))).toEqual([]);
+    expect(await dueRenewalNotices(db, new Date('2026-12-17T12:00:00.000Z'))).toEqual([expect.objectContaining({ daysLeft: 30 })]);
+  });
+
+  it('any other expiry keeps only the T-30/14/7/1 notices', async () => {
+    const expiresOn = new Date('2027-03-01T04:00:00.000Z');
+    const row = { id: 's2', documentId: 'd2', subjectId: 'u2', expiresOn, notifyAt: noticeTimesFor(expiresOn), lastNotified: null };
+    const db = { renewalSchedule: { findMany: async () => [row] } } as never;
+    expect(await dueRenewalNotices(db, new Date('2027-01-14T12:00:00.000Z'))).toEqual([]);
   });
 });
 

@@ -305,6 +305,45 @@ describe('[R15] a licence or food certificate is approved by its year and lasts 
   });
 });
 
+describe('[R16] a business registration: a yearly business name is checked every January; a company’s never expires', () => {
+  let svc: VerificationService;
+  beforeAll(() => { svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider()); });
+  const pendingRegistration = async () => {
+    const owner = await makeUser();
+    return runWithoutTenant(() => app.prisma.verificationDocument.create({ data: {
+      userId: owner.userId, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl: `storage://t/registration-${nanoid(6)}.jpg`,
+      status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1',
+    } }));
+  };
+  const code = async (docId: string, typed: Record<string, unknown>) => {
+    try { await svc.approveDocument(docId, 'admin-test', undefined, undefined, { required: true, ...typed }); return 'APPROVED'; } catch (err) { return (err as { code?: string }).code; }
+  };
+  const year = () => guyanaWallClockParts(new Date()).year;
+
+  it('the reviewer must say what it is; a business name needs its year and lasts to 16 January', async () => {
+    const doc = await pendingRegistration();
+    expect(await code(doc.id, {})).toBe('REGISTRATION_KIND_REQUIRED');
+    expect(await code(doc.id, { registrationKind: 'BUSINESS_NAME' })).toBe('CERTIFICATE_YEAR_REQUIRED');
+    expect(await code(doc.id, { registrationKind: 'BUSINESS_NAME', certificateYear: year() - 2 })).toBe('CERTIFICATE_YEAR_LAPSED');
+    expect((await runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } }))).status).toBe('PENDING');
+    expect(await code(doc.id, { registrationKind: 'BUSINESS_NAME', certificateYear: year() })).toBe('APPROVED');
+    const recheck = startOfGuyanaDay(`${year() + 1}-01-16`);
+    const approved = await runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id }, include: { renewalSchedule: true } }));
+    expect(approved.status).toBe('APPROVED');
+    expect(approved.expiresAt).toEqual(recheck);
+    expect(approved.renewalSchedule?.expiresOn).toEqual(recheck);
+  });
+
+  it('a company’s certificate of incorporation never expires and has no renewal schedule', async () => {
+    const doc = await pendingRegistration();
+    expect(await code(doc.id, { registrationKind: 'COMPANY', certificateYear: year() })).toBe('APPROVED');
+    const approved = await runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id }, include: { renewalSchedule: true } }));
+    expect(approved.status).toBe('APPROVED');
+    expect(approved.expiresAt).toBeNull();
+    expect(approved.renewalSchedule).toBeNull();
+  });
+});
+
 describe('[TRADES] profile wording', () => {
   it('a provider cannot offer to sell, refill or deliver cooking gas', async () => {
     const u = await makeUser();

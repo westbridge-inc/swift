@@ -5,7 +5,7 @@ import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
 import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
@@ -164,6 +164,8 @@ export interface ReviewerTypedInput {
   issuedOn?: Date;
   /** [R15] The year printed on a licence or food certificate that is checked again every January. */
   certificateYear?: number;
+  /** [R16] A business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation. */
+  registrationKind?: RegistrationKind;
   /** The reviewer console's contract: the fields this type needs must be typed. */
   required?: boolean;
 }
@@ -1082,6 +1084,17 @@ export class VerificationService {
       // approval lasts to the January re-check after it — never a keyed or guessed expiry.
       if (CERTIFICATE_YEAR_DOC_TYPES.has(candidate.docType) && (typed.required || typed.certificateYear !== undefined)) {
         expiresAt = certificateYearRecheck(typed.certificateYear);
+      }
+      // [R16 · research D7] A business NAME (sole trader, partnership) is registered for a year: recorded by
+      // that year and checked again every January (the store goes offline on 16 January if it is not
+      // renewed). A company's certificate of incorporation never expires: nothing is set for it (the console
+      // keys no date for a business registration).
+      if (REGISTRATION_DOC_TYPES.includes(candidate.docType) && (typed.required || typed.registrationKind !== undefined)) {
+        if (typed.registrationKind === 'BUSINESS_NAME') expiresAt = certificateYearRecheck(typed.certificateYear);
+        else if (typed.registrationKind !== 'COMPANY') {
+          throw new AppError(400, 'REGISTRATION_KIND_REQUIRED',
+            'Say what this certificate is: a business name registration (a sole trader or partnership, renewed every year) or a company’s certificate of incorporation.');
+        }
       }
     }
     // Never on any later write: the typed number leaves this method only as the blind index.
