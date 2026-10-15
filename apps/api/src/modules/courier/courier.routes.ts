@@ -558,6 +558,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       `Rider confirmed collecting the parcel with a pickup photo — ${gpsEvidence(body.gps.lat, body.gps.lng)}`, {
         allowedFrom: RIDER_PICKUP_FROM,
         expectedRiderId: rider.id,
+        // [Opus review 14 Oct #1695 S3-1] The assignment this request read: a
+        // release and re-assignment while it runs is refused at the lock.
+        expectedRiderAssignmentVersion: order.riderAssignmentVersion,
         withinTransaction: async (tx) => {
           await tx.order.update({ where: { id }, data: {
             courierPickupProofPhotoUrl: body.proofPhotoUrl,
