@@ -38,6 +38,13 @@ export type VendorActivationNext =
   | 'NEEDS_DOCUMENTS'
   /** Documents complete, but the storefront supplier information is incomplete while the gate is engaged. */
   | 'NEEDS_DISCLOSURE'
+  /** [owner #51] Waiting for approval with every other rule met, but no published phone customers can call: it goes
+   *  live by itself once the owner adds one (the projection holds it until then). */
+  | 'NEEDS_PHONE'
+  /** [owner #51 · DS1145 S3] Suspended before it was ever live, every other rule met, no published phone. A suspended
+   *  store cannot add the number in the app, so the console may lift the suspension back to waiting; it then goes
+   *  live by itself once the owner adds the number. */
+  | 'CAN_LIFT_TO_WAITING'
   /** Waiting for approval with every go-live rule met: the projection can make it live now. */
   | 'CAN_ACTIVATE'
   /** Suspended with every go-live rule met: it can be reinstated. */
@@ -72,7 +79,7 @@ export function feeOperable(subscription: OperabilitySubscription | null, feePau
   return subscriptionOperability(subscription, { missingRow: 'GRANDFATHER' }, feePause, now).operable;
 }
 
-export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick<VendorGoLive, 'checklist' | 'disclosure'>): VendorActivationNext {
+export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick<VendorGoLive, 'checklist' | 'disclosure' | 'publishedPhone'>): VendorActivationNext {
   if (vendor.status === 'ACTIVE') return 'LIVE';
   if (vendor.status === 'CLOSED') return 'CLOSED';
   if (vendor.suspensionSource === 'WIND_DOWN' || vendor.ownerAccountStatus === 'DEACTIVATED') return 'ACCOUNT_CLOSED';
@@ -80,6 +87,12 @@ export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick
   if (vendor.status === 'SUSPENDED' && !feeOperable(vendor.subscription, vendor.feePause)) return 'FEE_UNPAID';
   if (!goLive.checklist.complete) return 'NEEDS_DOCUMENTS';
   if (goLive.disclosure.engaged && goLive.disclosure.complete !== true) return 'NEEDS_DISCLOSURE';
+  // [owner #51] A store's FIRST go-live also needs a published contact phone. Every store that went live carries a
+  // subscription (its trial starts at activation), so a suspended store with none has never been live either
+  // [DS1142 S3]. A store that has been live is never held for it (no automatic unpublishing).
+  if (!goLive.publishedPhone && (vendor.status === 'PENDING_APPROVAL' || vendor.subscription == null)) {
+    return vendor.status === 'SUSPENDED' ? 'CAN_LIFT_TO_WAITING' : 'NEEDS_PHONE';
+  }
   return vendor.status === 'SUSPENDED' ? 'CAN_REINSTATE' : 'CAN_ACTIVATE';
 }
 
@@ -99,7 +112,7 @@ export function disclosureMissingWords(missing: readonly string[]): string {
 
 /**
  * The refusal for a verdict the console may not act on, in plain words — or null when the verdict allows the
- * action (CAN_ACTIVATE / CAN_REINSTATE). One place, so the first read and the re-decision inside the reinstate
+ * action (CAN_ACTIVATE / CAN_REINSTATE / CAN_LIFT_TO_WAITING). One place, so the first read and the re-decision inside the reinstate
  * transaction refuse identically. LIVE is answered by the caller (400 ALREADY_ACTIVE) before any verdict.
  */
 export function vendorActivationRefusal(
@@ -133,10 +146,17 @@ export function vendorActivationRefusal(
         `${name}'s documents are complete, but its storefront supplier information is not: missing ${disclosureMissingWords(goLive.disclosure.missing)}. It goes live by itself once that is complete.`,
         { missing: goLive.disclosure.missing },
       );
+    case 'NEEDS_PHONE':
+      return new AppError(
+        409,
+        'PUBLISHED_PHONE_MISSING',
+        `${name} has no published phone number yet. It goes live by itself once the owner adds the number customers can call.`,
+      );
     case 'LIVE':
       return new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
     case 'CAN_ACTIVATE':
     case 'CAN_REINSTATE':
+    case 'CAN_LIFT_TO_WAITING':
       return null;
   }
 }

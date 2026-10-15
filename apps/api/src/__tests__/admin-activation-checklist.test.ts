@@ -85,7 +85,8 @@ async function makeStore(ownerUserId: string, status: 'PENDING_APPROVAL' | 'SUSP
       ownerId: vo.id, name: `Check Mart ${seq}`, slug: `check-mart-${marker}-${seq}`, vendorType: 'SUPERMARKET',
       phone: `+59269${String(seq).padStart(5, '0')}`, addressLine1: `${seq} Checklist Street`, city: 'Georgetown',
       region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
-      status, isVerified: false, acceptingOrders: false, ...extra,
+      // [owner #51] A store's first go-live needs a published phone: these stores publish one unless a case says not.
+      status, isVerified: false, acceptingOrders: false, publicPhone: '+5926007788', ...extra,
     },
   });
 }

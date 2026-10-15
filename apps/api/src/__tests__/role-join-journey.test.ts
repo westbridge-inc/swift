@@ -240,6 +240,16 @@ describe('business: a customer with no business lists one, end to end', () => {
   });
 
   it('an admin reviews each document through the real route; the completed checklist activates the store and the dashboard loads', async () => {
+    // [owner #51, 14 Oct] A first go-live also needs a published contact phone: the owner adds it on the
+    // waiting store's screen before the review completes.
+    const waiting = await get('/api/v1/vendor/profile', tokens['vendor']!);
+    const waitingStore = waiting.json().data.vendors[0] as { id: string; goLiveMissing: string[] };
+    expect(waitingStore.goLiveMissing).toEqual(['PUBLISHED_PHONE']);
+    const phoneSaved = await app.inject({
+      method: 'PUT', url: '/api/v1/vendor/profile', payload: { publicPhone: '+592 600 5544' },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${tokens['vendor']!}`, 'x-vendor-id': waitingStore.id },
+    });
+    expect(phoneSaved.statusCode, phoneSaved.body).toBe(200);
     const status = await get('/api/v1/verification/status?role=SUPERMARKET', tokens['vendor']!);
     const pending = (status.json().data.documents as Array<{ id: string; status: string; docType: string }>).filter((d) => d.status === 'PENDING');
     expect(pending.length).toBeGreaterThan(0);

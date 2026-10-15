@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -8,6 +9,7 @@ import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
@@ -1379,7 +1381,8 @@ export async function adminRoutes(app: FastifyInstance) {
           },
         },
         subscription: true,
-        _count: { select: { items: true, orders: true } },
+        // [Item 62] "Menu items" counts the live menu, not archived history.
+        _count: { select: { items: { where: { archivedAt: null } }, orders: true } },
       },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
@@ -1596,6 +1599,10 @@ export async function adminRoutes(app: FastifyInstance) {
    *  - suspended with every rule met → reinstated by CAS, carrying the same
    *    expiry the projection would write [Fable #1481 S4-2: the suspension
    *    source is cleared, so no stale BILLING survives for a later heal];
+   *  - never live and no published phone [owner #51]: waiting → refused 409
+   *    PUBLISHED_PHONE_MISSING (it goes live by itself once the owner adds
+   *    one); suspended → lifted back to waiting, where the owner can add it
+   *    [DS1145 S3];
    *  - suspended while its subscription cannot operate (the vendor gate's
    *    rule: fee unpaid or billing stopped) → refused 409 FEE_UNPAID [MC-AD2]:
    *    only a confirmed payment (or billing's own heal) lifts a fee hold, and
@@ -1636,6 +1643,36 @@ export async function adminRoutes(app: FastifyInstance) {
       if (updated.status !== 'ACTIVE') {
         throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
+    } else if (next === 'CAN_LIFT_TO_WAITING') {
+      // [owner #51 · DS1145 S3] Suspended before it was ever live, every other rule met, no published phone. It
+      // cannot go live without one, and a suspended store cannot add one in the app — so approving lifts the
+      // suspension back to waiting for approval: the owner adds the number there and the activation projection
+      // makes the store live by itself. No subscription is created (that is the activation's), so the store still
+      // reads as never live. Decided again under the same locks as a reinstatement.
+      updated = await app.prisma.$transaction(async (tx) => {
+        await bindTenantTransaction(tx);
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-lift-to-waiting-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-lift-to-waiting-store */`;
+        const fresh = await tx.vendor.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, suspensionSource: true, owner: { select: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+        });
+        const freshGoLive = await verification.vendorGoLive(id, tx);
+        if (!freshGoLive) throw new NotFoundError('Vendor', id);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null, feePause: await readFeePause(tx, process.env, fresh.subscription?.id) }, freshGoLive);
+        const refusedNow = again === 'CAN_LIFT_TO_WAITING' ? null
+          : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        if (refusedNow) throw refusedNow;
+        const won = await tx.vendor.updateMany({
+          where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
+          data: { status: 'PENDING_APPROVAL', suspensionSource: null },
+        });
+        if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+          extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },
+        });
+        return tx.vendor.findUniqueOrThrow({ where: { id } });
+      });
     } else {
       // CAN_REINSTATE. [PR1270-S2-03] Price BEFORE the activation write: a
       // market that cannot price this store refuses here and it stays suspended.
@@ -1677,11 +1714,20 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
-      body: next === 'CAN_REINSTATE'
-        ? `${vendor.name} has been reinstated and can take orders again once you open it.`
-        : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
-      data: { vendorId: id },
+      ...(next === 'CAN_LIFT_TO_WAITING'
+        ? {
+            title: 'Add the number customers can call',
+            body: `${vendor.name} is no longer suspended. Add the phone number customers can call in Account, and your store goes live.`,
+          }
+        : {
+            title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
+            body: next === 'CAN_REINSTATE'
+              ? `${vendor.name} has been reinstated and can take orders again once you open it.`
+              : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
+          }),
+      // [DS1321 S4] The lift's notice IS the one "add the number" notice: its tap opens the waiting store's screen,
+      // and the activation projection, which asks once per store, does not ask again.
+      data: next === 'CAN_LIFT_TO_WAITING' ? { kind: 'vendor_needs_public_phone', vendorId: id } : { vendorId: id },
     });
 
     // [VERIFY-DOCS V5] The owner's VAT billing number never rides an admin store reply.
@@ -2319,7 +2365,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** [hold v3 · N-01] The held-for-review queue: paid MMG orders the food-age
    *  cutoff would have cancelled, held for a person instead. Tenant-scoped by
-   *  the request like every admin read. */
+   *  the request like every admin read.
+   *  [REVIEW-B #1699 S3-1] Classed C0 (writes no access record), so it carries
+   *  no customer identity and no store phone: the Orders page polls it every
+   *  minute and shows only the store's name. Who the customer is lives on
+   *  GET /orders/:id, which is C1 and records the read. */
   app.get('/orders/held', { preHandler: [adminGuard] }, async () => {
     const rows = await app.prisma.order.findMany({
       where: { foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...FOOD_AGE_WAITING] } },
@@ -2328,8 +2378,7 @@ export async function adminRoutes(app: FastifyInstance) {
       select: {
         id: true, orderNumber: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true,
         totalAmount: true, readyAt: true, foodAgeHeldAt: true, placedAt: true,
-        vendor: { select: { id: true, name: true, phone: true } },
-        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        vendor: { select: { id: true, name: true } },
       },
     });
     const now = Date.now();
@@ -2933,7 +2982,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // log + customer notification below. (Wallet credit is a Part C / fintech-phase
     // concern — see the dormant walletBalance/Transaction schema notes.)
 
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: newStatus });
 
     // [REPORT-010 F-03] Unattested MMG gets the direct-refund guidance — the
     // customer may have already paid the store's link before this cancel.
@@ -3074,7 +3123,7 @@ export async function adminRoutes(app: FastifyInstance) {
       return tx.order.findUniqueOrThrow({ where: { id } });
     });
     orderRefundCounter.labels('settled').inc();
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'REFUNDED' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'REFUNDED' });
     return { success: true, data: updated };
   });
 
@@ -5642,7 +5691,7 @@ export async function adminRoutes(app: FastifyInstance) {
       documents,
       (earlierWhere) => tenantPrisma.verificationDocument.findMany({
         where: earlierWhere,
-        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+        select: { id: true, userId: true, role: true, subjectId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
       }),
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
@@ -5729,7 +5778,7 @@ export async function adminRoutes(app: FastifyInstance) {
       });
       markReplayAudited(request as unknown as AuditRequestLike, decisionRow?.id);
     } else {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });
