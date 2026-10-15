@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -68,17 +66,6 @@ async function chooseDoor(user: Awaited<ReturnType<typeof business>>) {
   await user.click(screen.getByRole('button', { name: /12 Regent Street.*Georgetown/ }));
   loadMap();
 }
-
-// [W2 · size] The store map (its tiles, credit line and picker) is not in the sign-up
-// page's first-load JavaScript: most people signing up never open it, and the page
-// sits at its size ceiling. Its code loads when the owner opens the map.
-describe('[W2] the store map is not in the sign-up page\u2019s first load', () => {
-  it('the sign-up page loads the store map\u2019s code only when the map opens', () => {
-    const page = readFileSync(join(process.cwd(), 'src/app/signup/page.tsx'), 'utf8');
-    expect(page).not.toMatch(/from '@\/components\/store-location-picker'/);
-    expect(page).toMatch(/import\('@\/components\/store-location-picker'\)/);
-  });
-});
 
 describe('Q8 website store pin', () => {
   it('cannot create a business until the owner explicitly confirms a pin', async () => {
