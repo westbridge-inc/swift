@@ -24,6 +24,7 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { NotificationChannels, PushOptions, SmsProvider, PushProvider, EmailProvider } from './channels';
+import { SMS_REF_REVIEW_SUPPRESSED } from './sms-outcome';
 import { getTenantContext, runAsSystem } from '../../plugins/tenant-context';
 import { reviewSendSuppressedCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
@@ -98,7 +99,7 @@ export function sealSms(inner: SmsProvider): SmsProvider {
   return {
     sendSms: async (to: string, body: string) => {
       const why = await reviewSendSuppression('sms', [to]);
-      if (why) { suppressed('sms', why); return { ref: 'review-suppressed' }; }
+      if (why) { suppressed('sms', why); return { ref: SMS_REF_REVIEW_SUPPRESSED }; }
       return inner.sendSms(to, body);
     },
   };
