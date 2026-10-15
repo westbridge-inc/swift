@@ -5,5 +5,5 @@
 BEGIN;
 SET LOCAL lock_timeout = '10s';
 ALTER TABLE "chat_messages" DROP COLUMN IF EXISTS "recipientIds";
-DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261015001000_chat_message_recipients';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261015030000_chat_message_recipients';
 COMMIT;
