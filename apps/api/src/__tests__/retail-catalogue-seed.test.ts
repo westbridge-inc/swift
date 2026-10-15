@@ -49,7 +49,8 @@ let userId = '';
  *  are not ours to delete. */
 let weCreatedIt = false;
 const slugs = [
-  'stabroek-threads', 'regent-home-store', 'camp-street-electronics', 'bourda-pharmacy',
+  // 'bourda-health-beauty' was 'bourda-pharmacy' until the medicines ban (GUARDRAILS §8, owner 13 Oct 2026).
+  'stabroek-threads', 'regent-home-store', 'camp-street-electronics', 'bourda-health-beauty',
   'demerara-stationers', 'kitty-sports-and-auto', 'bourda-variety',
 ];
 

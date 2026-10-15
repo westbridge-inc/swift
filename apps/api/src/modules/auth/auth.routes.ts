@@ -11,6 +11,7 @@ import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import {
@@ -144,6 +145,8 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post('/register', authRateLimit, async (request, reply) => {
     const body = registerSchema.parse(request.body);
+    // [MC-PR3] "TEST-" names belong to test accounts (+5920…) only — checked before the signup proof is spent.
+    assertNameNotReserved(body.firstName, body.phone);
     // Read at request time so the flag flips without a restart (tsx watch) and
     // tests can exercise both modes.
     // [REPORT-021 F-021-05] Fail CLOSED: consent is required unless the
@@ -454,9 +457,10 @@ export async function authRoutes(app: FastifyInstance) {
    *  nothing here concerns them. Weekly tiers only; checklists/cash-rules
    *  stay internal (OWASP API3). Every rate is resolved by `partnerRateFor`,
    *  the function signup and the weekly re-tier bill through; a market that
-   *  cannot be priced is an error, never a zero or a partial list. The
-   *  franchise is a discount on each location's own rate, not a separate
-   *  price, so it is quoted as the rule rather than a number. */
+   *  cannot be priced is an error, never a zero or a partial list. Every
+   *  store pays its own tier by its own catalogue — there is no multi-store
+   *  pricing (owner, 13 Oct 2026) — and a vehicle Swift does not take on yet
+   *  is listed with `offered: false`, so no client shows it a price. */
   app.get('/pricing', async (request, reply) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
     const countryCode = country.toUpperCase();

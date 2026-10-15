@@ -2,6 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -69,8 +73,18 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
     headers: {
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
     },
   });
+}
+
+async function commandState(id: string) {
+  const job = await app.prisma.serviceJob.findUniqueOrThrow({ where: { id } });
+  return {
+    expectedUpdatedAt: job.updatedAt.toISOString(),
+    expectedScheduledFor: job.scheduledFor?.toISOString(),
+    expectedQuoteAmount: Number(job.quoteAmount),
+  };
 }
 
 let customer: { userId: string; token: string };
@@ -127,7 +141,10 @@ afterAll(async () => {
 describe('Provider accepts or declines the slot (§4.3)', () => {
   it('scheduling notifies the provider and awaits their confirmation', async () => {
     const when = new Date(Date.now() + 2 * DAY).toISOString();
-    const res = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: when }, customer.token);
+    const res = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+      scheduledFor: when,
+      ...await commandState(jobId),
+    }, customer.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.providerConfirmedAt).toBeNull();
 
@@ -138,12 +155,12 @@ describe('Provider accepts or declines the slot (§4.3)', () => {
   });
 
   it('the customer cannot confirm on behalf of the provider', async () => {
-    const res = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, {}, customer.token);
+    const res = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), customer.token);
     expect(res.statusCode).toBe(403);
   });
 
   it('declining returns the job to QUOTED with the slot cleared — the customer rebooks', async () => {
-    const declined = await inject('POST', `/api/v1/services/jobs/${jobId}/decline-slot`, {}, providerUser.token);
+    const declined = await inject('POST', `/api/v1/services/jobs/${jobId}/decline-slot`, await commandState(jobId), providerUser.token);
     expect(declined.statusCode).toBe(200);
     expect(declined.json().data.status).toBe('QUOTED');
     expect(declined.json().data.scheduledFor).toBeNull();
@@ -155,10 +172,13 @@ describe('Provider accepts or declines the slot (§4.3)', () => {
 
     // Rebook + confirm this time
     const when = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
-    const rebook = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: when }, customer.token);
+    const rebook = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+      scheduledFor: when,
+      ...await commandState(jobId),
+    }, customer.token);
     expect(rebook.statusCode).toBe(200);
 
-    const confirmed = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, {}, providerUser.token);
+    const confirmed = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), providerUser.token);
     expect(confirmed.statusCode).toBe(200);
     expect(confirmed.json().data.providerConfirmedAt).toBeTruthy();
 

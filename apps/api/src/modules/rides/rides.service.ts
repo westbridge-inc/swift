@@ -6,6 +6,7 @@ import { FareService, type ItineraryEstimate, type TieredEstimate } from './fare
 import { newRidePin } from './ride-pin';
 import type { TaxiStopPlan } from './taxi-itinerary';
 import { stopPreview, type TaxiStopPreview } from './taxi-stops-read';
+import { taxiWaitingEnabled, waitingDisclosure, waitingTermsCreate, type TaxiWaitingDisclosure } from './taxi-waiting';
 import type { DispatchService } from '../dispatch/dispatch.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { persistCheckoutReceiptInTransaction } from '../order/checkout-outbox';
@@ -115,6 +116,9 @@ export interface RideRequestAnswer {
     dropoffAddress: string;
     stopCount?: number;
     stops?: TaxiStopPreview[];
+    /** [TAXI waiting charge] The waiting terms frozen on this ride at booking
+     *  (CONTRACT §8.2); only for a ride booked while TAXI_WAITING_CHARGE is on. */
+    waiting?: TaxiWaitingDisclosure;
   };
   message: string;
 }
@@ -142,6 +146,7 @@ export function shapeRideRequestAnswer(facts: RideAnswerFacts, ridePin: string |
       pickupAddress: facts.pickupAddress,
       dropoffAddress: facts.dropoffAddress,
       ...(stops.length > 0 ? { stopCount: stops.length, stops: stopPreview(stops) } : {}),
+      ...(facts.waiting ? { waiting: facts.waiting } : {}),
     },
     message: 'Looking for a driver near you…',
   };
@@ -329,13 +334,15 @@ export async function createRideRequest(
       { capacity: tier.capacity, passengerCount: body.passengerCount });
   }
 
-  // [TAXI multi-stop] The passenger books the route fare they were shown, or
-  // nothing: a fare that moved since the quote (rates, the road, the tier) is
-  // shown to them again before anything is written. The order always stores
-  // the SERVER's fare; the passenger's number is only ever compared. A caller
-  // that sent no quoted fare at all (the route refuses that first, 400
-  // EXPECTED_FARE_REQUIRED) is refused here too: nothing is booked unseen.
-  if (stops.length > 0 && body.expectedFare !== tier.fare) {
+  // [TAXI multi-stop · PRICE-LOCK] The passenger books the fare they were
+  // shown, or nothing: a fare that moved since the quote (rates, the zone
+  // table, the road, the tier) is shown to them again before anything is
+  // written. The order always stores the SERVER's fare; the passenger's number
+  // is only ever compared. A ride with stops must carry it (the route refuses
+  // a missing one first, 400 EXPECTED_FARE_REQUIRED); a ride without stops is
+  // compared whenever the app sent it, and an app from before the lock (no
+  // fare) books at the server fare as it always did.
+  if ((stops.length > 0 || body.expectedFare !== undefined) && body.expectedFare !== tier.fare) {
     throw fareChanged(body.expectedFare, tier.fare, body.rideClass, tiered.currencyCode);
   }
 
@@ -350,6 +357,13 @@ export async function createRideRequest(
   };
   // The leg that ENDS at each stop, as priced: frozen on the stop row.
   const legs = itineraryEstimate?.legs ?? [];
+  // [TAXI waiting charge] While the switch is on, the market's waiting terms are
+  // frozen on the ride with it (the passenger pays what the estimate showed),
+  // in the fare's currency. Off: nothing is read or written, today's ride.
+  const waitingTerms = taxiWaitingEnabled() ? await fareService.waitingTerms(user.countryCode) : null;
+  const waiting = waitingTerms
+    ? { terms: { chargePerBlock: waitingTerms.chargePerBlock, blockMinutes: waitingTerms.blockMinutes, currencyCode: estimate.currencyCode }, version: waitingTerms.version }
+    : null;
 
   assertL2(user);
 
@@ -433,6 +447,8 @@ export async function createRideRequest(
             })),
           },
         } : {}),
+        // [TAXI waiting charge] The terms the passenger was shown, frozen with the ride.
+        ...(waiting ? { taxiRideWaiting: { create: waitingTermsCreate(orderTenantId, waiting.terms, waiting.version) } } : {}),
         statusHistory: {
           create: {
             status: 'PENDING',
@@ -458,6 +474,7 @@ export async function createRideRequest(
       pickupAddress: body.pickupAddress,
       dropoffAddress: body.dropoffAddress,
       ...(stops.length > 0 ? { stops: stopPreview(stops) } : {}),
+      ...(waiting ? { waiting: waitingDisclosure(waiting.terms) } : {}),
     };
     // [TAXI multi-stop · CHECKOUT-IDEM] The command's one answer commits WITH
     // the ride: a same-key retry is answered from here even if Redis forgot,

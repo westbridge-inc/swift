@@ -103,7 +103,7 @@ export function cardSessionWords(s: CardSessionView, returned = false): string {
     case 'UNKNOWN': return "Checking with the bank. Don't pay again.";
     case 'SUCCEEDED':
       if (enroll) return s.card ? `Card added: ${cardLabel(s.card)}.` : 'Card added.';
-      if (s.settlement === 'banked') return 'Payment received. It is kept as fee paid ahead and pays a coming weekly fee.';
+      if (s.settlement === 'banked') return 'Payment received. It is kept for your next weekly fee.';
       return s.amount != null && s.currencyCode ? `Paid: ${cardMoney(s.amount, s.currencyCode)} received.` : 'Paid: payment received.';
     case 'FAILED': return enroll
       ? 'The card was not added: the bank declined it, or the card has expired.'

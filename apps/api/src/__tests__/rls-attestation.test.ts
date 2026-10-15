@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { PrismaClient } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
@@ -25,6 +26,7 @@ const ENFORCED: RlsFacts = {
   isSuperuser: false,
   hasBypassRls: false,
   isBypassRoleMember: false,
+  isOwnerRoleMember: false,
   tenantTables: 76,
   rlsDisabledTables: 0,
   ownedUnforcedTables: 0,
@@ -51,6 +53,8 @@ describe('[TA-S0-003] the attestation names every way the wall fails to bind', (
     ['BYPASSRLS', { hasBypassRls: true }],
     ['RLS_DISABLED', { rlsDisabledTables: 1 }],
     ['OWNER_NOT_FORCED', { ownedUnforcedTables: 1 }],
+    // [TA-S0-003 · R3] An owner member can switch the wall off, whatever the flags say.
+    ['OWNER_ROLE_MEMBER', { isOwnerRoleMember: true }],
   ] as const)('%s alone breaks enforcement', (bypass, override) => {
     const a = attestationOf({ ...ENFORCED, ...override });
     expect(a.enforced).toBe(false);
@@ -90,13 +94,14 @@ describe('[TA-S0-003] the attestation names every way the wall fails to bind', (
       roleResolved: true,
       isSuperuser: true,
       isBypassRoleMember: false,
+      isOwnerRoleMember: true,
       hasBypassRls: true,
       tenantTables: 76,
       rlsDisabledTables: 0,
       ownedUnforcedTables: 76,
     });
     expect(a.enforced).toBe(false);
-    expect(a.bypasses).toEqual(['SUPERUSER', 'BYPASSRLS', 'OWNER_NOT_FORCED']);
+    expect(a.bypasses).toEqual(['SUPERUSER', 'BYPASSRLS', 'OWNER_ROLE_MEMBER', 'OWNER_NOT_FORCED']);
   });
 
   // A probe that finds nothing is a broken census, never a clean bill of health.
@@ -112,6 +117,7 @@ describe('[TA-S0-003] the attestation names every way the wall fails to bind', (
     expect(explainBypass('BYPASSRLS', facts)).toContain('BYPASSRLS');
     expect(explainBypass('RLS_DISABLED', facts)).toContain('3');
     expect(explainBypass('OWNER_NOT_FORCED', facts)).toContain('76');
+    expect(explainBypass('OWNER_ROLE_MEMBER', facts)).toContain('swift');
   });
 
   it('the log line carries the state and the numbers behind it', () => {
@@ -220,6 +226,68 @@ describe('[TA-S0-003] the facts come from the database, not from config', () => 
     const facts = await readRlsFacts(app.prisma);
     expect(facts.tenantTables).toBeGreaterThan(50);
   });
+
+  // [TA-S0-003 · R3] Owner membership, measured on real logins: the owner is
+  // its own member; a swift_app member is not, until it inherits from a role
+  // that owns something in the walled schemas — by a GRANT of the owner role,
+  // or because a table changed hands to a role it already belongs to.
+  it('a login that is, or inherits from, an owner of the walled schemas is OWNER_ROLE_MEMBER', async () => {
+    const owner = await readRlsFacts(app.prisma);
+    expect(owner.isOwnerRoleMember).toBe(true);
+    expect(attestationOf(owner).bypasses).toContain('OWNER_ROLE_MEMBER');
+    const role = `rls_owner_probe_${process.pid}`;
+    const password = `p${process.pid}${Date.now()}`;
+    const url = new URL(process.env['DATABASE_URL'] as string);
+    url.username = role;
+    url.password = password;
+    const probe = 'rls_attest_owner_probe';
+    await app.prisma.$executeRawUnsafe(`DROP ROLE IF EXISTS ${role}`);
+    await app.prisma.$executeRawUnsafe(`CREATE ROLE ${role} LOGIN NOBYPASSRLS PASSWORD '${password}'`);
+    await app.prisma.$executeRawUnsafe(`GRANT swift_app TO ${role}`);
+    const login = new PrismaClient({ datasourceUrl: url.toString() });
+    try {
+      const plain = await readRlsFacts(login);
+      expect(plain.isOwnerRoleMember).toBe(false);
+      expect(attestationOf(plain).bypasses).not.toContain('OWNER_ROLE_MEMBER');
+      await app.prisma.$executeRawUnsafe(`CREATE TABLE "${probe}" (id text PRIMARY KEY)`);
+      await app.prisma.$executeRawUnsafe(`ALTER TABLE "${probe}" OWNER TO swift_app`);
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(true);
+      await app.prisma.$executeRawUnsafe(`DROP TABLE "${probe}"`);
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(false);
+      // A function, a type, or a walled schema itself handed to the group: an
+      // owner member can drop a trigger function (and the append-only trigger
+      // with it), or any table in a schema it owns.
+      await app.prisma.$executeRawUnsafe(`CREATE FUNCTION "${probe}_fn"() RETURNS int LANGUAGE sql AS 'SELECT 1'`);
+      await app.prisma.$executeRawUnsafe(`ALTER FUNCTION "${probe}_fn"() OWNER TO swift_app`);
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(true);
+      await app.prisma.$executeRawUnsafe(`DROP FUNCTION "${probe}_fn"()`);
+      await app.prisma.$executeRawUnsafe(`CREATE TYPE "${probe}_type" AS ENUM ('a')`);
+      await app.prisma.$executeRawUnsafe(`ALTER TYPE "${probe}_type" OWNER TO swift_app`);
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(true);
+      await app.prisma.$executeRawUnsafe(`DROP TYPE "${probe}_type"`);
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(false);
+      const [qr] = await app.prisma.$queryRaw<Array<{ owner: string }>>`
+        SELECT pg_get_userbyid(nspowner)::text AS owner FROM pg_namespace WHERE nspname = 'swift_qr'`;
+      expect(qr?.owner).toBeTruthy();
+      await app.prisma.$executeRawUnsafe(`ALTER SCHEMA swift_qr OWNER TO swift_app`);
+      try {
+        expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(true);
+      } finally {
+        await app.prisma.$executeRawUnsafe(`ALTER SCHEMA swift_qr OWNER TO "${qr!.owner}"`);
+      }
+      expect((await readRlsFacts(login)).isOwnerRoleMember).toBe(false);
+      await app.prisma.$executeRawUnsafe(`GRANT "${owner.role}" TO ${role}`);
+      const member = await readRlsFacts(login);
+      expect([member.isSuperuser, member.hasBypassRls, member.isOwnerRoleMember]).toEqual([false, false, true]);
+      expect(attestationOf(member).enforced).toBe(false);
+    } finally {
+      await login.$disconnect();
+      await app.prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${probe}"`);
+      await app.prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${probe}_fn"()`);
+      await app.prisma.$executeRawUnsafe(`DROP TYPE IF EXISTS "${probe}_type"`);
+      await app.prisma.$executeRawUnsafe(`DROP ROLE IF EXISTS ${role}`);
+    }
+  });
 });
 
 describe('[TA-S0-003] readRlsFacts maps what the catalogue returns — including nothing', () => {
@@ -265,6 +333,7 @@ describe('[TA-S0-003] readRlsFacts maps what the catalogue returns — including
       isSuperuser: false,
       hasBypassRls: false,
       isBypassRoleMember: false,
+      isOwnerRoleMember: false,
       tenantTables: 76,
       rlsDisabledTables: 2,
       ownedUnforcedTables: 5,

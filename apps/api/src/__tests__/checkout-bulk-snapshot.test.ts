@@ -188,9 +188,10 @@ describe('checkout snapshots the item’s bulk onto the order line', () => {
       where: { id: orderId },
       select: { orderType: true, courierPackageSize: true, items: { select: { quantity: true, bulkUnits: true } } },
     });
-    // 1 × rice (8) + 2 × sachet (1) = 10 bulk units → MEDIUM. Before this write
-    // the same order summed to 3 units and banded SMALL: a bicycle's job, with
-    // a 20 kg bag in it.
-    expect(requiredPackageSizeForOrder(order!)).toBe('MEDIUM');
+    // [owner #20, 13 Oct] A line the store marked very bulky (the rice, 8)
+    // means a car or van: EXTRA_LARGE. Before this write the snapshot was
+    // missing, every line read ordinary and the order banded SMALL — a
+    // bicycle's job, with a 20 kg bag in it.
+    expect(requiredPackageSizeForOrder(order!)).toBe('EXTRA_LARGE');
   });
 });

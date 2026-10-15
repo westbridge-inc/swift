@@ -5,7 +5,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { BookingService } from '../modules/booking/booking.service';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
-import { vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
+import { checkoutOutboxId, dispatchCommandDedupeKey, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import {
   HOUR,
@@ -58,6 +58,20 @@ afterEach(() => {
 
 // ── 1. The hold-release tick tells the provider, not the riders ─────────────
 
+// [Owner ruling #15] Store-room events reach the CURRENT team of the store
+// only (emitToStoreRoom): the provider socket is seated in its room and
+// addressed by its id, and the team read answers with the provider as owner.
+const providerSocket = () => ({
+  id: 'provider-socket',
+  data: { userId: 'user-provider', tenantId: 'swift-default', authorizationExpiresAtMs: Date.now() + 60 * 60 * 1000 },
+  leave: async () => {},
+});
+const providerTeam = {
+  findUnique: async (args: { where: { id: string } }) => (args.where.id === 'vendor-svc'
+    ? { tenantId: 'swift-default', status: 'ACTIVE', isCurrentlyOpen: true, owner: { userId: 'user-provider', user: { status: 'ACTIVE', tenantId: 'swift-default' } }, staff: [] }
+    : null),
+};
+
 describe('OrderService.releaseDueHeldOrders — a released booking goes to its provider', () => {
   function releaseHarness(rows: Row[]) {
     const store = orderStore(rows);
@@ -78,7 +92,7 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
         inTransaction = true;
         try { return await fn(self.prisma); } finally { inTransaction = false; }
       },
-      vendor: counter('vendor'),
+      vendor: { ...counter('vendor'), ...providerTeam },
       item: counter('item'),
       orderOutbox: {
         createMany: async (args: { data: Array<Record<string, unknown>>; skipDuplicates?: boolean }) => {
@@ -90,7 +104,9 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
       stockMovement: { findMany: async () => [] },
     });
     self.prisma = prisma;
-    const io = recordingIo();
+    const io = Object.assign(recordingIo(), {
+      in: (room: string) => ({ fetchSockets: async () => (room === 'vendor:vendor-svc' ? [providerSocket()] : []) }),
+    });
     const svc = new OrderService(prisma, io);
     const vendorAlert = vi.spyOn(NotificationService.prototype, 'newOrderForVendor').mockResolvedValue('notification-1');
     const enqueueDispatch = vi.fn(async (_orderId: string) => {});
@@ -103,7 +119,7 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     expect(res.released).toEqual(['bk-held']);
     expect(h.store.rows[0]).toMatchObject({ holdExpiresAt: null });
     expect(h.store.rows[0]!['releasedToVendorAt']).toBeInstanceOf(Date);
-    expect(h.io.emits).toEqual([{ room: 'vendor:vendor-svc', event: 'order:new', payload: { orderId: 'bk-held', vendorId: 'vendor-svc', orderNumber: 'ORD-BK-HELD' } }]);
+    expect(h.io.emits).toEqual([{ room: ['provider-socket'], event: 'order:new', payload: { orderId: 'bk-held', vendorId: 'vendor-svc', orderNumber: 'ORD-BK-HELD' } }]);
     expect(h.vendorAlert).toHaveBeenCalledTimes(1);
     expect(h.vendorAlert).toHaveBeenCalledWith('user-provider', 'ORD-BK-HELD', 1, 2000, 'bk-held', expect.any(Date));
     // [Q10] ...carrying the booking's own response deadline, which its alert
@@ -140,11 +156,15 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     const h = releaseHarness([courierParcel('parcel-1', { holdExpiresAt: new Date(Date.now() - 1000) })]);
     const res = await h.svc.releaseDueHeldOrders(h.enqueueDispatch);
     expect(res.released).toEqual(['parcel-1']);
-    expect(h.enqueueDispatch).toHaveBeenCalledWith('parcel-1');
+    const dedupeKey = dispatchCommandDedupeKey('parcel-1', 'courier-hold-released');
+    expect(h.enqueueDispatch).toHaveBeenCalledExactlyOnceWith('parcel-1', checkoutOutboxId(dedupeKey));
     expect(h.io.emits).toEqual([]);
     expect(h.vendorAlert).not.toHaveBeenCalled();
     expect(h.counted).toEqual([]); // no store, no store counters
-    expect(h.outbox).toEqual([]); // and no store to escalate to
+    expect(h.outbox).toEqual([expect.objectContaining({
+      id: checkoutOutboxId(dedupeKey), dedupeKey, orderId: 'parcel-1',
+      kind: 'dispatch-order', queue: 'dispatch', inTransaction: true, skipDuplicates: true,
+    })]); // durable rider dispatch; no store escalation
   });
 });
 
@@ -166,7 +186,7 @@ async function providerHost(rows: Row[]) {
     subscription: { findFirst: async () => null },
     alertDelivery: { updateMany: async () => ({ count: 0 }) },
     notification: { updateMany: async () => ({ count: 0 }) },
-    platformConfig: { findUnique: async () => null },
+    platformConfig: { findUnique: async () => null, findMany: async () => [] },
   });
   const host = await hostRoutes(vendorRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
   return { ...host, store, prisma };
@@ -282,8 +302,20 @@ describe('OrderService.updateStatus → ACCEPTED — the customer is told a book
     const prisma = prismaDouble(store, {
       algoConfig: { findFirst: async () => null },
       user: { findUnique: async () => ({ countryCode: 'GY' }) },
+      // [L05] The order-room gate re-reads the audience and re-gates the order's chat rooms.
+      chatRoom: { findMany: async () => [] },
+      vendor: providerTeam,
     });
-    const io = recordingIo();
+    // [L05] Order-room events reach the order's CURRENT people only: the
+    // customer's socket is seated in the order room and addressed by its id.
+    const customerSocket = {
+      id: 'customer-socket',
+      data: { userId: row['customerId'], tenantId: row['tenantId'], authorizationExpiresAtMs: Date.now() + HOUR },
+      leave: async () => {},
+    };
+    const io = Object.assign(recordingIo(), {
+      in: (room: string) => ({ fetchSockets: async () => (room === `order:${String(row['id'])}` ? [customerSocket] : room === 'vendor:vendor-svc' ? [providerSocket()] : []) }),
+    });
     const svc = new OrderService(prisma, io);
     vi.spyOn(OrderService.prototype, 'transitionOrderAtomically').mockResolvedValue({ order: row as never, sourceStatus: 'PENDING', cancelledSearches: 0, earningNotices: [] });
     const accepted = vi.spyOn(NotificationService.prototype, 'orderAccepted').mockResolvedValue(undefined);
@@ -298,7 +330,10 @@ describe('OrderService.updateStatus → ACCEPTED — the customer is told a book
     await h.svc.updateStatus('bk-1', 'ACCEPTED', 'user-provider', 'Accepted by vendor');
     expect(confirmed).toHaveBeenCalledWith('user-customer', 'ORD-BK-1', 'Kim’s Barbershop', 'bk-1');
     expect(h.accepted).not.toHaveBeenCalled();
-    expect(h.io.emits.map((e) => e.room)).toEqual(['order:bk-1', 'vendor:vendor-svc']);
+    // The customer's socket in order:bk-1 hears the confirmation (addressed by id), then the provider's
+    // socket in its store room (addressed by id too: the store-room gate, owner ruling #15).
+    expect(h.io.emits.map((e) => e.room)).toEqual([['customer-socket'], ['provider-socket']]);
+    expect(h.io.emits[0]).toMatchObject({ event: 'order:status_changed', payload: { orderId: 'bk-1' } });
   });
 
   it('the booking confirmation copy carries no kitchen words and keeps the order-screen routing data', async () => {

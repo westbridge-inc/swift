@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { VehicleType } from '@prisma/client';
 import {
   VEHICLE_CLASSES,
@@ -9,6 +9,12 @@ import {
 import { vehiclesForPackageSize, vehicleCanCarry } from '../modules/dispatch/dispatch.service';
 
 describe('vehicle-class taxonomy', () => {
+  // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] TRANSFORMED: these cases pin PHYSICAL capacity (what each
+  // vehicle can carry), so they run with the CAR_DELIVERIES switch on; the dispatch wrapper then equals the config
+  // function exactly. With the switch off (default) a passenger vehicle carries no goods at all:
+  // taxi-cars-passengers-only.test.ts pins that.
+  beforeAll(() => { vi.stubEnv('CAR_DELIVERIES', '1'); });
+  afterAll(() => { vi.unstubAllEnvs(); });
   // ── Characterization: the original three vehicles keep their EXACT courier
   //    capacity, so expanding the fleet cannot silently change who gets a parcel.
   describe('capacity is preserved for the original fleet (SWIFT-062)', () => {

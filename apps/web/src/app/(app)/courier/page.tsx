@@ -48,6 +48,9 @@ export default function CourierPage() {
   // The server's field is `packageDescription` (what is inside); it has no
   // `notes`, so a "notes for the rider" box was silently thrown away.
   const [contents, setContents] = useState('');
+  // [GUARDRAILS §8 · owner #67] The sender's tick: "This parcel has no prohibited
+  // items". No courier is requested without it; the order records it.
+  const [declared, setDeclared] = useState(false);
   const [pinning, setPinning] = useState<'pickup' | 'dropoff' | null>(null);
   // Where focus returns when the map closes: the button that opened it.
   const pinButtons = { pickup: useRef<HTMLButtonElement>(null), dropoff: useRef<HTMLButtonElement>(null) };
@@ -59,6 +62,9 @@ export default function CourierPage() {
   });
   function closePin(end: 'pickup' | 'dropoff') { returnFocus.current = end; setPinning(null); }
   const [estimate, setEstimate] = useState<{ totalFee?: number; fare?: number } | null>(null);
+  // [PRICE-LOCK] Bumped when the server refuses a send because the fee moved:
+  // the quote is fetched again, so the new fee is what the button shows.
+  const [quoteRound, setQuoteRound] = useState(0);
   const [estimateFailed, setEstimateFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,7 +103,7 @@ export default function CourierPage() {
       .then((r) => { if (live) { setEstimate(r); setEstimateFailed(false); } })
       .catch(() => { if (live) { setEstimate(null); setEstimateFailed(true); } });
     return () => { live = false; };
-  }, [pickup, dropoff, size]);
+  }, [pickup, dropoff, size, quoteRound]);
 
   const fee = estimate ? (estimate.totalFee ?? estimate.fare ?? null) : null;
   // [WEB-PIN] The server requires who receives it (courier.routes.ts orderSchema:
@@ -107,13 +113,14 @@ export default function CourierPage() {
     : recipientPhone.trim().length < 5
       ? 'Add the recipient’s phone'
       : null;
-  // Both halves of every address agree, there is a price for THIS parcel, and someone to receive it.
-  const readyToSend = pickup !== null && dropoff !== null && fee !== null && recipientMissing === null && !busy;
+  const declarationMissing = declared ? null : 'Tick “no prohibited items” to send';
+  // Both halves of every address agree, there is a price for THIS parcel, someone to receive it, and the sender's tick.
+  const readyToSend = pickup !== null && dropoff !== null && fee !== null && recipientMissing === null && declarationMissing === null && !busy;
 
   async function send() {
     const from = submittablePlace(pickup, pickupText);
     const to = submittablePlace(dropoff, dropoffText);
-    if (!from || !to || fee === null || recipientMissing !== null) return;
+    if (!from || !to || fee === null || recipientMissing !== null || !declared) return;
     setBusy(true); setError(null);
     try {
       const r = await requestCourier({
@@ -126,10 +133,17 @@ export default function CourierPage() {
         recipientName: recipientName.trim(),
         recipientPhone: recipientPhone.trim(),
         ...(contents.trim() && { packageDescription: contents.trim() }),
+        declaresNoProhibitedItems: true,
+        // [PRICE-LOCK] The fee on the button: the server sends the parcel only at it.
+        expectedFee: fee,
       });
       const id = r?.orderId ?? r?.order?.id ?? r?.id;
       router.push(id ? `/orders/${id}` : '/orders');
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) {
+      setError((e as Error).message);
+      // The fee moved since the quote (nothing was sent): fetch the new one.
+      if ((e as { code?: string }).code === 'PRICE_CHANGED') setQuoteRound((n) => n + 1);
+    }
     finally { setBusy(false); }
   }
 
@@ -203,6 +217,15 @@ export default function CourierPage() {
             <input value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} placeholder="Recipient phone" aria-label="Recipient phone" autoComplete="off" maxLength={30} required type="tel" className="sw-input" />
           </div>
           <input value={contents} onChange={(e) => setContents(e.target.value)} placeholder="What’s inside? (optional)" aria-label="What’s inside? (optional)" maxLength={500} className="sw-input" />
+          {/* [GUARDRAILS §8 · owner #67] The server also screens what is written above
+              against the same list, and refuses a banned parcel in plain words. */}
+          <label className="flex items-start gap-2 text-[15px] leading-[22px] text-[var(--swift-ink)]">
+            <input type="checkbox" checked={declared} onChange={(e) => setDeclared(e.target.checked)} aria-label="This parcel has no prohibited items" aria-describedby="parcel-banned-goods" className="mt-1 h-4 w-4 accent-[var(--swift-red)]" />
+            <span className="flex flex-col">
+              <span className="font-semibold">This parcel has no prohibited items</span>
+              <span id="parcel-banned-goods" className="text-[13px] leading-[18px] text-[var(--swift-muted)]">Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.</span>
+            </span>
+          </label>
         </div>
 
         <aside className="flex flex-col gap-3 split:sticky split:top-4">
@@ -227,7 +250,7 @@ export default function CourierPage() {
           {error && <p role="alert" className="sw-note sw-note-error">{error}</p>}
 
           <button type="button" onClick={send} disabled={!readyToSend} className="sw-btn sw-btn-block mt-1">
-            {busy ? 'Requesting…' : !pickup || !dropoff ? 'Set both addresses' : fee === null ? 'Waiting for a price…' : recipientMissing ?? `Request courier · ${money(fee)}`}
+            {busy ? 'Requesting…' : !pickup || !dropoff ? 'Set both addresses' : fee === null ? 'Waiting for a price…' : recipientMissing ?? declarationMissing ?? `Request courier · ${money(fee)}`}
           </button>
         </aside>
       </div>

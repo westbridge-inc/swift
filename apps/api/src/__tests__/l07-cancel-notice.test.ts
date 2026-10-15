@@ -14,14 +14,19 @@ const users: string[] = [];
 const orders: string[] = [];
 let seq = 0;
 const emit = vi.fn();
+// [L05] Order-room publication reads the room's sockets and addresses the
+// authorized ones by id; tests seat the customer's socket in the room.
+const to = vi.fn(() => ({ emit }));
+const roomSockets = new Map<string, Array<{ id: string; data: Record<string, unknown>; leave: () => Promise<void> }>>();
+const fakeIo = { to, in: (room: string) => ({ fetchSockets: async () => roomSockets.get(room) ?? [] }) };
 let service: OrderService;
 beforeAll(async () => {
   app = Fastify({ logger: false });
   await app.register(prismaPlugin);
   await app.ready();
-  service = new OrderService(app.prisma, { to: () => ({ emit }) } as never);
+  service = new OrderService(app.prisma, fakeIo as never);
 });
-afterEach(() => { vi.restoreAllMocks(); emit.mockClear(); });
+afterEach(() => { vi.restoreAllMocks(); emit.mockClear(); to.mockClear(); roomSockets.clear(); });
 afterAll(async () => {
   if (!app) return;
   await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orders } } });
@@ -54,6 +59,9 @@ async function fixture(assigned = true) {
     deliveryAddress: 'Synthetic destination', deliveryLat: 3.39, deliveryLng: -59.78,
     subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 0, totalAmount: 0,
     paymentMethod: 'CASH', readyAt: new Date(),
+    // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
+    // cancel only when it is very late — 30 minutes past its promise.
+    promisedAt: new Date(Date.now() - 31 * 60_000),
   } });
   orders.push(order.id);
   return { customer, mover, order };
@@ -163,6 +171,7 @@ describe('assigned riders retain a durable cancellation notice', () => {
 describe('the cancel request never waits for the rider push (Opus S3)', () => {
   it('a hung push provider cannot hold the cancel: it returns, emits, and the post-commit attempt still starts', async () => {
     const { customer, order } = await fixture();
+    roomSockets.set(`order:${order.id}`, [{ id: 'customer-socket', data: { userId: customer.id, tenantId: order.tenantId, authorizationExpiresAtMs: Date.now() + 3_600_000 }, leave: async () => {} }]);
     const hung = vi.spyOn(NotificationService.prototype, 'publishPersisted').mockImplementation(() => new Promise<boolean>(() => {}));
     const outcome = await Promise.race([
       service.cancelOrder(order.id, customer.id).then(() => 'returned'),
@@ -171,6 +180,7 @@ describe('the cancel request never waits for the rider push (Opus S3)', () => {
     expect(outcome).toBe('returned');
     expect(await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({ status: 'CANCELLED' });
     expect(emit).toHaveBeenCalledWith('order:status_changed', { orderId: order.id, status: 'CANCELLED' });
+    expect(to).toHaveBeenCalledWith(['customer-socket']);
     // The immediate attempt is made, after the commit, off the request path.
     await vi.waitFor(() => expect(hung).toHaveBeenCalledTimes(1));
     const [row] = await noticeRows(order.id);

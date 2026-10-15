@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createGolden, DAY, type Actor } from './gold-7-helpers';
 import { documentHarness } from './gold-7-documents';
+import { reviewerTyped } from '../helpers/reviewer-typed';
 
 // ---------------------------------------------------------------------------
 // GOLD-7 · VEND-01 — agreement refusal → join → encrypted documents → review
@@ -13,7 +14,8 @@ import { documentHarness } from './gold-7-documents';
 const h = createGolden('+5920975', 'gold7-vend01');
 const docs = documentHarness(h, 'vend01');
 const REASON = { 'x-swift-reason': 'Golden vendor onboarding document review' };
-const CHECKLIST = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
+// [VERIFY-DOCS · ruling 7] no TIN certificate on the store list
+const CHECKLIST = ['owner_national_id', 'business_registration', 'storefront_photo'];
 beforeAll(() => docs.start());
 afterAll(() => docs.close());
 
@@ -30,7 +32,7 @@ async function submit(actor: Actor, docType: string) {
     role: 'STORE', docType, fileUrl: uploaded.json().data.url, consent: true, privacyNoticeVersion: 'v1',
   });
   expect(submitted.statusCode, submitted.json().error?.code).toBe(201);
-  return { id: submitted.json().data.id as string, bytes };
+  return { id: submitted.json().data.id as string, bytes, docType };
 }
 
 /** [VERIFY-DOCS V3] An admin who reviews documents holds the explicit document reviewer grant (`*` never confers it). */
@@ -40,7 +42,7 @@ async function reviewer(): Promise<Actor> {
   return admin;
 }
 
-async function review(admin: Actor, document: { id: string; bytes: Buffer }, approve: boolean) {
+async function review(admin: Actor, document: { id: string; bytes: Buffer; docType?: string }, approve: boolean) {
   const link = await h.call('GET', `/api/v1/admin/verification/${document.id}/document-url`, admin.token, undefined, REASON);
   expect(link.statusCode).toBe(200);
   const rendered = await h.app.inject({ method: 'GET', url: link.json().data.url });
@@ -54,7 +56,7 @@ async function review(admin: Actor, document: { id: string; bytes: Buffer }, app
   expect(claimed.statusCode, claimed.json().error?.code).toBe(200);
   expect(claimed.json().data.assignedTo).toBe(admin.userId);
   const result = await h.call('PUT', `/api/v1/admin/verification/${document.id}/${approve ? 'approve' : 'reject'}`, admin.token,
-    approve ? { expiresAt: new Date(Date.now() + 365 * DAY).toISOString() }
+    approve ? { expiresAt: new Date(Date.now() + 365 * DAY).toISOString(), ...reviewerTyped(document.docType ?? '', document.id) }
       : { reasonCode: 'UNREADABLE', reason: 'The registration number is unreadable' }, REASON);
   expect(result.statusCode, result.json().error?.code).toBe(200);
   const decided = await h.sys(() => h.app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: document.id } }));
@@ -94,7 +96,12 @@ describe('GOLD-7 · VEND-01 — join, documents and approval', () => {
     const early = await h.call('PUT', `/api/v1/admin/vendors/${vendorId}/approve`, admin.token, {}, REASON);
     expect(early.statusCode).toBe(409);
     expect(early.json().error.code).toBe('CHECKLIST_INCOMPLETE');
-    for (const type of ['owner_national_id', 'tin_certificate', 'storefront_photo', 'business_registration']) {
+    // [owner #51, 14 Oct] A first go-live also needs a published contact phone: the applicant adds it on
+    // the waiting store's screen, and it changes nothing while documents are still open.
+    const phone = await h.call('PUT', '/api/v1/vendor/profile', applicant.token, { publicPhone: '+592 600 3322' });
+    expect(phone.statusCode, phone.body).toBe(200);
+    expect(await vendorRow()).toMatchObject({ status: 'PENDING_APPROVAL', isVerified: false });
+    for (const type of ['owner_national_id', 'storefront_photo', 'business_registration']) {
       const document = await submit(applicant, type);
       const before = await h.sys(() => h.app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: document.id } }));
       const wrongRole = await h.call('PUT', `/api/v1/admin/verification/${document.id}/approve`, outsider.token, {}, REASON);

@@ -148,12 +148,23 @@ async function canonicalClockRow(tx: Tx, subscriptionId: string, tenantId: strin
   let clock = await tx.billingDunningClock.findUnique({ where: { subscriptionId } });
   if (!clock) {
     const age = Math.max(0, now.getTime() - sub.nextBillingDate.getTime());
+    // A retention that already ran out sits at its OWN place on the overdue
+    // clock (its end minus the due date), never at "now": a clock first read
+    // while a fee pause is open is then paused from the pause's START
+    // (mmg-pause.ts), which takes the paused time before this read off the
+    // clock. Pinned to "now", the churn point stayed where it was, so a store
+    // long past its retention was churned that much later once a way to pay
+    // came back. On a clock that is never rewound both places are already
+    // reached, so nothing else changes.
+    const retentionEnd = (sub.suspendedAt ?? sub.updatedAt).getTime() + suspensionRetentionMs();
     clock = await tx.billingDunningClock.create({ data: {
       subscriptionId, tenantId, moverPayerUserId, dueAt: sub.nextBillingDate, runningSince: sub.nextBillingDate,
       retryAtMs: sub.nextRetryAt ? BigInt(age + Math.max(0, sub.nextRetryAt.getTime() - now.getTime())) : 0n,
       ...(sub.status === 'SUSPENDED' ? {
         nudgeAtMs: BigInt(age),
-        churnAtMs: BigInt(age + Math.max(0, (sub.suspendedAt ?? sub.updatedAt).getTime() + suspensionRetentionMs() - now.getTime())),
+        churnAtMs: BigInt(retentionEnd > now.getTime()
+          ? age + (retentionEnd - now.getTime())
+          : Math.max(0, retentionEnd - sub.nextBillingDate.getTime())),
       } : {}),
     } });
   }
@@ -313,6 +324,15 @@ export async function lateCardApprovalHeldInTx(tx: Tx | PrismaClient, sourceIds:
   return !!await tx.cardSession.findFirst({ where: { subscriptionId: { in: sourceIds }, status: 'HELD', failureCode: 'LATE_PROVIDER_APPROVAL' }, select: { id: true } });
 }
 
+/** [MMG REVERSAL · owner #11] A weekly-fee payment being returned to the payer
+ *  through MMG (claimed, sent, or held for a person). Until MMG's lookup
+ *  settles it, the payer's billing sends no instruction and spends nothing
+ *  from the wallet that is being given back. */
+export const OPEN_REVERSAL_STATES = ['SENDING', 'SENT', 'HELD'] as const;
+export async function feeReversalOpenInTx(tx: Tx | PrismaClient, sourceIds: string[]): Promise<boolean> {
+  return !!await tx.mmgFeeReversal.findFirst({ where: { subscriptionId: { in: sourceIds }, state: { in: [...OPEN_REVERSAL_STATES] } }, select: { id: true } });
+}
+
 export async function hasConfirmationInTx(tx: Tx, subscriptionId: string, now: Date, except?: ConfirmationSource) {
   const clock = await currentDunningClock(tx, subscriptionId, now);
   subscriptionId = clock.subscriptionId;
@@ -333,6 +353,7 @@ export async function hasConfirmationInTx(tx: Tx, subscriptionId: string, now: D
   const authority = await tx.moverFeeAuthority.findUnique({ where: { canonicalSubscriptionId: subscriptionId }, include: { members: true } });
   const sourceIds = authority?.members.map((m) => m.subscriptionId) ?? [subscriptionId];
   if (await lateCardApprovalHeldInTx(tx, sourceIds)) return true;
+  if (await feeReversalOpenInTx(tx, sourceIds)) return true;
   const exceptPayment = except && 'paymentId' in except ? except.paymentId : undefined;
   return !!await tx.subscriptionPayment.findFirst({ where: {
     subscriptionId: { in: sourceIds }, paymentMethod: 'MOBILE_MONEY',

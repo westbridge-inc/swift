@@ -142,6 +142,51 @@ describe('Courier — quote', () => {
   });
 });
 
+// [PRICE-LOCK · owner: "the price shown is the price charged"] The courier
+// job is re-quoted at /order and the server's fee is stored. When the app sends
+// the fee it showed (expectedFee), the job is created only at that fee; a fee
+// that moved since the quote is refused with the fee now and nothing written.
+// An app from before the lock sends none and books exactly as before.
+describe('Courier — the fee shown is the fee charged', () => {
+  async function quotedFee(token: string) {
+    const res = await inject('POST', '/api/v1/courier/estimate', {
+      pickup: ORDER_BODY.pickup, dropoff: ORDER_BODY.dropoff, packageSize: ORDER_BODY.packageSize, speed: ORDER_BODY.speed,
+    }, token);
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json().data.totalFee as number;
+  }
+  const ordersOf = (userId: string) => app.prisma.order.count({ where: { customerId: userId } });
+
+  it('the shown fee matches: created at it — the answer, the stored fee and the total are that number', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const fee = await quotedFee(sender.token);
+    const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, expectedFee: fee }, sender.token);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data.fee).toBe(fee);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: res.json().data.orderId } });
+    expect([Number(order.deliveryFee), Number(order.totalAmount)]).toEqual([fee, fee]);
+  });
+
+  it('the shown fee differs: 409 PRICE_CHANGED naming the fee now, and nothing is written', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const fee = await quotedFee(sender.token);
+    for (const expectedFee of [fee - 100, fee + 1, 0]) {
+      const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, expectedFee }, sender.token);
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toMatchObject({ code: 'PRICE_CHANGED', details: { expectedFee, fee, currencyCode: 'GYD' } });
+    }
+    expect(await ordersOf(sender.userId)).toBe(0);
+  });
+
+  it('an app from before the lock sends no fee: created as today, at the server fee', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const fee = await quotedFee(sender.token);
+    const res = await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data.fee).toBe(fee);
+  });
+});
+
 describe('Courier — create, track, deliver', () => {
   it('creates a courier job (pickup != dropoff) and returns a tracking link', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -527,5 +572,51 @@ describe("Courier — a closed parcel does not keep the courier's phone", () => 
     expect(closed.json().data.rider.user.firstName).toBe('Courier');
     // [F-028-11] and the live position went with it.
     expect(closed.json().data.rider.currentLat).toBeNull();
+  });
+});
+
+// [GUARDRAILS §8 · owner #67] Swift never DELIVERS banned goods either: a parcel's description is screened against
+// the same prohibited-items list as the catalogue, and refused in plain words; the sender's declaration that the
+// parcel holds nothing prohibited is recorded on the order's own trail (the apps send it from build 11).
+describe('[§8 · #67] a parcel is screened against the prohibited-items list', () => {
+  const parcelsOf = (userId: string) => app.prisma.order.count({ where: { customerId: userId, orderType: 'COURIER' } });
+
+  it('a description naming banned goods is refused before anything is written; an ordinary parcel books', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    for (const [packageDescription, label] of [
+      ['2 bottles of El Dorado', 'alcohol'], ['20lb gas cylinder', 'cooking gas (LPG)'], ['Pack of cigarettes', 'tobacco and cigarettes'],
+      ['R\u200Bum for the party', 'alcohol'], ['Panadol for my mother', 'medicines'], ['Ganja', 'cannabis and illegal drugs'],
+    ] as const) {
+      const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription }, sender.token);
+      expect(res.statusCode, packageDescription).toBe(409);
+      expect(res.json().error).toMatchObject({
+        code: 'PROHIBITED_PARCEL',
+        message: `Swift can't carry this parcel: Swift never delivers ${label}. If it's something else, describe it in other words.`,
+      });
+    }
+    expect(await parcelsOf(sender.userId)).toBe(0);
+    const ok = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'School books and a lunch kit' }, sender.token);
+    expect(ok.statusCode, ok.body).toBe(201);
+    // [DS1109 S4-1] A brand-first word alone is not the goods; with a pack it is.
+    expect((await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'Banks birthday card' }, sender.token)).statusCode).toBe(201);
+    const pack = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'Banks 6 pack' }, sender.token);
+    expect(pack.json().error).toMatchObject({ code: 'PROHIBITED_PARCEL', message: 'Swift can\'t carry this parcel: Swift never delivers alcohol. If it\'s something else, describe it in other words.' });
+  });
+
+  it('the sender\'s declaration is recorded on the order\'s trail; a parcel declared as holding a prohibited item books nothing', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const declined = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, declaresNoProhibitedItems: false }, sender.token);
+    expect(declined.statusCode).toBe(409);
+    expect(declined.json().error).toMatchObject({ code: 'PROHIBITED_PARCEL', message: 'Swift can\'t carry a parcel with a prohibited item in it.' });
+    expect(await parcelsOf(sender.userId)).toBe(0);
+
+    const declared = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, declaresNoProhibitedItems: true }, sender.token);
+    expect(declared.statusCode, declared.body).toBe(201);
+    const trail = await app.prisma.orderStatusLog.findFirstOrThrow({ where: { orderId: declared.json().data.orderId } });
+    expect(trail.note).toContain('The sender declared the parcel holds no prohibited items.');
+    // Apps before build 11 send no declaration: the booking still stands, and the trail does not claim one.
+    const older = await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token);
+    expect(older.statusCode, older.body).toBe(201);
+    expect((await app.prisma.orderStatusLog.findFirstOrThrow({ where: { orderId: older.json().data.orderId } })).note).not.toContain('declared');
   });
 });

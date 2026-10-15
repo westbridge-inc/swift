@@ -1,3 +1,4 @@
+import { readFeePause } from '../modules/billing/mmg-pause';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
@@ -141,7 +142,7 @@ describe('[MKT G7] the endpoint counts the catalogue the shopper would see', () 
   it('depth counts only available items from visible RETAIL sellers', async () => {
     const { visibleVendorInTenant } = await import('../modules/vendor/vendor-visibility');
     const tenantId = 'swift-default';
-    const where = { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId), vendorType: 'STORE' as const } };
+    const where = { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId, await readFeePause(app.prisma)), vendorType: 'STORE' as const } };
     const items = await app.prisma.item.count({ where });
     const sellers = await app.prisma.item.findMany({ where, select: { vendorId: true }, distinct: ['vendorId'] });
 
@@ -151,7 +152,7 @@ describe('[MKT G7] the endpoint counts the catalogue the shopper would see', () 
 
     // And a restaurant dish must never be counted as market depth.
     const dishes = await app.prisma.item.count({
-      where: { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId), vendorType: 'RESTAURANT' } },
+      where: { isAvailable: true, vendor: { ...visibleVendorInTenant(tenantId, await readFeePause(app.prisma)), vendorType: 'RESTAURANT' } },
     });
     if (dishes > 0) expect(items).toBeLessThan(items + dishes);
   });

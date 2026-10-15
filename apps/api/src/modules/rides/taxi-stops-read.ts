@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient, TaxiStopStatus } from '@prisma/client';
 import { isTaxiStopOpen } from '../order/order-status';
+import { coarseStops, type CoarseStop } from '../dispatch/board-privacy';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 3/8] How the stops of a ride are READ and shown: one
@@ -116,14 +117,16 @@ export async function loadTaxiStops(
 }
 
 /** What a ride WITH stops adds to an offer, a board item or a recovered card:
- *  how many stops, and where. A ride without them adds nothing (null). */
+ *  how many stops, and roughly where. A ride without them adds nothing (null). */
 export function offerItinerary(
   order: { id: string; taxiStopCount: number | null },
   stops: ReadonlyMap<string, readonly TaxiStopRow[]>,
-): { stopCount: number; stops: TaxiStopPreview[] } | null {
+): { stopCount: number; stops: CoarseStop[] } | null {
   if (order.taxiStopCount == null) return null;
   const rows = stops.get(order.id) ?? [];
-  return { stopCount: rows.length, stops: stopPreview(rows) };
+  // [L05 · DS1301] Before acceptance a stop is only its order and a coarse
+  // point: no typed address, no exact position (the board's ~330 m grid).
+  return { stopCount: rows.length, stops: coarseStops(stopPreview(rows)) };
 }
 
 /** What a ride WITH stops adds to the passenger's or the driver's live ride:
@@ -153,7 +156,7 @@ export async function readRideItinerary(
 export async function readOfferItinerary(
   prisma: Pick<PrismaClient, 'taxiTripStop'>,
   order: { id: string; taxiStopCount: number | null },
-): Promise<{ stopCount: number; stops: TaxiStopPreview[] } | null> {
+): Promise<{ stopCount: number; stops: CoarseStop[] } | null> {
   if (order.taxiStopCount == null) return null;
   return offerItinerary(order, await loadTaxiStops(prisma, [order.id]));
 }

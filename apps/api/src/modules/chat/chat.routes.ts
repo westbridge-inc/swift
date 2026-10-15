@@ -1,6 +1,8 @@
+import { emitToChatRoom } from '../order/order-room-emission.service';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
+import { chatContentFilterEnabled, chatContentReason } from './content-filter';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
 import {
   assertRoomAccess, chatMediaFolder, isServerIssuedMediaId, reconcileParticipants, resolveRoomAuthority, rotateLeakedRidePin,
@@ -12,6 +14,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { chatGuardCounter } from '../../plugins/observability';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
+import { withLockedChatAccess } from './chat-persistence.service';
 
 /** How far back the split-code check looks. Bounded on BOTH axes on purpose:
  *  an unbounded scan of a long conversation would put an O(history) query on
@@ -133,20 +136,24 @@ export async function chatRoutes(app: FastifyInstance) {
     // every open — and the create response is an egress like any other: its messages pass
     // through the ONE serializer.
     const authority = await resolveRoomAuthority(app.prisma, room.id);
-    if (authority) {
-      const changed = await reconcileParticipants(app.prisma, authority);
-      if (changed.added || changed.removed) {
-        room = (await app.prisma.chatRoom.findUnique({
+    if (!authority) throw new NotFoundError('Chat room', room.id);
+    if (request.tenantId && request.tenantId !== authority.tenantId) throw new NotFoundError('Chat room', room.id);
+    if (!authority.participants.has(request.user.userId)) throw new ForbiddenError('You are not part of this conversation');
+    const changed = await reconcileParticipants(app.prisma, authority);
+    if (changed.added || changed.removed) {
+      room = (await app.prisma.chatRoom.findUnique({
           where: { id: room.id },
           include: {
             participants: { include: { user: { select: { id: true, firstName: true, avatar: true } } } },
             messages: { orderBy: { createdAt: 'desc' }, take: 50 },
           },
-        })) ?? room;
-      }
+      })) ?? room;
     }
-    const messages = authority ? await serializeChatMessages(room.messages, authority, 'create') : [];
-    return { success: true, data: { ...room, messages } };
+    const messages = await serializeChatMessages(room.messages, authority, 'create');
+    // Loading/reconciling/signing history yields. A participant removed during
+    // that work must not receive the snapshot it loaded before reassignment.
+    const current = await assertRoomAccess(app.prisma, room.id, request.user.userId, { tenantId: request.tenantId });
+    return { success: true, data: { ...room, participants: room.participants.filter((p) => current.participants.has(p.userId)), messages } };
   });
 
   /**
@@ -180,7 +187,7 @@ export async function chatRoutes(app: FastifyInstance) {
     const { message, messageType, mediaId, mediaUrl } = sendMessageSchema.parse(request.body);
 
     // [R048-004] Authority is the order's CURRENT people, inside the order's tenant, and the room must be open.
-    const access = await assertRoomAccess(app.prisma, roomId, request.user.userId, { write: true, tenantId: request.tenantId });
+    let access = await assertRoomAccess(app.prisma, roomId, request.user.userId, { write: true, tenantId: request.tenantId });
 
     // [R048-004] A client-supplied media URL is not stored — not scrubbed, not stored: refused.
     if (mediaUrl !== undefined) {
@@ -201,17 +208,17 @@ export async function chatRoutes(app: FastifyInstance) {
     // how a customer finds "I left it inside your gate" after they have blocked
     // the person who wrote it; deleting or hiding it would destroy the record
     // at the moment it matters most.
-    const otherUserIds = [...access.participants.keys()].filter((uid) => uid !== request.user.userId);
+    let otherUserIds = [...access.participants.keys()].filter((uid) => uid !== request.user.userId);
     for (const other of otherUserIds) {
       await assertUsersMayContact(app.prisma, access.tenantId, request.user.userId, other);
     }
 
-    // Off-platform contact detection (spec §2): the message still delivers —
-    // the sender gets a soft nudge and the flag feeds risk signals. Detection,
-    // never censorship.
+    // Retain the nudge/risk signal for allowed off-platform overtures. With the
+    // launch content filter on, admission below also refuses prohibited
+    // contact details and language.
     const offPlatform = detectOffPlatformContact(message);
 
-    // [F-027-12] ...with exactly one exception. The order's pickup/ride code is
+    // [F-027-12] Redact order secrets before content admission. The pickup/ride code is
     // not content to moderate, it is the proof that the driver physically met
     // the customer. Chat puts the driver in the room and copies message text
     // verbatim into the other participants' PUSH bodies, so an unguarded room
@@ -229,34 +236,53 @@ export async function chatRoutes(app: FastifyInstance) {
     const priorDigits = secrets
       ? await recentSenderDigits(app, roomId, request.user.userId)
       : '';
-    const guarded = redactOrderSecrets(message, secrets ?? {}, priorDigits);
-    const body = guarded.text;
+    const persisted = await withLockedChatAccess(app.prisma, roomId, request.user.userId, request.tenantId, async (tx, current) => {
+      // The earlier contact/content checks may yield. Re-prove the CURRENT
+      // audience and scrub against its current secrets while its parent is locked.
+      const recipients = [...current.participants.keys()].filter((uid) => uid !== request.user.userId);
+      for (const other of recipients) {
+        await assertUsersMayContact(tx, current.tenantId, request.user.userId, other);
+      }
+      const guarded = redactOrderSecrets(message, current.secrets, priorDigits);
+      // Content admission judges the exact text that would be stored, under the
+      // same lock: refusing here rolls the write back, so a refused message is
+      // never stored, broadcast or pushed. Off until the launch switch is on.
+      const contentReason = chatContentFilterEnabled() ? chatContentReason(guarded.text) : undefined;
+      if (contentReason) {
+        chatGuardCounter.labels('send', 'content_refused').inc();
+        throw new AppError(400, 'CHAT_CONTENT_NOT_ALLOWED',
+          'This message contains language or contact details that cannot be sent. Use Swift chat or the published support contact.',
+          { reason: contentReason });
+      }
+      const mediaBlocked = mediaId !== undefined && mediaUrlCarriesSecret(mediaId, current.secrets);
+      const msg = await tx.chatMessage.create({
+        data: {
+          chatRoomId: roomId, senderId: request.user.userId,
+          message: guarded.text, messageType,
+          mediaUrl: mediaBlocked ? undefined : mediaId,
+          offPlatformFlag: offPlatform,
+          // Who it was sent to, proved under this lock: a person later taken
+          // off the order may still report what they received (owner ruling).
+          recipientIds: recipients,
+        },
+      });
+      return { msg, access: current, recipients, guarded, mediaBlocked };
+    });
+    access = persisted.access;
+    otherUserIds = persisted.recipients;
+    const { msg, guarded, mediaBlocked } = persisted;
     if (guarded.redacted) chatGuardCounter.labels('send', 'redacted').inc();
 
     // [R048-004] A server-issued id cannot name the code by construction (a random name under the
     // room's folder); the check stays as the invariant it is.
-    const mediaBlocked = mediaId !== undefined && mediaUrlCarriesSecret(mediaId, secrets ?? {});
-    const safeMediaId = mediaBlocked ? undefined : mediaId;
-
-    const msg = await app.prisma.chatMessage.create({
-      data: {
-        chatRoomId: roomId,
-        senderId: request.user.userId,
-        message: body,
-        messageType,
-        mediaUrl: safeMediaId,
-        offPlatformFlag: offPlatform,
-      },
-    });
-
     // [R048-004] A live ride PIN typed into chat is in someone's hands now: re-issue it.
-    if (guarded.redacted && access.orderId) await rotateLeakedRidePin(app.prisma, access.orderId, message, secrets ?? {});
+    if (guarded.redacted && access.orderId) await rotateLeakedRidePin(app.prisma, access.orderId, message, access.secrets);
 
     // ONE serializer for every egress: the socket payload, the push body and the response are the same view.
     const view = await serializeChatMessage(msg, access, 'socket');
 
     // Broadcast via Socket.IO
-    app.io.to(`chat:${roomId}`).emit('chat:message', {
+    await emitToChatRoom(app.prisma, app.io, roomId, 'chat:message', {
       id: view.id,
       roomId,
       senderId: request.user.userId,
@@ -273,7 +299,17 @@ export async function chatRoutes(app: FastifyInstance) {
     // is live), respects the recipient's prefs, and lands in the failure
     // metrics. The old code wrote a row + a socket emit only, so a backgrounded
     // app never learned about the message.
-    for (const userId of otherUserIds) {
+    // A push is a new contact: only people who are STILL current AND were
+    // contact-checked under the lock with the write (a mover assigned after
+    // the commit was never checked against the sender's blocks).
+    const publicationAuthority = await resolveRoomAuthority(app.prisma, roomId).catch(() => null);
+    const publicationRecipients = [...(publicationAuthority?.participants.keys() ?? [])]
+      .filter((userId) => userId !== request.user.userId && persisted.recipients.includes(userId));
+    for (const userId of publicationRecipients) {
+      // An earlier notification may yield. Re-prove this recipient immediately
+      // before enqueueing, and suppress delivery if authority is unavailable.
+      const current = await resolveRoomAuthority(app.prisma, roomId).catch(() => null);
+      if (!current || current.tenantId !== access.tenantId || !current.participants.has(userId)) continue;
       await notifications.send({
         userId,
         type: 'CHAT_MESSAGE',
@@ -330,6 +366,7 @@ export async function chatRoutes(app: FastifyInstance) {
     // carries a secret nobody can act on once the code has been used.
     // [R048-004] ...through the ONE serializer: legacy raw text re-scrubbed, legacy raw media hidden.
     const visible = await serializeChatMessages(messages, access, 'history');
+    await assertRoomAccess(app.prisma, roomId, request.user.userId, { tenantId: request.tenantId });
     return { success: true, data: visible.reverse() };
   });
 
@@ -386,16 +423,24 @@ export async function chatRoutes(app: FastifyInstance) {
         continue;
       }
       const last = r.messages[0];
+      const lastMessage = last ? await serializeChatMessage(last, authority, 'list') : null;
+      let current;
+      try {
+        current = await assertRoomAccess(app.prisma, r.id, request.user.userId, { tenantId: request.tenantId });
+      } catch (error) {
+        if (error instanceof AppError && [403, 404].includes(error.statusCode)) continue;
+        throw error;
+      }
       listed.push({
         id: r.id,
         orderId: r.orderId,
-        participants: r.participants.map((p) => ({
+        participants: r.participants.filter((p) => current.participants.has(p.userId)).map((p) => ({
           userId: p.user.id,
           name: p.user.firstName,
           avatar: p.user.avatar,
           role: p.role,
         })),
-        lastMessage: last ? await serializeChatMessage(last, authority, 'list') : null,
+        lastMessage,
       });
     }
     return { success: true, data: listed };

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AppLayout from './layout';
 import { CustomerHome } from '@/components/customer-home';
+import { axeViolations } from '@/test/axe';
 
 const state = vi.hoisted(() => ({
   pathname: '/',
@@ -183,5 +184,14 @@ describe('[Q7b] in-app back buttons — an installed web app has no browser back
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
     go(view, '/account', 'Profile page');
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+  });
+});
+
+// [Row 111 · W8] The customer app's frame, as a page: a main landmark, one h1, named controls.
+describe('[W8] the app shell is accessible', () => {
+  it('has no accessibility violations axe can find', async () => {
+    render(<AppLayout><h1>Home page</h1></AppLayout>);
+    await screen.findByText('Home page');
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
   });
 });
