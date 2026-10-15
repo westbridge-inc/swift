@@ -409,6 +409,7 @@ const CENSUS: Case[] = [
   { k: 'ops_scheduler_never_booted', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'billing_dunning_ops_task', to: null, why: 'admins' },
   { k: 'billing_invariants', to: null, why: 'admins' },
+  { k: 'vat_threshold', to: null, why: 'admins — VAT registration threshold watch (owner legal plan R10)' },
   { k: 'billing_manual_reconciliation', to: null, why: 'admins — a card instruction the processor never saw; reviewed in the admin console before any new attempt' },
   { k: 'billing_unknown_intents_sla', to: null, why: 'admins' },
   { k: 'reconcile_mismatch', to: null, why: 'admins' },
