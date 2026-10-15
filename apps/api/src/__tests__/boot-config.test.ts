@@ -1207,7 +1207,9 @@ describe('[TA-S0-003 · R3] the contract posture runs on the two least-privilege
         return spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), [join(process.cwd(), '../../deploy/preflight.ts'), file, '--secrets-dir', secrets],
           { encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '' } });
       };
-      const { DATABASE_URL: _a, SYSTEM_DATABASE_URL: _b, ...walledSettings } = walled;
+      // The overlay hands the two URLs over as files from the store, never as settings.
+      const walledSettings = Object.fromEntries(Object.entries(walled)
+        .filter(([name]) => name !== 'DATABASE_URL' && name !== 'SYSTEM_DATABASE_URL'));
       const contract = run(walledSettings);
       expect(contract.stdout + contract.stderr).not.toMatch(/both set/);
       expect(contract.stdout).toMatch(/PASS/);
