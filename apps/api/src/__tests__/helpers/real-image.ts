@@ -18,7 +18,7 @@ export const REAL_JPEG = Buffer.from(
 );
 
 /** The real PNG with a text chunk (valid CRC) carrying `note`, just after IHDR. */
-export function uniquePng(note: string): Buffer {
+export function uniquePng(note: string) {
   const data = Buffer.from(`Comment\0${note}`, 'latin1');
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);
@@ -29,7 +29,7 @@ export function uniquePng(note: string): Buffer {
 }
 
 /** The real JPEG with a comment segment carrying `note`, just after the start marker. */
-export function uniqueJpeg(note: string): Buffer {
+export function uniqueJpeg(note: string) {
   const data = Buffer.from(note, 'latin1');
   const len = Buffer.alloc(2);
   len.writeUInt16BE(data.length + 2, 0);
@@ -43,7 +43,7 @@ export const REAL_WEBP = Buffer.from('UklGRjoAAABXRUJQVlA4IC4AAADQAQCdASoBAAEAAU
  * The real JPEG whose frame header says width × height, made unique by `note`. The decoder
  * reads a photo's size from that header; the pixels themselves are never decoded here.
  */
-export function jpegSized(width: number, height: number, note: string): Buffer {
+export function jpegSized(width: number, height: number, note: string) {
   const out = uniqueJpeg(note);
   const sof = out.indexOf(Buffer.from([0xff, 0xc0]));
   out.writeUInt16BE(height, sof + 5);
