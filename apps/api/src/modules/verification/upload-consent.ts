@@ -16,7 +16,7 @@ export const UPLOAD_CONSENT = {
   document_v1: {
     documentType: 'document_processing_consent',
     version: 'v1',
-    text: 'I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only with our hosting provider, as the Privacy Policy explains.',
+    text: 'I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.',
   },
   customer_id_v1: {
     documentType: 'customer_id_consent',

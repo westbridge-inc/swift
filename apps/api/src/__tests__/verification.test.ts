@@ -1204,7 +1204,7 @@ describe('[R17] upload consent ticks are recorded in the consent ledger', () => 
     const doc = await app.prisma.legalDocument.findUniqueOrThrow({
       where: { documentType_version_locale: { documentType: 'document_processing_consent', version: 'v1', locale: 'en-GY' } },
     });
-    expect(doc.renderedText).toBe('I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only with our hosting provider, as the Privacy Policy explains.');
+    expect(doc.renderedText).toBe('I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.');
   });
 
   it('a customer ID sent with the tick writes a customer_id_consent row (the in-app ¶15 words)', async () => {
