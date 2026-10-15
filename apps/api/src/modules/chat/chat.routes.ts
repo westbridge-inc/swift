@@ -2,6 +2,7 @@ import { emitToChatRoom } from '../order/order-room-emission.service';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
+import { chatContentFilterEnabled, chatContentReason } from './content-filter';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
 import {
   assertRoomAccess, chatMediaFolder, isServerIssuedMediaId, reconcileParticipants, resolveRoomAuthority, rotateLeakedRidePin,
@@ -212,12 +213,12 @@ export async function chatRoutes(app: FastifyInstance) {
       await assertUsersMayContact(app.prisma, access.tenantId, request.user.userId, other);
     }
 
-    // Off-platform contact detection (spec §2): the message still delivers —
-    // the sender gets a soft nudge and the flag feeds risk signals. Detection,
-    // never censorship.
+    // Retain the nudge/risk signal for allowed off-platform overtures. With the
+    // launch content filter on, admission below also refuses prohibited
+    // contact details and language.
     const offPlatform = detectOffPlatformContact(message);
 
-    // [F-027-12] ...with exactly one exception. The order's pickup/ride code is
+    // [F-027-12] Redact order secrets before content admission. The pickup/ride code is
     // not content to moderate, it is the proof that the driver physically met
     // the customer. Chat puts the driver in the room and copies message text
     // verbatim into the other participants' PUSH bodies, so an unguarded room
@@ -243,6 +244,16 @@ export async function chatRoutes(app: FastifyInstance) {
         await assertUsersMayContact(tx, current.tenantId, request.user.userId, other);
       }
       const guarded = redactOrderSecrets(message, current.secrets, priorDigits);
+      // Content admission judges the exact text that would be stored, under the
+      // same lock: refusing here rolls the write back, so a refused message is
+      // never stored, broadcast or pushed. Off until the launch switch is on.
+      const contentReason = chatContentFilterEnabled() ? chatContentReason(guarded.text) : undefined;
+      if (contentReason) {
+        chatGuardCounter.labels('send', 'content_refused').inc();
+        throw new AppError(400, 'CHAT_CONTENT_NOT_ALLOWED',
+          'This message contains language or contact details that cannot be sent. Use Swift chat or the published support contact.',
+          { reason: contentReason });
+      }
       const mediaBlocked = mediaId !== undefined && mediaUrlCarriesSecret(mediaId, current.secrets);
       const msg = await tx.chatMessage.create({
         data: {
