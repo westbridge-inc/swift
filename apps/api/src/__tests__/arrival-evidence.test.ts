@@ -131,7 +131,12 @@ describe('the evidence format still has exactly one author', () => {
     // The note must come from the evidence (now through the E19 gate, which
     // spreads the same `arrivalEvidence` result), and the clock must be stamped.
     expect(src).toMatch(/note:\s*gate\.note/);
-    expect(src).toContain('driverArrivedAt');
+    expect(src).toContain('advanceDriverPickup(app.prisma,');
+    expect(src).toContain('const arrivedAt = new Date()');
+    expect(src).toContain('note: gate.note, arrivedAt,');
+    const pickup = readFileSync(path.join(__dirname, '..', 'modules', 'rides', 'driver-pickup.ts'), 'utf8');
+    expect(pickup).toContain('driverArrivedAt: input.arrivedAt');
+    expect(pickup).toContain('note: input.note');
   });
 });
 

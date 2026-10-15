@@ -165,7 +165,6 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
         <p className="sr-only">Order food, groceries and more from businesses in {market} — you pay them directly, cash or MMG.</p>
         <Link
           href="/order/search"
-          prefetch={true}
           className={`mt-3 flex h-12 w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-[13px] font-medium leading-[18px] text-[var(--swift-muted-soft)] hover:border-[var(--swift-border-strong)] wide:max-w-[640px] ${PRESS}`}
         >
           <Search size={17} aria-hidden />

@@ -275,13 +275,13 @@ describe('BullMQ lifecycle', () => {
     process.on('unhandledRejection', onUnhandled);
 
     try {
-      expect(bullState.queues).toHaveLength(7);
+      expect(bullState.queues).toHaveLength(8); // [row 266] + the offer lane
       await Promise.all(Array.from({ length: 100 }, (_, index) =>
         enqueueVendorAlertFollowup(queues, `order-${index}`),
       ));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      expect(bullState.queues).toHaveLength(7);
+      expect(bullState.queues).toHaveLength(8); // [row 266] + the offer lane
       expect(notificationQueue.adds).toHaveLength(100);
       expect(notificationQueue.closeCalls).toBe(0);
       expect(unhandled).toEqual([]);
@@ -375,7 +375,7 @@ describe('BullMQ lifecycle', () => {
     await expect(initializeJobRuntime(context(), { runWorkers: false }))
       .rejects.toThrow(/verification-jobs failed readiness/);
 
-    expect(bullState.queues).toHaveLength(7);
+    expect(bullState.queues).toHaveLength(8); // [row 266] + the offer lane
     expect((bullState.queues as FakeQueue[]).every((queue) => queue.closeCalls === 1)).toBe(true);
     expect(bullState.workers).toHaveLength(0);
   });
@@ -400,7 +400,7 @@ describe('BullMQ lifecycle', () => {
     await expect(initializeJobRuntime(context(), { runWorkers: true }))
       .rejects.toThrow(/process-billing schedule failed/);
 
-    expect(bullState.workers).toHaveLength(7);
+    expect(bullState.workers).toHaveLength(8); // [row 266] + the offer worker
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.options.autorun === false)).toBe(true);
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.runCalls === 0)).toBe(true);
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.closeCalls === 1)).toBe(true);

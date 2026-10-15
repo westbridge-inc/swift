@@ -1,6 +1,6 @@
 import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -684,8 +684,10 @@ describe('Scoring — pure and predictable', () => {
     expect(scoreCandidate({ ...base, hasActiveJob: false })).toBeLessThan(scoreCandidate({ ...base, hasActiveJob: true }));
   });
 
-  it('chronic decliners drift down', () => {
-    expect(scoreCandidate({ ...base, acceptanceRate: 95 })).toBeLessThan(scoreCandidate({ ...base, acceptanceRate: 20 }));
+  // [Owner ruling 15 Oct 2026 · R25, contractor status] TRANSFORMED: was 'chronic decliners drift down'. Declining or
+  // cancelling an offer never costs a partner anything: no strike, no lower place in the offer order.
+  it('declining costs no place in the offer order', () => {
+    expect(scoreCandidate({ ...base, acceptanceRate: 95 })).toBe(scoreCandidate({ ...base, acceptanceRate: 20 }));
   });
 
   it('rating does NOT break ties — RATING_AFFECTS_DISPATCH is false (founder, R-Law 4)', () => {
@@ -2500,6 +2502,9 @@ describe('candidate selection at scale [SWIFT-142]', () => {
 
 describe('vehicle capability matching [SWIFT-062]', () => {
   it('an EXTRA_LARGE parcel is offered to a CAR, never to a bicycle', async () => {
+    // [Owner ruling 15 Oct 2026] TRANSFORMED: runs with CAR_DELIVERIES=1 (the re-enable path). With the switch
+    // off (default) no car is a goods candidate: taxi-cars-passengers-only.test.ts.
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     await app.prisma.rider.updateMany({ data: { isOnline: false } });
     const localUserIds: string[] = [];
     const phoneBase = 592_830_000_000 + Math.floor(Math.random() * 80_000_000);

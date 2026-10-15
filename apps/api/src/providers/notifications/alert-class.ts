@@ -69,8 +69,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // (Group, while buses are hidden): told once, like a timed-out queue entry.
     'ride_queue_unavailable',
     // Bookings and service jobs, other than the two that ring or need action now
-    'booking_confirmed', 'booking_slot_declined', 'booking_completed', 'booking_cancelled',
-    'booking_reminder', 'booking_rescheduled',
+    'booking_quoted', 'booking_confirmed', 'booking_slot_declined', 'booking_started',
+    'booking_completed', 'booking_cancelled', 'booking_reminder', 'booking_rescheduled',
     // Safety of the person receiving it (the driver confirm is a job update)
     'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',
@@ -98,6 +98,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'support_ticket', 'sos_active', 'sos_marked_safe', 'guardian_deescalation',
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',
     'safety_escrow_review', 'not_my_driver_discrepancy', 'ops_alert_escalated', 'ops_alert_drill',
+    // [R19] a child-safety (CSAE) report: an ops page, as loud as an SOS page
+    'csae_report',
     'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old',
     'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_reaper_stale', 'ops_reaper_failed',
