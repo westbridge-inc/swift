@@ -932,6 +932,8 @@ export function useTipOrder(orderId: string) {
 }
 
 /** Approve/reject the store's out-of-stock substitution, live (§5.3). */
+type SubstitutionDecision = { orderId: string; lineId: string; approve: boolean };
+
 export function useDecideSubstitution() {
   const qc = useQueryClient();
   // [review of #1565 S2] The order is part of the decision, never the render's
@@ -941,14 +943,14 @@ export function useDecideSubstitution() {
   return useMutation({
     // A 409 means the swap moved on (the store withdrew it, or another device
     // decided first): show the line as it is now instead of a stale card.
-    onError: (error: { response?: { status?: number } } | null | undefined, { orderId }: { orderId: string }) => {
+    onError: (error: { response?: { status?: number } } | null | undefined, { orderId }: SubstitutionDecision) => {
       if (error?.response?.status === 409) return qc.invalidateQueries({ queryKey: customerKeys.order(orderId) });
       return undefined;
     },
-    mutationFn: ({ orderId, lineId, approve }: { orderId: string; lineId: string; approve: boolean }) =>
+    mutationFn: ({ orderId, lineId, approve }: SubstitutionDecision) =>
       customerApi.decideSubstitution(orderId, lineId, approve),
     // The order screen reads customerKeys.order; a decision refreshes that key.
-    onSuccess: (_data, { orderId }) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
+    onSuccess: (_data: unknown, { orderId }: SubstitutionDecision) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
   });
 }
 

@@ -30,7 +30,7 @@ import { customerKeys, useDecideSubstitution } from './customer';
 
 const originalAdapter = api.defaults.adapter;
 let client: QueryClient;
-let observer: QueryObserver;
+let observer: QueryObserver<unknown, Error, unknown, unknown, ReturnType<typeof customerKeys.order>>;
 let seen: InternalAxiosRequestConfig[];
 let rejectRequest: (() => void) | undefined;
 let resolveRequest: (() => void) | undefined;
