@@ -13,7 +13,7 @@ import { gsm7Parts, isGsm7 } from '../../utils/sms-text';
  * test: every other sendSms/sendEmail caller is a listed service message). Each send:
  *  - goes only to a person whose LATEST marketing consent is a grant to the CURRENT words
  *    (mayReceiveMarketing; withdrawn means zero sends);
- *  - names Swift first ("Swift: …" in a text; "From Swift (Westbridge Inc.)" in an e-mail);
+ *  - names Swift first ("Swift: …" in a text; "From Swift (<the operator name>)" in an e-mail);
  *  - says how to stop: "Reply STOP to opt out." in a text, and in an e-mail the app switch
  *    the consent text promises (Account → Marketing messages), plus STOP by text.
  * A marketing TEXT is refused while the inbound STOP door is not configured: a text may
