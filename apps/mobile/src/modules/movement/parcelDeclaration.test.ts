@@ -27,6 +27,10 @@ describe('[owner #67] the words', () => {
     );
   });
 
+  it('[legal research A10 · REVIEW-F S3-1 on #1753] no size hint suggests documents, letters or mail', () => {
+    expect(SCREEN).not.toMatch(/hint: '[^']*(?:document|letter|mail|envelope)/i);
+  });
+
   it('[legal research A10 · R1] the website courier page lists the same goods, word for word', () => {
     const web = readFileSync(new URL('../../../../web/src/app/(app)/courier/page.tsx', import.meta.url), 'utf8');
     expect(web).toContain(`>${PARCEL_BANNED_GOODS}<`);
