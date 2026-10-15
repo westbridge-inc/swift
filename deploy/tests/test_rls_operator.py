@@ -472,11 +472,25 @@ class OperatorEndToEnd(unittest.TestCase):
             with self.subTest(project=stack):
                 self.assertEqual(self.host.run('apply', stack=stack)[1],
                                  {'status': 'hold', 'reason': 'REHEARSAL_STACK_NEEDS_ITS_OWN_PROJECT'})
+        # The base file joins production's private network (where `postgres`
+        # is production's database): a rehearsal that layers it must end with
+        # the rehearsal layer, which replaces that network with its own.
+        reh = str(DEPLOY / 'docker-compose.rehearsal.yml')
+        for stack in (['--project-name', 'swift-rehearsal', '--compose-file', base, *own_store],
+                      ['--project-name', 'swift-rehearsal', '--compose-file', base, '--compose-file', wall, *own_store],
+                      ['--project-name', 'swift-rehearsal', '--compose-file', base, '--compose-file', reh,
+                       '--compose-file', wall, *own_store],
+                      ['--project-name', 'swift-rehearsal', '--compose-file', base, '--compose-file', other, *own_store]):
+            with self.subTest(isolation=stack):
+                self.assertEqual(self.host.run('apply', stack=stack)[1],
+                                 {'status': 'hold', 'reason': 'REHEARSAL_STACK_NEEDS_ITS_ISOLATION'})
         self.assertEqual(self.host.call_records(), [])
         self.assertFalse(self.host.lock.exists())
         # The two allowed pairs get past the check (fingerprint reads no store).
         for stack in ([], ['--compose-file', base], ['--compose-file', base, '--compose-file', wall],
-                      ['--project-directory', str(DEPLOY) + '/'], rehearsal + own_store):
+                      ['--project-directory', str(DEPLOY) + '/'], rehearsal + own_store,
+                      ['--project-name', 'swift-rehearsal', '--compose-file', base, '--compose-file', wall,
+                       '--compose-file', str(DEPLOY / 'docker-compose.rehearsal.yml'), *own_store]):
             with self.subTest(allowed=stack):
                 self.assertEqual(self.host.run('fingerprint', stack=stack)[1]['status'], 'fingerprint')
 

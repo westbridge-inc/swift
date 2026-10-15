@@ -15,6 +15,7 @@ import { riderRoutes } from '../../modules/rider/rider.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { recordDispatchQueue } from '../helpers/dispatch-queue';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
+import { REAL_PNG } from '../helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · COUR-01 / COUR-02 — the courier "Send" journey, through the REAL
@@ -145,7 +146,9 @@ function track(token: string) {
   return app.inject({ method: 'GET', url: `/api/v1/courier/track/${token}`, remoteAddress: '10.43.3.2' });
 }
 
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 7)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
+
+const PNG = REAL_PNG;
 
 function postPhoto(orderId: string, token: string, content: Buffer = PNG, mime = 'image/png', route: 'proof-photo' | 'pickup-proof-photo' = 'proof-photo') {
   const boundary = `----gold3${nanoid(8)}`;

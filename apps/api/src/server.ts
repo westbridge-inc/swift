@@ -9,7 +9,6 @@ import { buildApp } from './app';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
 import { attestTenantWallAtBoot } from './boot/tenant-wall';
 import { attestSystemLoginAtBoot } from './boot/system-login';
-import { isProduction } from './utils/runtime-mode';
 import { runAsSystem } from './plugins/tenant-context';
 import { checkDeploymentIdentityAtStart } from './utils/deployment-identity';
 
@@ -87,15 +86,10 @@ async function start() {
         // validator with no implementation — is a lie about verification. In
         // production the boot contract stays incomplete (readiness 503); elsewhere
         // the gaps are named so the seed that closes them can be written.
-        const { registryCompletenessGaps } = await import('./modules/verification/doc-registry');
+        // The gate throws in production (caught below: readiness stays 503) and warns elsewhere.
+        const { enforceRegistryCompletenessAtBoot } = await import('./modules/verification/doc-registry');
         const { resolvesImpl } = await import('./modules/verification/validators');
-        const gaps = await registryCompletenessGaps(app.prisma, resolvesImpl);
-        if (gaps.length > 0) {
-          if (isProduction()) {
-            throw new Error(`document registry incomplete for active types: ${gaps.slice(0, 8).map((g) => `${g.docTypeCode}:${g.gap}${g.detail ? `(${g.detail})` : ''}`).join(', ')}`);
-          }
-          app.log.warn({ gaps }, 'documents: registry incomplete for active types — production refuses to boot like this');
-        }
+        await enforceRegistryCompletenessAtBoot(app.prisma, app.log, resolvesImpl);
         // [R048-006] The contract is COMPLETE only here. Readiness answers 503
         // until this line runs, so an orchestrator never routes to a process
         // whose category rail would be empty.

@@ -64,6 +64,7 @@ DEFAULT_STORE = '/etc/credstore.encrypted/swift'
 DEFAULT_RUN = '/run/swift-secrets'  # production's live secrets, mounted into its containers
 PRODUCTION_COMPOSE = ('docker-compose.yml', 'docker-compose.wall.yml')
 PROJECT_NAME = re.compile('[a-z0-9][a-z0-9_-]*')  # what Compose accepts as a project name
+REHEARSAL_COMPOSE = 'docker-compose.rehearsal.yml'  # the rehearsal's own network, volumes and secrets
 DEFAULT_LOCK = '/run/lock/swift-rls-logins.lock'
 SCRAM_ITERATIONS = 4096
 TIMEOUT = 120
@@ -405,6 +406,11 @@ def store_env_for(args, deploy):
     require(production is not None and type(args.project_name) is str
             and PROJECT_NAME.fullmatch(args.project_name) is not None
             and args.project_name not in (production, Path(deploy).name), 'REHEARSAL_STACK_NEEDS_ITS_OWN_PROJECT')
+    # The base file joins production's private network, where `postgres` is
+    # production's database: a stack that layers it ends with the rehearsal
+    # layer, which puts it on an internal network of its own.
+    if os.path.realpath(deploy / PRODUCTION_COMPOSE[0]) in files:
+        require(files[-1] == os.path.realpath(deploy / REHEARSAL_COMPOSE), 'REHEARSAL_STACK_NEEDS_ITS_ISOLATION')
     return ['env', f'SWIFT_SECRETS_STORE_DIR={args.store_dir}', f'SWIFT_SECRETS_RUN_DIR={args.run_dir}']
 
 

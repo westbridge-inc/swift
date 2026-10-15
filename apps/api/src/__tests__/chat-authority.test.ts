@@ -13,6 +13,7 @@ import { chatRoutes } from '../modules/chat/chat.routes';
 import { SECRET_REDACTION } from '../modules/chat/secret-guard';
 import { deactivateRoom, isServerIssuedMediaId, resolveRoomAuthority, serializeChatMessage } from '../modules/chat/chat-authority';
 import { chatGuardCounter } from '../plugins/observability';
+import { REAL_PNG } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // [R048-004] Live handover secrets never cross ANY chat boundary, and only the
@@ -71,7 +72,8 @@ function multipartBody(filename: string, mime: string, content: Buffer) {
   return { payload: Buffer.concat([head, content, tail]), contentType: `multipart/form-data; boundary=${boundary}` };
 }
 // a minimal PNG header the image sniffer accepts
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
+const PNG = REAL_PNG;
 
 beforeAll(async () => {
   app = Fastify({ logger: false });

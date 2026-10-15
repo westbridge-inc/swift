@@ -46,10 +46,22 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: { id: string
   }
 }
 
-/** Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless. */
+/**
+ * Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless.
+ * [Row 78] /logout needs a live access cookie, which lasts minutes: a tab left open got a 401 from the gate, nothing was
+ * revoked, and the 30-day refresh cookie could sign the browser back in. When /logout does not answer success, the
+ * session ends by its refresh cookie instead (/logout/refresh revokes and clears without an access token).
+ */
 export async function logout(): Promise<void> {
+  const init: RequestInit = { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' };
   try {
-    await fetch(`${API_URL}/api/v1/auth/logout`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' });
+    const res = await fetch(`${API_URL}/api/v1/auth/logout`, init);
+    if (res.ok) return;
+  } catch {
+    // unreachable: try the refresh-cookie sign-out below
+  }
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout/refresh`, init);
   } catch {
     // the cookies are HttpOnly and path-scoped: with the server unreachable the shell still redirects to login
   }
@@ -272,12 +284,19 @@ export interface Promo {
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
-export const fetchUsers = (params?: string): Promise<Envelope<AdminUser[]>> =>
+/** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
+export interface ListEnvelope<T> {
+  success: boolean;
+  data: T[];
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+}
+// [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
+export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
   apiFetch(`/api/v1/admin/users?${params || ''}`);
-export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
+export const fetchVendors = (params?: string) => apiFetch(`/api/v1/admin/vendors?${params || ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
-export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
-export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
+export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?${params || ''}`);
+export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 

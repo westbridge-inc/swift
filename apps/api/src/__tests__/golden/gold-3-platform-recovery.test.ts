@@ -20,6 +20,7 @@ import { registerErrorHandler } from '../../middleware/error-handler';
 import { createQueues, type SwiftQueues } from '../../jobs/queue';
 import { recoveryFor } from '../../jobs/recovery-policy';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
+import { REAL_PNG } from '../helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · PLAT-02 — a worker crashes mid-flow and the platform recovers.
@@ -192,7 +193,7 @@ function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token?: st
 
 function postPhoto(orderId: string, token: string, route: 'proof-photo' | 'pickup-proof-photo' = 'proof-photo') {
   const boundary = `----gold3${nanoid(8)}`;
-  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 3)]);
+  const png = REAL_PNG; // [Row 108] a real photo: the storage seam reads every photo with the real decoder
   return app.inject({
     method: 'POST',
     url: `/api/v1/courier/order/${orderId}/${route}`,
