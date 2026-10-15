@@ -51,7 +51,7 @@ export default function DeleteAccountPage() {
       <div className="max-w-3xl">
         <h1 className="text-4xl font-extrabold tracking-tight">Delete your Swift account</h1>
         <p className="mt-4 text-lg text-[var(--swift-muted)]">
-          Swift is operated by {site.legalEntityName} (registration no. {site.registrationNo}). You can delete your Swift account and its personal
+          Swift is operated by {site.legalEntityName} (registration no. {site.registrationNo}), {site.address}, phone {site.phone}. You can delete your Swift account and its personal
           data at any time. This page explains how, and exactly what is removed and what we are
           required to keep.
         </p>

@@ -61,7 +61,8 @@ describe('delivery (research E3)', () => {
 
 describe('account deletion (research C12, A4; owner C8)', () => {
   it.each([
-    'Swift is operated by {site.legalEntityName} (registration no. {site.registrationNo}). You can delete',
+    // [Legal research R2] the operator's registration number, address and phone, from the one constant (via site)
+    'Swift is operated by {site.legalEntityName} (registration no. {site.registrationNo}), {site.address}, phone {site.phone}. You can delete',
     'We complete verified requests within one month.',
     "Data Protection Act 2023 will give you the right, once in force, to access your data",
     'Swift honours these rights now.',
