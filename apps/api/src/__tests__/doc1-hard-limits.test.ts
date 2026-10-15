@@ -25,6 +25,7 @@ import { redisPlugin } from '../plugins/redis';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
+import { seedDocRegistry } from '../modules/verification/doc-registry';
 import { NotificationService } from '../modules/notification/notification.service';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 import { biometricFaceMatchEnabled } from '../lib/biometric-guard';
@@ -64,6 +65,11 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(socketPlugin);
   await app.ready();
+  // [2b] reads and restores the GY owner_national_id registry row. Seed the
+  // registry here (idempotent), as the other DOC-1 suites do: without it this
+  // file passed only when a seeding suite happened to run earlier in the same
+  // CI shard, and failed when the shard split moved it away from them.
+  await runWithoutTenant(() => seedDocRegistry(app.prisma), 'hard-limits-test');
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59275${NUM}9`, firstName: 'Doc', lastName: 'Limits', activeRole: 'VENDOR_OWNER', countryCode: 'GY',
     avatar: `avatars/${RUN}/selfie.jpg`, selfieCapturedAt: new Date(),
