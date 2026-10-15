@@ -511,7 +511,7 @@ describe('live: starting and following a checkout (sections 4-5)', () => {
     expect(view.json().data).toMatchObject({ ref: data.ref, status: 'OPEN', amountGyd: 1500, currencyCode: 'GYD', confirmedAt: null, subscriptionStatus: 'ACTIVE' });
     expect(Object.keys(view.json().data).sort()).toEqual(['amountGyd', 'confirmedAt', 'createdAt', 'currencyCode', 'expiresAt', 'mmgTransactionId', 'ref', 'seller', 'status', 'subscriptionStatus', 'swiftReference']);
     // [Owner 15 Oct 2026 · ruling #63] every weekly-fee receipt names its seller: Swift's operator, from the one constant.
-    expect(view.json().data.seller).toEqual({ name: 'Westbridge Inc.', tradingAs: 'Swift', registrationNo: '17703', registeredAddress: 'Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana' });
+    expect(view.json().data.seller).toEqual({ name: 'Westbridge Inc.', tradingAs: 'Swift', registrationNo: '17703', registeredAddress: 'Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana', phone: '+592 716 3534', email: 'support@swiftgy.com' });
     // [support lookup] The receipt references (section 5): ours always, MMG's only once CONFIRMED.
     expect(view.json().data).toMatchObject({ swiftReference: row.merchantTransactionId, mmgTransactionId: null });
 

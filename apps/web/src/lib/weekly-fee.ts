@@ -10,7 +10,7 @@ export interface CheckoutStatus {
   /** MMG's transaction, sent only once CONFIRMED. */
   mmgTransactionId?: string | null;
   /** [Owner 15 Oct 2026 · ruling #63] Who sold the weekly fee (Swift's operator), as the API states it. Absent from an older API. */
-  seller?: { name: string; tradingAs?: string; registrationNo?: string; registeredAddress: string };
+  seller?: { name: string; tradingAs?: string; registrationNo?: string; registeredAddress: string; phone?: string; email?: string };
 }
 export interface FeeSubscription {
   id?: string; status: string; amountDueGyd?: number | string; nextBillingDate?: string | null;
@@ -60,6 +60,7 @@ export function checkoutReferences(c: CheckoutStatus): Array<{ label: string; va
 export function checkoutSeller(c: CheckoutStatus): string | null {
   return c.seller
     ? `Sold by ${c.seller.name}${c.seller.registrationNo ? ` (registration no. ${c.seller.registrationNo})` : ''}, ${c.seller.registeredAddress}`
+      + (c.seller.phone && c.seller.email ? `. Phone ${c.seller.phone}, email ${c.seller.email}` : '')
     : null;
 }
 export function pollDelay(elapsed: number, state?: CheckoutState): number | null {
