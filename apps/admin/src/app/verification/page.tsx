@@ -25,11 +25,10 @@ const EXPIRING_DOC_TYPES = [
   // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
   // validity like a licence, so the console must ask for its date too.
   'self_declaration_unregistered',
-  // [TRADES · 13 Oct 2026] the service-trade licences, registrations and certificates
-  'pest_control_operator_licence', 'pesticide_applicator_certificate',
-  'chartered_accountant_practising_certificate', 'gra_practice_certificate',
-  'eating_house_registration', 'town_clerk_registration', 'town_clerk_shop_certificate',
-  'drone_authorisation',
+  // [TRADES · 13 Oct 2026; R15] the service-trade licences and certificates. The ones checked again
+  // every January ask for the certificate's YEAR instead of a date (reviewerTypes 'certificateYear').
+  'pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration',
+  'gei_electrical_licence',
 ] as const;
 const EMPTY_INSURANCE: InsuranceCheck = { insurerName: '', policyNumber: '', coverageClass: 'HIRE', hireClassConfirmed: false, plateCrossChecked: false };
 const LANES = [{ value: 'operator', label: 'Operators' }, { value: 'customer', label: 'Customers' }, { value: 'all', label: 'Everything' }] as const;
@@ -59,6 +58,7 @@ export default function VerificationPage() {
   const [expiresAt, setExpiresAt] = useState('');
   const [documentNumber, setDocumentNumber] = useState('');
   const [issuedOn, setIssuedOn] = useState('');
+  const [certificateYear, setCertificateYear] = useState('');
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
   const [decision, setDecision] = useState<'approve' | 'reject' | null>(null);
   const [reason, setReason] = useState('');
@@ -125,7 +125,7 @@ export default function VerificationPage() {
     documentList.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
   };
   const selectDocument = (doc: ReviewDocument) => {
-    setSelected(doc); setViewed(false); setExpiresAt(''); setDocumentNumber(''); setIssuedOn(''); setInsurance(EMPTY_INSURANCE);
+    setSelected(doc); setViewed(false); setExpiresAt(''); setDocumentNumber(''); setIssuedOn(''); setCertificateYear(''); setInsurance(EMPTY_INSURANCE);
     setMutationError(null); setDecision(null); setReason(''); setReasonCode('');
   };
   const openApplicant = (next: Applicant | null) => {
@@ -154,15 +154,21 @@ export default function VerificationPage() {
     if (match) { openApplicant(match); if (named) selectDocument(named); }
     else setNotice('No documents from this applicant are waiting for review. They may still need to upload one, or the decision is under Approved, Rejected or Expired.');
   }, [queue.data]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per queue load by design
-  const needsExpiry = !!selected && (EXPIRING_DOC_TYPES as readonly string[]).includes(selected.docType);
+  const needsExpiry = !!selected && (EXPIRING_DOC_TYPES as readonly string[]).includes(selected.docType)
+    && !(selected.reviewerTypes?.includes('certificateYear') ?? false);
   const expiryOk = !needsExpiry || (!!expiresAt && Date.parse(expiresAt) > now);
   const isInsurance = selected?.docType === 'vehicle_insurance';
   const insuranceReady = insurance.insurerName.trim() && insurance.policyNumber.trim() &&
     (insurance.coverageClass !== 'HIRE' || (insurance.hireClassConfirmed && insurance.plateCrossChecked));
   const needsNumber = selected?.reviewerTypes?.includes('documentNumber') ?? false;
   const needsIssuedOn = selected?.reviewerTypes?.includes('issuedOn') ?? false;
+  // [R15] A licence or food certificate checked every January: the year printed on it, never a date.
+  const needsCertificateYear = selected?.reviewerTypes?.includes('certificateYear') ?? false;
+  const yearNow = new Date(now).getFullYear();
+  const certificateYearOk = /^\d{4}$/.test(certificateYear.trim()) && Number(certificateYear) <= yearNow && Number(certificateYear) >= yearNow - 1;
   const typedReady = (!needsNumber || documentNumber.replace(/[^a-z0-9]/gi, '').length >= 4)
-    && (!needsIssuedOn || (!!issuedOn && Number.isFinite(Date.parse(issuedOn)) && Date.parse(issuedOn) <= now));
+    && (!needsIssuedOn || (!!issuedOn && Number.isFinite(Date.parse(issuedOn)) && Date.parse(issuedOn) <= now))
+    && (!needsCertificateYear || certificateYearOk);
   const approveBlocked = !viewed || !expiryOk || !typedReady || (isInsurance && !insuranceReady);
   const currentIndex = filtered.findIndex((a) => a.id === applicant?.id);
   const move = (offset: number) => {
@@ -177,6 +183,7 @@ export default function VerificationPage() {
         ...(isInsurance ? { insurance } : {}),
         ...(needsNumber ? { documentNumber: documentNumber.trim() } : {}),
         ...(needsIssuedOn ? { issuedOn: new Date(issuedOn).toISOString() } : {}),
+        ...(needsCertificateYear ? { certificateYear: Number(certificateYear) } : {}),
       }, note) : rejectDoc(doc.id, note, code as RejectionReasonCode);
     },
     onError: (error) => setMutationError(error),
@@ -298,7 +305,8 @@ export default function VerificationPage() {
               ]);
               openApplicant(null);
             }} />
-            {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn) && <div className="rc-fields">
+            {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn || needsCertificateYear) && <div className="rc-fields">
+              {needsCertificateYear && <label>Year printed on the certificate<input inputMode="numeric" aria-label="Year printed on the certificate" autoComplete="off" maxLength={4} placeholder={String(yearNow)} value={certificateYear} onChange={(e) => setCertificateYear(e.target.value)} disabled={busy} /><small>{certificateYear && !certificateYearOk ? `Only this year’s certificate (or, until 16 January, last year’s) can be approved.` : 'It is checked again every January. The server sets the date.'}</small></label>}
               {needsNumber && <label>Document number<input aria-label="Document number" autoComplete="off" maxLength={40} value={documentNumber} onChange={(e) => setDocumentNumber(e.target.value)} disabled={busy} /><small>Read the number from this document.</small></label>}
               {needsIssuedOn && <label>Issue date printed on the document<input type="date" aria-label="Issue date printed on the document" max={new Date(now).toISOString().slice(0, 10)} value={issuedOn} onChange={(e) => setIssuedOn(e.target.value)} disabled={busy} /><small>Read its issue date. The server determines when it must be checked again.</small></label>}
               {needsExpiry && <label>Expiry printed on the document (required)<input type="date" aria-label="Expiry printed on the document" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} disabled={busy} />{!expiryOk && <small>{expiresAt ? 'That date has already passed; an expired document cannot be approved.' : 'This document type expires — key the date from the document.'}</small>}</label>}

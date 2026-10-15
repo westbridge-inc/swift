@@ -69,6 +69,34 @@ describe('reviewer fields required by the approval route', () => {
   });
 });
 
+// [R15 · research A9/D9] A licence or food certificate checked every January: the console asks for the
+// YEAR printed on it — never a printed or invented expiry — and sends only that; the server sets the date.
+describe('[R15] certificate-year documents', () => {
+  it.each(['food_handler_cert', 'gei_electrical_licence', 'pest_control_operator_licence', 'eating_house_registration'])('%s asks for the certificate year and sends it', async (docType) => {
+    const fetch = fixture(docType, ['certificateYear']);
+    const { user } = renderWithQuery(<VerificationPage />);
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(screen.getByRole('button', { name: 'View document' }));
+    fireEvent.load(await screen.findByRole('img'));
+    expect(screen.queryByLabelText('Expiry printed on the document')).toBeNull();
+    const approve = () => screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    expect(approve().disabled).toBe(true);
+    const year = new Date().getFullYear();
+    // a year that has not started, a long-gone one, or not a year at all keeps Approve locked
+    for (const typed of [String(year + 1), String(year - 2), '20', 'abcd']) {
+      fireEvent.change(screen.getByLabelText('Year printed on the certificate'), { target: { value: typed } });
+      expect(approve().disabled, typed).toBe(true);
+    }
+    fireEvent.change(screen.getByLabelText('Year printed on the certificate'), { target: { value: String(year) } });
+    expect(approve().disabled).toBe(false);
+    await user.click(approve());
+    await user.type(screen.getByLabelText('Decision note'), 'Synthetic evidence checked');
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
+    await waitFor(() => expect(requestsByMethod(fetch, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toEqual({ certificateYear: year });
+  });
+});
+
 describe('PDF approval requires confirmed inline evidence', () => {
   const settings = (window as unknown as { happyDOM: { settings: { disableIframePageLoading: boolean } } }).happyDOM.settings;
   let previous: boolean;

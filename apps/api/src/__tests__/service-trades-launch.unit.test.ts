@@ -9,42 +9,40 @@ import {
 } from '../modules/services/service-catalog';
 import { providerChecklist, providerOptionalDocuments } from '../modules/services/services.service';
 import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../modules/ops/platform-config';
-import { ALWAYS_REVIEW_LEGACY_CODES, AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF } from '../modules/verification/doc-registry';
-import { resolveApprovalExpiry } from '../modules/verification/verification.service';
+import { ALWAYS_REVIEW_LEGACY_CODES, AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES } from '../modules/verification/doc-registry';
+import { certificateYearRecheck, resolveApprovalExpiry } from '../modules/verification/verification.service';
+import { reviewerTypedFields } from '../modules/verification/identity-signal-policy';
 
 // ---------------------------------------------------------------------------
-// [TRADES · owner 13 Oct 2026, decisions 23 + 40] Thirteen held service trades
-// open at launch, each with the Guyana document checks the research table names
-// (owner/SERVICE-TRADES-CHECKLISTS-20261013). Lawyers stay held until counsel
-// confirms the advertising rule and the touting risk. Every trade keeps the
-// base (national ID + police clearance); the trade's own documents are a floor
-// a stored config edit cannot remove — no trade ever goes live on ID alone.
+// [TRADES · owner 13 Oct 2026, decisions 23 + 40; R15 · owner 15 Oct 2026, research A9/D9]
+// The held service trades open with the Guyana document checks the research
+// confirms; the ones it marks UNSURE stay held: gas fitters, the barber group
+// (barber, hairdresser, salon, nail technician, makeup artist) and accountants,
+// with lawyers (counsel first). Drone work is held for every trade. Every opened
+// trade keeps the base (national ID + police clearance); the trade's own
+// documents are a floor a stored config edit cannot remove — no trade ever goes
+// live on ID alone. Licences and food certificates are checked every January.
 // ---------------------------------------------------------------------------
 
 const BASE = ['national_id', 'police_clearance'];
 
-/** The per-trade checklist as the owner decided it (13 Oct). */
+/** The per-trade checklist of every trade opened at launch (owner 13 + 15 Oct). */
 const EXPECTED: Record<string, string[]> = {
-  gas_fitter: [...BASE],
   pest_control: [...BASE, 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
   heavy_equipment_operator: [...BASE, 'drivers_licence'],
   chef: [...BASE, 'food_handler_cert'],
   caterer: [...BASE, 'food_handler_cert', 'eating_house_registration'],
-  barber: [...BASE, 'town_clerk_registration'],
-  hairdresser: [...BASE, 'town_clerk_registration'],
-  salon: [...BASE, 'town_clerk_registration', 'town_clerk_shop_certificate'],
-  nail_technician: [...BASE, 'town_clerk_registration'],
-  makeup_artist: [...BASE, 'town_clerk_registration'],
   photographer: [...BASE],
   tutor: [...BASE],
-  accountant: [...BASE, 'chartered_accountant_practising_certificate', 'gra_practice_certificate'],
 };
 const OPENED = Object.keys(EXPECTED) as ServiceTradeId[];
-const NEW_DOC_TYPES = [
-  'pest_control_operator_licence', 'pesticide_applicator_certificate',
-  'chartered_accountant_practising_certificate', 'gra_practice_certificate',
-  'eating_house_registration', 'town_clerk_registration', 'town_clerk_shop_certificate',
-  'drone_authorisation',
+/** [R15] research A9: UNSURE — held, with the lawyer. */
+const HELD: ServiceTradeId[] = ['lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant'];
+const NEW_DOC_TYPES = ['pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration'];
+/** [R15] the document types of the held trades are gone from the registry and the lists */
+const DROPPED_DOC_TYPES = [
+  'chartered_accountant_practising_certificate', 'gra_practice_certificate', 'town_clerk_registration',
+  'town_clerk_shop_certificate', 'drone_authorisation',
 ];
 
 function fakeDb(trade: string, lists: Record<string, string[]>, bio: string | null = null) {
@@ -55,29 +53,32 @@ function fakeDb(trade: string, lists: Record<string, string[]>, bio: string | nu
   } as never;
 }
 
-describe('[TRADES] the 13 held trades open at launch with their own checks', () => {
-  it('exactly thirteen trades open; only the lawyer stays held', () => {
-    expect(OPENED).toHaveLength(13);
+describe('[TRADES · R15] the research-confirmed trades open with their own checks; the UNSURE ones stay held', () => {
+  it('exactly the six decided trades open', () => {
+    expect(OPENED).toHaveLength(6);
     for (const trade of OPENED) {
       expect(isServiceCategoryOperational(trade), trade).toBe(true);
       expect(requireCanonicalServiceTrade(trade), trade).toBe(trade);
       const category = publicServiceCatalog().categories.find((entry) => entry.id === trade)!;
       expect(category.quoteRequestsEnabled, trade).toBe(true);
     }
-    expect(isServiceCategoryOperational('lawyer')).toBe(false);
   });
 
-  it.each(['lawyer', 'attorney', 'attorney at law', 'legal consultation'])('keeps the lawyer category held: %s', (alias) => {
-    expect(canonicalServiceTrade(alias)).toBe('lawyer');
-    expect(() => requireCanonicalServiceTrade(alias)).toThrow('not accepting profiles or requests yet');
-    const category = publicServiceCatalog().categories.find((entry) => entry.id === 'lawyer')!;
+  it.each(HELD)('%s stays held: no profile, no request, an under-review topic, no checklist', async (trade) => {
+    expect(isServiceCategoryOperational(trade), trade).toBe(false);
+    expect(() => requireCanonicalServiceTrade(trade)).toThrow('not accepting profiles or requests yet');
+    const category = publicServiceCatalog().categories.find((entry) => entry.id === trade)!;
     expect(category.quoteRequestsEnabled).toBe(false);
     expect(category.documents.some((document) => document.status === 'POLICY_REVIEW_REQUIRED')).toBe(true);
+    // a stored list cannot open it
+    const lists = { SERVICE_PROVIDER: BASE, [`SERVICE_PROVIDER_TRADE_${trade.toUpperCase()}`]: ['national_id'] };
+    expect(await providerChecklist(fakeDb(trade, lists), 'synthetic-user')).toEqual([]);
+    expect(SERVICE_TRADE_LAUNCH_FLOOR).not.toHaveProperty(trade);
+    expect(DEFAULT_DOCUMENT_CHECKLISTS).not.toHaveProperty(`SERVICE_PROVIDER_TRADE_${trade.toUpperCase()}`);
   });
 
-  it('a stored lawyer list cannot open the lawyer category', async () => {
-    const lists = { SERVICE_PROVIDER: BASE, SERVICE_PROVIDER_TRADE_LAWYER: ['national_id'] };
-    expect(await providerChecklist(fakeDb('lawyer', lists), 'synthetic-user')).toEqual([]);
+  it.each(['lawyer', 'attorney', 'attorney at law', 'legal consultation', 'barbering', 'hair stylist', 'beautician', 'manicure', 'make up artist', 'tax consultation'])('a held trade is held by every alias: %s', (alias) => {
+    expect(() => requireCanonicalServiceTrade(alias)).toThrow('not accepting profiles or requests yet');
   });
 
   it.each(OPENED)('%s gets its decided checklist from the code defaults when the stored row predates it', async (trade) => {
@@ -100,71 +101,119 @@ describe('[TRADES] the 13 held trades open at launch with their own checks', () 
     expect(SERVICE_TRADE_LAUNCH_FLOOR['tutor']).toContain('police_clearance');
   });
 
-  it('a provider whose profile offers drone or aerial work must show a drone authorisation', async () => {
+  it('drone or aerial work is held: a stored profile that offers it has no checklist, so it is never verified', async () => {
     const stored = { SERVICE_PROVIDER: BASE };
-    for (const bio of ['Weddings and drone shots', 'Aerial photography of your property', 'UAV video']) {
-      expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual([...BASE, 'drone_authorisation']);
+    for (const bio of ['Weddings and drone shots', 'Aerial photography of your property', 'UAV video', 'Quad-copter video', 'FPV flying for events']) {
+      expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual([]);
+      expect(await providerChecklist(fakeDb('tutor', stored, bio), 'synthetic-user'), bio).toEqual([]);
     }
-    expect(await providerChecklist(fakeDb('photographer', stored, 'Portraits and events'), 'synthetic-user')).toEqual(BASE);
-    // [DS1130 S4] other spellings count; a provider who says they do NOT fly is not asked
-    for (const bio of ['Quad-copter video', 'FPV flying for events']) {
-      expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual([...BASE, 'drone_authorisation']);
+    // a negation elsewhere in the sentence does not hide drone work: when unsure, it is drone work
+    for (const bio of ['Drone photos, not just stills', 'Not just drone work', 'We do not just drone work', 'We don’t only do drone shots']) {
+      expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual([]);
     }
-    for (const bio of ['No drone work', 'A drone-free studio', 'Portraits only, without drones', 'We avoid drone jobs', 'doesn’t fly drones', 'Drone work not offered']) {
+    // a provider who says they do NOT fly keeps the ordinary checklist
+    for (const bio of ['Portraits and events', 'No drone work', 'A drone-free studio', 'Portraits only, without drones', 'We avoid drone jobs', 'doesn’t fly drones', 'Drone work not offered']) {
       expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual(BASE);
     }
-    // a negation elsewhere in the sentence does not hide drone work: when unsure, Swift asks
-    for (const bio of ['Drone photos, not just stills', 'Not just drone work', 'We do not just drone work', 'We don’t only do drone shots']) {
-      expect(await providerChecklist(fakeDb('photographer', stored, bio), 'synthetic-user'), bio).toEqual([...BASE, 'drone_authorisation']);
-    }
-    // The authorisation is offered to every photographer as a document they MAY add first.
-    expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER_TRADE_PHOTOGRAPHER_OPTIONAL']).toEqual(['drone_authorisation']);
+    expect(DEFAULT_DOCUMENT_CHECKLISTS).not.toHaveProperty('SERVICE_PROVIDER_TRADE_PHOTOGRAPHER_OPTIONAL');
   });
 
-  it('a personal-care worker may add the shop certificate; a salon must hold it', () => {
-    for (const trade of ['barber', 'hairdresser', 'nail_technician', 'makeup_artist']) {
-      expect(DEFAULT_DOCUMENT_CHECKLISTS[`SERVICE_PROVIDER_TRADE_${trade.toUpperCase()}_OPTIONAL`], trade).toEqual(['town_clerk_shop_certificate']);
+  it('a profile that offers drone or aerial work is refused, whatever the trade', () => {
+    for (const bio of ['Weddings and drone shots', 'Aerial photography of your property', 'Not just drone work']) {
+      for (const trade of ['photographer', 'tutor', 'carpenter'] as ServiceTradeId[]) {
+        expect(() => assertProviderProfileWording(trade, bio), `${trade}: ${bio}`).toThrow(expect.objectContaining({ code: 'DRONE_WORK_HELD' }));
+      }
     }
-    expect(EXPECTED['salon']).toContain('town_clerk_shop_certificate');
+    for (const bio of ['Portraits and events', 'No drone work', 'Drone work not offered']) {
+      expect(() => assertProviderProfileWording('photographer', bio), bio).not.toThrow();
+    }
   });
 
-  it('the documents a provider MAY add come from the code defaults when the stored row predates them', async () => {
+  it('no opened trade has documents it MAY add any more (the shop and drone add-ons belonged to held work)', async () => {
     const stored = { SERVICE_PROVIDER: BASE };
-    expect(await providerOptionalDocuments(fakeDb('barber', stored), 'synthetic-user', EXPECTED['barber']!)).toEqual(['town_clerk_shop_certificate']);
-    expect(await providerOptionalDocuments(fakeDb('photographer', stored), 'synthetic-user', BASE)).toEqual(['drone_authorisation']);
-    // never a document the checklist already requires, and nothing for a held category
-    expect(await providerOptionalDocuments(fakeDb('photographer', stored, 'drone work'), 'synthetic-user', [...BASE, 'drone_authorisation'])).toEqual([]);
+    for (const trade of OPENED) {
+      expect(await providerOptionalDocuments(fakeDb(trade, stored), 'synthetic-user', EXPECTED[trade]!), trade).toEqual([]);
+    }
     expect(await providerOptionalDocuments(fakeDb('lawyer', stored), 'synthetic-user', [])).toEqual([]);
   });
 
-  it('the code floor and the default lists agree, trade by trade', () => {
+  it('the code floor and the default lists agree, trade by trade, and only for opened trades', () => {
+    expect(Object.keys(SERVICE_TRADE_LAUNCH_FLOOR).sort()).toEqual([...OPENED].sort());
     for (const trade of OPENED) {
       const floor = SERVICE_TRADE_LAUNCH_FLOOR[trade]!;
       expect(floor, trade).toEqual(EXPECTED[trade]);
       const lists = [...(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER'] ?? []), ...(DEFAULT_DOCUMENT_CHECKLISTS[`SERVICE_PROVIDER_TRADE_${trade.toUpperCase()}`] ?? [])];
       for (const docType of floor) expect(lists, `${trade}:${docType}`).toContain(docType);
     }
-    expect(SERVICE_TRADE_LAUNCH_FLOOR).not.toHaveProperty('lawyer');
+  });
+
+  it.each(DROPPED_DOC_TYPES)('%s (a held trade’s document) is gone from the registry and every list', (docType) => {
+    expect(BUCKET_OF[docType]).toBeUndefined();
+    expect(AUTO_APPROVE_EXPIRY_DAYS[docType]).toBeUndefined();
+    expect(Object.values(DEFAULT_DOCUMENT_CHECKLISTS).flat()).not.toContain(docType);
   });
 });
 
 describe('[TRADES] every new trade document is reviewed by a person and its expiry is tracked', () => {
-  it.each(NEW_DOC_TYPES)('%s expires and cannot be approved without a keyed date', (docType) => {
+  it.each(NEW_DOC_TYPES)('%s expires and cannot be approved without a date', (docType) => {
     expect(AUTO_APPROVE_EXPIRY_DAYS[docType], docType).toBeGreaterThan(0);
     expect(() => resolveApprovalExpiry(docType, undefined, null)).toThrow(expect.objectContaining({ code: 'EXPIRY_REQUIRED' }));
   });
 
-  it('the applicator certificate lasts two years (PTCCB regulation 89); the yearly ones one year', () => {
+  it('the applicator certificate lasts two years (PTCCB regulation 89)', () => {
     expect(AUTO_APPROVE_EXPIRY_DAYS['pesticide_applicator_certificate']).toBe(730);
-    for (const docType of ['chartered_accountant_practising_certificate', 'gra_practice_certificate', 'eating_house_registration', 'town_clerk_registration', 'town_clerk_shop_certificate', 'drone_authorisation']) {
-      expect(AUTO_APPROVE_EXPIRY_DAYS[docType], docType).toBe(365);
-    }
   });
 
   it.each(NEW_DOC_TYPES)('%s is a person’s document (purged after review) or always reviewed by a person', (docType) => {
     const bucket = BUCKET_OF[docType];
     expect(bucket, docType).toBeDefined();
     expect(bucket === 'PERSONAL' || ALWAYS_REVIEW_LEGACY_CODES.has(docType), docType).toBe(true);
+  });
+});
+
+describe('[R15] licences and food certificates are checked again every January', () => {
+  // 15 Oct 2026, 13:00 Guyana time; 10 Jan 2027, 09:00 Guyana time.
+  const OCT = new Date('2026-10-15T17:00:00.000Z');
+  const JAN = new Date('2027-01-10T13:00:00.000Z');
+  const RECHECK_2027 = new Date('2027-01-16T04:00:00.000Z'); // 16 Jan 2027, 00:00 Guyana time
+  const RECHECK_2028 = new Date('2028-01-16T04:00:00.000Z');
+
+  it('names every food or licence document of an opened trade', () => {
+    expect([...CERTIFICATE_YEAR_DOC_TYPES].sort()).toEqual(['eating_house_registration', 'food_handler_cert', 'gei_electrical_licence', 'pest_control_operator_licence']);
+    for (const docType of CERTIFICATE_YEAR_DOC_TYPES) {
+      expect(AUTO_APPROVE_EXPIRY_DAYS[docType], docType).toBeGreaterThan(0);
+      expect(reviewerTypedFields(docType), docType).toEqual(['certificateYear']);
+    }
+  });
+
+  it('this year’s certificate lasts to the start of 16 January next year, Guyana time', () => {
+    expect(certificateYearRecheck(2026, OCT)).toEqual(RECHECK_2027);
+    expect(certificateYearRecheck(2027, JAN)).toEqual(RECHECK_2028);
+  });
+
+  it('last year’s certificate is accepted only until 16 January; a later one is refused', () => {
+    expect(certificateYearRecheck(2026, JAN)).toEqual(RECHECK_2027);
+    expect(() => certificateYearRecheck(2026, RECHECK_2027)).toThrow(expect.objectContaining({ code: 'CERTIFICATE_YEAR_LAPSED' }));
+    expect(() => certificateYearRecheck(2025, OCT)).toThrow(expect.objectContaining({ code: 'CERTIFICATE_YEAR_LAPSED', message: expect.stringMatching(/2025/) }));
+  });
+
+  it('a year that has not started, or no year, is refused', () => {
+    expect(() => certificateYearRecheck(2027, OCT)).toThrow(expect.objectContaining({ code: 'CERTIFICATE_YEAR_IN_FUTURE' }));
+    expect(() => certificateYearRecheck(undefined, OCT)).toThrow(expect.objectContaining({ code: 'CERTIFICATE_YEAR_REQUIRED' }));
+    expect(() => certificateYearRecheck(2026.5, OCT)).toThrow(expect.objectContaining({ code: 'CERTIFICATE_YEAR_REQUIRED' }));
+  });
+
+  it.each([...CERTIFICATE_YEAR_DOC_TYPES])('%s: any other date is brought forward to the coming January re-check, never extended', (docType) => {
+    const later = new Date('2027-09-30T04:00:00.000Z');
+    expect(resolveApprovalExpiry(docType, later, null, OCT)).toEqual(RECHECK_2027);
+    const sooner = new Date('2026-12-01T04:00:00.000Z');
+    expect(resolveApprovalExpiry(docType, sooner, null, OCT)).toEqual(sooner);
+    expect(() => resolveApprovalExpiry(docType, undefined, null, OCT)).toThrow(expect.objectContaining({ code: 'EXPIRY_REQUIRED' }));
+  });
+
+  it('other expiring documents keep their own rule (a driver’s licence is not capped at January)', () => {
+    const later = new Date('2028-06-30T04:00:00.000Z');
+    expect(resolveApprovalExpiry('drivers_licence', later, null, OCT)).toEqual(later);
   });
 });
 
@@ -178,19 +227,19 @@ describe('[TRADES] the catalogue says what each trade needs, in plain words', ()
     expect(text(trade)).toMatch(/national ID/i);
   });
 
-  it('names each trade document plainly', () => {
+  it('names each trade document plainly, and says what is held or checked every January', () => {
     expect(text('pest_control')).toMatch(/Pesticides and Toxic Chemicals Control Board/);
     expect(text('pest_control')).toMatch(/applicator certificate/i);
-    expect(text('accountant')).toMatch(/ICAG/);
-    expect(text('accountant')).toMatch(/GRA practice certificate/);
+    expect(text('pest_control')).toMatch(/every January/);
     expect(text('chef')).toMatch(/food handler/i);
+    expect(text('chef')).toMatch(/Georgetown only for now/);
+    expect(text('chef')).toMatch(/Mayor and City Council of Georgetown/);
     expect(text('caterer')).toMatch(/eating-house registration/i);
+    expect(text('caterer')).toMatch(/Georgetown only for now/);
     expect(text('heavy_equipment_operator')).toMatch(/driver’s licence/i);
-    for (const trade of ['barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist']) expect(text(trade), trade).toMatch(/Town Clerk/);
-    expect(text('salon')).toMatch(/shop certificate/i);
-    expect(text('photographer')).toMatch(/drone/i);
-    expect(text('gas_fitter')).toMatch(/cooking gas \(LPG\)/);
+    expect(text('photographer')).toMatch(/Drone or aerial work is not offered on Swift yet/);
     expect(text('tutor')).toMatch(/children/i);
+    for (const trade of HELD) expect(text(trade), trade).not.toMatch(/Town Clerk|ICAG|GCAA|cooking gas/);
   });
 });
 

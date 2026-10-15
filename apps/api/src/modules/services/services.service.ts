@@ -1,4 +1,4 @@
-import { DRONE_AUTHORISATION_DOC_TYPE, isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX } from '../verification/doc-registry';
 import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
@@ -127,7 +127,10 @@ async function providerLists(prisma: ProviderVerificationDb, userId: string) {
   const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true, bio: true } });
   const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
   if (!trade || !isServiceCategoryOperational(trade)) return null;
-  return { lists, trade, bio: provider?.bio ?? null };
+  // [R15 · research A9] Drone and aerial work is held: a stored profile that offers it (saved before
+  // the profile check, or by any other writer) has no checklist, so it is never verified or listed.
+  if (profileOffersDroneWork(provider?.bio ?? null)) return null;
+  return { lists, trade };
 }
 
 /**
@@ -139,20 +142,19 @@ async function providerLists(prisma: ProviderVerificationDb, userId: string) {
  *
  * [TRADES · owner 13 Oct 2026] A trade opened at launch also carries its legal
  * floor (identity, police clearance and its own licences), which no stored
- * edit can remove; and a profile that offers drone or aerial work must show
- * the GCAA's authorisation. The provider gate reads the lists and the floor
+ * edit can remove. A profile that offers drone or aerial work has no
+ * checklist at all (held, R15). The provider gate reads the lists and the floor
  * here, never the DOC-1 registry facade (registryChecklist); a change that
  * moves providers onto the registry must carry SERVICE_TRADE_LAUNCH_FLOOR too.
  */
 export async function providerChecklist(prisma: ProviderVerificationDb, userId: string): Promise<string[]> {
   const found = await providerLists(prisma, userId);
   if (!found) return [];
-  const { lists, trade, bio } = found;
+  const { lists, trade } = found;
   const base = lists['SERVICE_PROVIDER'] ?? [];
   const extra = lists[tradeChecklistKey(trade)] ?? [];
   const floor = SERVICE_TRADE_LAUNCH_FLOOR[trade] ?? [];
-  const drone = profileOffersDroneWork(bio) ? [DRONE_AUTHORISATION_DOC_TYPE] : [];
-  return [...new Set([...base, ...extra, ...floor, ...drone])].filter((docType) => !isNeverAcceptedDocType(docType));
+  return [...new Set([...base, ...extra, ...floor])].filter((docType) => !isNeverAcceptedDocType(docType));
 }
 
 /**

@@ -5,7 +5,8 @@ import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
+import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor, recordEvidenceFor, type EvidenceRow } from './evidence';
@@ -161,6 +162,8 @@ export interface ReviewerTypedInput {
   documentNumber?: string;
   /** A police clearance's issue date. */
   issuedOn?: Date;
+  /** [R15] The year printed on a licence or food certificate that is checked again every January. */
+  certificateYear?: number;
   /** The reviewer console's contract: the fields this type needs must be typed. */
   required?: boolean;
 }
@@ -187,6 +190,39 @@ export function clearanceRecheckDate(issuedOn: Date | null, now: Date = new Date
   return recheck;
 }
 
+/**
+ * [R15 · owner 15 Oct 2026, research A9/D9] A licence or food certificate renewed by the calendar
+ * year is checked again every January: its approval lapses at the start of 16 January after its
+ * year, Guyana time (the holder has the first fortnight of January to bring the new one). Only the
+ * current year's certificate — or, until 16 January, last year's — can be approved.
+ */
+export function certificateYearRecheck(year: number | null | undefined, now: Date = new Date()): Date {
+  if (typeof year !== 'number' || !Number.isInteger(year)) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_REQUIRED', 'Type the year printed on the certificate before approving it. It is checked again every January.');
+  }
+  if (year > guyanaWallClockParts(now).year) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_IN_FUTURE', 'That year has not started yet. Check the year printed on the certificate.');
+  }
+  const recheck = startOfGuyanaDay(`${year + 1}-01-16`);
+  if (recheck.getTime() <= now.getTime()) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_LAPSED', `This certificate is for ${year}. Ask the person for this year’s certificate.`);
+  }
+  return recheck;
+}
+
+/** [R15] The automatic path's conservative default, never past the January re-check for a certificate-year type. */
+function autoApprovalExpiry(docType: string, days: number, now: Date = new Date()): Date {
+  const byDays = new Date(now.getTime() + days * 86_400_000);
+  if (!CERTIFICATE_YEAR_DOC_TYPES.has(docType)) return byDays;
+  const cap = januaryRecheckCap(now);
+  return byDays.getTime() > cap.getTime() ? cap : byDays;
+}
+
+/** [R15] The latest an approval of a certificate-year document may last: the coming January re-check. */
+export function januaryRecheckCap(now: Date = new Date()): Date {
+  return startOfGuyanaDay(`${guyanaWallClockParts(now).year + 1}-01-16`);
+}
+
 export function resolveApprovalExpiry(
   docType: string,
   supplied: Date | undefined,
@@ -208,6 +244,13 @@ export function resolveApprovalExpiry(
       'EXPIRY_IN_PAST',
       `That expiry date has already passed. An expired ${docType.replace(/_/g, ' ')} cannot be approved.`,
     );
+  }
+  // [R15] A certificate-year document never outlasts the coming January re-check: a date from its
+  // typed year is that re-check already; any other date (an internal caller, an older console, an
+  // expiry assigned at upload) is brought forward to it, never extended.
+  if (CERTIFICATE_YEAR_DOC_TYPES.has(docType)) {
+    const cap = januaryRecheckCap(now);
+    return effective.getTime() > cap.getTime() ? cap : effective;
   }
   // [self-test C · ruling 2026-09-06] The other direction: a date beyond the longest validity
   // this type is issued for is a typo or a forgery (2036 keyed for 2026), not a long licence.
@@ -762,7 +805,7 @@ export class VerificationService {
           reviewedAt: new Date(),
           // Auto-approvals lapse on a conservative default so the expiry
           // sweep + 30-day reminders always fire; humans key the real date.
-          ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
+          ...(autoExpiryDays && { expiresAt: autoApprovalExpiry(docType, autoExpiryDays) }),
         }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
     }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction, authority });
@@ -1034,6 +1077,11 @@ export class VerificationService {
       if (ISSUE_DATE_DOC_TYPES.has(candidate.docType) && (typed.required || typed.issuedOn)) {
         issuedOn = typed.issuedOn ?? null;
         expiresAt = clearanceRecheckDate(issuedOn);
+      }
+      // [R15] A licence or food certificate checked every January: the reviewer types its YEAR and the
+      // approval lasts to the January re-check after it — never a keyed or guessed expiry.
+      if (CERTIFICATE_YEAR_DOC_TYPES.has(candidate.docType) && (typed.required || typed.certificateYear !== undefined)) {
+        expiresAt = certificateYearRecheck(typed.certificateYear);
       }
     }
     // Never on any later write: the typed number leaves this method only as the blind index.
@@ -1700,8 +1748,8 @@ export class VerificationService {
     if (roleKey === 'SERVICE_PROVIDER') {
       // A service category that is not open has no checklist at all — and nothing to add either.
       if (required.length === 0) return [];
-      // [TRADES] The provider's base and trade `_OPTIONAL` lists (a barber's shop certificate,
-      // a photographer's drone authorisation) — the same projection as the checklist.
+      // [TRADES] The provider's base and trade `_OPTIONAL` lists
+      // — the same projection as the checklist.
       const { providerOptionalDocuments } = await import('../services/services.service');
       return providerOptionalDocuments(this.prisma, userId, required);
     }

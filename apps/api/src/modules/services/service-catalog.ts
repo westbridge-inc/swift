@@ -112,12 +112,19 @@ export function requireCanonicalServiceTrade(input: string): ServiceTradeId {
 // A category with an unresolved policy topic must never inherit the generic
 // base checklist and become live with identity documents alone. Opening one
 // requires a reviewed country checklist and an enforceable evidence path.
-// [TRADES · owner 13 Oct 2026, decisions 23 + 40] Thirteen trades opened with
-// their reviewed checklists (ops/platform-config SERVICE_TRADE_LAUNCH_FLOOR).
+// [TRADES · owner 13 Oct 2026, decisions 23 + 40] Trades opened with their
+// reviewed checklists (ops/platform-config SERVICE_TRADE_LAUNCH_FLOOR).
 // The lawyer stays held until counsel confirms it: lawyers may not advertise
 // their services, and a platform paid by a lawyer for bringing them clients may
 // itself commit an offence.
-const PENDING_CATEGORIES = new Set<ServiceTradeId>(['lawyer']);
+// [R15 · owner 15 Oct 2026, research A9/D9] The trades whose licensing the
+// research marks UNSURE stay held too: gas fitters, the barber group (barber,
+// hairdresser, salon, nail technician, makeup artist) and accountants. Opened
+// with their documents: pest control (the Board's operator licence) and chefs
+// and caterers (this year's food handler's certificate).
+const PENDING_CATEGORIES = new Set<ServiceTradeId>([
+  'lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant',
+]);
 
 export function isServiceCategoryOperational(trade: ServiceTradeId): boolean {
   return !PENDING_CATEGORIES.has(trade);
@@ -136,9 +143,14 @@ function categoryGroup(trade: ServiceTradeId): ServiceCategory['group'] {
 
 /** [TRADES] What a trade must also know before signing up, in plain words. */
 const TRADE_NOTES: Partial<Record<ServiceTradeId, readonly string[]>> = {
-  gas_fitter: ['Installation and repair only: selling, refilling or delivering cooking gas (LPG) is not allowed on Swift.'],
   tutor: ['The police clearance is always required: tutors work with children.'],
-  photographer: ['Drone or aerial work: add the GCAA authorisation before you offer it.'],
+  // [R15] Drone work is held (research A9: the GCAA rules are not confirmed).
+  photographer: ['Drone or aerial work is not offered on Swift yet. A profile that offers it cannot be saved.'],
+  // [R15 · research D9] The food handler's certificate is issued yearly by the Mayor and City Council of
+  // Georgetown; the rules outside Georgetown are not confirmed, so these trades are Georgetown only for now.
+  chef: ['Georgetown only for now. Your food handler’s certificate must be this year’s, from the Mayor and City Council of Georgetown. It is checked again every January.'],
+  caterer: ['Georgetown only for now. Your food handler’s certificate and eating-house registration must be this year’s, from the Mayor and City Council of Georgetown. They are checked again every January.'],
+  pest_control: ['Your Pesticides and Toxic Chemicals Control Board licence is checked again every January.'],
 };
 
 function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] {
@@ -165,6 +177,14 @@ function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] 
   // The live verification checklist remains the authority for actual uploads.
   const pending: Partial<Record<ServiceTradeId, string>> = {
     lawyer: 'Right to practise and current professional standing',
+    // [R15] held until their licensing rules are confirmed
+    gas_fitter: 'Gas work competency and applicable licence requirements',
+    barber: 'Premises registration and hygiene requirements for barbering',
+    hairdresser: 'Premises registration and hygiene requirements for hairdressing',
+    salon: 'Beauty service scope, premises and hygiene requirements',
+    nail_technician: 'Nail service scope, hygiene and premises requirements',
+    makeup_artist: 'Makeup service scope and hygiene requirements',
+    accountant: 'Professional credentials and authority for the services offered',
   };
   if (pending[trade]) documents.push({
     key: `POLICY_${trade.toUpperCase()}`, label: pending[trade]!, status: 'POLICY_REVIEW_REQUIRED',
@@ -262,18 +282,22 @@ export function assertProviderProfileWording(trade: ServiceTradeId, bio: string 
   if (NEVER_TITLES.test(bio) || (trade !== 'accountant' && ACCOUNTANT_TITLES.test(bio))) {
     throw new AppError(400, 'PROTECTED_TITLE', 'Your profile uses a professional title that this service on Swift does not check. Remove the title from your profile.');
   }
+  // [R15 · research A9] Drone and aerial work is held for every trade until the GCAA rules are confirmed.
+  if (profileOffersDroneWork(bio)) {
+    throw new AppError(400, 'DRONE_WORK_HELD', 'Swift does not offer drone or aerial work yet. Remove it from your profile to continue.');
+  }
 }
 
 const DRONE_WORDS = String.raw`(?:drones?|aerial|uavs?|quad[\s-]?copters?|fpv)`;
 /** "No drone work", "we avoid drone jobs", "doesn't fly drones", "drone-free", "drone work not offered":
  *  a provider who says they do not fly. A negation elsewhere in the sentence does not count — when
- *  unsure, Swift asks for the authorisation. [DS1132] */
+ *  unsure, the profile is treated as offering it. [DS1132] */
 const NOT_JUST = String.raw`(?!\s+(?:just|only)\b)`; // "not just drone work" is drone work
 const NEGATOR = String.raw`(?:no|not${NOT_JUST}|never|without|avoid(?:s|ing)?|(?:do|does|did)\s+not${NOT_JUST}|(?:don|doesn|didn)['’]?t${NOT_JUST})`;
 const NO_DRONE = new RegExp(String.raw`\b${NEGATOR}\s+(?:\w+\s+){0,2}?${DRONE_WORDS}\b|\b${DRONE_WORDS}[\s-]*free\b|\b${DRONE_WORDS}(?:\s+\w+){0,2}\s+not\s+(?:offered|available|provided|done)\b`, 'gi');
 const DRONE = new RegExp(String.raw`\b${DRONE_WORDS}\b`, 'i');
 
-/** [TRADES] A profile offering drone or aerial work needs the GCAA's authorisation (services.service). */
+/** [R15] A profile offering drone or aerial work is refused (held), and a stored one is never verified (services.service). */
 export function profileOffersDroneWork(bio: string | null | undefined): boolean {
   return !!bio && DRONE.test(bio.replace(NO_DRONE, ' '));
 }

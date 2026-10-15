@@ -362,6 +362,8 @@ const approveDocSchema = z.object({
   // only as a blind-index identity key — and a police clearance's issue date.
   documentNumber: z.string().trim().min(1).max(40).optional(),
   issuedOn: z.coerce.date().optional(),
+  // [R15] the year printed on a licence or food certificate checked again every January
+  certificateYear: z.coerce.number().int().min(1900).max(9999).optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -5951,6 +5953,7 @@ export async function adminRoutes(app: FastifyInstance) {
       required: true,
       ...(body.documentNumber !== undefined ? { documentNumber: body.documentNumber } : {}),
       ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
+      ...(body.certificateYear !== undefined ? { certificateYear: body.certificateYear } : {}),
     });
     await audit(
       request.user.userId,

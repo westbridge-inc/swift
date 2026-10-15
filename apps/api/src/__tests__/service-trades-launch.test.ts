@@ -8,16 +8,23 @@ import { socketPlugin } from '../plugins/socket';
 import { servicesRoutes } from '../modules/services/services.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { providerChecklist } from '../modules/services/services.service';
+import { VerificationService } from '../modules/verification/verification.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { getKycProvider } from '../providers/kyc/kyc-provider';
+import { guyanaWallClockParts, startOfGuyanaDay } from '../utils/guyana-day';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { ownedVerificationFixture } from './helpers/verification-object';
 
 // ---------------------------------------------------------------------------
-// [TRADES · owner 13 Oct 2026, decisions 23 + 40] The thirteen held service
-// trades open at launch through the real routes: a profile is accepted, the
-// verification checklist names the trade's own documents, base identity +
-// police clearance alone never lists the provider, the full set does, an
-// expired licence takes them off again, and the lawyer category stays held.
+// [TRADES · owner 13 Oct 2026, decisions 23 + 40; R15 · owner 15 Oct 2026,
+// research A9/D9] The service trades opened at launch, through the real routes:
+// a profile is accepted, the verification checklist names the trade's own
+// documents, base identity + police clearance alone never lists the provider,
+// the full set does, an expired licence takes them off again. The UNSURE trades
+// (gas fitter, barber group, accountant) stay held with the lawyer, drone work is
+// refused, and a licence or food certificate is approved by its YEAR and lasts
+// to the January re-check.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -28,20 +35,15 @@ let seq = 0;
 
 const BASE = ['national_id', 'police_clearance'];
 const TRADE_DOCS: Record<string, string[]> = {
-  gas_fitter: [],
   pest_control: ['pest_control_operator_licence', 'pesticide_applicator_certificate'],
   heavy_equipment_operator: ['drivers_licence'],
   chef: ['food_handler_cert'],
   caterer: ['food_handler_cert', 'eating_house_registration'],
-  barber: ['town_clerk_registration'],
-  hairdresser: ['town_clerk_registration'],
-  salon: ['town_clerk_registration', 'town_clerk_shop_certificate'],
-  nail_technician: ['town_clerk_registration'],
-  makeup_artist: ['town_clerk_registration'],
   photographer: [],
   tutor: [],
-  accountant: ['chartered_accountant_practising_certificate', 'gra_practice_certificate'],
 };
+/** [R15] research A9: UNSURE — held, with the lawyer. */
+const HELD = ['lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant'];
 
 async function makeUser() {
   seq += 1;
@@ -171,27 +173,33 @@ describe('[TRADES] each opened trade goes live only with its own documents', () 
     const gy = await runWithoutTenant(() => app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } }));
     const stored = gy.documentChecklists as Record<string, string[]>;
     await runWithoutTenant(() => app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: {
-      ...stored, SERVICE_PROVIDER: ['national_id'], SERVICE_PROVIDER_TRADE_ACCOUNTANT: [],
+      ...stored, SERVICE_PROVIDER: ['national_id'], SERVICE_PROVIDER_TRADE_PEST_CONTROL: [],
     } } }));
     try {
       const u = await makeUser();
-      const providerId = (await save(u.token, 'accountant')).json().data.id;
+      const providerId = (await save(u.token, 'pest_control')).json().data.id;
       await approve(u.userId, ['national_id']);
-      expect((await save(u.token, 'accountant')).json().data.isVerified).toBe(false);
-      expect(await listedIds('accountant')).not.toContain(providerId);
-      expect(await providerChecklist(app.prisma, u.userId)).toEqual([...BASE, ...TRADE_DOCS['accountant']!]);
+      expect((await save(u.token, 'pest_control')).json().data.isVerified).toBe(false);
+      expect(await listedIds('pest_control')).not.toContain(providerId);
+      expect(await providerChecklist(app.prisma, u.userId)).toEqual([...BASE, ...TRADE_DOCS['pest_control']!]);
     } finally {
       await runWithoutTenant(() => app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: stored } }));
     }
   });
 });
 
-describe('[TRADES] the lawyer category stays held', () => {
-  it('refuses a lawyer profile and a lawyer browse', async () => {
+describe('[TRADES · R15] the held categories stay held', () => {
+  it.each(HELD)('refuses a %s profile and browse; nothing is saved', async (trade) => {
     const u = await makeUser();
-    const res = await save(u.token, 'lawyer');
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error.code).toBe('SERVICE_CATEGORY_UNAVAILABLE');
+    const res = await save(u.token, trade, 'Ten years of experience');
+    expect(res.statusCode, trade).toBe(409);
+    expect(res.json().error.code, trade).toBe('SERVICE_CATEGORY_UNAVAILABLE');
+    expect(await runWithoutTenant(() => app.prisma.serviceProvider.count({ where: { userId: u.userId } }))).toBe(0);
+    const browse = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
+    expect(browse.statusCode, trade).toBe(409);
+  });
+
+  it('refuses a lawyer browse by its aliases too', async () => {
     for (const trade of ['lawyer', 'attorney']) {
       const browse = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
       expect(browse.statusCode, trade).toBe(409);
@@ -230,42 +238,81 @@ describe('[TRADES] documents are submittable where the trade names them', () => 
     expect(refused.json().error.code).toBe('INVALID_DOC_TYPE');
   });
 
-  it('a barber may add the shop certificate; a photographer the drone authorisation', async () => {
-    const barber = await makeUser();
-    await save(barber.token, 'barber');
-    expect((await status(barber.token)).optional).toEqual(['town_clerk_shop_certificate']);
-    expect((await submit(barber, 'town_clerk_shop_certificate')).statusCode).toBe(201);
-
+  it('a photographer has nothing extra to add and cannot submit a drone authorisation (drone work is held)', async () => {
     const photographer = await makeUser();
     await save(photographer.token, 'photographer', 'Portraits and weddings');
     const s = await status(photographer.token);
     expect(s.checklist).toEqual(BASE);
-    expect(s.optional).toEqual(['drone_authorisation']);
-    expect((await submit(photographer, 'drone_authorisation')).statusCode).toBe(201);
+    expect(s.optional).toEqual([]);
+    const refused = await submit(photographer, 'drone_authorisation');
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.code).toBe('INVALID_DOC_TYPE');
+  });
+});
+
+describe('[R15] drone and aerial work is held', () => {
+  it('a profile that offers it is refused and nothing is saved, whatever the trade', async () => {
+    for (const trade of ['photographer', 'carpenter']) {
+      const u = await makeUser();
+      const refused = await save(u.token, trade, 'Weddings, events and drone video');
+      expect(refused.statusCode, trade).toBe(400);
+      expect(refused.json().error.code, trade).toBe('DRONE_WORK_HELD');
+      expect(await runWithoutTenant(() => app.prisma.serviceProvider.count({ where: { userId: u.userId } }))).toBe(0);
+    }
   });
 
-  it('a photographer who offers drone work needs the authorisation to go live', async () => {
+  it('a stored profile that offers it (written before the check) is never verified or listed', async () => {
     const u = await makeUser();
     await approve(u.userId, BASE);
-    const saved = await save(u.token, 'photographer', 'Weddings, events and drone video');
-    expect(saved.statusCode).toBe(200);
-    expect(saved.json().data.isVerified).toBe(false);
-    expect((await status(u.token)).missing).toEqual(['drone_authorisation']);
-    await approve(u.userId, ['drone_authorisation']);
-    expect((await save(u.token, 'photographer', 'Weddings, events and drone video')).json().data.isVerified).toBe(true);
-    // Removing the drone offer from the profile removes the requirement.
-    expect((await save(u.token, 'photographer', 'Weddings and events')).json().data.isVerified).toBe(true);
+    const providerId = (await save(u.token, 'photographer', 'Weddings and events')).json().data.id;
+    expect(await listedIds('photographer')).toContain(providerId);
+    await runWithoutTenant(() => app.prisma.serviceProvider.update({ where: { id: providerId }, data: { bio: 'Weddings and aerial video' } }));
+    expect(await providerChecklist(app.prisma, u.userId)).toEqual([]);
+    const mine = await inject('GET', '/api/v1/services/providers/me', undefined, u.token);
+    expect(mine.json().data.isVerified).toBe(false);
+    expect(await listedIds('photographer')).not.toContain(providerId);
+  });
+});
+
+describe('[R15] a licence or food certificate is approved by its year and lasts to the January re-check', () => {
+  let svc: VerificationService;
+  beforeAll(() => { svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider()); });
+  const submit = async (u: { userId: string; token: string }, docType: string) => (await inject('POST', '/api/v1/verification/documents', {
+    role: 'SERVICE_PROVIDER', docType, fileUrl: await ownedVerificationFixture(app.prisma, u.userId, docType), consent: true, privacyNoticeVersion: 'v1',
+  }, u.token)).json().data.id as string;
+
+  it('the reviewer types the year; only this year’s (or, until 16 January, last year’s) is approved; it lapses on 16 January', async () => {
+    const chef = await makeUser();
+    await save(chef.token, 'chef', 'Private dinners');
+    await approve(chef.userId, BASE);
+    const docId = await submit(chef, 'food_handler_cert');
+    const year = guyanaWallClockParts(new Date()).year;
+    const code = async (typed: Record<string, unknown>, expiresAt?: Date) => {
+      try { await svc.approveDocument(docId, 'admin-test', expiresAt, undefined, { required: true, ...typed }); return 'APPROVED'; } catch (err) { return (err as { code?: string }).code; }
+    };
+    expect(await code({})).toBe('CERTIFICATE_YEAR_REQUIRED');
+    expect(await code({ certificateYear: year + 1 })).toBe('CERTIFICATE_YEAR_IN_FUTURE');
+    expect(await code({ certificateYear: year - 2 })).toBe('CERTIFICATE_YEAR_LAPSED');
+    expect(await runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: docId } }))).toMatchObject({ status: 'PENDING' });
+    // A keyed date never overrides the year: the approval lasts to the January re-check.
+    expect(await code({ certificateYear: year }, new Date(Date.now() + 700 * DAY))).toBe('APPROVED');
+    const recheck = startOfGuyanaDay(`${year + 1}-01-16`);
+    const doc = await runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: docId }, include: { renewalSchedule: true } }));
+    expect(doc.status).toBe('APPROVED');
+    expect(doc.expiresAt).toEqual(recheck);
+    expect(doc.renewalSchedule?.expiresOn).toEqual(recheck);
+    expect((await save(chef.token, 'chef', 'Private dinners')).json().data.isVerified).toBe(true);
   });
 });
 
 describe('[TRADES] profile wording', () => {
-  it('a gas fitter cannot offer to sell, refill or deliver cooking gas', async () => {
+  it('a provider cannot offer to sell, refill or deliver cooking gas', async () => {
     const u = await makeUser();
-    const refused = await save(u.token, 'gas_fitter', 'LPG cylinder refills and delivery');
+    const refused = await save(u.token, 'plumber', 'LPG cylinder refills and delivery');
     expect(refused.statusCode).toBe(400);
     expect(refused.json().error.code).toBe('PROHIBITED_SERVICE_WORDING');
     expect(await runWithoutTenant(() => app.prisma.serviceProvider.count({ where: { userId: u.userId } }))).toBe(0);
-    expect((await save(u.token, 'gas_fitter', 'I install and repair LPG stoves and lines')).statusCode).toBe(200);
+    expect((await save(u.token, 'plumber', 'I install and repair water lines')).statusCode).toBe(200);
   });
 
   it('a protected title is refused where the trade cannot prove it', async () => {
@@ -273,7 +320,5 @@ describe('[TRADES] profile wording', () => {
     const refused = await save(u.token, 'tutor', 'Chartered Accountant teaching maths');
     expect(refused.statusCode).toBe(400);
     expect(refused.json().error.code).toBe('PROTECTED_TITLE');
-    const accountant = await makeUser();
-    expect((await save(accountant.token, 'accountant', 'Chartered Accountant (ICAG)')).statusCode).toBe(200);
   });
 });

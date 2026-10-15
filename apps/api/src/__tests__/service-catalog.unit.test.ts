@@ -24,9 +24,9 @@ describe('service catalogue authority', () => {
     }
   });
 
-  // [TRADES · owner 13 Oct 2026] barbering, hair and tutoring opened with their checks
-  // (service-trades-launch tests); the lawyer aliases keep the held-category contract.
-  it.each(['attorney', 'attorney at law', 'legal consultation'])('keeps the %s alias canonical but held until its checks exist', (alias) => {
+  // [TRADES · 13 Oct; R15 · 15 Oct 2026] tutoring opened with its checks (service-trades-launch tests); barbering
+  // and hair stay held (research A9: UNSURE), with the lawyer.
+  it.each(['barbering', 'hair stylist', 'attorney at law'])('keeps the %s alias canonical but held until its checks exist', (alias) => {
     const trade = canonicalServiceTrade(alias)!;
     expect(trade).not.toBeNull();
     expect(() => requireCanonicalServiceTrade(alias)).toThrow('not accepting profiles or requests yet');
@@ -36,7 +36,7 @@ describe('service catalogue authority', () => {
     expect(category.appointmentsEnabled).toBe(false);
   });
 
-  it.each(['barbering', 'hair stylist', 'tutoring'])('accepts the %s alias now that its checks exist', (alias) => {
+  it.each(['tutoring'])('accepts the %s alias now that its checks exist', (alias) => {
     const trade = canonicalServiceTrade(alias)!;
     expect(requireCanonicalServiceTrade(alias)).toBe(trade);
     const category = publicServiceCatalog().categories.find((entry) => entry.id === trade)!;
@@ -50,8 +50,7 @@ describe('service catalogue authority', () => {
     expect(publicServiceCatalog().categories.find((entry) => entry.id === 'plumber')?.quoteRequestsEnabled).toBe(true);
   });
 
-  // [TRADES] the accountant opened with the ICAG + GRA practising certificates as its gate.
-  it.each(['lawyer', 'attorney at law'])('refuses unverified professional activation: %s', (alias) => {
+  it.each(['lawyer', 'attorney at law', 'accountant', 'tax consultation'])('refuses unverified professional activation: %s', (alias) => {
     expect(canonicalServiceTrade(alias)).not.toBeNull();
     expect(() => requireCanonicalServiceTrade(alias)).toThrow('not accepting profiles or requests yet');
     const category = publicServiceCatalog().categories.find((entry) => entry.id === canonicalServiceTrade(alias))!;
@@ -83,7 +82,7 @@ describe('service catalogue authority', () => {
   it('keeps document policy topics specific without manufacturing approved credentials', () => {
     const catalog = publicServiceCatalog();
     const documents = (id: string) => catalog.categories.find((entry) => entry.id === id)!.documents;
-    expect(documents('barber').some((doc) => doc.label.includes('Town Clerk registration'))).toBe(true);
+    expect(documents('barber').some((doc) => doc.label.includes('hygiene'))).toBe(true);
     expect(documents('lawyer').some((doc) => doc.label.includes('Right to practise'))).toBe(true);
     expect(documents('tutor').some((doc) => doc.label.includes('tutors work with children'))).toBe(true);
     expect(qualificationTypeMatchesTrade('GEI_LICENCE', 'barber')).toBe(false);
@@ -94,8 +93,11 @@ describe('service catalogue authority', () => {
   it('holds every category with an unresolved policy topic at profile, request, and document gates', async () => {
     const held = publicServiceCatalog().categories.filter((category) =>
       category.documents.some((document) => document.status === 'POLICY_REVIEW_REQUIRED'));
-    // [TRADES · owner 13 Oct 2026] only the lawyer remains; the other thirteen opened.
-    expect(held.map((category) => category.id)).toEqual(['lawyer']);
+    // [TRADES · 13 Oct; R15 · 15 Oct 2026] pest control, heavy equipment, chef, caterer, tutor and photographer
+    // opened with their checks; the trades the research marks UNSURE stay held with the lawyer.
+    expect(held.map((category) => category.id)).toEqual([
+      'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'lawyer', 'accountant',
+    ]);
     for (const category of held) {
       expect(category.quoteRequestsEnabled, category.id).toBe(false);
       expect(() => requireCanonicalServiceTrade(category.id), category.id)
@@ -111,7 +113,7 @@ describe('service catalogue authority', () => {
     }
   });
 
-  it.each(['lawyer'])('does not project a stored %s provider as verified with an empty checklist', async (trade) => {
+  it.each(['barber', 'lawyer'])('does not project a stored %s provider as verified with an empty checklist', async (trade) => {
     const db = {
       user: { findUnique: async () => ({ countryCode: 'GY', trustLevel: 'L1' }) },
       countryConfig: { findUnique: async () => ({ documentChecklists: {
@@ -134,11 +136,10 @@ describe('service catalogue authority', () => {
       expect(category.modes, category.id).toEqual(['QUOTE_JOB']);
       expect(category.appointmentsEnabled, category.id).toBe(false);
     }
-    for (const id of ['lawyer']) {
+    for (const id of ['lawyer', 'accountant']) {
       const category = categories.find((entry) => entry.id === id)!;
       expect(category.quoteRequestsEnabled).toBe(false);
       expect(category).not.toHaveProperty('price');
     }
-    expect(categories.find((entry) => entry.id === 'accountant')).not.toHaveProperty('price');
   });
 });

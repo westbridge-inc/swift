@@ -68,8 +68,12 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  change carried 2026-10-07.2 and then 2026-10-14.2 on older bases; neither
  *  label describes these values.
  *  2026-10-15.1 [TRADES]: all of 2026-10-14.5 plus this branch's 2026-10-13.1
- *  (the service trades opened with their own document lists; lawyers held). */
-export const PLATFORM_CONFIG_VERSION = '2026-10-15.1';
+ *  (the service trades opened with their own document lists; lawyers held).
+ *  2026-10-15.2 [R15 · owner 15 Oct, research A9/D9]: 2026-10-15.1 with the
+ *  UNSURE trades held again (gas fitter, barber group, accountant; drone work):
+ *  their lists are gone; pest control, heavy equipment, chef, caterer,
+ *  photographer and tutor keep theirs. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-15.2';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -181,44 +185,27 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
-    // [TRADES · owner 13 Oct 2026, decisions 23 + 40] The trades opened at launch, each with
-    // the documents Guyana law ties to it (research draft for counsel, 13 Oct). The base
-    // SERVICE_PROVIDER list (national ID + police clearance) applies to every one of them;
-    // SERVICE_TRADE_LAUNCH_FLOOR below keeps both halves required whatever a stored list says.
-    // Gas fitting: no installer licence was found, so the base checks only — and the profile
-    // may never offer to sell, refill or deliver cooking gas (services/service-catalog).
-    SERVICE_PROVIDER_TRADE_GAS_FITTER: ['police_clearance'],
+    // [TRADES · owner 13 Oct 2026, decisions 23 + 40; R15 · owner 15 Oct, research A9/D9] The trades
+    // opened at launch, each with the documents Guyana law ties to it. The base SERVICE_PROVIDER list
+    // (national ID + police clearance) applies to every one of them; SERVICE_TRADE_LAUNCH_FLOOR below
+    // keeps both halves required whatever a stored list says. Gas fitters, the barber group and
+    // accountants are HELD (services/service-catalog) and have no list here.
     // Pesticides and Toxic Chemicals Control Act s.21 (operator licence) and regulation 89
     // (commercial applicator certificate, two years).
     SERVICE_PROVIDER_TRADE_PEST_CONTROL: ['pest_control_operator_licence', 'pesticide_applicator_certificate'],
     // A driver's licence of the machine's class: the law asks for it when the machine is
     // driven on a road; recorded as required, the reviewer checks the class.
     SERVICE_PROVIDER_TRADE_HEAVY_EQUIPMENT_OPERATOR: ['drivers_licence'],
+    // This year's food handler's certificate from the Mayor and City Council of Georgetown
+    // (research D9; Georgetown only for now), re-checked every January.
     SERVICE_PROVIDER_TRADE_CHEF: ['food_handler_cert'],
-    // Food handler's certificate + the premises: Georgetown eating-house registration
-    // (City by-law 63), or the local council's sanitary certificate outside Georgetown.
+    // The certificate + the premises: the Georgetown eating-house registration (City by-law 63),
+    // renewed every 1 January.
     SERVICE_PROVIDER_TRADE_CATERER: ['food_handler_cert', 'eating_house_registration'],
-    // Georgetown City by-laws 18-22: a "barber" is anyone who cuts or dresses hair, does nails,
-    // face massage "or the like crafts" — each registered with the Town Clerk; a shop holds a
-    // yearly certificate. A salon is a shop; the others MAY add a shop certificate.
-    SERVICE_PROVIDER_TRADE_BARBER: ['town_clerk_registration'],
-    SERVICE_PROVIDER_TRADE_BARBER_OPTIONAL: ['town_clerk_shop_certificate'],
-    SERVICE_PROVIDER_TRADE_HAIRDRESSER: ['town_clerk_registration'],
-    SERVICE_PROVIDER_TRADE_HAIRDRESSER_OPTIONAL: ['town_clerk_shop_certificate'],
-    SERVICE_PROVIDER_TRADE_SALON: ['town_clerk_registration', 'town_clerk_shop_certificate'],
-    SERVICE_PROVIDER_TRADE_NAIL_TECHNICIAN: ['town_clerk_registration'],
-    SERVICE_PROVIDER_TRADE_NAIL_TECHNICIAN_OPTIONAL: ['town_clerk_shop_certificate'],
-    SERVICE_PROVIDER_TRADE_MAKEUP_ARTIST: ['town_clerk_registration'],
-    SERVICE_PROVIDER_TRADE_MAKEUP_ARTIST_OPTIONAL: ['town_clerk_shop_certificate'],
-    // Ground photography needs no licence. Drone work needs the GCAA's written authorisation:
-    // required as soon as the profile offers it (services.service), offered to every photographer.
+    // Ground photography needs no licence. Drone work is held: a profile offering it is refused.
     SERVICE_PROVIDER_TRADE_PHOTOGRAPHER: ['police_clearance'],
-    SERVICE_PROVIDER_TRADE_PHOTOGRAPHER_OPTIONAL: ['drone_authorisation'],
     // Works with children, often in their homes: the police clearance is required, never optional.
     SERVICE_PROVIDER_TRADE_TUTOR: ['police_clearance'],
-    // Public practice: the ICAG practising certificate (ICAG Act s.11) and the GRA practice
-    // certificate (Tax Act s.37), both renewed yearly.
-    SERVICE_PROVIDER_TRADE_ACCOUNTANT: ['chartered_accountant_practising_certificate', 'gra_practice_certificate'],
     CUSTOMER_L2: ['national_id', 'selfie'],
 };
 
@@ -227,22 +214,15 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
  * police clearance and the trade's own documents. The provider checklist is always a superset
  * of it — a stored CountryConfig edit can add documents but never take one of these away — so
  * an opened trade can never go live on identity documents alone. A trade without an entry here
- * (the lawyer is held) gains nothing from it.
+ * (a held trade: the lawyer, gas fitter, barber group, accountant) gains nothing from it.
  */
 export const SERVICE_TRADE_LAUNCH_FLOOR: Readonly<Record<string, readonly string[]>> = {
-  gas_fitter: ['national_id', 'police_clearance'],
   pest_control: ['national_id', 'police_clearance', 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
   heavy_equipment_operator: ['national_id', 'police_clearance', 'drivers_licence'],
   chef: ['national_id', 'police_clearance', 'food_handler_cert'],
   caterer: ['national_id', 'police_clearance', 'food_handler_cert', 'eating_house_registration'],
-  barber: ['national_id', 'police_clearance', 'town_clerk_registration'],
-  hairdresser: ['national_id', 'police_clearance', 'town_clerk_registration'],
-  salon: ['national_id', 'police_clearance', 'town_clerk_registration', 'town_clerk_shop_certificate'],
-  nail_technician: ['national_id', 'police_clearance', 'town_clerk_registration'],
-  makeup_artist: ['national_id', 'police_clearance', 'town_clerk_registration'],
   photographer: ['national_id', 'police_clearance'],
   tutor: ['national_id', 'police_clearance'],
-  accountant: ['national_id', 'police_clearance', 'chartered_accountant_practising_certificate', 'gra_practice_certificate'],
 };
 
 /**

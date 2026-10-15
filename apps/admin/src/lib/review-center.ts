@@ -22,7 +22,7 @@ export interface ReviewDocument {
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
   previousDecision?: PreviousDecision | null;
-  reviewerTypes?: Array<'documentNumber' | 'issuedOn'>;
+  reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear'>;
   /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
   reviewedBy?: string | null;
   user?: {
@@ -46,12 +46,9 @@ const LABELS: Record<string, string> = {
   self_declaration_unregistered: 'Unregistered business declaration',
   // [MC-PR2] checklist photo types the queue and the activation checklist both name
   storefront_photo: 'Storefront photo', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
-  // [TRADES · 13 Oct 2026] service-trade documents
+  // [TRADES · 13 Oct 2026; R15] service-trade documents
   pest_control_operator_licence: 'PTCCB pest-control operator licence', pesticide_applicator_certificate: 'PTCCB applicator certificate',
-  chartered_accountant_practising_certificate: 'ICAG practising certificate', gra_practice_certificate: 'GRA practice certificate',
-  eating_house_registration: 'Eating-house registration', town_clerk_registration: 'Town Clerk registration',
-  town_clerk_shop_certificate: 'Town Clerk shop certificate', drone_authorisation: 'GCAA drone authorisation',
-  gei_electrical_licence: 'GEI electrical licence',
+  eating_house_registration: 'Eating-house registration', gei_electrical_licence: 'GEI electrical licence',
   VENDOR_OWNER: 'Business owner', MOVER: 'Rider/Driver', CUSTOMER: 'Customer',
   RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
   CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',
@@ -88,16 +85,14 @@ export const reviewerHint = (type: string): string | undefined => REVIEWER_HINTS
  * A person decides every one of these; nothing here approves anything. `role` is the document's
  * filing role: a service provider's documents are filed under CUSTOMER (their super-app account).
  */
+// [R15 · research A9/D9] The licences and food certificates checked again every January: the reviewer
+// types the YEAR printed on the certificate, and only this year's (or, until 16 January, last year's) passes.
 const REVIEW_NOTES: Record<string, string> = {
-  pest_control_operator_licence: 'Pesticides and Toxic Chemicals Control Board licence to run a pest-control business, in this person’s name. Key the printed expiry.',
+  pest_control_operator_licence: 'Pesticides and Toxic Chemicals Control Board licence to run a pest-control business, in this person’s name. Type the year it is for; it is checked again every January.',
   pesticide_applicator_certificate: 'PTCCB commercial applicator certificate (urban/domestic) for this person. Valid two years from issue.',
-  chartered_accountant_practising_certificate: 'ICAG practising certificate, not only membership. ICAG lists practising accountants in the Gazette each January.',
-  gra_practice_certificate: 'GRA practice certificate for the current calendar year; it expires on 31 December.',
-  eating_house_registration: 'Georgetown: the Town Clerk’s eating-house registration (renewed each 1 January). Outside Georgetown: the local council’s sanitary certificate for the premises.',
-  town_clerk_registration: 'Town Clerk registration of this person as a barber (the by-laws cover hair, nails, face massage and similar work). Never accept a medical certificate instead.',
-  town_clerk_shop_certificate: 'Town Clerk certificate of registration of the shop, for the current calendar year; it expires on 31 December.',
-  drone_authorisation: 'Written authorisation from the Guyana Civil Aviation Authority to fly a camera drone, in this person’s name.',
-  food_handler_cert: 'Food handler’s certificate with the issuing office and a valid-until date. Never a medical certificate; record only the date.',
+  eating_house_registration: 'The Georgetown Town Clerk’s eating-house registration for this year (renewed each 1 January). Outside Georgetown is not accepted yet. Type the year it is for.',
+  food_handler_cert: 'Food handler’s certificate for this year, with the issuing office (for a chef or caterer: the Mayor and City Council of Georgetown). Never a medical certificate. Type the year it is for.',
+  gei_electrical_licence: 'Government Electrical Inspectorate licence in this person’s name. Type the year it is for; it is checked again every January.',
 };
 export function reviewNote(docType: string, role: string): string | null {
   if (docType === 'drivers_licence' && role === 'CUSTOMER') {

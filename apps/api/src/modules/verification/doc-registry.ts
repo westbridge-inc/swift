@@ -66,12 +66,10 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   nis_employer_reg: 'BUSINESS', digital_id: 'PERSONAL',
   // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration (versioned, hashed, consent-ledger row)
   self_declaration_unregistered: 'BUSINESS',
-  // [TRADES · 13 Oct 2026] service-trade documents: a person's licence or registration is PERSONAL;
-  // a premises certificate is BUSINESS and always reviewed by a person (ALWAYS_REVIEW_LEGACY_CODES).
+  // [TRADES · 13 Oct 2026; R15] service-trade documents: a person's licence is PERSONAL; a premises
+  // certificate is BUSINESS and always reviewed by a person (ALWAYS_REVIEW_LEGACY_CODES).
   pest_control_operator_licence: 'PERSONAL', pesticide_applicator_certificate: 'PERSONAL',
-  chartered_accountant_practising_certificate: 'PERSONAL', gra_practice_certificate: 'PERSONAL',
-  town_clerk_registration: 'PERSONAL', drone_authorisation: 'PERSONAL',
-  eating_house_registration: 'BUSINESS', town_clerk_shop_certificate: 'BUSINESS',
+  eating_house_registration: 'BUSINESS',
 };
 
 /** Auto-approved documents must still LAPSE (the "verified ≠ valid now" rule).
@@ -105,15 +103,25 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   self_declaration_unregistered: 365,
   // [TRADES · 13 Oct 2026] service-trade documents. The reviewer keys the printed date; these are
   // the longest validity each is issued for (a later date is refused as a typo).
-  pest_control_operator_licence: 3 * 365, // term set by the PTCCB and printed on the licence
   pesticide_applicator_certificate: 730,  // two years (Pesticides regulations, reg. 89)
-  chartered_accountant_practising_certificate: 365, // ICAG lists practising members every January
-  gra_practice_certificate: 365,          // calendar year (Tax Act s.37(5))
-  eating_house_registration: 365,         // calendar year, renewed 1 January (City by-law 63(3)); sanitary certificate elsewhere
-  town_clerk_registration: 365,           // no printed term found: reviewed yearly
-  town_clerk_shop_certificate: 365,       // calendar year, renewed 1 January (City by-law 18)
-  drone_authorisation: 365,               // the GCAA authorisation's own date
+  // [R15 · research A9/D9] The licences and food certificates checked again every January
+  // (CERTIFICATE_YEAR_DOC_TYPES): the reviewer types the certificate's YEAR and the approval lapses
+  // at the start of 16 January after it. These days are only the automatic path's default.
+  pest_control_operator_licence: 365,
+  eating_house_registration: 365,         // calendar year, renewed 1 January (City by-law 63(3))
+  gei_electrical_licence: 365,
 };
+
+/**
+ * [R15 · owner 15 Oct 2026, research A9/D9] The licences and food certificates Swift checks again
+ * every January. A person types the YEAR printed on the certificate (never a guessed expiry), and the
+ * approval lapses at the start of 16 January of the following year, Guyana time: the holder has the
+ * first fortnight of January to bring the new year's certificate (verification.service
+ * certificateYearRecheck). Every food or licence document of a service trade or store is here.
+ */
+export const CERTIFICATE_YEAR_DOC_TYPES: ReadonlySet<string> = new Set([
+  'gei_electrical_licence', 'pest_control_operator_licence', 'food_handler_cert', 'eating_house_registration',
+]);
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
  * [DOC-1 §6.9 · FD-DOC-6] Types in the always-review set by registry FACT (not by bucket rule):
@@ -125,7 +133,7 @@ const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSO
 export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set([
   'vehicle_insurance', 'fitness_cert',
   // [TRADES] which council issued a premises certificate, and for which premises, is a person's judgement
-  'eating_house_registration', 'town_clerk_shop_certificate',
+  'eating_house_registration',
 ]);
 
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;
@@ -478,7 +486,7 @@ const TRADE_LICENCE: FieldRow[] = [
   ...DATES(),
   { fieldCode: 'issuing_body', dataType: 'text' },
 ];
-/** [TRADES] A council certificate for premises (an eating-house, a barber's shop). */
+/** [TRADES] A council certificate for premises (an eating-house). */
 const PREMISES_CERTIFICATE: FieldRow[] = [
   { fieldCode: 'certificate_number', dataType: 'text', blind: true, identifier: true },
   // a home caterer's premises are their home
@@ -615,12 +623,7 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   // [TRADES · 13 Oct 2026] the service-trade licences and registrations: who holds it, its number, its dates
   pest_control_operator_licence: TRADE_LICENCE,
   pesticide_applicator_certificate: TRADE_LICENCE,
-  chartered_accountant_practising_certificate: TRADE_LICENCE,
-  gra_practice_certificate: TRADE_LICENCE,
-  town_clerk_registration: TRADE_LICENCE,
-  drone_authorisation: TRADE_LICENCE,
   eating_house_registration: PREMISES_CERTIFICATE,
-  town_clerk_shop_certificate: PREMISES_CERTIFICATE,
 };
 
 /**
@@ -749,10 +752,6 @@ export const HIRE_PERMIT_DOC_TYPE = 'hire_car_permit';
 export const HIRE_DRIVER_LICENCE_DOC_TYPE = 'hire_car_driver_licence';
 export const HIRE_VEHICLE_LICENCE_DOC_TYPE = 'hire_car_vehicle_licence';
 
-/** [TRADES · 13 Oct 2026] The GCAA's written authorisation to fly a camera drone: required of any service
- *  provider whose profile offers drone or aerial work. Registry text (DOC-INV-2). */
-export const DRONE_AUTHORISATION_DOC_TYPE = 'drone_authorisation';
-
 /**
  * [TRADES · 13 Oct 2026] What each service-provider document is, in the provider's own words — the
  * services catalogue lists these before anyone signs up, so older apps show them too.
@@ -763,13 +762,8 @@ export const SERVICE_DOCUMENT_WORDS: Readonly<Record<string, string>> = {
   pest_control_operator_licence: 'Pest-control operator licence from the Pesticides and Toxic Chemicals Control Board (PTCCB)',
   pesticide_applicator_certificate: 'Your PTCCB commercial applicator certificate (valid two years)',
   drivers_licence: 'Driver’s licence for the class of machine you drive on a road',
-  food_handler_cert: 'Food handler’s certificate',
-  eating_house_registration: 'Eating-house registration from the Town Clerk in Georgetown (outside Georgetown: your local council’s sanitary certificate)',
-  town_clerk_registration: 'Town Clerk registration for hair, nail and beauty work (Georgetown)',
-  town_clerk_shop_certificate: 'Town Clerk shop certificate: the shop’s certificate of registration for this year',
-  chartered_accountant_practising_certificate: 'ICAG practising certificate (Institute of Chartered Accountants of Guyana)',
-  gra_practice_certificate: 'GRA practice certificate for this year',
-  drone_authorisation: 'Written drone authorisation from the Guyana Civil Aviation Authority (GCAA)',
+  food_handler_cert: 'This year’s food handler’s certificate from the Mayor and City Council of Georgetown',
+  eating_house_registration: 'This year’s eating-house registration from the Town Clerk in Georgetown',
 };
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];
