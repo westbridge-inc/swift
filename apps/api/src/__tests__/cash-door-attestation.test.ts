@@ -1087,9 +1087,10 @@ describe('[C8 · owner 15 Oct] the rider\'s deletion block for held customer cas
   // The clock counts from when the hold was recorded (doorCashReturnRecordedAt).
   async function heldWith(riderId: string, customerId: string, amount: number, daysAgo: number) {
     const order = await orderAtDoor(riderId, customerId);
-    await app.prisma.order.update({ where: { id: order.id }, data: {
-      status: 'RETURNED', doorCashReturnAmount: amount, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(Date.now() - daysAgo * DAY),
-    } });
+    // Along declared edges only (#1740's transition guard refuses an ARRIVED -> RETURNED jump).
+    await walkOrderStatus(app.prisma, order.id, 'RETURNED', {
+      doorCashReturnAmount: amount, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(Date.now() - daysAgo * DAY),
+    });
     return order;
   }
   const guyanaDate = (at: Date) => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Guyana' }).format(at);
