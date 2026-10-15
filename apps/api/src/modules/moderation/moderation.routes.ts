@@ -5,6 +5,8 @@ import { getTenantId } from '../../plugins/tenant-context';
 import { activateUserBlock, deactivateUserBlock } from './user-block.service';
 import { assertRoomAccess } from '../chat/chat-authority';
 import { NotFoundError } from '../../utils/errors';
+import { NotificationService } from '../notification/notification.service';
+import { pageCsaeReport } from './csae-page';
 
 type AuthRequest = FastifyRequest & { user: { userId: string; role: string } };
 
@@ -79,6 +81,16 @@ export async function moderationRoutes(app: FastifyInstance) {
       },
       select: { id: true, status: true, createdAt: true },
     });
+    // [Brief item 3 · R19 · Child Safety Standards] A child-safety report pages operations at once (the SOS
+    // outbox: acknowledgement deadline, escalation, on-call texts). The report row above is the record; a page
+    // that fails to open is logged loudly and the moderation queue still floats CSAE to the top.
+    if (body.reason === 'CSAE') {
+      try {
+        await pageCsaeReport(app.prisma, new NotificationService(app.prisma, app.io), { tenantId: getTenantId() ?? null, contentReportId: report.id, targetType: body.targetType });
+      } catch (err) {
+        app.log.error({ err, contentReportId: report.id }, '[R19] CSAE report saved but the ops page did not open — moderation queue only');
+      }
+    }
     reply.code(201);
     return { success: true, data: report };
   });
