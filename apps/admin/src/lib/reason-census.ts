@@ -102,6 +102,8 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // [MMG REVERSAL · owner #11] Return a whole MMG weekly-fee payment: the whole amount, typed.
   { route: 'POST /billing/mmg-checkouts/:id/reverse', helper: 'reverseMmgFeePayment', args: ['mco_1', 2100], requiredBodyKeys: ['amountGyd'] },
   { route: 'POST /billing/mmg-fee-reversals/:id/resolve', helper: 'resolveMmgFeeReversal', args: ['rev_1', 'NOT_RETURNED', 'MMG-STMT-123'], requiredBodyKeys: ['outcome', 'mmgReference'] },
+  // [continues #1592] Weekly-fee payment confirmations: the reason travels in the body (and the header).
+  { route: 'POST /billing/confirmations/:id/resolve', helper: 'requestConfirmationResolution', args: ['hold_1', { sourceId: 'chk_1', epoch: 1, clockVersion: 3, decision: 'UNPAID', evidenceReference: 'MMG-STATEMENT-1', reason: 'Checked the MMG statement for this payment' }], requiredBodyKeys: ['sourceId', 'epoch', 'clockVersion', 'decision', 'evidenceReference', 'reason'] },
   { route: 'POST /billing/settlement-batches/:id/confirm-deposit', helper: 'confirmSettlementDeposit', args: ['batch_1', { depositedGyd: 500, depositedAt: '2026-01-01T00:00:00Z', bankRef: 'MMG-BANK-REF-1' }], requiredBodyKeys: ['depositedGyd', 'depositedAt', 'bankRef'] },
 
   // ── Custody recovery [AF-MOB-006] ──────────────────────────────────────
