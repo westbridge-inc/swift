@@ -223,7 +223,9 @@ describe('POST /rides/request — capacity guard (failure path)', () => {
     const { userId, token } = await makeCustomer();
     const base = {
       pickup: CENTRAL, dropoff: { lat: 6.755, lng: -58.155 },
-      pickupAddress: 'Central GT', dropoffAddress: 'South GT', passengerCount: 10,
+      // [R9 · owner research 15 Oct 2026] TRANSFORMED: 6 passengers (was 10). A party over 7 is now refused
+      // before its class is read (TOO_MANY_PASSENGERS); 6 keeps this case about the tier alone.
+      pickupAddress: 'Central GT', dropoffAddress: 'South GT', passengerCount: 6,
     };
     // [Ruling 2026-09-06] XL is hidden until a vehicle class serves it — a request for it is
     // an unavailable tier, not a capacity question.

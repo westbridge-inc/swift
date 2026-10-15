@@ -25,6 +25,7 @@ import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
+import { WEEKLY_RETIER_ON } from './weekly-retier';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -4769,6 +4770,23 @@ export class BillingService {
       return true;
     };
     return transaction ? apply(transaction) : this.prisma.$transaction(apply);
+  }
+
+  /**
+   * The scheduled weekly re-tier (tier-recalc). OFF until partners are told 14
+   * days ahead (weekly-retier.ts, owner legal plan R27): nobody moves to a new
+   * price. The two passes below stay callable for the day it comes back on.
+   */
+  async runWeeklyRetier(): Promise<{ on: boolean; vendorsChanged: number; moversChanged: number }> {
+    if (!WEEKLY_RETIER_ON) {
+      log().warn('[R27] weekly re-tier is OFF: no partner moves to a new weekly fee until the 14-day price-change notice ships');
+      return { on: false, vendorsChanged: 0, moversChanged: 0 };
+    }
+    const vendorsChanged = await this.recalculateVendorTiers();
+    // Movers re-tier on the same cadence: a vendor's basis is catalogue
+    // size, a mover's is the vehicle they currently have registered.
+    const moversChanged = await this.recalculateMoverTiers();
+    return { on: true, vendorsChanged, moversChanged };
   }
 
   /**

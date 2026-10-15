@@ -325,16 +325,43 @@ if argv[:2] == ['context', 'show']:
 if argv[:2] == ['image', 'inspect']:
     sys.exit(0 if not os.environ.get('FAKE_NO_IMAGE') else 1)
 if argv[:1] == ['inspect']:
-    print('running restarts=0'); sys.exit(0)
+    print(os.environ.get('FAKE_STATE_' + argv[-1].replace('-', '_'), 'running restarts=0')); sys.exit(0)
 rehearsal = argv[:3] == ['compose', '-p', 'swift-rehearsal']
 if argv[:1] == ['compose'] and 'ps' in argv:
     if rehearsal and '-aq' in argv:
         print(os.environ.get('FAKE_REHEARSAL_PS', '')); sys.exit(0)
     print(argv[-1] + '-id'); sys.exit(0)
 if argv[:1] == ['compose'] and 'logs' in argv:
-    print(os.environ.get('FAKE_LOGS', 'api | tenant wall: enforced role=swift_app_login\nworker | tenant wall: enforced role=swift_app_login\n'
-                         'api | tenant wall: system login is a bypass member\nworker | tenant wall: system login is a bypass member'))
+    services = [a for a in argv[argv.index('logs') + 1:] if not a.startswith('-')]
+    if 'FAKE_LOGS' in os.environ:
+        print(os.environ['FAKE_LOGS']); sys.exit(0)
+    for svc in services:
+        print(os.environ.get('FAKE_LOGS_' + svc.upper(), f'{svc} | tenant wall: enforced role=swift_app_login\n'
+                             f'{svc} | tenant wall: system login is a bypass member'))
     sys.exit(0)
+if argv[:1] == ['compose'] and 'exec' in argv and 'cat' in argv:
+    # The api container's secret mount: the copy's published URL files.
+    name = argv[-1].rsplit('/', 1)[-1]
+    login = {'DATABASE_URL': 'swift_app_login', 'SYSTEM_DATABASE_URL': 'swift_system_login'}[name]
+    user = os.environ.get('FAKE_URL_USER_' + name, login)
+    print(f'postgresql://{user}:{os.environ["FAKE_CRED_" + name]}@postgres:5432/swift'); sys.exit(0)
+if argv[:1] == ['compose'] and 'exec' in argv and 'PGPASSFILE' in argv[argv.index('-c') + 1]:
+    # A login's own new connection: the passfile line must arrive on stdin, for that login.
+    login, sql = argv[-2], argv[-1]
+    cred = os.environ['FAKE_CRED_' + ('DATABASE_URL' if login == 'swift_app_login' else 'SYSTEM_DATABASE_URL')]
+    if stdin.strip() != f'postgres:5432:swift:{login}:{cred}':
+        sys.stderr.write('psql: error: FATAL:  password authentication failed\n'); sys.exit(2)
+    if 'query_to_xml' in sql:
+        print(os.environ.get('FAKE_ROWS_' + login.upper(), '0' if login == 'swift_app_login' else '42')); sys.exit(0)
+    if sql.startswith('ALTER TABLE'):
+        if os.environ.get('FAKE_ALTER_OK'): sys.exit(0)
+        sys.stderr.write('ERROR:  must be owner of table users\n'); sys.exit(1)
+    if 'pg_get_userbyid' in sql:
+        print(os.environ.get('FAKE_OWNER', 'swift')); sys.exit(0)
+    if sql.startswith('SET ROLE'):
+        if os.environ.get('FAKE_SET_ROLE_OK'): sys.exit(0)
+        sys.stderr.write('ERROR:  permission denied to set role "swift"\n'); sys.exit(1)
+    sys.exit(3)
 if argv[:1] == ['compose'] and 'exec' in argv:
     script = argv[argv.index('-c') + 1]
     if 'pg_dumpall' in script:
@@ -384,7 +411,7 @@ class RehearsalHost:
         (self.deploy / 'wall').mkdir(parents=True)
         for name in ('docker-compose.yml', 'docker-compose.wall.yml', 'docker-compose.rehearsal.yml', 'gen-secrets.sh'):
             shutil.copy(DEPLOY / name, self.deploy / name)
-        for name in ('rehearsal.sh', 'rehearsal-roles.py'):
+        for name in ('rehearsal.sh', 'rehearsal-roles.py', 'walled-rows.sql'):
             shutil.copy(DEPLOY / 'wall' / name, self.deploy / 'wall' / name)
         shim(self.deploy, 'rls-logins.sh', FAKE_RLS, python=True)
         (self.deploy / '.env').write_text('PILOT_ENV=production\nNODE_ENV=production\n'
@@ -405,7 +432,8 @@ class RehearsalHost:
         self.calls.write_text('')
         self.values.write_text('')
         env = {'PATH': f'{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(self.tmp), 'CALL_LOG': str(self.calls),
-               'VALUE_LOG': str(self.values), 'SWIFT_REHEARSAL_LOCK': str(self.tmp / 'lock')}
+               'VALUE_LOG': str(self.values), 'SWIFT_REHEARSAL_LOCK': str(self.tmp / 'lock'),
+               'FAKE_CRED_DATABASE_URL': 'app-fixture-credential-7Qx', 'FAKE_CRED_SYSTEM_DATABASE_URL': 'system-fixture-credential-9Kw'}
         env.update(extra_env or {})
         result = subprocess.run(['bash', str(self.deploy / 'wall' / 'rehearsal.sh'), *args], env=env, text=True,
                                 capture_output=True, timeout=180, stdin=subprocess.DEVNULL)
@@ -495,6 +523,64 @@ class Rehearsal(unittest.TestCase):
                 result, _ = self.host.run('up', SHA, extra_env={'FAKE_LOGS': logs})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
+
+    def test_passed_only_after_every_step_and_the_wall_through_the_real_logins(self):
+        result, calls = self.host.run('up', SHA)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'PASSED at {SHA}: every step held', result.stdout)
+        self.assertIn('wall: walled rows seen unbound by swift_app_login=0, by swift_system_login=42', result.stdout)
+        self.assertIn('boot: api running restarts=0', result.stdout)
+        self.assertIn('boot: worker running restarts=0', result.stdout)
+        self.assertNotIn('FAILED', result.stdout + result.stderr)
+        # Each login on its own new connection inside the copy; its credential
+        # only ever on stdin (the fake refuses any other passfile line).
+        connects = [c['argv'] for c in calls if c['tool'] == 'docker' and 'PGPASSFILE' in ' '.join(c['argv'])]
+        self.assertEqual(sorted({a[-2] for a in connects}), ['swift_app_login', 'swift_system_login'])
+        self.assertTrue(all(a[:3] == ['compose', '-p', 'swift-rehearsal'] for a in connects))
+        self.assertTrue(any(a[-1].startswith('ALTER TABLE') for a in connects))
+        self.assertTrue(any(a[-1] == 'SET ROLE swift' for a in connects))
+        blob = self.host.calls.read_text() + result.stdout + result.stderr
+        for credential in ('app-fixture-credential-7Qx', 'system-fixture-credential-9Kw'):
+            self.assertNotIn(credential, blob)
+
+    def test_any_step_that_does_not_hold_fails_the_run_and_names_it(self):
+        both = 'tenant wall: enforced role=swift_app_login\ntenant wall: system login is a bypass member'
+        cases = [
+            ({'FAKE_STATE_api_id': 'running restarts=1'}, 'boot', 'api is not running cleanly'),
+            ({'FAKE_STATE_worker_id': 'exited restarts=0'}, 'boot', 'worker is not running cleanly'),
+            # The api attested twice (it restarted), the worker never: the old combined count passed this.
+            ({'FAKE_LOGS_API': f'{both}\n{both}', 'FAKE_LOGS_WORKER': 'worker | starting'}, 'boot', 'did not both attest'),
+            ({'FAKE_LOGS_WORKER': 'worker | tenant wall: enforced role=swift_app_login'}, 'boot', 'did not both attest'),
+            ({'FAKE_ROWS_SWIFT_APP_LOGIN': '3'}, 'wall', 'sees 3 walled rows'),
+            ({'FAKE_ROWS_SWIFT_SYSTEM_LOGIN': '0'}, 'wall', 'sees no walled row'),
+            ({'FAKE_ALTER_OK': '1'}, 'wall', 'could ALTER a walled table'),
+            ({'FAKE_SET_ROLE_OK': '1'}, 'wall', 'could become the database owner'),
+            ({'FAKE_OWNER': 'swift; DROP'}, 'wall', 'not a plain role name'),
+            # The api's URL file names another login (the owner): no passfile line is made for it.
+            ({'FAKE_URL_USER_DATABASE_URL': 'swift'}, 'wall', 'the request login could not count the walled rows'),
+        ]
+        for env, step, message in cases:
+            with self.subTest(message=message, env=sorted(env)):
+                result, _ = self.host.run('up', SHA, extra_env=env)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(message, result.stdout + result.stderr)
+                self.assertIn(f'REHEARSAL FAILED at step: {step}', result.stderr)
+                self.assertNotIn('PASSED', result.stdout)
+
+    def test_a_non_production_host_needs_each_process_walled_but_not_the_production_only_line(self):
+        """The system login's own boot attestation runs only in production mode
+        (boot/system-login.ts), so a staging host (NODE_ENV=development) shows
+        the enforced line only; each process must still show it."""
+        env_file = self.host.deploy / '.env'
+        env_file.write_text(env_file.read_text().replace('PILOT_ENV=production\nNODE_ENV=production', 'PILOT_ENV=staging\nNODE_ENV=development'))
+        walled = {'FAKE_LOGS_API': 'api | tenant wall: enforced role=swift_app_login',
+                  'FAKE_LOGS_WORKER': 'worker | tenant wall: enforced role=swift_app_login'}
+        result, _ = self.host.run('up', SHA, extra_env=walled)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('(mode development)', result.stdout)
+        result, _ = self.host.run('up', SHA, extra_env={**walled, 'FAKE_LOGS_WORKER': 'worker | starting'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('REHEARSAL FAILED at step: boot', result.stderr)
 
     def test_down_removes_only_the_rehearsal(self):
         result, calls = self.host.run('down')

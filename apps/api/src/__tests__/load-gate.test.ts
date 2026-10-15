@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
@@ -91,6 +91,10 @@ describe('what a vehicle must be able to carry', () => {
     expect(required).toBe('EXTRA_LARGE');
     expect(vehicleCanCarry('BICYCLE', required!)).toBe(false);
     expect(vehicleCanCarry('MOTORCYCLE', required!)).toBe(false);
+    // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] TRANSFORMED: a car carries goods only while the
+    // CAR_DELIVERIES switch is on (default off); with it on, the car carries this order as before.
+    expect(vehicleCanCarry('CAR', required!)).toBe(false);
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     expect(vehicleCanCarry('CAR', required!)).toBe(true);
   });
 

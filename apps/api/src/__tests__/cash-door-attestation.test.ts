@@ -1088,3 +1088,66 @@ describe('[row 34] the database refuses contradictory cash-return evidence', () 
     expect(f.order['doorCashReturnRecordedAt']).toBeNull();
   });
 });
+
+describe('[C8 · owner 15 Oct] the rider\'s deletion block for held customer cash lifts after 90 days', () => {
+  const DAY = 86_400_000;
+  // The clock counts from when the hold was recorded (doorCashReturnRecordedAt).
+  async function heldWith(riderId: string, customerId: string, amount: number, daysAgo: number) {
+    const order = await orderAtDoor(riderId, customerId);
+    await app.prisma.order.update({ where: { id: order.id }, data: {
+      status: 'RETURNED', doorCashReturnAmount: amount, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(Date.now() - daysAgo * DAY),
+    } });
+    return order;
+  }
+  const guyanaDate = (at: Date) => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Guyana' }).format(at);
+
+  it('while the hold is younger than 90 days the rider is refused and told the amount, the reason, how to resolve it and the day the block lifts', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await heldWith(holder.rider.id, customer.user.id, 2000, 89);
+    await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
+    const recordedAt = (await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).doorCashReturnRecordedAt!;
+    const error = await new AccountService(app).deleteAccount(holder.user.id).then(() => null, (e: unknown) => e as Error & { code?: string });
+    expect(error?.code).toBe('PARTNER_OBLIGATIONS');
+    expect(error?.message).toContain('GY$2,000');
+    expect(error?.message).toMatch(/could not pay in full/);
+    expect(error?.message).toMatch(/partial cash.*returned to the customer.*Get help.*confirm/i);
+    expect(error?.message).toContain(guyanaDate(new Date(recordedAt.getTime() + 90 * DAY)));
+    expect(error?.message).toMatch(/record of the cash is kept/);
+    expect(error?.message).not.toMatch(/\{amount\}|\{date\}/);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: holder.user.id } })).status).toBe('ACTIVE');
+  });
+
+  it('after 90 days unresolved the block lifts: the rider can delete the account and the order keeps the held cash record', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await heldWith(holder.rider.id, customer.user.id, 2000, 91);
+    await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
+    const obligations = await app.prisma.$transaction((tx) => partnerObligations(tx, holder.user.id));
+    expect(verdictFor(obligations).blockers).not.toContain('PARTIAL_CASH_RETURN');
+    await new AccountService(app).deleteAccount(holder.user.id);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: holder.user.id } })).status).not.toBe('ACTIVE');
+    const kept = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(kept.doorCashReturnStatus).toBe('HELD');
+    expect(Number(kept.doorCashReturnAmount)).toBe(2000);
+    expect(kept.doorCashReturnRecordedAt).toBeInstanceOf(Date);
+    expect(kept.doorCashReturnResolvedAt).toBeNull();
+  });
+
+  it('an older lifted hold does not hide a newer one: only the holds still inside 90 days block, and the message names their amount', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    await heldWith(holder.rider.id, customer.user.id, 1500, 120);
+    const recent = await heldWith(holder.rider.id, customer.user.id, 2000, 10);
+    await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
+    const obligations = await app.prisma.$transaction((tx) => partnerObligations(tx, holder.user.id));
+    expect(verdictFor(obligations).blockers).toContain('PARTIAL_CASH_RETURN');
+    expect(obligations.partialCashReturnCount).toBe(1);
+    expect(obligations.partialCashReturnAmount).toBe(2000);
+    const recordedAt = (await app.prisma.order.findUniqueOrThrow({ where: { id: recent.id } })).doorCashReturnRecordedAt!;
+    expect(obligations.partialCashReturnReleaseAt?.getTime()).toBe(recordedAt.getTime() + 90 * DAY);
+    const error = await new AccountService(app).deleteAccount(holder.user.id).then(() => null, (e: unknown) => e as Error);
+    expect(error?.message).toContain('GY$2,000');
+    expect(error?.message).not.toContain('GY$3,500');
+  });
+});

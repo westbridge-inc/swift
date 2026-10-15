@@ -43,7 +43,7 @@ beforeEach(async () => {
   db.userBlock.findFirst.mockResolvedValue(null);
   db.chatMessage.findMany.mockResolvedValue([]);
   db.chatMessage.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) =>
-    where.id === 'existing-message' ? { id: where.id, chatRoomId: 'room' } : null);
+    where.id === 'existing-message' ? { id: where.id, chatRoomId: 'room', recipientIds: [] } : null);
   db.chatMessage.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
     ({ id: 'created-message', ...data, mediaUrl: data['mediaUrl'] ?? null, createdAt: new Date() }));
   db.contentReport.findUnique.mockResolvedValue(null);
@@ -200,11 +200,28 @@ describe('chat report authority', () => {
     expect(crossTenant.body).not.toContain('room');
   });
 
-  it('rejects a reassigned rider and rechecks authority before duplicate success', async () => {
+  it('rejects a reassigned rider the message was not sent to, and rechecks authority before duplicate success', async () => {
     db.order.findUnique.mockResolvedValue({ ...order(), rider: { userId: 'replacement' } });
     db.contentReport.findUnique.mockResolvedValue({ id: 'old-report', status: 'PENDING' });
     expect((await report('existing-message', { 'x-user': 'recipient' })).statusCode).toBe(403);
     expect(db.contentReport.findUnique).not.toHaveBeenCalled();
+    expect(db.contentReport.create).not.toHaveBeenCalled();
+  });
+
+  it('owner ruling: a reassigned rider may report a message that was sent to them', async () => {
+    db.order.findUnique.mockResolvedValue({ ...order(), rider: { userId: 'replacement' } });
+    db.chatMessage.findUnique.mockResolvedValue({ id: 'existing-message', chatRoomId: 'room', recipientIds: ['recipient'] });
+    expect((await report('existing-message', { 'x-user': 'recipient' })).statusCode).toBe(201);
+    expect(db.contentReport.create).toHaveBeenCalledOnce();
+  });
+
+  it('a former recipient in another tenant still gets "not found", exactly like a missing message', async () => {
+    db.chatMessage.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) =>
+      where.id === 'existing-message' ? { id: where.id, chatRoomId: 'room', recipientIds: ['recipient'] } : null);
+    const missing = await report('missing', { 'x-user': 'recipient' });
+    const crossTenant = await report('existing-message', { 'x-user': 'recipient', 'x-tenant': 'other-tenant' });
+    expect(crossTenant.statusCode).toBe(404);
+    expect(crossTenant.json().error).toEqual(missing.json().error);
     expect(db.contentReport.create).not.toHaveBeenCalled();
   });
 

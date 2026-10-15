@@ -1899,6 +1899,7 @@ model Order {
   riderAssignmentVersion Int @default(0)
   rider                  Rider?                  @relation(fields: [riderId], references: [id])
   driverId               String?
+  driverAssignmentVersion Int                    @default(0)
   driver                 Driver?                 @relation(fields: [driverId], references: [id])
   status                 OrderStatus             @default(PENDING)
   statusHistory          OrderStatusLog[]
@@ -4781,6 +4782,11 @@ model ChatMessage {
   /// With the launch content filter on, phone numbers, outside links and
   /// abusive text are refused before storage.
   offPlatformFlag Boolean  @default(false)
+  /// The people the message was sent to: the conversation's participants,
+  /// other than the sender, at the moment it was written (under the room lock,
+  /// each cleared against blocks). A person taken off the order can still
+  /// report a message they received. Empty for messages written before this.
+  recipientIds    String[] @default([])
   createdAt       DateTime @default(now())
 
   @@index([offPlatformFlag])
