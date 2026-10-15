@@ -542,22 +542,29 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
     expect(cancelled.status).toBe('CANCELLED');
   });
 
-  it('charges the cancellation fee once the vendor has accepted', async () => {
+  // [owner #46, 13 Oct] These two cases used to record the G$500 marker. A
+  // store order now cancels free while it waits for the store, and once the
+  // store accepts the customer contacts the store instead — never a fee Swift
+  // cannot collect (full matrix: store-order-cancel-after-accept.test.ts).
+  it('refuses once the vendor has accepted — contact the store, nothing written, no fee', async () => {
     const vendor = await makeVendor();
     const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', { placedAtMinutesAgo: 1 });
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.cancellationFee).toBe(500);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('STORE_ACCEPTED');
+    const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: untouched.status, lateCancelFeeDue: untouched.lateCancelFeeDue }).toEqual({ status: 'ACCEPTED', lateCancelFeeDue: 0 });
   });
 
-  it('charges the fee even while PENDING once the free window has passed', async () => {
+  it('is free while still PENDING even after the old five-minute window', async () => {
     const vendor = await makeVendor();
     const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', { placedAtMinutesAgo: 10 });
 
     const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
     expect(res.statusCode).toBe(200);
-    expect(res.json().data.cancellationFee).toBe(500);
+    expect(res.json().data.cancellationFee).toBe(0);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).lateCancelFeeDue).toBe(0);
   });
 
   it('cannot cancel once the order is in transit', async () => {
@@ -592,16 +599,14 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
     expect(profile.currentRideId).toBe(order.id);
   });
 
-  it('restocks a tracked item and frees the rider on cancellation', async () => {
+  it('restocks a tracked item on cancellation', async () => {
     const vendor = await makeVendor();
-    const rider = await makeRider();
     const item = await app.prisma.item.create({
       data: { vendorId: vendor.vendorId, categoryId: vendor.categoryId, name: 'Tracked Plate', basePrice: 1000, stockQuantity: 4 },
     });
     // Decrement to mimic what checkout did when the order was placed.
     await app.prisma.item.update({ where: { id: item.id }, data: { stockQuantity: 2 } });
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', {
-      riderId: rider.riderId,
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING', {
       itemId: item.id,
       qty: 2,
       placedAtMinutesAgo: 1,
@@ -613,9 +618,43 @@ describe('Customer cancels an order — POST /customer/orders/:id/cancel', () =>
     const restocked = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
     expect(restocked.stockQuantity).toBe(4); // 2 back on the shelf
 
-    const freed = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
-    expect(freed.isAvailable).toBe(true);
+    await app.prisma.item.delete({ where: { id: item.id } });
+  });
 
+  // [owner #46, 13 Oct] An accepted store order with a rider on it is no longer
+  // the customer's to cancel (it used to cancel with the marker and free the
+  // rider). The refusal must leave everything exactly as it was: the rider
+  // keeps the job, the stock stays sold. (A customer cancel that DOES free a
+  // mover — a parcel — is pinned in late-cancel-marker.test.ts; a store that
+  // declines an accepted order frees its rider in the vendor-reject block.)
+  it('a refused cancel of an accepted order with a rider changes nothing: rider keeps the job, stock stays sold', async () => {
+    const vendor = await makeVendor();
+    const rider = await makeRider();
+    const item = await app.prisma.item.create({
+      data: { vendorId: vendor.vendorId, categoryId: vendor.categoryId, name: 'Tracked Plate', basePrice: 1000, stockQuantity: 2 },
+    });
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', {
+      riderId: rider.riderId,
+      itemId: item.id,
+      qty: 2,
+      placedAtMinutesAgo: 1,
+    });
+
+    const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, {}, customer.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('STORE_ACCEPTED');
+
+    const [after, stock, mover] = await Promise.all([
+      app.prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+      app.prisma.item.findUniqueOrThrow({ where: { id: item.id } }),
+      app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }),
+    ]);
+    expect({ status: after.status, riderId: after.riderId }).toEqual({ status: 'ACCEPTED', riderId: rider.riderId });
+    expect(stock.stockQuantity).toBe(2);
+    expect(mover.isAvailable).toBe(false);
+
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null } });
+    await app.prisma.orderItem.deleteMany({ where: { orderId: order.id } });
     await app.prisma.item.delete({ where: { id: item.id } });
   });
 
@@ -909,8 +948,9 @@ describe('Delivery-window auto-complete uses the canonical transaction', () => {
 // through the one cancel-policy predicate, the charge path under the order lock.
 // ---------------------------------------------------------------------------
 describe('free cancellation when the mover search found nobody', () => {
-  const NO_MOVER_PREVIEW = 'No mover was found. You can cancel without a fee.';
-  const NO_MOVER_CANCELLED = 'Order cancelled — no mover was found, so there is no fee.';
+  // [owner #46/#50, 13–14 Oct] No fee exists any more, so the words no longer name one.
+  const NO_MOVER_PREVIEW = 'No mover was found. You can cancel for free.';
+  const NO_MOVER_CANCELLED = 'Order cancelled — no mover was found.';
 
   /** A food order the store has prepared (well past the free window), out for
    *  a platform rider in delivery generation `generation`, whose search came
@@ -934,7 +974,7 @@ describe('free cancellation when the mover search found nobody', () => {
   async function preview(id: string, who = customer) {
     const res = await inject('GET', `/api/v1/customer/orders/${id}`, undefined, who.token);
     expect(res.statusCode, res.body).toBe(200);
-    return res.json().data as { cancellationFee: number; freeCancellationWindow: boolean; freeCancellationExpiresAt: string | null; cancellationMessage?: string | null };
+    return res.json().data as { canCancel: boolean; cancellationFee: number; freeCancellationWindow: boolean; freeCancellationExpiresAt: string | null; cancellationMessage?: string | null };
   }
 
   async function cancel(id: string, who = customer) {
@@ -943,27 +983,42 @@ describe('free cancellation when the mover search found nobody', () => {
     return res.json().data as { cancellationFee: number; message: string };
   }
 
-  async function expectFree(id: string, who = customer) {
+  async function expectFree(id: string, who = customer, message = NO_MOVER_PREVIEW) {
     const shown = await preview(id, who);
     expect(shown.cancellationFee).toBe(0);
     expect(shown.freeCancellationWindow).toBe(true);
     // Free until a mover takes it — there is no countdown to promise.
     expect(shown.freeCancellationExpiresAt).toBeNull();
-    expect(shown.cancellationMessage).toBe(NO_MOVER_PREVIEW);
+    expect(shown.cancellationMessage).toBe(message);
     const done = await cancel(id, who);
     expect(done.cancellationFee).toBe(0);
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).lateCancelFeeDue).toBe(0);
     return done;
   }
 
-  async function expectCharged(id: string, who = customer) {
+  /** [owner #46, 13 Oct] A STORE order the store accepted that is not free is
+   *  no longer charged the marker: the customer cannot cancel it at all. */
+  async function expectRefused(id: string, who = customer) {
     const shown = await preview(id, who);
-    expect(shown.cancellationFee).toBe(500);
-    expect(shown.freeCancellationWindow).toBe(false);
+    expect(shown).toMatchObject({ canCancel: false, cancellationFee: 0, freeCancellationWindow: false, cancellationMessage: null });
+    const res = await inject('POST', `/api/v1/customer/orders/${id}/cancel`, { reason: 'No mover available' }, who.token);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('STORE_ACCEPTED');
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, lateCancelFeeDue: row.lateCancelFeeDue }).toEqual({ status: 'READY_FOR_PICKUP', lateCancelFeeDue: 0 });
+  }
+
+  /** [owner #50, 14 Oct] A ride nobody has accepted is free at any age — but
+   *  not for the no-mover reason: the journal decides that, never mere
+   *  unassignment, so neither the preview nor the result claims it. */
+  async function expectFreeButNotNoMover(id: string, who = customer) {
+    const shown = await preview(id, who);
+    expect(shown.cancellationFee).toBe(0);
+    expect(shown.freeCancellationWindow).toBe(true);
     expect(shown.cancellationMessage ?? null).toBeNull();
     const done = await cancel(id, who);
-    expect(done.cancellationFee).toBe(500);
-    expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).lateCancelFeeDue).toBe(500);
+    expect(done.cancellationFee).toBe(0);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id } })).lateCancelFeeDue).toBe(0);
     expect(done.message).not.toContain('no mover');
   }
 
@@ -979,10 +1034,10 @@ describe('free cancellation when the mover search found nobody', () => {
     await expectFree(order.id);
   });
 
-  it('an exhaustion from an earlier delivery generation does not erase the fee for the current one', async () => {
+  it('an exhaustion from an earlier delivery generation does not make the current one free', async () => {
     const { order } = await exhaustedOrder(0);
     await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentModeVersion: 1 } });
-    await expectCharged(order.id);
+    await expectRefused(order.id);
   });
 
   it('a search that started again after coming back empty still found nobody: free', async () => {
@@ -994,16 +1049,16 @@ describe('free cancellation when the mover search found nobody', () => {
     await expectFree(order.id);
   });
 
-  it('a search that is still running and has not come back empty keeps the fee', async () => {
+  it('a search that is still running and has not come back empty is not free', async () => {
     const { order, search } = await exhaustedOrder(0);
     await app.prisma.dispatchSearch.update({ where: { id: search.id }, data: { status: 'SEARCHING', exhaustedAt: null } });
-    await expectCharged(order.id);
+    await expectRefused(order.id);
   });
 
   it.each(['PICKUP', 'VENDOR_DELIVERY'] as const)('%s does not borrow the platform-search exemption', async (mode) => {
     const { order } = await exhaustedOrder(0);
     await app.prisma.order.update({ where: { id: order.id }, data: { fulfillmentMode: mode, fulfillment: mode === 'PICKUP' ? 'PICKUP' : 'DELIVERY' } });
-    await expectCharged(order.id);
+    await expectRefused(order.id);
   });
 
   it('a rider assigned after the preview ends the exemption: the charge path reads the locked row', async () => {
@@ -1011,18 +1066,26 @@ describe('free cancellation when the mover search found nobody', () => {
     expect((await preview(order.id)).cancellationFee).toBe(0);
     const rider = await makeRider();
     await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rider.riderId } });
-    const done = await cancel(order.id);
-    expect(done.cancellationFee).toBe(500);
-    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).lateCancelFeeDue).toBe(500);
+    // [owner #46] Not free any more — and, the store having accepted, refused
+    // outright rather than charged; the locked row decides, not the preview.
+    const res = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'No mover available' }, customer.token);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('STORE_ACCEPTED');
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect({ status: row.status, riderId: row.riderId, lateCancelFeeDue: row.lateCancelFeeDue })
+      .toEqual({ status: 'READY_FOR_PICKUP', riderId: rider.riderId, lateCancelFeeDue: 0 });
   });
 
   it('an unattested MMG order is free too, and the message still says who refunds a payment already sent', async () => {
     const { order } = await exhaustedOrder(0, 'MOBILE_MONEY');
-    const done = await expectFree(order.id);
+    // [Opus S3-2, 14 Oct] An MMG order may already be paid to the store: the preview never says "free" for it
+    // and names who refunds, like the cancel result below.
+    const done = await expectFree(order.id, customer, 'No mover was found. You can cancel. If you already sent the MMG payment, the store refunds you directly.');
     expect(done.message).toBe(`${NO_MOVER_CANCELLED} If you already sent the MMG payment, the store refunds you directly.`);
   });
 
-  it('a taxi whose driver search came back empty cancels free; one still searching keeps the fee', async () => {
+  // [owner #50, 14 Oct] "keeps the fee" → free without the no-mover words (no fee exists).
+  it('a taxi whose driver search came back empty cancels free; one still searching is free only because nobody accepted it', async () => {
     // One open ride per passenger: each case rides with its own passenger.
     const taxi = async (status: 'EXHAUSTED' | 'SEARCHING') => {
       const rider = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -1043,9 +1106,9 @@ describe('free cancellation when the mover search found nobody', () => {
     const empty = await taxi('EXHAUSTED');
     const done = await expectFree(empty.order.id, empty.rider);
     // A ride is a ride in the customer's words, not an "order".
-    expect(done.message).toBe('Ride cancelled — no mover was found, so there is no fee.');
+    expect(done.message).toBe('Ride cancelled — no mover was found.');
     const searching = await taxi('SEARCHING');
-    await expectCharged(searching.order.id, searching.rider);
+    await expectFreeButNotNoMover(searching.order.id, searching.rider);
   });
 });
 

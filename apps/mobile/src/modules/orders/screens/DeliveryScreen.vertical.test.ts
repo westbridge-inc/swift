@@ -47,12 +47,15 @@ describe('controls — the words every other vertical already had', () => {
     expect(SCREEN).toMatch(/This stops the rider search and cancels the pickup request\. It can’t be undone\./);
   });
 
-  it('the sheet keeps the possible fee and final confirmation clear', () => {
-    expect(SCREEN).toMatch(/Cancelling stops this \$\{cancelledNoun\}\. Check the possible fee below\. We’ll show the final result when cancellation is confirmed\./);
+  // [owner #46/#50, 13–14 Oct] No fee exists, so the sheet names none — the
+  // final confirmation stays clear.
+  it('the sheet keeps the final confirmation clear, and never words a fee', () => {
+    expect(SCREEN).toMatch(/Cancelling stops this \$\{cancelledNoun\}\. We’ll show the final result when cancellation is confirmed\./);
+    expect(SCREEN).not.toMatch(/possible fee|late-cancellation|cancellation fee/i);
   });
 
   it('the booking-aware hold caption and pending summary this screen already had are still there', () => {
-    expect(SCREEN).toMatch(/Changed your mind\? Cancel before the provider starts — the app shows any cost before you confirm\./);
+    expect(SCREEN).toMatch(/Changed your mind\? You can cancel until the provider accepts your booking\. Swift never charges for cancelling\./);
     expect(SCREEN).toMatch(/The provider will confirm your booking shortly/);
   });
 });

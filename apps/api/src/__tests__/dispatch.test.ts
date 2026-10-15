@@ -1,3 +1,4 @@
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -1021,14 +1022,14 @@ describe('The offer cascade', () => {
     await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool -> terminal exhaustion
     const order = await makeDeliveryOrder();
     const emits: Array<{ room: string; ev: string }> = [];
-    const spy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
-      emit: (ev: string) => { emits.push({ room, ev }); return true; },
-    })) as never);
+    // [L05] Order-room events reach the order's CURRENT people only: observe the
+    // packet an authorized participant socket in the room actually receives.
+    const detach = orderSocketFixture(app.io, order, (ev) => { emits.push({ room: `order:${order.id}`, ev }); });
     try {
       const r = await dispatch.dispatchOrder(order.id);
       expect(r).toMatchObject({ exhausted: true });
     } finally {
-      spy.mockRestore();
+      detach();
     }
     // The rider's open ActiveRide screen gets a terminal signal, not just a push.
     expect(emits).toContainEqual({ room: `order:${order.id}`, ev: 'dispatch:exhausted' });

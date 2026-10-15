@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { confirmReturn } from '../custody/custody-recovery';
@@ -51,7 +52,7 @@ import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
-import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerView, unhideRestocked } from '../compliance/prohibited-gate';
+import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
@@ -60,12 +61,19 @@ import { DiscoveryService } from '../discovery/discovery.service';
 import { QrAnalyticsService } from '../qr/qr-analytics.service';
 import { cachedRender, renderQrPng, renderQrSvg, renderTemplatePdf } from '../qr/qr-assets.service';
 import { publicWebBase } from '../qr/qr-codes';
-import { processReviewText } from '../rating/review-scrub';
+import {
+  respondToVendorReview,
+  STORE_REVIEW_PROJECTION,
+  summarizeRatingDistribution,
+  publishedVendorReviewWhere,
+  storeVisibleReview,
+} from '../rating/vendor-review-visibility';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
@@ -659,6 +667,12 @@ export async function vendorRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const analytics = new VendorAnalyticsService(app.prisma);
   const menu = new VendorMenuService(app.prisma);
+  /** [Item 62] A listing archived between an editor's read and its guarded
+   *  write is gone: 404, never a 500 (Prisma's P2025 "record not found"). */
+  const goneIfArchived = (id: string) => (err: unknown): never => {
+    if (typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2025') throw new NotFoundError('Item', id);
+    throw err;
+  };
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
   const custodyDeps = { prisma: app.prisma, io: app.io, notifications };
@@ -1019,8 +1033,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       include: {
         operatingHours: { orderBy: { dayOfWeek: 'asc' } },
         subscription: true,
-        categories: { orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: true } } } },
-        _count: { select: { orders: true, items: true } },
+        categories: { where: { archivedAt: null }, orderBy: { sortOrder: 'asc' }, include: { _count: { select: { items: { where: { archivedAt: null } } } } } },
+        _count: { select: { orders: true, items: { where: { archivedAt: null } } } },
       },
     });
     // Legacy rows predate the MMG destination validator. Never reflect an
@@ -1030,6 +1044,12 @@ export async function vendorRoutes(app: FastifyInstance) {
       mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
       mmgPayUrlPending: safeMmgPayUrl(vendor.mmgPayUrlPending),
       publicPhone: safePublicPhone(vendor.publicPhone),
+      // [owner #51] What still stands between a never-live store and going
+      // live, besides its documents (additive; older apps ignore it).
+      goLiveMissing: awaitingFirstGoLive(vendor) ? goLiveMissing(vendor) : [],
+      // [GUARDRAILS §8 · owner 14 Oct, store names] Why customers can't see the store: its own words wait for Swift.
+      storeCheck: partnerStoreView(storeCheckOf(vendor)),
+      nameReviewApprovedHash: undefined,
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
@@ -1318,10 +1338,18 @@ export async function vendorRoutes(app: FastifyInstance) {
         actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
       });
     }
+    // [owner #51] A never-live store whose documents are done waits only for
+    // its published number: once it has one, the activation projection runs
+    // now (not at the next daily belt) and the store goes live. A failure
+    // there never undoes the saved number — the belt heals it.
+    if (publicPhone && awaitingFirstGoLive(vendor)) {
+      await verification.reprojectVendorActivation(await vendorOwnerUserId(app, vendorId))
+        .catch((err) => request.log.warn({ err, vendorId }, 'go-live projection after the published number was saved is held for the belt'));
+    }
     // The link state is read back AFTER staging so the response says what is
     // live and what is pending — never the value the caller sent.
     const link = await app.prisma.vendor.findUniqueOrThrow({
-      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true },
+      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, status: true, isVerified: true, acceptingOrders: true },
     });
 
     // On-write search sync [SWIFT-UG-SRCH-01]: catalog writes schedule a debounced per-vendor reindex.
@@ -1335,6 +1363,9 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...link,
         mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
         mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),
+        // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.
+        storeCheck: partnerStoreView(storeCheckOf(vendor)),
+        nameReviewApprovedHash: undefined,
       },
     };
   });
@@ -1776,7 +1807,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:prep_update', evt);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:prep_update', evt);
     if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
     // The rider on the FRESH row is the one who needs "it's ready" — never the
     // rider the stale screen read. Re-check after commit and push only while
@@ -1995,7 +2026,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       note: z.string().max(300).optional(),
     }).parse(request.body);
 
-    const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds } } });
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId: { in: access.vendorIds }, archivedAt: null } });
     if (!item) throw new NotFoundError('Item', request.params.id);
     if (item.stockQuantity == null) {
       throw new AppError(400, 'UNTRACKED', 'This item does not track stock — set a quantity on it first');
@@ -2008,24 +2039,27 @@ export async function vendorRoutes(app: FastifyInstance) {
     // it moves the counter and writes the ledger row in two statements, so
     // outside a transaction a crash between them leaves the cache and the truth
     // disagreeing, which is the exact failure the ledger exists to prevent.
-    await app.prisma.$transaction((tx) => applyStockMovement(tx, {
-      itemId: item.id,
-      delta: body.delta,
-      reason: body.reason,
-      actorId: request.user.userId,
-      note: body.note ?? null,
-    })).catch((err) => {
+    // Mirror the inventory engine's edges in the SAME transaction as the movement: zero hides, restock un-hides —
+    // never a banned item, judged under the item's row lock with the write. [GUARDRAILS §8 · DS1266 S3 · DS1267 S4]
+    await app.prisma.$transaction(async (tx) => {
+      await applyStockMovement(tx, {
+        itemId: item.id,
+        delta: body.delta,
+        reason: body.reason,
+        actorId: request.user.userId,
+        note: body.note ?? null,
+      });
+      await tx.item.updateMany({
+        where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
+        data: { isAvailable: false, autoHiddenAt: new Date() },
+      });
+      await unhideRestocked(tx, item.id);
+    }).catch((err) => {
       if (err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') {
         throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
       }
       throw err;
     });
-    // Mirror the inventory engine's edges: zero hides, restock un-hides.
-    await app.prisma.item.updateMany({
-      where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
-      data: { isAvailable: false, autoHiddenAt: new Date() },
-    });
-    await unhideRestocked(app.prisma, item.id); // never a banned item [GUARDRAILS §8 · DS1266 S3]
 
     const adjustment = await app.prisma.stockAdjustment.create({
       data: { itemId: item.id, delta: body.delta, reason: body.reason, note: body.note, createdBy: request.user.userId },
@@ -2044,6 +2078,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       WHERE "vendorId" = ANY(${access.vendorIds})
         AND "stockQuantity" IS NOT NULL AND "lowStockThreshold" IS NOT NULL
         AND "stockQuantity" <= "lowStockThreshold"
+        AND "archivedAt" IS NULL
       ORDER BY "stockQuantity" ASC
       LIMIT 200
     `;
@@ -2188,7 +2223,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
     const updated = capture.order;
-    app.io.to(`order:${order.id}`).emit('order:status_changed', {
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
     });
@@ -2387,7 +2422,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
-    app.io.to(`order:${order.id}`).emit('order:status_changed', rejectEvent);
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', rejectEvent);
     if (order.vendorId) {
       app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
     }
@@ -2445,12 +2480,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: category };
   });
 
-  /** DELETE /categories/:id — Delete a category (and its items) */
+  /** DELETE /categories/:id — Delete a category: [owner 11 Oct] it and its
+   *  listings are ARCHIVED (see VendorMenuService.deleteCategory). */
   app.delete<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { itemsRemoved, removedItemIds } = await menu.deleteCategory(vendorId, request.params.id);
 
-    // hard delete: no sweep could find these rows later [SWIFT-UG-SRCH-01]
+    // Evict the archived listings' search docs now [SWIFT-UG-SRCH-01].
     const search = new SearchService(app.prisma);
     for (const itemId of removedItemIds) search.removeItemDoc(itemId).catch(() => {});
     scheduleVendorSearchSync(app, vendorId);
@@ -2476,7 +2512,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const query = vendorItemsQuerySchema.parse(request.query);
 
-    const where: Record<string, unknown> = { vendorId };
+    // [Item 62] A deleted (archived) listing is history, not menu.
+    const where: Record<string, unknown> = { vendorId, archivedAt: null };
     if (query.categoryId) where['categoryId'] = query.categoryId;
     if (query.isAvailable === 'true') where['isAvailable'] = true;
     if (query.isAvailable === 'false') where['isAvailable'] = false;
@@ -2519,7 +2556,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     // Verify category belongs to this vendor
     const category = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
-    if (!category || category.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
+    if (!category || category.vendorId !== vendorId || category.archivedAt) throw new NotFoundError('Category', body.categoryId);
     // [GUARDRAILS §8 · #55] A name or an option that IS banned goods is refused, never held.
     assertNotBannedGoods([body.name, ...(body.optionGroups ?? []).flatMap((g) => [g.name, ...g.options.map((o) => o.name)])]);
     // [#54] A store filed under a banned category lists nothing new: every item it carries is banned.
@@ -2845,7 +2882,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     // Categories resolve by name (case-insensitive), created on demand
-    const categories = await app.prisma.category.findMany({ where: { vendorId } });
+    // [owner 11 Oct] An archived category never takes new rows: a row naming
+    // it files into a new live category of the same name.
+    const categories = await app.prisma.category.findMany({ where: { vendorId, archivedAt: null } });
     const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
 
     let imported = 0;
@@ -2917,7 +2956,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const file = await request.file();
@@ -2939,10 +2978,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
 
     const item = await app.prisma.item.update({
-      where: { id: request.params.id },
+      where: { id: request.params.id, archivedAt: null },
       data: { imageUrl: url },
       select: { id: true, name: true, imageUrl: true },
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     scheduleVendorSearchSync(app, vendorId);
 
@@ -2952,7 +2991,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /items/:id — Update an item */
   app.put<{ Params: IdParam }>('/items/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
     // [GUARDRAILS §8] An item Swift does not allow is never edited back to life (one banned only by
     // its own words may be renamed out of them — the new name is judged before it is written).
@@ -2964,7 +3003,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // If moving to a different category, verify ownership
     if (body.categoryId && body.categoryId !== existing.categoryId) {
       const cat = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
-      if (!cat || cat.vendorId !== vendorId) throw new NotFoundError('Category', body.categoryId);
+      if (!cat || cat.vendorId !== vendorId || cat.archivedAt) throw new NotFoundError('Category', body.categoryId);
     }
 
     // Inventory: restocking above zero undoes an AUTO-hide (the engine hid it
@@ -2994,7 +3033,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // renamed to "Coconut cake" may come on, and a restock never switches a banned item back on (its count is saved).
     const item = await app.prisma.$transaction(async (tx) => {
       const updated = await tx.item.update({
-        where: { id: request.params.id },
+        where: { id: request.params.id, archivedAt: null },
         data: {
           ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
           ...(body.name !== undefined && { name: body.name.trim() }),
@@ -3019,7 +3058,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (!unhide) return updated;
       const banned = (await catalogueChecksFor(tx, [updated.id])).get(updated.id)?.state === 'BANNED';
       return banned ? updated : tx.item.update({ where: { id: updated.id }, data: { isAvailable: true, autoHiddenAt: null }, include: itemInclude });
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     // [MKT-2] THE STOCK COUNT, through the single writer.
     //
@@ -3065,17 +3104,29 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: { ...withBulkWord(saved), catalogueCheck: partnerView(check) } };
   });
 
-  /** DELETE /items/:id — Delete an item and its option groups/options */
+  /** DELETE /items/:id — [Item 62] Delete a listing from the menu: the row is
+   *  ARCHIVED, not removed. Orders hold a loose reference to it (their lines
+   *  are snapshots) and bookings a real one (a hard delete cascaded and erased
+   *  the customer's reservation); an open order must still cancel and restock
+   *  against it. Archived means: off every menu, search and cart (it can never
+   *  be available again — the items_archived_unavailable check), refused by
+   *  every editor, and its option history kept. The response is unchanged. */
   app.delete<{ Params: IdParam }>('/items/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
-    await app.prisma.option.deleteMany({ where: { optionGroup: { itemId: request.params.id } } });
-    await app.prisma.optionGroup.deleteMany({ where: { itemId: request.params.id } });
-    await app.prisma.item.delete({ where: { id: request.params.id } });
+    // One compare-and-set: a concurrent delete or editor finds it archived.
+    // autoHiddenAt is cleared so a later cancellation restock (which re-shows
+    // only auto-hidden rows) can never put a deleted listing back on sale.
+    const archived = await app.prisma.item.updateMany({
+      where: { id: request.params.id, vendorId, archivedAt: null },
+      data: { archivedAt: new Date(), isAvailable: false, autoHiddenAt: null },
+    });
+    if (archived.count !== 1) throw new NotFoundError('Item', request.params.id);
 
-    // hard delete: no sweep could find this row later [SWIFT-UG-SRCH-01]
+    // Evict the search doc now [SWIFT-UG-SRCH-01]; the sync that follows sees
+    // an unavailable row and leaves it out.
     new SearchService(app.prisma).removeItemDoc(request.params.id).catch(() => {});
     scheduleVendorSearchSync(app, vendorId);
 
@@ -3085,7 +3136,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /items/:id/availability — Quick toggle availability */
   app.put<{ Params: IdParam }>('/items/:id/availability', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId } });
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
     const body = itemAvailabilitySchema.parse(request.body ?? {});
@@ -3094,10 +3145,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (newAvailability) await assertNotBanned(app.prisma, existing.id);
 
     const item = await app.prisma.item.update({
-      where: { id: request.params.id },
+      where: { id: request.params.id, archivedAt: null },
       data: { isAvailable: newAvailability },
       select: { id: true, name: true, isAvailable: true },
-    });
+    }).catch(goneIfArchived(request.params.id));
 
     scheduleVendorSearchSync(app, vendorId);
 
@@ -3111,7 +3162,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** POST /items/:itemId/option-groups — Add an option group to an item */
   app.post<{ Params: ItemIdParam }>('/items/:itemId/option-groups', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const item = await app.prisma.item.findFirst({ where: { id: request.params.itemId, vendorId } });
+    const item = await app.prisma.item.findFirst({ where: { id: request.params.itemId, vendorId, archivedAt: null } });
     if (!item) throw new NotFoundError('Item', request.params.itemId);
 
     const body = addOptionGroupSchema.parse(request.body);
@@ -3160,9 +3211,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
     await assertNotBanned(app.prisma, existing.itemId, { wordBanEditable: true });
 
     const body = updateOptionGroupSchema.parse(request.body);
@@ -3188,9 +3239,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
 
     await app.prisma.option.deleteMany({ where: { optionGroupId: request.params.id } });
     await app.prisma.optionGroup.delete({ where: { id: request.params.id } });
@@ -3207,9 +3258,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const group = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.groupId },
-      include: { item: { select: { vendorId: true } } },
+      include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!group || group.item.vendorId !== vendorId) throw new NotFoundError('OptionGroup', request.params.groupId);
+    if (!group || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
     await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
 
     const body = addOptionSchema.parse(request.body);
@@ -3244,9 +3295,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
+      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
+    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
     await assertNotBanned(app.prisma, existing.optionGroup.itemId, { wordBanEditable: true });
 
     const body = updateOptionSchema.parse(request.body);
@@ -3271,9 +3322,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.option.findUnique({
       where: { id: request.params.id },
-      include: { optionGroup: { include: { item: { select: { vendorId: true } } } } },
+      include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId) throw new NotFoundError('Option', request.params.id);
+    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
 
     await app.prisma.option.delete({ where: { id: request.params.id } });
 
@@ -3383,7 +3434,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       .parse(request.body);
 
     if (body.itemId) {
-      const item = await app.prisma.item.findFirst({ where: { id: body.itemId, vendorId }, select: { id: true } });
+      const item = await app.prisma.item.findFirst({ where: { id: body.itemId, vendorId, archivedAt: null }, select: { id: true } });
       if (!item) throw new NotFoundError('Listing', body.itemId);
     }
     const [y, m, d] = body.date.split('-').map(Number);
@@ -3438,7 +3489,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** The caller must own the item — every item-tag surface goes through this. */
   async function requireOwnItem(vendorId: string, itemId: string) {
-    const item = await app.prisma.item.findFirst({ where: { id: itemId, vendorId }, select: { id: true, name: true, description: true } });
+    const item = await app.prisma.item.findFirst({ where: { id: itemId, vendorId, archivedAt: null }, select: { id: true, name: true, description: true } });
     if (!item) throw new NotFoundError('Listing', itemId);
     return item;
   }
@@ -3777,52 +3828,54 @@ export async function vendorRoutes(app: FastifyInstance) {
     const query = request.query as Record<string, string | undefined>;
     const pagination = parsePagination(query);
 
-    const where: Record<string, unknown> = {
-      vendorId,
-      type: 'CUSTOMER_TO_VENDOR',
-    };
+    const tenantId = request.tenantId;
+    if (!tenantId) {
+      throw new AppError(500, 'TENANT_CONTEXT_REQUIRED', 'This review request has no authenticated tenant context.');
+    }
     const { minScore, maxScore } = reviewsQuerySchema.parse(request.query);
-    if (minScore) where['score'] = { ...(where['score'] as object || {}), gte: minScore };
-    if (maxScore) where['score'] = { ...(where['score'] as object || {}), lte: maxScore };
+    // The store console must not vary with the operator's own blocks: an
+    // operator already knows customers from orders and could link a review
+    // to a customer by toggling a block and watching this list change.
+    const publishedWhere = publishedVendorReviewWhere(vendorId);
+    const where = {
+      ...publishedWhere,
+      ...(minScore || maxScore
+        ? {
+          score: {
+            ...(minScore ? { gte: minScore } : {}),
+            ...(maxScore ? { lte: maxScore } : {}),
+          },
+        }
+        : {}),
+    };
 
-    const [reviews, total, aggregate] = await Promise.all([
+    const [reviews, scoreBuckets] = await Promise.all([
+      // Row 52: the store sees what was said, never who said it. An explicit
+      // allowlist (no rater, raterId, orderId or moderation fields) so a new
+      // column can never leak through this list by default.
       app.prisma.rating.findMany({
         where,
-        include: {
-          rater: { select: { id: true, firstName: true, lastName: true, avatar: true } },
-        },
+        select: STORE_REVIEW_PROJECTION,
         orderBy: { createdAt: 'desc' },
         skip: pagination.skip,
         take: pagination.limit,
       }),
-      app.prisma.rating.count({ where }),
-      app.prisma.rating.aggregate({
-        where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-        _avg: { score: true },
+      app.prisma.rating.groupBy({
+        by: ['score'],
+        where,
         _count: true,
+        orderBy: { score: 'asc' },
       }),
     ]);
-
-    // Score distribution
-    const distribution = await app.prisma.rating.groupBy({
-      by: ['score'],
-      where: { vendorId, type: 'CUSTOMER_TO_VENDOR' },
-      _count: true,
-      orderBy: { score: 'asc' },
-    });
-
-    const scoreDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    for (const d of distribution) {
-      scoreDistribution[d.score] = d._count;
-    }
+    const summary = summarizeRatingDistribution(scoreBuckets);
 
     return {
       success: true,
-      ...paginatedResponse(reviews, total, pagination),
+      ...paginatedResponse(reviews.map(storeVisibleReview), summary.totalReviews, pagination),
       summary: {
-        averageRating: aggregate._avg.score ?? 0,
-        totalReviews: aggregate._count,
-        distribution: scoreDistribution,
+        averageRating: summary.averageRating,
+        totalReviews: summary.totalReviews,
+        distribution: summary.distribution,
       },
     };
   });
@@ -3832,35 +3885,21 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.post<{ Params: IdParam }>('/reviews/:id/respond', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const { response } = respondReviewSchema.parse(request.body);
-
-    const rating = await app.prisma.rating.findUnique({ where: { id: request.params.id } });
-    if (!rating || rating.vendorId !== vendorId || rating.type !== 'CUSTOMER_TO_VENDOR') {
-      throw new NotFoundError('Review', request.params.id);
+    const tenantId = request.tenantId;
+    if (!tenantId) {
+      throw new AppError(500, 'TENANT_CONTEXT_REQUIRED', 'This review request has no authenticated tenant context.');
     }
-
-    // Movement R (R7): the reply rides the same scrub pipeline — PII masked;
-    // profanity is refused outright (this is the store's public face).
-    const processed = processReviewText(response);
-    if (processed.hold) {
-      throw new AppError(400, 'KEEP_IT_PROFESSIONAL', 'That language can’t go on your storefront — rephrase and post again');
-    }
-
-    const isEdit = rating.response !== null;
-    const updated = await app.prisma.rating.update({
-      where: { id: request.params.id },
-      data: { response: processed.text, respondedAt: new Date(), respondedBy: request.user.userId },
+    // Movement R (R7): scrub, live block/publication check, response CAS and
+    // durable notification fact are one serializable operation. Only delivery
+    // of the already-persisted notification happens after commit.
+    const updated = await respondToVendorReview(app.prisma, notifications, {
+      tenantId,
+      responderId: request.user.userId,
+      vendorId,
+      reviewId: request.params.id,
+      response,
+      respondedAt: new Date(),
     });
-
-    if (!isEdit) {
-      const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { name: true } });
-      await notifications.send({
-        userId: rating.raterId,
-        type: 'RATING_RECEIVED',
-        title: `${vendor.name} replied to your review`,
-        body: response.length > 120 ? `${response.slice(0, 117)}…` : response,
-        data: { kind: 'review_response', ratingId: rating.id, vendorId },
-      });
-    }
 
     return { success: true, data: updated };
   });
