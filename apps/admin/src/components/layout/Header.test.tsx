@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ts from 'typescript';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,51 +8,64 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // ---------------------------------------------------------------------------
 // Owner: "logging out of any account — the confirmation 'should we log you
 // out', like every other app." The admin console's one sign-out control is the
-// header's icon button. It now asks first, through the console's own confirm
-// (window.confirm, as every irreversible admin action does), and signs out on
+// header's icon button. It asks first — [MC shell] in the page now, not a
+// browser confirm (owner ruling, 6 Oct: no browser prompts) — and signs out on
 // the server exactly once.
 // ---------------------------------------------------------------------------
 
 const nav = vi.hoisted(() => ({ replace: vi.fn() }));
 const api = vi.hoisted(() => ({ logout: vi.fn<() => Promise<void>>() }));
 
-vi.mock('next/navigation', () => ({ useRouter: () => nav }));
-vi.mock('@/lib/api', () => ({ logout: api.logout }));
-vi.mock('./GlobalSearch', () => ({ GlobalSearch: () => null }));
+vi.mock('next/navigation', () => ({ useRouter: () => nav, usePathname: () => '/vendors' }));
+vi.mock('@/lib/api', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/api')>()), logout: api.logout }));
+vi.mock('./CommandPalette', () => ({ SearchLauncher: () => null }));
 
 import { Header } from './Header';
+import { ReasonDialogProvider } from '@/components/mc/ReasonDialog';
 
 beforeEach(() => {
   api.logout.mockResolvedValue(undefined);
 });
 
+const renderHeader = () => render(<ReasonDialogProvider><Header /></ReasonDialogProvider>);
 const signOutButton = () => screen.getByRole('button', { name: 'Sign out' });
 
 describe('the admin console asks before it signs out', () => {
-  it('asks, and a declined ask ends nothing', async () => {
-    const confirm = vi.fn(() => false);
+  it('asks in the page, and a declined ask ends nothing', async () => {
+    const confirm = vi.fn(() => true);
     vi.stubGlobal('confirm', confirm);
-    render(<Header />);
+    renderHeader();
+    const user = userEvent.setup();
 
-    await userEvent.setup().click(signOutButton());
+    await user.click(signOutButton());
+    const dialog = screen.getByRole('dialog', { name: 'Sign out of Swift Mission Control?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
 
-    expect(confirm).toHaveBeenCalledExactlyOnceWith('Sign out of Swift Admin on this browser?');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(confirm).not.toHaveBeenCalled();
     expect(api.logout).not.toHaveBeenCalled();
     expect(nav.replace).not.toHaveBeenCalled();
   });
 
   it('a confirmed ask signs out on the server once, even on a double click, then leaves', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    render(<Header />);
-    const button = signOutButton();
+    renderHeader();
+    const user = userEvent.setup();
+    await user.click(signOutButton());
+    const confirmButton = within(screen.getByRole('dialog')).getByRole('button', { name: 'Sign out' });
 
     await act(async () => {
-      button.click();
-      button.click();
+      confirmButton.click();
+      confirmButton.click();
     });
 
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledExactlyOnceWith('/login'));
     expect(api.logout).toHaveBeenCalledTimes(1);
-    expect(nav.replace).toHaveBeenCalledExactlyOnceWith('/login');
+  });
+
+  it('names the screen you are on', () => {
+    renderHeader();
+    expect(screen.getByText('Businesses')).toBeTruthy();
+    expect(screen.getByText('Stores and service businesses')).toBeTruthy();
   });
 });
 

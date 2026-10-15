@@ -1891,6 +1891,8 @@ model Order {
   vendorId               String?
   vendor                 Vendor?                 @relation(fields: [vendorId], references: [id])
   riderId                String?
+  /// Advances whenever the assigned rider changes, including release/reassignment.
+  riderAssignmentVersion Int @default(0)
   rider                  Rider?                  @relation(fields: [riderId], references: [id])
   driverId               String?
   driver                 Driver?                 @relation(fields: [driverId], references: [id])
@@ -4739,8 +4741,9 @@ model ChatMessage {
   messageType     String   @default("text")
   mediaUrl        String?
   isRead          Boolean  @default(false)
-  /// Off-platform contact signal (spec §2): phone number / "WhatsApp me"
-  /// detected at send. The message still delivers — this feeds risk scoring.
+  /// Off-platform contact signal (spec §2) on admitted text, used for risk scoring.
+  /// With the launch content filter on, phone numbers, outside links and
+  /// abusive text are refused before storage.
   offPlatformFlag Boolean  @default(false)
   createdAt       DateTime @default(now())
 

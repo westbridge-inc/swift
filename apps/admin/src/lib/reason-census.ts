@@ -16,6 +16,8 @@
 // demands (read from the route handler), so the census grades the body shape
 // at the wire and not just the reason — a helper that passed the reason gate
 // and then 400'd on a missing `note` / deposit evidence is caught here.
+// `reply` is the success `data` the census answers with, for a helper that
+// checks the server's answer before it resolves; absent = an empty object.
 // ---------------------------------------------------------------------------
 
 export interface ReasonCaller {
@@ -27,6 +29,8 @@ export interface ReasonCaller {
   readonly args: readonly unknown[];
   /** Top-level body fields the server's zod schema requires; absent = none. */
   readonly requiredBodyKeys?: readonly string[];
+  /** The success `data` the census replies with; absent = `{}`. */
+  readonly reply?: Readonly<Record<string, unknown>>;
 }
 
 export const REASONED_CALLERS: readonly ReasonCaller[] = [
@@ -34,6 +38,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /users/:id/suspend', helper: 'suspendUser', args: ['usr_1'] },
   { route: 'PUT /users/:id/unsuspend', helper: 'unsuspendUser', args: ['usr_1'] },
   { route: 'PUT /users/:id/ban', helper: 'banUser', args: ['usr_1'] },
+  { route: 'POST /support/:id/complete-account-closure', helper: 'completeAccountClosure', args: ['tkt_1'] },
 
   // ── Vendors and movers ─────────────────────────────────────────────────
   { route: 'PUT /vendors/:id/approve', helper: 'approveVendor', args: ['vnd_1'] },
@@ -45,6 +50,8 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── Orders ─────────────────────────────────────────────────────────────
   { route: 'PUT /orders/:id/cancel', helper: 'cancelOrder', args: ['ord_1', { refund: false }] },
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
+  { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
+    requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },
 
   // ── Moderation ─────────────────────────────────────────────────────────
   { route: 'PUT /moderation/reports/:id', helper: 'resolveModerationReport', args: ['rep_1', { status: 'ACTIONED' }], requiredBodyKeys: ['status'] },
@@ -63,6 +70,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── Verification ───────────────────────────────────────────────────────
   { route: 'PUT /verification/:id/approve', helper: 'approveDoc', args: ['doc_1', undefined] },
   { route: 'PUT /verification/:id/reject', helper: 'rejectDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /verification/:id/revoke', helper: 'revokeDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /staff/:userId/document-reviewer', helper: 'setDocumentReviewer', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
   { route: 'PUT /staff/:userId/catalogue-approver', helper: 'setCatalogueApprover', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
 
@@ -91,6 +99,8 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // [MMG REVERSAL · owner #11] Return a whole MMG weekly-fee payment: the whole amount, typed.
   { route: 'POST /billing/mmg-checkouts/:id/reverse', helper: 'reverseMmgFeePayment', args: ['mco_1', 2100], requiredBodyKeys: ['amountGyd'] },
   { route: 'POST /billing/mmg-fee-reversals/:id/resolve', helper: 'resolveMmgFeeReversal', args: ['rev_1', 'NOT_RETURNED', 'MMG-STMT-123'], requiredBodyKeys: ['outcome', 'mmgReference'] },
+  // [continues #1592] Weekly-fee payment confirmations: the reason travels in the body (and the header).
+  { route: 'POST /billing/confirmations/:id/resolve', helper: 'requestConfirmationResolution', args: ['hold_1', { sourceId: 'chk_1', epoch: 1, clockVersion: 3, decision: 'UNPAID', evidenceReference: 'MMG-STATEMENT-1', reason: 'Checked the MMG statement for this payment' }], requiredBodyKeys: ['sourceId', 'epoch', 'clockVersion', 'decision', 'evidenceReference', 'reason'] },
   { route: 'POST /billing/settlement-batches/:id/confirm-deposit', helper: 'confirmSettlementDeposit', args: ['batch_1', { depositedGyd: 500, depositedAt: '2026-01-01T00:00:00Z', bankRef: 'MMG-BANK-REF-1' }], requiredBodyKeys: ['depositedGyd', 'depositedAt', 'bankRef'] },
 
   // ── Custody recovery [AF-MOB-006] ──────────────────────────────────────
