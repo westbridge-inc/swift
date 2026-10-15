@@ -7,7 +7,7 @@ import { RefreshCcw } from 'lucide-react';
  *  the segment, so a transient API blip doesn't strand the visitor. */
 export default function RouteError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
   return (
-    <main className="flex min-h-[70vh] flex-col items-center justify-center px-6 text-center">
+    <main id="main" tabIndex={-1} className="flex min-h-[70vh] flex-col items-center justify-center px-6 text-center">
       <p className="font-display text-[56px] font-bold leading-none text-[var(--swift-red)]">Oops</p>
       <h1 className="sw-title mt-3">Something went wrong on this page</h1>
       <p className="mt-2 max-w-md text-sm text-[var(--swift-muted)]">
