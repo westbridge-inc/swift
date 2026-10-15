@@ -114,6 +114,8 @@ describe('the census', () => {
   it('the boot guard parses the mode rather than comparing it', () => {
     const boot = strip(readFileSync(join(SRC, 'utils/boot-config.ts'), 'utf8'));
     expect(boot).toContain("import { runtimeMode } from './runtime-mode';");
-    expect((boot.match(/runtimeMode\(env\) !== 'production'/g) ?? []).length).toBe(2);
+    // The production gates: assertSafeBootConfig, assertProductionData
+    // and [TA-S0-003 · R3] assertWallLoginConfig.
+    expect((boot.match(/runtimeMode\(env\) !== 'production'/g) ?? []).length).toBe(3);
   });
 });

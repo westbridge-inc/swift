@@ -26,6 +26,7 @@ import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../s
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import type { StorePin } from '../../../lib/storePin';
 import { vendorApi } from '../../../services/api';
@@ -723,6 +724,7 @@ function StaffSection() {
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
           Tap a role pill to switch Manager ↔ Staff.
         </T>
+        <WithdrawStaffInvites />
       </Card>
 
       {stepUp.sheet}

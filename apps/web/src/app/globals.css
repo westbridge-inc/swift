@@ -622,3 +622,24 @@ body {
   .sw-partner :where(h1, h2, h3) { text-wrap: balance; }
   .sw-partner :where(button, a):focus-visible { outline: 2px solid var(--swift-red); outline-offset: 3px; }
 }
+
+/* [Row 111 · W8] Skip to main content: out of sight until it has keyboard focus, then the
+   first thing on the page. The main region it targets takes focus without a ring. */
+.sw-skip-link {
+  position: absolute;
+  left: 1rem;
+  top: -6rem;
+  z-index: 100;
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  font-weight: 600;
+  box-shadow: 0 0 0 2px var(--swift-red);
+}
+.sw-skip-link:focus {
+  top: 1rem;
+}
+#main:focus {
+  outline: none;
+}

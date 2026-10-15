@@ -273,15 +273,15 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>(serverMenu ? 'ready' : 'loading');
   const [catalogCheckedAt, setCatalogCheckedAt] = useState<Date | null>(null);
   const [signedIn, setSignedIn] = useState(false);
-  // [PERF #2] Whether this page has heard who is visiting: the shell's one
-  // probe, or this page's own when it stands alone.
-  const [probeAnswered, setProbeAnswered] = useState(false);
-  const sessionKnown = shellStatus !== undefined ? shellStatus !== 'checking' : probeAnswered;
+  // [Row 109] Until the server has answered (the shell says "checking", or this page's
+  // own probe is out) the basket is neither the guest's nor the customer's: it says it
+  // is checking, shows no guest copy and takes no adds — no signed-out flash.
+  const [sessionKnown, setSessionKnown] = useState(false);
   const [cart, setCart] = useState<Cart | null>(null);
   const [loadingCart, setLoadingCart] = useState(false);
   const [cartHydrated, setCartHydrated] = useState(false);
   const [cartLoadVersion, setCartLoadVersion] = useState(0);
-  useEffect(() => { if (!signedIn) setCart(guestCart(guestBasket)); }, [signedIn, guestBasket]);
+  useEffect(() => { if (!signedIn && sessionKnown) setCart(guestCart(guestBasket)); }, [signedIn, sessionKnown, guestBasket]);
   useEffect(() => {
     const changed = () => setCartLoadVersion(v => v + 1);
     window.addEventListener('swift-guest-merged', changed);
@@ -401,9 +401,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     // only once the server has attested — so a signed-out visitor never fires
     // the authenticated cart load, exactly as the token check used to prevent.
     setSignedIn(false);
+    setSessionKnown(false);
+    if (shellStatus === 'checking') return () => { alive = false; };
     void (shellStatus !== undefined ? Promise.resolve({ ok: shellStatus === 'signed-in' }) : sessionProbe()).then((session) => {
       if (!alive) return;
-      setProbeAnswered(true);
+      setSessionKnown(true);
       if (!session.ok) return;
       setSignedIn(true);
       setLoadingCart(true);
@@ -443,7 +445,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const catalogVerified = catalogState === 'ready';
   const orderable = storeAcceptsOrders && catalogVerified;
   const cartItems = cart?.items ?? [];
-  const cartHydrationPending = signedIn && !cartHydrated;
+  const cartHydrationPending = !sessionKnown || (signedIn && !cartHydrated);
   const itemCount = cartItems.reduce((sum, line) => sum + line.quantity, 0);
   useEffect(() => {
     const dock = orderDock.current;
@@ -597,8 +599,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // [W6] `?item=` (Home's popular rail, the Market, a shared link) opens that
   // item's sheet once the live menu is verified — it never adds anything.
   // [PERF #2] And once the page knows who is visiting: the live menu can now
-  // arrive with the page, before the session answer, and an Add from this
-  // sheet must go to a signed-in person's saved cart, not this browser's basket.
+  // arrive with the page, before the session answer, and adds wait for that
+  // answer [Row 109], so the sheet opens when its Add can work (and goes to a
+  // signed-in person's saved cart, never this browser's basket).
   useEffect(() => {
     if (!initialItemId || deepLinkOpened.current || catalogState !== 'ready' || !sessionKnown) return;
     deepLinkOpened.current = true;
@@ -971,9 +974,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
               {orderingMode === 'PICKUP' ? (
                 <p className={styles.railNote}>Pickup from {storeLabel || catalog.name} · No delivery fee</p>
               ) : null}
-              {cartItems.length === 0 ? (
+              {!sessionKnown ? (
+                <p className={styles.emptyRail} role="status" aria-busy="true">Checking your basket…</p>
+              ) : cartItems.length === 0 ? (
                 <p className={styles.emptyRail}>
-                  Add a menu item to start your order. No account needed to fill your basket.
+                  {signedIn ? 'Add a menu item to start your order.' : 'Add a menu item to start your order. No account needed to fill your basket.'}
                 </p>
               ) : (
                 <>
@@ -1032,7 +1037,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             </div>
 
             <div className={styles.railFooter}>
-              {!signedIn ? (
+              {!signedIn && sessionKnown ? (
                 <>
                   <button type="button" disabled={!itemCount} onClick={goToCheckout} className={styles.primaryButton}>Place order</button>
                   <p className={styles.guestCopy}>Sign in with your phone at Place order. We then price your basket, delivery or pickup, and the total.</p>

@@ -40,6 +40,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
 import * as authority from '../modules/admin/admin-authority';
+import { uniquePng } from './helpers/real-image';
 
 const GRANT = 'documents.review';
 const REQUIRED = 'DOCUMENT_REVIEWER_REQUIRED';
@@ -50,7 +51,8 @@ const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const REASON = `Document review rota ${RUN}: owner reviews this week`;
 const OTHER_TENANT = `vd3-${RUN.toLowerCase()}`;
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`vd3-${RUN}`)]);
+// [Row 108] A real photo, unique to this run: the storage seam reads every photo with the real decoder.
+const PNG = uniquePng(`vd3-${RUN}`);
 
 let app: FastifyInstance;
 const users: string[] = [];

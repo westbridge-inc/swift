@@ -68,10 +68,12 @@ const waitingSoup = () => screen.getByRole('button', { name: 'Pumpkin soup unava
 const browserReads = () => vi.mocked(customer.getPublicVendor).mock.calls.length;
 
 describe('the store page arrives ready to order from (PERF #2)', () => {
-  it('Add works on the first render, with no menu read from the browser', async () => {
+  it('arrives with the menu verified (no checking notice); Add works once the session answers, with no menu read from the browser', async () => {
     render(<StorefrontExperience store={storefront} returnPath="/store/sample-kitchen" liveMenu={serverMenu()} />);
-    expect(addSoup().disabled).toBe(false);
+    // First render: the live menu is in. (Adds wait only for the session answer, row 109.)
+    expect(addSoup()).toBeTruthy();
     expect(screen.queryByText(/Checking this live menu/)).toBeNull();
+    await waitFor(() => expect(addSoup().disabled).toBe(false));
     expect(await screen.findByText(/Live menu checked at/)).toBeTruthy();
     expect(customer.getPublicStorefront).not.toHaveBeenCalled();
     expect(customer.getPublicVendor).not.toHaveBeenCalled();
@@ -79,6 +81,7 @@ describe('the store page arrives ready to order from (PERF #2)', () => {
 
   it('still blocks an item until its required choice is made, judged on the live menu', async () => {
     render(<StorefrontExperience store={storefront} returnPath="/store/sample-kitchen" liveMenu={serverMenu()} />);
+    await waitFor(() => expect(addSoup().disabled).toBe(false));
     // The storefront copy has no choices; the live menu does, so this item opens them.
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
     const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
@@ -107,19 +110,21 @@ describe('the store page arrives ready to order from (PERF #2)', () => {
       </CustomerSessionProvider>
     );
     const view = render(page('checking'));
-    // The live menu is in: the page is ready, but the shell has not answered yet.
-    expect(addSoup().disabled).toBe(false);
+    // The live menu is in (no checking notice), but the shell has not answered yet.
+    expect(addSoup()).toBeTruthy();
+    expect(screen.queryByText(/Checking this live menu/)).toBeNull();
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(screen.queryByRole('dialog', { name: 'Curry & roti' })).toBeNull();
     view.rerender(page('guest'));
-    expect(await screen.findByRole('dialog', { name: 'Curry & roti' })).toBeTruthy();
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
+    expect((within(sheet).getByRole('button', { name: /^Add to order/ }) as HTMLButtonElement).disabled).toBe(false);
     expect(customer.getPublicVendor).not.toHaveBeenCalled();
   });
 
   it('a second showing of the same render (Back/Forward) reads the live menu again before Add works', async () => {
     const menu = serverMenu();
     const first = render(<StorefrontExperience store={storefront} returnPath="/store/sample-kitchen" liveMenu={menu} />);
-    expect(addSoup().disabled).toBe(false);
+    await waitFor(() => expect(addSoup().disabled).toBe(false));
     first.unmount();
     render(<StorefrontExperience store={storefront} returnPath="/store/sample-kitchen" liveMenu={menu} />);
     expect(waitingSoup().disabled).toBe(true);
