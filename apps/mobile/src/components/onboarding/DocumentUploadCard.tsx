@@ -42,16 +42,11 @@ const DOC_LABELS: Record<string, string> = {
   food_handler_cert: "Food Handler's Certificate",
   storefront_photo: 'Storefront Photo',
   selfie: 'Selfie',
-  // [TRADES · 13 Oct 2026] service-trade documents, in plain words
+  // [TRADES · 13 Oct 2026; R15 · 15 Oct] service-trade documents of the opened trades, in plain words
   gei_electrical_licence: 'GEI Electrical Licence',
   pest_control_operator_licence: 'Pest-Control Operator Licence (PTCCB)',
   pesticide_applicator_certificate: 'Pesticide Applicator Certificate (PTCCB)',
-  chartered_accountant_practising_certificate: 'ICAG Practising Certificate',
-  gra_practice_certificate: 'GRA Practice Certificate',
-  eating_house_registration: 'Eating-House Registration or local Sanitary Certificate',
-  town_clerk_registration: 'Town Clerk Registration (hair, nails, beauty)',
-  town_clerk_shop_certificate: 'Town Clerk Shop Certificate',
-  drone_authorisation: 'GCAA Drone Authorisation',
+  eating_house_registration: 'Eating-House Registration (Georgetown)',
 };
 const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
 /** Friendly document name for other surfaces (suspension banners etc.). */
