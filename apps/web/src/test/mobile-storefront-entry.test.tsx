@@ -18,6 +18,7 @@ vi.mock('../../../mobile/src/screens/QrOutcomeScreen', () => ({ QrOutcomeScreen:
 vi.mock('../../../mobile/src/screens/auth/RolePickerScreen', () => ({ RolePickerScreen: () => null }));
 vi.mock('../../../mobile/src/screens/auth/SelfieCaptureScreen', () => ({ SelfieCaptureScreen: () => null }));
 vi.mock('../../../mobile/src/navigation/AuthStack', () => ({ AuthStack: () => null }));
+vi.mock('../../../mobile/src/components/LegalAcceptanceModal', () => ({ LegalAcceptanceModal: () => null }));
 vi.mock('../../../mobile/src/navigation/CustomerStack', () => ({ CustomerStack: () => <span>Customer menu navigator</span> }));
 vi.mock('../../../mobile/src/modules/mover/MoverStack', () => ({ MoverStack: () => null }));
 vi.mock('../../../mobile/src/modules/vendor/VendorStack', () => ({ VendorStack: () => null }));

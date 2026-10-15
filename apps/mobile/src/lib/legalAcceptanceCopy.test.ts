@@ -32,6 +32,22 @@ describe('the phone fresh acceptance tick', () => {
     expect(modal).toMatch(/enabled: isAuthenticated/);
   });
 
+  it('the way out is inside the modal (REVIEW-F S3): Delete my account and Sign out, both reachable while it covers every stack', () => {
+    const modal = SRC('components', 'LegalAcceptanceModal.tsx');
+    // Delete: the modal closes first (#910's law), then opens Profile › Personal data, where the deletion lives;
+    // it steps aside ONLY while that screen is in front and comes back the moment the person goes anywhere else.
+    expect(modal).toMatch(/label="Delete my account instead"/);
+    expect(modal).toMatch(/afterDismiss\(\(\) => \{ if \(!safeNavigate\('PersonalData'\)\) setStepAside\(false\); \}\)/);
+    expect(modal).toMatch(/if \(stepAside && route !== undefined && route !== 'PersonalData'\) setStepAside\(false\);/);
+    expect(modal).toMatch(/<Modal visible=\{!stepAside && !leaving\}/);
+    expect(modal).toMatch(/navigationRef\.addListener\('state'/);
+    // Sign out: the app's one log-out ask; the modal closes before the session ends.
+    expect(modal).toMatch(/useLogoutConfirm\(\{/);
+    expect(modal).toMatch(/onLogout: \(logout\) => \{ setLeaving\(true\); afterDismiss\(logout\); \}/);
+    expect(modal).toMatch(/label="Sign out"/);
+    expect(modal).toMatch(/\{logoutDialog\}/);
+  });
+
   it('is mounted over every stack', () => {
     expect(SRC('navigation', 'RootNavigator.tsx')).toMatch(/<LegalAcceptanceModal \/>/);
   });
