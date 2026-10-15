@@ -10,7 +10,7 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { useCallback, useContext, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
@@ -27,6 +27,7 @@ import {
   type VendorDetail,
 } from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
+import { LIVE_MENU_MAX_AGE_MS, type ServerStoreMenu } from '@/lib/browse-keys';
 import {
   OptionSelectionError,
   basePrice,
@@ -62,7 +63,17 @@ type DisplayVendor = VendorDetail & {
   acceptingOrders: boolean;
 };
 
-const CATALOG_REFRESH_MS = 30_000;
+/**
+ * How often an open store page re-reads the live store and menu in the
+ * background. [PERF #2] Only while the page is on screen: a hidden page reads
+ * nothing, and coming back after longer than this reads at once. Every Add
+ * and every checkout is re-checked by the API whatever this copy says.
+ */
+export const CATALOG_REFRESH_MS = LIVE_MENU_MAX_AGE_MS;
+
+/** [PERF #2] Server renders whose live menu this browser has already shown. */
+const shownServerMenus = new Set<string>();
+const noSubscription = () => () => {};
 
 /**
  * [W6] An item's sheet (choices, quantity, Add) is only needed after a tap or
@@ -125,6 +136,18 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
         isAvailable: true,
       })),
     })),
+  };
+}
+
+/** The store copy merged with the live menu: the menu (choices, availability,
+ *  open and accepting) wins; the store copy keeps its address and minimum. */
+function liveCatalog(store: StorefrontDetail, vendor: VendorDetail): DisplayVendor {
+  const fromStore = publicCatalog(store);
+  return {
+    ...fromStore,
+    ...(vendor as DisplayVendor),
+    addressLine1: fromStore.addressLine1,
+    minOrderAmount: fromStore.minOrderAmount,
   };
 }
 
@@ -209,7 +232,7 @@ function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string
  * (storefront-page.tsx) so the design-token tables stay out of the page's
  * first-load JavaScript.
  */
-export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties }) {
+export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle, liveMenu }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties; liveMenu?: ServerStoreMenu | null }) {
   const router = useRouter();
   // [W6] The store page lives inside the customer app's frame (rail, dock,
   // session). Its session can renew an expired access cookie before sending a
@@ -233,10 +256,27 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     }
   }, [fromQr, store.id, diningNoticeStorageKey]);
   const menu = useRef<HTMLDivElement | null>(null);
-  const [catalog, setCatalog] = useState<DisplayVendor>(() => publicCatalog(store));
-  const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
+  // [PERF #2] A page that arrives with the server's recent live menu starts
+  // ready to order from it. While React adopts the HTML the server just drew
+  // for this visit, the menu is taken as the server judged it (at most
+  // LIVE_MENU_MAX_AGE_MS old). A page drawn in the browser instead may be a
+  // kept copy (Back/Forward, a load made earlier): its menu counts once per
+  // server render, and only while it is at most LIVE_MENU_MAX_AGE_MS old by
+  // this phone's clock. Otherwise the page reads the live menu before Add
+  // works, as before.
+  const adoptingServerHtml = useSyncExternalStore(noSubscription, () => false, () => true);
+  const [serverMenu] = useState<ServerStoreMenu | null>(() => {
+    if (!liveMenu || liveMenu.vendor.id !== store.id || shownServerMenus.has(liveMenu.renderId)) return null;
+    return adoptingServerHtml || Date.now() - liveMenu.at <= LIVE_MENU_MAX_AGE_MS ? liveMenu : null;
+  });
+  const [catalog, setCatalog] = useState<DisplayVendor>(() => (serverMenu ? liveCatalog(store, serverMenu.vendor) : publicCatalog(store)));
+  const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>(serverMenu ? 'ready' : 'loading');
   const [catalogCheckedAt, setCatalogCheckedAt] = useState<Date | null>(null);
   const [signedIn, setSignedIn] = useState(false);
+  // [PERF #2] Whether this page has heard who is visiting: the shell's one
+  // probe, or this page's own when it stands alone.
+  const [probeAnswered, setProbeAnswered] = useState(false);
+  const sessionKnown = shellStatus !== undefined ? shellStatus !== 'checking' : probeAnswered;
   const [cart, setCart] = useState<Cart | null>(null);
   const [loadingCart, setLoadingCart] = useState(false);
   const [cartHydrated, setCartHydrated] = useState(false);
@@ -300,24 +340,20 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   useEffect(() => {
     let alive = true;
     let catalogRefreshInFlight = false;
-    setCatalogState('loading');
+    // [PERF #2] When the menu this page holds was read (or last tried), by this phone's clock.
+    let lastRead = 0;
 
     const refreshCatalog = async () => {
       if (catalogRefreshInFlight) return;
       catalogRefreshInFlight = true;
+      lastRead = Date.now();
       try {
         const [liveStore, vendor] = await Promise.all([
           getPublicStorefront(store.slug),
           getPublicVendor(store.id),
         ]);
         if (!alive) return;
-        const liveCatalog = publicCatalog(liveStore);
-        setCatalog({
-          ...liveCatalog,
-          ...(vendor as DisplayVendor),
-          addressLine1: liveCatalog.addressLine1,
-          minOrderAmount: liveCatalog.minOrderAmount,
-        });
+        setCatalog(liveCatalog(liveStore, vendor));
         setCatalogState('ready');
         setCatalogCheckedAt(new Date());
       } catch {
@@ -326,14 +362,36 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
         catalogRefreshInFlight = false;
       }
     };
-    void refreshCatalog();
-    const catalogTimer = window.setInterval(() => void refreshCatalog(), CATALOG_REFRESH_MS);
+    const onScreen = () => document.visibilityState !== 'hidden';
+    const tick = () => { if (onScreen()) void refreshCatalog(); };
+    let catalogTimer: number | undefined;
+    let firstTick: number | undefined;
+    if (serverMenu) {
+      // The server's read is this page's first: the next is due when it is
+      // LIVE_MENU_MAX_AGE_MS old (the older of the two clocks' estimates).
+      shownServerMenus.add(serverMenu.renderId);
+      const age = Math.min(LIVE_MENU_MAX_AGE_MS, Math.max(serverMenu.ageMs, Date.now() - serverMenu.at));
+      lastRead = Date.now() - age;
+      setCatalogCheckedAt(new Date(lastRead));
+      firstTick = window.setTimeout(() => {
+        tick();
+        catalogTimer = window.setInterval(tick, CATALOG_REFRESH_MS);
+      }, CATALOG_REFRESH_MS - age);
+    } else {
+      setCatalogState('loading');
+      void refreshCatalog();
+      catalogTimer = window.setInterval(tick, CATALOG_REFRESH_MS);
+    }
+    const onVisibility = () => { if (onScreen() && Date.now() - lastRead >= CATALOG_REFRESH_MS) void refreshCatalog(); };
+    document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
       alive = false;
+      window.clearTimeout(firstTick);
       window.clearInterval(catalogTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [store.id, store.slug]);
+  }, [store.id, store.slug, serverMenu]);
 
   useEffect(() => {
     let alive = true;
@@ -344,7 +402,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     // the authenticated cart load, exactly as the token check used to prevent.
     setSignedIn(false);
     void (shellStatus !== undefined ? Promise.resolve({ ok: shellStatus === 'signed-in' }) : sessionProbe()).then((session) => {
-      if (!alive || !session.ok) return;
+      if (!alive) return;
+      setProbeAnswered(true);
+      if (!session.ok) return;
       setSignedIn(true);
       setLoadingCart(true);
       setCartHydrated(false);
@@ -536,8 +596,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
 
   // [W6] `?item=` (Home's popular rail, the Market, a shared link) opens that
   // item's sheet once the live menu is verified — it never adds anything.
+  // [PERF #2] And once the page knows who is visiting: the live menu can now
+  // arrive with the page, before the session answer, and an Add from this
+  // sheet must go to a signed-in person's saved cart, not this browser's basket.
   useEffect(() => {
-    if (!initialItemId || deepLinkOpened.current || catalogState !== 'ready') return;
+    if (!initialItemId || deepLinkOpened.current || catalogState !== 'ready' || !sessionKnown) return;
     deepLinkOpened.current = true;
     const item = catalog.categories.flatMap(category => category.items).find(item => item.id === initialItemId);
     // A closed or paused store opens nothing: its Add could only refuse.
@@ -547,7 +610,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       setModalError(null);
       setModalItem(item);
     }
-  }, [initialItemId, catalogState, catalog]);
+  }, [initialItemId, catalogState, catalog, sessionKnown]);
 
   useEffect(() => {
     if (!signedIn || !cartHydrated || catalogState !== 'ready') return;
