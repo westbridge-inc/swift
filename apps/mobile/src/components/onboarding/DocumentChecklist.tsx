@@ -3,7 +3,8 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { EmptyState, Spinner, T } from '../../kit';
 import { DocumentUploadCard } from './DocumentUploadCard';
-import { emptyChecklistCopy, faceMatchedDocTypes } from './documentChecklistPresentation';
+import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
+import { emptyChecklistCopy, faceMatchedDocTypes, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
  *  theme maps no numeric spacing, so it was never a token. Named here so the
@@ -51,6 +52,8 @@ export function DocumentChecklist({
   }
 
   const checklist: string[] = status?.checklist ?? [];
+  // [VERIFY-DOCS] Documents the person MAY add — shown after the required ones, never counted.
+  const optional = optionalDocTypes(status);
   const documents: any[] = status?.documents ?? [];
   // Which of these the server face-matches right now (none while it is off).
   const faceMatched = faceMatchedDocTypes(status);
@@ -93,6 +96,11 @@ export function DocumentChecklist({
       <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
         Upload these to activate your account. We review within 24 hours.
       </T>
+      {isTaxiChecklist(checklist) ? (
+        <T variant="label" style={{ marginBottom: space.sm }}>
+          {TAXI_TWO_LICENCES}
+        </T>
+      ) : null}
       {/* Progress — how far through the door they are */}
       <View style={{ marginBottom: space.md }}>
         <View style={{ marginBottom: space.xs, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -134,11 +142,40 @@ export function DocumentChecklist({
             expiresAt={doc?.status === 'APPROVED' ? doc?.expiresAt : null}
             submittedAt={doc?.createdAt ?? null}
             reviewNote={doc?.reviewNote ?? null}
+            replaced={doc?.replaced === true}
             isNext={docType === nextDoc}
             faceMatched={faceMatched.has(docType)}
+            hint={taxiDocumentHint(docType, checklist)}
           />
         );
       })}
+      {optional.length > 0 ? (
+        <View style={{ marginTop: space.md }}>
+          <T variant="heading" style={{ marginBottom: space.xs }}>
+            Optional
+          </T>
+          <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
+            You can add these any time. You do not need them to go live.
+          </T>
+          {optional.map((docType) => {
+            const doc = latestDoc(docType);
+            return (
+              <DocumentUploadCard
+                key={docType}
+                role={role}
+                docType={docType}
+                status={doc?.status}
+                expiresAt={doc?.status === 'APPROVED' ? doc?.expiresAt : null}
+                submittedAt={doc?.createdAt ?? null}
+                reviewNote={doc?.reviewNote ?? null}
+                replaced={doc?.replaced === true}
+                faceMatched={faceMatched.has(docType)}
+                optionalHint={optionalDocHint(docType)}
+              />
+            );
+          })}
+        </View>
+      ) : null}
       <View style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'flex-start', borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.md }}>
         <MaterialCommunityIcons name="shield-check-outline" size={16} color={color.text.muted} style={{ marginTop: 1 }} />
         <T variant="micro" tone="muted" style={{ marginLeft: space.sm, flex: 1 }}>

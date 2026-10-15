@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiReply, type ApiRequest } from '@/test/test-utils';
 import AppLayout from './layout';
-import VendorPage from './order/vendor/[id]/page';
+import { StorefrontPage } from '@/components/storefront/storefront-page';
+import { storefrontFixture } from '@/test/storefront-fixture';
 import CartPage from './cart/page';
 import FavouritesPage from './account/favourites/page';
 
@@ -16,7 +17,8 @@ vi.mock('next/navigation', () => ({
 
 // ---------------------------------------------------------------------------
 // [WEB-REDESIGN · different-model review] The S2/S3 findings on #1433, each
-// pinned against the real shell and the real API contract.
+// pinned against the real shell and the real API contract. [W6] The store is
+// its one page now, /store/<slug>, inside the app's frame.
 // ---------------------------------------------------------------------------
 
 const STORE = {
@@ -49,12 +51,16 @@ beforeEach(async () => {
     if (url.pathname === '/api/v1/customer/favorites' && method === 'GET') return ok(favourites);
     if (url.pathname === '/api/v1/customer/favorites/v1' && method === 'POST') { favourites = [...favourites, { id: 'v1', name: 'Shanta Kitchen' }]; return ok({}); }
     if (url.pathname === '/api/v1/customer/favorites/v1' && method === 'DELETE') { favourites = favourites.filter((f) => f.id !== 'v1'); return ok({}); }
+    if (url.pathname === '/api/v1/public/storefronts/shanta-kitchen') return ok(storefrontFixture(STORE));
     if (url.pathname === '/api/v1/customer/vendors/v1') return storeReply ?? ok(STORE);
     if (url.pathname === '/api/v1/customer/cart' && method === 'GET') return cartReply ?? ok({ items: [] });
     if (url.pathname === '/api/v1/customer/addresses') return ok([]);
     return { status: 404, body: { success: false } };
   });
 });
+
+/** The store's one page, as the server draws it. */
+const storePage = () => StorefrontPage({ params: Promise.resolve({ slug: 'shanta-kitchen' }), searchParams: Promise.resolve({}) });
 
 function go(view: ReturnType<typeof render> | null, pathname: string, params: Record<string, string>, page: React.ReactNode) {
   state.pathname = pathname;
@@ -66,14 +72,14 @@ function go(view: ReturnType<typeof render> | null, pathname: string, params: Re
 
 describe('[review S2] the store’s heart and Account’s favourites are one source', () => {
   it('a favourite removed in Account is shown — and saved, not removed again — back at the store', async () => {
-    let view = go(null, '/order/vendor/v1', { id: 'v1' }, <VendorPage />);
+    let view = go(null, '/store/shanta-kitchen', {}, await storePage());
     await waitFor(() => expect(screen.getByRole('button', { name: 'Remove from favourites' }).getAttribute('aria-pressed')).toBe('true'));
 
     view = go(view, '/account/favourites', {}, <FavouritesPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Remove Shanta Kitchen from favourites' }));
     await screen.findByText('No favourites yet. Save a store with its heart.');
 
-    go(view, '/order/vendor/v1', { id: 'v1' }, <VendorPage />);
+    go(view, '/store/shanta-kitchen', {}, await storePage());
     const heart = await screen.findByRole('button', { name: 'Save to favourites' });
     await waitFor(() => expect(heart.getAttribute('aria-pressed')).toBe('false'));
     await waitFor(() => expect((heart as HTMLButtonElement).disabled).toBe(false));
@@ -83,7 +89,7 @@ describe('[review S2] the store’s heart and Account’s favourites are one sou
   });
 
   it('never sends a write chosen from a stale list: it reads the list again first', async () => {
-    go(null, '/order/vendor/v1', { id: 'v1' }, <VendorPage />);
+    go(null, '/store/shanta-kitchen', {}, await storePage());
     const heart = await screen.findByRole('button', { name: 'Remove from favourites' });
     await waitFor(() => expect((heart as HTMLButtonElement).disabled).toBe(false));
     // Removed elsewhere (another tab) after this page read its list.
@@ -97,13 +103,18 @@ describe('[review S2] the store’s heart and Account’s favourites are one sou
 
 describe('[review S3] Back never disappears while a page is loading, failed or empty', () => {
   it('the store, while it loads and when it fails', async () => {
+    // The page arrives with the store drawn by the server; the browser then
+    // checks the live menu. While that check is out, and when it fails, Back
+    // stays, the store stays readable, and ordering waits.
     let fail: (_reply: ApiReply) => void = () => undefined;
     storeReply = new Promise<ApiReply>((resolve) => { fail = resolve; });
-    go(null, '/order/vendor/v1', { id: 'v1' }, <VendorPage />);
-    await screen.findByLabelText('Loading this store');
+    go(null, '/store/shanta-kitchen', {}, await storePage());
+    await screen.findByText('Checking this live menu’s required choices before ordering…');
     expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy();
     await act(async () => { fail({ status: 503, body: { success: false, error: { message: 'busy' } } }); });
-    await screen.findByText(/Couldn.t load this store/, {}, { timeout: 4000 });
+    await screen.findByText(/Swift could not verify its required choices/, {}, { timeout: 4000 });
+    expect(screen.getByRole('heading', { level: 1, name: 'Shanta Kitchen' })).toBeTruthy();
+    expect((screen.getByRole('button', { name: /Pepperpot bowl unavailable/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy();
   });
 

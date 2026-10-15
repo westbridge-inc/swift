@@ -1,5 +1,6 @@
 import type { PrismaClient, TripSafetySession, GuardianCloseReason, Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { haversineDistance } from '../../utils/distance';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -629,7 +630,7 @@ export class GuardianService {
         state.driverConfirmedAtMs = undefined;
         pushEvent(state, now, 'L2_SOFT_CHECKIN', { cycleId });
         await this.deliverAsks(session.id, now);
-        this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
+        await this.orderEmit(session.orderId, 'guardian:checkin', {
           level: 'SOFT',
           sessionId: session.id,
           orderId: session.orderId,
@@ -677,7 +678,7 @@ export class GuardianService {
         state.driverConfirmedAtMs = undefined;
         pushEvent(state, now, 'L3_HARD_CHECKIN', { deadline: deadline.toISOString(), cycleId: hardCycle.id });
         await this.deliverAsks(session.id, now);
-        this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
+        await this.orderEmit(session.orderId, 'guardian:checkin', {
           level: 'HARD',
           sessionId: session.id,
           orderId: session.orderId,
@@ -967,9 +968,13 @@ export class GuardianService {
     } catch { /* advisory only */ }
   }
 
-  private roomEmit(room: string, event: string, payload: Record<string, unknown>) {
+  /** [L05] The order room hears a check-in only through the current-audience
+   *  gate: the passenger, the ride's CURRENT driver and the visible store — a
+   *  driver taken off the ride stops hearing it. The pushes above stay the
+   *  check-in's real channel; this socket hint is advisory and never throws. */
+  private async orderEmit(orderId: string, event: string, payload: Record<string, unknown>) {
     try {
-      this.io.to(room).emit(event, payload);
+      await emitToOrderRoom(this.prisma, this.io, orderId, event, payload);
     } catch { /* advisory only */ }
   }
 }

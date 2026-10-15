@@ -66,7 +66,7 @@ const PORT_OF_SPAIN = { lat: 10.6596, lng: -61.5089, address: 'Port of Spain' };
 const PINNED_SINGLE_LEG_ANSWER = '{"success":true,"data":{"ride":{"id":"<ID>","orderNumber":"<NUMBER>","status":"PENDING","fare":1700,"rideClass":"ECONOMY","currencyCode":"GYD","fareSource":"formula","distanceKm":2,"durationMin":5,"ridePin":"<PIN>","pickupAddress":"Bartica Police Station","dropoffAddress":"Bartica Airstrip"},"message":"Looking for a driver near you…"}}';
 
 /** The keys of an open-board item and of the two offer cards today (main). */
-const BOARD_ITEM_KEYS = ['id', 'orderNumber', 'pickupAddress', 'dropoffAddress', 'pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng', 'passengerCount', 'estimatedDistance', 'estimatedDuration', 'fareTotal', 'fareSurge', 'distanceToPickup', 'etaToPickup', 'customer', 'createdAt'];
+const BOARD_ITEM_KEYS = ['id', 'orderNumber', 'pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng', 'passengerCount', 'estimatedDistance', 'estimatedDuration', 'fareTotal', 'fareSurge', 'distanceToPickup', 'etaToPickup', 'customer', 'createdAt'];
 const LIVE_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'isExpress', 'expiresInSeconds', 'etaMinutes', 'rescueIncentiveGyd', 'paymentMethod', 'customerTrust', 'itemCount', 'estLoad', 'cashMath'];
 const RECOVERED_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'vendorName', 'isExpress', 'paymentMethod', 'expiresInSeconds', 'itemCount', 'estLoad', 'customerTrust', 'deliveryFee', 'tipAmount', 'taxiFareTotal', 'pickupAddress', 'deliveryAddress', 'etaMinutes', 'rescueIncentiveGyd', 'cashMath'];
 const STOP_KEYS = ['stops', 'stopCount', 'nextStopSequence'];
@@ -369,6 +369,75 @@ describe('a ride without stops is the same ride with the switch on', () => {
 });
 
 // ===========================================================================
+// [PRICE-LOCK · owner: "the price shown is the price charged"] A ride without
+// stops is re-priced at /request, and the server's fare is the one stored. When
+// the app sends the fare it showed (expectedFare), the server books only at
+// that fare: a fare that moved since the quote (rates, the zone table, the
+// road) is refused with the fare now, and nothing is written. An app from
+// before the lock (build 9) sends no fare and books exactly as before.
+describe('a ride without stops books only at the fare the passenger was shown', () => {
+  async function plainQuote(token: string, rideClass = 'ECONOMY') {
+    const res = await call(app, 'POST', '/api/v1/rides/estimate', token, { pickup: PICKUP, dropoff: DEST });
+    expect(res.statusCode, res.body).toBe(200);
+    return (res.json().data.tiers as { rideClass: string; fare: number }[]).find((t) => t.rideClass === rideClass)!.fare;
+  }
+
+  it('the shown fare matches: booked at it — the answer, the stored fare and the total are that number', async () => {
+    const customer = await makeCustomer();
+    const fare = await plainQuote(customer.token);
+    const res = await requestRide(customer.token, trip(undefined, { expectedFare: fare }));
+    expect(res.statusCode, res.body).toBe(201);
+    const ride = res.json().data.ride as { id: string; fare: number };
+    expect(Number(ride.fare)).toBe(fare);
+    const row = await rideRow(ride.id);
+    expect([Number(row.taxiFareTotal), Number(row.subtotalCustomer), Number(row.totalAmount)]).toEqual([fare, fare, fare]);
+  });
+
+  it('the shown fare differs: 409 FARE_CHANGED naming the fare now, and nothing is written', async () => {
+    const customer = await makeCustomer();
+    const fare = await plainQuote(customer.token);
+    for (const expectedFare of [fare - 100, fare + 100, 0]) {
+      const res = await requestRide(customer.token, trip(undefined, { expectedFare }));
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toMatchObject({ code: 'FARE_CHANGED', details: { expectedFare, fare, rideClass: 'ECONOMY', currencyCode: 'GYD' } });
+    }
+    expect(await writesOf(customer)).toEqual(NOTHING);
+    // The corrected request books once.
+    expect((await requestRide(customer.token, trip(undefined, { expectedFare: fare }))).statusCode).toBe(201);
+  });
+
+  it('the shown fare is for the tier booked: an Economy fare on a Comfort ride is refused', async () => {
+    const customer = await makeCustomer();
+    const economy = await plainQuote(customer.token, 'ECONOMY');
+    const comfort = await plainQuote(customer.token, 'COMFORT');
+    expect(comfort).not.toBe(economy);
+    const wrong = await requestRide(customer.token, trip(undefined, { rideClass: 'COMFORT', expectedFare: economy }));
+    expect([wrong.statusCode, wrong.json().error.details.fare]).toEqual([409, comfort]);
+    const right = await requestRide(customer.token, trip(undefined, { rideClass: 'COMFORT', expectedFare: comfort }));
+    expect(right.statusCode, right.body).toBe(201);
+    expect(Number((await rideRow(right.json().data.ride.id)).taxiFareTotal)).toBe(comfort);
+  });
+
+  it('a stale fare under an Idempotency-Key releases the key: the corrected request books once', async () => {
+    const customer = await makeCustomer();
+    const fare = await plainQuote(customer.token);
+    const key = `lock-${nanoid(12)}`;
+    expect((await requestRide(customer.token, trip(undefined, { expectedFare: fare - 100 }), key)).statusCode).toBe(409);
+    const booked = await requestRide(customer.token, trip(undefined, { expectedFare: fare }), key);
+    expect(booked.statusCode, booked.body).toBe(201);
+    expect(await writesOf(customer)).toEqual({ orders: 1, stops: 0, receipts: 1 });
+  });
+
+  it('an app from before the lock sends no fare: booked as today, at the server fare', async () => {
+    const customer = await makeCustomer();
+    const fare = await plainQuote(customer.token);
+    const res = await requestRide(customer.token, trip());
+    expect(res.statusCode, res.body).toBe(201);
+    expect(Number((await rideRow(res.json().data.ride.id)).taxiFareTotal)).toBe(fare);
+  });
+});
+
+// ===========================================================================
 describe('switched on (TAXI_MAX_STOPS=3): a ride with stops', () => {
   it('two stops: created at the server\'s whole-route fare, the stops stored in the passenger\'s order with their legs, and the answer carries them', async () => {
     vi.stubEnv('TAXI_MAX_STOPS', '3');
@@ -619,35 +688,46 @@ describe('the reads carry the stops, in order', () => {
     const res = await requestRide(customer.token, trip([S1, S2, S3], { expectedFare: q.fare }), `read-${nanoid(10)}`);
     expect(res.statusCode, res.body).toBe(201);
     const rideId = res.json().data.ride.id as string;
-    const preview = [
-      { sequence: 1, address: S1.address, lat: S1.lat, lng: S1.lng },
-      { sequence: 2, address: S2.address, lat: S2.lat, lng: S2.lng },
-      { sequence: 3, address: S3.address, lat: S3.lat, lng: S3.lng },
-    ];
+    // [L05] Before acceptance every surface (live card, rebuilt card, board)
+    // shows a stop as its order and a ~330 m point: no typed address.
+    const coarseStops = [S1, S2, S3].map((s, i) => ({ sequence: i + 1, lat: Math.round(s.lat / 0.003) * 0.003, lng: Math.round(s.lng / 0.003) * 0.003 }));
+    const noStopAddress = (stops: Array<Record<string, unknown>>) => stops.every((s) => !('address' in s));
 
     // The live card (socket), as the app receives it.
     const live = emitted.filter((e) => e.event === 'dispatch:offer' && e.room === `user:${driver.userId}`).at(-1);
     expect(live, 'the nearest driver was offered the ride').toBeTruthy();
     const card = JSON.parse(JSON.stringify(live!.payload));
-    expect(card).toMatchObject({ orderId: rideId, stopCount: 3, stops: preview });
+    expect(card).toMatchObject({ orderId: rideId, stopCount: 3, stops: coarseStops });
+    expect(noStopAddress(card.stops), 'the live card names no stop address').toBe(true);
+    expect(JSON.stringify(card)).not.toContain(S1.address);
     expect(Object.keys(card)).toEqual([...LIVE_OFFER_KEYS, 'stopCount', 'stops']);
 
     // The card rebuilt after the app died: the same stops.
     const recovered = await call(app, 'GET', '/api/v1/driver/offers/current', driver.token);
     expect(recovered.statusCode, recovered.body).toBe(200);
     const offer = recovered.json().data.offer;
-    expect(offer).toMatchObject({ orderId: rideId, offerAttemptId: card.offerAttemptId, stopCount: 3, stops: preview });
+    expect(offer).toMatchObject({ orderId: rideId, offerAttemptId: card.offerAttemptId, stopCount: 3, stops: coarseStops });
+    expect(noStopAddress(offer.stops), 'the rebuilt card names no stop address').toBe(true);
+    // A taxi's pickup and destination are private places: the rebuilt card keeps
+    // the keys (the installed app falls back) but names neither before accept.
+    expect({ pickup: offer.pickupAddress, dropoff: offer.deliveryAddress }).toEqual({ pickup: null, dropoff: null });
+    expect(recovered.body).not.toContain(S1.address);
+    expect(recovered.body).not.toContain(DROPOFF_ADDRESS);
     expect(Object.keys(offer)).toEqual([...RECOVERED_OFFER_KEYS, 'stopCount', 'stops']);
     // A server restart loses nothing either: a fresh instance (its own dispatch
     // service, its own Redis connection) rebuilds the same card from the ride.
     restarted = await buildApp();
     const afterRestart = await call(restarted, 'GET', '/api/v1/driver/offers/current', driver.token);
-    expect(afterRestart.json().data.offer).toMatchObject({ orderId: rideId, offerAttemptId: card.offerAttemptId, stopCount: 3, stops: preview });
+    expect(afterRestart.json().data.offer).toMatchObject({ orderId: rideId, offerAttemptId: card.offerAttemptId, stopCount: 3, stops: coarseStops, pickupAddress: null, deliveryAddress: null });
 
     // The open board.
     const board = await call(app, 'GET', '/api/v1/driver/rides/available', driver.token);
     const item = (board.json().data as { id: string }[]).find((r) => r.id === rideId);
-    expect(item).toMatchObject({ stopCount: 3, stops: preview, dropoffAddress: DROPOFF_ADDRESS, dropoffLat: DEST.lat, dropoffLng: DEST.lng, fareTotal: q.fare });
+    expect(item).toMatchObject({ stopCount: 3, stops: coarseStops, dropoffLat: Math.round(DEST.lat / 0.003) * 0.003, dropoffLng: Math.round(DEST.lng / 0.003) * 0.003, fareTotal: q.fare });
+    expect(noStopAddress((item as unknown as { stops: Array<Record<string, unknown>> }).stops), 'the board names no stop address').toBe(true);
+    expect(item).not.toHaveProperty('pickupAddress');
+    expect(item).not.toHaveProperty('dropoffAddress');
+    expect(Object.keys((item as { id: string; customer: object }).customer)).toEqual(['displayRating']);
     expect(Object.keys(item!)).toEqual([...BOARD_ITEM_KEYS, 'stopCount', 'stops']);
 
     // Accepted from the card.

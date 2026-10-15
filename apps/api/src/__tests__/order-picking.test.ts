@@ -60,6 +60,13 @@ async function makeItem(opts: { name: string; price?: number; stock?: number | n
   });
 }
 
+/** [owner #46/#52, 13–14 Oct] A store order the store accepted is the
+ *  customer's to cancel only when it is very late (30 minutes past its
+ *  promise); the customer-cancel cases below make it so before cancelling. */
+async function pastPromise(orderId: string) {
+  await app.prisma.order.update({ where: { id: orderId }, data: { promisedAt: new Date(Date.now() - 31 * 60_000) } });
+}
+
 async function makeOrderWithLines(
   lines: Array<{ itemId: string; name: string; qty: number; price: number }>,
   status = 'PREPARING',
@@ -476,6 +483,7 @@ describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 
 
   it('cancel-then-approve mutates nothing: closed order refuses and stock is counted once', async () => {
     const { item, sub, order, lineId } = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
+    await pastPromise(order.id); // [owner #46/#52, 13–14 Oct]
     const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'changed my mind' });
     expect(cancel.statusCode).toBe(200);
     const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true });
@@ -596,6 +604,7 @@ describe('cancellation restock is substitution-aware [REPORT-006 F-006-05]', () 
     expect(refund.statusCode).toBe(200);
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
 
+    await pastPromise(order.id); // [owner #46/#52, 13–14 Oct]
     const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'raced the refund' });
     expect(cancel.statusCode).toBe(200);
     // The refunded line stays at 11 (NOT 12); the live line restocks once.
@@ -617,6 +626,7 @@ describe('cancellation restock is substitution-aware [REPORT-006 F-006-05]', () 
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).stockQuantity).toBe(11);
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: sub.id } })).stockQuantity).toBe(9);
 
+    await pastPromise(order.id); // [owner #46/#52, 13–14 Oct]
     const cancel = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, { reason: 'after swap' });
     expect(cancel.statusCode).toBe(200);
     // Cancellation returns the SUBSTITUTE (9→10); the original stays at 11 —
