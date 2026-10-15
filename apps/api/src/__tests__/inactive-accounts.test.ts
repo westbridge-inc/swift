@@ -20,7 +20,9 @@ import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
-import { inactivitySweep, inactivityNoticeText, INACTIVITY_NOTICE_TITLE, INACTIVITY_RECEIPT_CLASS } from '../modules/user/inactivity';
+import {
+  inactivitySweep, inactivityNoticeText, INACTIVITY_NOTICE_TITLE, INACTIVITY_RECEIPT_CLASS, INACTIVE_CLOSURE_SWITCH_KEY,
+} from '../modules/user/inactivity';
 import { gsm7Parts, isGsm7 } from '../utils/sms-text';
 import type { SmsProvider } from '../providers/notifications/channels';
 
@@ -32,7 +34,16 @@ const users: string[] = [];
 const orders: string[] = [];
 let seq = 0;
 const texts: Array<{ to: string; body: string }> = [];
-const sms: SmsProvider = { async sendSms(to, body) { texts.push({ to, body }); return { ref: 'r23' }; } };
+let smsRefuses = false;
+const sms: SmsProvider = { async sendSms(to, body) {
+  if (smsRefuses) throw new Error('provider refused');
+  texts.push({ to, body }); return { ref: 'r23' };
+} };
+const vendors: string[] = [];
+const advertisers: string[] = [];
+const setSwitch = (on: boolean | null) => system<unknown>(async () => on === null
+  ? app.prisma.platformConfig.deleteMany({ where: { key: INACTIVE_CLOSURE_SWITCH_KEY } })
+  : app.prisma.platformConfig.upsert({ where: { key: INACTIVE_CLOSURE_SWITCH_KEY }, create: { key: INACTIVE_CLOSURE_SWITCH_KEY, value: on }, update: { value: on } }));
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'inactive-accounts-test');
 /** The sweep reads people; in the shared test database it may only ever see this suite's. */
 const peopleScope = (): PrismaClient => app.prisma.$extends({ query: { user: { async findMany({ args, query }) {
@@ -53,6 +64,8 @@ async function person(opts: { role?: UserRole; ageDays?: number; activeDaysAgo?:
   users.push(u.id);
   return u.id;
 }
+/** Take a person out of later tests' counts: notice cleared, just used. */
+const settle = (id: string) => system(() => app.prisma.user.update({ where: { id }, data: { inactivityNoticeAt: null, lastActiveAt: new Date() } }));
 const userOf = (id: string) => system(() => app.prisma.user.findUniqueOrThrow({ where: { id }, select: { status: true, phone: true, inactivityNoticeAt: true } }));
 
 async function order(customerId: string, status: 'DELIVERED' | 'PREPARING', touchedDaysAgo: number) {
@@ -74,11 +87,20 @@ beforeAll(async () => {
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(socketPlugin);
   await app.ready();
   await system(() => app.prisma.platformConfig.deleteMany({ where: { key: 'accounts.inactive_customer_days' } }));
+  await setSwitch(true);
 });
 
 afterAll(async () => {
   // consent, audit and deletion-receipt rows are append-only evidence: only what this suite made and may delete goes.
+  await setSwitch(null);
   await system(async () => {
+    await app.prisma.advertiserMember.deleteMany({ where: { advertiserId: { in: advertisers } } });
+    await app.prisma.advertiser.deleteMany({ where: { id: { in: advertisers } } });
+    await app.prisma.vendorStaff.deleteMany({ where: { vendorId: { in: vendors } } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: vendors } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.serviceProvider.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.supportTicket.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.order.deleteMany({ where: { id: { in: orders } } });
@@ -125,6 +147,34 @@ describe('[R23] 12 months without use: a notice, then the deletion pipeline', ()
     const closed = await userOf(u);
     expect(closed.status).toBe('DEACTIVATED');
     expect(closed.phone).toBe(`deleted:${u}`);
+    const audit = await system(() => app.prisma.auditLog.findFirst({ where: { action: 'ACCOUNT_CLOSED_INACTIVE', entityId: u } }));
+    expect(audit?.changes).toMatchObject({ windowDays: 365, noticeDays: 30, closedBy: 'inactivity-sweep' });
+  });
+
+  it('DARK until switched on: with the switch off or absent, nobody is told', async () => {
+    const u = await person({ activeDaysAgo: 400 });
+    try {
+      await setSwitch(false);
+      expect(await sweep()).toEqual({ noticed: 0, deleted: 0, blocked: 0, revived: 0 });
+      await setSwitch(null);
+      expect((await sweep()).noticed).toBe(0);
+      expect((await userOf(u)).inactivityNoticeAt).toBeNull();
+    } finally { await setSwitch(true); }
+    expect((await sweep()).noticed).toBe(1);
+    await settle(u);
+  });
+
+  it('the clock starts only on a text the provider accepted: a refused text is no notice, tried again next run', async () => {
+    const u = await person({ activeDaysAgo: 400 });
+    smsRefuses = true;
+    try {
+      expect((await sweep()).noticed).toBe(0);
+      expect((await userOf(u)).inactivityNoticeAt).toBeNull();
+      expect(await system(() => app.prisma.notification.count({ where: { userId: u, title: INACTIVITY_NOTICE_TITLE } }))).toBe(0);
+    } finally { smsRefuses = false; }
+    expect((await sweep()).noticed).toBe(1);
+    expect((await userOf(u)).inactivityNoticeAt).not.toBeNull();
+    await settle(u);
   });
 
   it('use after the notice cancels it: a sign-in, a refreshed session, an order', async () => {
@@ -165,8 +215,32 @@ describe('[R23] 12 months without use: a notice, then the deletion pipeline', ()
       subjectUserId: held, reason: `hold ${RUN}`, ownerId: held, placedBy: held, reviewBy: new Date(Date.now() + 30 * DAY),
     } }));
     const young = await person({ ageDays: 100, activeDaysAgo: null });
+    // REVIEW-G S2-1: partners and staff can be CUSTOMER-only users with a profile or a membership
+    const owner = await person({ role: 'VENDOR_OWNER', activeDaysAgo: 400 });
+    const vo = await system(() => app.prisma.vendorOwner.create({ data: { userId: owner } }));
+    const vendor = await system(() => app.prisma.vendor.create({ data: {
+      ownerId: vo.id, name: `Quiet ${RUN}`, slug: `quiet-${RUN.toLowerCase()}-${seq}`, vendorType: 'STORE', phone: `+5926${NUM}1`,
+      addressLine1: '1 Way', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
+    } }));
+    vendors.push(vendor.id);
+    const teamMember = await person({ activeDaysAgo: 400 });
+    await system(() => app.prisma.vendorStaff.create({ data: { vendorId: vendor.id, userId: teamMember, invitedBy: owner } }));
+    const provider = await person({ activeDaysAgo: 400 });
+    await system(() => app.prisma.serviceProvider.create({ data: { userId: provider, trade: 'PLUMBER' } }));
+    const advertiser = await person({ activeDaysAgo: 400 });
+    const adv = await system(() => app.prisma.advertiser.create({ data: {
+      companyName: `Quiet ads ${RUN}`, industry: 'RETAIL', contactName: 'Quiet', contactEmail: `r23-${NUM}@example.test`, contactPhone: `+5926${NUM}2`, createdByUserId: advertiser,
+    } }));
+    advertisers.push(adv.id);
+    // REVIEW-G S3-2: an open matter with Swift keeps the account
+    const owedRefund = await person({ activeDaysAgo: 400 });
+    const refundOrder = await order(owedRefund, 'DELIVERED', 400);
+    await system(() => app.prisma.$executeRaw`UPDATE orders SET "refundOwedAt" = ${new Date(Date.now() - 400 * DAY)} WHERE id = ${refundOrder}`);
+    const openTicket = await person({ activeDaysAgo: 400 });
+    const t = await system(() => app.prisma.supportTicket.create({ data: { userId: openTicket, category: 'ACCOUNT', subject: 'r23', message: 'open ticket fixture' } }));
+    await system(() => app.prisma.$executeRaw`UPDATE support_tickets SET "updatedAt" = ${new Date(Date.now() - 400 * DAY)}, "createdAt" = ${new Date(Date.now() - 400 * DAY)} WHERE id = ${t.id}`);
     expect((await sweep()).noticed).toBe(0);
-    for (const id of [recent, recentOrder, recentSession, mover, store, staff, held, young]) {
+    for (const id of [recent, recentOrder, recentSession, mover, store, staff, held, young, owner, teamMember, provider, advertiser, owedRefund, openTicket]) {
       expect((await userOf(id)).inactivityNoticeAt, id).toBeNull();
     }
   });

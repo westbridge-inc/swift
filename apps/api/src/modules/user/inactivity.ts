@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { getChannels, type SmsProvider } from '../../providers/notifications/channels';
+import { runWithTenant } from '../../plugins/tenant-context';
 import { AccountService } from './account.service';
 
 /**
@@ -15,13 +16,23 @@ import { AccountService } from './account.service';
  *     (AccountService.deleteAccount): its own blockers (live orders or jobs) keep the account,
  *     and a safety hold is escrowed exactly as for a person who asked.
  *
- * Never touched: partners and staff (any role besides CUSTOMER; research C10: partners need
- * longer while documents and fee records run, a period not yet decided), store-review and
- * crawler tenants, synthetic people, an already-closed account, and anyone under a document
- * legal hold. Every run writes a retention receipt (accounts.inactive_customers).
+ * Never touched: partners and staff of any kind (any role besides CUSTOMER, a rider, driver,
+ * store-owner, service-provider or admin profile, a store team membership, an advertiser
+ * account; research C10: partners need longer while documents and fee records run, a period
+ * not yet decided), store-review and crawler tenants, synthetic people, an already-closed
+ * account, anyone under a document legal hold, and anyone Swift still has an open matter
+ * with (a refund owed, an open MMG payment claim, an open support ticket).
+ *
+ * DARK until the owner switches it on (PlatformConfig accounts.inactive_closure = true),
+ * which waits for the Privacy Policy and Terms to say it (GUARDRAILS 7(1)). The clock starts
+ * only on a text the SMS provider accepted, so nobody is closed on a notice that never left.
+ * Each closure writes an audit row (ACCOUNT_CLOSED_INACTIVE); every run writes a retention
+ * receipt (accounts.inactive_customers).
  */
 
 export const INACTIVE_CUSTOMER_DAYS_KEY = 'accounts.inactive_customer_days';
+/** The switch: only `true` turns the sweep on. */
+export const INACTIVE_CLOSURE_SWITCH_KEY = 'accounts.inactive_closure';
 export const DEFAULT_INACTIVE_CUSTOMER_DAYS = 365;
 export const INACTIVITY_NOTICE_DAYS = 30;
 export const INACTIVITY_RECEIPT_CLASS = 'accounts.inactive_customers';
@@ -52,8 +63,27 @@ const IN_SCOPE: Prisma.UserWhereInput = {
   roles: { equals: ['CUSTOMER'] },
   tenant: { kind: 'PRODUCTION' },
   NOT: { phone: { startsWith: 'deleted:' } },
+  // A partner or staff member can be a CUSTOMER-only user with a profile or a membership.
+  rider: { is: null }, driver: { is: null }, vendorOwner: { is: null }, serviceProvider: { is: null }, admin: { is: null },
+  vendorStaffMemberships: { none: {} },
   docLegalHolds: { none: { releasedAt: null } },
+  // An open matter with Swift keeps the account: a refund owed, an open MMG payment claim, an open ticket.
+  orders: { none: { OR: [
+    { refundOwedAt: { not: null }, refundSettledAt: null },
+    { customerMmgClaimAt: { not: null }, mmgClaimResolvedAt: null },
+  ] } },
+  supportTickets: { none: { status: { not: 'RESOLVED' } } },
 };
+
+/** Advertisers are customer-role users with an advertiser account (no back-relation on the user). */
+async function advertiserIds(prisma: Db, ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const [owners, members] = await Promise.all([
+    prisma.advertiser.findMany({ where: { createdByUserId: { in: ids } }, select: { createdByUserId: true } }),
+    prisma.advertiserMember.findMany({ where: { userId: { in: ids } }, select: { userId: true } }),
+  ]);
+  return new Set([...owners.map((r) => r.createdByUserId), ...members.map((r) => r.userId)]);
+}
 
 /** No use at or after `since`: no sign-in, no session made or refreshed, no order or service job touched. */
 function unusedSince(since: Date): Prisma.UserWhereInput {
@@ -87,15 +117,21 @@ export async function inactivitySweep(deps: InactivityDeps, now: Date = new Date
   const { prisma } = deps;
   const started = Date.now();
   const run: InactivityRun = { noticed: 0, deleted: 0, blocked: 0, revived: 0 };
+  const sw = await prisma.platformConfig.findUnique({ where: { key: INACTIVE_CLOSURE_SWITCH_KEY }, select: { value: true } });
+  if (sw?.value !== true) return run;
   const days = await inactiveCustomerDays(prisma);
   const cutoff = new Date(now.getTime() - days * DAY_MS);
 
   // 1. Use after a notice cancels it.
-  const noticed = await prisma.user.findMany({ where: { inactivityNoticeAt: { not: null } }, select: { id: true, inactivityNoticeAt: true }, take: BATCH * 5 });
-  const stillQuiet: Array<{ id: string; noticeAt: Date }> = [];
+  const noticed = await prisma.user.findMany({
+    where: { inactivityNoticeAt: { not: null } }, select: { id: true, tenantId: true, inactivityNoticeAt: true },
+    orderBy: { inactivityNoticeAt: 'asc' }, take: BATCH * 5,
+  });
+  const stillQuiet: Array<{ id: string; tenantId: string; noticeAt: Date }> = [];
+  const advertisers = await advertiserIds(prisma, noticed.map((u) => u.id));
   for (const u of noticed) {
-    const quiet = await prisma.user.count({ where: { id: u.id, ...IN_SCOPE, ...unusedSince(u.inactivityNoticeAt!) } });
-    if (quiet === 1) { stillQuiet.push({ id: u.id, noticeAt: u.inactivityNoticeAt! }); continue; }
+    const quiet = advertisers.has(u.id) ? 0 : await prisma.user.count({ where: { id: u.id, AND: [IN_SCOPE, unusedSince(u.inactivityNoticeAt!)] } });
+    if (quiet === 1) { stillQuiet.push({ id: u.id, tenantId: u.tenantId, noticeAt: u.inactivityNoticeAt! }); continue; }
     const cleared = await prisma.user.updateMany({ where: { id: u.id, inactivityNoticeAt: u.inactivityNoticeAt }, data: { inactivityNoticeAt: null } });
     run.revived += cleared.count;
   }
@@ -106,30 +142,47 @@ export async function inactivitySweep(deps: InactivityDeps, now: Date = new Date
   for (const u of stillQuiet) {
     if (u.noticeAt.getTime() > closeBefore.getTime()) continue;
     try {
-      await accounts.deleteAccount(u.id);
+      // Narrowed to the person's tenant, like every other deletion caller (account-erasure-retry).
+      await runWithTenant(u.tenantId, () => accounts.deleteAccount(u.id));
       run.deleted += 1;
     } catch (err) {
       run.blocked += 1;
       deps.log.warn({ userId: u.id, code: (err as { code?: string }).code ?? null }, '[R23] inactive account kept: the deletion pipeline refused it');
+      continue;
     }
+    // Closed: the notice has done its job (a later reactivation starts from no notice).
+    await prisma.user.updateMany({ where: { id: u.id }, data: { inactivityNoticeAt: null } });
+    // Per person: why this account was closed, and on what notice (append-only audit trail).
+    await prisma.auditLog.create({ data: {
+      userId: null, action: 'ACCOUNT_CLOSED_INACTIVE', entity: 'User', entityId: u.id,
+      changes: { noticeAt: u.noticeAt.toISOString(), windowDays: days, noticeDays: INACTIVITY_NOTICE_DAYS, closedBy: 'inactivity-sweep' },
+    } }).catch((err) => deps.log.error({ err, userId: u.id }, '[R23] inactive account closed but its audit row was not written'));
   }
 
   // 3. New notices: unused for the whole window (and older than it).
-  const due = await prisma.user.findMany({
-    where: { ...IN_SCOPE, inactivityNoticeAt: null, createdAt: { lt: cutoff }, ...unusedSince(cutoff) },
+  const candidates = await prisma.user.findMany({
+    // AND, never a spread: both filters constrain `orders` and must both hold.
+    where: { AND: [IN_SCOPE, unusedSince(cutoff)], inactivityNoticeAt: null, createdAt: { lt: cutoff } },
     select: { id: true, phone: true }, orderBy: { createdAt: 'asc' }, take: BATCH,
   });
+  const notAdvertisers = await advertiserIds(prisma, candidates.map((u) => u.id));
+  const due = candidates.filter((u) => !notAdvertisers.has(u.id));
   const closesOn = new Date(now.getTime() + INACTIVITY_NOTICE_DAYS * DAY_MS);
   const text = inactivityNoticeText(closesOn, days);
   const sms = deps.sms ?? getChannels().sms;
   for (const u of due) {
-    // The notice date is the clock: set once (a concurrent run cannot notify twice), then told.
+    // The clock starts only on a text the provider accepted: a notice that never left is no
+    // notice. Failed today = tried again tomorrow, nothing set.
+    try {
+      await sms.sendSms(u.phone, text.sms);
+    } catch (err) {
+      deps.log.warn({ err, userId: u.id }, '[R23] inactivity notice text not accepted; no notice, tried again next run');
+      continue;
+    }
+    // The notice date is the clock: set once (a concurrent run cannot start it twice).
     const claimed = await prisma.user.updateMany({ where: { id: u.id, inactivityNoticeAt: null }, data: { inactivityNoticeAt: now } });
     if (claimed.count !== 1) continue;
     await prisma.notification.create({ data: { userId: u.id, type: 'SYSTEM_ANNOUNCEMENT', title: text.title, body: text.body } });
-    await sms.sendSms(u.phone, text.sms).catch((err) => {
-      deps.log.warn({ err, userId: u.id }, '[R23] inactivity notice text not sent; the in-app notice stands');
-    });
     run.noticed += 1;
   }
 
