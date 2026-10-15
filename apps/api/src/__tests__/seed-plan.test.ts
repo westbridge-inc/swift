@@ -101,8 +101,9 @@ describe('[R048-005] the plan applies once; a replay changes nothing', () => {
     // document rulings, and 2026-10-13.1 without main's 2026-10-13.3 pricing;
     // the merged values are a version of their own (2026-10-14.3), and the
     // service-business and taxi document changes carry them on top as
-    // 2026-10-14.4 and then 2026-10-14.5.
-    expect(desiredPlatformConfig().version).toBe('2026-10-14.5');
+    // 2026-10-14.4 and then 2026-10-14.5; the service trades (13 Oct) on top as 2026-10-15.1, and the
+    // trades the research marks UNSURE held again as 2026-10-15.2 (R15).
+    expect(desiredPlatformConfig().version).toBe('2026-10-15.2');
   });
 
   it.each(['create', 'policy'] as const)('seeds owner-confirmed emergency numbers for the Guyana %s path', (path) => {

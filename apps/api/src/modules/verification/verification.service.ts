@@ -1052,6 +1052,9 @@ export class VerificationService {
       select: { docType: true, expiresAt: true, status: true, userId: true, role: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    // [DOC-1 §8.6 · R16] Recusal before anything the reviewer typed is judged: a recused reviewer is told so, never
+    // asked for a certificate's year or a registration's kind first. (The decision boundary checks it again.)
+    await assertNotRecused(this.prisma, adminId, candidate.userId);
     // [VERIFY-DOCS · owner ruling 6 Oct 2026] What the reviewer must TYPE for
     // this type: the ID/licence number (kept only as a blind-index identity
     // key) or the police clearance's issue date (the re-check falls due a year
