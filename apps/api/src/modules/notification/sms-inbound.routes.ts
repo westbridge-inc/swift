@@ -27,8 +27,9 @@ export const SMS_INBOUND_BODY_LIMIT = 16 * 1024;
 const SMS_INBOUND_RATE = { max: 120, timeWindow: '1 minute' } as const;
 const MAX_FIELDS = 64;
 
-/** The reply to a STOP: who it is from, what stopped, what continues (GSM-7, one part). */
-export const STOP_CONFIRMATION = 'Swift: you will get no more marketing messages. Texts about your account, orders and safety still come.';
+/** The reply to a STOP: who it is from and what stopped (GSM-7, one part). It promises nothing
+ *  about other texts: the SMS provider's own opt-out handling may also act on a STOP. */
+export const STOP_CONFIRMATION = 'Swift: you will get no more marketing messages from Swift.';
 
 type FormFields = Record<string, string[]>;
 
