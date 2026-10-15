@@ -18,6 +18,9 @@ const CLAIM = /face[- ]match(?:ed|es|ing)?\b|faces? (?:were|was|are|is) (?:match
 /** The one sentence that may speak of a selfie not matching: the liveness check's FAIL outcome, which the
  *  server returns only when a person (or, if it is ever switched on, face-matching) decided it. Pinned below. */
 const LIVENESS_FAIL_LINE = 'mobile/src/modules/safety/screens/LivenessCheckScreen.tsx: That selfie didn’t match your profile photo.';
+/** A reviewer's own rejection reason in the admin console: a PERSON decided the face does not match (identity
+ *  checks are human-only). It is a choice the reviewer makes, never a claim that a machine matched a face. */
+const REVIEWER_REASON_LINE = "admin/src/lib/rejection-reasons.ts: { code: 'FACE_MISMATCH', label: 'The face does not match' },";
 
 /** Source text with comments removed, so a code note about the switch is not a claim to a person. */
 function withoutComments(text: string): string {
@@ -55,8 +58,8 @@ const CARD = readFileSync(join(process.cwd(), 'src', 'components', 'onboarding',
 const CHECKLIST = readFileSync(join(process.cwd(), 'src', 'components', 'onboarding', 'DocumentChecklist.tsx'), 'utf8');
 
 describe('no client says a face was matched (legal research G4, in-app ¶17)', () => {
-  it('the phone, the website and the admin console carry no such sentence at all (but the liveness FAIL line)', () => {
-    expect(claims()).toEqual([LIVENESS_FAIL_LINE]);
+  it('the phone, the website and the admin console carry no such sentence (but the liveness FAIL line and a reviewer’s own reason)', () => {
+    expect(claims().sort()).toEqual([LIVENESS_FAIL_LINE, REVIEWER_REASON_LINE].sort());
   });
 
   it('[review S4-2 on #1732] the liveness mismatch line shows only on the server’s FAIL outcome', () => {
