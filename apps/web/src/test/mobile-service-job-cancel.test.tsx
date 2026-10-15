@@ -72,11 +72,23 @@ function scheduledJob(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe('[row 40] a booked service job can be cancelled from the phone', () => {
+// [TRANSFORMED, coordinator ruling 14 Oct · Terms 2026-10-15 §7] A booked job is the
+// provider's to cancel from the phone; the customer is shown who to contact instead.
+describe('[row 40] a booked service job can be cancelled from the phone by the provider; the customer is told who to contact', () => {
   it.each([
-    ['the customer, slot awaiting confirmation', 'customer-1', { providerConfirmedAt: null }],
-    ['the customer, slot confirmed', 'customer-1', {}],
+    ['the customer, slot awaiting confirmation', { providerConfirmedAt: null }],
+    ['the customer, slot confirmed', {}],
+  ])('%s: no Cancel, and the server\u2019s words say to contact the provider', (_name, overrides) => {
+    state.me = 'customer-1';
+    state.jobs = [scheduledJob(overrides as Record<string, unknown>)];
+    render(<ServiceJobsScreen navigation={{ navigate: vi.fn() }} />);
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    expect(screen.getByText('This job is booked, so it can no longer be cancelled in the app. Contact your provider to change or cancel it.')).toBeTruthy();
+  });
+
+  it.each([
     ['the provider, slot confirmed', 'provider-1', {}],
+    ['the provider, slot awaiting confirmation', 'provider-1', { providerConfirmedAt: null }],
   ])('%s: Cancel opens the confirmation and sends the compare-and-set cancel', (_name, me, overrides) => {
     state.me = me;
     state.jobs = [scheduledJob(overrides as Record<string, unknown>)];

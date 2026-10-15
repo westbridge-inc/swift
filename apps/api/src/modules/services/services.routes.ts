@@ -434,17 +434,17 @@ export async function servicesRoutes(app: FastifyInstance) {
     // expire, be rejected, or be purged between the request and the quote.
     // The write is a state CAS, not a read-then-unconditional update.
     // (Completion/decline of already-contracted work keeps its own policy.)
-    const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (boundTx) => {
-      const users = await boundTx.$queryRaw<Array<{ id: string; status: string }>>`
+    const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (tx) => {
+      const users = await tx.$queryRaw<Array<{ id: string; status: string }>>`
         SELECT "id", "status" FROM "users" WHERE "id" = ${request.user.userId} FOR UPDATE
       `;
       if (!users[0] || users[0].status !== 'ACTIVE') {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your account is not active — contact support before taking new work.');
       }
-      if (!(await isProviderVerified(boundTx, request.user.userId))) {
+      if (!(await isProviderVerified(tx, request.user.userId))) {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your verification has lapsed — renew your documents before taking new work.');
       }
-      return transitionServiceJob(boundTx, {
+      return transitionServiceJob(tx, {
         jobId: id,
         actorUserId: request.user.userId,
         expectedUpdatedAt,
@@ -533,18 +533,18 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to confirm');
     // [STRAND-8 / EV-ACT-25] Affirming the slot is the last acceptance gate
     // for NEW work — re-prove live authority and bind the state in the write.
-    const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (boundTx) => {
-      const users = await boundTx.$queryRaw<Array<{ id: string; status: string }>>`
+    const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (tx) => {
+      const users = await tx.$queryRaw<Array<{ id: string; status: string }>>`
         SELECT "id", "status" FROM "users" WHERE "id" = ${request.user.userId} FOR UPDATE
       `;
       if (!users[0] || users[0].status !== 'ACTIVE') {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your account is not active — contact support before taking new work.');
       }
-      if (!(await isProviderVerified(boundTx, request.user.userId))) {
+      if (!(await isProviderVerified(tx, request.user.userId))) {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your verification has lapsed — renew your documents before confirming new work.');
       }
       const confirmedAt = new Date();
-      return transitionServiceJob(boundTx, {
+      return transitionServiceJob(tx, {
         jobId: id,
         actorUserId: request.user.userId,
         expectedUpdatedAt,
