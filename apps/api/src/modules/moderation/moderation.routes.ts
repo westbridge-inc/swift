@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { getTenantId } from '../../plugins/tenant-context';
 import { activateUserBlock, deactivateUserBlock } from './user-block.service';
 import { assertRoomAccess } from '../chat/chat-authority';
-import { NotFoundError } from '../../utils/errors';
+import { ForbiddenError, NotFoundError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
 import { CSAE_PAGE_WINDOW_SECONDS, pageCsaeReport } from './csae-page';
 
@@ -47,9 +47,13 @@ export async function moderationRoutes(app: FastifyInstance) {
     // Reporting preserves read access after a conversation closes or a user
     // blocks contact, but cannot expose or target somebody else's transcript.
     // Recheck before duplicate success as room participants can change.
+    // Owner ruling (14 Oct 2026): a person taken off the order may still
+    // report a message that was sent TO them while they were part of the
+    // conversation (recorded on the message when it was written). Only after
+    // the room's tenant matched: a cross-tenant reporter still gets "not found".
     if (body.targetType === 'CHAT_MESSAGE') {
       const message = await app.prisma.chatMessage.findUnique({
-        where: { id: body.targetId }, select: { chatRoomId: true },
+        where: { id: body.targetId }, select: { chatRoomId: true, recipientIds: true },
       });
       if (!message) throw new NotFoundError('Chat message');
       try {
@@ -58,7 +62,7 @@ export async function moderationRoutes(app: FastifyInstance) {
         // A room outside the reporter's tenant answers exactly like a missing
         // message: no room id, no different wording to probe existence with.
         if (error instanceof NotFoundError) throw new NotFoundError('Chat message');
-        throw error;
+        if (!(error instanceof ForbiddenError && message.recipientIds.includes(reporterId))) throw error;
       }
     }
 

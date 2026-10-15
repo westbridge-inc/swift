@@ -63,6 +63,8 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** Decorated in server.ts when background queues are up */
     dispatchQueue?: Queue;
+    /** [row 266] The offer fast lane: offer timeouts only (jobs/queue.ts QUEUE_NAMES.OFFER). */
+    offerQueue?: Queue;
   }
 }
 
@@ -3193,8 +3195,9 @@ export class DispatchService {
 /** Route-side construction: timeouts ride the BullMQ queue when it exists. */
 export function makeDispatchService(app: FastifyInstance): DispatchService {
   const scheduler: TimeoutScheduler = async (orderId, riderId, delayMs, attemptId) => {
-    if (!app.dispatchQueue) throw new AppError(503, 'DISPATCH_QUEUE_UNAVAILABLE', 'Offer timeout scheduling is unavailable');
-    await app.dispatchQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
+    // [row 266] Offer timeouts ride their own queue and worker slots, never the sweeps' dispatch queue.
+    if (!app.offerQueue) throw new AppError(503, 'DISPATCH_QUEUE_UNAVAILABLE', 'Offer timeout scheduling is unavailable');
+    await app.offerQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
       delay: delayMs,
       removeOnComplete: 100,
       removeOnFail: 50,
