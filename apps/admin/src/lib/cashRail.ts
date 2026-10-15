@@ -145,7 +145,7 @@ export type CollectionTab = (typeof COLLECTION_TABS)[number];
 
 export const TAB_COPY: Record<CollectionTab, { label: string; meaning: string }> = {
   due72: { label: 'Due in 72h', meaning: 'Still active, fee lands within three days — a reminder now costs nothing.' },
-  pastdue: { label: 'Past due', meaning: 'The fee did not arrive. They are still working; this is the window where a call helps.' },
+  pastdue: { label: 'Past due', meaning: 'The fee did not arrive. They are still working; this is the window where a reminder helps.' },
   suspended: { label: 'Suspended', meaning: 'They have stopped earning. Every day here is a day of lost income for them and lost fee for Swift.' },
   churned: { label: 'Churned', meaning: 'Gone. Kept so the number is honest, not because anyone is chasing it.' },
 };
@@ -153,9 +153,9 @@ export const TAB_COPY: Record<CollectionTab, { label: string; meaning: string }>
 export const CONTACT_OUTCOMES = ['PROMISED', 'REFUSED', 'NO_ANSWER', 'WRONG_NUMBER', 'RESOLVED'] as const;
 export type ContactOutcome = (typeof CONTACT_OUTCOMES)[number];
 
-/** A promise with no date is not a promise — it is a way to close a call. */
+/** A promise with no date is not a promise — it is a way to close a contact. */
 export function contactProblem(outcome: ContactOutcome | '', promisedDate: string): string | null {
-  if (!outcome) return 'Say what happened on the call.';
+  if (!outcome) return 'Say what happened when you contacted them.';
   if (outcome === 'PROMISED' && !promisedDate) {
     return 'A promise needs a date, or nothing checks whether it was kept.';
   }
