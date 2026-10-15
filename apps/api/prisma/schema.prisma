@@ -352,6 +352,12 @@ model DeviceToken {
   platform  String
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
+  /// [RINGER · loud alerts 3/4] What the app installed on this device can
+  /// ring with, as the app reported it when it registered this token: 0 =
+  /// builds 9-11 and anything that reported nothing (sent exactly today's
+  /// push); 1 = the build with the job ring (the 'job_offers' Android
+  /// channel, the bundled ring tone, the iOS time-sensitive entitlement).
+  alertsVersion Int @default(0)
 
   @@map("device_tokens")
 }
