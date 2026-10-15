@@ -25,7 +25,10 @@ export type ConsentDocumentType =
   | 'marketing_consent'
   | 'location_bg_consent'
   /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger */
-  | 'unregistered_trader_declaration';
+  | 'unregistered_trader_declaration'
+  /** [R17] the tick before a document upload, and before a customer ID upload (verification/upload-consent.ts) */
+  | 'document_processing_consent'
+  | 'customer_id_consent';
 export type ConsentAction = 'granted' | 'withdrawn' | 're_granted';
 /** 'mobile' = the RN app when the platform isn't client-attested (signup). */
 export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket';
