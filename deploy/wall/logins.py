@@ -13,7 +13,7 @@ LOGINS = ('swift_app_login', 'swift_system_login')
 TARGET_FIELDS = ('cluster', 'database', 'migration', 'migrationOwner', 'ownershipDigest', 'aclDigest')
 ZERO_FIELDS = ('disabledTables', 'unforcedTables', 'qrUnsafeGrants', 'obsoleteExecutable',
                'parentUpdateMissing', 'appendOnlyUnsafeGrants', 'defaultGrantCount',
-               'groupUnsafeAttributes', 'groupUnexpectedParents')
+               'groupUnsafeAttributes', 'groupUnexpectedParents', 'groupOwnedObjects')
 ROLE_FLAGS = {'login': True, 'inherit': True, 'superuser': False, 'bypassrls': False,
               'createdb': False, 'createrole': False, 'replication': False}
 

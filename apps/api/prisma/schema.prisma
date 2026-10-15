@@ -1667,6 +1667,10 @@ model Category {
   imageUrl    String?
   sortOrder   Int      @default(0)
   isActive    Boolean  @default(true)
+  /// [Item 62 · owner 11 Oct] When the store deleted this category. Like a
+  /// deleted listing it is archived, not removed: its listings are archived
+  /// with it and stay attached to the orders and bookings that hold them.
+  archivedAt  DateTime?
   items       Item[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -1699,6 +1703,11 @@ model Item {
   bookings          Booking[]
   optionGroups      OptionGroup[]
   isAvailable       Boolean           @default(true)
+  /// [Item 62] When the store deleted this listing. The row stays: orders
+  /// reference it (their lines are snapshots) and bookings hold it by key, so
+  /// a delete archives instead. Archived = off every menu and editor, never
+  /// available again (CHECK items_archived_unavailable), history kept.
+  archivedAt        DateTime?
   isPopular         Boolean           @default(false)
   sku               String?
   barcode           String?
@@ -4665,8 +4674,9 @@ model ChatMessage {
   messageType     String   @default("text")
   mediaUrl        String?
   isRead          Boolean  @default(false)
-  /// Off-platform contact signal (spec §2): phone number / "WhatsApp me"
-  /// detected at send. The message still delivers — this feeds risk scoring.
+  /// Off-platform contact signal (spec §2) on admitted text, used for risk scoring.
+  /// With the launch content filter on, phone numbers, outside links and
+  /// abusive text are refused before storage.
   offPlatformFlag Boolean  @default(false)
   createdAt       DateTime @default(now())
 
