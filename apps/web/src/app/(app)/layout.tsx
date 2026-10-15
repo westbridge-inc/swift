@@ -2,6 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import { useQuery } from '@tanstack/react-query';
 import { getSessionPrincipal, restoreSession, sessionProbe, subscribeSession } from '@/lib/auth';
 import { getMarketDepth } from '@/lib/customer';
@@ -11,13 +12,19 @@ import { customerRoute, HOME_PATH } from '@/lib/customer-routes';
 import { Providers } from '@/components/providers';
 import { CustomerSessionProvider, type CustomerSession, type NearPoint, type SessionStatus } from '@/components/customer-session';
 import { BackRow, ContentSkeleton, ShellNavProvider, SideRail, SignInDoor, SwitchAppSheet, TabBar } from '@/components/customer-shell';
-import CartSkeleton from './cart/loading';
-import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
 import { OfflineNotice } from '@/components/offline-notice';
 import { useGuestBasket } from '@/lib/basket-state';
 import { framesOrderingContext } from '@/lib/ordering-paths';
 import { InstallPrompt } from '@/components/install-prompt';
+
+// [PERF #4] The cart's and an order's own loading shapes are drawn here only
+// while one of those private pages waits for the session answer on its first
+// load. They (and their page stylesheets) used to ride in every page's first
+// load, Home and the store page included; now they come with the page that
+// shows them. The server still draws them into that page's HTML, styles linked.
+const CartSkeleton = dynamic(() => import('./cart/loading'), { loading: () => <ContentSkeleton /> });
+const OrderDetailSkeleton = dynamic(() => import('./orders/[id]/loading'), { loading: () => <ContentSkeleton /> });
 
 // Upload code is needed only after sign-in with a browser basket.
 const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
