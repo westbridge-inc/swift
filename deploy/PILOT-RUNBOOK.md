@@ -1259,18 +1259,47 @@ public. Production is only read: the four group roles without passwords, a
 dump streamed straight into the copy, and the census. It checks the copy
 matches its source in every catalogue field but the cluster id, runs `plan`,
 `apply` and `verify` twice on the copy, then boots the real API and worker in
-deny mode and requires both attestation lines from each and no
-`TenantInUnboundTransactionError` or `FATAL` line. It leaves the copy running
-for the rest of the rehearsal (journeys, isolation checks, the launch jobs,
-the rollback test). It needs passwordless `sudo -n` for `env … swift-secrets`,
-`test` and `rm`, and fails closed without it. Never layer
-`docker-compose.rehearsal.yml` by hand.
+deny mode and requires both attestation lines from each (the system-login
+line in production mode only), each process running and never restarted, and
+no `TenantInUnboundTransactionError` or `FATAL` line. Then it checks the wall
+itself through the copy's own logins, each on a new connection: the request
+login, bound to no tenant, sees no walled row (`deploy/wall/walled-rows.sql`),
+the system login sees the copy's rows, the request login cannot `ALTER` a
+walled table and the system login cannot become the owner. Any step that does
+not hold ends the run non-zero with `REHEARSAL FAILED at step: …`; `PASSED` is
+printed only when every step held. It needs passwordless `sudo -n` for
+`env … swift-secrets`, `test` and `rm`, and fails closed without it. Never
+layer `docker-compose.rehearsal.yml` by hand.
 
-The rehearsal is not passed by `up` alone. On the copy, under the walled
-login, real journeys must succeed: a vendor route (a store's own catalogue
-and orders), a driver's and a rider's profile, a dispatch offer reaching a
-mover, and a cart through checkout. Any failure is a stop: Phase C does not
-go ahead, and the cause is fixed in code, never by loosening the wall.
+No journeys run on this copy: it holds production's personal data, and the
+journeys sign synthetic accounts in with the development code, which never
+touches a copy of production's data (coordinator ruling, 15 Oct). The
+walled-login journeys run on the STAGING host instead, as the deploy user,
+against a throwaway copy of staging's synthetic database in the same contract
+posture, once pilot-up has built the API image for `$SHA`:
+
+    LIVETEST_ADMIN_PHONE=+5920400000 ./deploy/wall/journeys-on-copy.sh "$SHA"
+
+It refuses unless `deploy/.env` says `PILOT_ENV=staging` (and not
+`NODE_ENV=production`) and the live database says staging; then
+`rehearsal.sh up` builds the walled copy (which must say staging too), the
+copy's worker stops, and a private `api-journeys`
+(`deploy/docker-compose.journeys-copy.yml`: both logins, `TENANT_RLS_BIND=1`,
+deny, no port, the copy's internal network only, uploads to a throwaway
+store inside it) serves the journeys and runs the queues. The journeys: an
+OTP sign-in (AUTH-01), a vendor route (VEND-02, VEND-05), a rider's and a
+driver's profile (RIDE-01, TAXI-02), a dispatch offer (RIDE-02) and a cart
+through checkout (CUST-01, CUST-02), every one PASS. A SKIP fails, except
+the runner's SKIP whose executed steps all passed and whose only cases left
+to the target are the ones the script names (an MMG pay link needs an SMS
+step-up the copy cannot do). Then the system jobs `compliance-sample` and
+`expiry-sweep`. The instance's own metrics must hold: the 95th-percentile
+request time within 1 s, no query waiting for a pool connection, tenant and
+non-tenant bindings ran, and `nontenant_system_in_tx` = 0. The copy is removed
+however the run ends, and `JOURNEYS PASSED` is printed only when every step
+held. The live staging API and database are only read. Any failure is a stop:
+Phase C does not go ahead, and the cause is fixed in code, never by loosening
+the wall.
 
 The copy holds production's personal data on the same host. Remove it with
 `./deploy/wall/rehearsal.sh down` as soon as the rehearsal's checks finish,
