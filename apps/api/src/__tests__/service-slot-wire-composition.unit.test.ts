@@ -6,7 +6,7 @@ import { GUYANA_TZ } from '../modules/prep/prep-time';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { BookingService } from '../modules/booking/booking.service';
 import { computeDaySlots, fmtSlotTime, slotFitsConfig } from '../modules/booking/availability';
-import { FREE_CANCEL_WINDOW_MIN, freeCancellationExpiresAt } from '../modules/order/cancel-policy';
+import { VERY_LATE_AFTER_MIN, freeCancellationExpiresAt, isFreeCancellation } from '../modules/order/cancel-policy';
 import { sendBookingReminders } from '../modules/services/services.service';
 import { hostRoutes, orderStore, prismaDouble, recordingIo, recordingRedis } from './helpers/service-vertical-doubles';
 
@@ -166,11 +166,17 @@ describe('09:00 Guyana appointment slot across the API wire', () => {
     vi.setSystemTime(new Date('2026-09-23T14:00:00.000Z'));
     const slot = new Date('2026-09-24T13:00:00.000Z');
     const snapshot = {
-      status: 'PENDING', orderType: 'FOOD_DELIVERY', placedAt: new Date('2026-09-23T13:00:00.000Z'),
+      status: 'PENDING', orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', placedAt: new Date('2026-09-23T13:00:00.000Z'),
       holdExpiresAt: null, riderId: null, driverId: null, scheduledFor: null, appointmentSlot: slot,
     };
-    expect(freeCancellationExpiresAt(snapshot)?.toISOString())
-      .toBe(new Date(slot.getTime() - FREE_CANCEL_WINDOW_MIN * 60_000).toISOString());
+    // [owner #50, 14 Oct] A booking nobody accepted has no countdown (free
+    // until the provider accepts). The slot instant now decides the
+    // "provider very late" exit of an ACCEPTED booking: free from the TRUE
+    // slot instant + VERY_LATE_AFTER_MIN, not a wall-clock reading of it.
+    expect(freeCancellationExpiresAt(snapshot)).toBeNull();
+    const accepted = { ...snapshot, status: 'ACCEPTED' };
+    expect(isFreeCancellation(accepted, new Date(slot.getTime() + (VERY_LATE_AFTER_MIN - 1) * 60_000))).toBe(false);
+    expect(isFreeCancellation(accepted, new Date(slot.getTime() + VERY_LATE_AFTER_MIN * 60_000))).toBe(true);
     const bodies: string[] = [];
     let reminderWindow: { gt: Date; lte: Date } | undefined;
     const prisma = {

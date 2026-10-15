@@ -5,9 +5,12 @@ import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Card, LabeledInput, PillButton, T } from '../../../kit';
 import { GUTTER } from '../shared';
-import { API_URL } from '../../../services/api';
+import { API_URL, vendorApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
+import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { useVendorMutation } from '../../../hooks/useVendorMutation';
+import { useQueryClient } from '@tanstack/react-query';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useBecomePartner, useVerificationStatus } from '../../../hooks/verification';
 import { usePartnerPricing } from '../../../hooks/partnerPricing';
@@ -305,6 +308,22 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
   const back = useBackToSwift('vendor');
   // Poll while onboarding so an approval reflects within seconds.
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
+  // [owner #51] A store goes live only with a number customers can call. The
+  // server says when that is all that is missing (`goLiveMissing`), and the
+  // number is saved here, on the waiting store's own screen — the store goes
+  // live the moment the server accepts it.
+  const needsPhone = Array.isArray(store.goLiveMissing) && store.goLiveMissing.includes('PUBLISHED_PHONE');
+  const qc = useQueryClient();
+  const [phoneError, setPhoneError] = useState<string | null>(null);
+  const savePhone = useVendorMutation({
+    mutationFn: (publicPhone: string | null) => vendorApi.updateProfile({ publicPhone }),
+    onMutate: () => setPhoneError(null),
+    onSuccess: () => {
+      setPhoneError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setPhoneError(e?.response?.data?.error?.message ?? 'That number could not be saved. Check it and try again.'),
+  });
   return (
     <BackToSwiftScreen onBack={back.leave}>
       {/* Waiting for approval is not a reason to be kept out of Swift. */}
@@ -312,6 +331,17 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <PricingCard kind="vendor" vendorType={store.vendorType} />
+        {needsPhone ? (
+          <>
+            <T variant="label" weight="semibold" style={{ marginTop: space.lg }}>
+              Add the number customers can call to go live
+            </T>
+            <T variant="caption" tone="muted" style={{ marginTop: 4, marginBottom: space.sm }}>
+              After you accept an order, customers contact you on this number to change or cancel it.
+            </T>
+            <PublicCallNumberCard value={store.publicPhone} saving={savePhone.isPending} error={phoneError} onSave={(p) => savePhone.mutate(p)} />
+          </>
+        ) : null}
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}

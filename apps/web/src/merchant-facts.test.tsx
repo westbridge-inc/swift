@@ -84,6 +84,19 @@ describe('[Q36] the minimum website information the card bank requires', () => {
     expect(screen.getByRole('heading', { name: /weekly partner fee/i })).toBeTruthy();
   });
 
+  it('3b · the cancellation words promise no in-app cancel the app refuses, and no fee [owner #46/#50/#52 · Opus review 14 Oct]', async () => {
+    await renderRoute('/legal/refunds');
+    const words = (document.body.textContent ?? '').replace(/\s+/g, ' ');
+    expect(words).toContain('never charges a cancellation fee');
+    // An MMG order whose payment the business confirmed is refused at every stage, so "before acceptance" is not enough.
+    expect(words).toContain('unless you paid by MMG and the business has already confirmed your payment');
+    expect(words).toContain('Paid by MMG, but the business has not confirmed your payment yet: you can cancel in the app.');
+    expect(words).not.toMatch(/has not accepted the order yet: you can cancel in the app/);
+    // The app offers a customer Cancel on a service job only while it is a request.
+    expect(words).toContain('Once it is booked, contact the provider to change or cancel it.');
+    expect(words).not.toMatch(/late-cancellation fee|cancellation fee may apply/i);
+  });
+
   it('4 · customer service contact: e-mail address and telephone number', async () => {
     await renderRoute('/contact');
     expect(screen.getAllByRole('link', { name: site.supportEmail })[0]!.getAttribute('href')).toBe(`mailto:${site.supportEmail}`);

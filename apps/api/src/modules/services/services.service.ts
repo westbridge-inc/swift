@@ -1,3 +1,4 @@
+import { isNeverAcceptedDocType } from '../verification/doc-registry';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
@@ -127,7 +128,7 @@ export async function providerChecklist(prisma: ProviderVerificationDb, userId: 
   const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
   if (!trade || !isServiceCategoryOperational(trade)) return [];
   const extra = lists[tradeChecklistKey(trade)] ?? [];
-  return [...new Set([...base, ...extra])];
+  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
 }
 
 /**

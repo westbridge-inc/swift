@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from './order-room-emission.service';
 import type { Prisma, PrismaClient, SubstitutionStatus } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
@@ -7,6 +8,7 @@ import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
 import { substitutionLineChange, MMG_SWAP_SETTLES_DIRECTLY } from './substitution-view';
+import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -212,6 +214,10 @@ export class PickingService {
     if (!substitute.isAvailable) {
       throw new AppError(409, 'SUBSTITUTE_UNAVAILABLE', 'That substitute is itself unavailable');
     }
+    // [GUARDRAILS §8] A substitution never puts a prohibited item on an order.
+    if ((await hiddenAmong(this.prisma, [substitute.id])).size > 0) {
+      throw new AppError(409, 'SUBSTITUTE_UNAVAILABLE', 'That substitute isn\'t available on Swift');
+    }
     if (original?.substitutionGroup && substitute.substitutionGroup !== original.substitutionGroup) {
       throw new AppError(400, 'WRONG_GROUP', 'Substitutes must come from the same substitution group');
     }
@@ -247,7 +253,7 @@ export class PickingService {
       });
     });
     // Only the committed winner speaks.
-    this.io.to(`order:${orderId}`).emit('order:substitution', {
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:substitution', {
       orderId,
       lineId,
       originalName: line.name,
@@ -363,6 +369,11 @@ export class PickingService {
       const fresh = await tx.orderItem.findFirst({ where: { id: lineId, orderId } });
       if (!fresh || fresh.subStatus !== 'PENDING') {
         throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
+      }
+      // [GUARDRAILS §8 · DS1106 S2] The substitute is judged again at the customer's yes, under the
+      // order lock: a person may have removed it, or its words changed, since the store proposed it.
+      if (fresh.substituteItemId && (await hiddenAmong(tx, [fresh.substituteItemId])).size > 0) {
+        throw new AppError(409, 'SUBSTITUTE_UNAVAILABLE', 'That substitute isn\'t available on Swift');
       }
 
       const substitutePrice = Number(fresh.substitutePrice ?? 0);
@@ -541,7 +552,7 @@ export class PickingService {
     });
     if (!closed) return false;
     this.emitPickState(line.order.vendorId, line.order.id, line.id, { subStatus });
-    this.io.to(`order:${line.order.id}`).emit('order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
+    await emitToOrderRoom(this.prisma, this.io, line.order.id, 'order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
     return true;
   }
 
@@ -561,10 +572,7 @@ export class PickingService {
       note: `picking: ${note}`,
     });
     if (restock.applied) {
-      await db.item.updateMany({
-        where: { id: line.itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-        data: { isAvailable: true, autoHiddenAt: null },
-      });
+      await unhideRestocked(db, line.itemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
       await db.stockAdjustment.create({
         data: { itemId: line.itemId, delta: line.quantity, reason: 'RETURN', note: `picking: ${note}` },
       });
