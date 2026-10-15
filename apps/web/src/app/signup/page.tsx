@@ -18,6 +18,7 @@ import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
 import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
+import { AGE_TICK_LABEL, AGE_TICK_REQUIRED } from '@/lib/age-tick';
 
 /** The server's rule for a taxi's year (partner.routes vehicle schema): 1980
  *  to next year. Checked here too, so a typo is caught before the round trip. */
@@ -94,6 +95,10 @@ export default function SignupPage() {
   // The partner agreement: an explicit, unticked clickwrap. The API records the
   // consent and refuses a partner sign-up without it (AGREEMENT_REQUIRED).
   const [agree, setAgree] = useState(false);
+  // [Owner ruling 15 Oct 2026] the sign-up ticks: Terms + Privacy, and "I am 18 or older". Both start
+  // unticked and, like the agreement, are cleared whenever the role or the step changes.
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const [adult, setAdult] = useState(false);
   // A tick is given to the agreement on screen: it is cleared whenever the role
   // or the step changes, so it never carries from one agreement to the other,
   // nor survives leaving the step (reset during render, so no frame shows it).
@@ -102,6 +107,8 @@ export default function SignupPage() {
   if (agreeScope !== agreementScope) {
     setAgreeScope(agreementScope);
     setAgree(false);
+    setAcceptTerms(false);
+    setAdult(false);
   }
   // A signed-in business account whose store was never created comes back
   // here from the console (/signup?resume=business) straight to that step.
@@ -147,10 +154,12 @@ export default function SignupPage() {
     setStep('name');
   });
   const doRegister = () => wrap(async () => {
-    // Consent is explicit clickwrap: the agreement line sits directly above
-    // the button that triggers this. Recorded server-side [SWIFT-AUD-D9-03].
+    // Consent is explicit clickwrap: both ticks sit directly above the button
+    // that triggers this. Recorded server-side [SWIFT-AUD-D9-03 · owner 15 Oct 2026].
+    if (!acceptTerms) throw new Error('Tick the Terms of Service and Privacy Policy to continue');
+    if (!adult) throw new Error(AGE_TICK_REQUIRED);
     try {
-      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role: accountRole(role), acceptTerms: true });
+      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role: accountRole(role), acceptTerms, ageConfirmed: adult });
     } catch (cause) {
       // Registration consumes its HttpOnly continuation before account reads
       // and writes. A transport or server error is therefore ambiguous: never
@@ -278,13 +287,22 @@ export default function SignupPage() {
               <label htmlFor="signup-last" className={styles.label}>Last name</label>
               <input id="signup-last" autoComplete="family-name" value={last} onChange={(e) => setLast(e.target.value)} className={styles.input} />
             </div>
-            <p className={styles.legal}>
-              By creating an account you agree to the{' '}
-              <a href="/legal/terms" target="_blank" rel="noreferrer" className={styles.inlineLink}>Terms of Service</a>{' '}
-              and{' '}
-              <a href="/legal/privacy" target="_blank" rel="noreferrer" className={styles.inlineLink}>Privacy Policy</a>.
-            </p>
-            <button type="button" onClick={() => void doRegister()} disabled={busy || !first.trim() || !last.trim()} className={styles.primaryButton}>{busy ? 'Creating…' : 'Create account'}</button>
+            {/* Two explicit, unticked ticks (the Terms say acceptance is by "ticking the acceptance box at registration"):
+                the Terms and Privacy consent, and the owner's 15 Oct 18+ declaration. The API records both in the consent ledger. */}
+            <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+              <input type="checkbox" checked={acceptTerms} onChange={(e) => setAcceptTerms(e.target.checked)} />
+              <span>
+                I agree to the{' '}
+                <a href="/legal/terms" target="_blank" rel="noreferrer" className={styles.inlineLink}>Terms of Service</a>{' '}
+                and{' '}
+                <a href="/legal/privacy" target="_blank" rel="noreferrer" className={styles.inlineLink}>Privacy Policy</a>
+              </span>
+            </label>
+            <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+              <input type="checkbox" checked={adult} onChange={(e) => setAdult(e.target.checked)} />
+              <span>{AGE_TICK_LABEL}</span>
+            </label>
+            <button type="button" onClick={() => void doRegister()} disabled={busy || !first.trim() || !last.trim() || !acceptTerms || !adult} className={styles.primaryButton}>{busy ? 'Creating…' : 'Create account'}</button>
           </div>
         )}
         {step === 'business' && (
