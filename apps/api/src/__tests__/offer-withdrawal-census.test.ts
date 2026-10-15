@@ -46,6 +46,8 @@ const CANCELLING_WRITERS: Record<string, string> = {
 
 /** Order writes the scan cannot read a status from, each reviewed. */
 const REVIEWED_WRITERS: Record<string, string> = {
+  'modules/rides/driver-pickup.ts#advanceDriverPickup':
+    'Assignment-bound pickup advances only to DRIVER_EN_ROUTE or DRIVER_ARRIVED, with arrival time; its two typed route callers never cancel.',
   'modules/order/order.service.ts#stageCanonicalOrderTransition':
     'THE SEAM: status is input.target. Its caller transitionOrderAtomically withdraws after every operational cancellation (asserted below).',
   'modules/chat/chat-authority.ts#rotateLeakedRidePin': 'rotates the ride PIN (freshRidePinReset); never touches status.',

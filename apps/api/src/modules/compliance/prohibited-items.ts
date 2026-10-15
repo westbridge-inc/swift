@@ -1097,9 +1097,50 @@ export function offersLegalServices(text: string | null | undefined): string | n
   return LEGAL_SERVICE_OFFERS.find((term) => judged.some((j) => hasPhrase(j, term))) ?? null;
 }
 
+// ── Remembered verdicts [PERF] ───────────────────────────────────────────────
+//
+// Judging words is pure: the same words always get the same verdict (nothing
+// here reads the clock, the database or the environment, and the lists above
+// are fixed for the life of the process). It is also slow, a few milliseconds
+// per item, and every menu, storefront and Market read judged every item it
+// showed, again, on every request: a 100-item menu spent about 0.6 s of the
+// API's single thread on it. So the three judges below remember their answers
+// for the exact words they were given (the key is every input, in order), in a
+// bounded table. A new or changed word is simply a new key, judged fresh; a
+// deploy with new lists starts with an empty table. Each caller gets its own
+// copy of a remembered answer, so no caller can change another's.
+
+/** The most answers each judge remembers (oldest dropped first). */
+export const PROHIBITED_MEMO_MAX = 10_000;
+
+function rememberedJudge<A, R extends object>(keyOf: (_input: A) => string, judge: (_input: A) => R | null): { judge: (_input: A) => R | null; size: () => number } {
+  const table = new Map<string, R | null>();
+  return {
+    judge: (input) => {
+      const key = keyOf(input);
+      let answer = table.get(key);
+      if (answer === undefined) {
+        answer = judge(input);
+        if (table.size >= PROHIBITED_MEMO_MAX) table.delete(table.keys().next().value!);
+      } else {
+        table.delete(key);
+      }
+      table.set(key, answer);
+      return answer === null ? null : { ...answer };
+    },
+    size: () => table.size,
+  };
+}
+
+/** A platform (discovery) category, judged by its immutable slug and its name — never its aliases. Not remembered. */
+export function judgeCategory(category: { slug: string; name: string }): { prohibitedClass: ProhibitedClass; term: string } | null {
+  return classifyText(`${category.slug.replace(/-/g, ' ')} ${category.name}`);
+}
+const categoryJudge = rememberedJudge((category: { slug: string; name: string }) => JSON.stringify([category.slug, category.name]), judgeCategory);
+
 /** A platform (discovery) category, judged by its immutable slug and its name — never its aliases. */
 export function classifyCategory(category: { slug: string; name: string }): { prohibitedClass: ProhibitedClass; term: string } | null {
-  return classifyText(`${category.slug.replace(/-/g, ' ')} ${category.name}`);
+  return categoryJudge.judge(category);
 }
 
 /** The partner's own words about an item — what a word hit is judged on, and what an approval is bound to. */
@@ -1137,7 +1178,7 @@ export type CatalogueCheck =
  * The partner's text judged: the first word hit, in the order a partner reads
  * it — or, when the name or an option IS the banned goods, that, as certain.
  */
-export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
+export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
   const fields: Array<[JudgedField, string | null | undefined]> = [
     ['name', item.name],
     ['section', item.sectionName],
@@ -1163,6 +1204,19 @@ export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; fi
     if (hit) first = { ...hit, field: 'name' };
   }
   return first ? { ...first, certain: false } : null;
+}
+const itemWordsJudge = rememberedJudge(
+  (item: ItemWords) => JSON.stringify([item.name, item.sectionName ?? null, item.description ?? null, (item.optionNames ?? []).map((name) => name ?? null)]),
+  judgeItemWords,
+);
+
+/**
+ * The partner's text judged: the first word hit, in the order a partner reads
+ * it — or, when the name or an option IS the banned goods, that, as certain.
+ * Remembered for these exact words (see "Remembered verdicts").
+ */
+export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
+  return itemWordsJudge.judge(item);
 }
 
 /**
@@ -1238,7 +1292,7 @@ export type StoreCheck =
  * as often as not ("Jameson's Hardware", "Carib Glassworks"), and a person tells the two apart. Banning a store
  * stays Swift's: filing it under a banned category (#54) or suspending it.
  */
-export function storeWordHit(store: StoreWords): StoreWordHit | null {
+export function judgeStoreWords(store: StoreWords): StoreWordHit | null {
   const labels = [...(store.tags ?? []), ...(store.cuisineTypes ?? [])];
   const fields: Array<[StoreField, string | null | undefined, boolean]> = [
     ['name', store.name, true],
@@ -1253,6 +1307,20 @@ export function storeWordHit(store: StoreWords): StoreWordHit | null {
   const together = fields.map(([, text]) => text).filter(Boolean).join(' . ');
   const hit = classifyText(together, { noSoftDrinks, brandFirst: false, splitWords: false });
   return hit ? { ...hit, field: 'name' } : null;
+}
+const storeWordsJudge = rememberedJudge(
+  (store: StoreWords) => JSON.stringify([store.name, store.description ?? null, (store.tags ?? []).map((tag) => tag ?? null), (store.cuisineTypes ?? []).map((label) => label ?? null)]),
+  judgeStoreWords,
+);
+
+/** A store's own words judged (see judgeStoreWords), remembered for these exact words (see "Remembered verdicts"). */
+export function storeWordHit(store: StoreWords): StoreWordHit | null {
+  return storeWordsJudge.judge(store);
+}
+
+/** How many answers each judge holds now (for the bound's test). */
+export function prohibitedMemoSizes(): { categories: number; items: number; stores: number } {
+  return { categories: categoryJudge.size(), items: itemWordsJudge.size(), stores: storeWordsJudge.size() };
 }
 
 /** The fingerprint of a store's words a person approved: any change to them brings the check back. */
