@@ -171,9 +171,9 @@ const PUBLISHED: Record<
   // [V1b batch · owner 15 Oct 2026 · legal research Part 4] the operator named (reg. 17703, address, phone; one constant),
   // the research's Terms/Privacy/Mover/Business/Child Safety wording, letters or documents never carried, the 18+ box.
   '2026-10-16': {
-    terms: '40bbacb1b8dfd9f8ab21f18be2cdd4a8cbcf92689c6ce24dea2d16f288e1c00c',
+    terms: 'f9edd1cd9c5d4818226af3cb3500d200b90b0205466a69a10be5ce6db0b2a5a9',
     privacy: '5abf3fc0bc88d5c2ea39df75b61384f6b3d3940c5c7d05081412a14388b729ed',
-    driver_agreement: '138915e1a8a39fec1ba8a1343efc7bc325fe467707ce298b353342e5f6da7a1c',
+    driver_agreement: 'e8ee25dcd36b6f1cd1f9dd18d24ab238c3604a50695057bbc9c8feb50ac7e29f',
     vendor_agreement: 'c3e89ace0ff86e0101462ed5df0a6805e7643b5330d550113b6a58fe081b30ae',
   },
 };
