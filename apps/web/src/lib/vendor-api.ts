@@ -2,6 +2,7 @@
 
 // Typed client over the EXISTING vendor endpoints — the web dashboard is
 // another client on the same backend; it never invents its own order logic.
+import type { SubstitutionStatus } from '@swift/types';
 import { apiFetch } from './auth';
 import { formatMoney, parseAmount } from './money';
 
@@ -64,7 +65,7 @@ export interface OrderLine {
   /** `OrderItem.substitutePrice` — `Decimal(10,2)`; coerced by the seam below. */
   substitutePrice?: number | null;
   picked?: boolean;
-  subStatus?: 'NONE' | 'PROPOSED' | 'ACCEPTED' | 'REJECTED' | 'REFUNDED' | null;
+  subStatus?: SubstitutionStatus | null;
   substituteItemId?: string | null;
   substituteName?: string | null;
 
