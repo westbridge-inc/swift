@@ -13,8 +13,12 @@ export function liveDocumentsLabel(mover: Mover): string {
   return live.reason === 'insurance' ? 'Needs hire insurance' : 'Documents missing';
 }
 
-export function liveDocumentsTone(mover: Mover): string {
+/** The live verdict GO uses when the API sends it; the legacy flag otherwise. */
+export function liveDocumentsOk(mover: Mover): boolean {
   const live = mover.documentsLive;
-  const ok = live ? live.allowed : !!mover.documentsVerified;
-  return ok ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400';
+  return live ? live.allowed : !!mover.documentsVerified;
+}
+
+export function liveDocumentsTone(mover: Mover): string {
+  return liveDocumentsOk(mover) ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400';
 }

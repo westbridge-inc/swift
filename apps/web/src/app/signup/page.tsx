@@ -202,7 +202,7 @@ export default function SignupPage() {
   };
 
   return (
-    <main className={styles.page}>
+    <main id="main" tabIndex={-1} className={styles.page}>
       <section className={styles.card} aria-labelledby="signup-title">
         {step !== 'role' ? (
           <button

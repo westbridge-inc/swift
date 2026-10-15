@@ -440,7 +440,8 @@ export const customerApi = {
   // without it and checkout stops sending it. (The web cart cannot remove a
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`),
+  // This client renders the server's swap permissions and refusal guidance.
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v1' } }),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message } } inside the axios body — reading one
   // level short silently discarded the authoritative cancellation outcome.
@@ -1316,6 +1317,8 @@ export const vendorApi = {
   addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),
   updateStaff: (id: string, role: 'MANAGER' | 'STAFF') => api.put(`/vendor/staff/${id}`, { role }),
   removeStaff: (id: string) => api.delete(`/vendor/staff/${id}`),
+  /** [Row 55] Take back every unanswered team invite from this store (none is ever listed). */
+  withdrawStaffInvites: () => api.post('/vendor/staff/invites/withdraw', {}),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging

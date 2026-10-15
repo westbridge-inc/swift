@@ -118,7 +118,11 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
         body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : ''}. Open the war room now.`,
         data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId },
       });
-      return { status: 'SENT', receipt: { opsPaged: page.delivered, opsAlertId: page.opsAlertId, recipients: page.recipients } };
+      // [AUD-L8b-008 · AUD-G7-003] opsPaged is what REACHED a person: pushes
+      // the provider accepted plus on-call texts the provider accepted. Inbox
+      // rows are kept apart (opsInbox) and prove nothing. A page that reached
+      // nobody is already due for escalation (openOpsAlert); its receipt says 0.
+      return { status: 'SENT', receipt: { opsPaged: page.reached, opsPushed: page.pushed, oncallTexted: page.oncallTexted, opsInbox: page.inboxed, opsAlertId: page.opsAlertId, recipients: page.recipients } };
     }
     case 'WAR_ROOM': {
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
@@ -180,7 +184,12 @@ async function refreshReceipts(prisma: PrismaClient, sosAlertId: string): Promis
   const alert = await prisma.sosAlert.findUnique({ where: { id: sosAlertId }, select: { deliveryReceipts: true } });
   const receipts: Record<string, unknown> = { ...((alert?.deliveryReceipts as Record<string, unknown> | null) ?? {}) };
   const ops = rows.find((r) => r.channel === 'OPS_PAGE' && r.status === 'SENT');
-  if (ops) receipts['opsPaged'] = (ops.receipt as Record<string, unknown> | null)?.['opsPaged'] ?? 0;
+  if (ops) {
+    // [AUD-L8b-008] opsPaged = people actually reached; opsInbox = inbox rows (a record, never evidence).
+    const r = (ops.receipt as Record<string, unknown> | null) ?? {};
+    receipts['opsPaged'] = r['opsPaged'] ?? 0;
+    if (r['opsInbox'] !== undefined) receipts['opsInbox'] = r['opsInbox'];
+  }
   const room = rows.find((r) => r.channel === 'WAR_ROOM' && r.status === 'SENT');
   if (room) receipts['socketListeners'] = (room.receipt as Record<string, unknown> | null)?.['socketListeners'] ?? 0;
   const repages = rows.filter((r) => r.channel === 'OPS_PAGE' && r.targetKey.startsWith('ops:repage:')).length;
@@ -419,7 +428,7 @@ export async function pageFailedSosEscalations(
       await prisma.sosEscalation.update({ where: { id: row.id }, data: { failurePageOpsAlertId: page.opsAlertId } });
       paged.push(row.id);
       sosEscalationCounter.labels('failure_paged').inc();
-      log().error({ sosAlertId: alert.id, escalationId: row.id, channel: row.channel, rowStatus: row.status, opsAlertId: page.opsAlertId, recipients: page.recipients, oncallTexted: page.oncallTexted }, '[AUD-L4-016] an SOS delivery failed — on-call operations paged');
+      log().error({ sosAlertId: alert.id, escalationId: row.id, channel: row.channel, rowStatus: row.status, opsAlertId: page.opsAlertId, recipients: page.recipients, reached: page.reached, pushed: page.pushed, oncallTexted: page.oncallTexted }, '[AUD-L4-016] an SOS delivery failed — on-call operations paged');
     } catch (err) {
       await prisma.sosEscalation.updateMany({ where: { id: row.id, failurePageOpsAlertId: null }, data: { failurePageClaimedAt: null } }).catch(() => {});
       sosEscalationCounter.labels('failure_page_failed').inc();

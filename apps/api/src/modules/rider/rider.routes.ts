@@ -4,6 +4,7 @@ import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
+import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
@@ -31,7 +32,7 @@ import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { RIDER_INCIDENT_REASONS } from '../custody/custody-case';
-import { reportIncident, holderView, relayTasks, transferCustody, declineRelay, invalidTransferCodeError } from '../custody/custody-recovery';
+import { reportIncident, holderView, relayTasks, transferCustody, declineRelay, invalidTransferCodeError, announceShortPaymentReturn } from '../custody/custody-recovery';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -41,14 +42,12 @@ import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSum
 import { requireStepUp } from '../auth/step-up';
 import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
-import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
-import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
-import { handoverBlockCounter } from '../../plugins/observability';
+import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { handoverAuthorityFor } from '../order/handover-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
-import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
-import { log } from '../../utils/logger';
+import { estimateLoad, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
@@ -125,7 +124,9 @@ const offerActionSchema = z.object({
 
 /** Golden-rule handover: GPS is mandatory — a claim is impossible without it. */
 const handoverSchema = z.object({
-  outcome: z.enum(['paid', 'no_show', 'refused']),
+  /** [L02 · row 34] 'short_payment' = the customer cannot pay in full: no
+   *  handover, the order goes back to the store (owner ruling, 5 Oct 2026). */
+  outcome: z.enum(['paid', 'no_show', 'refused', 'short_payment']),
   /** [MKT-F057] The customer-held door PIN for a goods delivery (verified on
    *  the 'paid' outcome only — no_show/refused stay open without one). */
   ridePin: z.string().min(1).max(10).optional(),
@@ -134,6 +135,17 @@ const handoverSchema = z.object({
     lng: z.number().min(-180).max(180),
   }),
   photoUrl: z.string().max(2048).optional(),
+  /** [L02 · row 34] The cash actually taken (whole units). Older apps omit it
+   *  and complete as before. See cash/door-cash.ts for what it means. */
+  collectedAmount: zMoneyWhole.optional(),
+  /** Partial cash was handed back at the door. False reports cash still held
+   * by the rider for operations; neither choice executes a platform refund. */
+  cashReturned: z.boolean().optional(),
+  /** [L02 · row 34] The door authority version the screen rendered (the
+   *  `handover.version` of GET /orders/active); a stale one is refused. */
+  handoverVersion: z.string().min(1).max(64).optional(),
+  /** [L02 · row 34] The goods were already handed over for less than due. */
+  handedOverShort: z.boolean().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -318,13 +330,29 @@ export async function riderRoutes(app: FastifyInstance) {
     // Idempotent on Idempotency-Key: a network-retried handover returns the
     // original result instead of failing the (now-terminal) transition.
     const { data, replayed } = await withIdempotency(app, request, 'handover', id, async () => {
+      if (body.outcome === 'paid') await assertHandoverRequestBudget(app.redis, id);
       const result = await cashRules.handover(id, request.user.userId, { ...body, sessionId: request.authSessionId ?? undefined });
+      // [L02 · row 34] A return the customer's short payment started is
+      // announced once, by the call that committed it (never by a replay).
+      if (result.returnStarted) await announceShortPaymentReturn(custodyDeps, id);
       return {
         orderId: id,
         status: result.order.status,
         claim: result.claim
           ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags }
           : null,
+        ...(result.cashReturn ? { cashReturn: result.cashReturn } : {}),
+        // [L02 · row 34] What was recorded about the cash, when the app stated it.
+        ...(result.doorCash && result.doorCash.kind !== 'UNSTATED'
+          ? {
+            cash: {
+              due: result.doorCash.due,
+              collected: result.doorCash.collected,
+              shortfall: result.doorCash.kind === 'SHORT_HANDED_OVER' ? result.doorCash.shortfall : 0,
+              heldForReview: result.doorCash.kind === 'SHORT_HANDED_OVER',
+            },
+          }
+          : {}),
       };
     });
     // [ALG-16] Once, at completion: match the trace to the road graph in the
@@ -1095,13 +1123,21 @@ export async function riderRoutes(app: FastifyInstance) {
             addressLine1: true, city: true,
           },
         },
-        items: { select: { quantity: true } },
+        // [owner #20] bulkUnits only to judge the vehicle below; never sent.
+        items: { select: { quantity: true, bulkUnits: true } },
       },
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
 
-    const orders = await safeBoardOrders(app.prisma, candidates, request.user.userId, 'RIDER');
+    // [owner #20 · G1] The board shows only work this rider's vehicle can
+    // carry — the same size rule dispatch and the grab enforce (a parcel's
+    // declared size; a goods order's bulk, a bulky line needing a car or van).
+    const carriable = candidates.filter((order) => {
+      const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
+      return !requiredSize || vehicleCanCarry(rider.vehicleType, requiredSize);
+    });
+    const orders = await safeBoardOrders(app.prisma, carriable, request.user.userId, 'RIDER');
 
     // §4d trust badge: WHO the rider would front cash for — trust level,
     // completed orders, strikes. One batch (3 queries), never per-row.
@@ -1301,9 +1337,9 @@ export async function riderRoutes(app: FastifyInstance) {
       where: { id },
       include: {
         vendor: { select: { id: true, name: true } },
-        // [G1 SHADOW] The lines, so the load gate can be measured against the
-        // vehicle that ACTUALLY took the job. One join on the accept path, not
-        // the dispatch hot loop.
+        // [owner #20 · G1] The lines, so the load gate can refuse a vehicle that
+        // cannot carry the order. One join on the accept path, not the
+        // dispatch hot loop.
         items: { select: { quantity: true, bulkUnits: true } },
       },
     });
@@ -1340,34 +1376,17 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', `A ${order.courierPackageSize.toLowerCase().replace(/_/g, ' ')} parcel needs a bigger vehicle than your ${rider.vehicleType.toLowerCase()}.`);
     }
 
-    // [G1 SHADOW] The gate that does NOT exist yet, measured against reality.
-    //
-    // The check above is COURIER-only — the same shape as the candidate SQL,
-    // and the same hole. Food and grocery orders reach this line with no
-    // capacity test at dispatch OR at accept, which is how a 40-item
-    // supermarket run can be taken by a bicycle.
-    //
-    // This REFUSES NOTHING. It records what a gate would have demanded and
-    // what vehicle actually took the job, because `wouldHaveExcluded: true` on
-    // a job that then completes fine is the single field that decides whether
-    // the bands are right. Enforcing first and measuring after would trade a
-    // visible failure for a silent one — an order nobody can take, and nobody
-    // is paged.
-    try {
+    // [owner #20 · G1 ENFORCED] The same gate for food and grocery: an order
+    // the rider's vehicle cannot carry — a bulky line needs a car or van; a
+    // big ordinary load is banded — is refused here exactly as dispatch never
+    // offers it. (A parcel was refused just above by its declared size.)
+    if (order.orderType !== 'COURIER') {
       const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
-      if (requiredSize && order.orderType !== 'COURIER') {
-        log().info({
-          orderId: order.id,
-          orderType: order.orderType,
-          requiredSize,
-          bulkUnits: totalBulkUnits(order.items),
-          acceptedByVehicle: rider.vehicleType,
-          wouldHaveExcluded: !vehicleCanCarry(rider.vehicleType, requiredSize),
-          bands: DEFAULT_LOAD_BANDS,
-        }, 'loadgate:accepted');
+      if (requiredSize && !vehicleCanCarry(rider.vehicleType, requiredSize)) {
+        throw new AppError(400, 'VEHICLE_TOO_SMALL', requiredSize === 'EXTRA_LARGE'
+          ? `This order needs a car or van — it is too big for your ${rider.vehicleType.toLowerCase()}.`
+          : `This order is too big for your ${rider.vehicleType.toLowerCase()}.`);
       }
-    } catch {
-      // A shadow may never refuse an accept. Silent by design.
     }
     // [REPORT-014 F-014-08] Service authorization, mirroring the candidate SQL
     // filter: a COURIER job needs a courier-serving rider, a food/grocery
@@ -1571,84 +1590,14 @@ export async function riderRoutes(app: FastifyInstance) {
     // replay short-circuits to the stored result.
     const { data, replayed } = await withIdempotency(app, request, 'delivered', id, async () => {
       const order = await getOwnedOrder(app, id, rider.id);
+      await assertHandoverRequestBudget(app.redis, id);
 
-      // [MOB-023] The door's authority, validated at the moment of hand-over:
-      // a screen that rendered an older payment or custody state is refused
-      // (refresh), and a non-cash rail whose money has not landed — PENDING,
-      // UNKNOWN, FAILED, EXPIRED, REFUNDED — is never handed over as paid.
-      if (!handoverVersionMatches(order, handoverVersion)) {
-        handoverBlockCounter.labels('STALE_VERSION').inc();
-        throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
-      }
-      const authority = handoverAuthorityFor(order);
-      if (authority.permitted === 'BLOCKED') {
-        handoverBlockCounter.labels(authority.blockReason ?? 'BLOCKED').inc();
-        // [F-103-01 · F-106-xx] ONE mapping, so a reason the door produces is
-        // never answered as a different one. This enumerated two and let the
-        // third fall through to "Payment is captured — do not hand over",
-        // which contradicts itself and re-offers the "ask the store" advice
-        // F-106-03 removed.
-        const refusal = HANDOVER_REFUSALS[authority.blockReason ?? ''];
-        if (refusal) throw new AppError(409, refusal.code, refusal.message);
-        // PENDING keeps the fulfilment gate's one domain error (SPS-F-0016); every other un-landed state is the door's.
-        const code = order.paymentStatus === 'PENDING' ? 'MMG_PAYMENT_PENDING' : 'PAYMENT_NOT_CAPTURED';
-        throw new AppError(409, code, `Payment is ${order.paymentStatus.toLowerCase()} — do not hand over. Refresh, or ask the store to confirm the payment.`);
-      }
-
-      const validFrom = ['ARRIVED', 'EN_ROUTE_DELIVERY'];
-      if (!validFrom.includes(order.status)) {
-        throw new AppError(
-          400,
-          'INVALID_TRANSITION',
-          `Cannot mark as delivered from status ${order.status}. Rider must be ARRIVED or EN_ROUTE_DELIVERY.`,
-        );
-      }
-
-      // Golden rule: a CASH order can't be closed until the money is in hand.
-      // Cash is captured only via POST /handover {outcome:'paid'} (which then
-      // completes the delivery); /delivered is the final step for orders already
-      // paid (MMG is CAPTURED at checkout). Without this gate a rider could mark
-      // a cash order delivered without collecting — skipping the strike/guarantee
-      // flow and leaving the books saying "delivered" while nothing was paid.
-      if (order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
-        throw new AppError(
-          409,
-          'PAYMENT_NOT_CAPTURED',
-          'Collect the cash first — use “Confirm payment & hand over” to record it, which completes the delivery.',
-        );
-      }
-
-      // Verify the delivery PIN if one was set on the order.
-      // [F-0011] Read the secret ONLY here, where it is compared — the rider is
-      // its VERIFIER, so no rider-facing payload may carry it (see getOwnedOrder).
-      // [MKT-F057] The same shared lockout as the taxi PIN and the pickup code:
-      // 5 wrong tries (MAX_HANDOVER_ATTEMPTS), support-only reset. Legacy rows
-      // without a PIN complete as before (presence-gated), so nothing in flight
-      // strands.
-      const secret = await app.prisma.order.findUnique({ where: { id },
-        select: { ridePin: true, ridePinAttempts: true } });
-      if (secret?.ridePin) {
-        const { locked, remaining } = handoverAttemptState(secret.ridePinAttempts);
-        if (locked) throw new AppError(400, 'MAX_ATTEMPTS',
-          'Too many incorrect delivery-PIN attempts on this order. Please contact support.');
-        if (ridePin == null || ridePin === '') throw new AppError(400, 'MISSING_PIN',
-          "Enter the customer's 6-digit delivery PIN.");
-        if (ridePin !== secret.ridePin) {
-          // A wrong guess burns its attempt as its own committed update BEFORE
-          // the throw — the DELIVERED transition never runs for it.
-          await app.prisma.order.update({ where: { id }, data: { ridePinAttempts: { increment: 1 } } });
-          throw new AppError(400, 'INVALID_PIN',
-            `That PIN does not match. ${remaining} attempt(s) remaining.`);
-        }
-      }
-
-      // 1. Update order status — handles notifications, sockets, float release,
-      //    and freeing the rider (isAvailable/currentOrderId/totalDeliveries)
-      //    centrally, so every terminal path behaves the same.
-      await orderService.updateStatus(id, 'DELIVERED', request.user.userId, 'Delivery completed');
-
-      // 2. Create earning records (delivery fee + tip).
-      await orderService.createEarnings(id);
+      // Fresh custody, payment, code and budget are one canonical Order-lock
+      // decision. A wrong attempt commits before its route error is returned.
+      await orderService.updateStatus(id, 'DELIVERED', request.user.userId, 'Delivery completed', {
+        allowedFrom: ['ARRIVED', 'EN_ROUTE_DELIVERY'], expectedRiderId: rider.id,
+        handover: { purpose: 'delivery', code: ridePin, handoverVersion },
+      });
 
       // 3. Read the freed rider back for the response payload.
       const updated = await app.prisma.rider.findUniqueOrThrow({

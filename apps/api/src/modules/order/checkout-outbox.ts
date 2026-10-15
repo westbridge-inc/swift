@@ -50,10 +50,13 @@ export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
  *  [L07] `rider-cancel-notice`: a customer's cancellation told to the rider
  *  who held the delivery, drained by `drainRiderCancellationNotices`
  *  (order/rider-cancel-notice.ts) until push confirms it.
+ *  [L07] `handover-completed-notice`: the customer's handover notice that
+ *  commits with the completion, drained by `drainHandoverNotices`
+ *  (handover/handover-notice.ts).
  *  [L07] `driver-pickup-notice`: the passenger's pickup-progress notice from
  *  the assignment-bound advance, drained by `drainDriverPickupNotices`
  *  (rides/driver-pickup.ts). */
-export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'rescue-notice', 'rider-cancel-notice', 'driver-pickup-notice'];
+export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'rescue-notice', 'rider-cancel-notice', 'handover-completed-notice', 'driver-pickup-notice'];
 
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */

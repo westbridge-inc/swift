@@ -8,6 +8,7 @@ import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-ca
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { isDuplicateOn } from '../money/evidence';
@@ -48,6 +49,7 @@ import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
+import { lineOptionsAsMade, substitutionView } from '../order/substitution-view';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
@@ -726,7 +728,8 @@ export async function customerRoutes(app: FastifyInstance) {
     undefined,
     // §2 checkout gate reads the SAME supply dispatch would search — including
     // the cash-float requirement, so the probe and the real dispatch agree.
-    (point, floatRequired) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired),
+    // [owner #20] …and, for an order too big for a bike, only the movers whose vehicle can carry it.
+    (point, floatRequired, packageSize) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired, undefined, packageSize),
     app.redis,
   );
   const picking = new PickingService(app.prisma, app.io);
@@ -807,10 +810,15 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    const referrer = await app.prisma.customer.findFirst({
-      where: { referralCode: { equals: code, mode: 'insensitive' } },
+    // [B-1] A code belongs to one operator: the referrer is looked up inside the
+    // caller's own tenant only (the caller's account says which). A code from
+    // another tenant reads exactly like an unknown one — nobody named, nothing
+    // linked, no count raised.
+    const caller = await app.prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } });
+    const referrer = caller ? await app.prisma.customer.findFirst({
+      where: { referralCode: { equals: code, mode: 'insensitive' }, user: { tenantId: caller.tenantId } },
       include: { user: { select: { firstName: true } } },
-    });
+    }) : null;
     if (!referrer) {
       throw new AppError(404, 'INVALID_REFERRAL', 'That referral code wasn’t found');
     }
@@ -910,6 +918,11 @@ export async function customerRoutes(app: FastifyInstance) {
   app.put('/profile', async (request: AuthRequest, _reply: FastifyReply) => {
     const { userId } = request.user;
     const body = updateProfileSchema.parse(request.body);
+    if (body.firstName !== undefined) {
+      // [MC-PR3] "TEST-" names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
+      const me = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, firstName: true } });
+      assertNameNotReserved(body.firstName, me?.phone, me?.firstName);
+    }
     // [OWNER #13 · Opus S2] An admin account's email change takes a fresh
     // sign-in code and tells the old address; every change is dated.
     const user = await updateCustomerProfile(app, userId, request.authSessionId, body);
@@ -2596,6 +2609,9 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/orders/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
+    // Only clients that render server decision permissions opt in. Build 9 /
+    // Android vc5 omit this capability and retain the pre-feature item shape.
+    const supportsSwapDecisions = (request.query as { swapDecisions?: unknown }).swapDecisions === 'v1';
 
     const order = await app.prisma.order.findFirst({
       where: { id, customerId: userId },
@@ -2760,6 +2776,15 @@ export async function customerRoutes(app: FastifyInstance) {
           customerPrice: Number(i.markedUpPrice),
           lineTotal: Number(i.totalCustomer),
           specialInstructions: i.specialInstructions,
+          // Additions only for a permission-aware client. The flat subStatus
+          // field activates dormant swap controls in older binaries.
+          ...(supportsSwapDecisions ? {
+            options: lineOptionsAsMade(i),
+            subStatus: i.subStatus,
+            substituteName: i.substituteName,
+            substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
+            substitution: substitutionView(i, order),
+          } : {}),
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),
@@ -3378,7 +3403,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const result = await decideStaffInvite(app.prisma, {
       inviteId: id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
-    });
+    }, notificationService);
     return { success: true, data: result };
   });
   app.post('/team-invites/:id/decline', async (request: AuthRequest) => {

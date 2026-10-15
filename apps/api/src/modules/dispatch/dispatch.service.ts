@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { assertDispatchPairEligible, safetyExcludedMovers } from './pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -1007,6 +1007,10 @@ export class DispatchService {
      *  must pass the queue/order tenant explicitly because they intentionally
      *  run without request-local tenant context. */
     tenantId: string | null = getTenantId(),
+    /** [owner #20] Count only movers whose vehicle can carry an order of this
+     *  size (a food/grocery order's bulk — never parcel work). Omitted = any
+     *  vehicle, exactly as before. */
+    packageSize?: string | null,
   ): Promise<{
     level: 'GOOD' | 'LOW' | 'NONE';
     /** Stable client contract: null when no eligible fresh mover exists. */
@@ -1020,6 +1024,11 @@ export class DispatchService {
       floatRequired,
       null,
       tenantId,
+      packageSize ?? null,
+      undefined,
+      undefined,
+      undefined,
+      false,
     );
     const level = candidates.length >= 3 ? 'GOOD' : candidates.length >= 1 ? 'LOW' : 'NONE';
     return {
@@ -1050,6 +1059,11 @@ export class DispatchService {
     /** Delivery search-memory generation. Omitted for taxi, availability
      * probes and pre-generation compatibility callers. */
     deliveryAuthorityVersion?: number,
+    /** [owner #20] Whether this is COURIER (parcel) work. Separate from
+     *  `packageSize` since a food or grocery order now carries a required size
+     *  too (its bulk): the size gates the VEHICLE, this gates the rider's
+     *  SERVICE type. Omitted = the historical reading (a size means a parcel). */
+    courierWork?: boolean,
   ): Promise<DispatchCandidate[]> {
     // Stacking: the RIDER pool's live capacity (AlgoConfig, cached ~30s;
     // clamped 1..3; 1 = historical behaviour and the kill switch).
@@ -1068,7 +1082,7 @@ export class DispatchService {
     // rider — a DELIVERY-only rider must never be offered/claim a parcel and
     // vice versa. BOTH serves either. (Drivers are the taxi pool — N/A here.)
     const riderTypeFilter = pool === 'RIDER'
-      ? (packageSize
+      ? ((courierWork ?? !!packageSize)
           ? Prisma.sql`AND r."riderType"::text = ANY(ARRAY['COURIER','BOTH'])`
           : Prisma.sql`AND r."riderType"::text = ANY(ARRAY['DELIVERY','BOTH'])`)
       : Prisma.empty;
@@ -1382,21 +1396,14 @@ export class DispatchService {
       await this.journalOpenSearch(order, round, radius);
       // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
       const floatRequired = pool === 'RIDER' ? riderFloatForOrder(order) : 0;
-      const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId, order.taxiPassengerCount, searchVersion);
-
-      // [G1 SHADOW] What a load gate WOULD demand, and what it WOULD cost.
-      //
-      // Changes nothing. It exists to answer the one question that decides
-      // whether this may ever be enforced: how much of the rider pool would the
-      // gate remove, and would it have removed riders from jobs that completed
-      // perfectly well? Turning the filter on without that evidence trades a
-      // visible failure (a rider who cannot carry it) for an invisible one
-      // (nothing dispatches, and nobody is paged) — which is worse.
-      //
-      // Wrapped, and deliberately so: a classification bug must never stop a
-      // dispatch. A shadow that can take the cascade down is not a shadow, it
-      // is an outage.
-      this.logLoadGateShadow(order, candidates.length);
+      // [owner #20 · G1 ENFORCED] The size of vehicle this order needs — a
+      // parcel's declared size, or a food/grocery order's bulk (a bulky line
+      // means a car or van) — gates the candidate pool, exactly as the parcel
+      // gate always has. The visible half of the rule is checkout, which
+      // tells the customer before placing when no such vehicle is near.
+      const requiredSize = pool === 'RIDER' ? requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS) : null;
+      const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, requiredSize, order.customerId, order.taxiPassengerCount, searchVersion, order.orderType === 'COURIER');
+      this.logLoadGate(order, requiredSize, candidates.length);
 
       const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
       // [F-014-05] Walk the ranked candidates: the FIRST who can atomically
@@ -1871,46 +1878,28 @@ export class DispatchService {
    *  (wave/radius), resolving a prior EXHAUSTED row as RETRIED when a fresh
    *  search begins. Never throws — the journal is beside the machine. */
   /**
-   * [G1 SHADOW] Record what a vehicle-capacity gate would have demanded of this
-   * order, and how much of the candidate pool it would have cost.
-   *
-   * READ BY NOBODY IN DISPATCH. The only consumer is the rollout decision.
-   *
-   * `wouldHaveExcluded: true` on a job that then completes fine is the signal
-   * that the bands are too tight — that single field is what says whether this
-   * may ever be enforced. `poolAfter` against `poolBefore` is the other half:
-   * a gate that removes most of the pool is a misconfiguration wearing the
-   * costume of a safety feature.
-   *
-   * Synchronous and total: it awaits nothing, so it cannot add latency to a
-   * dispatch round, and it swallows everything, so it cannot end one. If this
-   * ever throws into the cascade it has become the outage it was meant to
-   * prevent.
+   * [owner #20 · G1] Record the vehicle-size requirement a goods order was
+   * dispatched under and how many candidates it left — the evidence that the
+   * bands and the bulky rule are not starving the pool. Synchronous and total:
+   * it awaits nothing and swallows everything, so it can never end a round.
    */
-  private logLoadGateShadow(
-    order: { id: string; orderType: string; courierPackageSize: string | null; items: { quantity: number; bulkUnits: number | null }[] },
-    poolBefore: number,
+  private logLoadGate(
+    order: { id: string; orderType: string; items: { quantity: number; bulkUnits: number | null }[] },
+    requiredSize: string | null,
+    poolAfter: number,
   ): void {
     try {
-      const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
-      // No requirement means nothing to shadow — a taxi, or a goods order with
-      // no lines. Logging those would bury the rows that carry a decision.
-      if (!requiredSize) return;
-      // COURIER is already gated in production; it is here only as the control
-      // that shows the derivation agrees with the declaration it cannot see.
-      const alreadyGated = order.orderType === 'COURIER';
+      if (!requiredSize || order.orderType === 'COURIER') return;
       log().info({
         orderId: order.id,
         orderType: order.orderType,
         requiredSize,
         bulkUnits: totalBulkUnits(order.items),
         bands: DEFAULT_LOAD_BANDS,
-        alreadyGated,
-        poolBefore,
-      }, 'loadgate:shadow');
+        poolAfter,
+      }, 'loadgate:enforced');
     } catch {
-      // Deliberately silent. A shadow that reports its own failure into the
-      // dispatch path is still in the dispatch path.
+      // Deliberately silent: a log line never ends a dispatch round.
     }
   }
 
@@ -2820,7 +2809,7 @@ export class DispatchService {
     try {
       await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', assignedEvent);
       if (order.vendorId) {
-        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', assignedEvent);
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', assignedEvent);
       }
     } catch (err) {
       warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch socket publication failed after claim commit');

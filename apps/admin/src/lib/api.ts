@@ -46,10 +46,22 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: { id: string
   }
 }
 
-/** Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless. */
+/**
+ * Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless.
+ * [Row 78] /logout needs a live access cookie, which lasts minutes: a tab left open got a 401 from the gate, nothing was
+ * revoked, and the 30-day refresh cookie could sign the browser back in. When /logout does not answer success, the
+ * session ends by its refresh cookie instead (/logout/refresh revokes and clears without an access token).
+ */
 export async function logout(): Promise<void> {
+  const init: RequestInit = { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' };
   try {
-    await fetch(`${API_URL}/api/v1/auth/logout`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' });
+    const res = await fetch(`${API_URL}/api/v1/auth/logout`, init);
+    if (res.ok) return;
+  } catch {
+    // unreachable: try the refresh-cookie sign-out below
+  }
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout/refresh`, init);
   } catch {
     // the cookies are HttpOnly and path-scoped: with the server unreachable the shell still redirects to login
   }
@@ -272,12 +284,19 @@ export interface Promo {
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
-export const fetchUsers = (params?: string): Promise<Envelope<AdminUser[]>> =>
+/** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
+export interface ListEnvelope<T> {
+  success: boolean;
+  data: T[];
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+}
+// [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
+export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
   apiFetch(`/api/v1/admin/users?${params || ''}`);
-export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
+export const fetchVendors = (params?: string) => apiFetch(`/api/v1/admin/vendors?${params || ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
-export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
-export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
+export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?${params || ''}`);
+export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 
@@ -983,6 +1002,53 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
 
+// ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ────────────
+// MMG reverses in full only. Asking is a money action: a reason and a second
+// admin (or the owner's solo approval) — the first call answers 202
+// APPROVAL_REQUIRED. Only MMG's own lookup then moves the partner's balance.
+export interface MmgFeeReversalRow {
+  id: string;
+  state: 'SENDING' | 'SENT' | 'REVERSED' | 'FAILED' | 'HELD';
+  amount: number;
+  currencyCode: string;
+  reason: string;
+  requestedBy: string;
+  providerStatus: string | null;
+  lookupStatus: string | null;
+  heldReason: string | null;
+  sentAt: string;
+  answeredAt: string | null;
+  lastCheckedAt: string | null;
+  reversedAt: string | null;
+  failedAt: string | null;
+  resolution?: string | null;
+  resolvedBy?: string | null;
+}
+export interface MmgFeeReversalView {
+  checkoutId: string;
+  amountGyd: number;
+  switchedOn: boolean;
+  canReverse: boolean;
+  refusal?: { code: string; message: string };
+  reversals: MmgFeeReversalRow[];
+}
+export const fetchMmgFeeReversal = (checkoutId: string): Promise<Envelope<MmgFeeReversalView>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reversal`);
+export const reverseMmgFeePayment = (checkoutId: string, amountGyd: number, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reverse`, {
+    method: 'POST',
+    body: JSON.stringify({ amountGyd, reason }),
+    reason,
+  });
+// [DS1112] Resolve a HELD return on MMG's evidence (money: a reason and a second admin).
+export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED', mmgReference: string, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ outcome, mmgReference, reason }),
+    reason,
+  });
+export const checkMmgFeeReversal = (reversalId: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/check`, { method: 'POST', body: '{}' });
 
 export interface PaymentConfirmation {
   id: string; subscriptionId: string; source: string; sourceId: string | null;
