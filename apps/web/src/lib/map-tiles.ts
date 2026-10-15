@@ -29,6 +29,18 @@
 
 export const MAPTILER_KEY_SETTING = 'NEXT_PUBLIC_MAPTILER_KEY';
 
+// Next's compiler requires this exact dot-form lookup for static replacement.
+// The ambient member makes that syntax type-safe under noPropertyAccessFromIndexSignature.
+/* eslint-disable no-unused-vars */
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      NEXT_PUBLIC_MAPTILER_KEY?: string;
+    }
+  }
+}
+/* eslint-enable no-unused-vars */
+
 /** MapTiler's raster tiles: 256 px, Web Mercator, OpenStreetMap data. */
 const MAPTILER_TILES = 'https://api.maptiler.com/maps/streets-v2/256';
 /** Development only (`next dev`): never requested by a built site. */
