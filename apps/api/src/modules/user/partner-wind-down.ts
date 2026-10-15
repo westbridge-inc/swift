@@ -2,6 +2,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { formatMoney } from '../../utils/currency-amount';
 import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
+import { formatGuyanaTime } from '../../utils/guyana-day';
 
 /** Account closure preserves financial history. Earnings describe direct payments
  * between participants; Swift holds no balance to pay out. Open cash obligations
@@ -16,6 +17,14 @@ import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
  * with no one to tell), an unresolved payment hold, and fee credit Swift holds
  * for the person. Never a silently dropped payment.
  */
+/** [Owner ruling 15 Oct 2026 · research C8] A customer's partial cash HELD by a
+ *  rider blocks that rider's account deletion for at most this many days from
+ *  when the hold was recorded (doorCashReturnRecordedAt). After that the block
+ *  lifts even if operations has not resolved it; the cash record on the order
+ *  is kept (still HELD, amount and time unchanged). Only the block lifts. */
+export const HELD_CASH_DELETION_BLOCK_DAYS = 90;
+const HELD_CASH_DELETION_BLOCK_MS = HELD_CASH_DELETION_BLOCK_DAYS * 86_400_000;
+
 export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'PARTIAL_CASH_RETURN', 'OPEN_CLAIM', 'FEE_PAYMENT_PENDING', 'FEE_CREDIT'] as const;
 export type PartnerBlocker = (typeof PARTNER_BLOCKERS)[number];
 
@@ -25,8 +34,13 @@ export interface PartnerObligations {
   /** Cash handovers neither the rider nor the store has closed out. */
   unsettledCashCount: number;
   /** A customer's partial cash still with this rider (HELD), independently of
-   *  goods/float return, until operations records it resolved. Rider only. */
+   *  goods/float return, until operations records it resolved or the hold is
+   *  HELD_CASH_DELETION_BLOCK_DAYS old. Rider only. */
   partialCashReturnCount?: number;
+  /** Those holds' cash in total, in GYD major units — what the rider is told. */
+  partialCashReturnAmount?: number;
+  /** When the last of those holds stops blocking (recorded + 90 days). */
+  partialCashReturnReleaseAt?: Date | null;
   /** Historical direct-payment earnings; not a Swift payout obligation. */
   earningsOwed: number;
   /** Loss-protection claims for this mover that Swift has neither paid nor rejected. */
@@ -75,8 +89,10 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
     'You are holding vendor cash from a delivery that has not been settled. Hand it in, then return here to delete your account. Use Get help if you cannot resolve the handover.',
   UNSETTLED_CASH:
     'A cash settlement is still open between you and a store. Confirm the handover, then return here to delete your account. Use Get help if the other party cannot confirm.',
+  // [C8 · owner 15 Oct] The amount, the reason, the fix, and the day the block
+  // lifts if operations has not resolved it (the cash record is kept).
   PARTIAL_CASH_RETURN:
-    'Partial cash from a delivery still needs to be returned to the customer. Open Get help to arrange and confirm the cash return with operations, then return here to delete your account.',
+    'You hold {amount} of a customer\u2019s cash from a delivery they could not pay in full, and the goods went back to the store. This partial cash still needs to be returned to the customer. Open Get help to arrange and confirm the cash return with operations, then return here to delete your account. If operations has not recorded it resolved by {date}, you can delete your account from that day; the record of the cash is kept.',
   OPEN_CLAIM:
     'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
   FEE_PAYMENT_PENDING:
@@ -91,11 +107,22 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
 
 /** The whole refusal, as one sentence a person can act on, with the amounts
  *  that apply to this person filled in. */
-export function refusalMessage(blockers: PartnerBlocker[], o?: Pick<PartnerObligations, 'feeCreditAmount'>): string {
+export function refusalMessage(
+  blockers: PartnerBlocker[],
+  o?: Pick<PartnerObligations, 'feeCreditAmount' | 'partialCashReturnAmount' | 'partialCashReturnReleaseAt'>,
+): string {
+  const gyd = (amount: number) => formatMoney(amount, 'GYD', { whole: Number.isInteger(amount) });
   const credit = o?.feeCreditAmount;
-  return blockers.map((b) => b === 'FEE_CREDIT' && credit !== undefined
-    ? BLOCKER_MESSAGE[b].replace('{amount}', formatMoney(credit, 'GYD', { whole: Number.isInteger(credit) }))
-    : BLOCKER_MESSAGE[b]).join(' ');
+  const held = o?.partialCashReturnAmount;
+  const releaseAt = o?.partialCashReturnReleaseAt;
+  return blockers.map((b) => {
+    if (b === 'FEE_CREDIT' && credit !== undefined) return BLOCKER_MESSAGE[b].replace('{amount}', gyd(credit));
+    if (b === 'PARTIAL_CASH_RETURN' && held !== undefined && releaseAt) {
+      return BLOCKER_MESSAGE[b].replace('{amount}', gyd(held))
+        .replace('{date}', formatGuyanaTime(releaseAt, { day: 'numeric', month: 'long', year: 'numeric' }));
+    }
+    return BLOCKER_MESSAGE[b];
+  }).join(' ');
 }
 
 /**
@@ -107,6 +134,7 @@ export function refusalMessage(blockers: PartnerBlocker[], o?: Pick<PartnerOblig
 export async function partnerObligations(
   tx: Prisma.TransactionClient,
   userId: string,
+  now: Date = new Date(),
 ): Promise<PartnerObligations> {
   const [rider, driver] = await Promise.all([
     tx.rider.findUnique({ where: { userId }, select: { id: true, committedFloat: true } }),
@@ -117,16 +145,26 @@ export async function partnerObligations(
   // operations recording it resolved does (resolveHeldDoorCash). It holds the
   // RIDER only [review S2-1]: the customer is the person owed the cash, and
   // their deletion request is honoured (the order row keeps the held record).
-  const partialCashReturnCount = rider
-    ? await tx.order.count({ where: { doorCashReturnStatus: 'HELD', riderId: rider.id } })
-    : 0;
+  // [C8 · owner 15 Oct] A hold recorded HELD_CASH_DELETION_BLOCK_DAYS ago or
+  // more no longer blocks; the record itself is untouched.
+  const held = rider
+    ? await tx.order.findMany({
+      where: { doorCashReturnStatus: 'HELD', riderId: rider.id, doorCashReturnRecordedAt: { gt: new Date(now.getTime() - HELD_CASH_DELETION_BLOCK_MS) } },
+      select: { doorCashReturnAmount: true, doorCashReturnRecordedAt: true },
+    })
+    : [];
+  const partialCashReturnCount = held.length;
+  const partialCashReturnAmount = held.reduce((sum, row) => sum + Number(row.doorCashReturnAmount ?? 0), 0);
+  const lastRecorded = held.reduce((latest, row) => Math.max(latest, row.doorCashReturnRecordedAt?.getTime() ?? 0), 0);
+  const partialCashReturnReleaseAt = held.length > 0 ? new Date(lastRecorded + HELD_CASH_DELETION_BLOCK_MS) : null;
+  const partialCash = { partialCashReturnCount, partialCashReturnAmount, partialCashReturnReleaseAt };
   const claimants = [...(rider ? [{ riderId: rider.id }] : []), ...(driver ? [{ driverId: driver.id }] : [])];
   const openClaimCount = claimants.length === 0 ? 0 : await tx.reimbursementClaim.count({
     where: { OR: claimants, paidAt: null, status: { in: ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'] } },
   });
   const fees = await feeMoney(tx, userId);
   if (!rider && await tx.vendor.count({ where: { owner: { userId } } }) === 0) {
-    return { committedFloat: 0, unsettledCashCount: 0, partialCashReturnCount, earningsOwed: 0, openClaimCount, ...fees };
+    return { committedFloat: 0, unsettledCashCount: 0, ...partialCash, earningsOwed: 0, openClaimCount, ...fees };
   }
 
   const unsettled = await tx.deliveryCashSettlement.count({
@@ -137,7 +175,7 @@ export async function partnerObligations(
   return {
     committedFloat: Number(rider?.committedFloat ?? 0),
     unsettledCashCount: unsettled,
-    partialCashReturnCount,
+    ...partialCash,
     earningsOwed: 0,
     openClaimCount,
     ...fees,
