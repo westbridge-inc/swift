@@ -115,6 +115,26 @@ describe('[MC-PR3] stores, riders, drivers and orders lists', () => {
     expect(within(table).queryByRole('button')).toBeNull();
   });
 
+  // [Owner report 8 Oct, carried into these tables] The documents column is the LIVE verdict GO uses: a mover
+  // the live gate lets online never reads "Check documents", and a lapsed one does even if the old flag says verified.
+  it.each([['Riders', RidersPage, '/riders'], ['Drivers', DriversPage, '/drivers']] as const)('%s: the documents column is the live verdict, not only the legacy flag', async (name, Page, base) => {
+    const mover = (id: string, documentsVerified: boolean, documentsLive: { allowed: boolean; reason: string; validUntil: null }) => ({
+      id, riderType: 'BOTH', isOnline: false, documentsVerified, documentsLive, rideClass: 'ECONOMY', averageRating: null, totalRatings: 0, totalTrips: 0,
+      user: { firstName: 'Mover', lastName: id, phone: '+5926000000' },
+    });
+    mockApi(() => ({ body: { success: true, data: [
+      mover('m1', true, { allowed: false, reason: 'insurance', validUntil: null }),
+      mover('m2', false, { allowed: true, reason: 'ok', validUntil: null }),
+    ], meta: meta(1, 2) } }));
+    renderWithQuery(<Page />);
+    const table = await screen.findByRole('table', { name });
+    expect(within(table).getByText('Needs hire insurance')).toBeTruthy();
+    expect(within(table).getByText('Documents complete')).toBeTruthy();
+    const links = within(table).getAllByRole('link', { name: 'Check documents' });
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([`${base}/m1`]);
+    expect(within(table).queryByText('Verified')).toBeNull();
+  });
+
   it('drivers: a ride-class change asks why in the page and its answer is shown', async () => {
     const fetchMock = mockApi((r) => (r.method === 'GET'
       ? { body: { success: true, data: [{ id: 'd1', isOnline: false, documentsVerified: true, rideClass: 'ECONOMY', vehicleMake: 'Toyota', vehicleModel: 'Axio', averageRating: 4.8, totalRatings: 30, totalTrips: 30, user: { firstName: 'Drive', lastName: 'Person', phone: '+5926001122' } }], meta: meta(1, 1) } }

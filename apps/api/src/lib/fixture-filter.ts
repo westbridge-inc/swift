@@ -29,6 +29,16 @@ import { AppError } from '../utils/errors';
 // true`, which the console sends unless "Show test data" is ticked): with no
 // parameter a list returns every row, as it always has, so the API's other
 // callers — the journey and contract suites among them — see no change.
+//
+// KNOWN LIMIT (Sol review of #1522, 7 Oct; kept on purpose): erasing a fixture
+// account replaces its phone with the `deleted:<id>` tombstone, so its
+// de-identified history (the "Deleted User" row, its stores and orders) stops
+// matching FIXTURE_USER and is listed as real, outside the hidden count.
+// Fixtures exist only where the journey suite runs (staging): production
+// refuses the development OTP bypass at boot, and the review tenant's +5920
+// accounts are another tenant's rows. Keeping the class through erasure would
+// need a second tombstone shape, and billing's deleted-payer check
+// (billing.service.ts) compares the exact `deleted:<id>` form.
 // ---------------------------------------------------------------------------
 
 export const FIXTURE_PHONE_PREFIX = '+5920';
