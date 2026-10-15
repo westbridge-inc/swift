@@ -38,7 +38,7 @@ export function phoneReady(local: string): boolean {
 
 export function AuthPage({ children, onBrandClick }: { children: ReactNode; onBrandClick?: () => void }) {
   return (
-    <main className="flex min-h-dvh justify-center bg-[var(--swift-canvas)] px-6 pb-10 pt-8 wide:px-10 wide:pt-24">
+    <main id="main" tabIndex={-1} className="flex min-h-dvh justify-center bg-[var(--swift-canvas)] px-6 pb-10 pt-8 wide:px-10 wide:pt-24">
       <div className="flex w-full max-w-[420px] flex-col gap-6 sw-in">
         <Link href="/" aria-label="Swift home" onClick={onBrandClick} className="flex items-center gap-1.5 self-start">
           <SwiftLogo />

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
+import { axeViolations } from '@/test/axe';
 
 const fx = vi.hoisted(() => ({
   send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(),
@@ -327,5 +328,14 @@ describe('Q8 website store pin', () => {
     fireEvent.change(input, { target: { value: 'New address' } });
     expect(disabled('Find address')).toBe(false);
     expect(screen.queryByRole('button', { name: /12 Regent Street.*Georgetown/ })).toBeNull();
+  });
+});
+
+// [Row 111 · W8] Sign-up with the store map open, as a page.
+describe('[W8] sign-up is accessible', () => {
+  it('the business step with its store map open has no accessibility violations axe can find', async () => {
+    const user = await business();
+    await picker(user);
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
   });
 });
