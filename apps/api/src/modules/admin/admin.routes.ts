@@ -80,6 +80,7 @@ import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminR
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
+import { openCreditRefunds, openSetAsideIds, PAID_REFUND_BODY, payoutAskStateFor, recordCreditRefundPaid, REFUND_AMOUNT, REFUND_SET_ASIDE_ID, refundReferenceOf, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -4008,6 +4009,8 @@ export async function adminRoutes(app: FastifyInstance) {
           rider: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           driver: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           vendor: { select: { id: true, name: true } },
+          // The unused credit a refund would pay back (the console shows the action only then).
+          prepaidBalance: { select: { balance: true, currencyCode: true } },
         },
         skip,
         take: limit,
@@ -4018,10 +4021,15 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // Subscription.weeklyRate / customRate are Decimal(10,2) — this IS Swift's
     // revenue line (flat weekly fee, no commission). Coerce at the seam.
+    // A refund set aside and not yet paid or released: the console shows its
+    // next step (record the payout, or release it) instead of a new refund.
+    const setAside = await openCreditRefunds(app.prisma, subscriptions.map((sub) => sub.id));
+    const setAsideIds = await openSetAsideIds(app.prisma, [...setAside.keys()]);
+    const payoutAsks = await payoutAskStateFor(app.prisma, setAsideIds);
     const current = await Promise.all(subscriptions.map(async (sub) => {
       const payer = sub.rider?.user.id ?? sub.driver?.user.id;
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
-      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority };
+      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null, refundPayoutReported: payoutAsks.get(sub.id) === 'ACTIVE', refundPayoutAsk: payoutAsks.get(sub.id) ?? null };
     }));
     // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
     return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
@@ -4143,6 +4151,66 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, replayed, data: { balance: result.balance, currencyCode: result.currencyCode } };
+  });
+
+  /**
+   * [Owner ruling 2026-10-07] Refund unused prepaid fee credit, then the
+   * account can be deleted. Swift never moves the money. Three steps, each a
+   * money action a second admin approves (credit-refund.ts):
+   *   1. set-aside: the whole credit leaves the wallet; nothing is paid before;
+   *   2. paid: after paying it outside Swift, the set-aside amount and the
+   *      transfer reference (one reference, one refund, across every account);
+   *   3. release: a set-aside that could not be paid goes back to the wallet.
+   * Every answer carries the LIVE wallet and the open set-aside.
+   */
+  // One schema with the approval gate's ask check (credit-refund.ts): a wallet is Decimal(12,2),
+  // so any balance it can hold can be refunded whole.
+  const refundAmount = REFUND_AMOUNT;
+  const refundSetAsideId = REFUND_SET_ASIDE_ID;
+  const refundSubject = async (request: { params: unknown }) => {
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const subscription = await app.prisma.subscription.findFirst({ where: { id, ...subscriptionTenantScope(tenantId) }, select: { id: true } });
+    if (!subscription) throw new NotFoundError('Subscription', id);
+    return id;
+  };
+  const approvalOf = (request: unknown) => (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? '';
+  const refundAnswer = (r: Awaited<ReturnType<typeof setAsideCreditRefund>>) => ({
+    success: true,
+    replayed: r.replayed,
+    data: { amount: r.amount, currencyCode: r.currencyCode, balance: r.balance, refundSetAside: r.refundSetAside, billingEventId: r.billingEventId },
+  });
+
+  app.post('/subscriptions/:id/refund-credit/set-aside', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    const body = z.object({ amount: refundAmount }).parse(request.body);
+    return refundAnswer(await setAsideCreditRefund(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id, amount: body.amount,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
+  });
+
+  app.post('/subscriptions/:id/refund-credit/paid', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    // [Sol r2 S1] The set-aside this payout pays is part of what the second admin approves.
+    const body = PAID_REFUND_BODY.parse(request.body);
+    const reference = refundReferenceOf(body.reference);
+    return refundAnswer(await recordCreditRefundPaid(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id,
+      amount: body.amount, method: body.method, reference, setAsideId: body.setAsideId,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
+  });
+
+  app.post('/subscriptions/:id/refund-credit/release', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    const body = z.object({ amount: refundAmount, setAsideId: refundSetAsideId }).parse(request.body);
+    return refundAnswer(await releaseCreditRefund(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id, amount: body.amount, setAsideId: body.setAsideId,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
   });
 
   /** Billing audit trail for one subscription. */
