@@ -24,6 +24,15 @@ import { launchCity } from '@/lib/web-ordering';
 import { CircleCheck, Plus, Search } from 'lucide-react';
 
 /**
+ * [PERF #6] The first row of goods is the first thing a phone shows, so its
+ * photos load at once with high priority (preloaded from the page itself);
+ * every later photo still waits until it nears the screen. Two = the phone
+ * grid's two columns; a wide screen's later columns load as soon as they are
+ * laid out, like any photo in view.
+ */
+export const MARKET_FIRST_ROW = 2;
+
+/**
  * [Q7b] MARKET — the phone app's Market tab on the web: goods (clothes,
  * tools, household things) across every store, by category. Tapping an item
  * opens it at its own store, where it is added to the one cart.
@@ -104,14 +113,14 @@ function MarketInner({ seed }: { seed: MarketPageSeed }) {
       ) : (
         <>
           <ul className={MARKET_GRID}>
-            {items.map((item) => (
+            {items.map((item, index) => (
               <li key={item.id} className="min-w-0">
                 <Link
                   href={`/order/vendor/${encodeURIComponent(item.vendorId)}?item=${encodeURIComponent(item.id)}`}
                   className={`${MARKET_CARD} ${PRESS}`}
                 >
                   <span className={MARKET_IMAGE}>
-                    <Photo src={item.imageUrl} vendorType="STORE" name={item.name} sizes="(min-width: 760px) 220px, 46vw" className="absolute inset-0 rounded-none" />
+                    <Photo src={item.imageUrl} vendorType="STORE" name={item.name} sizes="(min-width: 760px) 220px, 46vw" className="absolute inset-0 rounded-none" priority={index < MARKET_FIRST_ROW} />
                     {item.isNew ? <span className="absolute left-2 top-2 rounded-full bg-[rgba(33,26,26,0.72)] px-3 py-[5px] text-[13px] font-semibold leading-[18px] text-[var(--swift-white)]">NEW</span> : null}
                   </span>
                   <span className={MARKET_COPY}>
