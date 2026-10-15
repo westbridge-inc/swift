@@ -7,7 +7,6 @@ import { z } from 'zod';
 import { FareService } from './fare.service';
 import {
   assertRideGates,
-  assertHirePassengers,
   assertL2,
   createRideRequest,
   replayRideRequestAnswer,
@@ -17,6 +16,7 @@ import {
   type RideRequestBody,
 } from './rides.service';
 import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from './taxi-stops-flag';
+import { assertHirePassengers } from './hire-passengers';
 import { readRideItinerary } from './taxi-stops-read';
 import { hasTaxiPassengerCustody } from './passenger-custody';
 import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';

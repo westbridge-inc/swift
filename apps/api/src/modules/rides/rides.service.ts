@@ -12,7 +12,7 @@ import { orderingRestriction } from '../cash/cash-rules.service';
 import { persistCheckoutReceiptInTransaction } from '../order/checkout-outbox';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError } from '../../utils/errors';
-import { MAX_HIRE_PASSENGERS } from '../../config/vehicle-classes';
+import { assertHirePassengers } from './hire-passengers';
 import { log } from '../../utils/logger';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
@@ -47,16 +47,6 @@ const rideInProgress = () => new AppError(
 // selfie → fare → capacity → L2) and is pinned by
 // taxi-characterization.test.ts.
 // ---------------------------------------------------------------------------
-
-/** [Owner research R9, 15 Oct 2026] A hire carries at most MAX_HIRE_PASSENGERS (7). A larger party is refused
- *  before anything is priced or written, in words that say what to do. */
-export function assertHirePassengers(passengerCount: number): void {
-  if (passengerCount > MAX_HIRE_PASSENGERS) {
-    throw new AppError(400, 'TOO_MANY_PASSENGERS',
-      `A Swift taxi carries at most ${MAX_HIRE_PASSENGERS} passengers. For a bigger group, book more than one ride.`,
-      { max: MAX_HIRE_PASSENGERS, passengerCount });
-  }
-}
 
 /** The slice of the app the request core needs — the route passes the real
  *  Fastify instance; the queue-scan worker passes { prisma } (no dispatch
