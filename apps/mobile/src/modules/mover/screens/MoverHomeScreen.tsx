@@ -50,6 +50,7 @@ import { offerEarnings } from './offer-earnings';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
+import { useJobRing } from '../../../hooks/useJobRing';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -95,6 +96,18 @@ export function DispatchOfferCard({
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offer.orderId, total, deadlineAt]);
+
+  // [RINGER · owner ruling 15 Oct] The offer rings (Swift's tone on build 12,
+  // the buzz on every build) from the moment the card shows until Accept is
+  // tapped, Decline unmounts the card, or the offer's clock runs out; never
+  // in the background. The deadline is fixed when each offer opens.
+  const ringDeadline = useMemo<number | undefined>(
+    () => deadlineAt ?? (total ? Date.now() + total * 1000 : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [offer.orderId, deadlineAt, total],
+  );
+  const clockOpen = ringDeadline === undefined || secs > 0;
+  useJobRing(!accepting && clockOpen, ringDeadline);
 
   const isDriver = kind === 'DRIVER';
   const fare = job ? jobAmount(job) : null;
