@@ -50,7 +50,7 @@ import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kit
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
 import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
-import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
+import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, persistDispatchCommandInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
@@ -486,7 +486,7 @@ async function releaseHoldInTransaction(
   tx: Prisma.TransactionClient,
   orderId: string,
   opts: { now?: Date; statusIn?: OrderStatus[] } = {},
-): Promise<{ vendorId: string | null; tenantId: string } | null> {
+): Promise<{ vendorId: string | null; tenantId: string; orderType: string } | null> {
   const now = opts.now ?? new Date();
   const res = await tx.order.updateMany({
     where: {
@@ -500,10 +500,10 @@ async function releaseHoldInTransaction(
   if (res.count === 0) return null;
   const released = await tx.order.findUniqueOrThrow({
     where: { id: orderId },
-    select: { vendorId: true, tenantId: true, items: { select: { itemId: true } } },
+    select: { vendorId: true, tenantId: true, orderType: true, items: { select: { itemId: true } } },
   });
   if (released.vendorId) await countOrderForStore(tx, released.vendorId, released.items.map((i) => i.itemId));
-  return { vendorId: released.vendorId, tenantId: released.tenantId };
+  return { vendorId: released.vendorId, tenantId: released.tenantId, orderType: released.orderType };
 }
 
 /** [Q12 · AX289 F1] The store's first action (accept, reject) on an order
@@ -1083,6 +1083,16 @@ export class OrderService {
       });
       let distanceKm = plan.distanceKm;
       let distanceSource: RouteSource | null = plan.distanceSource;
+      // [owner #18] Road routing was down, so this delivery was priced from
+      // the straight-line estimate (never below the base fee). Orders keep
+      // flowing; this line, the frozen `billableKmSource` and the routing
+      // fallback counter (and its alarm) say it happened.
+      if (fulfillment === 'DELIVERY' && plan.distanceSource === 'haversine' && (process.env['MAPS_PROVIDER'] ?? 'haversine') !== 'haversine') {
+        log().warn({
+          vendorId: vendor.id, km: plan.distanceKm, source: plan.distanceSource,
+          deliveryFee: plan.standardDeliveryFee, baseFee: deliveryRates.baseFee,
+        }, 'delivery:fee-fallback');
+      }
       if (fulfillment === 'DELIVERY' && distanceKm > vendor.deliveryRadius) {
         throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
       }
@@ -2823,7 +2833,7 @@ export class OrderService {
    * Courier orders (born READY_FOR_PICKUP, no vendor) start their offer
    * cascade here instead of at creation.
    */
-  async releaseDueHeldOrders(enqueueDispatch: (orderId: string) => Promise<void>, batch = 100) {
+  async releaseDueHeldOrders(enqueueDispatch: (orderId: string, jobId?: string) => Promise<void>, batch = 100) {
     const due = await this.prisma.order.findMany({
       where: { status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
       select: { id: true },
@@ -2844,9 +2854,12 @@ export class OrderService {
       // never an enqueue a crash between here and the queue could lose.
       const releasedNow = await this.prisma.$transaction(async (tx) => {
         const store = await releaseHoldInTransaction(tx, id, { statusIn: ['PENDING', 'READY_FOR_PICKUP'] });
-        if (!store) return false; // cancelled or raced — idempotent skip
+        if (!store) return null; // cancelled or raced — idempotent skip
         if (store.vendorId) await persistReleaseAlertLadderInTransaction(tx, { orderId: id, tenantId: store.tenantId, alertDelayMs });
-        return true;
+        const dispatch = store.orderType === 'COURIER'
+          ? await persistDispatchCommandInTransaction(tx, { orderId: id, tenantId: store.tenantId, reason: 'courier-hold-released' })
+          : null;
+        return { dispatchId: dispatch?.id };
       });
       if (!releasedNow) continue;
       await holdReleaseObserver.afterRelease?.({ orderId: id });
@@ -2870,7 +2883,7 @@ export class OrderService {
       // No vendor to notify on a courier job — release = start the cascade.
       if (order.orderType === 'COURIER') {
         try {
-          await enqueueDispatch(id);
+          await enqueueDispatch(id, releasedNow.dispatchId);
         } catch (err) {
           log().error({ err, orderId: id }, 'hold-release: courier dispatch enqueue failed — reconcile will recover');
         }

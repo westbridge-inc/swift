@@ -74,6 +74,7 @@ import { promiseView } from '../eta/promise';
 import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
+import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
 
@@ -1153,7 +1154,7 @@ export async function customerRoutes(app: FastifyInstance) {
             // chip with and every chip fell back to the same stock photograph —
             // "Popular", "Produce" and "Rice & Grains" were one identical image.
             // The column has been on Category the whole time.
-            categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
+            categories: { where: { archivedAt: null }, select: { id: true, name: true, imageUrl: true }, take: 5 },
           },
           orderBy: { averageRating: 'desc' },
           take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
@@ -1579,6 +1580,8 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { id, ...vendorTenantForCaller() },
       include: {
         categories: {
+          // [Item 62] A deleted (archived) category is not on the storefront.
+          where: { archivedAt: null },
           orderBy: { sortOrder: 'asc' },
           include: {
             items: {
@@ -3360,6 +3363,30 @@ export async function customerRoutes(app: FastifyInstance) {
     ]);
 
     return { success: true, ...paginatedResponse(notifications, total, { page, limit, skip }) };
+  });
+
+  /** [Row 55] GET /team-invites — the caller's own live store-team invites.
+   *  The person invited is not on a store team yet, so these live here, under
+   *  the inbox, not under the /vendor prefix. */
+  app.get('/team-invites', async (request: AuthRequest) => {
+    return { success: true, data: await listMyStaffInvites(app.prisma, request.user.userId, new Date()) };
+  });
+
+  /** [Row 55] POST /team-invites/:id/accept | /decline — answer one invite. */
+  app.post('/team-invites/:id/accept', async (request: AuthRequest) => {
+    if (!staffInviteAcceptEnabled()) throw new AppError(404, 'NOT_FOUND', 'Invite not found');
+    const { id } = request.params as { id: string };
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
+    });
+    return { success: true, data: result };
+  });
+  app.post('/team-invites/:id/decline', async (request: AuthRequest) => {
+    const { id } = request.params as { id: string };
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: id, userId: request.user.userId, decision: 'DECLINE', now: new Date(),
+    });
+    return { success: true, data: result };
   });
 
   /** PUT /notifications/prefs — per-user channel switches. */

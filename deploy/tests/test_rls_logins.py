@@ -18,6 +18,7 @@ def catalogue():
         'qrSchemaPresent': True, 'qrUnsafeGrants': 0, 'obsoleteExecutable': 0,
         'parentUpdateMissing': 0, 'appendOnlyUnsafeGrants': 0,
         'defaultGrantCount': 0, 'groupUnsafeAttributes': 0, 'groupUnexpectedParents': 0,
+        'groupOwnedObjects': 0,
         'ownershipDigest': 'a' * 64, 'aclDigest': 'b' * 64,
         'roles': {},
     }
@@ -121,7 +122,7 @@ class LoginPlanTests(unittest.TestCase):
                    'disabledTables': 1, 'unforcedTables': 1, 'qrSchemaPresent': False,
                    'qrUnsafeGrants': 1, 'obsoleteExecutable': 1, 'parentUpdateMissing': 1,
                    'appendOnlyUnsafeGrants': 1, 'defaultGrantCount': 1,
-                   'groupUnsafeAttributes': 1, 'groupUnexpectedParents': 1,
+                   'groupUnsafeAttributes': 1, 'groupUnexpectedParents': 1, 'groupOwnedObjects': 1,
                    'ownershipDigest': 'c' * 64, 'aclDigest': 'c' * 64}
         for key, value in invalid.items():
             with self.subTest(key=key):

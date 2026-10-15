@@ -9,6 +9,7 @@ import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
+import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -1381,7 +1382,8 @@ export async function adminRoutes(app: FastifyInstance) {
           },
         },
         subscription: true,
-        _count: { select: { items: true, orders: true } },
+        // [Item 62] "Menu items" counts the live menu, not archived history.
+        _count: { select: { items: { where: { archivedAt: null } }, orders: true } },
       },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
@@ -3418,7 +3420,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const configs = await app.prisma.platformConfig.findMany({
       orderBy: { key: 'asc' },
     });
-    return { success: true, data: configs };
+    // Launch switches set in the server environment (read-only here), so the
+    // console shows what this API is actually running with.
+    return { success: true, data: configs, switches: { staffInviteAccept: staffInviteAcceptEnabled() } };
   });
 
   app.put('/config/:key', { preHandler: [platformControlGuard] }, async (request) => {
