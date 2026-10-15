@@ -8,7 +8,8 @@ import { isSoleApprover } from '../admin/solo-approval';
 import { normaliseReference } from '../money/evidence';
 import { postLedger, refundPaidPostings, refundReleasePostings, refundSetAsidePostings } from './ledger';
 import { feeReversalOpenInTx } from './dunning-clock';
-import { referenceOnRecord } from './mmg-fee-reversal';
+import { feeReturnMayStillLandInTx, referenceOnRecord } from './mmg-fee-reversal';
+import { formatGuyanaTime } from '../../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling 2026-10-07] Unused prepaid weekly-fee credit is refunded, then
@@ -194,6 +195,15 @@ export async function setAsideCreditRefund(prisma: PrismaClient, input: {
     // back twice. Decided under the payer lock the return also takes, so neither can start beside the other.
     if (await feeReversalOpenInTx(tx, sources)) {
       throw new AppError(409, 'REFUND_REVERSAL_IN_FLIGHT', 'MMG is returning one of this partner\'s weekly-fee payments right now. Nothing was set aside: wait until that return is closed, then ask again for the credit that is left.');
+    }
+    // [#1527 review S3-1] A return closed "not returned" is watched for a week in case MMG finishes it late,
+    // and one MMG returned after that close is unbooked until it is asked again: either may still take this
+    // credit back through MMG, so it is not set aside beside them.
+    const pending = await feeReturnMayStillLandInTx(tx, sources, new Date());
+    if (pending) {
+      throw new AppError(409, 'REFUND_REVERSAL_WATCHED', 'unbookedReturn' in pending
+        ? 'MMG returned one of this partner\'s weekly-fee payments after it was closed as not returned, and that return is not booked yet. Nothing was set aside: book it first (ask for the return again on that payment), then ask again for the credit that is left.'
+        : `MMG may still return one of this partner's weekly-fee payments (a return closed as not returned is watched for a week). Nothing was set aside: ask again after ${formatGuyanaTime(pending.watchedUntil, { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', hour12: false })} (Guyana time), or once that return is settled.`);
     }
     if (await openSetAside(tx, input.subscriptionId)) {
       throw new AppError(409, 'REFUND_ALREADY_SET_ASIDE', 'A refund is already set aside for this account. Record its payout, or release it, first.');

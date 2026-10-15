@@ -1488,4 +1488,39 @@ describe('[#1527 review S2-2] a fee-credit set-aside never starts beside an open
     expect(await rowsFor(p.checkoutId)).toHaveLength(0);
     expect(reversalCalls).not.toContain(p.txn);
   });
+
+  // [#1527 review S3-1] A return a person closed "not returned" is watched for a week: MMG may still finish
+  // it. A set-aside beside it could pay the same money back twice (MMG, then Swift's transfer).
+  const closedNotReturned = async (p: Paid) => {
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    expect((await resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}W${nanoid(4)}`)).state).toBe('FAILED');
+    return held.id;
+  };
+
+  it('[S3-1] within the week a "not returned" close is watched: the set-aside is refused, saying when to ask again', async () => {
+    const p = await paidCheckout();
+    await closedNotReturned(p);
+    const refused = setAside(p.subId, p.amount);
+    await expect(refused).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_REVERSAL_WATCHED' });
+    await expect(refused).rejects.toThrow(/ask again after .+ \(Guyana time\)/);
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    expect(await reserved(p.subId)).toBe(0);
+  });
+
+  it('[S3-1] MMG returned it after the close and it is not booked yet: refused until it is booked, even after the week', async () => {
+    const p = await paidCheckout();
+    const id = await closedNotReturned(p);
+    await app.prisma.mmgFeeReversal.update({ where: { id }, data: { lookupStatus: 'RETURNED_AFTER_CLOSE', failedAt: new Date(Date.now() - 10 * 24 * 3_600_000) } });
+    await expect(setAside(p.subId, p.amount)).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_REVERSAL_WATCHED' });
+    expect(await reserved(p.subId)).toBe(0);
+  });
+
+  it('[S3-1] once the week is over with nothing returned, the credit can be set aside', async () => {
+    const p = await paidCheckout();
+    const id = await closedNotReturned(p);
+    await app.prisma.mmgFeeReversal.update({ where: { id }, data: { failedAt: new Date(Date.now() - 8 * 24 * 3_600_000) } });
+    expect(await setAside(p.subId, p.amount)).toMatchObject({ replayed: false, amount: p.amount });
+    expect(await reserved(p.subId)).toBe(1);
+  });
 });

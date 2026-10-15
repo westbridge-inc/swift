@@ -223,6 +223,40 @@ export function referenceOnRecord(tx: Tx, reference: string): Promise<boolean> {
   return namesAKnownPayment(tx, '', reference);
 }
 
+/**
+ * [#1527 review S3-1] A fee payment of these subscriptions that MMG may still
+ * return, or has returned, while the fee credit still holds it: a return a
+ * person closed as "not returned" is read again for a week (MMG may finish an
+ * in-flight reversal late), and one MMG returned after that close stays
+ * unbooked until it is asked again. Setting the credit aside for a refund
+ * beside either could pay the same money back twice (MMG, then Swift's
+ * transfer). Settled since (a later return booked, or closed "returned, not
+ * booked") = nothing pending. Returns what is pending (an unbooked late
+ * return, or the end of the latest watch), or null.
+ */
+export async function feeReturnMayStillLandInTx(tx: Tx, sourceIds: string[], now: Date): Promise<{ unbookedReturn: true } | { watchedUntil: Date } | null> {
+  const rows = await tx.mmgFeeReversal.findMany({
+    where: {
+      subscriptionId: { in: sourceIds }, state: 'FAILED', resolution: 'NOT_RETURNED',
+      OR: [
+        { failedAt: { gte: new Date(now.getTime() - REVERSAL_LATE_WATCH_MS) } },
+        { lookupStatus: 'RETURNED_AFTER_CLOSE' },
+      ],
+    },
+    select: { checkoutId: true, failedAt: true, lookupStatus: true },
+  });
+  let until: Date | null = null;
+  for (const row of rows) {
+    const settledSince = await tx.mmgFeeReversal.count({ where: { checkoutId: row.checkoutId, OR: [{ state: 'REVERSED' }, { resolution: 'RETURNED_NOT_BOOKED' }] } });
+    if (settledSince > 0) continue;
+    // Returned after the close and not booked: pending until a person books it (no date).
+    if (row.lookupStatus === 'RETURNED_AFTER_CLOSE') return { unbookedReturn: true };
+    const ends = new Date((row.failedAt ?? now).getTime() + REVERSAL_LATE_WATCH_MS);
+    if (!until || ends > until) until = ends;
+  }
+  return until ? { watchedUntil: until } : null;
+}
+
 async function namesAKnownPayment(tx: Tx, reversalId: string, reference: string): Promise<boolean> {
   // One static subquery per KNOWN_PAYMENT_REFERENCE_COLUMNS entry: no raw identifier fragments (the
   // production SQL safety surface), and a test keeps the list and these lines identical. The typed
