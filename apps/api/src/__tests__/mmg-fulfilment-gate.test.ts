@@ -18,7 +18,7 @@ import { OrderService, reconcileMissingEarnings } from '../modules/order/order.s
 import { registerErrorHandler } from '../middleware/error-handler';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
-import { retireLiveOrders } from './helpers/order-status-walk';
+import { retireLiveOrders, walkOrderStatus } from './helpers/order-status-walk';
 
 // [W-25] A store's attestation now carries the provider reference from its own
 // wallet message — a bare tap is refused (REFERENCE_REQUIRED), and one reference
@@ -471,7 +471,7 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     expect(Number(fresh.deliveryFee)).toBe(300);
     expect(Number(fresh.totalAmount)).toBe(1500);
     await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
+    await walkOrderStatus(app.prisma, order.id, 'FAILED', { riderId: null });
   });
 
   it('the persistence seam takes no price at all: a stray fee from any caller never reprices (defense in depth)', async () => {
@@ -485,7 +485,7 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     expect(Number(fresh.deliveryFee)).toBe(300);
     expect(Number(fresh.totalAmount)).toBe(1500);
     await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
+    await walkOrderStatus(app.prisma, order.id, 'FAILED', { riderId: null });
   });
 
   it('a market-fee board grab (no undercut) still assigns a captured MMG order', async () => {
@@ -500,7 +500,7 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     // PAID MMG, which the database no longer lets anyone write CANCELLED without
     // a refund obligation, so the fixture closes it as FAILED instead.
     await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
+    await walkOrderStatus(app.prisma, order.id, 'FAILED', { riderId: null });
   });
 });
 

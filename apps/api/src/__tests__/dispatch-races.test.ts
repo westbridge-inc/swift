@@ -472,7 +472,7 @@ describe('[DISPATCH 1/3] the database itself refuses a second winner', () => {
     await expect(sys(() => app.prisma.order.update({ where: { id: second.id }, data: { driverId: driver.driverId, status: 'DRIVER_ASSIGNED' } })))
       .rejects.toThrow(/Unique constraint failed on the fields: \(`driverId`\)/);
     // A finished ride is history, not custody: the driver may take the next one.
-    await sys(() => app.prisma.order.update({ where: { id: first.id }, data: { status: 'COMPLETED' } }));
+    await sys(() => walkOrderStatus(app.prisma, first.id, 'COMPLETED'));
     await sys(() => app.prisma.order.update({ where: { id: second.id }, data: { driverId: driver.driverId, status: 'DRIVER_ASSIGNED' } }));
     // Unassigned requests carry no driver and never meet in the index.
     await makeTaxi(c3);
