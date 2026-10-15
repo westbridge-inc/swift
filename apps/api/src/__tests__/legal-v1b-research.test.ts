@@ -51,7 +51,7 @@ describe('Terms of Service (Part 4)', () => {
   it.each([
     ['¶1 who the agreement is with, Guyana only, the tick, binding', `<p>These Terms of Service are a binding agreement between you and ${ID} ("<b>Swift</b>", "we", "us"), which operates the Swift app, websites and related services in Guyana (the "<b>Platform</b>"). By creating an account and ticking the acceptance box, you accept these Terms and confirm you have read our Privacy Policy. Your electronic acceptance forms a binding contract. If you do not agree, do not use the Platform.</p>`],
     ['¶4 P5 ID wording + the 18+ box', 'You must be at least 18 years old and capable of forming a binding contract. By creating an account you confirm that you are 18 or older; where the sign-up shows the "I am 18 or older" box, you confirm it by ticking that box. An account requires a phone number verified by SMS code; higher-value Orders and all taxi rides additionally require a government-issued ID on file, requested in the app when it becomes necessary; taxi rides also need a profile photo, so the driver can see who they are picking up.'],
-    ['¶5 payments and prices', "<p>Swift is software, not a payment service. You pay for an Order in cash at Handover or, where the Business offers it, directly into the Business's own MMG account under MMG's terms. Swift never holds, collects or transmits Order money, offers no wallet or stored value, and never asks for card numbers. Prices are the Business's own prices. Delivery fees and taxi fares are set by Swift's published formula and shown before you confirm; if the price changes first, nothing is booked. Swift charges customers nothing.</p>"],
+    ['¶5 payments and prices', "<p>Swift is software, not a payment service. You pay for an Order in cash at Handover or, where the Business offers it, directly into the Business's own MMG account under MMG's terms. Swift never holds, collects or transmits Order money, offers no wallet or stored value, and never asks for card numbers. Prices are the Business's own prices. Delivery fees and taxi fares are calculated by Swift and shown in the app before you confirm. Swift charges customers nothing.</p>"],
     ['¶8 problems + statutory rights', "If something goes wrong with a fulfilled Order, report it from the Order screen within 7 days. Swift reviews it with GPS and photo evidence and asks the Business to put it right; any refund of Order money is made by the Business that received it. Nothing in this section affects your rights under the Consumer Affairs Act 2011, including returning goods to, and getting refunds from, the Business.</p>"],
     ['¶9 (h) the prohibited list, letters or documents, legal services', '(h) order, sell, send or carry anything Swift prohibits: alcohol, tobacco and vapes, medicines and drugs, 18+ items, cooking gas and fuel, weapons and ammunition, fireworks and explosives, pesticides and controlled chemicals, protected wildlife, raw gold and precious minerals, lottery and gambling products, counterfeit goods, currency and payment cards, and letters or documents; or offer legal services.'],
     ['¶11 SOS is not an emergency service', "These tools support your safety. Swift's safety team is not an emergency service and may not respond immediately; in an emergency call Police 911, Fire 912 or Ambulance 913 first."],
@@ -67,6 +67,8 @@ describe('Terms of Service (Part 4)', () => {
 
   it('no longer says what the research removed', () => {
     for (const gone of [/Caribbean markets/, /calculated estimates/, /advertising terms/, /published guarantee process/, /Continued use after a change takes effect is acceptance/, /a document may travel/]) expect(TERMS).not.toMatch(gone);
+    // [REVIEW-F S2-1 on #1753] held: the ride queue and pre-lock apps can book at a changed price, and no page publishes the formula
+    expect(TERMS).not.toMatch(/nothing is booked|published formula/);
   });
 });
 
@@ -111,12 +113,12 @@ describe('Mover and Business Agreements (Part 4)', () => {
   });
 
   it('Mover: P1 documents, the selfie, courier goods only, confirmation records, insurance and hire licences', () => {
-    expect(DRIVER_AGREEMENT).toContain("(for example: your driver's licence — or, if you ride a bicycle, your national ID or Digital ID card — vehicle registration, and insurance appropriate to carrying passengers where you drive passengers). A police clearance is optional: if you upload one and it is approved, your profile shows that you are police-cleared; it is never needed to go online.");
+    expect(DRIVER_AGREEMENT).toContain("(for example: your driver's licence — or, if you ride a bicycle, your national ID or Digital ID card — vehicle registration, and insurance appropriate to carrying passengers where you drive passengers). A police clearance is optional: if you upload one and Swift approves it, your account is recorded as police-cleared; it is never needed to go online.");
     expect(DRIVER_AGREEMENT).toContain('You may not let anyone else work under your account; Swift may ask for a selfie, reviewed by a person, to confirm it is you.');
     expect(DRIVER_AGREEMENT).toContain('on courier jobs, carrying goods only — never letters, documents or mail, which in Guyana only the Post Office may carry;');
     expect(DRIVER_AGREEMENT).toContain("The app's confirmation records show what each side has confirmed; Swift does not hold or move this money.");
     expect(DRIVER_AGREEMENT).toContain("Taxi drivers must hold insurance covering passengers carried for hire. Anyone delivering must hold insurance that permits use for hire or reward. Taxi drivers must hold a current hire-car driver's licence, and the car a current hire-car licence.");
-    expect(DRIVER_AGREEMENT).not.toMatch(/in-shift selfie|police clearance\)/);
+    expect(DRIVER_AGREEMENT).not.toMatch(/in-shift selfie|police clearance\)|profile shows that you are police-cleared/);
   });
 
   it('Business: authority, P1 documents + January renewal, storefront facts + statutory rights, F8, own deliveries, invited staff', () => {
