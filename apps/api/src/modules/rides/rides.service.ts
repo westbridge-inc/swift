@@ -12,6 +12,7 @@ import { orderingRestriction } from '../cash/cash-rules.service';
 import { persistCheckoutReceiptInTransaction } from '../order/checkout-outbox';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError } from '../../utils/errors';
+import { assertHirePassengers } from './hire-passengers';
 import { log } from '../../utils/logger';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
@@ -322,6 +323,7 @@ export async function createRideRequest(
     : await fareService.estimateItineraryTiers(body.pickup, stops, body.dropoff, user.countryCode, orderTenantId);
   const tiered: TieredEstimate = itineraryEstimate
     ?? await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, orderTenantId);
+  assertHirePassengers(body.passengerCount);
   const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
   if (!tier) {
     throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');

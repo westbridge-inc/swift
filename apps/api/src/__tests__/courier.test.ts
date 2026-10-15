@@ -603,6 +603,27 @@ describe('[§8 · #67] a parcel is screened against the prohibited-items list', 
     expect(pack.json().error).toMatchObject({ code: 'PROHIBITED_PARCEL', message: 'Swift can\'t carry this parcel: Swift never delivers alcohol. If it\'s something else, describe it in other words.' });
   });
 
+  // [Legal research A10 · R1] Courier = goods only: letters, documents and mail are the Post Office's to carry in
+  // Guyana. Refused in plain words before anything is written, documents travelling with goods included.
+  it('a parcel described as letters, documents or mail is refused before anything is written', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    for (const packageDescription of ['A letter for my aunt', 'Documents for the bank', 'Laptop and its documents', 'Mail', 'Two envelopes', 'Signed cheque', 'L\u200Betters']) {
+      const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription }, sender.token);
+      expect(res.statusCode, packageDescription).toBe(409);
+      expect(res.json().error, packageDescription).toMatchObject({
+        code: 'PROHIBITED_PARCEL',
+        message: "Swift can't carry letters, documents or mail: in Guyana only the Post Office may carry them. Swift's couriers carry goods only.",
+        details: { prohibitedClass: 'POSTAL' },
+      });
+    }
+    expect(await parcelsOf(sender.userId)).toBe(0);
+    // Goods still book, including words that only contain a postal word ("email", "newsletter" is a word of its own).
+    for (const packageDescription of ['School books and a lunch kit', 'Phone charger (email me when it arrives)']) {
+      const ok = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription }, sender.token);
+      expect(ok.statusCode, `${packageDescription}: ${ok.body}`).toBe(201);
+    }
+  });
+
   it('the sender\'s declaration is recorded on the order\'s trail; a parcel declared as holding a prohibited item books nothing', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const declined = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, declaresNoProhibitedItems: false }, sender.token);
