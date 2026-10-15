@@ -603,6 +603,7 @@ export interface CanonicalOrderTransitionInput {
    * ownership pre-read cannot survive a watchdog release or reassignment
    * committing before the lock — this can. */
   expectedRiderId?: string | null;
+  expectedRiderAssignmentVersion?: number;
   /** Optional locked-row custody predicates for role-specific commands. A
    * route pre-read is authorization UX only; physical ownership is proved
    * again here, in the same transaction as the state transition. */
@@ -1927,6 +1928,11 @@ export class OrderService {
       where: { orderId },
       select: { itemId: true, quantity: true, subStatus: true, substituteItemId: true },
     });
+    // [L02 · row 36] The order's tenant, for the ledger row that records a
+    // line whose item the store has since deleted (see ifItemMissing below).
+    const owner = items.length > 0
+      ? await db.order.findUnique({ where: { id: orderId }, select: { tenantId: true } })
+      : null;
     for (const oi of items) {
       // [REPORT-006 F-006-05] Picking already restocked refunded/rejected
       // lines when it closed them — restocking again here doubles stock. An
@@ -1939,12 +1945,16 @@ export class OrderService {
       // [MKT-2] Through the single writer. It no-ops on an untracked item, which
       // preserves the rule this code already had: a vendor may have stopped
       // tracking since the order was placed, and null must stay null.
+      // [L02 · row 36] An item the store deleted while this order held it can
+      // take nothing back: the ledger records the skip and the cancellation
+      // completes, instead of the whole cancellation failing on ITEM_NOT_FOUND.
       const restock = await applyStockMovement(db, {
         itemId: restockItemId,
         delta: oi.quantity,
         reason: 'CANCEL_RESTOCK',
         orderId,
         note: 'Order cancelled before pickup',
+        ...(owner?.tenantId ? { ifItemMissing: { record: true as const, tenantId: owner.tenantId } } : {}),
       });
       if (restock.applied) {
         await unhideRestocked(db, restockItemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
@@ -2107,6 +2117,11 @@ export class OrderService {
     if (input.expectedRiderId !== undefined && source.riderId !== input.expectedRiderId) {
       throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
         'This job is no longer assigned to you — it was released or reassigned.');
+    }
+    if (input.expectedRiderAssignmentVersion !== undefined
+        && source.riderAssignmentVersion !== input.expectedRiderAssignmentVersion) {
+      throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
+        'This assignment changed while the action was in progress. Refresh the order before continuing.');
     }
     if (input.expectedDriverId !== undefined && source.driverId !== input.expectedDriverId) {
       throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
@@ -2746,6 +2761,21 @@ export class OrderService {
       .catch((err) => log().warn({ err, orderId }, 'rider cancellation notice awaits retry'));
   }
 
+  /** Rider lifecycle commands must carry the authority and allowed states they observed. */
+  async updateRiderStatus(
+    orderId: string,
+    status: OrderStatus,
+    changedBy: string,
+    note: string,
+    authority: { riderId: string; assignmentVersion: number; allowedFrom: readonly OrderStatus[] },
+  ) {
+    return this.updateStatus(orderId, status, changedBy, note, {
+      expectedRiderId: authority.riderId,
+      expectedRiderAssignmentVersion: authority.assignmentVersion,
+      allowedFrom: authority.allowedFrom,
+    });
+  }
+
   async updateStatus(
     orderId: string,
     status: string,
@@ -2757,6 +2787,7 @@ export class OrderService {
       withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
       allowedFrom?: readonly OrderStatus[];
       expectedRiderId?: string | null;
+      expectedRiderAssignmentVersion?: number;
       expectedDriverId?: string | null;
       expectedFulfillment?: FulfillmentType;
       expectedFulfillmentMode?: FulfillmentMode;
@@ -2780,6 +2811,7 @@ export class OrderService {
       handover: opts?.handover,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
       ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
+      ...(opts?.expectedRiderAssignmentVersion !== undefined ? { expectedRiderAssignmentVersion: opts.expectedRiderAssignmentVersion } : {}),
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
       ...(opts?.expectedFulfillment !== undefined ? { expectedFulfillment: opts.expectedFulfillment } : {}),
       ...(opts?.expectedFulfillmentMode !== undefined ? { expectedFulfillmentMode: opts.expectedFulfillmentMode } : {}),
