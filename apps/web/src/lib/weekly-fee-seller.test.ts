@@ -7,7 +7,7 @@ import { checkoutSeller, type CheckoutStatus } from './weekly-fee';
 // Swift's operator — in the words the API sends (one source: apps/api/src/modules/legal/operator.ts). An older
 // API sends none, and the card then says nothing rather than something invented.
 const SELLER = { name: 'Westbridge Inc.', tradingAs: 'Swift', registrationNo: '17703', registeredAddress: 'Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana', phone: '+592 716 3534', email: 'support@swiftgy.com' };
-const { phone: _p, email: _e, ...OLDER_SELLER } = SELLER; // an API before R2 sent no phone or e-mail
+const OLDER_SELLER = { name: SELLER.name, tradingAs: SELLER.tradingAs, registrationNo: SELLER.registrationNo, registeredAddress: SELLER.registeredAddress }; // an API before R2 sent no phone or e-mail
 const base: CheckoutStatus = { ref: 'r1', status: 'CONFIRMED', amountGyd: 8000, currencyCode: 'GYD', createdAt: '2026-10-15T00:00:00Z', expiresAt: '2026-10-15T00:10:00Z', confirmedAt: '2026-10-15T00:01:00Z', subscriptionStatus: 'ACTIVE' };
 
 describe('the weekly-fee receipt names its seller', () => {
