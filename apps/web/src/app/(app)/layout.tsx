@@ -228,7 +228,7 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
             returnPath={returnPath}
             onSwitchApp={openSwitchApp}
           />
-          <main className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
+          <main id="main" tabIndex={-1} className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
             <div className="sw-page">
               {framesOrderingContext(pathname) ? <Suspense fallback={<div aria-hidden="true" className="py-3"><div className="min-h-11" /></div>}><OrderingContextBar /></Suspense> : null}
               <OfflineNotice />

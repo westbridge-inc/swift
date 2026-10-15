@@ -19,7 +19,7 @@ export function QrState({
   storeSlug?: string;
   retryAction?: () => void;
   /** [W6] Drawn inside the customer app's frame (a store page's error or
-   *  not-found state), which already holds the page's one <main>. */
+   *  not-found state), which already holds the page's one <main id="main" tabIndex={-1}>. */
   embedded?: boolean;
 }) {
   const Frame = embedded ? 'div' : 'main';

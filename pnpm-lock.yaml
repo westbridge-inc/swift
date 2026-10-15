@@ -585,6 +585,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.0.0
         version: 19.2.3(@types/react@19.2.14)
+      axe-core:
+        specifier: ^4.11.2
+        version: 4.11.2
       eslint-config-next:
         specifier: 15.2.0
         version: 15.2.0(eslint@9.39.5(jiti@2.7.0))(typescript@6.0.3)
