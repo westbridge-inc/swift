@@ -46,10 +46,22 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: { id: string
   }
 }
 
-/** Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless. */
+/**
+ * Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless.
+ * [Row 78] /logout needs a live access cookie, which lasts minutes: a tab left open got a 401 from the gate, nothing was
+ * revoked, and the 30-day refresh cookie could sign the browser back in. When /logout does not answer success, the
+ * session ends by its refresh cookie instead (/logout/refresh revokes and clears without an access token).
+ */
 export async function logout(): Promise<void> {
+  const init: RequestInit = { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' };
   try {
-    await fetch(`${API_URL}/api/v1/auth/logout`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' });
+    const res = await fetch(`${API_URL}/api/v1/auth/logout`, init);
+    if (res.ok) return;
+  } catch {
+    // unreachable: try the refresh-cookie sign-out below
+  }
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout/refresh`, init);
   } catch {
     // the cookies are HttpOnly and path-scoped: with the server unreachable the shell still redirects to login
   }
