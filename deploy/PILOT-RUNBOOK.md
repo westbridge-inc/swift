@@ -1222,7 +1222,8 @@ That file gives the API and the worker `DATABASE_URL_FILE` and
 `SYSTEM_DATABASE_URL_FILE` from the store, empties every owner part, and masks
 the owner's password file inside their secrets mount; Postgres and migrate
 keep the owner, which migrations need. Put no database `*_FILE` line in
-`deploy/.env`.
+`deploy/.env`, and write each of these settings unquoted (`TENANT_RLS_BIND=1`,
+not `"1"`): pilot-up reads the text after `=` as it is.
 
 Under `TENANT_RLS_BIND=1`, pilot-up refuses before anything is stopped or
 migrated when unscoped access is not `deny`, when the expand declaration is
@@ -1264,3 +1265,14 @@ for the rest of the rehearsal (journeys, isolation checks, the launch jobs,
 the rollback test). It needs passwordless `sudo -n` for `env … swift-secrets`,
 `test` and `rm`, and fails closed without it. Never layer
 `docker-compose.rehearsal.yml` by hand.
+
+The rehearsal is not passed by `up` alone. On the copy, under the walled
+login, real journeys must succeed: a vendor route (a store's own catalogue
+and orders), a driver's and a rider's profile, a dispatch offer reaching a
+mover, and a cart through checkout. Any failure is a stop: Phase C does not
+go ahead, and the cause is fixed in code, never by loosening the wall.
+
+The copy holds production's personal data on the same host. Remove it with
+`./deploy/wall/rehearsal.sh down` as soon as the rehearsal's checks finish,
+and do not keep it across days: a deletion request honoured in production in
+the meantime does not reach the copy.
