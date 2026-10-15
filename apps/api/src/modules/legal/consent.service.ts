@@ -28,7 +28,9 @@ export type ConsentDocumentType =
   | 'unregistered_trader_declaration'
   /** [R17] the tick before a document upload, and before a customer ID upload (verification/upload-consent.ts) */
   | 'document_processing_consent'
-  | 'customer_id_consent';
+  | 'customer_id_consent'
+  /** [Owner ruling 15 Oct 2026] the sign-up's "I am 18 or older" tick (auth/age-declaration.ts) */
+  | 'age_declaration';
 export type ConsentAction = 'granted' | 'withdrawn' | 're_granted';
 /** 'mobile' = the RN app when the platform isn't client-attested (signup). */
 export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket';
