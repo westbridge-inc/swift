@@ -21,6 +21,7 @@ import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { reviewerTyped } from './helpers/reviewer-typed';
 
 // [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
 process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
@@ -220,25 +221,30 @@ describe('Checklists drive from config', () => {
     expect(res.json().error.code).toBe('INVALID_DOC_TYPE');
   });
 
-  it('commerce checklists carry the Guyana-real docs (TIN, GRA licence, storefront)', async () => {
+  // [VERIFY-DOCS · owner ruling 7, 6 Oct 2026 — a DELIBERATE change] no TIN certificate on any list:
+  // no law found requires Swift to hold it; a VAT-registered store types its VAT number instead.
+  it('commerce checklists carry the Guyana-real docs (registration, GRA licence, storefront) — no TIN certificate', async () => {
     const restaurant = await inject('GET', '/api/v1/verification/status?role=RESTAURANT', undefined, vendorToken);
     expect(restaurant.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate',
+      'owner_national_id', 'business_registration',
       'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo',
     ]);
 
     const supermarket = await inject('GET', '/api/v1/verification/status?role=SUPERMARKET', undefined, vendorToken);
     expect(supermarket.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+      'owner_national_id', 'business_registration', 'storefront_photo',
     ]);
 
     const store = await inject('GET', '/api/v1/verification/status?role=STORE', undefined, vendorToken);
     expect(store.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+      'owner_national_id', 'business_registration', 'storefront_photo',
     ]);
 
+    // [VERIFY-DOCS · owner ruling 6 Oct ~21:25 GYT] A service business opens on its owner's ID; a
+    // police clearance is optional for the store (home-visit bookings need it: verify-docs-home-visits).
     const service = await inject('GET', '/api/v1/verification/status?role=SERVICE', undefined, vendorToken);
-    expect(service.json().data.checklist).toEqual(['owner_national_id', 'police_clearance']);
+    expect(service.json().data.checklist).toEqual(['owner_national_id']);
+    expect(service.json().data.optional).toContain('police_clearance');
   });
 });
 
@@ -329,9 +335,11 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     for (const doc of pending) {
       // [A-19] A reviewer keys the printed expiry; a document type that carries
       // one can no longer be approved without it.
-      const body = docTypeExpires(doc.docType)
-        ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() }
-        : {};
+      const body = {
+        ...(docTypeExpires(doc.docType) ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() } : {}),
+        // [VERIFY-DOCS] …and types the ID/licence number or the clearance's issue date.
+        ...reviewerTyped(doc.docType, doc.id),
+      };
       const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/approve`, body, adminToken);
       expect(res.statusCode, doc.docType).toBe(200);
     }
@@ -373,15 +381,17 @@ describe('Provider auto-decisions (swappable interface)', () => {
     expect(res.json().data.status).toBe('APPROVED');
     expect(res.json().data.kycRef).toMatch(/^sbx_/);
 
-    // ID alone is not the SERVICE bar — police clearance is still missing
-    // (service people enter customers' homes), so listing stays gated.
+    // [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT — a DELIBERATE change] The owner's ID IS
+    // the service business's bar now. A police clearance is needed only for HOME-VISIT bookings
+    // (verify-docs-home-visits.test.ts), never to list, so the listing is accepted at once.
     const early = await inject('POST', '/api/v1/vendor/items', {
       categoryId: serviceCategoryId,
       name: 'Hot Stone Massage',
       basePrice: 8000,
     }, vendorToken);
-    expect(early.statusCode).toBe(403);
-    expect(early.json().error.code).toBe('VERIFICATION_REQUIRED');
+    expect(early.statusCode).toBe(200);
+
+    // The clearance stays a document the business MAY add (and what home visits need).
 
     const clearance = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
@@ -442,7 +452,7 @@ describe('L2 identity — permanent customer verification', () => {
     }, customer.tokens.accessToken);
     expect(res.json().data.status).toBe('PENDING');
 
-    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, {}, adminToken);
+    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, reviewerTyped('identity_l2', res.json().data.id), adminToken);
     expect(approve.statusCode).toBe(200);
 
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_MANUAL_PHONE } });
@@ -596,10 +606,11 @@ describe('Document storage & DPA compliance', () => {
 
 describe('Taxi checklist merge + auto-KYC audit', () => {
   it('a mover can submit a taxi-only document and the auto-approval is audited', async () => {
-    // hire_car_permit lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    // hire_car_vehicle_licence lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    // ([VERIFY-DOCS · ruling 8] it and the person's licence replace the single hire-car permit)
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'hire_car_permit',
+      docType: 'hire_car_vehicle_licence',
       fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'auto-approve-hire-permit'),
       consent: true,
       privacyNoticeVersion: 'v1',
@@ -620,7 +631,8 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
   // because the live gate ALSO requires hire permit / exterior photo / fitness
   // cert. What onboarding shows must equal what gates. [VERIFY-DOCS] The plate
   // photo is merged into the exterior photo (it shows the plate).
-  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert'];
+  // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
+  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'];
   let taxiToken: string;
   let bicycleToken: string;
 
@@ -661,7 +673,8 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, moverToken);
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
-    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('hire_car_driver_licence');
+    expect(data.checklist).not.toContain('hire_car_vehicle_licence');
     expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
@@ -691,13 +704,13 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const data = res.json().data;
     // A box truck is a commercial goods vehicle, not a hire car.
     expect(data.checklist).toEqual([...MOVER_DOCS, 'road_service_licence', 'fitness_cert']);
-    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('hire_car_vehicle_licence');
   });
 
   it('asks a bus for the hire extras AND commercial docs — fitness cert only once', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER&vehicleType=BUS_15', undefined, taxiToken);
     const data = res.json().data;
-    expect(data.checklist).toContain('hire_car_permit'); // it carries passengers
+    expect(data.checklist).toContain('hire_car_vehicle_licence'); // it carries passengers
     expect(data.checklist).toContain('road_service_licence'); // it is commercial
     // fitness_cert is in both the taxi and commercial profiles — deduped to one.
     expect(data.checklist.filter((d: string) => d === 'fitness_cert')).toHaveLength(1);
@@ -947,7 +960,7 @@ describe('Taxi hire-class insurance — the manual 5-point check is enforced', (
   let taxiUserId: string;
   const TAXI_CHECKLIST = [
     'drivers_licence', 'vehicle_registration',
-    'vehicle_insurance', 'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert',
+    'vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert',
   ];
 
   beforeAll(async () => {
@@ -1085,7 +1098,7 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
   const past = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   it('knows which types carry a printed expiry, from the one map', () => {
-    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'fitness_cert']) {
+    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'fitness_cert']) {
       expect(docTypeExpires(t), t).toBe(true);
     }
     expect(docTypeExpires('business_registration')).toBe(false);
@@ -1119,10 +1132,12 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
 
   it('the route refuses the approval, and the document stays PENDING', async () => {
     const pending = await app.prisma.verificationDocument.findFirst({
-      where: { status: 'PENDING', docType: { in: ['drivers_licence', 'vehicle_insurance', 'police_clearance'] } },
+      // [VERIFY-DOCS] A police clearance's re-check date now comes from its typed ISSUE date
+      // (reviewer-typed-fields.test.ts), so it is no longer an example of a printed expiry.
+      where: { status: 'PENDING', docType: { in: ['drivers_licence', 'vehicle_insurance'] } },
     });
     if (!pending) return; // no such candidate in this fixture run
-    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, {}, adminToken);
+    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, reviewerTyped(pending.docType, pending.id), adminToken);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('EXPIRY_REQUIRED');
     const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: pending.id } });

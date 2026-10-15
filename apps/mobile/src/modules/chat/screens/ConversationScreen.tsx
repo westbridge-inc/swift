@@ -6,6 +6,7 @@ import { useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { withAlpha, color, font, fontSize, radius, space } from '@swift/ui';
 import { useChatMessages, useChatRoom, useSendMessage } from '../../../hooks/chat';
+import { chatSendRefusal } from '../sendRefusal';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBlockUser, useReportContent } from '../../../hooks/customer';
 import { ActionSheet, CircleChip, ConfirmDialog, ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
@@ -73,7 +74,13 @@ export function ConversationScreen() {
     setDraft('');
     // [WR-035] A failed send restores the draft (unless they typed anew) —
     // clearing it optimistically must never eat the message.
-    send.mutate(text, { onError: () => setDraft((cur) => (cur.trim() ? cur : text)) });
+    send.mutate(text, {
+      onError: (error) => {
+        setDraft((cur) => (cur.trim() ? cur : text));
+        const refusal = chatSendRefusal(error);
+        if (refusal) setNotice(refusal);
+      },
+    });
   };
 
   return (

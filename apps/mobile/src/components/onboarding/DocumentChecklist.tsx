@@ -3,6 +3,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { EmptyState, Spinner, T } from '../../kit';
 import { DocumentUploadCard } from './DocumentUploadCard';
+import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
 import { emptyChecklistCopy, faceMatchedDocTypes, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
@@ -95,6 +96,11 @@ export function DocumentChecklist({
       <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
         Upload these to activate your account. We review within 24 hours.
       </T>
+      {isTaxiChecklist(checklist) ? (
+        <T variant="label" style={{ marginBottom: space.sm }}>
+          {TAXI_TWO_LICENCES}
+        </T>
+      ) : null}
       {/* Progress — how far through the door they are */}
       <View style={{ marginBottom: space.md }}>
         <View style={{ marginBottom: space.xs, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -136,8 +142,10 @@ export function DocumentChecklist({
             expiresAt={doc?.status === 'APPROVED' ? doc?.expiresAt : null}
             submittedAt={doc?.createdAt ?? null}
             reviewNote={doc?.reviewNote ?? null}
+            replaced={doc?.replaced === true}
             isNext={docType === nextDoc}
             faceMatched={faceMatched.has(docType)}
+            hint={taxiDocumentHint(docType, checklist)}
           />
         );
       })}
@@ -160,6 +168,7 @@ export function DocumentChecklist({
                 expiresAt={doc?.status === 'APPROVED' ? doc?.expiresAt : null}
                 submittedAt={doc?.createdAt ?? null}
                 reviewNote={doc?.reviewNote ?? null}
+                replaced={doc?.replaced === true}
                 faceMatched={faceMatched.has(docType)}
                 optionalHint={optionalDocHint(docType)}
               />

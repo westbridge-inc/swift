@@ -11,6 +11,7 @@ import { SmtpEmailProvider } from './smtp-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
 import { sealReviewChannels } from './review-seal';
 import { guardNonProductionSms } from './sms-recipient-allowlist';
+import { SMS_REF_HANDOFF_SUPPRESSED } from './sms-outcome';
 
 export type NotificationHandoff = <T>(part: string, effect: () => Promise<T>) => Promise<T | undefined>;
 export interface SmsOptions { handoff?: NotificationHandoff }
@@ -118,7 +119,7 @@ let seq = 0;
 class DevSms implements SmsProvider {
   readonly supportsHandoff = true;
   async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
-    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: 'suppressed' };
+    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
     devChannelLog.push({ channel: 'sms', to, body, at: new Date() });
     return { ref: `dev_sms_${++seq}` };
   }
@@ -195,7 +196,7 @@ class TwilioSmsProvider implements SmsProvider {
   }
 
   async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
-    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: 'suppressed' };
+    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
     const auth = Buffer.from(`${this.keySid}:${this.keySecret}`).toString('base64');
     // Bound the WHOLE call, body read included: a hung Twilio must not hang
     // the login request or the ops page behind it. Abort releases the

@@ -20,6 +20,7 @@ import { registerErrorHandler } from '../../middleware/error-handler';
 import { createQueues, type SwiftQueues } from '../../jobs/queue';
 import { recoveryFor } from '../../jobs/recovery-policy';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
+import { REAL_PNG } from '../helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · PLAT-02 — a worker crashes mid-flow and the platform recovers.
@@ -192,7 +193,7 @@ function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token?: st
 
 function postPhoto(orderId: string, token: string, route: 'proof-photo' | 'pickup-proof-photo' = 'proof-photo') {
   const boundary = `----gold3${nanoid(8)}`;
-  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 3)]);
+  const png = REAL_PNG; // [Row 108] a real photo: the storage seam reads every photo with the real decoder
   return app.inject({
     method: 'POST',
     url: `/api/v1/courier/order/${orderId}/${route}`,
@@ -273,7 +274,9 @@ async function jobsFor(queue: Queue, name: string, orderId: string, states: JobS
 /** Each job re-read from its queue (the instance `add` returns never updates). */
 async function describeJobs(jobs: Job[]) {
   return Promise.all(jobs.map(async (j) => {
-    const fresh = j.id ? (await queues.dispatchQueue.getJob(j.id)) ?? j : j;
+    // [row 266] Offer timeouts live on their own queue.
+    const own = j.queueName === queues.offerQueue.name ? queues.offerQueue : queues.dispatchQueue;
+    const fresh = j.id ? (await own.getJob(j.id)) ?? j : j;
     return { id: fresh.id, name: fresh.name, state: await fresh.getState(), attemptsMade: fresh.attemptsMade, failedReason: fresh.failedReason, processedOn: fresh.processedOn, finishedOn: fresh.finishedOn };
   }));
 }
@@ -322,7 +325,7 @@ async function offerDiagnostics(orderId: string) {
   return {
     order: { status: row.status, riderId: row.riderId },
     offer: await app.redis.get(offerKey(orderId)),
-    offerTimeouts: await describeJobs(await jobsFor(queues.dispatchQueue, 'offer-timeout', orderId, ALL_STATES)),
+    offerTimeouts: await describeJobs(await jobsFor(queues.offerQueue, 'offer-timeout', orderId, ALL_STATES)),
     dispatchJobs: await describeJobs(await jobsFor(queues.dispatchQueue, 'dispatch-order', orderId, ALL_STATES)),
     deadLetters: await deadLetters(),
   };
@@ -425,6 +428,7 @@ beforeAll(async () => {
   queues = createQueues(app.redis, app.log);
   app.decorate('queues', queues);
   app.decorate('dispatchQueue', queues.dispatchQueue);
+  app.decorate('offerQueue', queues.offerQueue);
   app.decorate('workersActive', false);
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
@@ -592,7 +596,7 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     await waitFor('the offer to be published to Arjun', async () => ({
       offer: await app.redis.get(offerKey(o1)),
       rows: await sys(() => app.prisma.alertDelivery.count({ where: { kind: 'MOVER_OFFER', subjectId: o1, recipientId: a.userId } })),
-      timeouts: (await jobsFor(queues.dispatchQueue, 'offer-timeout', o1, ['delayed'])).length,
+      timeouts: (await jobsFor(queues.offerQueue, 'offer-timeout', o1, ['delayed'])).length,
       dispatched: (await jobsFor(queues.dispatchQueue, 'dispatch-order', o1, ['completed'])).length,
     }), (v) => v.offer?.startsWith(`${a.riderId}:`) === true && v.rows === 1 && v.timeouts === 1 && v.dispatched === 1, 60_000, { consumer: worker, diagnose: () => offerDiagnostics(o1) });
 
@@ -604,7 +608,7 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     expect(card!.split(':')[0]).toBe(a.riderId);
     const recovered = await call('GET', '/api/v1/rider/offers/current', a.token);
     expect(recovered.json().data.offer.orderId).toBe(o1);
-    const timeouts = await jobsFor(queues.dispatchQueue, 'offer-timeout', o1, ['delayed']);
+    const timeouts = await jobsFor(queues.offerQueue, 'offer-timeout', o1, ['delayed']);
     expect(timeouts.map((j) => ({ riderId: j.data.riderId, attemptId: j.data.attemptId }))).toEqual([{ riderId: a.riderId, attemptId: card!.split(':')[1] }]);
     const done = await jobsFor(queues.dispatchQueue, 'dispatch-order', o1, ['completed']);
     expect(done).toHaveLength(1);

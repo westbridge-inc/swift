@@ -31,6 +31,11 @@ describe('destinationFor — the tap table', () => {
     expect(destinationFor({ kind: 'ride_sos_ack' })).toEqual({ screen: 'Taxi' });
   });
 
+  it('an unavailable queue notice opens the ride picker without retry parameters', () => {
+    expect(destinationFor({ kind: 'ride_queue_unavailable', audience: 'customer' }))
+      .toEqual({ screen: 'Taxi' });
+  });
+
   it('an OFFER ping lands the earner on their mover home, never the customer screen [E36 / danger #22]', () => {
     // Pre-fix, the generic orderId branch dropped an earner mid-countdown on
     // the CUSTOMER Delivery screen — a dead end with the clock running.
@@ -141,9 +146,11 @@ describe('booking + service-job pushes land on the job [S0]', () => {
       // The request itself — the rung that had no notification at all, so the
       // provider never learned there was anything to quote on.
       'booking_requested',
+      'booking_quoted',
       'booking_to_confirm',
       'booking_confirmed',
       'booking_slot_declined',
+      'booking_started',
       'booking_completed',
       'booking_cancelled',
     ]) {
@@ -287,12 +294,15 @@ const CENSUS: Case[] = [
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
+  { k: 'ops_cash_door_short', d: { ...O, due: 3500, collected: 2800, shortfall: 700 }, to: DELIVERY('o1'), why: 'admins — [L02 row 34] a cash order was handed over for less than due; the mismatch is held for review' },
+  { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — partial cash could not be handed back and remains with the rider for operations' },
   { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
   { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },
 
   // ── Rides: the taxi screen reads the active ride itself.
   { k: 'ride_queue_matched', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — a driver took their queued ride' },
   { k: 'ride_queue_expired', d: { audience: 'customer', rideClass: 'STANDARD' }, to: { screen: 'Taxi' }, why: 'customer — queue timed out, request again' },
+  { k: 'ride_queue_unavailable', d: { audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — the queued class is no longer offered; choose an available class without retrying the retired trip' },
   { k: 'ride_released_no_drivers', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — ride released' },
   { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1', expiresAt: '2026-09-24T20:00:20.000Z' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
   { k: 'custody_handoff_code', d: { ...O, caseId: 'c1' }, to: { screen: 'ActiveJob' }, why: 'RIDER holding the goods — [AF-MOB-006] a relay rider is coming; the handoff code is on their live job, which MoverStack mounts' },
@@ -303,9 +313,11 @@ const CENSUS: Case[] = [
 
   // ── Bookings + service jobs [the S0 this pass closed].
   { k: 'booking_requested', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — a customer asked them to quote; the first rung of the ladder, and the one that used to send nothing at all' },
+  { k: 'booking_quoted', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — a durable quote is ready to review' },
   { k: 'booking_to_confirm', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — accept or move the customer’s slot' },
   { k: 'booking_confirmed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider took the slot' },
   { k: 'booking_slot_declined', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — pick another time' },
+  { k: 'booking_started', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider asserted commencement at the agreed time' },
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
   { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },
@@ -351,6 +363,8 @@ const CENSUS: Case[] = [
   // ── Store / advertiser business surfaces [GAPS].
   { k: 'low_stock', d: { itemId: 'i1', remaining: 2 }, to: null, why: 'GAP: store — the item editor exists and is unrouted' },
   { k: 'staff_added', d: { vendorId: 'v1' }, to: null, why: 'GAP: store team screen' },
+  { k: 'staff_invite', d: { vendorId: 'v1', audience: 'customer' }, to: { screen: 'Storefront', params: { screen: 'Notifications' } }, why: '[row 55] the invite is answered on the inbox Accept card' },
+  { k: 'staff_joined', d: { vendorId: 'v1', audience: 'business' }, to: null, why: 'GAP: store team screen — [row 55] the owner told that someone accepted their invite (same gap as staff_added)' },
   { k: 'review_response', d: { ratingId: 'r1', vendorId: 'v1' }, to: null, why: 'GAP: store reviews' },
   { k: 'rating_removed', to: null, why: 'GAP: a rating was removed' },
   { k: 'category_request_resolved', to: null, why: 'GAP: store category request answered' },
@@ -390,6 +404,7 @@ const CENSUS: Case[] = [
   { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'GAP: admin only — the reserve line is below its floor' },
   { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'GAP: admin only — the monthly provisioning notice' },
   { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6)' },
+  { k: 'vendor_needs_public_phone', d: { vendorId: 'v1' }, to: { screen: 'Main' }, why: 'vendor owner — [owner #51] documents done, the store goes live once it publishes a number customers can call; the waiting store\'s own screen asks for it' },
   { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps' },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
@@ -531,6 +546,10 @@ describe('every destination is a route the app actually registers', () => {
     const mounted = new Set([...stack.matchAll(/\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g)].map((m) => m[1]!));
     // Every role stack sits under the root route Main, so it is reachable too.
     mounted.add('Main');
+    // The root mounts a CustomerStack separately for cross-mode inbox taps.
+    const root = readFileSync(join(process.cwd(), 'src', 'navigation', 'RootNavigator.tsx'), 'utf8');
+    expect(root).toMatch(/name="Storefront"\s+component=\{CustomerStack\}/);
+    mounted.add('Storefront');
     expect(mounted.size, 'the scan itself found the stack').toBeGreaterThan(5);
 
     const payloads = [

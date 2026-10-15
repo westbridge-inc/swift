@@ -40,6 +40,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
 import * as authority from '../modules/admin/admin-authority';
+import { uniquePng } from './helpers/real-image';
 
 const GRANT = 'documents.review';
 const REQUIRED = 'DOCUMENT_REVIEWER_REQUIRED';
@@ -50,7 +51,8 @@ const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const REASON = `Document review rota ${RUN}: owner reviews this week`;
 const OTHER_TENANT = `vd3-${RUN.toLowerCase()}`;
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`vd3-${RUN}`)]);
+// [Row 108] A real photo, unique to this run: the storage seam reads every photo with the real decoder.
+const PNG = uniquePng(`vd3-${RUN}`);
 
 let app: FastifyInstance;
 const users: string[] = [];
@@ -173,7 +175,12 @@ describe('[V3] the grant is explicit-only: `*`, a wildcard or a role default nev
     const doors = ['GET /verification/:id/document-url', 'PUT /verification/:id/approve', 'PUT /verification/:id/reject', 'PUT /verification/:id/revoke'];
     for (const door of doors) expect((authority.ADMIN_ROUTE_AUTHORITY[door] as { requires?: string } | undefined)?.requires, door).toBe(GRANT);
     const others = Object.entries(authority.ADMIN_ROUTE_AUTHORITY).filter(([k, a]) => !doors.includes(k) && (a as { requires?: string }).requires);
-    expect(others.map(([k]) => k)).toEqual([]);
+    // [GUARDRAILS §8 · Opus S3-9] The other explicit-only doors: showing a held catalogue item, and (owner 14 Oct) a
+    // store its own words hold — both under their OWN grant.
+    expect(others.map(([k, a]) => [k, (a as { requires?: string }).requires])).toEqual([
+      ['POST /catalogue-review/:id/approve', 'catalogue.approve'],
+      ['POST /catalogue-review/stores/:id/approve', 'catalogue.approve'],
+    ]);
     expect(authority.decideCapability({ role: 'SUPER_ADMIN', permissions: ['*'] }, 'GET', '/verification/:id/document-url').allowed).toBe(false);
     expect(authority.decideCapability({ role: 'SUPER_ADMIN', permissions: ['*', GRANT] }, 'GET', '/verification/:id/document-url').allowed).toBe(true);
   });

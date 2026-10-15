@@ -134,8 +134,11 @@ vi.mock('../../../kit', async () => {
   return {
     T, Eyebrow: T, PopupTitle: T, Card: Box,
     PillButton,
-    LabeledInput: (p: any) => h('input', { value: p.value ?? '', readOnly: true }),
+    // Typable, so the courier form can be filled (TaxiScreen draws none).
+    LabeledInput: (p: any) => h('input', { value: p.value ?? '', placeholder: p.placeholder, onChange: (e: any) => p.onChangeText?.(e.target.value) }),
     TonePill: (p: any) => h('span', null, p.label),
+    // [owner #67] The courier form's "This parcel has no prohibited items" tick.
+    BrandCheckbox: (p: any) => h('button', { type: 'button', role: 'checkbox', 'aria-label': p.label, 'aria-checked': !!p.checked, onClick: p.onToggle }),
     Money: (p: any) => h('span', null, money(p.amount)),
     CircleChip: (p: any) => h('button', { type: 'button', 'aria-label': p.label, onClick: p.onPress }, ''),
     StatePill: (p: any) => h('span', { 'data-pill': '', style: { borderWidth: 1, borderStyle: 'solid', borderColor: color.border.subtle, borderRadius: 99, padding: '2px 8px', fontSize: 11 } }, p.label),
@@ -143,7 +146,7 @@ vi.mock('../../../kit', async () => {
     CalmRadar: (p: any) => h('div', null, p.title),
     EmptyState: (p: any) => h('div', null, p.title),
     LoadingBlock: () => h('div', null, 'Loading'),
-    IconChip: () => null, Pictogram: () => null, PinGlyph: () => null, Stars: () => null, VehicleRender: () => null,
+    IconChip: () => null, DecorativeIcon: () => null, Pictogram: () => null, PinGlyph: () => null, Stars: () => null, VehicleRender: () => null,
     cardShadow: {},
   };
 });
@@ -175,7 +178,8 @@ vi.mock('../../../components/LocationPrimerCard', () => ({ LocationPrimerCard: (
 vi.mock('../../../lib/images', () => ({ mediaUrl: (x: unknown) => x }));
 vi.mock('../../../lib/haptics', () => ({ haptic: { success: vi.fn(), commit: vi.fn(), warn: vi.fn(), failure: vi.fn(), select: vi.fn() } }));
 vi.mock('../../../lib/openExternal', () => ({ openExternal: vi.fn() }));
-vi.mock('../../../services/emergencyPolicy', () => ({ currentMarketDial: () => ({ kind: 'manual' }), emergencyDialCopy: () => '', previewEmergencyDial: () => null }));
+// The live ride now hosts the SOS ceremony (TaxiScreen.sos.navigation.test.ts), which reads the market policy too.
+vi.mock('../../../services/emergencyPolicy', () => ({ currentMarketDial: () => ({ kind: 'manual' }), emergencyDialCopy: () => '', previewEmergencyDial: () => null, useEmergencyPolicy: () => ({ country: 'GY', dial: { kind: 'manual' } }), emergencyDialFor: () => ({ kind: 'manual' }) }));
 vi.mock('../taxiEntry', () => ({ signInForTaxi: vi.fn() }));
 vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null }) } }));
 vi.mock('../../../lib/storage', () => ({
@@ -296,7 +300,7 @@ describe('flag off — the booking screen is exactly today’s', () => {
   it.each([
     ['an older server without the capability read (404)', () => refuse(404, 'NOT_FOUND')],
     ['a server with stops switched off (maxStops 0)', () => ok({ maxStops: 0 })],
-  ])('%s: no stop control anywhere; today’s bodies; still a key', async (_label, capabilities) => {
+  ])('%s: no stop control anywhere; today’s bodies plus the fare on screen; still a key', async (_label, capabilities) => {
     fx.routes['get /rides/capabilities'] = capabilities;
     await mount();
     await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
@@ -311,7 +315,9 @@ describe('flag off — the booking screen is exactly today’s', () => {
 
     await click(requestButton() ?? null);
     const [request] = sent('post /rides/request');
-    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass']);
+    // [PRICE-LOCK] Today's body plus the fare the passenger was shown.
+    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass', 'expectedFare']);
+    expect(bodyOf(request).expectedFare).toBe(ESTIMATE_WITHOUT_STOPS.data.tiers.find((t) => t.rideClass === 'ECONOMY')!.fare);
     expect(request.headers.get('Idempotency-Key')).toMatch(/^ride_[0-9a-z]+_[0-9a-z]{10}$/);
   });
 });
@@ -410,7 +416,9 @@ describe('[review 1] the server takes stops away after the rider chose some', ()
 
     await click(requestButton() ?? null);
     const [request] = sent('post /rides/request');
-    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass']);
+    // No stops; the fare of the stop-free quote on screen [PRICE-LOCK].
+    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass', 'expectedFare']);
+    expect(bodyOf(request).expectedFare).toBe(ESTIMATE_WITHOUT_STOPS.data.tiers.find((t) => t.rideClass === 'ECONOMY')!.fare);
   });
 
   it('maxStops lowered below the count: the extra stops go, the rest are booked', async () => {
@@ -590,6 +598,68 @@ describe('the live ride', () => {
   });
 });
 
+
+// [PRICE-LOCK · owner: the price shown is the price charged]
+describe('the price on screen is the price booked', () => {
+  /** Types into an input the way a person does (React reads the native value). */
+  async function type(el: HTMLInputElement | null, value: string) {
+    expect(el, 'the field is on screen').toBeTruthy();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')!.set!.call(el, value);
+      const DomEvent = (el!.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
+      el!.dispatchEvent(new DomEvent('input', { bubbles: true }));
+    });
+    await settle();
+  }
+  const courierQuote = (totalFee: number) => ok({ baseFee: 800, distanceFee: 360, sizeSurcharge: 0, speedMultiplier: 1, totalFee, estimatedMinutes: 45, currency: 'GYD', distanceKm: 3 });
+
+  it('a ride without stops: a changed fare is shown, re-quoted, and booked at the new fare', async () => {
+    let fare = 2400;
+    fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, tiers: [{ rideClass: 'ECONOMY', multiplier: 1, fare, capacity: 4, source: 'formula' }] });
+    let calls = 0;
+    fx.routes['post /rides/request'] = () => (++calls === 1
+      ? refuse(409, 'FARE_CHANGED', { expectedFare: 2400, fare: 2600, rideClass: 'ECONOMY', currencyCode: 'GYD' })
+      : { status: 201, data: REQUEST_ANSWER_WITH_ONE_STOP });
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    fare = 2600;
+    await click(requestButton() ?? null);
+    expect(requestButton()?.textContent).toMatch(/\$2.?600$/);
+    await click(requestButton() ?? null);
+    expect(sent('post /rides/request').map((c) => bodyOf(c).expectedFare)).toEqual([2400, 2600]);
+  });
+
+  it('courier sends the fee on the button, and a changed fee is quoted again before anything is sent', async () => {
+    let fee = 1160;
+    fx.routes['get /courier/orders'] = () => ok([]);
+    fx.routes['post /courier/estimate'] = () => courierQuote(fee);
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1
+      ? refuse(409, 'PRICE_CHANGED', { expectedFee: 1160, fee: 1280, currencyCode: 'GYD' })
+      : { status: 201, data: { success: true, data: { orderId: 'parcel-1', fee: 1280 } } });
+    await act(async () => root.render(React.createElement(QueryClientProvider, { client }, React.createElement(CourierScreen, { navigation }))));
+    await settle();
+    await pickFromSearch(byLabel('Set drop-off location'), LAMAHA);
+    await type(host.querySelector('input[placeholder="Recipient name"]'), 'Aunty Pat');
+    await type(host.querySelector('input[placeholder="Recipient phone"]'), '+5926001234');
+    const sendButton = () => Array.from(host.querySelectorAll('button')).find((b) => /^Send parcel/.test(b.textContent ?? '')) as HTMLElement | undefined;
+    expect(sendButton()?.textContent).toMatch(/1.?160$/);
+    // [owner #67] Nothing is sent until the sender ticks "This parcel has no prohibited items".
+    expect(sendButton()?.hasAttribute('disabled')).toBe(true);
+    expect(text()).toContain('Tick “This parcel has no prohibited items” to continue.');
+    await click(byLabel('This parcel has no prohibited items'));
+    expect(sendButton()?.hasAttribute('disabled')).toBe(false);
+    fee = 1280;
+    const quotesBefore = sent('post /courier/estimate').length;
+    await click(sendButton() ?? null);
+    expect(text()).toContain('server words for PRICE_CHANGED');
+    expect(sent('post /courier/estimate').length).toBeGreaterThan(quotesBefore);
+    expect(sendButton()?.textContent).toMatch(/1.?280$/);
+    await click(sendButton() ?? null);
+    expect(sent('post /courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
+    expect(sent('post /courier/order').map((c) => bodyOf(c).declaresNoProhibitedItems)).toEqual([true, true]);
+  });
+});
 
 describe('a road-routing outage is explained on single-stop quote screens', () => {
   it('taxi says routing is unavailable instead of blaming the destination', async () => {

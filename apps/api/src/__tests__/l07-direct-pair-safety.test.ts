@@ -50,7 +50,7 @@ async function fixture(pool: 'DRIVER' | 'RIDER') {
   const common = { userId: user.id, isOnline: true, isAvailable: true, documentsVerified: true, locationSessionId: session.id,
     currentLat: 3.38, currentLng: -59.79, lastLocationUpdate: new Date() };
   const mover = pool === 'DRIVER'
-    ? await app.prisma.driver.create({ data: { ...common, vehicleMake: 'Toyota', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `L07-P-${seq}`, driverLicenseUrl: 'synthetic', vehicleInsuranceUrl: 'synthetic' } })
+    ? await app.prisma.driver.create({ data: { ...common, vehicleMake: 'Toyota', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `HL07-P-${seq}`, driverLicenseUrl: 'synthetic', vehicleInsuranceUrl: 'synthetic' } })
     : await app.prisma.rider.create({ data: { ...common, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', floatLimit: 100_000 } });
   if (pool === 'DRIVER') await currentMoverDocuments(app.prisma, user.id, 'CAR', true);
   const order = await app.prisma.order.create({ data: { orderNumber: `L07-P-${nanoid(12)}`, customerId: customer.id,

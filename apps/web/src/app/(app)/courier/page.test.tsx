@@ -33,6 +33,8 @@ const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(
 const bodyOf = (call: unknown[]) => JSON.parse(String((call[1] as RequestInit).body));
 const button = (name: string | RegExp) => screen.getByRole('button', { name }) as HTMLButtonElement;
 const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
+/** [owner #67] The sender's tick: "This parcel has no prohibited items". */
+const declare = () => fireEvent.click(screen.getByRole('checkbox', { name: 'This parcel has no prohibited items' }));
 
 function device(fix: 'ok' | 'denied' | 'rough') {
   const getCurrentPosition = vi.fn((success: PositionCallback, fail?: PositionErrorCallback | null) => {
@@ -99,6 +101,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'What’s inside? (optional)' }), { target: { value: 'Documents' } });
+    declare();
     await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
     fireEvent.click(button('Request courier · $1,160'));
     await waitFor(() => expect(calls('POST', '/api/v1/courier/order')).toHaveLength(1));
@@ -111,10 +114,55 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
       recipientName: 'Test Recipient',
       recipientPhone: '+592 600 0000',
       packageDescription: 'Documents',
+      declaresNoProhibitedItems: true,
     });
     expect(order.dropoff.lat).toBeCloseTo(pin.latitude, 9);
     expect(order).not.toHaveProperty('notes');
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-1'));
+  });
+
+  it('[PRICE-LOCK] the order carries the fee on the button; a fee that moved is quoted again and sent at the new fee', async () => {
+    // Owner: the price shown is the price charged. The server creates the job
+    // only at the fee the sender saw, and says so (409 PRICE_CHANGED) when it moved.
+    let fee = 1160;
+    let orders = 0;
+    fetchMock = mockApi(({ url, method }) => {
+      if (url.pathname === '/api/v1/customer/addresses' && method === 'GET') return ok([SAVED]);
+      if (url.pathname === '/api/v1/places/reverse') return ok({ address: reverseLabel });
+      if (url.pathname === '/api/v1/places/autocomplete') return ok([]);
+      if (url.pathname === '/api/v1/courier/estimate' && method === 'POST') return ok({ ...ESTIMATE, totalFee: fee });
+      if (url.pathname === '/api/v1/courier/order' && method === 'POST') {
+        orders += 1;
+        if (orders === 1) {
+          return { status: 409, body: { success: false, error: { code: 'PRICE_CHANGED', message: 'The fee for this parcel has changed. Check the new fee, then send it again.', details: { expectedFee: 1160, fee: 1280, currencyCode: 'GYD' } } } };
+        }
+        return ok({ orderId: 'co-2', orderNumber: 'SW-3002', fee: 1280, distanceKm: 3, trackingToken: 't', trackingUrl: 'https://example.test/t', expiresAt: null }, 201);
+      }
+      return { status: 404, body: { success: false, error: { message: `unmocked ${method} ${url.pathname}` } } };
+    });
+    device('ok');
+    render(<CourierPage />);
+    await screen.findByDisplayValue('Current location');
+    await pinDropoff();
+    fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
+    loadMap();
+    fireEvent.keyDown(screen.getByRole('application', { name: 'Drop-off pin map' }), { key: 'ArrowRight' });
+    loadMap();
+    await screen.findByText(`Near ${reverseLabel}`);
+    fireEvent.click(button('Use this pin'));
+    expect(await screen.findByText('$1,160')).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
+    declare();
+    await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
+    fee = 1280;
+    fireEvent.click(button('Request courier · $1,160'));
+    expect(await screen.findByText(/The fee for this parcel has changed/)).toBeTruthy();
+    await waitFor(() => expect(button('Request courier · $1,280').disabled).toBe(false));
+    expect(state.push).not.toHaveBeenCalled();
+    fireEvent.click(button('Request courier · $1,280'));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-2'));
+    expect(calls('POST', '/api/v1/courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
   });
 
   it('pins the pickup when the device location is refused; an unnamed spot is sent as "Dropped pin"', async () => {
@@ -183,5 +231,73 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     fireEvent.click(button('Cancel'));
     expect(screen.queryByRole('application')).toBeNull();
     expect(calls('POST', '/api/v1/courier/estimate')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [GUARDRAILS §8 · owner #67] Swift never carries banned goods. The server
+// screens the parcel description against the catalogue's ban list and refuses
+// it in plain words (409 PROHIBITED_PARCEL); the sender also ticks "This parcel
+// has no prohibited items" before a courier is requested, and the order says
+// so (`declaresNoProhibitedItems`, recorded on the order's own trail).
+// ---------------------------------------------------------------------------
+describe('[owner #67] a parcel with no prohibited items', () => {
+  async function readyParcel() {
+    device('ok');
+    render(<CourierPage />);
+    await screen.findByDisplayValue('Current location');
+    await pinDropoff();
+    fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
+    loadMap();
+    fireEvent.keyDown(screen.getByRole('application', { name: 'Drop-off pin map' }), { key: 'ArrowRight' });
+    loadMap();
+    await screen.findByText(`Near ${reverseLabel}`);
+    fireEvent.click(button('Use this pin'));
+    expect(await screen.findByText('$1,160')).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
+  }
+
+  it('no courier is requested until the sender ticks the box; the order carries the tick', async () => {
+    await readyParcel();
+    // The list the tick refers to is on screen, in the server's own words.
+    expect(screen.getByText(/Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas \(LPG\), fuel or 18\+ items\./)).toBeTruthy();
+    const box = screen.getByRole('checkbox', { name: 'This parcel has no prohibited items' }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(button('Tick “no prohibited items” to send').disabled).toBe(true);
+    fireEvent.click(button('Tick “no prohibited items” to send'));
+    expect(calls('POST', '/api/v1/courier/order')).toHaveLength(0);
+
+    declare();
+    expect(box.checked).toBe(true);
+    await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
+    // Unticking takes it back.
+    declare();
+    expect(button('Tick “no prohibited items” to send').disabled).toBe(true);
+    declare();
+    fireEvent.click(button('Request courier · $1,160'));
+    await waitFor(() => expect(calls('POST', '/api/v1/courier/order')).toHaveLength(1));
+    expect(bodyOf(calls('POST', '/api/v1/courier/order')[0]!)).toMatchObject({ declaresNoProhibitedItems: true });
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-1'));
+  });
+
+  it('a parcel the server refuses says why in plain words, and the sender stays on the form', async () => {
+    const refusal = "Swift can't carry this parcel: Swift never delivers alcohol. If it's something else, describe it in other words.";
+    fetchMock = mockApi(({ url, method }) => {
+      if (url.pathname === '/api/v1/customer/addresses' && method === 'GET') return ok([SAVED]);
+      if (url.pathname === '/api/v1/places/reverse') return ok({ address: reverseLabel });
+      if (url.pathname === '/api/v1/places/autocomplete') return ok([]);
+      if (url.pathname === '/api/v1/courier/estimate' && method === 'POST') return ok(ESTIMATE);
+      if (url.pathname === '/api/v1/courier/order' && method === 'POST') {
+        return { status: 409, body: { success: false, error: { code: 'PROHIBITED_PARCEL', message: refusal, details: { prohibitedClass: 'ALCOHOL' } } } };
+      }
+      return { status: 404, body: { success: false, error: { message: `unmocked ${method} ${url.pathname}` } } };
+    });
+    await readyParcel();
+    fireEvent.change(screen.getByRole('textbox', { name: 'What’s inside? (optional)' }), { target: { value: 'Rum 750ml' } });
+    declare();
+    fireEvent.click(button('Request courier · $1,160'));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', refusal);
+    expect(state.push).not.toHaveBeenCalled();
   });
 });

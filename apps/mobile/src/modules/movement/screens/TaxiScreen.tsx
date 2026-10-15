@@ -15,7 +15,7 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue, useRideCapabilities } from '../../../hooks';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue, useRideCapabilities } from '../../../hooks';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
 import { addStop, canAddStop, maxStopsFrom, moveStop, removeStop, replaceStop, rideStops, sameWireStops, stopRefusalCopy, wireStops } from '../../../lib/taxiItinerary';
 import { fareBreakdownOf, liveWaiting, waitingDisclosure } from '../../../lib/taxiWaiting';
@@ -35,9 +35,8 @@ import { CalmRadar, Card, CircleChip, Eyebrow, IconChip, LoadingBlock, Money, Pi
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { openExternal } from '../../../lib/openExternal';
-import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
+import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
-import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
 import { taxiDoorFor } from '../../../lib/taxiDoors';
 import { TaxiSignedOut } from '../TaxiSignedOut';
@@ -508,13 +507,15 @@ function TaxiBooking({ navigation }: any) {
         }
       : null;
 
-  // [TAXI multi-stop] The request body: today's exactly when there are no
-  // stops; with stops, the stops in the passenger's order and the fare of the
-  // chosen class from the quote of exactly this itinerary (the server checks it).
+  // [TAXI multi-stop · PRICE-LOCK] The request body carries the fare of the
+  // chosen class from the quote on screen, so the server books only at the
+  // fare the passenger saw (409 FARE_CHANGED refetches the quote otherwise).
+  // With stops, the stops too, in the passenger's order; a ride with stops is
+  // never sent without its fare.
   const requestPayload = (): RideRequestBody | null => {
     const base = tripPayload();
     if (!base) return null;
-    if (stops.length === 0) return base;
+    if (stops.length === 0) return selectedTier ? { ...base, expectedFare: selectedTier.fare } : base;
     if (!selectedTier) return null;
     return { ...base, stops: stopsWire, expectedFare: selectedTier.fare };
   };
@@ -1156,9 +1157,6 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   // Without this the rider sits on the "Contacting drivers…" spinner forever.
   const [exhausted, setExhausted] = useState(false);
   const [sosConfirm, setSosConfirm] = useState(false);
-  const sos = useRideSos();
-  // [MOB-018] The signed-in market decides the emergency number the popup names and dials.
-  const sosCountry = useAuthStore((st) => st.countryCode);
   // Named in the share so a relative knows whose ride they are watching.
   const myFirstName = useAuthStore((st) => st.user?.firstName ?? null);
   const riderLoc = useLocationStore();
@@ -1391,7 +1389,15 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   const showStartCode = !!d
     && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status)
     && !pinVerified;
-  const canCancelRide = !pinVerified
+  // [owner #50] The server's verdict decides (`canCancel` on the ride read):
+  // free while no driver has accepted, inside the five minutes after acceptance (owner ruling 14 Oct), or when
+  // the driver is very late — otherwise the passenger contacts the driver. A
+  // server that does not say yet leaves the old status rule in charge.
+  const serverAllowsCancel = typeof ride.canCancel === 'boolean' ? ride.canCancel : true;
+  const cancelUnavailableMessage: string | null = !serverAllowsCancel && typeof ride.cancelUnavailable?.message === 'string'
+    ? ride.cancelUnavailable.message
+    : null;
+  const canCancelRide = serverAllowsCancel && !pinVerified
     && ['PENDING', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status);
 
   useEffect(() => {
@@ -1682,6 +1688,11 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               />
             ) : null}
           </View>
+          {/* [owner #50] Five minutes after the driver accepted, the passenger contacts the
+              driver — the server's own words; the driver card above has the call. */}
+          {cancelUnavailableMessage && !pinVerified ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>{cancelUnavailableMessage}</T>
+          ) : null}
 
           {/* [S-16] What the sharer gave away, and the way back.
               A live location link with no stated end is one a person forgets
@@ -1717,13 +1728,16 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
           Cancel this ride?
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          {/* [owner #50] Never a fee, and never a "free" the app authored itself
+              (DS1141 S1): the server's own words when it gives them. */}
           {d
             ? arrived
-              ? 'Your driver has arrived. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
+              ? 'Your driver has arrived. Cancelling frees your driver for other rides.'
               : status === 'DRIVER_EN_ROUTE'
-                ? 'Your driver is already on the way. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
-                : 'Your driver accepted the ride. Cancelling now may record a late-cancellation fee. Swift does not collect ride money.'
+                ? 'Your driver is already on the way. Cancelling frees your driver for other rides.'
+                : 'Your driver accepted the ride. Cancelling frees your driver for other rides.'
             : 'We’ll stop looking for a driver.'}
+          {typeof ride.cancellationMessage === 'string' ? ` ${ride.cancellationMessage}` : ''}
         </T>
         {cancelRideError ? (
           <T variant="body" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.lg }}>
@@ -1743,17 +1757,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               {
                 onSuccess: (result: any) => {
                   const message = typeof result?.message === 'string' ? result.message : 'Ride cancelled.';
-                  const fee = typeof result?.cancellationFee === 'number' && Number.isFinite(result.cancellationFee)
-                    ? result.cancellationFee
-                    : null;
-                  toast.show(
-                    message,
-                    fee == null
-                      ? 'Cancellation confirmed.'
-                      : fee > 0
-                        ? `A ${money(fee)} cancellation fee was recorded. Swift does not collect ride money.`
-                        : 'No cancellation fee was recorded.',
-                  );
+                  toast.show(message, 'Cancellation confirmed.');
                   setConfirmCancel(false);
                 },
                 onError: (error: any) => {
@@ -1783,58 +1787,32 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
         />
       </PopupCard>
 
-      {/* SOS confirm — a deliberate two-step so it isn't triggered by accident,
-          then records the incident + pages ops AND dials local emergency. */}
-      <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
-        <IconChip icon="alert-triangle" size={56} tone="error" />
-        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
-          Get emergency help?
-        </PopupTitle>
-        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          {emergencyDialCopy(previewEmergencyDial(sosCountry))} Swift also saves the alert and any available location on this trip’s record. Use only in a real emergency.
-        </T>
-        <PillButton
-          label="Yes — get help now"
-          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          loading={sos.isPending}
-          onPress={() => {
-            setSosConfirm(false);
-            // 911 is THE action — dial first, never behind anything else. Swift
-            // records evidence; it is not an emergency responder and the copy
-            // must never imply a staffed safety desk [liability shield].
-            // [MOB-018] The market's emergency number, not a hard-coded 911: a
-            // verified number dials at once, an unverified candidate dials on this
-            // explicit tap (the popup named it), no number means the manual sheet.
-            const emergency = currentMarketDial('police');
-            if (emergency.kind !== 'manual') void openExternal(telUrl(emergency.number), `Couldn't start the call — dial ${emergency.number} directly.`);
-            // [F-028-08] Only a GRANTED fix may speak for the passenger.
-            // The old existence check preferred persisted coordinates over
-            // the LIVE driver position, so after a permission refusal an SOS
-            // could page ops with wherever the phone last was — on the one
-            // payload where a wrong location sends help to the wrong place.
-            // Stale-but-granted beats nothing; live driver beats stale rider;
-            // an honest "unknown" beats both when that is the truth.
-            const riderFix = grantedLocationFix(riderLoc.latitude, riderLoc.longitude, riderLoc.status);
-            const coords = riderFix
-              ? { lat: riderFix.latitude, lng: riderFix.longitude }
-              : freshDriverLoc
-                ? { lat: freshDriverLoc.latitude, lng: freshDriverLoc.longitude }
-                : undefined;
-            sos.mutate(
-              { id: ride.id, coords },
-              {
-                onError: () => {
-                  toast.error(
-                    'Swift could not save the SOS alert',
-                    'The emergency call was still started. Tell the 911 operator where you are.',
-                  );
-                },
-              },
-            );
-          }}
-        />
-        <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
-      </PopupCard>
+      {/* SOS — the one SOS ceremony every surface uses [AUD-L5b-009]: a
+          deliberate two-step that dials the market's emergency number first,
+          stays up through the raise and shows the SERVER's answer, says loudly
+          when Swift was NOT alerted (with a retry and the emergency call), and
+          once pressed is never hidden by a stray tap outside. The ride keeps
+          its own immediate route, /rides/:id/sos. A ride with no id names no
+          record: no SOS is sent, and the emergency call is offered instead. */}
+      <SosCeremony
+        visible={sosConfirm}
+        onClose={() => setSosConfirm(false)}
+        context={{ rideId: ride?.id ?? '' }}
+        recordNoun="trip"
+        getCoords={() => {
+          // [F-028-08] Only a GRANTED fix may speak for the passenger.
+          // Stale-but-granted beats nothing; the live driver position beats a
+          // refused rider fix; an honest "unknown" beats both when that is the
+          // truth — on the one payload where a wrong location sends help to
+          // the wrong place.
+          const riderFix = grantedLocationFix(riderLoc.latitude, riderLoc.longitude, riderLoc.status);
+          return riderFix
+            ? { lat: riderFix.latitude, lng: riderFix.longitude }
+            : freshDriverLoc
+              ? { lat: freshDriverLoc.latitude, lng: freshDriverLoc.longitude }
+              : undefined;
+        }}
+      />
 
       {/* "This isn't my driver" [safety spec / rides 5.7]: wrong person or
           car at the kerb — don't get in. The server releases the ride,

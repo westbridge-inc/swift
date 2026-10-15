@@ -6,8 +6,9 @@ import { StorePhotoCache, type CachedStorePhoto } from './store-photo-cache';
 const CACHE_SECONDS = 3600;
 const TIMEOUT_MS = 5000;
 const MAX_SOURCE_BYTES = 5 * 1024 * 1024;
-// Preserve Next's previous imgOptMaxInputPixels limit for camera uploads.
-const MAX_INPUT_PIXELS = 268_402_689;
+// [Row 108] About 40 megapixels, the same cap the API puts on uploads: a decode
+// never expands a larger canvas (it was Next's old 268,402,689-pixel limit).
+const MAX_INPUT_PIXELS = 40_000_000;
 const WIDTH_QUERY = new RegExp(`^\\?w=(${[...MEDIA_DEVICE_SIZES, ...MEDIA_IMAGE_SIZES].join('|')})$`);
 const cache = new StorePhotoCache(128, 16 * 1024 * 1024);
 const MAX_ACTIVE_JOBS = 4;

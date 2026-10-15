@@ -1,3 +1,4 @@
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -341,7 +342,7 @@ describe('Rider location authority', () => {
       headers: { authorization: `Bearer ${secondDevice.token}` },
     });
     expect(ownerSample.statusCode).toBe(200);
-    expect(ownerSample.json()).toEqual({ success: true });
+    expect(ownerSample.json()).toEqual({ success: true, data: { accepted: true } });
     const afterOwnerSample = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
     expect({ lat: afterOwnerSample.currentLat, lng: afterOwnerSample.currentLng })
       .toEqual({ lat: 6.803, lng: -58.153 });
@@ -629,6 +630,8 @@ describe('Rider location authority', () => {
       headers: { authorization: `Bearer ${active.token}` },
     });
     expect(activeRes.statusCode).toBe(200);
+    // An active-delivery fix is an explicit acceptance too: the app keeps tracking only on one.
+    expect(activeRes.json()).toEqual({ success: true, data: { accepted: true } });
     const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: active.riderId } });
     expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.83, lng: -58.17 });
   });
@@ -1019,14 +1022,14 @@ describe('The offer cascade', () => {
     await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool -> terminal exhaustion
     const order = await makeDeliveryOrder();
     const emits: Array<{ room: string; ev: string }> = [];
-    const spy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
-      emit: (ev: string) => { emits.push({ room, ev }); return true; },
-    })) as never);
+    // [L05] Order-room events reach the order's CURRENT people only: observe the
+    // packet an authorized participant socket in the room actually receives.
+    const detach = orderSocketFixture(app.io, order, (ev) => { emits.push({ room: `order:${order.id}`, ev }); });
     try {
       const r = await dispatch.dispatchOrder(order.id);
       expect(r).toMatchObject({ exhausted: true });
     } finally {
-      spy.mockRestore();
+      detach();
     }
     // The rider's open ActiveRide screen gets a terminal signal, not just a push.
     expect(emits).toContainEqual({ room: `order:${order.id}`, ev: 'dispatch:exhausted' });

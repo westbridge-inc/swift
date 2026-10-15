@@ -1,5 +1,7 @@
+import { assertHirePlate } from '../verification/hire-plate';
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../utils/errors';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
@@ -66,6 +68,11 @@ export async function partnerRoutes(app: FastifyInstance) {
     if (body.acceptAgreement !== true) {
       throw new AppError(400, AGREEMENT_REQUIRED, `Accept the ${body.role === 'VENDOR' ? 'vendor' : 'driver'} agreement to continue — Swift records that you agreed, and cannot record what you did not.`);
     }
+    if (body.business?.name) {
+      // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only.
+      const me = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
+      assertNameNotReserved(body.business.name, me?.phone);
+    }
     const { result, authorityCleanup } = await service.becomePartnerWithAuthority(
       request.user.userId,
       body,
@@ -114,6 +121,9 @@ export async function partnerRoutes(app: FastifyInstance) {
     ]);
     const verified = !!rider?.documentsVerified || !!driver?.documentsVerified
       || ((!!rider || !!driver) && await verification.isRoleVerified(userId, 'MOVER'));
+    // [Owner ruling 11 Oct 2026] A taxi plate that can never be approved is refused in plain words
+    // BEFORE the step-up: there is nothing to confirm for it. The service checks it again.
+    if (body.vehicle) assertHirePlate(body.vehicleType, body.vehicle.licensePlate);
     if (verified) await requireStepUp(app, request);
     const { result, authorityCleanup } = await service.changeVehicleWithAuthority(
       userId,
