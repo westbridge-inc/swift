@@ -92,8 +92,23 @@ export async function moderationRoutes(app: FastifyInstance) {
       try {
         // [REVIEW-F S3-1 on #1755] one page per reporter per 10 minutes: a person filing many CSAE reports cannot
         // turn the on-call phones into a pager they control; every report still lands, at the top of the queue.
-        const firstInWindow = await app.redis.set(`csae:page:${reporterId}`, report.id, 'EX', CSAE_PAGE_WINDOW_SECONDS, 'NX');
-        if (firstInWindow === 'OK') await pageCsaeReport(app.prisma, new NotificationService(app.prisma, app.io), { tenantId: request.tenantId ?? getTenantId() ?? null, contentReportId: report.id, targetType: body.targetType });
+        // [REVIEW-F S3-1 on e53c15fe] the window never silences a page that did not go out: a Redis error pages
+        // anyway, and a page that fails to open releases the window so the next report can page.
+        const windowKey = `csae:page:${reporterId}`;
+        let firstInWindow: string | null = 'OK';
+        try {
+          firstInWindow = await app.redis.set(windowKey, report.id, 'EX', CSAE_PAGE_WINDOW_SECONDS, 'NX');
+        } catch (err) {
+          app.log.warn({ err, contentReportId: report.id }, '[R19] CSAE page window unavailable; paging anyway');
+        }
+        if (firstInWindow === 'OK') {
+          try {
+            await pageCsaeReport(app.prisma, new NotificationService(app.prisma, app.io), { tenantId: request.tenantId ?? getTenantId() ?? null, contentReportId: report.id, targetType: body.targetType });
+          } catch (err) {
+            await app.redis.del(windowKey).catch(() => undefined);
+            throw err;
+          }
+        }
       } catch (err) {
         app.log.error({ err, contentReportId: report.id }, '[R19] CSAE report saved but the ops page did not open — moderation queue only');
       }

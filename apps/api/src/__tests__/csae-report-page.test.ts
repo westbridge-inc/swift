@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -9,6 +9,19 @@ import { socketPlugin } from '../plugins/socket';
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { CSAE_PAGE_TITLE } from '../modules/moderation/csae-page';
+
+// [REVIEW-F S3-1 on e53c15fe] a page that fails to open must not silence the next one: one switch makes the next page fail.
+const fx = vi.hoisted(() => ({ failNextPage: false }));
+vi.mock('../modules/moderation/csae-page', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../modules/moderation/csae-page')>();
+  return {
+    ...real,
+    pageCsaeReport: async (...args: Parameters<typeof real.pageCsaeReport>) => {
+      if (fx.failNextPage) { fx.failNextPage = false; throw new Error('test: the ops page did not open'); }
+      return real.pageCsaeReport(...args);
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // [Brief item 3 · Child Safety Standards] "Reports reach our moderation team immediately and are
@@ -114,5 +127,31 @@ describe('a Child safety (CSAE) report pages operations at once', () => {
     const res = await report({ targetType: 'USER', targetId: `user_${RUN}_${reason}`, reason });
     expect(res.statusCode, res.body).toBe(201);
     expect(await csaePages()).toHaveLength(1);
+  });
+});
+
+describe('[REVIEW-F S3-1] the 10-minute window never silences a page that did not go out', () => {
+  it('a page that fails to open releases the window: the same person\'s next CSAE report pages', async () => {
+    reporter = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
+    const before = (await csaePages()).length;
+    fx.failNextPage = true;
+    const failed = await report({ targetType: 'USER', targetId: `user_${RUN}_fail`, reason: 'CSAE' });
+    expect(failed.statusCode, failed.body).toBe(201); // the report is on record even when the page fails
+    expect(await csaePages()).toHaveLength(before);
+    const next = await report({ targetType: 'USER', targetId: `user_${RUN}_after_fail`, reason: 'CSAE' });
+    await closeOurPages();
+    expect(next.statusCode, next.body).toBe(201);
+    expect(await csaePages()).toHaveLength(before + 1);
+  });
+
+  it('a Redis error on the window pages anyway', async () => {
+    reporter = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
+    const before = (await csaePages()).length;
+    const set = vi.spyOn(app.redis, 'set').mockRejectedValueOnce(new Error('test: redis down'));
+    const res = await report({ targetType: 'USER', targetId: `user_${RUN}_redis`, reason: 'CSAE' });
+    set.mockRestore();
+    await closeOurPages();
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await csaePages()).toHaveLength(before + 1);
   });
 });
