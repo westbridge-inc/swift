@@ -286,6 +286,23 @@ describe('[owner 15 Oct + owner #20] checkout never accepts a bulky delivery no 
   });
 });
 
+describe('[owner 15 Oct] the checkout supply probe counts only vehicles that carry goods', () => {
+  it('with only a taxi car near, an ordinary delivery is refused at checkout (no delivery rider), never placed to strand', async () => {
+    process.env['DISPATCH_AVAILABILITY'] = '1';
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await sys(() => app.prisma.address.create({
+      data: { userId: customer.userId, label: 'Home', addressLine1: '3 Lethem Road', city: 'Lethem', region: 'Upper Takutu-Upper Essequibo', latitude: SPOT.lat + 0.004, longitude: SPOT.lng, isDefault: true },
+    }));
+    await makeRider('CAR', 100);
+    const add = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId: plainItemId, quantity: 1 });
+    expect([200, 201], add.body).toContain(add.statusCode);
+    const refused = await call('POST', '/api/v1/customer/checkout', customer.token, { paymentMethod: 'CASH' });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('DELIVERY_NO_RIDERS');
+    expect(await sys(() => app.prisma.order.count({ where: { customerId: customer.userId } }))).toBe(0);
+  });
+});
+
 describe('[owner 15 Oct] switch ON (CAR_DELIVERIES=1): cars deliver again, exactly as #1693 built it', () => {
   it('a bulky order is offered to the car again, and the car’s board shows it', async () => {
     process.env['CAR_DELIVERIES'] = '1';
