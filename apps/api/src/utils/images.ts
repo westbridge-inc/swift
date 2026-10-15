@@ -4,6 +4,8 @@
  * smuggle scripts/PDFs into publicly served folders.
  */
 
+import { AppError } from './errors';
+
 export const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 /** Cheap magic-byte sniff so a spoofed Content-Type cannot smuggle non-images. */
@@ -14,6 +16,84 @@ export function looksLikeImage(buffer: Buffer): boolean {
   const webp =
     buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
   return jpeg || png || webp;
+}
+
+// ---------------------------------------------------------------------------
+// [Row 108] THE PIXEL CAP. A 5 MB upload can declare a huge canvas (a
+// decompression bomb, or a 100 MP camera mode) that every later decode must
+// expand: the website's resizer, a reviewer's screen. The width and height
+// are read from the image's own header (JPEG frame, PNG IHDR, WebP
+// VP8/VP8L/VP8X) without decoding a pixel, and the storage seam refuses
+// anything over about 40 megapixels. A header this cannot read is left to the
+// magic-byte sniff and the size limit, as before.
+// ---------------------------------------------------------------------------
+
+export const MAX_IMAGE_PIXELS = 40_000_000;
+
+const JPEG_FRAME_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+
+function jpegDimensions(buffer: Buffer): { width: number; height: number } | null {
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let at = 2;
+  while (at + 4 <= buffer.length) {
+    if (buffer[at] !== 0xff) return null;
+    let marker = buffer[at + 1]!;
+    while (marker === 0xff && at + 2 < buffer.length) { at += 1; marker = buffer[at + 1]!; }
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { at += 2; continue; }
+    if (marker === 0xd9 || marker === 0xda) return null; // end of image, or scan data before any frame header
+    const length = buffer.readUInt16BE(at + 2);
+    if (length < 2) return null;
+    if (JPEG_FRAME_MARKERS.has(marker)) {
+      if (at + 9 > buffer.length) return null;
+      return { height: buffer.readUInt16BE(at + 5), width: buffer.readUInt16BE(at + 7) };
+    }
+    at += 2 + length;
+  }
+  return null;
+}
+
+function pngDimensions(buffer: Buffer): { width: number; height: number } | null {
+  if (buffer.length < 24 || buffer.readUInt32BE(0) !== 0x89504e47 || buffer.toString('ascii', 12, 16) !== 'IHDR') return null;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+function webpDimensions(buffer: Buffer): { width: number; height: number } | null {
+  // 25 bytes hold the smallest header (lossless); a read past the end throws and reads as null.
+  if (buffer.length < 25 || buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WEBP') return null;
+  const chunk = buffer.toString('ascii', 12, 16);
+  const data = 20;
+  if (chunk === 'VP8X') return { width: buffer.readUIntLE(data + 4, 3) + 1, height: buffer.readUIntLE(data + 7, 3) + 1 };
+  if (chunk === 'VP8L') {
+    if (buffer[data] !== 0x2f) return null;
+    const bits = buffer.readUInt32LE(data + 1);
+    return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+  }
+  if (chunk === 'VP8 ') {
+    if (buffer[data + 3] !== 0x9d || buffer[data + 4] !== 0x01 || buffer[data + 5] !== 0x2a) return null;
+    return { width: buffer.readUInt16LE(data + 6) & 0x3fff, height: buffer.readUInt16LE(data + 8) & 0x3fff };
+  }
+  return null;
+}
+
+/** Width and height from the header alone; null when it cannot be read or the type is not a raster image. */
+export function imageDimensions(buffer: Buffer, mimeType: string): { width: number; height: number } | null {
+  try {
+    const found = mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? jpegDimensions(buffer)
+      : mimeType === 'image/png' ? pngDimensions(buffer)
+        : mimeType === 'image/webp' ? webpDimensions(buffer)
+          : null;
+    return found && found.width > 0 && found.height > 0 ? found : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Refuses (413 IMAGE_TOO_LARGE) a photo whose header declares more than MAX_IMAGE_PIXELS. */
+export function assertImageWithinPixelCap(buffer: Buffer, mimeType: string): void {
+  const size = imageDimensions(buffer, mimeType);
+  if (size && size.width * size.height > MAX_IMAGE_PIXELS) {
+    throw new AppError(413, 'IMAGE_TOO_LARGE', 'This photo is larger than 40 megapixels. Take it again or choose a smaller photo.');
+  }
 }
 
 /**

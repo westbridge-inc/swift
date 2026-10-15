@@ -9,7 +9,7 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
-import { stripImageMetadata } from '../../utils/images';
+import { assertImageWithinPixelCap, stripImageMetadata } from '../../utils/images';
 import { storageSigningKeys } from '../../utils/signing-keys';
 import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from './storage-key';
 import { assertDurableStorageConfig } from './storage-config';
@@ -46,6 +46,8 @@ export interface StorageProvider {
  * untouched, as does anything that will not parse.
  */
 function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
+  // [Row 108] The same seam refuses a photo over the pixel cap before anything is written.
+  assertImageWithinPixelCap(input.buffer, input.mimeType);
   return { ...input, buffer: stripImageMetadata(input.buffer, input.mimeType) };
 }
 

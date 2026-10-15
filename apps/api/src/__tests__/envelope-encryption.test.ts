@@ -222,6 +222,21 @@ describe('encrypted upload → render → shred', () => {
   });
 });
 
+// [Row 108] The verification store only ever sees ciphertext, so the pixel cap is
+// checked at this route, before the photo is encrypted.
+describe('[row 108] an oversized ID photo is refused before it is encrypted', () => {
+  it('a PNG declaring 8000 × 6000 pixels answers 413 IMAGE_TOO_LARGE and nothing is stored', async () => {
+    const big = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA3fxQ8AAAAABJRU5ErkJggg==', 'base64');
+    big.writeUInt32BE(8000, 16);
+    big.writeUInt32BE(6000, 20);
+    const before = await app.prisma.encryptedObject.count();
+    const res = await uploadAs(token, big);
+    expect(res.statusCode).toBe(413);
+    expect(res.json().error.code).toBe('IMAGE_TOO_LARGE');
+    expect(await app.prisma.encryptedObject.count()).toBe(before);
+  });
+});
+
 describe('retention purge shreds the envelope', () => {
   it('purgeExpiredDocuments nulls wrappedDek alongside the object delete', async () => {
     const up = await uploadMultipart();

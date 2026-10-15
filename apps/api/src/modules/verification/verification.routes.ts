@@ -8,7 +8,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
 import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
 import { createHash } from 'node:crypto';
-import { looksLikeDocument } from '../../utils/images';
+import { assertImageWithinPixelCap, looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 
@@ -133,6 +133,8 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (!looksLikeDocument(buffer, file.mimetype)) {
       throw new AppError(400, 'BAD_CONTENT', 'File content does not match its declared format');
     }
+    // [Row 108] Checked here because the storage seam only ever sees this file encrypted.
+    assertImageWithinPixelCap(buffer, file.mimetype);
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
