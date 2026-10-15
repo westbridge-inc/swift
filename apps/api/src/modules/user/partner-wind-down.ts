@@ -2,6 +2,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { formatMoney } from '../../utils/currency-amount';
 import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
+import { openCreditRefunds } from '../billing/credit-refund';
 
 /** Account closure preserves financial history. Earnings describe direct payments
  * between participants; Swift holds no balance to pay out. Open cash obligations
@@ -14,9 +15,11 @@ import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
  * [GUARDRAILS §1] Weekly-fee money also blocks: a checkout MMG can still
  * confirm (it would be credited to a cancelled, de-identified subscription
  * with no one to tell), an unresolved payment hold, and fee credit Swift holds
- * for the person. Never a silently dropped payment.
+ * for the person, and credit set aside for a refund that has not been paid
+ * back yet (the payout needs the person still reachable). Never a silently
+ * dropped payment.
  */
-export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'PARTIAL_CASH_RETURN', 'OPEN_CLAIM', 'FEE_PAYMENT_PENDING', 'FEE_CREDIT'] as const;
+export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'PARTIAL_CASH_RETURN', 'OPEN_CLAIM', 'FEE_PAYMENT_PENDING', 'FEE_CREDIT', 'FEE_REFUND_PENDING'] as const;
 export type PartnerBlocker = (typeof PARTNER_BLOCKERS)[number];
 
 export interface PartnerObligations {
@@ -37,6 +40,8 @@ export interface PartnerObligations {
   feeCreditCount?: number;
   /** That credit in total, in GYD major units — the amount Swift refunds. */
   feeCreditAmount?: number;
+  /** Fee subscriptions with credit set aside for a refund, not yet paid back. */
+  feeRefundPendingCount?: number;
 }
 
 export interface PartnerDeletionVerdict {
@@ -60,6 +65,7 @@ export function verdictFor(o: PartnerObligations): PartnerDeletionVerdict {
   if ((o.openClaimCount ?? 0) > 0) blockers.push('OPEN_CLAIM');
   if ((o.pendingFeePaymentCount ?? 0) > 0) blockers.push('FEE_PAYMENT_PENDING');
   if ((o.feeCreditCount ?? 0) > 0) blockers.push('FEE_CREDIT');
+  if ((o.feeRefundPendingCount ?? 0) > 0) blockers.push('FEE_REFUND_PENDING');
   return { blockers, clear: blockers.length === 0 };
 }
 
@@ -87,6 +93,9 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
   // paid for weekly fees that have not started.
   FEE_CREDIT:
     'You have {amount} paid for weekly fees that have not started. Open Get help and we\u2019ll refund it, then your account can be deleted.',
+  // The refund is set aside and on its way: the person waits for it to arrive.
+  FEE_REFUND_PENDING:
+    'Swift is paying back what you paid for weekly fees that have not started. Once you have received it, return here to delete your account. Open Get help if it has not arrived.',
 };
 
 /** The whole refusal, as one sentence a person can act on, with the amounts
@@ -156,7 +165,7 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
     where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },
     select: { id: true },
   });
-  if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmount: 0 };
+  if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmount: 0, feeRefundPendingCount: 0 };
   const subscriptionId = { in: subscriptions.map((sub) => sub.id) };
   const lateHorizon = new Date(Date.now() - LATE_WINDOW_MS);
   const [checkouts, cardPayments, payments, holds, credit, reversals] = await Promise.all([
@@ -180,10 +189,14 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
     // [MMG REVERSAL] A fee payment being returned through MMG, or held for a person.
     tx.mmgFeeReversal.count({ where: { subscriptionId, state: { in: ['SENDING', 'SENT', 'HELD'] } } }),
   ]);
+  // Credit set aside for a refund leaves the wallet before it is paid back,
+  // so it is counted on its own until the payout is recorded (or released).
+  const refundsPending = await openCreditRefunds(tx, subscriptions.map((sub) => sub.id));
   return {
     pendingFeePaymentCount: checkouts + cardPayments + payments + holds + reversals,
     feeCreditCount: credit._count._all,
     feeCreditAmount: Number(credit._sum.balance ?? 0),
+    feeRefundPendingCount: refundsPending.size,
   };
 }
 

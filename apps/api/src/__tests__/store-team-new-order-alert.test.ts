@@ -503,7 +503,8 @@ describe('[#15] every publication to a store room goes through the team gate', (
       visit(ast);
     }
     expect(bypasses).toEqual([]);
-    expect(publishers).toBe(12);
+    // 12 + the admin store-refund close (#1607).
+    expect(publishers).toBe(13);
   });
 });
 

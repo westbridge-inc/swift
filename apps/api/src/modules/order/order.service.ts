@@ -620,6 +620,14 @@ export interface CanonicalOrderTransitionInput {
    * acceptance). Runs AFTER the status write and cleanup on the same locked
    * row; a throw rolls the whole transition back. Must not publish. */
   withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
+  /** [MMGCLOSE] The ONE exception to the paid-MMG cancel refusal: Swift support
+   * closing a STORE-CLAIMED (CLAIMED, never provider-CAPTURED) MMG order that
+   * cannot be fulfilled, as "refund handled by the store". Record only: the
+   * caller must write the refund rail's CANCELLATION obligation in
+   * `withinTransaction` — the database refuses the commit without it
+   * (orders_paid_mmg_terminal_needs_refund_obligation). Only
+   * `closeMmgOrderAsStoreRefund` (order/mmg-store-close.ts) sets it. */
+  paidMmgStoreRefundClosure?: true;
   /** Admin's explicit action evidence belongs in the same commit as the order
    * state. The generic after-response route audit remains defence in depth. */
   operatorAudit?: {
@@ -2240,10 +2248,14 @@ export class OrderService {
     // lock — the pair {capture, cancel} is serialized in both commit orders.
     // The store settles a cancellation of paid MMG money with the customer
     // directly; the order then completes or stays live for support.
+    const storeRefundClosure = input.paidMmgStoreRefundClosure === true
+      && input.target === 'CANCELLED'
+      && source.paymentStatus === 'CLAIMED';
     if (
       operationalCancellation
       && source.paymentMethod === 'MOBILE_MONEY'
       && MMG_MONEY_MOVED.has(source.paymentStatus)
+      && !storeRefundClosure
     ) {
       throw new AppError(
         409,

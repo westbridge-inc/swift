@@ -9,7 +9,7 @@ import {
 } from '../modules/country/pricing-config';
 import { DEFAULT_DELIVERY_RATES, calculateCourierFee, calculateDeliveryFee } from '../utils/markup';
 import { DEFAULT_COURIER_RATES, estimateCourierFee, type DeliverySpeed, type PackageSize } from '../modules/courier/courier.service';
-import { FareService, formulaFare } from '../modules/rides/fare.service';
+import { FareService, applyClassMultiplier, formulaFare } from '../modules/rides/fare.service';
 import { planVendorGroup } from '../modules/order/cart-plans';
 import { desiredPlatformConfig, PLATFORM_CONFIG_VERSION } from '../modules/ops/platform-config';
 import { pricingConfigCounter } from '../plugins/observability';
@@ -162,8 +162,11 @@ describe('taxi economy: the owner’s worked examples, priced from the seeded Gu
     for (const km of [2, 7, 41]) expect((await quote(km, 0))['ECONOMY']).toBe((await quote(km, 240))['ECONOMY']);
   });
 
-  it('Comfort and Group scale the same fare by the unchanged multipliers: 10 km is 2,000 / 2,700 / 5,000', async () => {
-    expect(await quote(10, 24)).toEqual({ ECONOMY: 2000, COMFORT: 2700, GROUP: 5000 });
+  it('Comfort scales the same fare by the unchanged multiplier: 10 km is 2,000 / 2,700; Group would be 5,000', async () => {
+    // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] Both buses are hidden at launch, so the
+    // Group tier is not quoted; its unchanged multiplier still prices 10 km at 5,000 the day buses return.
+    expect(await quote(10, 24)).toEqual({ ECONOMY: 2000, COMFORT: 2700 });
+    expect(applyClassMultiplier(2000, DEFAULT_CLASS_RATES.GROUP, DEFAULT_TAXI_RATES.minimum)).toBe(5000);
   });
 
   it('the seeded card reads as written, is recorded as version 1, and the shadow merge agrees with it', async () => {
