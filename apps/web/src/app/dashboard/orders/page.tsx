@@ -118,11 +118,13 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   const lineResolved = (l: OrderLine) => l.picked || l.subStatus === 'REFUNDED' || l.subStatus === 'REJECTED';
   const lineFulfilled = (l: OrderLine) => l.picked && l.subStatus !== 'REFUNDED' && l.subStatus !== 'REJECTED';
   const open = order.items.filter((l) => !lineResolved(l)).length;
+  const waiting = order.items.filter((l) => !l.picked && l.subStatus === 'PENDING').length;
+  const pickable = open - waiting;
   const fulfilled = order.items.filter(lineFulfilled).length;
   const removed = order.items.length - open - fulfilled;
   const pickingSummary =
     open > 0
-      ? `Shelf picking — ${open} to pick`
+      ? `Shelf picking — ${[pickable > 0 ? `${pickable} to pick` : '', waiting > 0 ? `${waiting} waiting on customer` : ''].filter(Boolean).join(', ')}`
       : fulfilled === 0
         ? 'Nothing left to hand over — cancel this order'
         : removed > 0
@@ -161,7 +163,17 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                   there is no tender here on which a refund could be owed. */}
               {it.subStatus === 'REFUNDED' && <span className="text-xs font-semibold text-[var(--swift-muted)]">Removed — not charged</span>}
               {it.subStatus === 'REJECTED' && <span className="text-xs font-semibold text-[var(--swift-red)]">Sub declined</span>}
-              {!it.picked && it.subStatus !== 'PENDING' && it.subStatus !== 'REFUNDED' && it.subStatus !== 'REJECTED' && (
+              {!it.picked && (it.subStatus === 'PENDING' || it.subStatus === 'APPROVED') && (
+                <button
+                  onClick={() => refundMut.mutate(it.id)}
+                  disabled={busy || mmgLocked}
+                  title={mmgLocked ? MMG_LINE_LOCK : undefined}
+                  className="text-xs font-semibold text-[var(--swift-red)] disabled:opacity-50"
+                >
+                  Remove unavailable line
+                </button>
+              )}
+              {!it.picked && it.subStatus === 'NONE' && (
                 <button
                   onClick={() => setSubFor(subFor === it.id ? null : it.id)}
                   disabled={busy}
@@ -171,7 +183,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                 </button>
               )}
             </div>
-            {subFor === it.id && it.subStatus !== 'PENDING' && it.subStatus !== 'REFUNDED' && it.subStatus !== 'REJECTED' && (
+            {subFor === it.id && !it.picked && it.subStatus === 'NONE' && (
               <div className="mt-2 border-t border-black/5 pt-2">
                 <p className="text-xs font-semibold text-[var(--swift-muted)]">Offer a substitute:</p>
                 <div className="mt-1 flex flex-wrap gap-1.5">

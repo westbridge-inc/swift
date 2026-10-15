@@ -565,3 +565,37 @@ describe('store picking uses the server substitution status', () => {
     expect(screen.getByText('Nothing left to hand over — cancel this order')).toBeTruthy();
   });
 });
+
+
+describe('pending and approved line removal remains available', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it.each(['PENDING', 'APPROVED'])('%s allows removal but never offers a second proposal', async (subStatus) => {
+    const detail = wireVendorOrderDetail({
+      vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: false }, status: 'PREPARING',
+      items: [wireOrderLine({ subStatus, picked: false, substituteName: 'Replacement rice' })],
+    });
+    const handler = boardHandler([detail], detail);
+    const fetchMock = mockApi((request) => {
+      if (request.method === 'POST' && request.url.pathname.endsWith('/refund-line')) {
+        return { body: { success: true, data: {} } };
+      }
+      return handler(request);
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText('Total (Cash)');
+    expect(screen.queryByRole('button', { name: 'Out of stock?' })).toBeNull();
+    if (subStatus === 'PENDING') {
+      expect(screen.getByText('Shelf picking — 1 waiting on customer')).toBeTruthy();
+      expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
+    } else {
+      expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(false);
+    }
+    await user.click(screen.getByRole('button', { name: 'Remove unavailable line' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).includes('/refund-line') && init?.method === 'POST')).toBe(true));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/substitute'))).toBe(false);
+  });
+});
