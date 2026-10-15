@@ -548,7 +548,6 @@ describe('store picking uses the server substitution status', () => {
     });
     mockApi(boardHandler([detail], detail));
     const { user, queryClient } = renderWithQuery(<OrdersPage />);
-    await user.click(await screen.findByRole('button', { name: /In progress/ }));
     await user.click(await rowFor('SW-1001'));
     await screen.findByText('Total (Cash)');
     return { user, queryClient, detail };
@@ -604,7 +603,6 @@ describe('pending and approved line removal remains available', () => {
       return handler(request);
     });
     const { user } = renderWithQuery(<OrdersPage />);
-    await user.click(await screen.findByRole('button', { name: /In progress/ }));
     await user.click(await rowFor('SW-1001'));
     await screen.findByText('Total (Cash)');
     expect(screen.queryByRole('button', { name: 'Out of stock?' })).toBeNull();
@@ -618,6 +616,8 @@ describe('pending and approved line removal remains available', () => {
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).includes('/refund-line') && init?.method === 'POST')).toBe(true));
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/substitute'))).toBe(false);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Independent review of #1601 (11 Oct), S2-1: React Query keeps the last good
