@@ -1,3 +1,5 @@
+import { courierReceiptKey, openCourierAnswer, sealCourierAnswer } from './courier-receipt';
+import { checkoutRequestHash, persistCheckoutReceiptInTransaction, persistDispatchCommandInTransaction, drainCheckoutOutbox } from '../order/checkout-outbox';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertRoadTripInMarket } from '../rides/road-trip-market';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
@@ -11,7 +13,6 @@ import { estimateCourierFee, type CourierRates, type PackageSize, type DeliveryS
 import { readCourierRates } from '../country/pricing-config';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { assertRoadQuoteAvailable, getMapsProvider } from '../../providers/maps/maps-provider';
-import { makeDispatchService } from '../dispatch/dispatch.service';
 import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { RIDER_PICKUP_FROM } from '../order/order-status';
 import { NotificationService } from '../notification/notification.service';
@@ -182,7 +183,6 @@ async function quote(
 
 export default async function courierRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
-  const dispatch = makeDispatchService(app);
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const notifications = new NotificationService(app.prisma, app.io);
   // [M-28] The cash rail — the same one the rider's door handover and the driver's fare outcome use.
@@ -218,10 +218,23 @@ export default async function courierRoutes(app: FastifyInstance) {
     // dispatched — refused before the routing provider is asked for a quote.
     if (customer.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError(REVIEW_DEMO_NO_BOOKINGS_MESSAGE);
 
-    const restriction = await orderingRestriction(app.prisma, userId);
-    if (restriction === 'banned') {
-      throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Courier is disabled on this account after repeated failed payments. Contact support.');
-    }
+    const receiptKey = courierReceiptKey(request.headers['idempotency-key']);
+    const requestHash = checkoutRequestHash(body);
+    const receiptContext = checkoutRequestHash({ userId, receiptKey, requestHash });
+    const replay = async (db: Prisma.TransactionClient) => {
+      if (!receiptKey) return null;
+      const receipt = await db.checkoutReceipt.findUnique({ where: { userId_idempotencyKey: { userId, idempotencyKey: receiptKey } } });
+      if (!receipt) return null;
+      if (receipt.requestHash !== requestHash) throw new AppError(422, 'IDEMPOTENCY_MISMATCH', 'This request key was already used for a different parcel. Use a new key for a new job.');
+      return { answer: await openCourierAnswer(receipt.result, receiptContext), orderId: receipt.orderIds[0]! };
+    };
+    const existing = await replay(app.prisma);
+    if (existing) { reply.code(201); return existing.answer; }
+    const assertCashAllowed = async (db: Prisma.TransactionClient) => {
+      const restriction = await orderingRestriction(db, userId);
+      if (restriction !== null) throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Cash courier requests are disabled on this account after failed payments. Contact support.');
+    };
+    await assertCashAllowed(app.prisma);
 
     // [GUARDRAILS §8 · owner #67] Swift never delivers banned goods: the description is screened against the
     // same list as the catalogue (disguises included) and refused in plain words, before anything is written.
@@ -254,9 +267,13 @@ export default async function courierRoutes(app: FastifyInstance) {
     const todayCount = await app.prisma.order.count({ where: { placedAt: { gte: today } } });
 
     const trackingToken = randomBytes(32).toString('base64url');
-    const order = await app.prisma.$transaction(async (tx) => {
+    const committed = await app.prisma.$transaction(async (tx) => {
       await lockActiveOrderCustomer(tx, userId, customer.tenantId);
-      return tx.order.create({
+      // A racing retry observes the first commit under the same customer lock.
+      const existing = await replay(tx);
+      if (existing) return existing;
+      await assertCashAllowed(tx);
+      const order = await tx.order.create({
         data: {
           tenantId: customer.tenantId,
           orderNumber: generateOrderNumber(todayCount + 1),
@@ -304,39 +321,32 @@ export default async function courierRoutes(app: FastifyInstance) {
           },
         },
       });
+      const answer = {
+        success: true,
+        data: {
+          orderId: order.id, orderNumber: order.orderNumber, fee: estimate.totalFee,
+          distanceKm: Math.round(distanceKm * 10) / 10,
+          trackingToken, trackingUrl: `/track/${trackingToken}`,
+          expiresAt: new Date(order.placedAt.getTime() + TRACKING_TTL_MS),
+        },
+      };
+      if (!order.holdExpiresAt) await persistDispatchCommandInTransaction(tx, {
+        orderId: order.id, tenantId: order.tenantId, reason: 'courier-created', priority: 5, now: order.placedAt,
+      });
+      if (receiptKey) await persistCheckoutReceiptInTransaction(tx, {
+        userId, tenantId: order.tenantId, idempotencyKey: receiptKey, requestHash,
+        orderIds: [order.id], result: await sealCourierAnswer(answer, receiptContext),
+      });
+      return { answer, orderId: order.id };
     });
 
-    // Held courier jobs dispatch at release (the worker enqueues); otherwise now.
-    // SWIFT-097: enqueue the first-pass dispatch like taxi does (SWIFT-AUD-D6-08),
-    // instead of awaiting the offer cascade inline — the cascade does ETA
-    // round-trips that would pin this handler (and a DB connection) open. The
-    // client listens for the dispatch:offer socket event either way. Inline
-    // fallback when no queue is up (tests / degraded boot).
-    if (!order.holdExpiresAt) {
-      if (app.dispatchQueue) {
-        await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
-          priority: 5,
-          removeOnComplete: 100,
-          removeOnFail: 50,
-        });
-      } else {
-        await dispatch.dispatchOrder(order.id);
-      }
-    }
-
+    // The existing worker sweep recovers a crash or outage after commit.
+    // A failed fast publication never turns a committed order into a failure.
+    if (app.dispatchQueue) await drainCheckoutOutbox({
+      prisma: app.prisma, queues: { ...app.queues, dispatchQueue: app.dispatchQueue }, log: request.log,
+    }, { orderIds: [committed.orderId] }).catch((err: unknown) => request.log.warn({ err }, 'Courier dispatch remains in the outbox'));
     reply.code(201);
-    return {
-      success: true,
-      data: {
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        fee: estimate.totalFee,
-        distanceKm: Math.round(distanceKm * 10) / 10,
-        trackingToken,
-        trackingUrl: `/track/${trackingToken}`,
-        expiresAt: new Date(order.placedAt.getTime() + TRACKING_TTL_MS),
-      },
-    };
+    return committed.answer;
   });
 
   /** GET /orders — the sender's courier history. */
