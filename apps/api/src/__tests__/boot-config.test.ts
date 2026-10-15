@@ -2,10 +2,10 @@ import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPair, type KeyObject } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { assertSafeBootConfig, assertProductionData, assertWallLoginConfig } from '../utils/boot-config';
 import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
 
@@ -1136,4 +1136,89 @@ describe('[LAUNCH-LOCK] production refuses to boot with card payments or ads on'
     expect(result.stdout).toContain('CARD_RAIL_ENROLL must be unset or 0');
     expect(result.stdout).toContain('ADS_ENABLED must be unset or 0');
   });
+});
+
+describe('[TA-S0-003 · R3] the contract posture runs on the two least-privilege logins only', () => {
+  const APP_URL = 'postgresql://swift_app_login:app-fixture-secret@postgres:5432/swift';
+  const SYSTEM_URL = 'postgresql://swift_system_login:system-fixture-secret@postgres:5432/swift';
+  const walled: Record<string, string | undefined> = {
+    ...good, TENANT_RLS_BIND: '1', TENANT_UNSCOPED_ACCESS: 'deny', DATABASE_URL: APP_URL, SYSTEM_DATABASE_URL: SYSTEM_URL,
+  };
+  const refusal = (env: Record<string, string | undefined>) => {
+    try {
+      assertSafeBootConfig(env);
+      return null;
+    } catch (error) {
+      return (error as Error).message;
+    }
+  };
+
+  it('boots on swift_app_login + swift_system_login with unscoped access denied', () => {
+    expect(refusal(walled)).toBeNull();
+  });
+
+  it.each([
+    ['unscoped access only counted', { TENANT_UNSCOPED_ACCESS: 'log' }, /TENANT_UNSCOPED_ACCESS is not deny/],
+    ['unscoped access unset', { TENANT_UNSCOPED_ACCESS: undefined }, /TENANT_UNSCOPED_ACCESS is not deny/],
+    ['the expand declaration riding along', { TENANT_WALL_EXPAND_ATTESTED: '1' }, /TENANT_WALL_EXPAND_ATTESTED is set/],
+    ["the owner's password in the process", { POSTGRES_PASSWORD: 'owner-fixture-secret' }, /owner's password/],
+    ['no request URL', { DATABASE_URL: undefined }, /DATABASE_URL is missing/],
+    ['a request URL that is not a postgres URL', { DATABASE_URL: 'mysql://swift_app_login:x@postgres/swift' }, /DATABASE_URL is missing or not/],
+    ['no system URL', { SYSTEM_DATABASE_URL: undefined }, /SYSTEM_DATABASE_URL is missing/],
+    ['the owner as the request login', { DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' }, /DATABASE_URL does not sign in as swift_app_login/],
+    ['postgres as the request login', { DATABASE_URL: 'postgresql://postgres:owner-fixture-secret@postgres:5432/swift' }, /does not sign in as swift_app_login/],
+    ['the system login as the request login', { DATABASE_URL: SYSTEM_URL }, /does not sign in as swift_app_login/],
+    ['the owner as the system login', { SYSTEM_DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' }, /SYSTEM_DATABASE_URL does not sign in as swift_system_login/],
+    ['one login for both', { SYSTEM_DATABASE_URL: APP_URL }, /does not sign in as swift_system_login/],
+    ['another database', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace(':5432/swift', ':5432/other') }, /different databases/],
+    ['another host', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace('@postgres:', '@elsewhere:') }, /different databases/],
+    ['another port', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace(':5432/', ':5433/') }, /different databases/],
+  ])('refuses %s, naming no value', (_label, change, pattern) => {
+    const message = refusal({ ...walled, ...change });
+    expect(message).toMatch(/^FATAL: TENANT_RLS_BIND=1 in production/);
+    expect(message).toMatch(pattern);
+    for (const value of ['fixture-secret', 'elsewhere', 'mysql://', '5433']) expect(message).not.toContain(value);
+  });
+
+  it('touches nothing without TENANT_RLS_BIND=1, and nothing outside production', () => {
+    // Today's expand posture (staging, production before Phase C) is unchanged.
+    expect(refusal({ ...good, TENANT_WALL_EXPAND_ATTESTED: '1', DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' })).toBeNull();
+    expect(refusal({ ...good, TENANT_RLS_BIND: '0', DATABASE_URL: 'postgresql://swift:o@postgres:5432/swift' })).toBeNull();
+    for (const NODE_ENV of ['development', 'test']) {
+      expect(() => assertWallLoginConfig({ NODE_ENV, TENANT_RLS_BIND: '1', DATABASE_URL: 'postgresql://swift:o@postgres:5432/swift' })).not.toThrow();
+    }
+  });
+
+  it('the deploy preflight mirrors the compose overlay when it reads the store', () => {
+    // The store after Phase C holds the owner's password (postgres and migrate
+    // still use it) AND the two runtime URLs. The overlay hands the API only the
+    // URLs; without it the API gets only the owner's parts.
+    const directory = mkdtempSync(join(tmpdir(), 'swift-wall-preflight-'));
+    try {
+      const secrets = join(directory, 'secrets');
+      mkdirSync(secrets);
+      writeFileSync(join(secrets, 'POSTGRES_PASSWORD'), 'owner-fixture-secret');
+      writeFileSync(join(secrets, 'DATABASE_URL'), APP_URL);
+      writeFileSync(join(secrets, 'SYSTEM_DATABASE_URL'), SYSTEM_URL);
+      const run = (candidate: Record<string, string | undefined>) => {
+        const file = join(directory, 'candidate.txt');
+        writeFileSync(file, Object.entries(candidate).filter((e): e is [string, string] => e[1] !== undefined)
+          .map(([name, value]) => `${name}=${value}`).join('\n'));
+        return spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), [join(process.cwd(), '../../deploy/preflight.ts'), file, '--secrets-dir', secrets],
+          { encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '' } });
+      };
+      // The overlay hands the two URLs over as files from the store, never as settings.
+      const walledSettings = Object.fromEntries(Object.entries(walled)
+        .filter(([name]) => name !== 'DATABASE_URL' && name !== 'SYSTEM_DATABASE_URL'));
+      const contract = run(walledSettings);
+      expect(contract.stdout + contract.stderr).not.toMatch(/both set/);
+      expect(contract.stdout).toMatch(/PASS/);
+      const expand = run({ ...good, TENANT_WALL_EXPAND_ATTESTED: '1', POSTGRES_HOST: 'postgres', POSTGRES_USER: 'swift', POSTGRES_DB: 'swift' });
+      expect(expand.stdout + expand.stderr).not.toMatch(/both set/);
+      expect(expand.stdout).toMatch(/PASS/);
+      for (const output of [contract, expand]) expect(output.stdout + output.stderr).not.toContain('fixture-secret');
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  }, 60_000);
 });
