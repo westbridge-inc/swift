@@ -2180,10 +2180,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // provenance check inside dispatchOrder): candidates are this tenant's.
         await inTenantOf(ctx.prisma, { order: job.data.orderId }, () =>
           dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined));
-      } else if (job.name === 'offer-timeout') {
-        // [row 266] Drain only: a timeout enqueued here before the offer lane
-        // existed (in flight across the deploy). Every new one is added to
-        // the offer queue and runs on the offer worker below.
+      } else if (job.name === 'offer-timeout') { // [row 266] drain only: enqueued here before the offer lane existed
         await inTenantOf(ctx.prisma, { order: job.data.orderId }, () => dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId));
       } else if (job.name === 'supply-watch-scan') {
           // Availability spec §5: tell waiting customers when supply returns.

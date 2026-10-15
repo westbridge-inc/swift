@@ -201,8 +201,10 @@ describe('[L01 · job PR-2] per-entity jobs run as their object’s tenant', () 
     // [DS704 S4] The census below reads the FIRST site of each job name; a
     // second, unwrapped site for the same name must not hide behind it.
     const count = (re: RegExp) => (QUEUE_SRC.match(new RegExp(re.source, 'g')) ?? []).length;
+    // [row 266] offer-timeout has two sites, both wrapped: the offer worker (the
+    // handler) and the dispatch worker's drain of timeouts enqueued before the split.
     for (const anchor of [/case 'auto-cancel':/, /case 'auto-complete':/, /job\.name === 'dispatch-order'/, /job\.name === 'offer-timeout'/,
-      /job\.name === 'route-match'/, /job\.name !== 'vendor-alert-escalate'/, /job\.name !== 'sync-vendor'/]) {
+      /job\.name !== 'offer-timeout'/, /job\.name === 'route-match'/, /job\.name !== 'vendor-alert-escalate'/, /job\.name !== 'sync-vendor'/]) {
       expect(count(anchor), String(anchor)).toBe(1);
     }
     for (const call of ['autoCancelUnresponsiveOrder\\(ctx,', 'autoCompleteDeliveredOrder\\(ctx,', 'dispatch\\.dispatchOrder\\(', 'dispatch\\.handleOfferTimeout\\(',
@@ -219,6 +221,7 @@ describe('[L01 · job PR-2] per-entity jobs run as their object’s tenant', () 
     expect(block(/case 'auto-complete':/, 200)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: job\.data\.orderId \}, \(\) => autoCompleteDeliveredOrder/);
     expect(block(/job\.name === 'dispatch-order'/)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: job\.data\.orderId \}, \(\) =>\s+dispatch\.dispatchOrder/);
     expect(block(/job\.name === 'offer-timeout'/, 300)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: job\.data\.orderId \}, \(\) => dispatch\.handleOfferTimeout/);
+    expect(block(/job\.name !== 'offer-timeout'/, 700)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: job\.data\.orderId \}, \(\) => dispatch\.handleOfferTimeout/);
     expect(block(/job\.name === 'route-match'/)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: routeOrderId \}, \(\) => matchOrderRoute/);
     expect(block(/job\.name !== 'vendor-alert-escalate'/, 600)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: orderId \}, \(\) => escalateVendorAlert/);
     expect(block(/job\.name !== 'sync-vendor'/, 600)).toMatch(/inTenantOf\(ctx\.prisma, \{ vendor: vendorId \}/);
