@@ -213,6 +213,16 @@ export const KNOWN_PAYMENT_REFERENCE_COLUMNS: ReadonlyArray<readonly [table: str
   ['ad_invoices', 'providerRef'], ['ad_refund_intents', 'providerRefundRef'], ['ad_refund_intents', 'manualPayoutRef'],
 ];
 
+/**
+ * [#1527 review S3-1] The one shared census for a reference a person types as proof that money moved:
+ * true when ANY money reference Swift records already names it (every inbound payment and its MMG
+ * candidates, every outbound refund or payout, and every return's reference), on MMG's canonical spelling.
+ * A column a customer or partner can type into can only make it refuse more, never less.
+ */
+export function referenceOnRecord(tx: Tx, reference: string): Promise<boolean> {
+  return namesAKnownPayment(tx, '', reference);
+}
+
 async function namesAKnownPayment(tx: Tx, reversalId: string, reference: string): Promise<boolean> {
   // One static subquery per KNOWN_PAYMENT_REFERENCE_COLUMNS entry: no raw identifier fragments (the
   // production SQL safety surface), and a test keeps the list and these lines identical. The typed

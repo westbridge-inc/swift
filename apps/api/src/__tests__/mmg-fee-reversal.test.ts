@@ -30,6 +30,7 @@ import {
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { setAsideCreditRefund } from '../modules/billing/credit-refund';
 
 // ---------------------------------------------------------------------------
 // [MMG REVERSAL · owner decision #11, 13 Oct] Return a WHOLE weekly-fee
@@ -1379,5 +1380,51 @@ describe('[review #1654] what MMG names is checked, one reference books once, no
     const weekLater = new Date(sent.sentAt.getTime() + 8 * 24 * 3_600_000);
     const closed = await runWithTenant('swift-default', () => service.resolveHeld({ tenantId: 'swift-default', reversalId: held.id, outcome: 'NOT_RETURNED', mmgReference: `STMT${RUN}Q`, actorId: admin.userId }, async () => {}, weekLater));
     expect(closed).toMatchObject({ state: 'FAILED', resolution: 'NOT_RETURNED' });
+  });
+});
+
+describe('[#1527 review S2-2] a fee-credit set-aside never starts beside an open MMG return of the same payer', () => {
+  const setAside = (subscriptionId: string, amount: number) => setAsideCreditRefund(app.prisma, {
+    adminId: admin.userId, approvalId: `s22-${nanoid(10)}`, subscriptionId, amount,
+  });
+  const reserved = (subId: string) => app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'PREPAID_REFUND_RESERVED' } });
+  type Paid = Awaited<ReturnType<typeof paidCheckout>>;
+  const openReturn: Record<'SENDING' | 'SENT' | 'HELD', (p: Paid) => Promise<{ state: string }>> = {
+    // SENDING is the durable claim written before MMG is asked: written here as the service writes it.
+    SENDING: async (p) => {
+      const intent = await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: p.checkoutId } });
+      return app.prisma.mmgFeeReversal.create({ data: {
+        tenantId: intent.tenantId, subscriptionId: p.subId, checkoutId: p.checkoutId, providerPaymentId: intent.providerPaymentId!,
+        mmgTransactionId: p.txn, amount: p.amount, currencyCode: intent.currencyCode, reason: REASON, requestedBy: admin.userId, sentAt: new Date(),
+      } });
+    },
+    SENT: async (p) => { sandboxScriptReversal(p.txn, 'pending'); return ask(p.checkoutId, p.amount); },
+    HELD: async (p) => { sandboxScriptReversal(p.txn, 'error'); return ask(p.checkoutId, p.amount); },
+  };
+
+  it.each(['SENDING', 'SENT', 'HELD'] as const)('while a return is %s: the set-aside is refused, nothing is set aside and the credit is untouched', async (state) => {
+    const p = await paidCheckout();
+    expect((await openReturn[state](p)).state).toBe(state);
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    await expect(setAside(p.subId, p.amount)).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_REVERSAL_IN_FLIGHT' });
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    expect(await reserved(p.subId)).toBe(0);
+  });
+
+  it('a closed return (MMG refused it) does not block: the credit can then be set aside', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'declined');
+    expect(await ask(p.checkoutId, p.amount)).toMatchObject({ state: 'FAILED' });
+    expect(await setAside(p.subId, p.amount)).toMatchObject({ replayed: false, amount: p.amount });
+    expect(await walletOf(p.subId)).toBe(0);
+    expect(await reserved(p.subId)).toBe(1);
+  });
+
+  it('the other order: once the credit is set aside, a return of that payment is refused before MMG is asked', async () => {
+    const p = await paidCheckout();
+    await setAside(p.subId, p.amount);
+    await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'MONEY_ALREADY_USED' });
+    expect(await rowsFor(p.checkoutId)).toHaveLength(0);
+    expect(reversalCalls).not.toContain(p.txn);
   });
 });
