@@ -29,7 +29,7 @@ import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, pric
 import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
-import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
+import { goodsSizeCarriableToday, vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -1048,6 +1048,19 @@ export class OrderService {
 
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
+        // [owner #20] The vehicle size this delivery needs (a bulky line → the largest class: cars and vans).
+        const requiredSize = requiredPackageSizeForOrder({
+          orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
+          courierPackageSize: null,
+          items: items.map((ci) => ({ quantity: ci.quantity, bulkUnits: ci.item.bulkUnits ?? null })),
+        }, DEFAULT_LOAD_BANDS);
+        // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] When no vehicle Swift takes on today may carry
+        // it (a bulky order while car deliveries are off), it is refused HERE, always, whatever the availability
+        // flag below: never placed, accepted and then stranded with nobody who can carry it.
+        if (requiredSize && !goodsSizeCarriableToday(requiredSize)) {
+          throw new AppError(409, 'DELIVERY_TOO_BIG',
+            'This order is too big for delivery by bike or motorbike, and no vehicle on Swift can carry this right now. Choose Pickup for this order.');
+        }
         // §2 checkout gate (availability spec, flag-gated): zero riders online
         // means an order that would strand food on a counter — honesty beats
         // accepting it. Pickup remains available; appointments never get here.
@@ -1074,11 +1087,7 @@ export class OrderService {
           // vehicle that can carry it (a bulky line → a car or van), so the
           // customer is told NOW, before anything is placed, when none such is
           // near — never an order that silently finds nobody.
-          const requiredSize = requiredPackageSizeForOrder({
-            orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
-            courierPackageSize: null,
-            items: items.map((ci) => ({ quantity: ci.quantity, bulkUnits: ci.item.bulkUnits ?? null })),
-          }, DEFAULT_LOAD_BANDS);
+          // (requiredSize: computed above, before the flag.)
           // Only a size a bicycle cannot carry narrows the pool; anything smaller
           // was already answered by the probe above.
           if (supply && requiredSize && !vehicleTypesForPackageSize(requiredSize).includes('BICYCLE')) {

@@ -155,6 +155,42 @@ export function vehicleTypesForPackageSize(size: string | null | undefined): Veh
   return VEHICLE_TYPES_IN_ORDER.filter((t) => (SIZE_RANK[VEHICLE_CLASSES[t].maxPackageSize] ?? 0) >= need);
 }
 
+/**
+ * [Owner ruling 15 Oct 2026 ~04:25Z, criminal-liability decisions] TAXI CARS = PASSENGERS ONLY until
+ * counsel confirms the hire-car licence conditions cover goods. This reverses the 8 Oct "cars can deliver"
+ * for H-plate taxis: deliveries go to riders. The server switch CAR_DELIVERIES re-enables car deliveries
+ * later; only exactly '1' turns it on (default OFF), like the other launch switches.
+ */
+export const CAR_DELIVERIES_SWITCH = 'CAR_DELIVERIES';
+export function carDeliveriesEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env[CAR_DELIVERIES_SWITCH] === '1';
+}
+
+/**
+ * May this vehicle carry goods (a store delivery or a parcel) today? A passenger vehicle (car, wagon car,
+ * bus: every vehicle a taxi Driver works) only while CAR_DELIVERIES is on; every other vehicle always.
+ * The ONE answer every goods door reads: dispatch, the rider board, the grab, every claim, checkout, courier.
+ */
+export function carriesGoods(vehicleType: string, env: Record<string, string | undefined> = process.env): boolean {
+  if (!(vehicleType in VEHICLE_CLASSES)) return false;
+  return !isPassengerVehicle(vehicleType as VehicleType) || carDeliveriesEnabled(env);
+}
+
+/** The vehicles that may carry goods of this size today (any size when unknown): capacity AND the switch. */
+export function goodsVehicleTypesForPackageSize(size: string | null | undefined, env: Record<string, string | undefined> = process.env): VehicleType[] {
+  return vehicleTypesForPackageSize(size).filter((type) => carriesGoods(type, env));
+}
+
+/**
+ * Can any vehicle Swift takes on today carry goods of this size? False means no mover on Swift could ever be
+ * offered it right now (e.g. a bulky order while car deliveries are off: only cars, vans and the heavy fleet
+ * carry the largest class, and the heavy fleet is not taken on yet), so it must be refused before it is placed,
+ * never accepted and stranded.
+ */
+export function goodsSizeCarriableToday(size: string | null | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  return goodsVehicleTypesForPackageSize(size, env).some((type) => isVehicleOffered(type));
+}
+
 /** The document-checklist keys a given vehicle adds on top of the base MOVER list. */
 export function docProfilesFor(vehicleType: VehicleType): string[] {
   return VEHICLE_CLASSES[vehicleType]?.docProfiles ?? [];

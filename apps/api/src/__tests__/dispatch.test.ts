@@ -1,6 +1,6 @@
 import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -2500,6 +2500,9 @@ describe('candidate selection at scale [SWIFT-142]', () => {
 
 describe('vehicle capability matching [SWIFT-062]', () => {
   it('an EXTRA_LARGE parcel is offered to a CAR, never to a bicycle', async () => {
+    // [Owner ruling 15 Oct 2026] TRANSFORMED: runs with CAR_DELIVERIES=1 (the re-enable path). With the switch
+    // off (default) no car is a goods candidate: taxi-cars-passengers-only.test.ts.
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     await app.prisma.rider.updateMany({ data: { isOnline: false } });
     const localUserIds: string[] = [];
     const phoneBase = 592_830_000_000 + Math.floor(Math.random() * 80_000_000);
