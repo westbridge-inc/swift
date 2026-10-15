@@ -119,6 +119,10 @@ describe('Mover and Business Agreements (Part 4)', () => {
     expect(DRIVER_AGREEMENT).toContain("The app's confirmation records show what each side has confirmed; Swift does not hold or move this money.");
     expect(DRIVER_AGREEMENT).toContain("Taxi drivers must hold insurance covering passengers carried for hire. Anyone delivering must hold insurance that permits use for hire or reward. Taxi drivers must hold a current hire-car driver's licence, and the car a current hire-car licence.");
     expect(DRIVER_AGREEMENT).not.toMatch(/in-shift selfie|police clearance\)|profile shows that you are police-cleared/);
+    // [R25 · owner 15 Oct · research D13] independence; declining or handing back never costs anything
+    expect(DRIVER_AGREEMENT).toContain('You may work with other apps, platforms or customers at the same time; Swift never asks for exclusivity. Swift sets no uniform and no working hours: you choose when, where and how long you work.');
+    expect(DRIVER_AGREEMENT).toContain('You may decline any offer, and hand a job back before pickup: declining or handing back never costs you a strike, a lower place in the offer order, or any other penalty. Strikes are only for safety, fraud or dishonesty, for example fake completions, GPS manipulation or collusion detected by our integrity systems, and can lead to restriction or removal.');
+    expect(DRIVER_AGREEMENT).not.toMatch(/cherry-picking|repeated abandonment/);
   });
 
   it('Business: authority, P1 documents + January renewal, storefront facts + statutory rights, F8, own deliveries, invited staff', () => {

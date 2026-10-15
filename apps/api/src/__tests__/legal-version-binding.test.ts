@@ -173,7 +173,7 @@ const PUBLISHED: Record<
   '2026-10-16': {
     terms: 'f9edd1cd9c5d4818226af3cb3500d200b90b0205466a69a10be5ce6db0b2a5a9',
     privacy: '5abf3fc0bc88d5c2ea39df75b61384f6b3d3940c5c7d05081412a14388b729ed',
-    driver_agreement: 'e8ee25dcd36b6f1cd1f9dd18d24ab238c3604a50695057bbc9c8feb50ac7e29f',
+    driver_agreement: 'ec16841b718b6469eb4fcc980bf7a913c1ba32f6449580a87001a3cf9efaa35a',
     vendor_agreement: 'c3e89ace0ff86e0101462ed5df0a6805e7643b5330d550113b6a58fe081b30ae',
   },
 };
