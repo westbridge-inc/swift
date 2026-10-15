@@ -12,6 +12,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { LivenessService, assertShiftLiveness } from '../modules/safety/liveness.service';
 import type { KycProvider } from '../providers/kyc/kyc-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { REAL_PNG } from './helpers/real-image';
 
 // [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
 process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
@@ -214,7 +215,7 @@ describe('LivenessService.check — the §7.1 outcome ladder', () => {
 });
 
 describe('POST /api/v1/safety/liveness-check (multipart)', () => {
-  const REAL_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+  // [Row 108] A real photo: the storage seam reads every photo with the real decoder.
   function multipartBody(filename: string, mime: string, content: Buffer) {
     const boundary = `----swift${nanoid(8)}`;
     const head = Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="${filename}"\r\ncontent-type: ${mime}\r\n\r\n`);

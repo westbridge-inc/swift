@@ -1169,3 +1169,110 @@ Once the owner's provider secrets are stored and wired (TWILIO_*,
 SMTP_PASS_FILE, OPS_ONCALL_PHONES) and DNS points at this host, run
 `./deploy/pilot-up.sh "$APPROVED_SHA"`. It ends with `PRODUCTION READY at
 exact SHA …`. Then follow section 9 for the certificate chain.
+
+## 13. The least-privilege database logins (TA-S0-003)
+
+The API and worker can run on two runtime logins instead of the database
+owner: `swift_app_login` (member of `swift_app` only; the tenant wall binds
+it) and `swift_system_login` (`swift_app` and `swift_bypass_rls`; audited
+system work only). Both are LOGIN, never superuser, BYPASSRLS, CREATEDB,
+CREATEROLE or REPLICATION, and own nothing. `deploy/rls-logins.sh` creates
+them on the host that runs the stack, as the deploy user, with Postgres up:
+
+    ./deploy/rls-logins.sh fingerprint > ~/rls-target.json    # review it: cluster, database, migration, owner, two digests
+    ./deploy/rls-logins.sh plan   --approved-target-file ~/rls-target.json
+    ./deploy/rls-logins.sh apply  --approved-target-file ~/rls-target.json
+    ./deploy/rls-logins.sh verify --approved-target-file ~/rls-target.json   # twice; identical output
+
+- Every command prints one JSON line of names, counts, digests and a
+  constant reason code. It never prints a password, and none travels in an
+  argument or an environment variable.
+- `apply` refuses before writing anything unless the database is exactly
+  the approved target and every catalogue invariant holds (row security on
+  and forced, the private QR schema closed to the app, the migrations' own
+  revocations in place, no extra default grants, the two groups unchanged
+  and owning nothing). It never repairs an existing role.
+- The passwords are generated inside the tool, kept in the encrypted store
+  (`RLS_LOGIN_SWIFT_APP_LOGIN`, `RLS_LOGIN_SWIFT_SYSTEM_LOGIN`) before either
+  login exists, and the database receives only a SCRAM verifier. Each login
+  must then sign in on a new connection (a wrong password refused first)
+  before `DATABASE_URL` and `SYSTEM_DATABASE_URL` are written to the store.
+  A run that stops halfway is finished by running `apply` again, with the
+  same credentials; a re-run that finds everything done writes nothing.
+- `verify` checks the approved target, so it holds only until the next
+  migration. Later deploys run `./deploy/rls-logins.sh roles`: the same role
+  and catalogue contract with both logins present, without the target pin.
+- One run at a time (a lock). Rotation is not part of this tool.
+- The store goes with the stack. Production's project (the commands above,
+  with no `--project-name` or extra compose file) uses production's store
+  and nothing else. Any other project (the Phase C rehearsal) must name a
+  store of its own with both `--store-dir` and `--run-dir`, neither of them
+  production's, and its own `--project-name` (never production's `swift`);
+  a project that layers `docker-compose.yml` must end with
+  `docker-compose.rehearsal.yml` (its own internal network). The tool
+  refuses any other pairing before it touches anything.
+
+### The contract posture on the stack, and the rehearsal before it
+
+Phase C switches the API and the worker onto the two logins with one
+`deploy/.env` change, after `apply` and `verify` hold: `TENANT_RLS_BIND=1`,
+`TENANT_UNSCOPED_ACCESS=deny`, and no `TENANT_WALL_EXPAND_ATTESTED` line.
+pilot-up then adds `deploy/docker-compose.wall.yml` to every Compose command.
+That file gives the API and the worker `DATABASE_URL_FILE` and
+`SYSTEM_DATABASE_URL_FILE` from the store, empties every owner part, and masks
+the owner's password file inside their secrets mount; Postgres and migrate
+keep the owner, which migrations need. Put no database `*_FILE` line in
+`deploy/.env`, and write each of these settings unquoted (`TENANT_RLS_BIND=1`,
+not `"1"`): pilot-up reads the text after `=` as it is.
+
+Under `TENANT_RLS_BIND=1`, pilot-up refuses before anything is stopped or
+migrated when unscoped access is not `deny`, when the expand declaration is
+set, when `deploy/.env` sets `DATABASE_URL_FILE`, `SYSTEM_DATABASE_URL_FILE` or
+`POSTGRES_PASSWORD_FILE`, when the store lacks either URL, or when the
+database's cluster does not have both logins. After migrating it runs
+`./deploy/rls-logins.sh roles` and starts nothing if that holds. The API
+refuses to boot in production under the bind with the owner's password in its
+process, a URL that is not the matching login, or two URLs naming different
+databases, and its boot attestation refuses a login that is a superuser,
+BYPASSRLS, a member of the owner of a walled schema or of anything in one, or
+(for the request login) a member of `swift_bypass_rls`.
+
+After Phase C production never goes back (owner ruling, 14 Oct): a production
+pilot-up without `TENANT_RLS_BIND=1` is refused once the store holds
+`RLS_LOGIN_SWIFT_APP_LOGIN`, `RLS_LOGIN_SWIFT_SYSTEM_LOGIN`, `DATABASE_URL` or
+`SYSTEM_DATABASE_URL`, or the database's cluster has either login, and
+`./deploy/doctor.sh` reports the same. A rollback is the previous compatible
+image with the contract posture kept. Staging is unchanged unless its own
+`deploy/.env` sets the bind.
+
+The rehearsal, before the owner's go for Phase C, on the production host, as
+the deploy user, once `./deploy/pilot-up.sh --data-only "$APPROVED_SHA"` has
+built the API image and with production's database running:
+
+    ./deploy/wall/rehearsal.sh up "$APPROVED_SHA"
+    ./deploy/wall/rehearsal.sh down     # removes only the rehearsal: its project, volumes, store and secrets
+
+`up` builds an isolated copy under its own Compose project (`swift-rehearsal`,
+`deploy/docker-compose.rehearsal.yml`): an internal network with no route out,
+its own volumes, its own freshly generated secrets in its own store, nothing
+public. Production is only read: the four group roles without passwords, a
+dump streamed straight into the copy, and the census. It checks the copy
+matches its source in every catalogue field but the cluster id, runs `plan`,
+`apply` and `verify` twice on the copy, then boots the real API and worker in
+deny mode and requires both attestation lines from each and no
+`TenantInUnboundTransactionError` or `FATAL` line. It leaves the copy running
+for the rest of the rehearsal (journeys, isolation checks, the launch jobs,
+the rollback test). It needs passwordless `sudo -n` for `env … swift-secrets`,
+`test` and `rm`, and fails closed without it. Never layer
+`docker-compose.rehearsal.yml` by hand.
+
+The rehearsal is not passed by `up` alone. On the copy, under the walled
+login, real journeys must succeed: a vendor route (a store's own catalogue
+and orders), a driver's and a rider's profile, a dispatch offer reaching a
+mover, and a cart through checkout. Any failure is a stop: Phase C does not
+go ahead, and the cause is fixed in code, never by loosening the wall.
+
+The copy holds production's personal data on the same host. Remove it with
+`./deploy/wall/rehearsal.sh down` as soon as the rehearsal's checks finish,
+and do not keep it across days: a deletion request honoured in production in
+the meantime does not reach the copy.

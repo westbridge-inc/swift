@@ -13,6 +13,7 @@ import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { REAL_PNG } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D8-02 — the assigned rider can capture a proof-of-delivery photo.
@@ -68,7 +69,7 @@ async function makeCourierOrder(customerId: string, riderId: string, status: 'PI
   });
 }
 
-const REAL_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
 
 function multipartBody(filename: string, mime: string, content: Buffer) {
   const boundary = `----swift${nanoid(8)}`;

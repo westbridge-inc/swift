@@ -87,8 +87,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // password sign-in paused after many wrong attempts
     'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
-    'low_stock', 'staff_added', 'review_response', 'rating_removed', 'category_request_resolved',
-    'category_backfill_review', 'vendor_tier_promoted', 'support_update', 'store_pin_moved',
+    'low_stock', 'staff_added', 'staff_invite', 'staff_joined', 'review_response', 'rating_removed', 'category_request_resolved',
+    'category_backfill_review', 'vendor_tier_promoted', 'vendor_needs_public_phone', 'support_update', 'store_pin_moved',
     'ad_campaign_paused', 'ad_campaign_cancelled', 'ad_campaign_killed', 'ad_campaign_auto_cancelled',
     'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture',
     // Operations pages (admins)
@@ -96,7 +96,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',
     'safety_escrow_review', 'not_my_driver_discrepancy', 'ops_alert_escalated', 'ops_alert_drill',
     'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old',
-    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
+    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low', 'rlp_reserve_provisioned',

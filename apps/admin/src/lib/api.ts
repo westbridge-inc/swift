@@ -46,10 +46,22 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: { id: string
   }
 }
 
-/** Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless. */
+/**
+ * Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless.
+ * [Row 78] /logout needs a live access cookie, which lasts minutes: a tab left open got a 401 from the gate, nothing was
+ * revoked, and the 30-day refresh cookie could sign the browser back in. When /logout does not answer success, the
+ * session ends by its refresh cookie instead (/logout/refresh revokes and clears without an access token).
+ */
 export async function logout(): Promise<void> {
+  const init: RequestInit = { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' };
   try {
-    await fetch(`${API_URL}/api/v1/auth/logout`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' });
+    const res = await fetch(`${API_URL}/api/v1/auth/logout`, init);
+    if (res.ok) return;
+  } catch {
+    // unreachable: try the refresh-cookie sign-out below
+  }
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout/refresh`, init);
   } catch {
     // the cookies are HttpOnly and path-scoped: with the server unreachable the shell still redirects to login
   }
@@ -272,12 +284,19 @@ export interface Promo {
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
-export const fetchUsers = (params?: string): Promise<Envelope<AdminUser[]>> =>
+/** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
+export interface ListEnvelope<T> {
+  success: boolean;
+  data: T[];
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+}
+// [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
+export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
   apiFetch(`/api/v1/admin/users?${params || ''}`);
-export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
+export const fetchVendors = (params?: string) => apiFetch(`/api/v1/admin/vendors?${params || ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
-export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
-export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
+export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?${params || ''}`);
+export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 
@@ -300,7 +319,7 @@ export interface ActivationChecklistItem {
   /** Approved, and a newer submission of the same type is waiting for review. */
   renewalPending: boolean;
 }
-export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'NEEDS_PHONE' | 'CAN_LIFT_TO_WAITING' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
 export interface VendorActivationChecklist {
   vendorId: string;
   /** The owner's user id: the Review Center's applicant. */
@@ -552,7 +571,9 @@ export const updateZoneFare = (id: string, body: { fromZoneId: string; toZoneId:
 export const deleteZoneFare = (id: string, pair: { fromZoneId: string; toZoneId: string }, reason: string) =>
   apiFetch(`/api/v1/admin/zone-fares/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(pair), reason });
 
-export const fetchConfig = (): Promise<Envelope<ConfigRow[]>> => apiFetch('/api/v1/admin/config');
+/** Launch switches the API reads from its server environment (read-only). */
+export interface LaunchSwitches { staffInviteAccept?: boolean }
+export const fetchConfig = (): Promise<Envelope<ConfigRow[]> & { switches?: LaunchSwitches }> => apiFetch('/api/v1/admin/config');
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
 export const approveVendor = (id: string, reason: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT', reason });
@@ -980,3 +1001,135 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 };
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
+
+// ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ────────────
+// MMG reverses in full only. Asking is a money action: a reason and a second
+// admin (or the owner's solo approval) — the first call answers 202
+// APPROVAL_REQUIRED. Only MMG's own lookup then moves the partner's balance.
+export interface MmgFeeReversalRow {
+  id: string;
+  state: 'SENDING' | 'SENT' | 'REVERSED' | 'FAILED' | 'HELD';
+  amount: number;
+  currencyCode: string;
+  reason: string;
+  requestedBy: string;
+  providerStatus: string | null;
+  lookupStatus: string | null;
+  heldReason: string | null;
+  sentAt: string;
+  answeredAt: string | null;
+  lastCheckedAt: string | null;
+  reversedAt: string | null;
+  failedAt: string | null;
+  resolution?: string | null;
+  resolvedBy?: string | null;
+}
+export interface MmgFeeReversalView {
+  checkoutId: string;
+  amountGyd: number;
+  switchedOn: boolean;
+  canReverse: boolean;
+  refusal?: { code: string; message: string };
+  reversals: MmgFeeReversalRow[];
+}
+export const fetchMmgFeeReversal = (checkoutId: string): Promise<Envelope<MmgFeeReversalView>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reversal`);
+export const reverseMmgFeePayment = (checkoutId: string, amountGyd: number, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reverse`, {
+    method: 'POST',
+    body: JSON.stringify({ amountGyd, reason }),
+    reason,
+  });
+// [DS1112] Resolve a HELD return on MMG's evidence (money: a reason and a second admin).
+export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED', mmgReference: string, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ outcome, mmgReference, reason }),
+    reason,
+  });
+export const checkMmgFeeReversal = (reversalId: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/check`, { method: 'POST', body: '{}' });
+
+export interface PaymentConfirmation {
+  id: string; subscriptionId: string; source: string; sourceId: string | null;
+  epoch: number; clockVersion: number; status: string; reason: string;
+  beganAt: string; reviewDueAt: string; overdue: boolean; remainingGraceMs: number; resolvable: boolean;
+  swiftReference: string | null; partner: string | null;
+  settlementPayments: { providerPaymentId: string; mmgTransactionId: string }[];
+}
+export const fetchPaymentConfirmations = (): Promise<Envelope<PaymentConfirmation[]>> => apiFetch('/api/v1/admin/billing/confirmations');
+export interface ConfirmationDecision {
+  sourceId: string; epoch: number; clockVersion: number; decision: 'UNPAID' | 'PAID';
+  providerPaymentId?: string; evidenceReference: string; reason: string;
+}
+export const requestConfirmationResolution = (id: string, body: ConfirmationDecision) =>
+  apiFetch(`/api/v1/admin/billing/confirmations/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify(body), reason: body.reason });
+
+/** Both active statuses, every page: the first fifty approvals are not exhaustive. */
+export async function fetchConfirmationApprovals(): Promise<import('./approvals').ApprovalRow[]> {
+  const rows: import('./approvals').ApprovalRow[] = [];
+  for (const status of ['PENDING', 'APPROVED']) {
+    for (let page = 1; ; page += 1) {
+      const response = await apiFetch(`/api/v1/admin/approvals?status=${status}&limit=50&page=${page}`);
+      if (response?.success !== true || !Array.isArray(response.data) || !Number.isInteger(response.pagination?.pages)) {
+        throw new Error('Could not read the complete approvals queue. Reload before requesting another decision.');
+      }
+      rows.push(...response.data);
+      if (page >= response.pagination.pages) break;
+    }
+  }
+  return rows;
+}
+
+// ── [MC-AD4] Paid MMG orders held for review (ready too long) ─────────────
+export interface HeldOrder {
+  id: string;
+  orderNumber: string;
+  orderType: string;
+  status: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  totalAmount: number;
+  readyAt: string | null;
+  foodAgeHeldAt: string | null;
+  placedAt: string | null;
+  heldMinutes: number | null;
+  readyMinutes: number | null;
+  vendor: { id: string; name: string } | null;
+}
+/** An unreadable acknowledgement does not establish whether an action completed. */
+const unreadableOrderAction = () => Object.assign(new Error('Swift returned an unreadable answer. Refresh the order and check whether the action went through before retrying.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+/** [DS878 S4] A 200 that is not a list of held orders is a failed read — never "nothing held". */
+export const fetchHeldOrders = async (): Promise<Envelope<HeldOrder[]>> => {
+  const response = await apiFetch('/api/v1/admin/orders/held');
+  if (response?.success !== true || !Array.isArray(response.data)) {
+    throw Object.assign(new Error('Swift returned an unreadable list of held orders.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+  }
+  return response;
+};
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+export const retryOrderDispatch = async (id: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/retry-dispatch`, { method: 'POST', body: '{}' });
+  if (response?.success !== true || !isRecord(response.data)) throw unreadableOrderAction();
+  return response;
+};
+/** C2 (operational): the only release the server offers today is "deliver anyway". */
+export const releaseHeldOrder = async (id: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/food-age-hold/release`, { method: 'POST', body: JSON.stringify({ decision: 'DELIVER_ANYWAY' }) });
+  if (response?.success !== true || response.data?.released !== true || response.data?.decision !== 'DELIVER_ANYWAY' || !isRecord(response.data?.dispatch)) throw unreadableOrderAction();
+  return response;
+};
+
+// ── [MC-AD5] An MMG payment dispute on a store order ──────────────────────
+/** C3: decided against the claim revision the operator reviewed; the reason is the decision note too. */
+export const resolvePaymentDispute = async (
+  id: string,
+  decision: { resolution: 'CUSTOMER_PAID' | 'CUSTOMER_DID_NOT_PAY'; expectedClaimRevision: number },
+  reason: string,
+) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/payment-claim/resolve`, {
+    method: 'POST', body: JSON.stringify({ ...decision, note: reason }), reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.resolution !== decision.resolution || response.data?.mismatch !== false) throw unreadableOrderAction();
+  return response;
+};

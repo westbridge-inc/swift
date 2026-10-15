@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -8,6 +9,8 @@ import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
+import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
@@ -26,6 +29,7 @@ import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { lockFeeCollectionAuthority, moverFeeSourceSummary, resolveMoverFeeAuthority, resolveMoverFeeHold, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { CashRulesService } from '../cash/cash-rules.service';
+import { resolveHeldDoorCash } from '../cash/door-cash-hold';
 import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
@@ -54,6 +58,8 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
+import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
 import {
   approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
   startSoloApproval,
@@ -82,6 +88,7 @@ import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-con
 import { platformStats } from './platform-stats';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
+import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
@@ -1108,8 +1115,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/users', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { role, status, search } = usersQuerySchema.parse(request.query);
+    // [MC-PR3] test data is left out unless asked for, in the query, so the total stays true
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(role && { activeRole: role }),
       ...(status && { status }),
       ...(search && {
@@ -1121,8 +1130,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_USER, excludeFixtures);
 
-    const [users, total] = await Promise.all([
+    const [users, total, hiddenTestRecords] = await Promise.all([
       app.prisma.user.findMany({
         where,
         select: {
@@ -1141,12 +1151,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.user.count({ where }),
+      hiddenWhere ? app.prisma.user.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(users, total, { page, limit, skip }) };
+    const result = paginatedResponse(users, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** [S1 response-shaping] The mover slice `GET /users/:id` needs: identity
@@ -1324,8 +1336,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/vendors', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = vendorsQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { vendorType: type }),
       ...(search && {
@@ -1335,8 +1348,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_VENDOR, excludeFixtures);
 
-    const [vendors, total] = await Promise.all([
+    const [vendors, total, hiddenTestRecords] = await Promise.all([
       app.prisma.vendor.findMany({
         where,
         include: {
@@ -1346,12 +1360,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.vendor.count({ where }),
+      hiddenWhere ? app.prisma.vendor.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip }) };
+    const result = paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
@@ -1380,7 +1396,8 @@ export async function adminRoutes(app: FastifyInstance) {
           },
         },
         subscription: true,
-        _count: { select: { items: true, orders: true } },
+        // [Item 62] "Menu items" counts the live menu, not archived history.
+        _count: { select: { items: { where: { archivedAt: null } }, orders: true } },
       },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
@@ -1597,6 +1614,10 @@ export async function adminRoutes(app: FastifyInstance) {
    *  - suspended with every rule met → reinstated by CAS, carrying the same
    *    expiry the projection would write [Fable #1481 S4-2: the suspension
    *    source is cleared, so no stale BILLING survives for a later heal];
+   *  - never live and no published phone [owner #51]: waiting → refused 409
+   *    PUBLISHED_PHONE_MISSING (it goes live by itself once the owner adds
+   *    one); suspended → lifted back to waiting, where the owner can add it
+   *    [DS1145 S3];
    *  - suspended while its subscription cannot operate (the vendor gate's
    *    rule: fee unpaid or billing stopped) → refused 409 FEE_UNPAID [MC-AD2]:
    *    only a confirmed payment (or billing's own heal) lifts a fee hold, and
@@ -1637,6 +1658,36 @@ export async function adminRoutes(app: FastifyInstance) {
       if (updated.status !== 'ACTIVE') {
         throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
+    } else if (next === 'CAN_LIFT_TO_WAITING') {
+      // [owner #51 · DS1145 S3] Suspended before it was ever live, every other rule met, no published phone. It
+      // cannot go live without one, and a suspended store cannot add one in the app — so approving lifts the
+      // suspension back to waiting for approval: the owner adds the number there and the activation projection
+      // makes the store live by itself. No subscription is created (that is the activation's), so the store still
+      // reads as never live. Decided again under the same locks as a reinstatement.
+      updated = await app.prisma.$transaction(async (tx) => {
+        await bindTenantTransaction(tx);
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-lift-to-waiting-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-lift-to-waiting-store */`;
+        const fresh = await tx.vendor.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, suspensionSource: true, owner: { select: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+        });
+        const freshGoLive = await verification.vendorGoLive(id, tx);
+        if (!freshGoLive) throw new NotFoundError('Vendor', id);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null, feePause: await readFeePause(tx, process.env, fresh.subscription?.id) }, freshGoLive);
+        const refusedNow = again === 'CAN_LIFT_TO_WAITING' ? null
+          : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        if (refusedNow) throw refusedNow;
+        const won = await tx.vendor.updateMany({
+          where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
+          data: { status: 'PENDING_APPROVAL', suspensionSource: null },
+        });
+        if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+          extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },
+        });
+        return tx.vendor.findUniqueOrThrow({ where: { id } });
+      });
     } else {
       // CAN_REINSTATE. [PR1270-S2-03] Price BEFORE the activation write: a
       // market that cannot price this store refuses here and it stays suspended.
@@ -1678,11 +1729,20 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
-      body: next === 'CAN_REINSTATE'
-        ? `${vendor.name} has been reinstated and can take orders again once you open it.`
-        : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
-      data: { vendorId: id },
+      ...(next === 'CAN_LIFT_TO_WAITING'
+        ? {
+            title: 'Add the number customers can call',
+            body: `${vendor.name} is no longer suspended. Add the phone number customers can call in Account, and your store goes live.`,
+          }
+        : {
+            title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
+            body: next === 'CAN_REINSTATE'
+              ? `${vendor.name} has been reinstated and can take orders again once you open it.`
+              : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
+          }),
+      // [DS1321 S4] The lift's notice IS the one "add the number" notice: its tap opens the waiting store's screen,
+      // and the activation projection, which asks once per store, does not ask again.
+      data: next === 'CAN_LIFT_TO_WAITING' ? { kind: 'vendor_needs_public_phone', vendorId: id } : { vendorId: id },
     });
 
     // [VERIFY-DOCS V5] The owner's VAT billing number never rides an admin store reply.
@@ -1747,8 +1807,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1765,8 +1826,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [riders, total] = await Promise.all([
+    const [riders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.rider.findMany({
         where,
         include: {
@@ -1775,14 +1837,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.rider.count({ where }),
+      hiddenWhere ? app.prisma.rider.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, riders, 'RIDER');
-    return { success: true, ...paginatedResponse(withLive, total, { page, limit, skip }) };
+    const result = paginatedResponse(withLive, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1931,8 +1995,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1948,8 +2013,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [drivers, total] = await Promise.all([
+    const [drivers, total, hiddenTestRecords] = await Promise.all([
       app.prisma.driver.findMany({
         where,
         include: {
@@ -1958,14 +2024,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.driver.count({ where }),
+      hiddenWhere ? app.prisma.driver.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, drivers, 'DRIVER');
-    return { success: true, ...paginatedResponse(withLive, total, { page, limit, skip }) };
+    const result = paginatedResponse(withLive, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -2126,8 +2194,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/orders', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, dateFrom, dateTo, search } = adminOrdersQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { orderType: type }),
       ...(dateFrom || dateTo
@@ -2145,8 +2214,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_ORDER, excludeFixtures);
 
-    const [orders, total] = await Promise.all([
+    const [orders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.order.findMany({
         where,
         // [A-15] The handover secrets never enter the admin DTO. `include`
@@ -2162,14 +2232,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.order.count({ where }),
+      hiddenWhere ? app.prisma.order.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // 13 Decimal columns on the order + 7 more on every included OrderItem,
     // all of which the admin client types as `number`. Coerce at the seam.
-    return { success: true, ...paginatedResponse(coerceMoney(orders), total, { page, limit, skip }) };
+    const result = paginatedResponse(coerceMoney(orders), total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** Live ops snapshot for the command map: every online mover's position +
@@ -2320,7 +2392,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** [hold v3 · N-01] The held-for-review queue: paid MMG orders the food-age
    *  cutoff would have cancelled, held for a person instead. Tenant-scoped by
-   *  the request like every admin read. */
+   *  the request like every admin read.
+   *  [REVIEW-B #1699 S3-1] Classed C0 (writes no access record), so it carries
+   *  no customer identity and no store phone: the Orders page polls it every
+   *  minute and shows only the store's name. Who the customer is lives on
+   *  GET /orders/:id, which is C1 and records the read. */
   app.get('/orders/held', { preHandler: [adminGuard] }, async () => {
     const rows = await app.prisma.order.findMany({
       where: { foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...FOOD_AGE_WAITING] } },
@@ -2329,8 +2405,7 @@ export async function adminRoutes(app: FastifyInstance) {
       select: {
         id: true, orderNumber: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true,
         totalAmount: true, readyAt: true, foodAgeHeldAt: true, placedAt: true,
-        vendor: { select: { id: true, name: true, phone: true } },
-        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        vendor: { select: { id: true, name: true } },
       },
     });
     const now = Date.now();
@@ -2938,7 +3013,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // log + customer notification below. (Wallet credit is a Part C / fintech-phase
     // concern — see the dormant walletBalance/Transaction schema notes.)
 
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: newStatus });
 
     // [REPORT-010 F-03] Unattested MMG gets the direct-refund guidance — the
     // customer may have already paid the store's link before this cancel.
@@ -3025,6 +3100,31 @@ export async function adminRoutes(app: FastifyInstance) {
       });
     }
     return { success: true, data: { orderId: id, status: 'CANCELLED', disposition: MMG_STORE_CLOSE_DISPOSITION } };
+  });
+
+  /**
+   * [L02 · row 34 · review S2-1] POST /orders/:id/door-cash-return/resolve —
+   * operations records partial cash a rider could not hand back at the door
+   * (HELD) as resolved: handed back later, or otherwise settled, as the stated
+   * reason says. RECORD ONLY: Swift moves, refunds and deducts nothing; the
+   * amount and the rider's original report stay as they were. C4 (a reason and
+   * a second admin, the approval gate above). Until this existed nothing could
+   * ever move HELD, so the rider holding the cash could never close their account.
+   */
+  app.post('/orders/:id/door-cash-return/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const resolved = await resolveHeldDoorCash(tenantPrisma as unknown as PrismaClient, {
+      orderId: id,
+      adminUserId: request.user.userId,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+    return {
+      success: true,
+      data: { orderId: resolved.orderId, doorCashReturn: { amount: resolved.amount, status: 'RESOLVED', resolvedAt: resolved.resolvedAt } },
+    };
   });
 
   /**
@@ -3125,7 +3225,7 @@ export async function adminRoutes(app: FastifyInstance) {
       return tx.order.findUniqueOrThrow({ where: { id } });
     });
     orderRefundCounter.labels('settled').inc();
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'REFUNDED' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'REFUNDED' });
     return { success: true, data: updated };
   });
 
@@ -3421,7 +3521,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const configs = await app.prisma.platformConfig.findMany({
       orderBy: { key: 'asc' },
     });
-    return { success: true, data: configs };
+    // Launch switches set in the server environment (read-only here), so the
+    // console shows what this API is actually running with.
+    return { success: true, data: configs, switches: { staffInviteAccept: staffInviteAcceptEnabled() } };
   });
 
   app.put('/config/:key', { preHandler: [platformControlGuard] }, async (request) => {
@@ -5253,6 +5355,75 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: detail };
   });
 
+  // ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ─────────
+  //
+  // A duplicate, over-the-cap or mistaken MMG weekly-fee payment, returned in
+  // full to the partner's MMG account (MMG reverses in full only). The ask is
+  // C4: a stated reason and a second person (or the owner in solo mode), over
+  // this payment and its whole amount. The claim and its audit row commit
+  // before MMG is asked; only MMG's lookup moves the fee balance
+  // (mmg-fee-reversal.ts). Off until MMG_FEE_REVERSAL=on.
+  const feeReversals = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications });
+  const reversalOut = (row: { amount: unknown } & Record<string, unknown>) => ({
+    id: row['id'], checkoutId: row['checkoutId'], state: row['state'], amount: Number(row.amount), currencyCode: row['currencyCode'],
+    providerStatus: row['providerStatus'], lookupStatus: row['lookupStatus'], heldReason: row['heldReason'],
+    sentAt: row['sentAt'], reversedAt: row['reversedAt'], failedAt: row['failedAt'], resolution: row['resolution'],
+  });
+
+  app.get('/billing/mmg-checkouts/:id/reversal', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    return { success: true, data: await feeReversals.view({ tenantId, checkoutId: id }) };
+  });
+
+  app.post('/billing/mmg-checkouts/:id/reverse', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      // MMG reverses in full only: the admin types the whole amount, and the
+      // approval's fingerprint binds it with the payment.
+      amountGyd: z.number().positive().max(MAJOR_AMOUNT_CEILING),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers as never) ?? body.reason ?? '';
+    const row = await feeReversals.requestReversal(
+      { tenantId, checkoutId: id, amountGyd: body.amountGyd, reason, actorId: request.user.userId,
+        approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // [DS1112] A person resolves a HELD return (C4: a reason and a second
+  // person, or solo): "MMG shows nothing was returned" (only while MMG's
+  // lookup shows the payment standing) or "returned, here is MMG's reference"
+  // (booked only if MMG's lookup proves it). Never a guess.
+  app.post('/billing/mmg-fee-reversals/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      outcome: z.enum(['NOT_RETURNED', 'RETURNED', 'RETURNED_NOT_BOOKED']),
+      // The MMG statement line or the MMG reversal reference the person read.
+      mmgReference: z.string().trim().min(3).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/#-]*$/, 'Use the reference exactly as MMG shows it'),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const row = await feeReversals.resolveHeld(
+      { tenantId, reversalId: id, outcome: body.outcome, mmgReference: body.mmgReference, actorId: request.user.userId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // "Check with MMG": MMG's lookup settles an open return (proof debits the
+  // balance once; a refusal with the payment standing closes it). It decides
+  // nothing itself, so it is C2 — the money decision was the approved C4 ask.
+  app.post('/billing/mmg-fee-reversals/:id/check', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const row = await feeReversals.check({ tenantId, reversalId: id });
+    return { success: true, data: reversalOut(row as never) };
+  });
+
   // ── Collections workbench [san spec PART 21] — the founder's call list ────
 
   /** Tabs of who to call, with tap-to-call + WhatsApp links and the promise
@@ -5693,7 +5864,7 @@ export async function adminRoutes(app: FastifyInstance) {
       documents,
       (earlierWhere) => tenantPrisma.verificationDocument.findMany({
         where: earlierWhere,
-        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+        select: { id: true, userId: true, role: true, subjectId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
       }),
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
@@ -5780,7 +5951,7 @@ export async function adminRoutes(app: FastifyInstance) {
       });
       markReplayAudited(request as unknown as AuditRequestLike, decisionRow?.id);
     } else {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });

@@ -440,14 +440,16 @@ export const customerApi = {
   // without it and checkout stops sending it. (The web cart cannot remove a
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`),
+  // This client renders the server's swap permissions and refusal guidance.
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v1' } }),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
-  // returns { success, data: { message, cancellationFee } } inside the axios
-  // body — reading one level short silently discarded the authoritative
-  // cancellation outcome and the fee actually charged.
+  // returns { success, data: { message } } inside the axios body — reading one
+  // level short silently discarded the authoritative cancellation outcome.
+  // [owner #46/#50] There is no cancellation fee (the server's
+  // `cancellationFee` is always 0, kept only for older builds).
   cancelOrder: (id: string, reason?: string) =>
     api.post(`/customer/orders/${id}/cancel`, { reason })
-      .then((res) => (res.data?.data ?? {}) as { message?: string; cancellationFee?: number }),
+      .then((res) => (res.data?.data ?? {}) as { message?: string }),
   // Order placement = checkout; it reads the server-side cart. (The old POST
   // /customer/orders had no backend route.)
   placeOrder: (data: {
@@ -477,6 +479,10 @@ export const customerApi = {
   checkoutReceipt: (idempotencyKey: string, session?: AuthSessionSnapshot) =>
     api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`, capturedAuthConfig(session)),
   getNotifications: () => api.get('/customer/notifications'),
+  // [Row 55] Store team invites this signed-in person has received
+  teamInvites: () => api.get('/customer/team-invites'),
+  acceptTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/accept`, {}),
+  declineTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/decline`, {}),
   reorder: (id: string, session?: AuthSessionSnapshot) => api.post(`/customer/orders/${id}/reorder`, {}, capturedAuthConfig(session)),
   ratingTags: () => api.get('/customer/rating-tags'),
   itemFeedback: (id: string, body: { itemId: string; verdict: 'UP' | 'DOWN' }) =>
@@ -1311,6 +1317,8 @@ export const vendorApi = {
   addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),
   updateStaff: (id: string, role: 'MANAGER' | 'STAFF') => api.put(`/vendor/staff/${id}`, { role }),
   removeStaff: (id: string) => api.delete(`/vendor/staff/${id}`),
+  /** [Row 55] Take back every unanswered team invite from this store (none is ever listed). */
+  withdrawStaffInvites: () => api.post('/vendor/staff/invites/withdraw', {}),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging

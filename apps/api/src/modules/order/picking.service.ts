@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from './order-room-emission.service';
 import type { Prisma, PrismaClient, SubstitutionStatus } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
@@ -6,6 +7,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
+import { substitutionLineChange, MMG_SWAP_SETTLES_DIRECTLY } from './substitution-view';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
@@ -21,7 +23,7 @@ function assertMmgMoneyAdjustable(order: { paymentMethod: string | null }): void
   throw new AppError(
     409,
     'MMG_ADJUSTMENT_UNAVAILABLE',
-    'MMG order totals can’t change in-app — the store settles item changes with you directly until in-app MMG adjustments arrive.',
+    MMG_SWAP_SETTLES_DIRECTLY,
   );
 }
 
@@ -251,7 +253,7 @@ export class PickingService {
       });
     });
     // Only the committed winner speaks.
-    this.io.to(`order:${orderId}`).emit('order:substitution', {
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:substitution', {
       orderId,
       lineId,
       originalName: line.name,
@@ -375,8 +377,10 @@ export class PickingService {
       }
 
       const substitutePrice = Number(fresh.substitutePrice ?? 0);
-      const newLineTotal = substitutePrice * fresh.quantity;
-      const delta = newLineTotal - Number(fresh.totalCustomer);
+      // [L09 · M028] The one formula, also what the customer was shown before
+      // deciding (substitution-view.ts): the substitute's price × quantity
+      // replaces the line's total, paid options included.
+      const { newLineTotal, delta } = substitutionLineChange(fresh);
 
       // [F-006-02] On MMG, a dearer substitute records money never collected
       // and a cheaper one an unrecorded refund — any payment status. Only a
@@ -548,7 +552,7 @@ export class PickingService {
     });
     if (!closed) return false;
     this.emitPickState(line.order.vendorId, line.order.id, line.id, { subStatus });
-    this.io.to(`order:${line.order.id}`).emit('order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
+    await emitToOrderRoom(this.prisma, this.io, line.order.id, 'order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
     return true;
   }
 

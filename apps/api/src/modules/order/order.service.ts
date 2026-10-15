@@ -1,3 +1,6 @@
+import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
+import { authorizeHandover, preflightHandoverDoor, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
+import { emitToOrderRoom } from './order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
@@ -23,7 +26,10 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { isFreeCancellation, freeBecauseNoMoverFound, readNoMoverFound, LATE_CANCEL_FEE } from './cancel-policy';
+import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
+import { readTooLateToDeliver } from '../dispatch/rescue';
+import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -48,7 +54,7 @@ import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kit
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
 import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
-import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
+import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, persistDispatchCommandInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
@@ -484,7 +490,7 @@ async function releaseHoldInTransaction(
   tx: Prisma.TransactionClient,
   orderId: string,
   opts: { now?: Date; statusIn?: OrderStatus[] } = {},
-): Promise<{ vendorId: string | null; tenantId: string } | null> {
+): Promise<{ vendorId: string | null; tenantId: string; orderType: string } | null> {
   const now = opts.now ?? new Date();
   const res = await tx.order.updateMany({
     where: {
@@ -498,10 +504,10 @@ async function releaseHoldInTransaction(
   if (res.count === 0) return null;
   const released = await tx.order.findUniqueOrThrow({
     where: { id: orderId },
-    select: { vendorId: true, tenantId: true, items: { select: { itemId: true } } },
+    select: { vendorId: true, tenantId: true, orderType: true, items: { select: { itemId: true } } },
   });
   if (released.vendorId) await countOrderForStore(tx, released.vendorId, released.items.map((i) => i.itemId));
-  return { vendorId: released.vendorId, tenantId: released.tenantId };
+  return { vendorId: released.vendorId, tenantId: released.tenantId, orderType: released.orderType };
 }
 
 /** [Q12 · AX289 F1] The store's first action (accept, reject) on an order
@@ -566,6 +572,7 @@ type EarningNotice = {
 };
 
 export interface CanonicalOrderTransitionInput {
+  handover?: HandoverDecision;
   serializeIdentity?: boolean;
   orderId: string;
   target: OrderStatus;
@@ -579,7 +586,6 @@ export interface CanonicalOrderTransitionInput {
     /** Null keeps system cancellations out of customer-risk attribution. */
     by: string | null;
     reason: string;
-    lateFeeDue?: number;
   };
   /** Route-specific terminal facts that must commit with the state machine.
    * Deliberately whitelisted so callers cannot overwrite ownership, money, or
@@ -599,6 +605,7 @@ export interface CanonicalOrderTransitionInput {
    * ownership pre-read cannot survive a watchdog release or reassignment
    * committing before the lock — this can. */
   expectedRiderId?: string | null;
+  expectedRiderAssignmentVersion?: number;
   /** Optional locked-row custody predicates for role-specific commands. A
    * route pre-read is authorization UX only; physical ownership is proved
    * again here, in the same transaction as the state transition. */
@@ -633,9 +640,14 @@ export interface CanonicalOrderTransitionInput {
     userAgent?: string;
   };
   invalidStatus?: (current: OrderStatus) => AppError;
+  /** [owner #50] A CUSTOMER's own cancel through this seam (the courier sender
+   *  cancel): the one cancellation predicate [cancel-policy.ts] decides on the
+   *  LOCKED row, exactly as `cancelOrder` does — free or refused, never a fee. */
+  customerCancel?: boolean;
 }
 
 export interface CanonicalOrderTransitionResult {
+  replayed?: boolean;
   order: CanonicalTransitionOrder;
   sourceStatus: OrderStatus;
   cancelledSearches: number;
@@ -659,7 +671,7 @@ export class OrderService {
      *  SAME read dispatch uses, injected so this service stays dispatch-free.
      *  floatRequired mirrors dispatch's cash-float gate so the probe counts only
      *  riders that could actually take THIS order. */
-    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number) => Promise<{ level: string }>,
+    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number, packageSize?: string | null) => Promise<{ level: string }>,
     /** [DISPATCH 1/3 · B4] Where live offer cards are kept. A cancellation
      *  withdraws the card of the order it closes (withdrawLiveOffer). Every
      *  production construction passes it, which offer-withdrawal-census.test.ts
@@ -805,7 +817,7 @@ export class OrderService {
       timestamp: new Date().toISOString(),
     };
     try {
-      this.io.to(`order:${order.id}`).emit('order:status_changed', statusEvent);
+      await emitToOrderRoom(this.prisma, this.io, order.id, 'order:status_changed', statusEvent);
       if (order.vendorId) {
         this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
       }
@@ -1066,6 +1078,29 @@ export class OrderService {
               'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.',
             );
           }
+          // [owner #20] Too big for a bike: the order is offered only to a
+          // vehicle that can carry it (a bulky line → a car or van), so the
+          // customer is told NOW, before anything is placed, when none such is
+          // near — never an order that silently finds nobody.
+          const requiredSize = requiredPackageSizeForOrder({
+            orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
+            courierPackageSize: null,
+            items: items.map((ci) => ({ quantity: ci.quantity, bulkUnits: ci.item.bulkUnits ?? null })),
+          }, DEFAULT_LOAD_BANDS);
+          // Only a size a bicycle cannot carry narrows the pool; anything smaller
+          // was already answered by the probe above.
+          if (supply && requiredSize && !vehicleTypesForPackageSize(requiredSize).includes('BICYCLE')) {
+            const fitting = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }, cashFloat, requiredSize).catch(() => null);
+            if (fitting?.level === 'NONE') {
+              throw new AppError(
+                409,
+                'DELIVERY_TOO_BIG',
+                requiredSize === 'EXTRA_LARGE'
+                  ? 'This order is too big for delivery by bike or motorbike, and no car or van is free nearby right now. Choose Pickup, or try delivery again later.'
+                  : 'This order is too big for delivery by bike, and no bigger vehicle is free nearby right now. Choose Pickup, or try delivery again later.',
+              );
+            }
+          }
         }
       }
 
@@ -1086,6 +1121,16 @@ export class OrderService {
       });
       let distanceKm = plan.distanceKm;
       let distanceSource: RouteSource | null = plan.distanceSource;
+      // [owner #18] Road routing was down, so this delivery was priced from
+      // the straight-line estimate (never below the base fee). Orders keep
+      // flowing; this line, the frozen `billableKmSource` and the routing
+      // fallback counter (and its alarm) say it happened.
+      if (fulfillment === 'DELIVERY' && plan.distanceSource === 'haversine' && (process.env['MAPS_PROVIDER'] ?? 'haversine') !== 'haversine') {
+        log().warn({
+          vendorId: vendor.id, km: plan.distanceKm, source: plan.distanceSource,
+          deliveryFee: plan.standardDeliveryFee, baseFee: deliveryRates.baseFee,
+        }, 'delivery:fee-fallback');
+      }
       if (fulfillment === 'DELIVERY' && distanceKm > vendor.deliveryRadius) {
         throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
       }
@@ -1916,6 +1961,11 @@ export class OrderService {
       where: { orderId },
       select: { itemId: true, quantity: true, subStatus: true, substituteItemId: true },
     });
+    // [L02 · row 36] The order's tenant, for the ledger row that records a
+    // line whose item the store has since deleted (see ifItemMissing below).
+    const owner = items.length > 0
+      ? await db.order.findUnique({ where: { id: orderId }, select: { tenantId: true } })
+      : null;
     for (const oi of items) {
       // [REPORT-006 F-006-05] Picking already restocked refunded/rejected
       // lines when it closed them — restocking again here doubles stock. An
@@ -1928,12 +1978,16 @@ export class OrderService {
       // [MKT-2] Through the single writer. It no-ops on an untracked item, which
       // preserves the rule this code already had: a vendor may have stopped
       // tracking since the order was placed, and null must stay null.
+      // [L02 · row 36] An item the store deleted while this order held it can
+      // take nothing back: the ledger records the skip and the cancellation
+      // completes, instead of the whole cancellation failing on ITEM_NOT_FOUND.
       const restock = await applyStockMovement(db, {
         itemId: restockItemId,
         delta: oi.quantity,
         reason: 'CANCEL_RESTOCK',
         orderId,
         note: 'Order cancelled before pickup',
+        ...(owner?.tenantId ? { ifItemMissing: { record: true as const, tenantId: owner.tenantId } } : {}),
       });
       if (restock.applied) {
         await unhideRestocked(db, restockItemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
@@ -2071,15 +2125,16 @@ export class OrderService {
   async stageCanonicalOrderTransition(
     tx: Prisma.TransactionClient,
     input: CanonicalOrderTransitionInput,
-  ): Promise<CanonicalOrderTransitionResult> {
+  ): Promise<CanonicalOrderTransitionResult | HandoverFailure> {
     await bindTenantTransaction(tx);
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const source = await tx.order.findUnique({ where: { id: input.orderId } });
     if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
-    if (!input.allowedFrom.includes(source.status)) {
+    if (!input.handover && !input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
+
     // A BOOKING is confirmed, completed or cancelled — never prepared, marked
     // ready, handed to a rider or delivered [order-status.ts BOOKING_LAW]. The
     // kitchen routes refuse it first, but this is the locked seam every caller
@@ -2096,6 +2151,11 @@ export class OrderService {
       throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
         'This job is no longer assigned to you — it was released or reassigned.');
     }
+    if (input.expectedRiderAssignmentVersion !== undefined
+        && source.riderAssignmentVersion !== input.expectedRiderAssignmentVersion) {
+      throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
+        'This assignment changed while the action was in progress. Refresh the order before continuing.');
+    }
     if (input.expectedDriverId !== undefined && source.driverId !== input.expectedDriverId) {
       throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
     }
@@ -2104,6 +2164,18 @@ export class OrderService {
     }
     if (input.expectedFulfillmentMode !== undefined && source.fulfillmentMode !== input.expectedFulfillmentMode) {
       throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
+    }
+    if (input.handover) {
+      await authorizeHandover(tx, source, input.handover);
+      if (source.status === input.target) {
+        const order = await tx.order.findUniqueOrThrow({ where: { id: input.orderId }, omit: HANDOVER_SECRETS_OMIT, include: CANONICAL_TRANSITION_INCLUDE });
+        return { order, sourceStatus: source.status, cancelledSearches: 0, earningNotices: [], replayed: true };
+      }
+      preflightHandoverDoor(source, input.handover);
+    }
+    if (!input.allowedFrom.includes(source.status)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
     // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
@@ -2114,6 +2186,20 @@ export class OrderService {
     // rider legs before pickup, the store's own handover). Cancelling is never refused.
     if (heldAtSeam(source, input.target)) {
       await assertOrderMayProceed(tx, source.id, refusalAudience(input.target), { storeMayReject: storeMayReject(source, MMG_MONEY_MOVED) });
+    }
+    // [owner #50] A customer's own cancel is the cancellation policy's to
+    // decide, on this locked row and before anything is written — the same
+    // verdict `cancelOrder` reads (the no-mover fact from the journal under
+    // this lock), so no cancel door forks the rule.
+    if (input.customerCancel === true && input.target === 'CANCELLED') {
+      const lockedNow = new Date();
+      const verdict = cancellationVerdict({
+        ...source,
+        noMoverFound: await readNoMoverFound(tx, source),
+        tooLateToDeliver: await readTooLateToDeliver(this.prisma, source, lockedNow),
+        assignedAt: await readAssignedAt(tx, source),
+      }, lockedNow);
+      if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
     }
     // [TAXI multi-stop 3/8] A ride is over only when every stop the passenger
     // asked for is done: arrived at and left, or skipped with a reason the
@@ -2185,6 +2271,10 @@ export class OrderService {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
     }
+    if (input.handover) {
+      const failure = await verifyHandoverDecision(tx, source, input.handover);
+      if (failure) return failure;
+    }
     const data: Prisma.OrderUncheckedUpdateInput = { status: input.target };
     const timestampField: Partial<Record<OrderStatus, keyof Prisma.OrderUncheckedUpdateInput>> = {
       ACCEPTED: 'acceptedAt',
@@ -2200,9 +2290,6 @@ export class OrderService {
       data.cancelledAt = now;
       data.cancelledBy = input.cancellation.by;
       data.cancellationReason = input.cancellation.reason;
-      if (input.cancellation.lateFeeDue !== undefined) {
-        data.lateCancelFeeDue = input.cancellation.lateFeeDue;
-      }
     }
     if (input.terminalMetadata?.actualDeliveryTime !== undefined) {
       data.actualDeliveryTime = input.terminalMetadata.actualDeliveryTime;
@@ -2379,6 +2466,7 @@ export class OrderService {
         );
       }
     }
+    if (input.handover) await persistHandoverNotice(tx, order);
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
 
@@ -2398,7 +2486,7 @@ export class OrderService {
   async transitionOrderAtomically(
     input: CanonicalOrderTransitionInput,
   ): Promise<CanonicalOrderTransitionResult> {
-    let committed: CanonicalOrderTransitionResult | undefined;
+    let committed: CanonicalOrderTransitionResult | HandoverFailure | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         committed = await this.prisma.$transaction(async (tx) => {
@@ -2415,6 +2503,14 @@ export class OrderService {
       }
     }
     if (!committed) throw new Error('Order transition transaction did not produce a result');
+    if ('handoverFailure' in committed) {
+      const refusal = committed.handoverFailure;
+      throw new AppError(refusal.statusCode, refusal.code, refusal.message);
+    }
+
+
+    if (input.handover) await drainHandoverNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId: input.orderId })
+      .catch((err) => log().warn({ err, orderId: input.orderId }, 'handover notice remains pending after commit'));
 
     // [DISPATCH 1/3 · B4] Every operational cancellation passes here (vendor
     // reject, courier sender cancel, admin cancel, the no-response
@@ -2464,9 +2560,8 @@ export class OrderService {
     let committed: {
       order: CancellationOrder;
       heldNow: boolean;
-      freeCancellation: boolean;
       noMoverFree: boolean;
-      cancellationFee: number;
+      tooLateFree: boolean;
       cancelledSearches: number;
     } | undefined;
 
@@ -2506,16 +2601,14 @@ export class OrderService {
           // capture serializes on this same orders lock, so cancel-after-
           // capture refuses here and capture-after-cancel refuses in the
           // capture CAS — CANCELLED+CAPTURED can no longer be minted in
-          // either commit order. PENDING MMG stays cancellable (the only
-          // exit from an unpaid MMG order); if external money landed
-          // unattested, the capture path's closed-order refusal directs the
-          // store to refund directly.
+          // either commit order. PENDING MMG stays cancellable while the
+          // policy below allows it (for a store order: until the store
+          // accepts, then the store declines it — owner #46); if external
+          // money landed unattested, the capture path's closed-order refusal
+          // directs the store to refund directly.
           if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
-            throw new AppError(
-              409,
-              'MMG_CANCEL_UNAVAILABLE',
-              'This order is already paid by MMG to the store. The store cancels and refunds you directly — Swift never holds the money.',
-            );
+            // [owner #46 · Opus S3-1] The same words the order screen shows beside the store's number.
+            throw new AppError(409, 'MMG_CANCEL_UNAVAILABLE', MMG_PAID_STORE_CANCELS_MESSAGE);
           }
 
           const now = new Date();
@@ -2523,17 +2616,29 @@ export class OrderService {
           // so the vendor-board socket below stays silent about it.
           const heldNow = isHeld(order, now) && !order.riderId && !order.driverId;
           // THE one policy predicate, shared with the customer preview
-          // [cancel-policy.ts]: free ⟺ nothing was committed — no mover holds
-          // the job, and the order is held or still in its uncommitted status
-          // (PENDING; READY_FOR_PICKUP for a courier, which is born there)
-          // inside the window.
-          // [Item 64] ...or the mover search came back empty — read here, under
-          // the order lock and before the searches are closed below, so a mover
+          // [cancel-policy.ts], read from this LOCKED row: free or refused,
+          // never a fee (owner #46/#50).
+          // [Item 64] The mover search came back empty — read here, under the
+          // order lock and before the searches are closed below, so a mover
           // assigned after the customer's preview still ends the exemption.
-          const policyOrder = { ...order, noMoverFound: await readNoMoverFound(tx, order) };
-          const freeCancellation = isFreeCancellation(policyOrder, now);
-          const noMoverFree = freeCancellation && freeBecauseNoMoverFound(policyOrder);
-          const cancellationFee = freeCancellation ? 0 : LATE_CANCEL_FEE;
+          // [owner #46] For a store order, too late to deliver (the rescue
+          // cutoff, read from this LOCKED row; the tenant's cutoff is
+          // configuration, read on the app client).
+          const policyOrder = {
+            ...order,
+            noMoverFound: await readNoMoverFound(tx, order),
+            tooLateToDeliver: await readTooLateToDeliver(this.prisma, order, now),
+            // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
+            assignedAt: await readAssignedAt(tx, order),
+          };
+          const verdict = cancellationVerdict(policyOrder, now);
+          // [owner #46/#50] Not the customer's to cancel any more (the store
+          // accepted, or the five-minute window of a ride, parcel or booking
+          // has passed): refused before anything is written, in the words the
+          // apps show as-is.
+          if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
+          const noMoverFree = verdict.reason === 'NO_MOVER';
+          const tooLateFree = verdict.reason === 'TOO_LATE';
 
           // The row lock makes this update and every dependent release below one
           // canonical state transition. No stale riderId/driverId can escape.
@@ -2544,8 +2649,8 @@ export class OrderService {
               cancelledAt: now,
               cancelledBy: userId,
               cancellationReason: reason,
-              // Founder decision #5: recorded cash-only marker, never collected.
-              lateCancelFeeDue: cancellationFee,
+              // [owner #46/#50] No late-cancel marker is ever written: there
+              // is no fee (`lateCancelFeeDue` keeps its default 0).
             },
           });
 
@@ -2592,9 +2697,8 @@ export class OrderService {
           return {
             order,
             heldNow,
-            freeCancellation,
             noMoverFree,
-            cancellationFee,
+            tooLateFree,
             cancelledSearches: searches.count,
           };
         });
@@ -2609,7 +2713,7 @@ export class OrderService {
     }
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
-    const { order, heldNow, freeCancellation, noMoverFree, cancellationFee, cancelledSearches } = committed;
+    const { order, heldNow, noMoverFree, tooLateFree, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
@@ -2629,7 +2733,7 @@ export class OrderService {
       });
     }
 
-    this.io.to(`order:${orderId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', { orderId, status: 'CANCELLED' });
     // A held order was never shown to the vendor — telling them about a
     // cancellation of something they never saw would only confuse the board.
     if (order.vendorId && !heldNow) {
@@ -2660,20 +2764,26 @@ export class OrderService {
     // The result is the banner the customer reads first (the tracking screen
     // shows the server's message before its own fallback). A booking is a
     // booking and its money is with the PROVIDER — the noun and the party
-    // follow the committed row's fulfillment; the fee and the MMG uncertainty
-    // above are the server's and are unchanged. Food keeps its exact words.
+    // follow the committed row's fulfillment; the MMG uncertainty above is the
+    // server's and is unchanged. Food keeps its exact words.
     // A ride is a "Ride" in the customer's words [Item 64 · review S4].
+    // [owner #46/#50] Every customer cancel is free — there is no fee any more.
+    // `cancellationFee: 0` stays in the answer only because builds 9 and 10
+    // read it (a number) after a cancel; it is never anything but zero.
     const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
     const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
     // [Item 64] The plain reason, when the platform found nobody to do the job.
-    const cancelled = noMoverFree ? `${noun} cancelled — no mover was found, so there is no fee.` : null;
+    // [owner #46/#52] ...and when it was running very late.
+    const cancelled = noMoverFree
+      ? `${noun} cancelled — no mover was found.`
+      : tooLateFree ? `${noun} cancelled because it was running very late.` : null;
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
         message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
-        cancellationFee,
+        cancellationFee: 0,
       };
     }
-    return { message: cancelled ?? (freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`), cancellationFee };
+    return { message: cancelled ?? `${noun} cancelled — no charge`, cancellationFee: 0 };
   }
 
   /** [L07 · Opus S3] The first delivery attempt of a committed rider
@@ -2688,16 +2798,33 @@ export class OrderService {
       .catch((err) => log().warn({ err, orderId }, 'rider cancellation notice awaits retry'));
   }
 
+  /** Rider lifecycle commands must carry the authority and allowed states they observed. */
+  async updateRiderStatus(
+    orderId: string,
+    status: OrderStatus,
+    changedBy: string,
+    note: string,
+    authority: { riderId: string; assignmentVersion: number; allowedFrom: readonly OrderStatus[] },
+  ) {
+    return this.updateStatus(orderId, status, changedBy, note, {
+      expectedRiderId: authority.riderId,
+      expectedRiderAssignmentVersion: authority.assignmentVersion,
+      allowedFrom: authority.allowedFrom,
+    });
+  }
+
   async updateStatus(
     orderId: string,
     status: string,
     changedBy: string,
     note?: string,
     opts?: {
+      handover?: HandoverDecision;
       serializeIdentity?: boolean;
       withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
       allowedFrom?: readonly OrderStatus[];
       expectedRiderId?: string | null;
+      expectedRiderAssignmentVersion?: number;
       expectedDriverId?: string | null;
       expectedFulfillment?: FulfillmentType;
       expectedFulfillmentMode?: FulfillmentMode;
@@ -2711,15 +2838,17 @@ export class OrderService {
 
     // Status, timestamps, terminal mover/float release, stock, earnings, and
     // append-only evidence share one commit. Only sockets/push happen below.
-    const { order } = await this.transitionOrderAtomically({
+    const { order, replayed } = await this.transitionOrderAtomically({
       orderId,
       target,
       allowedFrom,
       changedBy,
       note,
       serializeIdentity: opts?.serializeIdentity,
+      handover: opts?.handover,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
       ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
+      ...(opts?.expectedRiderAssignmentVersion !== undefined ? { expectedRiderAssignmentVersion: opts.expectedRiderAssignmentVersion } : {}),
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
       ...(opts?.expectedFulfillment !== undefined ? { expectedFulfillment: opts.expectedFulfillment } : {}),
       ...(opts?.expectedFulfillmentMode !== undefined ? { expectedFulfillmentMode: opts.expectedFulfillmentMode } : {}),
@@ -2730,13 +2859,21 @@ export class OrderService {
       ),
     });
 
+    if (replayed) return order;
+
     log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
     const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
-    this.io.to(`order:${orderId}`).emit('order:status_changed', statusEvent);
+    try {
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition
     // live without subscribing to each order individually.
     if (order.vendorId) {
       this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+    }
+
+    } catch (err) {
+      if (!opts?.handover) throw err;
+      log().warn({ err, orderId }, 'handover socket publication failed after commit');
     }
 
     // Send notifications
@@ -2771,7 +2908,7 @@ export class OrderService {
         break;
       }
       case 'DELIVERED':
-        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
+        if (!opts?.handover) await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
         break;
     }
 
@@ -2781,6 +2918,10 @@ export class OrderService {
       const account = await this.prisma.user.findUnique({
         where: { id: order.customerId },
         select: { countryCode: true },
+      }).catch((err) => {
+        if (!opts?.handover) throw err;
+        log().warn({ err, orderId }, 'trust promotion deferred after handover');
+        return null;
       });
       if (account) {
         await new CashRulesService(this.prisma, this.notifications, this)
@@ -2805,7 +2946,7 @@ export class OrderService {
    * Courier orders (born READY_FOR_PICKUP, no vendor) start their offer
    * cascade here instead of at creation.
    */
-  async releaseDueHeldOrders(enqueueDispatch: (orderId: string) => Promise<void>, batch = 100) {
+  async releaseDueHeldOrders(enqueueDispatch: (orderId: string, jobId?: string) => Promise<void>, batch = 100) {
     const due = await this.prisma.order.findMany({
       where: { status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
       select: { id: true },
@@ -2826,9 +2967,12 @@ export class OrderService {
       // never an enqueue a crash between here and the queue could lose.
       const releasedNow = await this.prisma.$transaction(async (tx) => {
         const store = await releaseHoldInTransaction(tx, id, { statusIn: ['PENDING', 'READY_FOR_PICKUP'] });
-        if (!store) return false; // cancelled or raced — idempotent skip
+        if (!store) return null; // cancelled or raced — idempotent skip
         if (store.vendorId) await persistReleaseAlertLadderInTransaction(tx, { orderId: id, tenantId: store.tenantId, alertDelayMs });
-        return true;
+        const dispatch = store.orderType === 'COURIER'
+          ? await persistDispatchCommandInTransaction(tx, { orderId: id, tenantId: store.tenantId, reason: 'courier-hold-released' })
+          : null;
+        return { dispatchId: dispatch?.id };
       });
       if (!releasedNow) continue;
       await holdReleaseObserver.afterRelease?.({ orderId: id });
@@ -2852,7 +2996,7 @@ export class OrderService {
       // No vendor to notify on a courier job — release = start the cascade.
       if (order.orderType === 'COURIER') {
         try {
-          await enqueueDispatch(id);
+          await enqueueDispatch(id, releasedNow.dispatchId);
         } catch (err) {
           log().error({ err, orderId: id }, 'hold-release: courier dispatch enqueue failed — reconcile will recover');
         }

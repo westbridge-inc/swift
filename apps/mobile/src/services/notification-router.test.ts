@@ -287,6 +287,8 @@ const CENSUS: Case[] = [
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
+  { k: 'ops_cash_door_short', d: { ...O, due: 3500, collected: 2800, shortfall: 700 }, to: DELIVERY('o1'), why: 'admins — [L02 row 34] a cash order was handed over for less than due; the mismatch is held for review' },
+  { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — partial cash could not be handed back and remains with the rider for operations' },
   { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
   { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },
 
@@ -351,6 +353,8 @@ const CENSUS: Case[] = [
   // ── Store / advertiser business surfaces [GAPS].
   { k: 'low_stock', d: { itemId: 'i1', remaining: 2 }, to: null, why: 'GAP: store — the item editor exists and is unrouted' },
   { k: 'staff_added', d: { vendorId: 'v1' }, to: null, why: 'GAP: store team screen' },
+  { k: 'staff_invite', d: { vendorId: 'v1', audience: 'customer' }, to: { screen: 'Storefront', params: { screen: 'Notifications' } }, why: '[row 55] the invite is answered on the inbox Accept card' },
+  { k: 'staff_joined', d: { vendorId: 'v1', audience: 'business' }, to: null, why: 'GAP: store team screen — [row 55] the owner told that someone accepted their invite (same gap as staff_added)' },
   { k: 'review_response', d: { ratingId: 'r1', vendorId: 'v1' }, to: null, why: 'GAP: store reviews' },
   { k: 'rating_removed', to: null, why: 'GAP: a rating was removed' },
   { k: 'category_request_resolved', to: null, why: 'GAP: store category request answered' },
@@ -390,6 +394,7 @@ const CENSUS: Case[] = [
   { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'GAP: admin only — the reserve line is below its floor' },
   { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'GAP: admin only — the monthly provisioning notice' },
   { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6)' },
+  { k: 'vendor_needs_public_phone', d: { vendorId: 'v1' }, to: { screen: 'Main' }, why: 'vendor owner — [owner #51] documents done, the store goes live once it publishes a number customers can call; the waiting store\'s own screen asks for it' },
   { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps' },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
@@ -531,6 +536,10 @@ describe('every destination is a route the app actually registers', () => {
     const mounted = new Set([...stack.matchAll(/\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g)].map((m) => m[1]!));
     // Every role stack sits under the root route Main, so it is reachable too.
     mounted.add('Main');
+    // The root mounts a CustomerStack separately for cross-mode inbox taps.
+    const root = readFileSync(join(process.cwd(), 'src', 'navigation', 'RootNavigator.tsx'), 'utf8');
+    expect(root).toMatch(/name="Storefront"\s+component=\{CustomerStack\}/);
+    mounted.add('Storefront');
     expect(mounted.size, 'the scan itself found the stack').toBeGreaterThan(5);
 
     const payloads = [
