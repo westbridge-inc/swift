@@ -16,7 +16,7 @@ import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
  * with no one to tell), an unresolved payment hold, and fee credit Swift holds
  * for the person. Never a silently dropped payment.
  */
-export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'OPEN_CLAIM', 'FEE_PAYMENT_PENDING', 'FEE_CREDIT'] as const;
+export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'PARTIAL_CASH_RETURN', 'OPEN_CLAIM', 'FEE_PAYMENT_PENDING', 'FEE_CREDIT'] as const;
 export type PartnerBlocker = (typeof PARTNER_BLOCKERS)[number];
 
 export interface PartnerObligations {
@@ -24,6 +24,9 @@ export interface PartnerObligations {
   committedFloat: number;
   /** Cash handovers neither the rider nor the store has closed out. */
   unsettledCashCount: number;
+  /** A customer's partial cash still with this rider (HELD), independently of
+   *  goods/float return, until operations records it resolved. Rider only. */
+  partialCashReturnCount?: number;
   /** Historical direct-payment earnings; not a Swift payout obligation. */
   earningsOwed: number;
   /** Loss-protection claims for this mover that Swift has neither paid nor rejected. */
@@ -53,6 +56,7 @@ export function verdictFor(o: PartnerObligations): PartnerDeletionVerdict {
   const blockers: PartnerBlocker[] = [];
   if (o.committedFloat > 0) blockers.push('CASH_HELD');
   if (o.unsettledCashCount > 0) blockers.push('UNSETTLED_CASH');
+  if ((o.partialCashReturnCount ?? 0) > 0) blockers.push('PARTIAL_CASH_RETURN');
   if ((o.openClaimCount ?? 0) > 0) blockers.push('OPEN_CLAIM');
   if ((o.pendingFeePaymentCount ?? 0) > 0) blockers.push('FEE_PAYMENT_PENDING');
   if ((o.feeCreditCount ?? 0) > 0) blockers.push('FEE_CREDIT');
@@ -71,6 +75,8 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
     'You are holding vendor cash from a delivery that has not been settled. Hand it in, then return here to delete your account. Use Get help if you cannot resolve the handover.',
   UNSETTLED_CASH:
     'A cash settlement is still open between you and a store. Confirm the handover, then return here to delete your account. Use Get help if the other party cannot confirm.',
+  PARTIAL_CASH_RETURN:
+    'Partial cash from a delivery still needs to be returned to the customer. Open Get help to arrange and confirm the cash return with operations, then return here to delete your account.',
   OPEN_CLAIM:
     'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
   FEE_PAYMENT_PENDING:
@@ -106,13 +112,21 @@ export async function partnerObligations(
     tx.rider.findUnique({ where: { userId }, select: { id: true, committedFloat: true } }),
     tx.driver.findUnique({ where: { userId }, select: { id: true } }),
   ]);
+  // A customer's partial cash still with this rider. Returning goods,
+  // releasing vendor float or acknowledging an alert does not return it; only
+  // operations recording it resolved does (resolveHeldDoorCash). It holds the
+  // RIDER only [review S2-1]: the customer is the person owed the cash, and
+  // their deletion request is honoured (the order row keeps the held record).
+  const partialCashReturnCount = rider
+    ? await tx.order.count({ where: { doorCashReturnStatus: 'HELD', riderId: rider.id } })
+    : 0;
   const claimants = [...(rider ? [{ riderId: rider.id }] : []), ...(driver ? [{ driverId: driver.id }] : [])];
   const openClaimCount = claimants.length === 0 ? 0 : await tx.reimbursementClaim.count({
     where: { OR: claimants, paidAt: null, status: { in: ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'] } },
   });
   const fees = await feeMoney(tx, userId);
   if (!rider && await tx.vendor.count({ where: { owner: { userId } } }) === 0) {
-    return { committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0, openClaimCount, ...fees };
+    return { committedFloat: 0, unsettledCashCount: 0, partialCashReturnCount, earningsOwed: 0, openClaimCount, ...fees };
   }
 
   const unsettled = await tx.deliveryCashSettlement.count({
@@ -123,6 +137,7 @@ export async function partnerObligations(
   return {
     committedFloat: Number(rider?.committedFloat ?? 0),
     unsettledCashCount: unsettled,
+    partialCashReturnCount,
     earningsOwed: 0,
     openClaimCount,
     ...fees,
