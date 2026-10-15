@@ -7,6 +7,8 @@ import { z } from 'zod';
 import { isSoleApprover } from '../admin/solo-approval';
 import { normaliseReference } from '../money/evidence';
 import { postLedger, refundPaidPostings, refundReleasePostings, refundSetAsidePostings } from './ledger';
+import { feeReversalOpenInTx } from './dunning-clock';
+import { referenceOnRecord } from './mmg-fee-reversal';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling 2026-10-07] Unused prepaid weekly-fee credit is refunded, then
@@ -91,9 +93,12 @@ export async function creditRefundState(db: Db, subscriptionId: string): Promise
   return { balance: Number(wallet?.balance ?? 0), currencyCode: wallet?.currencyCode ?? 'GYD', refundSetAside: open.get(subscriptionId) ?? 0 };
 }
 
-async function lockPayer(tx: Prisma.TransactionClient, subscriptionId: string) {
+/** Locks the payer (and a mover's fee authority) and answers every subscription that pays into the
+ *  same fee credit: the one named, and a mover's sources. */
+async function lockPayer(tx: Prisma.TransactionClient, subscriptionId: string): Promise<string[]> {
   const payer = await lockSubscriptionPayer(tx, subscriptionId);
-  if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
+  const mover = payer.kind === 'MOVER' ? await lockMoverFeeAuthority(tx, payer) : null;
+  return [...new Set([subscriptionId, ...(mover?.sourceSubscriptionIds ?? [])])];
 }
 
 /** The open set-aside under the payer lock, with the event that opened it. */
@@ -181,9 +186,15 @@ export async function setAsideCreditRefund(prisma: PrismaClient, input: {
   if (!input.approvalId) throw new AppError(403, 'APPROVAL_REQUIRED', 'Setting credit aside for a refund needs a second admin.');
   const eventKey = `${SET_ASIDE_KEY}${input.approvalId}`;
   const done = await prisma.$transaction(async (tx) => {
-    await lockPayer(tx, input.subscriptionId);
+    const sources = await lockPayer(tx, input.subscriptionId);
     const prior = await tx.billingEvent.findUnique({ where: { idempotencyKey: eventKey } });
     if (prior) return { replayed: true, amount: Number(prior.amount), billingEventId: prior.id };
+    // [#1527 review S2-2] While MMG is returning one of this payer's fee payments (asked, sent, or held for a
+    // person), the credit may be about to go back through MMG: setting it aside too could pay the same money
+    // back twice. Decided under the payer lock the return also takes, so neither can start beside the other.
+    if (await feeReversalOpenInTx(tx, sources)) {
+      throw new AppError(409, 'REFUND_REVERSAL_IN_FLIGHT', 'MMG is returning one of this partner\'s weekly-fee payments right now. Nothing was set aside: wait until that return is closed, then ask again for the credit that is left.');
+    }
     if (await openSetAside(tx, input.subscriptionId)) {
       throw new AppError(409, 'REFUND_ALREADY_SET_ASIDE', 'A refund is already set aside for this account. Record its payout, or release it, first.');
     }
@@ -229,17 +240,12 @@ export const refundReferenceOf = (raw: unknown) => normaliseReference(raw, {
 
 const REFERENCE_REUSED = 'This transfer reference already recorded a refund. One transfer pays one refund: check the reference.';
 
-/** A refund reference is money going OUT. One that names money that came IN is a typing mistake. */
+/** A refund reference is money going OUT, through one transfer. One that Swift already has on record (a
+ *  payment that came IN, or another refund or payout that went out) is a typing mistake, never proof of
+ *  this payout [review S3-1: the shared census]. A replay of this same payout is answered before this. */
 async function refuseInboundReference(tx: Prisma.TransactionClient, reference: string): Promise<void> {
-  const [inbound] = await tx.$queryRaw<Array<{ n: number }>>`
-    SELECT (
-      (SELECT count(*) FROM provider_payments p WHERE mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${reference}))
-      + (SELECT count(*) FROM provider_payment_aliases a WHERE mmg_txn_canon(a."aliasKey") = mmg_txn_canon(${reference}))
-      + (SELECT count(*) FROM topup_commands t WHERE upper(t."providerRef") = ${reference})
-      + (SELECT count(*) FROM subscription_payments s WHERE upper(s."externalRef") = ${reference})
-    )::int AS n`;
-  if ((inbound?.n ?? 0) > 0) {
-    throw new AppError(409, 'REFUND_REFERENCE_IS_A_PAYMENT', 'That reference is a payment Swift received, not the refund you sent. Enter the reference of the refund transfer.');
+  if (await referenceOnRecord(tx, reference)) {
+    throw new AppError(409, 'REFUND_REFERENCE_IS_A_PAYMENT', 'Swift already has that reference on record: a payment Swift received, or another refund or payout that was sent. It is not this refund\'s transfer. Enter the reference of the refund transfer you sent.');
   }
 }
 

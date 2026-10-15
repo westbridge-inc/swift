@@ -1006,6 +1006,34 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
   });
 
+  it('[review S3-1] a reference Swift has on record for money that went OUT (another payout) cannot record this refund, in any spelling; a fresh one can', async () => {
+    const fx = await storeWithCredit(6000);
+    expect((await setAside(fx.subId, 6000)).statusCode).toBe(200);
+    const sentElsewhere = ref('PAYOUTOUT');
+    const payout = await app.prisma.payoutRequest.create({ data: {
+      userId: other.userId, amount: 6000, method: 'BANK_TRANSFER', destination: {}, netAmount: 6000, externalRef: sentElsewhere,
+    } });
+    try {
+      const asks = () => app.prisma.privilegedApproval.count({ where: { action: 'POST /subscriptions/:id/refund-credit/paid', entityId: fx.subId } });
+      for (const reuse of [sentElsewhere, sentElsewhere.toLowerCase()]) {
+        const res = await paid(fx.subId, { amount: 6000, method: 'BANK_TRANSFER', reference: reuse });
+        expect(res.statusCode, res.payload).toBe(409);
+        expect(res.json().error.code).toBe('REFUND_REFERENCE_IS_A_PAYMENT');
+      }
+      // Refused when ASKED: nothing was recorded and no "payout reported" marker was written.
+      expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
+      expect(await asks()).toBe(0);
+      expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(6000);
+      const fresh = await paid(fx.subId, { amount: 6000, method: 'BANK_TRANSFER', reference: ref('FRESHOUT') });
+      expect(fresh.statusCode, fresh.payload).toBe(200);
+      expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(1);
+      expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(0);
+      await booksAgree(fx.subId);
+    } finally {
+      await app.prisma.payoutRequest.delete({ where: { id: payout.id } });
+    }
+  });
+
   it('a permanent inbound payment alias is refused as a refund transfer', async () => {
     const fx = await storeWithCredit(7000);
     expect((await setAside(fx.subId, 7000)).statusCode).toBe(200);
