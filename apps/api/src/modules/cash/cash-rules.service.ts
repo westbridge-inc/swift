@@ -116,7 +116,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * banned -> no ordering at all. Thresholds come from CountryConfig.
  */
 export async function orderingRestriction(
-  prisma: PrismaClient,
+  prisma: PrismaClient | Prisma.TransactionClient,
   userId: string,
 ): Promise<'restricted' | 'banned' | null> {
   const user = await prisma.user.findUnique({
