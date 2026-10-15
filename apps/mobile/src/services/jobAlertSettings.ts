@@ -1,6 +1,18 @@
 import { Linking, Platform } from 'react-native';
-import * as Application from 'expo-application';
 import { JOB_OFFERS_CHANNEL } from './jobRingCapability';
+
+/** This app's Android package (the dev variant has its own), read from
+ *  expo-application on first use: a static import would load the native
+ *  module layer into every screen that shows the row. */
+function installedApplicationId(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const id = (require('expo-application') as { applicationId?: unknown }).applicationId;
+    return typeof id === 'string' && id ? id : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * [RINGER · owner ruling 15 Oct: silent and Do Not Disturb are the partner's
@@ -10,8 +22,7 @@ import { JOB_OFFERS_CHANNEL } from './jobRingCapability';
  * Notifications > Time Sensitive Notifications lets a job alert through a
  * Focus. Any failure falls back to Swift's settings page.
  */
-export async function openJobAlertSettings(): Promise<void> {
-  const appPackage = Application.applicationId;
+export async function openJobAlertSettings(appPackage: string | null = installedApplicationId()): Promise<void> {
   if (Platform.OS === 'android' && appPackage) {
     try {
       await Linking.sendIntent('android.settings.CHANNEL_NOTIFICATION_SETTINGS', [

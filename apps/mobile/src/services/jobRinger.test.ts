@@ -16,9 +16,7 @@ vi.mock('react-native', () => ({ Vibration: { vibrate: vi.fn(), cancel: vi.fn() 
 import { RING_PERIOD_MS, RING_VIBRATION, createJobRinger, loadRingAudio, type RingAudio, type RingPlayer } from './jobRinger';
 
 function fakeAudio() {
-  const player: RingPlayer & { play: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> } = {
-    loop: false, volume: 0, play: vi.fn(), pause: vi.fn(), remove: vi.fn(),
-  };
+  const player = { loop: false, volume: 0, play: vi.fn(), pause: vi.fn(), remove: vi.fn() } satisfies RingPlayer;
   const audio = {
     createAudioPlayer: vi.fn((_source: unknown) => player),
     setAudioModeAsync: vi.fn(async () => undefined),
