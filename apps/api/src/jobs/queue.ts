@@ -1350,6 +1350,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (cancellations.pending > 0) ctx.log.warn(cancellations, 'rider cancellation pushes remain pending');
           else if (cancellations.expired > 0) ctx.log.warn(cancellations, 'rider cancellation pushes closed unconfirmed; the inbox notices remain');
         });
+        await drain('handover-completed-notice', async () => {
+          // [L07] The customer's "handed over" notice commits with the
+          // completion under the order lock; whatever its post-commit attempt
+          // could not deliver is delivered here, in process.
+          const { drainHandoverNotices } = await import('../modules/handover/handover-notice');
+          const handovers = await drainHandoverNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
+          if (handovers.pending > 0) ctx.log.warn(handovers, 'handover notices remain pending');
+          else if (handovers.expired > 0) ctx.log.warn(handovers, 'handover pushes closed unconfirmed; the inbox notices remain');
+        });
         if (drainFailure !== undefined) throw drainFailure;
         return;
       }

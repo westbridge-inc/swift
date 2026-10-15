@@ -186,6 +186,8 @@ const E = {
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
   // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
+  // [L02 · row 34] Partial cash a rider could not hand back at the door, and its resolution.
+  orderDoorCash: { model: 'order', fields: ['status', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'doorCashReturnResolvedById'] },
   moverFee: { model: 'moverFeeAuthority', routeParam: 'userId', uniqueField: 'userId', fields: ['state', 'holdReason', 'canonicalSubscriptionId', 'feeType', 'revision', 'decisionId'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
@@ -205,6 +207,8 @@ const E = {
   // [PT-4] A held card payment's resolution: what finance decided and the provider actions it took.
   cardSession: { model: 'cardSession', fields: ['status', 'failureCode', 'providerTransactionRef', 'providerVoidState', 'providerRefundState', 'bookClaimedAt', 'resolution', 'resolvedBy', 'resolvedAt'] },
   agentPayment: { model: 'mmgAgentPayment', fields: ['status', 'amount', 'subscriptionId'] },
+  // [MMG REVERSAL] A return of a weekly-fee payment: where it stands and how a person resolved it.
+  feeReversal: { model: 'mmgFeeReversal', fields: ['state', 'heldReason', 'resolution', 'resolvedBy', 'failedAt', 'reversedAt', 'walletDebitedAt'] },
   settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
   // [ADM-002] `resolvedAt` does not exist on ReturnRequest (`reviewedAt` does).
@@ -294,6 +298,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
+  // [L02 · row 34 · review S2-1] Record-only: operations records partial cash a
+  // rider could not hand back (HELD) as resolved. It claims settlement of a
+  // customer's money (like refund-settled), so: money class, reason, two admins.
+  'POST /orders/:id/door-cash-return/resolve': c('C4', 'order.refund.settle', E.orderDoorCash),
   // [AF-MOB-006] Custody recovery after pickup. Reading a case discloses rider
   // positions and phones (C1). Owning it is workflow (C2). Directing a return
   // or relay, naming the relay rider and confirming a return decide where
@@ -414,6 +422,13 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/mmg-checkouts': c('C1', 'billing.mmg.read'),
   'GET /billing/mmg-checkouts/:id': c('C1', 'billing.mmg.read'),
   'POST /billing/confirmations/:id/resolve': c('C4', 'billing.payment.attach', E.paymentConfirmation),
+  // [MMG REVERSAL · owner #11] Return a whole weekly-fee payment through MMG:
+  // money (C4, a reason and two people); its state, read; MMG's lookup re-read.
+  'GET /billing/mmg-checkouts/:id/reversal': c('C0', 'billing.read'),
+  'POST /billing/mmg-checkouts/:id/reverse': c('C4', 'billing.mmg.reverse'),
+  'POST /billing/mmg-fee-reversals/:id/check': c('C2', 'billing.mmg.reverse.check'),
+  // [DS1112] A person closes a HELD return on MMG's evidence: money (C4).
+  'POST /billing/mmg-fee-reversals/:id/resolve': c('C4', 'billing.mmg.reverse.resolve', E.feeReversal),
   'GET /billing/collections': c('C0', 'billing.read'),
   'GET /billing/mover-fees': c('C0', 'billing.read'),
   'GET /billing/mover-fees/:userId': c('C0', 'billing.read'),
@@ -816,6 +831,8 @@ export function reasonOf(body: unknown, headers?: Record<string, unknown>): stri
 export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>> = {
   'GET /legal/processors': 'code-declared register (DGP-1); no row to name',
   'POST /promos': 'creates the row; there is no before state to digest',
+  // [MMG REVERSAL] the claim row is the record; the audit facts name it
+  'POST /billing/mmg-checkouts/:id/reverse': 'creates the reversal claim row; the audit facts carry the reversal id, the checkout, the amount and the MMG transaction',
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',

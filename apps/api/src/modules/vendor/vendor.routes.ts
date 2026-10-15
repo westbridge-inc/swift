@@ -1,9 +1,11 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
+import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
@@ -13,15 +15,16 @@ import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
 import { PickingService } from '../order/picking.service';
+import { lineOptionsAsMade } from '../order/substitution-view';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
-import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
-import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
+import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -620,6 +623,19 @@ const ORDER_ITEM_MONEY_FIELDS = [
 const ITEM_MONEY_FIELDS = ['basePrice'] as const;
 const OPTION_MONEY_FIELDS = ['additionalPrice'] as const;
 
+/** [L09 · M026] The store makes what the customer chose: every line carries its
+ *  snapshotted options (group, choice, price) on the board and the detail —
+ *  and none once an approved substitute replaced the line, because the swap is
+ *  charged without them (order/substitution-view.ts). */
+const VENDOR_ORDER_ITEMS = {
+  include: { selectedOptions: { select: { optionGroupName: true, optionName: true, markedUpPrice: true } } },
+} as const;
+
+function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{ optionGroupName: string; optionName: string; markedUpPrice: unknown }> }>(line: T) {
+  const { selectedOptions, ...rest } = line;
+  return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
+}
+
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
@@ -639,7 +655,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
     // Do not assert another path is safe; assert it in handover-secrets.test.ts.
     omit: HANDOVER_SECRETS_OMIT,
     include: {
-      items: true,
+      items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
       customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
@@ -886,6 +902,16 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   // The person invited answers under /customer/team-invites (customer.routes):
   // they are not on a store team yet, so the /vendor prefix is not theirs.
+
+  /** POST /staff/invites/withdraw — take back every unanswered invite from
+   *  this store. [Row 55] Nothing pending is listed to the owner, so a mistyped
+   *  number is withdrawn with all the others; the reply is the same however
+   *  many there were, so it never counts which numbers are Swift accounts. */
+  app.post('/staff/invites/withdraw', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    await withdrawPendingStaffInvites(app.prisma, { vendorId, actorId: request.user.userId, now: new Date() });
+    return { success: true, data: { withdrawn: true, message: 'Any invites from this store that were not answered yet have been withdrawn.' } };
+  });
 
   /** PUT /staff/:id — change a member's role. */
   app.put<{ Params: IdParam }>('/staff/:id', auth, async (request) => {
@@ -1298,6 +1324,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     const access = await requireVendor(app, request, 'MANAGER');
     const { vendorId } = access;
     const body = updateVendorProfileSchema.parse(request.body);
+    if (body.name !== undefined) {
+      // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
+      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, owner: { select: { user: { select: { phone: true } } } } } });
+      assertNameNotReserved(body.name, current?.owner.user.phone, current?.name);
+    }
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
     // refused before it is even read, and before any step-up, write or owner notice.
     if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
@@ -1647,7 +1678,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         // HND-003: strip handover secrets from the vendor board too (see resolveOwnedOrder).
         omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
         include: {
-          items: true,
+          items: VENDOR_ORDER_ITEMS,
           customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
@@ -1674,7 +1705,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // live order keeps all of it, which is the only thing a handover needs.
     const data = orders.map((order) => redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
-      items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
+      items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
       canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
     }));
@@ -1694,7 +1725,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
     const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
-    return { success: true, data: { ...redactCustomerContact({ ...order, respondBy, canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
+    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -2334,37 +2365,15 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (order.fulfillment !== 'PICKUP') {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
     }
-    if (order.status !== 'READY_FOR_PICKUP') {
+    if (order.status !== 'READY_FOR_PICKUP' && order.status !== 'COMPLETED') {
       throw new AppError(400, 'INVALID_STATUS', `Cannot complete pickup from ${order.status} status`);
     }
     const { code } = completePickupSchema.parse(request.body ?? {});
-    // HND-003: the shared vendor order object never carries the code (the vendor
-    // is the verifier). Read the secret ONLY here, where it's actually checked.
-    const secret = await app.prisma.order.findUnique({
-      where: { id: order.id },
-      select: { pickupCode: true, pickupCodeAttempts: true },
+    await assertHandoverRequestBudget(app.redis, order.id);
+    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer', {
+      allowedFrom: ['READY_FOR_PICKUP'], expectedFulfillment: 'PICKUP',
+      handover: { purpose: 'pickup', code, vendorUserId: request.user.userId, expectedVendorId: order.vendorId! },
     });
-    // SWIFT-077: when a pickup code is set, it is REQUIRED — it's the only proof
-    // the person collecting is the customer (mirrors the taxi ride PIN). The old
-    // check let a missing code through (`code != null`), so the handover could be
-    // closed without ever verifying it — anyone could claim the order.
-    if (secret?.pickupCode) {
-      if (code == null || code === '') {
-        throw new AppError(400, 'MISSING_PICKUP_CODE', "Enter the customer's pickup code to hand over this order.");
-      }
-      // HND-001: brute-force lockout, parity with the taxi ride PIN. A 6-digit
-      // code is guessable without it. Refuse once the budget is spent, then
-      // count this try BEFORE comparing so a wrong guess always burns an attempt.
-      const { locked, remaining } = handoverAttemptState(secret.pickupCodeAttempts);
-      if (locked) {
-        throw new AppError(400, 'MAX_ATTEMPTS', 'Too many incorrect pickup-code attempts on this order. Please contact support.');
-      }
-      await app.prisma.order.update({ where: { id: order.id }, data: { pickupCodeAttempts: { increment: 1 } } });
-      if (code !== secret.pickupCode) {
-        throw new AppError(400, 'WRONG_PICKUP_CODE', `That pickup code does not match. ${remaining} attempt(s) remaining.`);
-      }
-    }
-    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer');
     return { success: true, data: updated };
   });
 

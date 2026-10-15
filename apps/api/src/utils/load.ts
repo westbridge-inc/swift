@@ -108,6 +108,22 @@ export interface OrderForLoad {
 }
 
 /**
+ * [owner #20, 13 Oct 2026] An item its store marked bulky or very bulky (the
+ * item editor's own words, stored as `bulkUnits` above the ordinary 1) goes by
+ * car or van only: an order holding one needs the largest size class, which
+ * only cars and vans carry (config/vehicle-classes). Read from the line's
+ * checkout snapshot, like the bands.
+ */
+export function hasBulkyLine(
+  items: { quantity: number; item?: { bulkUnits?: number | null } | null; bulkUnits?: number | null }[],
+): boolean {
+  return items.some((line) => {
+    const per = line.item?.bulkUnits ?? line.bulkUnits ?? DEFAULT_BULK_UNITS;
+    return Number.isFinite(line.quantity) && line.quantity > 0 && Number.isFinite(per) && (per as number) > DEFAULT_BULK_UNITS;
+  });
+}
+
+/**
  * The `PackageSize` a vehicle must be able to carry for this order.
  *
  * `null` means "no capacity requirement" and is NOT a failure — it is the
@@ -119,9 +135,15 @@ export interface OrderForLoad {
  *  2. COURIER         → `courierPackageSize` UNCHANGED. The customer declared
  *                       it and paid against it; an estimate must never
  *                       overrule a declaration.
- *  3. FOOD / GROCERY  → sum `quantity × bulkUnits` and band it.
+ *  3. FOOD / GROCERY  → a line marked bulky or very bulky → EXTRA_LARGE
+ *                       (cars and vans only — owner #20); otherwise sum
+ *                       `quantity × bulkUnits` and band it.
  *  4. anything else   → null, so a new OrderType cannot silently acquire a
  *                       gate nobody designed for it.
+ *
+ * [owner #20] ENFORCED: dispatch offers the order only to a vehicle that can
+ * carry this size, the rider board shows and lets it be taken only by one, and
+ * checkout tells the customer before placing when none is near.
  */
 export function requiredPackageSizeForOrder(
   order: OrderForLoad,
@@ -131,6 +153,7 @@ export function requiredPackageSizeForOrder(
   if (order.orderType === 'COURIER') return (order.courierPackageSize as PackageSizeName | null) ?? null;
   if (order.orderType !== 'FOOD_DELIVERY' && order.orderType !== 'GROCERY_DELIVERY') return null;
   if (!order.items || order.items.length === 0) return null;
+  if (hasBulkyLine(order.items)) return 'EXTRA_LARGE';
   const total = totalBulkUnits(order.items);
   if (total <= 0) return null;
   return bandForBulk(total, bands);

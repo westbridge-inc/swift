@@ -258,6 +258,13 @@ export function useAddStaff(guard: MutationGuard = passThrough) {
   });
 }
 
+/** [Row 55] Withdraw every unanswered team invite (nothing pending is listed). */
+export function useWithdrawStaffInvites() {
+  return usePreviewSafeMutation({
+    mutationFn: () => unwrap<{ withdrawn: boolean; message?: string }>(vendorApi.withdrawStaffInvites()),
+  });
+}
+
 export function useRemoveStaff() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({

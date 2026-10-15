@@ -410,6 +410,22 @@ export class NotificationService {
   ) {}
 
   async send(payload: NotificationPayload): Promise<string> {
+    return (await this.sendAndReport(payload, false)).id;
+  }
+
+  /**
+   * [AUD-L8b-008 · AUD-G7-003] The same send, saying whether it REACHED a
+   * phone: `pushed` is true only when the push provider accepted the push for
+   * at least one of the person's devices on THIS send. An inbox row is a
+   * record the person may read later, never proof that a person was told —
+   * no device, push turned off, a provider refusal, a dedupe hit (nothing
+   * re-sent) and a fee demand (its own handoff ledger) all read `false`.
+   */
+  async sendReach(payload: NotificationPayload): Promise<{ id: string; pushed: boolean }> {
+    return this.sendAndReport(payload, true);
+  }
+
+  private async sendAndReport(payload: NotificationPayload, requirePush: boolean): Promise<{ id: string; pushed: boolean }> {
     if (isFeeDemand(payload)) {
       // A fee demand that cannot be recorded for THIS recipient is logged and
       // counted, never thrown into the caller: an admin fan-out must still
@@ -421,9 +437,9 @@ export class NotificationService {
       } catch (err) {
         log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not recorded for this recipient');
         notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
-        return '';
+        return { id: '', pushed: false };
       }
-      return this.deliverFeeDemand(notice.id);
+      return { id: await this.deliverFeeDemand(notice.id), pushed: false };
     }
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 
@@ -461,16 +477,16 @@ export class NotificationService {
             where: { userId_dedupeKey: { userId: payload.userId, dedupeKey: payload.dedupeKey } },
             select: { id: true },
           });
-          if (existing) return existing.id;
+          if (existing) return { id: existing.id, pushed: false };
         } catch { /* fall through to the failure path below */ }
       }
       log().warn({ err, userId: payload.userId, type: payload.type }, 'notification persist failed');
       notificationFailuresCounter.inc({ channel: 'db', stage: 'persist' });
-      return '';
+      return { id: '', pushed: false };
     }
 
-    await this.publishPersisted(notification.id);
-    return notification.id;
+    const pushed = await this.publishPersisted(notification.id, { requirePush });
+    return { id: notification.id, pushed: requirePush && pushed };
   }
 
   async deliverFeeDemand(noticeId: string): Promise<string> {

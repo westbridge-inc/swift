@@ -79,7 +79,7 @@ export const ENUM_LABELS = {
   },
   BillingEventType: {
     CHARGE_ATTEMPT: 'Weekly fee charge started', CHARGE_ATTEMPT_RECLAIMED: 'Stalled charge restarted',
-    CHARGE_SUCCESS: 'Weekly fee paid', CHARGE_FAILED: 'Weekly fee not paid', PREPAID_TOPUP: 'Weekly fee received early',
+    CHARGE_SUCCESS: 'Weekly fee paid', CHARGE_FAILED: 'Weekly fee not paid', PREPAID_TOPUP: 'Weekly fee received early', PREPAID_REVERSAL: 'Fee payment returned by MMG',
     SUSPENDED: 'Suspended for an unpaid fee', REINSTATED: 'Reinstated', REMINDER: 'Reminder sent',
     TIER_CHANGE: 'Plan changed', CHURNED: 'Left Swift',
   },
