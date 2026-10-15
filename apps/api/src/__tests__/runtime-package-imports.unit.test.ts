@@ -49,11 +49,11 @@ export function runtimeImportsOf(source: string, pkg: string): string[] {
   const found: string[] = [];
   const fromClause = new RegExp(`^\\s*(import|export)\\s+([^;]*?)\\s+from\\s+${quoted}`, 'gms');
   for (const m of text.matchAll(fromClause)) {
-    const clause = m[2].trim();
+    const clause = (m[2] ?? '').trim();
     if (clause.startsWith('type ') || clause.startsWith('type{')) continue; // import type { … } / export type { … }
     const braces = clause.match(/^\{([\s\S]*)\}$/);
     if (braces) {
-      const names = braces[1].split(',').map((s) => s.trim()).filter(Boolean);
+      const names = (braces[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
       if (names.length > 0 && names.every((n) => n.startsWith('type '))) continue; // import { type A, type B }
     }
     found.push(m[0].replace(/\s+/g, ' '));
