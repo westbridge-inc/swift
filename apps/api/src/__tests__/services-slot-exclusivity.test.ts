@@ -322,7 +322,11 @@ describe('Services — double-booking a provider is impossible at the data layer
     expect((await schedule(jobA, slot, first.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(409);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, await commandState(jobA), first.token)).statusCode).toBe(200);
+    // [TRANSFORMED, coordinator ruling 14 Oct · Terms §7] A booked job is no longer the
+    // customer's to cancel in the app (they contact the provider), so the provider cancels
+    // it here; the slot is freed exactly as before.
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, await commandState(jobA), first.token)).statusCode).toBe(409);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, await commandState(jobA), provider.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(200);
 
     expect(await liveJobsAt(provider.providerId, slot)).toBe(1);
@@ -394,7 +398,11 @@ describe('Services — double-booking a provider is impossible at the data layer
 });
 
 describe('Services — closing a job is never silent', () => {
-  it('a customer cancelling tells the provider, and says which hour is free again', async () => {
+  // [TRANSFORMED, coordinator ruling 14 Oct · Terms §7] This case used to have the customer
+  // cancel a booked, confirmed job and the provider told which hour was free again. A booked
+  // job is no longer the customer's to cancel in the app: the refusal writes and tells nobody,
+  // and the provider who cancels it names the booked hour to the customer, in the same spelling.
+  it('a customer cannot cancel a booked job in the app (nobody is told anything); the provider who cancels it names the booked hour', async () => {
     const provider = await makeVerifiedProvider();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const jobId = await quotedJob(provider, customer);
@@ -402,17 +410,20 @@ describe('Services — closing a job is never silent', () => {
     expect((await schedule(jobId, slot, customer.token)).statusCode).toBe(200);
     expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
-    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), customer.token)).statusCode).toBe(200);
+    const refused = await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), customer.token);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('SERVICE_JOB_BOOKED');
+    expect(await notificationFor(provider.userId, 'booking_cancelled', jobId)).toBeNull();
 
-    const told = await notificationFor(provider.userId, 'booking_cancelled', jobId);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    const told = await notificationFor(customer.userId, 'booking_cancelled', jobId);
     expect(told).not.toBeNull();
-    expect(told!.body).toContain('free again');
     // The hour the provider had blocked is named, in the same spelling the
     // booking notification used: the market zone through the one shared
     // formatter (services.routes.ts slotLabel), never the host zone.
     expect(told!.body).toContain(formatGuyanaTime(slot, { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short', hour12: true }, 'en-US'));
     // The canceller is not notified about their own action.
-    expect(await notificationFor(customer.userId, 'booking_cancelled', jobId)).toBeNull();
+    expect(await notificationFor(provider.userId, 'booking_cancelled', jobId)).toBeNull();
   });
 
   it('a provider cancelling tells the customer', async () => {

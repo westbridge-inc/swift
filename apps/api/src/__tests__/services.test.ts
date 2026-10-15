@@ -650,7 +650,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(updated.averageRating).toBe(5);
   });
 
-  it('[owner #50 · coordinator ruling 14 Oct] the customer cancels free until the provider starts the job; once in progress the app refuses and names who to contact — never a fee', async () => {
+  it('[owner #50 · coordinator rulings 14 Oct · Terms §7] the customer cancels free while the job is a request; once it is booked or in progress the app refuses and names who to contact — never a fee', async () => {
     const provider = await makeVerifiedProvider('carpenter');
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const job = async () => {
@@ -663,12 +663,28 @@ describe('Services — job lifecycle + two-way rating', () => {
       return jobId;
     };
 
-    // Scheduled, not started: free.
-    const notStarted = await job();
-    const freed = await inject('POST', `/api/v1/services/jobs/${notStarted}/cancel`, {}, customer.token);
+    // A request (quoted, no slot agreed yet): free.
+    const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
+    const request = created.json().data.id as string;
+    await inject('POST', `/api/v1/services/jobs/${request}/quote`, { amount: 8000 }, provider.token);
+    const freed = await inject('POST', `/api/v1/services/jobs/${request}/cancel`, {}, customer.token);
     expect(freed.statusCode, freed.body).toBe(200);
     expect(freed.json().data.status).toBe('CANCELLED');
     expect(freed.body).not.toMatch(/fee/i);
+
+    // [TRANSFORMED, coordinator ruling 14 Oct: the server matches the Terms] Booked, not
+    // started: this case used to cancel free. Once a slot is booked the app refuses and the
+    // customer contacts the provider; nothing is written.
+    const booked = await job();
+    const refusedBooked = await inject('POST', `/api/v1/services/jobs/${booked}/cancel`, {}, customer.token);
+    expect(refusedBooked.statusCode, refusedBooked.body).toBe(409);
+    expect(refusedBooked.json().error).toMatchObject({
+      code: 'SERVICE_JOB_BOOKED',
+      message: 'This job is booked, so it can no longer be cancelled in the app. Contact your provider to change or cancel it.',
+    });
+    expect(refusedBooked.body).not.toMatch(/fee/i);
+    const bookedRow = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: booked } }), 'services-test-fixture');
+    expect({ status: bookedRow.status, cancelledAt: bookedRow.cancelledAt }).toEqual({ status: 'SCHEDULED', cancelledAt: null });
 
     // Started: refused, nothing written.
     const started = await job();

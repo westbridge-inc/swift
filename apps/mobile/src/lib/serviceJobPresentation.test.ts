@@ -1,7 +1,12 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   armServiceJobDueWakeup,
   parseServiceQuoteInput,
+  SERVICE_JOB_BOOKED_CANCEL_WORDS,
+  SERVICE_JOB_STARTED_CANCEL_WORDS,
+  serviceJobCancelView,
   serviceJobDueDelayMs,
   serviceJobErrorMessage,
   showsServiceJobAgreedPrice,
@@ -107,5 +112,40 @@ describe('service-job presentation contract', () => {
       expect(serviceJobScheduleSelection('2026-09-20', '10:00', now)).toEqual({ scheduledFor: '2026-09-20T14:00:00.000Z', isPast: true });
       expect(serviceJobScheduleSelection('2026-09-20', '12:00', now).isPast).toBe(false);
     });
+  });
+});
+
+describe('[coordinator ruling 14 Oct · Terms 2026-10-15 §7] who may cancel a service job in the app', () => {
+  const API_POLICY = readFileSync(join(process.cwd(), '../api/src/modules/order/cancel-policy.ts'), 'utf8');
+  const apiWords = (name: string) => API_POLICY.match(new RegExp(`export const ${name} = '([^']+)';`))?.[1];
+
+  it('the customer cancels only a request; once booked or started the app says who to contact instead', () => {
+    expect(serviceJobCancelView('REQUESTED', true)).toEqual({ canCancel: true, contactWords: null });
+    expect(serviceJobCancelView('QUOTED', true)).toEqual({ canCancel: true, contactWords: null });
+    expect(serviceJobCancelView('SCHEDULED', true)).toEqual({ canCancel: false, contactWords: SERVICE_JOB_BOOKED_CANCEL_WORDS });
+    expect(serviceJobCancelView('IN_PROGRESS', true)).toEqual({ canCancel: false, contactWords: SERVICE_JOB_STARTED_CANCEL_WORDS });
+  });
+
+  it('the provider keeps Cancel through SCHEDULED and IN_PROGRESS; a closed job offers nobody a Cancel', () => {
+    for (const status of ['REQUESTED', 'QUOTED', 'SCHEDULED', 'IN_PROGRESS']) {
+      expect(serviceJobCancelView(status, false), status).toEqual({ canCancel: true, contactWords: null });
+    }
+    for (const status of ['COMPLETED', 'CANCELLED']) {
+      expect(serviceJobCancelView(status, true), status).toEqual({ canCancel: false, contactWords: null });
+      expect(serviceJobCancelView(status, false), status).toEqual({ canCancel: false, contactWords: null });
+    }
+  });
+
+  it('the words are the server refusal, word for word', () => {
+    expect(apiWords('SERVICE_JOB_BOOKED_MESSAGE')).toBe(SERVICE_JOB_BOOKED_CANCEL_WORDS);
+    expect(apiWords('SERVICE_JOB_STARTED_MESSAGE')).toBe(SERVICE_JOB_STARTED_CANCEL_WORDS);
+  });
+
+  it('the job card asks this one rule for its Cancel button and its contact words', () => {
+    const SCREEN = readFileSync(join(process.cwd(), 'src/modules/services/screens/ServiceJobsScreen.tsx'), 'utf8');
+    expect(SCREEN).toMatch(/serviceJobCancelView\(job\.status, isCustomer\)/);
+    expect(SCREEN).toMatch(/\{cancelView\.canCancel \? \(\s*<PillButton label="Cancel"/);
+    expect(SCREEN).toMatch(/\{cancelView\.contactWords\}/);
+    expect(SCREEN).not.toMatch(/\['REQUESTED', 'QUOTED', 'SCHEDULED', 'IN_PROGRESS'\]\.includes\(job\.status\)/);
   });
 });

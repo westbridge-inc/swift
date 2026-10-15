@@ -733,9 +733,10 @@ export async function servicesRoutes(app: FastifyInstance) {
     const { expectedUpdatedAt } = commandGeneration(command, job);
     if (['COMPLETED', 'CANCELLED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', 'This job is already closed');
     const cancelledByCustomer = job.customerId === request.user.userId;
-    // [owner #50 · coordinator ruling 14 Oct (Opus S3-3)] The one cancellation
-    // rule decides the customer's cancel: free until the provider starts the
-    // job, refused once it is in progress (contact the provider). Never a fee.
+    // [owner #50 · coordinator rulings 14 Oct] The one cancellation rule decides
+    // the customer's cancel, as the Terms (§7) say: free while the job is a
+    // request, refused once it is booked or in progress (contact the provider).
+    // The provider may still cancel a booked or started job. Never a fee.
     if (cancelledByCustomer) {
       const verdict = serviceJobCancelVerdict(job);
       if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);

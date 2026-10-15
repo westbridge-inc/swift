@@ -17,6 +17,7 @@ import {
   armServiceJobDueWakeup,
   parseServiceQuoteInput,
   serviceJobDueDelayMs,
+  serviceJobCancelView,
   serviceJobErrorMessage,
   showsServiceJobAgreedPrice,
 } from '../../../lib/serviceJobPresentation';
@@ -291,6 +292,7 @@ const SOS_STATUSES = new Set(['SCHEDULED', 'IN_PROGRESS']);
 function JobCard({ job, navigation }: { job: any; navigation: any }) {
   const myId = useAuthStore((s) => s.user?.id);
   const isCustomer = job.customerId === myId;
+  const cancelView = serviceJobCancelView(job.status, isCustomer);
   const cancel = useCancelJob();
   const [scheduling, setScheduling] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -357,10 +359,18 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
             onPress={() => navigation.navigate('Conversation', { roomId: job.chatRoomId, title: 'Job chat' })}
           />
         ) : null}
-        {['REQUESTED', 'QUOTED', 'SCHEDULED', 'IN_PROGRESS'].includes(job.status) ? (
+        {cancelView.canCancel ? (
           <PillButton label="Cancel" variant="outline" size="md" style={{ flex: 1 }} loading={cancel.isPending} onPress={() => setConfirmCancel(true)} />
         ) : null}
       </View>
+
+      {/* [coordinator ruling 14 Oct · Terms §7] A booked or started job is not the
+          customer's to cancel in the app: the server's own words say who to contact. */}
+      {cancelView.contactWords ? (
+        <View accessibilityRole="summary" style={{ marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
+          <T variant="label" tone="info">{cancelView.contactWords}</T>
+        </View>
+      ) : null}
 
       {isCustomer && job.status === 'COMPLETED' ? <RateRow job={job} /> : null}
 
@@ -401,7 +411,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {isCustomer
-            ? 'The provider will be told immediately and any reserved time will be released.'
+            ? 'This withdraws the job request.'
             : 'The customer will be told immediately so they can choose another provider.'}
         </T>
         <PillButton
