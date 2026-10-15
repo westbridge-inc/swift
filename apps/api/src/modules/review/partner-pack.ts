@@ -163,10 +163,10 @@ export async function packPartnerDocuments(db: Db, countryCode: string, vehicleT
 }
 
 /**
- * What the checklist still lacks for this account now, by the records the gates read, WITHOUT the 60-day
- * hire-car permit grace. [Opus 13 Oct · #1546 S3-1] A pack seeded before the split holds the old permit,
- * which the grace counts as both new licences; read with the grace, a re-seed would add nothing and the
- * review taxi would go offline the day the window closes. The fiction always holds the real documents.
+ * What the checklist still lacks for this account now, by the records the gates read. [Opus 13 Oct · #1546
+ * S3-1] A pack seeded before the split holds the old permit; a re-seed commits the two real licences, so the
+ * review taxi stays ready. [Owner 15 Oct 2026] The permit no longer counts at all (no grace), so the gates
+ * read these same records. The fiction always holds the real documents.
  */
 async function missingEvidence(db: Db, role: PartnerRole, userId: string, countryCode: string, now: Date): Promise<string[]> {
   const spec = REVIEW_PACK_PARTNERS[role];

@@ -8,8 +8,8 @@
  *    licence (s.79; 1 year), (5) the certificate of fitness (printed date only; a person keys it),
  *    (6) insurance covering hire, (7) one car photo with the plate visible. Items 2 and 4 replace
  *    the single `hire_car_permit`.
- *    Transition: an approved permit counts as BOTH new licences until it expires or 60 days pass,
- *    whichever comes first, with reminders — nobody is knocked offline on day one.
+ *    Transition: [owner 15 Oct 2026] NONE. The 60-day grace (an approved permit counting as both new
+ *    licences) is removed: no taxi driver goes online without both licences approved.
  * 7. TIN: no certificate image on any checklist; an OPTIONAL "VAT registration number (if
  *    VAT-registered)" on the store, typed, format-checked only, for VAT invoices.
  * (Ruling 9, buses, is its own change: verify-docs-buses.test.ts.)
@@ -31,8 +31,11 @@ import { verificationRoutes } from '../modules/verification/verification.routes'
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
+import { driverRoutes } from '../modules/driver/driver.routes';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { VerificationService } from '../modules/verification/verification.service';
-import { evaluateMoverDocuments } from '../modules/verification/mover-document-authority';
+import { evaluateMoverDocuments, lockMoverDocuments } from '../modules/verification/mover-document-authority';
 import { NotificationService } from '../modules/notification/notification.service';
 import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
@@ -65,6 +68,7 @@ beforeAll(async () => {
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
+  await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
   service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   const admin = await app.prisma.user.create({ data: {
@@ -210,7 +214,20 @@ describe('[V5 · ruling 8] the taxi’s seven documents', () => {
   });
 });
 
-describe('[V5 · transition] an approved permit counts as both new licences for 60 days, or until it expires', () => {
+// [Owner ruling 15 Oct 2026 ~04:25Z, criminal-liability decisions] THE 60-DAY GRACE IS REMOVED (abettor risk,
+// MVRTA s.80 + SJ(O)A s.19). No taxi driver goes online, or is offered work, without BOTH hire licences on file
+// and approved; the old single hire-car permit never stands in for them, however recently the switch-over was
+// recorded. Cases marked TRANSFORMED asserted the grace (the old rule) and now assert its removal.
+describe('[owner 15 Oct · no grace] the old hire-car permit never counts as the two hire licences', () => {
+  /** The daily sweep (and the boot run) that enforces the two licences. Through a lookup so the old code runs its
+   *  grace sweep here and fails on this file's assertions, not on a missing method. */
+  const licenceSweep = (now?: Date) => {
+    const s = service as unknown as Record<string, ((now?: Date) => Promise<number>) | undefined>;
+    return (s['hireLicenceSweep'] ?? s['hirePermitGraceSweep'])!.call(service, now);
+  };
+  const HIRE_LICENCES = ['hire_car_driver_licence', 'hire_car_vehicle_licence'];
+  const goOnline = (m: { token: string }) => app.inject({ method: 'POST', url: '/api/v1/driver/go-online', headers: { authorization: `Bearer ${m.token}` } });
+
   it('initialization refuses a failed write instead of starting with no persisted grace', async () => {
     await app.prisma.platformConfig.deleteMany({ where: { key: SPLIT_KEY } });
     const failure = vi.spyOn(app.prisma.platformConfig, 'create').mockRejectedValueOnce(new Error('synthetic grace write unavailable'));
@@ -229,41 +246,66 @@ describe('[V5 · transition] an approved permit counts as both new licences for 
     } finally { raced.mockRestore(); }
   });
 
-  it('during the 60 days: verified and live, with the two new licences asked for', async () => {
+  // TRANSFORMED (was 'during the 60 days: verified and live, with the two new licences asked for').
+  it('inside what was the 60-day window, a permit-only driver is not live, not verified, refused at GO, and told both licences are missing', async () => {
     await setSplitStarted(10);
     const m = await legacyTaxi();
-    expect(await live(m.userId)).toEqual({ allowed: true, reason: 'ok' });
-    // The permit (300 days) stands in only until the window closes (60 days from the switch-over, 10 days ago).
-    expect(Math.abs((await validUntil(m.userId))!.getTime() - (Date.now() + 50 * DAY))).toBeLessThan(5 * 60_000);
+    expect(await live(m.userId)).toEqual({ allowed: false, reason: 'docs' });
     const s = await statusOf(m.token);
-    expect(s.roleVerified).toBe(true);
-    expect(s.missing).toEqual([]);
-    expect(s.checklist).toEqual(expect.arrayContaining(['hire_car_driver_licence', 'hire_car_vehicle_licence']));
-    expect((s as unknown as { hirePermitGrace?: { until: string } }).hirePermitGrace?.until).toBeTruthy();
-    // the new licences can be uploaded now
-    for (const t of ['hire_car_driver_licence', 'hire_car_vehicle_licence']) expect((await submit(m, t)).statusCode, t).toBe(201);
-  });
-
-  it('a permit that expires first ends the grace with it', async () => {
-    await setSplitStarted(10);
-    const m = await legacyTaxi(5);
+    expect(s.roleVerified).toBe(false);
+    expect(s.missing).toEqual(HIRE_LICENCES);
+    expect(s).not.toHaveProperty('hirePermitGrace');
+    const go = await goOnline(m);
+    expect([go.statusCode, go.json().error?.code ?? go.json().code]).toEqual([403, 'VERIFICATION_REQUIRED']);
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { userId: m.userId } })).isOnline).toBe(false);
+    // the two licences, uploaded and approved by a person, restore the driver
+    for (const t of HIRE_LICENCES) {
+      const r = await submit(m, t); expect(r.statusCode, t).toBe(201); await approve(r.json().data.id, t);
+    }
     expect((await live(m.userId)).allowed).toBe(true);
-    // Before it expires, the stand-in already ends with the permit (5 days), not with the window (50 days).
-    const until = (await validUntil(m.userId))!.getTime();
-    expect(until).toBeLessThanOrEqual(Date.now() + 5 * DAY + 60_000);
-    expect(until).toBeGreaterThan(Date.now() + 3 * DAY);
-    await app.prisma.verificationDocument.update({ where: { id: m.permitId }, data: { expiresAt: new Date(Date.now() - DAY) } });
-    expect((await live(m.userId)).allowed).toBe(false);
   });
 
-  it('a reminder uses the permit’s earlier deadline rather than promising the whole remaining window', async () => {
+  // TRANSFORMED (was 'a permit that expires first ends the grace with it'): one licence is not enough either.
+  it('with the permit and only ONE of the two licences, the driver is not live, the checklist names exactly the other, and the claim path refuses', async () => {
     await setSplitStarted(10);
-    const m = await legacyTaxi(5);
-    await service.hirePermitGraceSweep();
-    const notes = await app.prisma.notification.findMany({ where: { userId: m.userId, title: { contains: 'hire' } } });
-    expect(notes).toHaveLength(1);
-    expect(notes[0]!.data).toMatchObject({ daysLeft: 5 });
-    expect(notes[0]!.body).toContain(new Date(Date.now() + 5 * DAY).toISOString().slice(0, 10));
+    const m = await legacyTaxi();
+    const r = await submit(m, 'hire_car_driver_licence'); expect(r.statusCode).toBe(201); await approve(r.json().data.id, 'hire_car_driver_licence');
+    expect(await live(m.userId)).toEqual({ allowed: false, reason: 'docs' });
+    expect((await statusOf(m.token)).missing).toEqual(['hire_car_vehicle_licence']);
+    // the locked read every job claim, ride accept and GO runs under lock (dispatch.service, driver.routes)
+    const locked = await app.prisma.$transaction((tx) => lockMoverDocuments(tx, m.userId, 'DRIVER'));
+    expect(locked.allowed).toBe(false);
+  });
+
+  // TRANSFORMED (was 'the daily sweep reminds a driver on the grace once per stage, and takes them offline when it ends'
+  // and 'a reminder uses the permit’s earlier deadline rather than promising the whole remaining window').
+  it('the sweep takes an ONLINE permit-only driver offline at once, inside what was the window, and tells them once to upload both licences', async () => {
+    await setSplitStarted(10);
+    const m = await legacyTaxi();
+    await app.prisma.driver.update({ where: { userId: m.userId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('v5-no-grace') } });
+    await licenceSweep();
+    await licenceSweep();
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { userId: m.userId } })).isOnline).toBe(false);
+    const offline = await app.prisma.notification.findMany({ where: { userId: m.userId, title: 'You have been taken offline' } });
+    expect(offline).toHaveLength(1);
+    expect(offline[0]!.body).toContain('Upload your Hire Car Driver’s Licence and your car’s hire licence');
+    const asks = await app.prisma.notification.findMany({ where: { userId: m.userId, title: { contains: 'hire' } } });
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.body).toContain('Upload your Hire Car Driver’s Licence and your car’s hire licence');
+    expect(asks[0]!.body).not.toMatch(/still counts|keep working|within \d+ days/i);
+  });
+
+  it('a driver holding the permit and the Hire Car Driver’s Licence is asked for the car’s hire licence alone', async () => {
+    await setSplitStarted(10);
+    const m = await legacyTaxi();
+    const r = await submit(m, 'hire_car_driver_licence'); await approve(r.json().data.id, 'hire_car_driver_licence');
+    await app.prisma.driver.update({ where: { userId: m.userId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('v5-one-licence') } });
+    await licenceSweep();
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { userId: m.userId } })).isOnline).toBe(false);
+    const asks = await app.prisma.notification.findMany({ where: { userId: m.userId, title: { contains: 'hire' } } });
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.body).toContain('Upload your car’s hire licence (the yearly one shown on the car) in Documents');
+    expect(asks[0]!.body).not.toContain('Upload your Hire Car Driver’s Licence');
   });
 
   it('a permit whose retention clock elapsed never promises continuing eligibility', async () => {
@@ -271,7 +313,7 @@ describe('[V5 · transition] an approved permit counts as both new licences for 
     const m = await legacyTaxi();
     await app.prisma.verificationDocument.update({ where: { id: m.permitId }, data: { retentionExpiresAt: new Date(Date.now() - DAY) } });
     expect(await app.prisma.documentRecord.count({ where: { submissionId: m.permitId, status: 'VALID' } })).toBe(1);
-    await service.hirePermitGraceSweep();
+    await licenceSweep();
     expect(await app.prisma.notification.count({ where: { userId: m.userId, title: { contains: 'hire' } } })).toBe(0);
   });
 
@@ -286,29 +328,25 @@ describe('[V5 · transition] an approved permit counts as both new licences for 
     expect(notices[0]!.body).toContain('Hire Car Driver’s Licence');
   });
 
-  it('concurrent grace reminders persist one notice per stage', async () => {
+  // TRANSFORMED (was 'concurrent grace reminders persist one notice per stage'): concurrent sweeps, one of each notice.
+  it('concurrent sweeps take the driver offline once and ask once', async () => {
     await setSplitStarted(10);
     const m = await legacyTaxi();
-    let reached = 0;
-    let release!: () => void;
-    const barrier = new Promise<void>((resolve) => { release = resolve; });
-    // This query is awaited directly; the concurrency seam does not use Prisma's fluent relation API.
-    const finder = app.prisma.notification as unknown as {
-      findFirst: (args?: Parameters<typeof app.prisma.notification.findFirst>[0]) => Promise<{ id: string } | null>;
-    };
-    const original = finder.findFirst.bind(finder);
-    const probe = vi.spyOn(finder, 'findFirst').mockImplementation(async (args) => {
-      if (args?.where?.userId !== m.userId) return original(args);
-      reached += 1;
-      if (reached === 4) release();
-      await barrier;
-      return null;
-    });
-    try {
-      await Promise.all(Array.from({ length: 4 }, () => service.hirePermitGraceSweep()));
-      expect(reached).toBe(4);
-      expect(await app.prisma.notification.count({ where: { userId: m.userId, title: { contains: 'hire' } } })).toBe(1);
-    } finally { probe.mockRestore(); }
+    await app.prisma.driver.update({ where: { userId: m.userId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('v5-concurrent') } });
+    await Promise.all(Array.from({ length: 4 }, () => licenceSweep()));
+    expect(await app.prisma.notification.count({ where: { userId: m.userId, title: { contains: 'hire' } } })).toBe(1);
+    expect(await app.prisma.notification.count({ where: { userId: m.userId, title: 'You have been taken offline' } })).toBe(1);
+  });
+
+  it('a permit expiring soon is never reminded as something to keep operating on', async () => {
+    await setSplitStarted(10);
+    const m = await legacyTaxi(10); // T-14 notice due now
+    expect(await service.sendExpiryReminders()).toBeGreaterThanOrEqual(1);
+    const reminders = (await app.prisma.notification.findMany({ where: { userId: m.userId, data: { path: ['docId'], equals: m.permitId } } }))
+      .filter((n) => (n.data as { kind?: string } | null)?.kind === 'verification_expiry_reminder');
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]!.body).not.toMatch(/keep operating|keep working/i);
+    expect(reminders[0]!.body).toContain('Upload your Hire Car Driver’s Licence and your car’s hire licence (the yearly one shown on the car) in Documents to go online');
   });
 
   it('after 60 days the permit no longer counts; the two new licences restore the driver', async () => {
@@ -328,19 +366,26 @@ describe('[V5 · transition] an approved permit counts as both new licences for 
     expect((await live(m.userId)).allowed).toBe(false);
   });
 
-  it('the daily sweep reminds a driver on the grace once per stage, and takes them offline when it ends', async () => {
+  it('every API boot runs the licence sweep (after the switch-over is recorded), and a failing sweep never stops the boot', async () => {
+    const { runHireLicenceSweepAtBoot } = await import('../modules/verification/hire-licence-boot').catch(() => ({ runHireLicenceSweepAtBoot: undefined }));
+    expect(typeof runHireLicenceSweepAtBoot).toBe('function');
     await setSplitStarted(10);
     const m = await legacyTaxi();
-    const sweep = (service as unknown as { hirePermitGraceSweep: (now?: Date) => Promise<number> }).hirePermitGraceSweep.bind(service);
-    await sweep();
-    await sweep();
-    const notes = await app.prisma.notification.findMany({ where: { userId: m.userId, title: { contains: 'hire' } } });
-    expect(notes).toHaveLength(1);
-    expect(notes[0]!.body).toMatch(/Hire Car Driver.s Licence/);
-    await app.prisma.driver.update({ where: { userId: m.userId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('v5-grace') } });
-    await setSplitStarted(61);
-    await sweep();
+    await app.prisma.driver.update({ where: { userId: m.userId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('v5-boot') } });
+    const warnings: unknown[] = [];
+    await runHireLicenceSweepAtBoot!({ prisma: app.prisma, io: app.io, log: { warn: (...a: unknown[]) => warnings.push(a), info: () => {} } });
     expect((await app.prisma.driver.findUniqueOrThrow({ where: { userId: m.userId } })).isOnline).toBe(false);
+    expect(warnings).toEqual([]);
+    const failing = vi.spyOn(app.prisma.documentRecord, 'findMany').mockRejectedValueOnce(new Error('synthetic sweep failure'));
+    try {
+      await expect(runHireLicenceSweepAtBoot!({ prisma: app.prisma, io: app.io, log: { warn: (...a: unknown[]) => warnings.push(a), info: () => {} } })).resolves.toBeUndefined();
+      expect(warnings).toHaveLength(1);
+    } finally { failing.mockRestore(); }
+    const server = readFileSync(join(__dirname, '../server.ts'), 'utf8');
+    const split = server.indexOf('await ensureHireSplitStarted(app.prisma);');
+    const boot = server.indexOf('runHireLicenceSweepAtBoot(');
+    expect(split).toBeGreaterThan(0);
+    expect(boot).toBeGreaterThan(split);
   });
 });
 
