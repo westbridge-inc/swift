@@ -684,8 +684,10 @@ describe('Scoring — pure and predictable', () => {
     expect(scoreCandidate({ ...base, hasActiveJob: false })).toBeLessThan(scoreCandidate({ ...base, hasActiveJob: true }));
   });
 
-  it('chronic decliners drift down', () => {
-    expect(scoreCandidate({ ...base, acceptanceRate: 95 })).toBeLessThan(scoreCandidate({ ...base, acceptanceRate: 20 }));
+  // [Owner ruling 15 Oct 2026 · R25, contractor status] TRANSFORMED: was 'chronic decliners drift down'. Declining or
+  // cancelling an offer never costs a partner anything: no strike, no lower place in the offer order.
+  it('declining costs no place in the offer order', () => {
+    expect(scoreCandidate({ ...base, acceptanceRate: 95 })).toBe(scoreCandidate({ ...base, acceptanceRate: 20 }));
   });
 
   it('rating does NOT break ties — RATING_AFFECTS_DISPATCH is false (founder, R-Law 4)', () => {
