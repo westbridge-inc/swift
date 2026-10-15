@@ -19,6 +19,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CashRulesService, gpsEvidence, orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { goodsSizeCarriableToday } from '../../config/vehicle-classes';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
@@ -198,9 +199,19 @@ export default async function courierRoutes(app: FastifyInstance) {
     return (await readCourierRates(app.prisma, user?.countryCode ?? 'GY')).payload;
   }
 
+  /** [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] A parcel no vehicle Swift takes on today may
+   *  carry (the largest size while car deliveries are off) is refused at its quote and at its request, before
+   *  anything is written: never booked, dispatched to nobody and stranded. */
+  const assertParcelCarriable = (packageSize: string) => {
+    if (!goodsSizeCarriableToday(packageSize)) {
+      throw new AppError(409, 'PARCEL_TOO_BIG', 'No vehicle on Swift can carry a parcel this size right now. Choose a smaller size if it fits, or send it another way.');
+    }
+  };
+
   /** POST /estimate — price quote (size + distance + speed) before requesting. */
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
+    assertParcelCarriable(body.packageSize);
     const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(request.user.userId));
     return { success: true, data: { ...estimate, distanceKm: Math.round(distanceKm * 10) / 10 } };
   });
@@ -230,6 +241,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     };
     const existing = await replay(app.prisma);
     if (existing) { reply.code(201); return existing.answer; }
+    assertParcelCarriable(body.packageSize);
     const assertCashAllowed = async (db: Prisma.TransactionClient) => {
       const restriction = await orderingRestriction(db, userId);
       if (restriction !== null) throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Cash courier requests are disabled on this account after failed payments. Contact support.');

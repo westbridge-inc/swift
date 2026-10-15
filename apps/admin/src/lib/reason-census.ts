@@ -52,6 +52,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
   { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
     requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },
+  { route: 'POST /orders/:id/door-cash-return/resolve', helper: 'resolveHeldDoorCash', args: ['ord_1'], reply: { orderId: 'ord_1', doorCashReturn: { status: 'RESOLVED' } } },
 
   // ── Moderation ─────────────────────────────────────────────────────────
   { route: 'PUT /moderation/reports/:id', helper: 'resolveModerationReport', args: ['rep_1', { status: 'ACTIONED' }], requiredBodyKeys: ['status'] },
@@ -88,6 +89,9 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /finance/settlements/:id/process', helper: 'processSettlement', args: ['set_1', undefined] },
   { route: 'PUT /subscriptions/:id/waive-fee', helper: 'waiveSubscriptionFee', args: ['sub_1'], requiredBodyKeys: ['reason'] },
   { route: 'POST /subscriptions/:id/topup', helper: 'topUpSubscription', args: ['sub_1', 1000, 'REF-1', 'idem-1'], requiredBodyKeys: ['amount', 'reference'] },
+  { route: 'POST /subscriptions/:id/refund-credit/set-aside', helper: 'setAsideSubscriptionCredit', args: ['sub_1', 1000], requiredBodyKeys: ['amount'] },
+  { route: 'POST /subscriptions/:id/refund-credit/paid', helper: 'recordSubscriptionRefundPaid', args: ['sub_1', 1000, 'MMG', 'REF-1', 'evt_aside_1'], requiredBodyKeys: ['amount', 'method', 'reference', 'setAsideId'] },
+  { route: 'POST /subscriptions/:id/refund-credit/release', helper: 'releaseSubscriptionRefund', args: ['sub_1', 1000, 'evt_aside_1'], requiredBodyKeys: ['amount', 'setAsideId'] },
   { route: 'PUT /cash-rules/claims/:id/approve', helper: 'approveClaim', args: ['clm_1'] },
   { route: 'PUT /cash-rules/claims/:id/reject', helper: 'rejectClaim', args: ['clm_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /cash-rules/claims/:id/paid', helper: 'payClaim', args: ['clm_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },

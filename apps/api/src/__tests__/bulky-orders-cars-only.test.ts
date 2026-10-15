@@ -27,7 +27,14 @@ import { stackVerdict } from '../modules/dispatch/stack-eligibility';
 //
 // Fixtures: Mabaruma, far from every other suite, so only this file's movers
 // are ever candidates.
+//
+// [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] TRANSFORMED: this
+// file now pins #1693's behaviour on the switch's re-enable path
+// (CAR_DELIVERIES=1, set for the whole file). With the switch OFF, the default,
+// no car takes goods work and a bulky delivery is refused at checkout whatever
+// is near: taxi-cars-passengers-only.test.ts pins that.
 // ---------------------------------------------------------------------------
+const priorCarDeliveries = process.env['CAR_DELIVERIES'];
 
 const SPOT = { lat: 8.2005, lng: -59.7811 }; // Mabaruma
 const DAY = 24 * 60 * 60 * 1000;
@@ -114,6 +121,7 @@ const call = (method: 'GET' | 'POST', url: string, token: string, payload?: Reco
 });
 
 beforeAll(async () => {
+  process.env['CAR_DELIVERIES'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);
@@ -152,6 +160,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  if (priorCarDeliveries === undefined) delete process.env['CAR_DELIVERIES']; else process.env['CAR_DELIVERIES'] = priorCarDeliveries;
   await sys(async () => {
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
     const placed = await app.prisma.order.findMany({ where: { customerId: { in: userIds } }, select: { id: true } });

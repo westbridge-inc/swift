@@ -10,6 +10,7 @@ import { StorefrontPage } from '@/components/storefront/storefront-page';
 import { storefrontFixture } from '@/test/storefront-fixture';
 import { customerRoute } from '@/lib/customer-routes';
 import { loadItemSheet } from '@/components/storefront/storefront-experience';
+import { axeViolations } from '@/test/axe';
 
 // ---------------------------------------------------------------------------
 // [W4] ONE checkout. Every web order is placed on one page (/checkout, which
@@ -198,5 +199,19 @@ describe('[W4] the store page sends the customer to the one checkout', () => {
     fireEvent.click(add);
     expect((await screen.findAllByText(/unresolved server outcome/)).length).toBeGreaterThan(0);
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
+  });
+});
+
+// [Row 111 · W8] The checkout and a store page, as pages inside the customer app.
+describe('[W8] checkout and the store page are accessible', () => {
+  it('the checkout has no accessibility violations axe can find', async () => {
+    at('/checkout', <CheckoutPage />);
+    await screen.findByRole('button', { name: 'Place cash order · $2,100' });
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
+  });
+  it('a store page has no accessibility violations axe can find', async () => {
+    at('/store/fixture-bakery', await storePage());
+    await screen.findByRole('button', { name: /Add Bake and saltfish/ });
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
   });
 });

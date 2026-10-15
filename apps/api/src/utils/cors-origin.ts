@@ -68,3 +68,28 @@ export function resolveCorsOrigins(
   }
   return [...new Set(entries.map(normalizeOrigin))];
 }
+
+/**
+ * How long a browser may reuse one CORS preflight answer, in seconds.
+ *
+ * Without `Access-Control-Max-Age` Chrome keeps a preflight for only 5 s, so
+ * the website paid an extra OPTIONS round trip before nearly every API call it
+ * repeated (polling, refetch on focus, going back to a page): about 0.1 s from
+ * Guyana on a warm connection, more on phone data. 7200 s is the Chrome cap
+ * (Firefox caps at 86400 and uses the lower value we send).
+ *
+ * This changes nothing about WHO may call the API: the origin allowlist and the
+ * credentials rule stay exactly as resolved above, and every real response
+ * still carries its own Access-Control-Allow-Origin check. A browser only
+ * remembers an answer this API already gave it, per origin and per URL.
+ */
+export const CORS_PREFLIGHT_MAX_AGE_SECONDS = 7200;
+
+/** The one @fastify/cors configuration the API registers (see app.ts). */
+export function corsPluginOptions(origin: string[] | false): {
+  origin: string[] | false;
+  credentials: true;
+  maxAge: number;
+} {
+  return { origin, credentials: true, maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS };
+}

@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { randomInt, timingSafeEqual } from 'node:crypto';
 import type { CustodyIncidentReason, CustodyRecoveryCase, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -8,8 +8,9 @@ import { haversineDistance } from '../../utils/distance';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
-import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
+import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs, VEHICLE_PASSENGERS_ONLY } from '../dispatch/concurrency-policy';
 import { vehicleCanCarry } from '../dispatch/dispatch.service';
+import { carriesGoods } from '../../config/vehicle-classes';
 import { assertDispatchPairEligible, safetyExcludedMovers } from '../dispatch/pair-safety';
 import { handoverAttemptState } from '../handover/handover-security';
 import { assertActiveMoverAccount, assertMoverRoleAuthority, lockUserRoleAuthority } from '../mover-authority';
@@ -164,7 +165,7 @@ export async function publishCaseChange(
   try {
     const event = { orderId: order.id, caseId: kase.id, state: kase.state, timestamp: new Date().toISOString() };
     await emitToOrderRoom(deps.prisma, deps.io, order.id, CASE_ROOM_EVENT, event);
-    if (order.vendorId) deps.io.to(`vendor:${order.vendorId}`).emit(CASE_ROOM_EVENT, event);
+    if (order.vendorId) await emitToStoreRoom(deps.prisma, deps.io, order.vendorId, CASE_ROOM_EVENT, event);
   } catch (err) {
     log().warn({ err, orderId: order.id }, 'custody case socket publication failed after commit');
   }
@@ -709,6 +710,8 @@ export async function assignRelay(
     const needsCourier = order.orderType === 'COURIER';
     const serves = needsCourier ? relay.riderType === 'COURIER' || relay.riderType === 'BOTH' : relay.riderType === 'DELIVERY' || relay.riderType === 'BOTH';
     if (!serves) throw new AppError(400, 'WRONG_SERVICE_TYPE', `That rider does not do ${needsCourier ? 'courier' : 'delivery'} work.`);
+    // [Owner ruling 15 Oct 2026] A taxi car carries no goods while car deliveries are off (the claim refuses it too).
+    if (!carriesGoods(relay.vehicleType)) throw new AppError(400, VEHICLE_PASSENGERS_ONLY, 'That rider’s vehicle is a taxi car, and taxi cars carry passengers only for now. Choose another rider.');
     if (needsCourier && order.courierPackageSize && !vehicleCanCarry(relay.vehicleType, order.courierPackageSize)) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', 'That rider’s vehicle cannot carry this parcel.');
     }

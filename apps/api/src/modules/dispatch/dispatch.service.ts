@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { assertDispatchPairEligible, safetyExcludedMovers } from './pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -26,7 +26,7 @@ import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
-import { vehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { goodsVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
@@ -63,6 +63,8 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** Decorated in server.ts when background queues are up */
     dispatchQueue?: Queue;
+    /** [row 266] The offer fast lane: offer timeouts only (jobs/queue.ts QUEUE_NAMES.OFFER). */
+    offerQueue?: Queue;
   }
 }
 
@@ -85,11 +87,13 @@ export const EXPRESS_OFFER_TIMEOUT_SECONDS = 12;
 // actually carry it — a bicycle can't take a wardrobe box. Capacity is derived
 // from the vehicle-class taxonomy (config/vehicle-classes) — the single source
 // of truth — so adding a box truck or canter automatically extends dispatch.
-/** Vehicle types that can carry a package of this size (any vehicle if unknown). */
+// [Owner ruling 15 Oct 2026] Goods only: a taxi car (any passenger vehicle) carries no goods while the
+// CAR_DELIVERIES switch is off (config/vehicle-classes `carriesGoods`), whatever its capacity.
+/** Vehicle types that may carry goods of this size today (any goods vehicle if unknown). */
 export function vehiclesForPackageSize(size: string | null | undefined): string[] {
-  return vehicleTypesForPackageSize(size);
+  return goodsVehicleTypesForPackageSize(size);
 }
-/** Can this vehicle carry a parcel of this size? */
+/** Can this vehicle carry goods (a parcel, a store order) of this size today? */
 export function vehicleCanCarry(vehicleType: string, size: string | null | undefined): boolean {
   return vehiclesForPackageSize(size).includes(vehicleType);
 }
@@ -1073,9 +1077,9 @@ export class DispatchService {
 
     // SWIFT-062: a courier parcel only goes to a vehicle that can carry it.
     const capableVehicles = vehiclesForPackageSize(packageSize);
-    const vehicleFilter = packageSize
-      ? Prisma.sql`AND r."vehicleType"::text = ANY(${capableVehicles})`
-      : Prisma.empty;
+    // [Owner ruling 15 Oct 2026] Emitted for every goods search, sized or not: a taxi car is never a goods
+    // candidate while car deliveries are off (an unsized order still excludes it).
+    const vehicleFilter = Prisma.sql`AND r."vehicleType"::text = ANY(${capableVehicles})`;
     // [REPORT-014 F-014-08] Service authorization, not just vehicle capability:
     // a COURIER order (packageSize set) may only go to a rider whose riderType
     // serves courier work, and a food/grocery DELIVERY only to a delivery
@@ -2809,7 +2813,7 @@ export class DispatchService {
     try {
       await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', assignedEvent);
       if (order.vendorId) {
-        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', assignedEvent);
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', assignedEvent);
       }
     } catch (err) {
       warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch socket publication failed after claim commit');
@@ -3193,8 +3197,9 @@ export class DispatchService {
 /** Route-side construction: timeouts ride the BullMQ queue when it exists. */
 export function makeDispatchService(app: FastifyInstance): DispatchService {
   const scheduler: TimeoutScheduler = async (orderId, riderId, delayMs, attemptId) => {
-    if (!app.dispatchQueue) throw new AppError(503, 'DISPATCH_QUEUE_UNAVAILABLE', 'Offer timeout scheduling is unavailable');
-    await app.dispatchQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
+    // [row 266] Offer timeouts ride their own queue and worker slots, never the sweeps' dispatch queue.
+    if (!app.offerQueue) throw new AppError(503, 'DISPATCH_QUEUE_UNAVAILABLE', 'Offer timeout scheduling is unavailable');
+    await app.offerQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
       delay: delayMs,
       removeOnComplete: 100,
       removeOnFail: 50,

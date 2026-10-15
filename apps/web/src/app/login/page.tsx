@@ -145,5 +145,5 @@ function LoginInner() {
 }
 
 export default function LoginPage() {
-  return <Suspense fallback={<main className="grid min-h-dvh place-items-center bg-[var(--swift-canvas)] text-[var(--swift-muted)]">Loading…</main>}><LoginInner /></Suspense>;
+  return <Suspense fallback={<main id="main" tabIndex={-1} className="grid min-h-dvh place-items-center bg-[var(--swift-canvas)] text-[var(--swift-muted)]">Loading…</main>}><LoginInner /></Suspense>;
 }
