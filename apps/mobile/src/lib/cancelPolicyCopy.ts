@@ -15,4 +15,5 @@ export const CANCEL_ORDER_FAQ_ANSWER =
   + 'A service job can be cancelled free until it is booked. '
   + 'You can still cancel free if no driver or rider was found, or if it is running very late. Once it is on its way, it can’t be cancelled. '
   + 'If you paid by MMG and the store has confirmed your payment, ask the store to cancel: the store refunds you directly. '
+  + 'Whenever an order you paid by MMG is cancelled, the store refunds you directly. '
   + 'Swift never charges a cancellation fee.';

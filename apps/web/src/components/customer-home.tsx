@@ -17,7 +17,7 @@ import { Modal } from '@/components/modal';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
 import { EmptyNote, ItemCard, SectionHead, VendorCard, VendorHeroCard, VendorSquareCard, VENDOR_GRID } from '@/components/order-ui';
-import { useOrderingContext } from '@/components/ordering-context';
+import { PRICE_PROMISE_BODY, PRICE_PROMISE_TITLE } from '@/lib/price-promise';
 
 // [owner, staging] Home's one place control: delivery or pickup together with
 // where (the phone app's Home has one location pill). Its code loads with the
@@ -84,7 +84,6 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
   const [locationError, setLocationError] = useState<string | null>(null);
   const [more, setMore] = useState(false);
   const [scanHelp, setScanHelp] = useState(false);
-  const pickup = useOrderingContext().mode === 'PICKUP';
 
   const addresses = useQuery({
     queryKey: ['customer', 'addresses', scope],
@@ -207,7 +206,7 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
       ) : !data ? (
         <div className="mt-5"><HomeSkeleton /></div>
       ) : (
-        <HomeRails data={data} pickup={pickup} />
+        <HomeRails data={data} />
       )}
 
       {more ? <MoreMenu guest={status === 'guest'} returnPath={() => '/'} onClose={() => setMore(false)} /> : null}
@@ -216,7 +215,7 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
   );
 }
 
-function HomeRails({ data, pickup }: { data: HomeFeed; pickup: boolean }) {
+function HomeRails({ data }: { data: HomeFeed }) {
   const openStores = withoutRepeats(data.nearby, data.openVendors);
   const foodOpen = data.openVendors.filter((v) => v.vendorType === 'RESTAURANT');
   const recommended = (data.featured.length > 0 ? data.featured : foodOpen).filter((v) => v.isCurrentlyOpen).slice(0, 3);
@@ -229,10 +228,9 @@ function HomeRails({ data, pickup }: { data: HomeFeed; pickup: boolean }) {
         <CircleCheck size={16} className="mt-0.5 flex-none text-[var(--swift-success)]" aria-hidden />
         <div className="flex-1">
           {/* The Explore page's promise, true in either mode: a delivery fee is never hidden by it. */}
-          <p className="text-[15px] font-semibold leading-5">0% fees, no markups</p>
-          <p className="mt-0.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">{pickup
-            ? 'Prices are the business’s own. Swift adds nothing to your order, and pickup has no delivery fee.'
-            : 'Prices are the business’s own. Swift adds nothing to your order — the delivery fee is shown at checkout.'}</p>
+          {/* [Legal research A12] the research's price promise, true for delivery and pickup alike. */}
+          <p className="text-[15px] font-semibold leading-5">{PRICE_PROMISE_TITLE}</p>
+          <p className="mt-0.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">{PRICE_PROMISE_BODY}</p>
         </div>
       </div>
 

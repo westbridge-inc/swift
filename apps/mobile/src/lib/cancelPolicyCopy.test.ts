@@ -29,6 +29,8 @@ const RULES: Array<{ rule: string; terms: RegExp; answer: RegExp }> = [
   { rule: 'never once on its way', terms: /Once your Order is on its way/, answer: /Once it is on its way, it can’t be cancelled/ },
   { rule: 'paid by MMG and confirmed: the store cancels and refunds', terms: /confirmed your payment, the app cannot cancel[\s\S]*the Business refunds you directly/, answer: /confirmed your payment, ask the store to cancel: the store refunds you directly/ },
   { rule: 'never a fee', terms: /Swift never charges a cancellation fee/, answer: /Swift never charges a cancellation fee/ },
+  // [Review S3-2 on #1732] the general MMG rule, not only the confirmed case
+  { rule: 'any cancelled MMG-paid order: the store refunds', terms: /If an Order you paid by MMG is cancelled, <b>the Business refunds you directly<\/b>/, answer: /Whenever an order you paid by MMG is cancelled, the store refunds you directly/ },
 ];
 
 describe('the in-app "Can I cancel an order?" answer says what Terms §7 says', () => {
@@ -41,6 +43,17 @@ describe('the in-app "Can I cancel an order?" answer says what Terms §7 says', 
     const OLD = /first few minutes|may not be available|starts preparing|may carry a cost|exact amount|late-cancellation|possible fee/i;
     expect(CANCEL_ORDER_FAQ_ANSWER).not.toMatch(OLD);
     expect(FAQ_SCREEN).not.toMatch(OLD);
+  });
+
+  it('[review S4-1 on #1732] a fee, a charge or a cost is named only to say Swift never charges one', () => {
+    const allowed = /never charges a cancellation fee/gi;
+    expect(CANCEL_ORDER_FAQ_ANSWER.replace(allowed, '')).not.toMatch(/\b(fees?|charge[sd]?|costs?)\b/i);
+  });
+
+  it('[review S3-1 on #1732] the cash checkout caption says free until the store ACCEPTS, never only while it has not been told', () => {
+    const cart = readFileSync(join(process.cwd(), 'src', 'modules', 'cart', 'cartPayment.ts'), 'utf8');
+    expect(cart).toContain('Until the store accepts it, you can cancel free from the order screen.');
+    expect(cart).not.toMatch(/hasn.t received it/);
   });
 
   it('the FAQ screen shows this answer, not a copy of its own', () => {

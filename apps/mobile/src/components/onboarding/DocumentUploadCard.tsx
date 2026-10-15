@@ -69,7 +69,6 @@ export function DocumentUploadCard({
   reviewNote,
   isNext,
   replaced = false,
-  faceMatched = false,
   optionalHint,
   hint,
 }: {
@@ -82,8 +81,6 @@ export function DocumentUploadCard({
   isNext?: boolean;
   /** [REPLACE-PENDING] This copy replaced an earlier one that was still waiting for review. */
   replaced?: boolean;
-  /** The server says it compares this document with the profile selfie (documentChecklistPresentation). */
-  faceMatched?: boolean;
   /** [VERIFY-DOCS] Set for a document the person MAY add: what it is for. Never a gate, so no
    *  "keep operating" copy and no "next step" nudge. */
   optionalHint?: string;
@@ -247,9 +244,8 @@ function explainPermissionDenied(
             {caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
-          {/* [Owner, 1 Oct · truth] Only when the server says it face-matches
-              this document. It used to show under every ID, while the
-              server's face-matching was switched off. */}
+          {/* [Legal research G4, in-app ¶17] The card no longer says a face was matched: identity checks are made
+              by people (face-matching is off, GUARDRAILS §8). The checklist says what really happens. */}
           {hint ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               {hint}
@@ -258,11 +254,6 @@ function explainPermissionDenied(
           {optionalHint ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               {optionalHint}
-            </T>
-          ) : null}
-          {faceMatched ? (
-            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
-              Face-matched against your profile selfie
             </T>
           ) : null}
         </View>

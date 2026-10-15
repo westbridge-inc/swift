@@ -4,7 +4,7 @@ import { color, radius, space } from '@swift/ui';
 import { EmptyState, Spinner, T } from '../../kit';
 import { DocumentUploadCard } from './DocumentUploadCard';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
-import { emptyChecklistCopy, faceMatchedDocTypes, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
+import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
  *  theme maps no numeric spacing, so it was never a token. Named here so the
@@ -55,8 +55,6 @@ export function DocumentChecklist({
   // [VERIFY-DOCS] Documents the person MAY add — shown after the required ones, never counted.
   const optional = optionalDocTypes(status);
   const documents: any[] = status?.documents ?? [];
-  // Which of these the server face-matches right now (none while it is off).
-  const faceMatched = faceMatchedDocTypes(status);
 
   const latestDoc = (docType: string) => {
     const docs = documents
@@ -101,6 +99,11 @@ export function DocumentChecklist({
           {TAXI_TWO_LICENCES}
         </T>
       ) : null}
+      {/* [Legal research G4, in-app ¶17] What happens to the documents, truly: a person checks them, and the
+          daily expiry sweep re-checks the dates. */}
+      <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>
+        {DOCUMENT_REVIEW_PROMISE}
+      </T>
       {/* Progress — how far through the door they are */}
       <View style={{ marginBottom: space.md }}>
         <View style={{ marginBottom: space.xs, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -144,7 +147,6 @@ export function DocumentChecklist({
             reviewNote={doc?.reviewNote ?? null}
             replaced={doc?.replaced === true}
             isNext={docType === nextDoc}
-            faceMatched={faceMatched.has(docType)}
             hint={taxiDocumentHint(docType, checklist)}
           />
         );
@@ -169,7 +171,6 @@ export function DocumentChecklist({
                 submittedAt={doc?.createdAt ?? null}
                 reviewNote={doc?.reviewNote ?? null}
                 replaced={doc?.replaced === true}
-                faceMatched={faceMatched.has(docType)}
                 optionalHint={optionalDocHint(docType)}
               />
             );

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { TERMS_BODY } from '@/legal/generated';
-import { CANCEL_EARLY_STEP, CANCEL_ORDER_ANSWER } from './cancel-policy-copy';
+import { CANCEL_EARLY_STEP, CANCEL_FREE_SHORT, CANCEL_ORDER_ANSWER } from './cancel-policy-copy';
 
 // ---------------------------------------------------------------------------
 // [Terms 2026-10-15 §7 · counsel packet E5] The public FAQ said "after the store starts work a
@@ -30,9 +30,12 @@ const RULES: Array<{ rule: string; terms: RegExp; answer: RegExp }> = [
   { rule: 'never once on its way', terms: /Once your Order is on its way/, answer: /Once it is on its way, it can no longer be cancelled/ },
   { rule: 'paid by MMG and confirmed: the business cancels and refunds', terms: /confirmed your payment, the app cannot cancel[\s\S]*the Business refunds you directly/, answer: /confirmed your payment, ask the business to cancel: the business refunds you directly/ },
   { rule: 'never a fee', terms: /Swift never charges a cancellation fee/, answer: /Swift never charges a cancellation fee/ },
+  // [Review S3-2 on #1732] the general MMG rule, not only the confirmed case
+  { rule: 'any cancelled MMG-paid order: the business refunds', terms: /If an Order you paid by MMG is cancelled, <b>the Business refunds you directly<\/b>/, answer: /Whenever an order you paid by MMG is cancelled, the business refunds you directly/ },
 ];
 
-const OLD = /may carry a cost|exact amount|typically free|exact outcome|first few minutes|may not be available|cancellation fee may|late-cancellation|possible fee/i;
+const OLD = /may carry a cost|exact amount|typically free|exact outcome|first few minutes|may not be available|cancellation fee may|late-cancellation|possible fee|costs nothing inside|inside it costs|clock counting down/i;
+const WELCOME_PAGE = page('welcome', 'page.tsx');
 
 describe('the site says what Terms §7 says about cancelling', () => {
   it.each(RULES)('FAQ: $rule', ({ terms, answer }) => {
@@ -47,8 +50,19 @@ describe('the site says what Terms §7 says about cancelling', () => {
     expect(CANCEL_EARLY_STEP).toMatch(/Swift never charges a cancellation fee/);
   });
 
-  it('neither page words a fee, an amount or a "typically"', () => {
-    for (const text of [CANCEL_ORDER_ANSWER, CANCEL_EARLY_STEP, FAQ_PAGE, HOW_PAGE]) expect(text).not.toMatch(OLD);
+  it('no page words a fee, an amount, a "typically" or a window with a clock', () => {
+    for (const text of [CANCEL_ORDER_ANSWER, CANCEL_EARLY_STEP, CANCEL_FREE_SHORT, FAQ_PAGE, HOW_PAGE, WELCOME_PAGE]) expect(text).not.toMatch(OLD);
+  });
+
+  it('[review S4-1 on #1732] a fee, a charge or a cost is named only to say Swift never charges one', () => {
+    for (const text of [CANCEL_ORDER_ANSWER, CANCEL_EARLY_STEP, CANCEL_FREE_SHORT]) {
+      expect(text.replace(/never charges a cancellation fee/gi, '')).not.toMatch(/\b(fees?|charge[sd]?|costs?)\b/i);
+    }
+  });
+
+  it('[review S3-1 on #1732] the /welcome card says the rule from the copy module', () => {
+    expect(CANCEL_FREE_SHORT).toBe('Cancel free until the store accepts your order. Swift never charges a cancellation fee.');
+    expect(WELCOME_PAGE).toMatch(/body: CANCEL_FREE_SHORT,/);
   });
 
   it('both pages show these words, not copies of their own', () => {

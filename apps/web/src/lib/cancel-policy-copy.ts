@@ -13,7 +13,11 @@ export const CANCEL_ORDER_ANSWER =
   + 'A service job can be cancelled free until it is booked. '
   + 'You can still cancel free if no driver or rider was found, or if it is running very late. Once it is on its way, it can no longer be cancelled. '
   + 'If you paid by MMG and the business has confirmed your payment, ask the business to cancel: the business refunds you directly. '
+  + 'Whenever an order you paid by MMG is cancelled, the business refunds you directly. '
   + 'Swift never charges a cancellation fee.';
+
+/** [Review S3-1 on #1732] The /welcome card: the rule, not a window with a clock. */
+export const CANCEL_FREE_SHORT = 'Cancel free until the store accepts your order. Swift never charges a cancellation fee.';
 
 /** How it works, ordering step 2. */
 export const CANCEL_EARLY_STEP =

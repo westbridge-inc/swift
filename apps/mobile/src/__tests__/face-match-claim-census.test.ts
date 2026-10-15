@@ -1,21 +1,23 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { faceMatchedDocTypes } from '../components/onboarding/documentChecklistPresentation';
+import { DOCUMENT_REVIEW_PROMISE, faceMatchedDocTypes } from '../components/onboarding/documentChecklistPresentation';
 
 // ---------------------------------------------------------------------------
 // [GUARDRAILS §4 · §8 · counsel packet, Part 1 "Documents and identity checks"] Face-matching is OFF
 // (FD-D5; owner 13 Oct: automated identity decisions stay off) — identity checks are made by people.
-// No screen may tell a person their face was matched while it is off. Since #1429 (1 Oct) the one
-// sentence that says so — the document card's "Face-matched against your profile selfie" — shows
-// ONLY for a document the server's GET /verification/status names in `faceMatchDocTypes`, which the
-// server leaves empty while face-matching is off (apps/api verification-face-match-truth.test.ts).
-// This census pins the client side of that promise across the phone app, the website and the admin
-// console: the words appear in exactly one place, behind exactly that gate, and nowhere else.
+// No screen may tell a person their face was matched. Since #1429 (1 Oct) the document card's
+// "Face-matched against your profile selfie" showed only behind the server's (empty) faceMatchDocTypes;
+// the owner's legal research (G4, in-app ¶17) removes the sentence altogether and says what happens
+// instead. This census pins that across the phone app, the website and the admin console.
 // ---------------------------------------------------------------------------
 
 const ROOT = join(process.cwd(), '..');
-const CLAIM = /face[- ]match(?:ed|es|ing)?\b|faces? (?:were|was|are|is) (?:matched|compared)|matched (?:against|to) your (?:profile|selfie)/i;
+// [Review S4-2 on #1732] widened: "matched your face/selfie" forms and "(face|selfie) … match" in either order.
+const CLAIM = /face[- ]match(?:ed|es|ing)?\b|faces? (?:were|was|are|is) (?:matched|compared)|matched (?:against|to) your (?:profile|selfie)|match(?:ed|es|ing)? your (?:face|selfie)|\b(?:face|selfie)\b[^.\n]{0,40}\bmatch/i;
+/** The one sentence that may speak of a selfie not matching: the liveness check's FAIL outcome, which the
+ *  server returns only when a person (or, if it is ever switched on, face-matching) decided it. Pinned below. */
+const LIVENESS_FAIL_LINE = 'mobile/src/modules/safety/screens/LivenessCheckScreen.tsx: That selfie didn’t match your profile photo.';
 
 /** Source text with comments removed, so a code note about the switch is not a claim to a person. */
 function withoutComments(text: string): string {
@@ -52,21 +54,27 @@ function claims(): string[] {
 const CARD = readFileSync(join(process.cwd(), 'src', 'components', 'onboarding', 'DocumentUploadCard.tsx'), 'utf8');
 const CHECKLIST = readFileSync(join(process.cwd(), 'src', 'components', 'onboarding', 'DocumentChecklist.tsx'), 'utf8');
 
-describe('no client says a face was matched while face-matching is off', () => {
-  it('the phone, the website and the admin console carry exactly one such sentence: the document card line', () => {
-    expect(claims()).toEqual(['mobile/src/components/onboarding/DocumentUploadCard.tsx: Face-matched against your profile selfie']);
+describe('no client says a face was matched (legal research G4, in-app ¶17)', () => {
+  it('the phone, the website and the admin console carry no such sentence at all (but the liveness FAIL line)', () => {
+    expect(claims()).toEqual([LIVENESS_FAIL_LINE]);
   });
 
-  it('the card shows that line only under its faceMatched prop, which defaults to false', () => {
-    expect(CARD).toMatch(/\{faceMatched \? \(\s*<T[^>]*>\s*Face-matched against your profile selfie\s*<\/T>\s*\) : null\}/);
-    expect(CARD).toMatch(/faceMatched = false,/);
+  it('[review S4-2 on #1732] the liveness mismatch line shows only on the server’s FAIL outcome', () => {
+    const screen = readFileSync(join(ROOT, 'mobile', 'src', 'modules', 'safety', 'screens', 'LivenessCheckScreen.tsx'), 'utf8');
+    expect(screen).toMatch(/const mismatched = result\?\.outcome === 'FAIL';/);
+    expect(screen).toMatch(/\{mismatched \? \(\s*<View[^>]*>\s*<T variant="label">\s*That selfie didn’t match your profile photo\./);
   });
 
-  it('the checklist sets faceMatched only from the server’s own faceMatchDocTypes list', () => {
-    expect(CHECKLIST).toMatch(/const faceMatched = faceMatchedDocTypes\(status\);/);
-    const props = CHECKLIST.match(/faceMatched=\{[^}]*\}/g) ?? [];
-    expect(props.length).toBeGreaterThan(0);
-    for (const prop of props) expect(prop).toBe('faceMatched={faceMatched.has(docType)}');
+  it('the document card has no face-match line and no prop that could show one', () => {
+    expect(CARD).not.toMatch(/Face-matched|faceMatched/);
+  });
+
+  it('the checklist says what really happens: a person checks, and expiry dates are re-checked daily', () => {
+    expect(DOCUMENT_REVIEW_PROMISE).toBe('A person on our team checks your documents and re-checks expiry dates daily.');
+    expect(CHECKLIST).toMatch(/\{DOCUMENT_REVIEW_PROMISE\}/);
+    expect(CHECKLIST).not.toMatch(/faceMatched/);
+    // The promise is true only while the daily sweep exists: the API schedules it every day at 06:00.
+    expect(readFileSync(join(ROOT, 'api', 'src', 'jobs', 'queue.ts'), 'utf8')).toMatch(/Verification document expiry sweep \+ reminders: daily at 06:00/);
   });
 
   it('face-matching off: the server sends an empty list (or nothing) and no document is named', () => {

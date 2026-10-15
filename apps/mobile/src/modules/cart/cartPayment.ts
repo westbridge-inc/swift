@@ -160,7 +160,8 @@ export function placedOrderConfirmationCopy(input: {
     // [REPORT-013 F-013-03 S2] This popup can outlive the hold (one-time
     // device-clock snapshot, no timer) — state the RULE, never "is free"
     // as a standing promise the order screen may already contradict.
-    return 'Changed your mind? While the store hasn’t received it, you can cancel free from the order screen. Pay cash at handover.';
+    // [Terms 2026-10-15 §7 · review S3-1 on #1732] free until the store ACCEPTS, not only while it has not been told
+    return 'Changed your mind? Until the store accepts it, you can cancel free from the order screen. Pay cash at handover.';
   }
   return 'The store has been notified — pay cash at handover. Swift never holds the order money.';
 }
