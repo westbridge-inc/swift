@@ -657,8 +657,9 @@ describe('Services — job lifecycle + two-way rating', () => {
       const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
       expect(created.statusCode, created.body).toBe(201);
       const jobId = created.json().data.id as string;
-      await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000 }, provider.token);
-      const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+      // (Merged with #1483: lifecycle commands carry the job's last-seen version.)
+      await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000, ...await commandState(jobId) }, provider.token);
+      const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(), ...await commandState(jobId) }, customer.token);
       expect(scheduled.json().data.status).toBe('SCHEDULED');
       return jobId;
     };
@@ -666,8 +667,8 @@ describe('Services — job lifecycle + two-way rating', () => {
     // A request (quoted, no slot agreed yet): free.
     const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
     const request = created.json().data.id as string;
-    await inject('POST', `/api/v1/services/jobs/${request}/quote`, { amount: 8000 }, provider.token);
-    const freed = await inject('POST', `/api/v1/services/jobs/${request}/cancel`, {}, customer.token);
+    await inject('POST', `/api/v1/services/jobs/${request}/quote`, { amount: 8000, ...await commandState(request) }, provider.token);
+    const freed = await inject('POST', `/api/v1/services/jobs/${request}/cancel`, await commandState(request), customer.token);
     expect(freed.statusCode, freed.body).toBe(200);
     expect(freed.json().data.status).toBe('CANCELLED');
     expect(freed.body).not.toMatch(/fee/i);
@@ -676,7 +677,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     // started: this case used to cancel free. Once a slot is booked the app refuses and the
     // customer contacts the provider; nothing is written.
     const booked = await job();
-    const refusedBooked = await inject('POST', `/api/v1/services/jobs/${booked}/cancel`, {}, customer.token);
+    const refusedBooked = await inject('POST', `/api/v1/services/jobs/${booked}/cancel`, await commandState(booked), customer.token);
     expect(refusedBooked.statusCode, refusedBooked.body).toBe(409);
     expect(refusedBooked.json().error).toMatchObject({
       code: 'SERVICE_JOB_BOOKED',
@@ -689,7 +690,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     // Started: refused, nothing written.
     const started = await job();
     await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: started }, data: { status: 'IN_PROGRESS' } }), 'services-test-fixture');
-    const refused = await inject('POST', `/api/v1/services/jobs/${started}/cancel`, {}, customer.token);
+    const refused = await inject('POST', `/api/v1/services/jobs/${started}/cancel`, await commandState(started), customer.token);
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json().error).toMatchObject({
       code: 'SERVICE_JOB_STARTED',

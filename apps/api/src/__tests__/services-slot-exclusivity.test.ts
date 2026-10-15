@@ -557,12 +557,14 @@ describe('Services — closing a job is never silent', () => {
     });
 
     it('old-app complete and cancel together still leave exactly one winner', async () => {
-      const { provider, customer, jobId } = await legacyConfirmedJob();
+      const { provider, jobId } = await legacyConfirmedJob();
       expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token)).statusCode).toBe(200);
       await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+      // [TRANSFORMED, coordinator ruling 14 Oct · Terms §7: a customer cannot cancel a booked job
+      // in the app, so the race that can still happen is the provider's own complete and cancel.]
       const [complete, cancel] = await Promise.all([
         injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token),
-        injectLegacy(`/api/v1/services/jobs/${jobId}/cancel`, {}, customer.token),
+        injectLegacy(`/api/v1/services/jobs/${jobId}/cancel`, {}, provider.token),
       ]);
       expect([complete.statusCode, cancel.statusCode].filter((code) => code === 200)).toHaveLength(1);
       expect(['COMPLETED', 'CANCELLED']).toContain((await jobRow(jobId)).status);
@@ -591,9 +593,11 @@ describe('Services — closing a job is never silent', () => {
     expect((await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token)).statusCode).toBe(200);
 
     const expected = await commandState(jobId);
+    // [TRANSFORMED after merging main's owner #50 rule: a customer can no longer cancel a job
+    // in progress at all, so the race is between the provider's own complete and cancel.]
     const [complete, cancel] = await Promise.all([
       inject('POST', `/api/v1/services/jobs/${jobId}/complete`, expected, provider.token),
-      inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, expected, customer.token),
+      inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, expected, provider.token),
     ]);
     expect([complete.statusCode, cancel.statusCode].filter((code) => code === 200)).toHaveLength(1);
     const loser = complete.statusCode === 200 ? cancel : complete;
@@ -621,7 +625,7 @@ describe('Services — closing a job is never silent', () => {
 
     // A delayed copy of the losing command remains stale after the winner.
     const staleRetry = complete.statusCode === 200
-      ? await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, expected, customer.token)
+      ? await inject('POST', `/api/v1/services/jobs/${jobId}/cancel`, expected, provider.token)
       : await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, expected, provider.token);
     expect([400, 409]).toContain(staleRetry.statusCode);
     expect((await jobRow(jobId)).status).toBe(winnerStatus);
