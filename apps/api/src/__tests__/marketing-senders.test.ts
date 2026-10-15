@@ -25,6 +25,7 @@ const SERVICE_SENDERS: Record<string, string> = {
   'modules/safety/sos-escalation.ts': 'SOS to emergency contacts',
   'modules/safety/sos.service.ts': 'SOS notices to emergency contacts',
   'modules/safety/trip-share.service.ts': 'the trip-share link the rider asked to send',
+  'modules/user/inactivity.ts': 'the 30-day notice before an unused customer account is closed (R23 / C10)',
 };
 const MARKETING_SENDER = 'modules/notification/marketing-message.ts';
 
