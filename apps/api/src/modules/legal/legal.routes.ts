@@ -25,8 +25,25 @@ import type { FastifyInstance } from 'fastify';
 // stays in every ledger that holds it, and these words get their own stamp.
 // [LEGAL-FEE · owner 2026-09-29] Partner weekly fees are paid through MMG's
 // checkout in the Swift app, or by card where offered. New words, new version.
-export const LEGAL_VERSION = '2026-10-04';
-const LAST_UPDATED = '4 October 2026'; // human form of LEGAL_VERSION
+// [OWNER RULING 8 Oct, NO "WALLET" · legal] Swift's words never say "wallet",
+// "top up" or a money "balance": the Privacy Policy's "wallet credentials" (a
+// payer's MMG sign-in) now reads "mobile-money credentials". The Terms keep
+// their denial that Swift "offers no wallet or stored value" — that sentence
+// is the protection, not the problem. New words, new version.
+// [OWNER RULING 8 Oct, NO "WALLET" (2) + (3)] The Mover and Business
+// Agreements say what the server now enforces: the weekly fee can be paid at
+// most four weeks ahead; a fee paid ahead is used only for the weekly fee; on
+// closing an account the unstarted weeks paid ahead are refunded and recorded
+// before deletion (account deletion already waits for it). Still a DRAFT the
+// owner reviews, not lawyer-confirmed. New words, new version.
+// [OWNER #62 · 14 Oct, NO PAYING AHEAD] The Mover and Business Agreements say
+// what the server now enforces: the weekly fee is paid one week at a time
+// (while a week runs, the coming week may be paid, and no further); money
+// beyond that is returned; a fee paid before its week starts is used only for
+// that fee, and refunded at closing if its week has not started. Still a DRAFT
+// the owner reviews, not lawyer-confirmed. New words, new version.
+export const LEGAL_VERSION = '2026-10-15';
+const LAST_UPDATED = '15 October 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -75,7 +92,7 @@ export const TERMS = page(
 <p>Payment is due before or at Handover. Refusing to pay for what you ordered, or repeatedly failing to accept deliveries you requested, results in recorded strikes on your account and can restrict or end your access to cash-on-delivery or to the Platform.</p>
 
 <h2>7. Cancellations and refunds</h2>
-<p>You can cancel within the window the app shows for your Order. Cash Orders cancel free within that window. If you already sent an MMG payment to a Business, cancelling stops fulfilment and <b>the Business refunds you directly</b> on its own MMG — because Swift never holds the money, every refund of Order money is made by, and is the obligation of, the Partner who received it. After a Business has started acting on your Order a cancellation fee may apply; the exact outcome, including any fee, is computed by our servers at the moment you cancel and shown to you before you confirm. If something goes wrong with a fulfilled Order, report it from the Order screen: claims are reviewed with GPS and photo evidence under Swift's published guarantee process, and any settlement of Order money is made by the responsible Partner.</p>
+<p>You can cancel an Order free while the Business has not yet accepted it. Once the Business accepts it, the Order can no longer be cancelled in the app: contact the Business to change or cancel it — the app shows the number the Business published. A ride, a parcel or a booking can be cancelled free at any time while nobody has accepted it, and for five minutes after a driver, rider or provider accepts it; after that, contact your driver, rider or provider. A service job request can be cancelled free in the app until the job is booked; once it is booked, contact the provider to change or cancel it. You can still cancel free when no driver or rider was found for your Order, or when it is running very late, as the app shows. Once your Order is on its way, or you are in the taxi, it can no longer be cancelled. If you paid by MMG and the Business has already confirmed your payment, the app cannot cancel the Order at any stage, even before the Business accepts it: contact the Business to cancel it. <b>Swift never charges a cancellation fee.</b> If an Order you paid by MMG is cancelled, <b>the Business refunds you directly</b> on its own MMG — because Swift never holds the money, every refund of Order money is made by, and is the obligation of, the Partner who received it. If something goes wrong with a fulfilled Order, report it from the Order screen: claims are reviewed with GPS and photo evidence under Swift's published guarantee process, and any settlement of Order money is made by the responsible Partner.</p>
 
 <h2>8. Your conduct</h2>
 <p>You agree not to: (a) break the law through the Platform or order anything unlawful; (b) harass, threaten, discriminate against or endanger Partners, customers or staff; (c) place Orders you do not intend to honour, or manipulate ratings, promotions, referrals or the strike system; (d) trigger safety features falsely; (e) impersonate anyone or use another person's account or documents; (f) interfere with the Platform — no scraping, automated access, probing, reverse engineering, or circumventing technical or fee protections; (g) use Platform data for any purpose outside your own use of Swift. We may investigate violations and act under section 17.</p>
@@ -147,7 +164,7 @@ export const PRIVACY = page(
 </ul>
 
 <h2>2. What we do NOT collect</h2>
-<p>Swift never holds your order money, so we do not collect card numbers or wallet credentials. If you pay a business through MMG, that payment happens in MMG's own flow under MMG's terms — we only record that the business confirmed receiving it. Our websites and app carry no third-party advertising or cross-site tracking pixels.</p>
+<p>Swift never holds your order money, so we do not collect card numbers or mobile-money credentials. If you pay a business through MMG, that payment happens in MMG's own flow under MMG's terms — we only record that the business confirmed receiving it. Our websites and app carry no third-party advertising or cross-site tracking pixels.</p>
 
 <h2>3. Why we use it — and the legal bases</h2>
 <p>Under the Data Protection Act 2023, each use of your data rests on a legal basis:</p>
@@ -197,7 +214,7 @@ export const DRIVER_AGREEMENT = page(
 <p>You provide transport services as an independent business, in your own name and at your own direction. You choose when to go online, which jobs to accept, and how to run your work. Nothing in this Agreement or the platform creates employment, agency, partnership or a joint venture between you and Swift; you are not entitled to employment benefits from Swift, and you are responsible for your own national insurance, tax and statutory obligations as an independent earner under Guyanese law.</p>
 
 <h2>2. What you pay Swift — and what you keep</h2>
-<p>You pay Swift a flat weekly subscription for the software, shown to you before you start and payable in the Swift app through MMG's checkout, or by card where the app offers it. Swift takes <b>no commission</b>: 100% of every fare, delivery fee and tip is yours, collected by you directly from the customer in cash — or, where you offer it, into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period shown in the app pauses your ability to take new jobs until the fee is settled.</p>
+<p>You pay Swift a flat weekly subscription for the software, shown to you before you start and payable in the Swift app through MMG's checkout, or by card where the app offers it. Swift takes <b>no commission</b>: 100% of every fare, delivery fee and tip is yours, collected by you directly from the customer in cash — or, where you offer it, into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period shown in the app pauses your ability to take new jobs until the fee is settled. You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you. A weekly fee paid before its week starts is Swift's own fee paid early: it is used only for that weekly fee and cannot be withdrawn or sent to anyone. If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, records the refund, and then deletes the account; a week that has started is not refunded.</p>
 
 <h2>3. Verification and documents</h2>
 <p>Before operating — and continuously afterwards — you must hold and keep current the documents the app lists for your vehicle class (for example: national ID, driver's licence, vehicle registration, insurance appropriate to carrying passengers where you drive passengers, and a police clearance). You upload them in the app; they are verified before you can go online and re-verified as they expire, with renewal windows shown in advance. An expired required document takes you offline automatically until it is renewed. Handling of these documents is governed by the Privacy Policy.</p>
@@ -236,7 +253,7 @@ export const VENDOR_AGREEMENT = page(
 <p>Your Business is an independent seller. Swift provides the software that publishes your listings, transmits orders and arranges delivery; Swift is not your employer, franchisor, agent or reseller, and the sale contract for every order is between your Business and the customer.</p>
 
 <h2>2. What you pay Swift — and what you keep</h2>
-<p>You pay Swift a flat weekly subscription for the software, shown before you start and payable in the Swift app through MMG's checkout, or by card where the app offers it. Swift takes <b>no commission</b>: 100% of every sale is yours, paid by the customer in cash at handover or into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period pauses new orders until the fee is settled; your data and listings are retained as the Privacy Policy describes.</p>
+<p>You pay Swift a flat weekly subscription for the software, shown before you start and payable in the Swift app through MMG's checkout, or by card where the app offers it. Swift takes <b>no commission</b>: 100% of every sale is yours, paid by the customer in cash at handover or into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period pauses new orders until the fee is settled; your data and listings are retained as the Privacy Policy describes. You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you. A weekly fee paid before its week starts is Swift's own fee paid early: it is used only for that weekly fee and cannot be withdrawn or sent to anyone. If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, records the refund, and then deletes the account; a week that has started is not refunded.</p>
 
 <h2>3. Verification and licences</h2>
 <p>Before selling — and continuously afterwards — you must hold and keep current the documents the app lists for your business type (for example: the owner's national ID, business registration, TIN certificate, and the food-safety licences and certificates your category requires). Expired required documents suspend new orders automatically until renewed. You are responsible for operating with every licence and permit Guyanese law requires of your trade.</p>

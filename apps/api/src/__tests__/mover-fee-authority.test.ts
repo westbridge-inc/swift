@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { activeOverdueMs, currentDunningClock, projectDunningClock } from '../modules/billing/dunning-clock';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -57,8 +58,9 @@ async function dual(tenantId = 'swift-default') {
   return sys(async () => {
     const rider = await app.prisma.rider.create({ data: { userId: who.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
     const driver = await app.prisma.driver.create({ data: { userId: who.userId, vehicleType: 'CAR', documentsVerified: true,
-      vehicleMake: 'Test', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `FEE-${run}-${ids.length}`, driverLicenseUrl: 'storage://test/dl', vehicleInsuranceUrl: 'storage://test/insurance' } });
+      vehicleMake: 'Test', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `HFEE-${run}-${ids.length}` /* [owner 11 Oct] H-series taxi plate */, driverLicenseUrl: 'storage://test/dl', vehicleInsuranceUrl: 'storage://test/insurance' } });
     await app.prisma.verificationDocument.create({ data: { userId: who.userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: 'storage://test/insurance', status: 'APPROVED', coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true, consentAt: new Date(), privacyNoticeVersion: 'v1' } });
+    await currentTaxiSplitDocuments(app.prisma, who.userId);
     return { ...who, riderId: rider.id, driverId: driver.id, tenantId };
   });
 }
@@ -273,13 +275,14 @@ describe('bounded finance decision with original money retained', () => {
     await sys(async () => {
       await subscriptions.startTrialForDriver(f.driverId);
       await subscriptions.convertExpiredTrials();
-      await billing.recordTopUp(f.driver.id, 20_000, finance.userId, 'test-canonical-credit', `fee-convert-${run}-${f.driver.id}`);
+      // [owner #62] The week now due plus the coming one: the most a partner may pay (fee GY$8,000).
+      await billing.recordTopUp(f.driver.id, 16_000, finance.userId, 'test-canonical-credit', `fee-convert-${run}-${f.driver.id}`);
       expect(await billing.billSubscription(await ready(f.driver))).toBe('succeeded');
       const captures = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, status: 'CAPTURED' } });
       expect(captures).toHaveLength(1);
       expect(Number(captures[0]!.amount)).toBe(8000);
       expect(captures[0]!.subscriptionId).toBe(f.driver.id);
-      expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: f.driver.id } })).balance)).toBe(12000);
+      expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: f.driver.id } })).balance)).toBe(8000);
       const stats = await platformStats(app.prisma, { tenantId: f.tenantId, today: new Date(), subscriptionScope: { id: { in: f.authority.sourceSubscriptionIds } } });
       expect(stats.activeSubscriptions).toHaveLength(1);
       expect(stats.activeSubscriptions[0]).toMatchObject({ id: f.driver.id, type: 'TAXI_DRIVER' });

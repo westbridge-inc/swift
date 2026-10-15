@@ -84,7 +84,10 @@ describe('a ride without stops gains nothing', () => {
   });
 
   it('a ride WITH stops: the count, the stops in order and the next one', async () => {
-    expect(offerItinerary({ id: 'ride-1', taxiStopCount: 1 }, rows)).toEqual({ stopCount: 1, stops: [{ sequence: 1, address: 'Stop 1', lat: 6.41, lng: -58.61 }] });
+    // [L05] Before acceptance a stop is its order and a ~330 m point — no address.
+    const snap = (v: number) => Math.round(v / 0.003) * 0.003;
+    expect(offerItinerary({ id: 'ride-1', taxiStopCount: 1 }, rows)).toEqual({ stopCount: 1, stops: [{ sequence: 1, lat: snap(6.41), lng: snap(-58.61) }] });
+    expect(rideItinerary({ id: 'ride-1', taxiStopCount: 1 }, rows)).toMatchObject({ stops: [{ sequence: 1, address: 'Stop 1', lat: 6.41, lng: -58.61 }] });
     expect(rideItinerary({ id: 'ride-1', taxiStopCount: 1 }, rows)).toMatchObject({ nextStopSequence: 1, stops: [{ sequence: 1, status: 'PENDING' }] });
   });
 });

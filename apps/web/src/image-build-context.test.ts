@@ -65,4 +65,19 @@ describe('[Q11] the image build context carries what the site imports', () => {
     const missing = importsOutsideTheSite().filter((target) => !copied.some((source) => covers(source, target)));
     expect(missing, 'add a COPY for each to apps/web/Dockerfile').toEqual([]);
   });
+
+  it('[W6] an API module the site imports by path imports nothing itself (the image copies exactly that file)', () => {
+    // apps/web/Dockerfile copies apps/api/src/modules/order/options.ts alone.
+    // An import added to it would pass CI (the whole monorepo is there) and
+    // then fail the web image build at deploy time.
+    const fromTheApi = importsOutsideTheSite().filter((target) => target.startsWith('apps/api/'));
+    expect(fromTheApi).toContain('apps/api/src/modules/order/options');
+    for (const target of fromTheApi) {
+      const code = readFileSync(join(REPO_ROOT, `${target}.ts`), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+      expect(code, target).not.toMatch(/^\s*import[\s{*'"]/m);
+      expect(code, target).not.toMatch(/^\s*export\s*(type\s*)?(\*|\{[^}]*\})\s*(as\s+\w+\s*)?from\s*['"]/m);
+      expect(code, target).not.toMatch(/\bimport\s*\(|\brequire\s*\(/);
+    }
+  });
 });

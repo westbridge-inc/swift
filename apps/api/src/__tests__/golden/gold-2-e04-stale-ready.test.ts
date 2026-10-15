@@ -181,6 +181,9 @@ async function staleMilestoneAgainstCancellation(
       reached,
       new Promise((_, reject) => setTimeout(() => reject(new Error('the vendor route never reached the pre-write seam')), 10_000)),
     ]);
+    // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
+    // cancel only when it is very late — 30 minutes past its promise.
+    await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { promisedAt: new Date(Date.now() - 31 * 60_000) } }));
     const cancelled = await call('POST', `/api/v1/customer/orders/${orderId}/cancel`, customer.token, { reason: 'Plans changed' });
     expect(cancelled.statusCode, cancelled.body).toBe(200);
     expect((await orderRow(orderId)).status).toBe('CANCELLED');

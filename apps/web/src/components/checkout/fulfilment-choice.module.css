@@ -1,0 +1,70 @@
+/* [W5] Delivery · Pickup: two large radio cards, the payment cards' look.
+   Token variables only. Each card is at least 44 px tall and wraps on a
+   narrow phone instead of hiding its words. */
+
+.choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.legend {
+  grid-column: 1 / -1;
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--swift-ink);
+  font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
+}
+
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 44px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--swift-border);
+  border-radius: var(--swift-radius-lg);
+  background: var(--swift-card);
+  color: var(--swift-ink);
+  cursor: pointer;
+}
+
+.choice:has(input:checked) { border-color: var(--swift-red); }
+.choice:has(input:disabled) { cursor: default; opacity: 0.7; }
+.choice:has(input:focus-visible) { outline: 2px solid var(--swift-focus); outline-offset: 2px; }
+
+.choice input {
+  appearance: none;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  border: 2px solid var(--swift-border-strong);
+  border-radius: var(--swift-radius-full);
+  transition: border 140ms;
+}
+
+.choice input:checked { border: 6px solid var(--swift-red); }
+
+.copy {
+  display: grid;
+  min-width: 0;
+}
+
+.title { font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif; }
+
+.sub {
+  color: var(--swift-muted);
+  font-size: 13px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .choice input { transition: none; }
+}

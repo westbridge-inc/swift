@@ -349,6 +349,11 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
  */
 export const RIDER_PICKUP_FROM = ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'] as const satisfies readonly OrderStatus[];
 
+/** The statuses from which a STORE may reject an order (the vendor reject route). Later, only Swift support cancels.
+ *  [GUARDRAILS §8 · Opus S3-6] One definition: the reject route reads it, and so does a refusal that must not tell
+ *  the store to reject when it cannot. */
+export const STORE_REJECTABLE_STATUSES = ['PENDING', 'ACCEPTED', 'PREPARING'] as const satisfies readonly OrderStatus[];
+
 /**
  * THE RELEASE EDGES. Key = the stage an order is returned to, value = the
  * pre-custody states a release may return it from.
