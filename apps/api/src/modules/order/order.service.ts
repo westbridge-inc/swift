@@ -1,6 +1,6 @@
 import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
 import { authorizeHandover, preflightHandoverDoor, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
-import { emitToOrderRoom } from './order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from './order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
@@ -620,6 +620,14 @@ export interface CanonicalOrderTransitionInput {
    * acceptance). Runs AFTER the status write and cleanup on the same locked
    * row; a throw rolls the whole transition back. Must not publish. */
   withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
+  /** [MMGCLOSE] The ONE exception to the paid-MMG cancel refusal: Swift support
+   * closing a STORE-CLAIMED (CLAIMED, never provider-CAPTURED) MMG order that
+   * cannot be fulfilled, as "refund handled by the store". Record only: the
+   * caller must write the refund rail's CANCELLATION obligation in
+   * `withinTransaction` — the database refuses the commit without it
+   * (orders_paid_mmg_terminal_needs_refund_obligation). Only
+   * `closeMmgOrderAsStoreRefund` (order/mmg-store-close.ts) sets it. */
+  paidMmgStoreRefundClosure?: true;
   /** Admin's explicit action evidence belongs in the same commit as the order
    * state. The generic after-response route audit remains defence in depth. */
   operatorAudit?: {
@@ -811,7 +819,7 @@ export class OrderService {
     try {
       await emitToOrderRoom(this.prisma, this.io, order.id, 'order:status_changed', statusEvent);
       if (order.vendorId) {
-        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', statusEvent);
       }
     } catch (err) {
       log().warn({ err, orderId: order.id }, 'rider assignment socket publication failed');
@@ -1864,10 +1872,8 @@ export class OrderService {
       // order, by its release [Q12].
       try {
         const held = isHeld(order);
-        if (!held) {
-          this.io
-            .to(`vendor:${order.vendorId}`)
-            .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        if (!held && order.vendorId) {
+          await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         }
         const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
         if (vendorOwner) {
@@ -2242,10 +2248,14 @@ export class OrderService {
     // lock — the pair {capture, cancel} is serialized in both commit orders.
     // The store settles a cancellation of paid MMG money with the customer
     // directly; the order then completes or stays live for support.
+    const storeRefundClosure = input.paidMmgStoreRefundClosure === true
+      && input.target === 'CANCELLED'
+      && source.paymentStatus === 'CLAIMED';
     if (
       operationalCancellation
       && source.paymentMethod === 'MOBILE_MONEY'
       && MMG_MONEY_MOVED.has(source.paymentStatus)
+      && !storeRefundClosure
     ) {
       throw new AppError(
         409,
@@ -2725,7 +2735,7 @@ export class OrderService {
     // A held order was never shown to the vendor — telling them about a
     // cancellation of something they never saw would only confuse the board.
     if (order.vendorId && !heldNow) {
-      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+      await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', { orderId, status: 'CANCELLED' });
     }
     // [L07] The rider's notice committed with the cancel; this is only its
     // first delivery attempt, started after the emits and never awaited.
@@ -2856,7 +2866,7 @@ export class OrderService {
     // The vendor board listens on its own room so it sees every transition
     // live without subscribing to each order individually.
     if (order.vendorId) {
-      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+      await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', statusEvent);
     }
 
     } catch (err) {
@@ -2992,9 +3002,7 @@ export class OrderService {
       }
 
       if (order.vendorId && order.vendor) {
-        this.io
-          .to(`vendor:${order.vendorId}`)
-          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         try {
           const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
           if (vendorOwner) {

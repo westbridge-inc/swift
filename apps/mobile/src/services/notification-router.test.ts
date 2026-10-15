@@ -31,6 +31,11 @@ describe('destinationFor — the tap table', () => {
     expect(destinationFor({ kind: 'ride_sos_ack' })).toEqual({ screen: 'Taxi' });
   });
 
+  it('an unavailable queue notice opens the ride picker without retry parameters', () => {
+    expect(destinationFor({ kind: 'ride_queue_unavailable', audience: 'customer' }))
+      .toEqual({ screen: 'Taxi' });
+  });
+
   it('an OFFER ping lands the earner on their mover home, never the customer screen [E36 / danger #22]', () => {
     // Pre-fix, the generic orderId branch dropped an earner mid-countdown on
     // the CUSTOMER Delivery screen — a dead end with the clock running.
@@ -295,6 +300,7 @@ const CENSUS: Case[] = [
   // ── Rides: the taxi screen reads the active ride itself.
   { k: 'ride_queue_matched', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — a driver took their queued ride' },
   { k: 'ride_queue_expired', d: { audience: 'customer', rideClass: 'STANDARD' }, to: { screen: 'Taxi' }, why: 'customer — queue timed out, request again' },
+  { k: 'ride_queue_unavailable', d: { audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — the queued class is no longer offered; choose an available class without retrying the retired trip' },
   { k: 'ride_released_no_drivers', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — ride released' },
   { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1', expiresAt: '2026-09-24T20:00:20.000Z' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
   { k: 'custody_handoff_code', d: { ...O, caseId: 'c1' }, to: { screen: 'ActiveJob' }, why: 'RIDER holding the goods — [AF-MOB-006] a relay rider is coming; the handoff code is on their live job, which MoverStack mounts' },

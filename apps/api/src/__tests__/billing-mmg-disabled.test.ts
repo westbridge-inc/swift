@@ -769,6 +769,38 @@ describe('[PROD-PATH] queued demands respect the platform pause at delivery', ()
     expect(await events(upcoming, 'REMINDER')).toBe(1);
     expect(await events(trial, 'REMINDER')).toBe(1);
   });
+
+  // The case above was red now and then in CI ('expected SUSPENDED to be
+  // CHURNED'): its first sweep, while the span is open, is the first read of
+  // the store's billing clock, and the clock pinned its churn point to "now"
+  // (the moment of that read). The resume then pauses the clock from the
+  // span's START, so the time between the start and that first read was
+  // taken off the clock but not off the churn point: the store churned only
+  // after that much more time once a way to pay was back. CI's timing decided
+  // which was longer. Here the gap is an hour, so the old code is always red.
+  it.each([
+    ['a sweep (the hold check reads the clock)', 'sweep'],
+    ['any other first read of the clock', 'read'],
+  ] as const)('a store whose retention ran out before the pause is churned by the first sweep after the resume, however late in the span its clock was first read: %s', async (_label, firstRead) => {
+    await noPauseOpen();
+    // All instants in the past, so no record is stamped ahead of the wall clock.
+    const start = new Date(Date.now() - 3 * 3_600_000);
+    await syncMmgPauseClock(app.prisma, start, OFF);
+    const longAgo = new Date(start.getTime() - 40 * DAY); // suspended 40 days before the pause: 10 days past its 30
+    const suspended = await makeVendorSub(longAgo, { method: 'CASH', status: 'SUSPENDED', extra: { suspendedAt: longAgo, failedAttempts: 3 } });
+    const firstReadAt = new Date(start.getTime() + 3_600_000); // an hour into the span
+    if (firstRead === 'sweep') await billing.sweepSuspended(firstReadAt);
+    else await app.prisma.$transaction((tx) => currentDunningClock(tx, suspended, firstReadAt));
+    expect(await clockOf(suspended)).not.toBeNull();
+    expect((await sub(suspended)).status).toBe('SUSPENDED'); // held while the span is open
+    expect(await events(suspended)).toBe(0);
+    const back = new Date(start.getTime() + 2 * 3_600_000);
+    await syncMmgPauseClock(app.prisma, back, ON);
+    expect((await clockOf(suspended))!.pausedAt).toBeNull(); // the resume ran for this clock
+    await billing.sweepSuspended(new Date(back.getTime() + 1_000));
+    expect((await sub(suspended)).status).toBe('CHURNED');
+    expect(await events(suspended, 'CHURNED')).toBe(1);
+  });
 });
 
 describe('[PROD-PATH] each pause and resume is on the record, and admins see it', () => {
