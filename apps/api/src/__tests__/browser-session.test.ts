@@ -337,7 +337,8 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
 
     const res = await app.inject({
       method: 'POST', url: '/api/v1/auth/register', headers: { ...WEB, cookie: cookieHeader(jar) },
-      payload: { phone: newPhone, firstName: 'New', lastName: `Web${RUN}`, acceptTerms: true },
+      // [Owner ruling 15 Oct 2026] the website sends the ticked 18+ declaration with the Terms consent.
+      payload: { phone: newPhone, firstName: 'New', lastName: `Web${RUN}`, acceptTerms: true, ageConfirmed: true },
     });
     expect(res.statusCode, res.body).toBe(201);
     expect(res.headers['cache-control']).toContain('no-store');
