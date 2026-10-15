@@ -47,7 +47,7 @@ export function Photo({
   return (
     <span className={`sw-photo ${className}`} style={dim ? { opacity: 0.45 } : undefined}>
       {media ? (
-        <Image {...media} alt={alt} fill sizes={sizes} {...(priority ? { priority: true } : { loading: 'lazy' as const })} className="object-cover" onError={onError} />
+        <Image {...media} alt={alt} fill sizes={sizes} {...(priority ? { priority: true, fetchPriority: 'high' as const } : { loading: 'lazy' as const })} className="object-cover" onError={onError} />
       ) : (
         <span className="flex flex-col items-center justify-center gap-2 p-3 text-center">
           <Pictogram name={verticalPictogram(vendorType)} size={iconSize} />
@@ -193,7 +193,7 @@ export function SectionHead({ id, eyebrow, title, seeAll }: { id: string; eyebro
       {eyebrow ? <span className="sw-eyebrow sw-eyebrow-soft mb-0.5">{eyebrow}</span> : null}
       <div className="flex items-baseline justify-between gap-3">
         <h2 id={id} className="sw-title">{title}</h2>
-        {seeAll ? <Link href={seeAll.href} prefetch={true} className="sw-link-btn">{seeAll.label ?? 'See all'}</Link> : null}
+        {seeAll ? <Link href={seeAll.href} className="sw-link-btn">{seeAll.label ?? 'See all'}</Link> : null}
       </div>
     </div>
   );

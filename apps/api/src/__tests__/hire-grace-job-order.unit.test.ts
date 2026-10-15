@@ -17,7 +17,8 @@ it('a failed hire-licence reminder does not prevent the daily retention purge', 
     sendExpiryReminders: async () => { effects.push('remind'); return 0; },
     scheduleRejectedDocumentRetention: async () => { effects.push('schedule-rejected'); return 0; },
     purgeExpiredDocuments: async () => { effects.push('purge'); return 0; },
-    hirePermitGraceSweep: async () => { effects.push('grace'); throw new Error('synthetic grace unavailable'); },
+    // [owner 15 Oct · no grace] TRANSFORMED: the sweep is the hire-licence sweep (was hirePermitGraceSweep).
+    hireLicenceSweep: async () => { effects.push('grace'); throw new Error('synthetic grace unavailable'); },
   };
   const ctx = { log: { error: () => effects.push('logged') } };
   await expect(run(verification, ctx)).rejects.toThrow('synthetic grace unavailable');

@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
@@ -7,12 +7,15 @@ import { socketPlugin } from '../../plugins/socket';
 import { chatRoutes } from '../../modules/chat/chat.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 
-export async function chatFixture() {
+/** `register` adds routes beside chat (e.g. reports) before the app starts. */
+export async function chatFixture(opts: { register?: (app: FastifyInstance) => Promise<void> } = {}) {
   const app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin); await app.register(redisPlugin);
   await app.register(authPlugin); await app.register(socketPlugin);
-  await app.register(chatRoutes, { prefix: '/api/v1/chat' }); await app.ready();
+  await app.register(chatRoutes, { prefix: '/api/v1/chat' });
+  if (opts.register) await opts.register(app);
+  await app.ready();
   const users: string[] = []; const drivers: string[] = [];
   let createdOrder: string | undefined; let createdRoom: string | undefined;
   const close = async () => {

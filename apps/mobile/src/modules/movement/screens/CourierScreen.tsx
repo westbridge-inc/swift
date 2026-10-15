@@ -29,7 +29,8 @@ const SEND_TINT = VERTICAL_TINT.send ?? { bg: color.brand[50], ink: color.brand[
 // EXTRA_LARGE is the only tier that excludes motorcycles, so the trunk promise
 // remains mechanically true in dispatch.
 const SIZES: { key: Size; letter: string; label: string; hint: string }[] = [
-  { key: 'SMALL', letter: 'S', label: 'Fits one hand', hint: 'Keys or documents' },
+  // [Legal research A10 · REVIEW-F S3-1 on #1753] never suggest documents: letters, documents and mail are refused
+  { key: 'SMALL', letter: 'S', label: 'Fits one hand', hint: 'Keys or a phone' },
   { key: 'MEDIUM', letter: 'M', label: 'A shopping bag', hint: 'Bike-friendly' },
   // [Wave 3 vs reference 12] LARGE was simply never offered — the reference
   // draws four tiers, the API accepts it, and dispatch has priced and proven

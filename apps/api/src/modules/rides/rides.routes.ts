@@ -16,6 +16,7 @@ import {
   type RideRequestBody,
 } from './rides.service';
 import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from './taxi-stops-flag';
+import { assertHirePassengers } from './hire-passengers';
 import { readRideItinerary } from './taxi-stops-read';
 import { hasTaxiPassengerCustody } from './passenger-custody';
 import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';
@@ -220,6 +221,8 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  the first answer (201, replayed) and never books a second ride. */
   app.post('/request', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
+    // [R9] No hire for more than 7 passengers: refused first, nothing read or written.
+    assertHirePassengers(body.passengerCount);
     // Judged before anything is read, priced or claimed: the switch, the
     // count, each stop and where the route lies, then the quoted fare a ride
     // with stops must carry. A malformed request never consumes a key.
@@ -336,6 +339,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] The queue never holds a trip with stops (v1): its entry
     // has no place for them, and the trip would be booked later without them.
     refuseQueuedStops(body.stops);
+    // [R9] No hire for more than 7 passengers, queued or not.
+    assertHirePassengers(body.passengerCount);
     if (!isRideClassServed(body.rideClass)) throw new AppError(400, 'INVALID_RIDE_CLASS', 'This ride class is no longer offered. Choose one of the available ride classes.');
     assertRoadTripInMarket(body);
     const user = await assertRideGates(app, request.user.userId);

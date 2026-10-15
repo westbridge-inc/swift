@@ -9,6 +9,7 @@ import { openPayLink } from '../../lib/payLink';
 import { useAuthStore } from '../../stores/authStore';
 import { SwiftMark } from '../../components/SwiftLogo';
 import { BrandCheckbox, LabeledInput, PillButton, Screen, T } from '../../kit';
+import { AGE_TICK_LABEL } from '../../lib/ageTickCopy';
 
 // Kit "Register" (frame 7) on the real signup contract: the phone arrived
 // verified from the OTP step; name (+ optional email) completes the account.
@@ -23,6 +24,8 @@ export function RegisterScreen() {
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [agreed, setAgreed] = useState(false);
+  // [Owner ruling 15 Oct 2026] a required, unticked "I am 18 or older" tick, recorded server-side.
+  const [adult, setAdult] = useState(false);
 
   const role = intent === 'mover' ? 'MOVER' : intent === 'vendor' ? 'VENDOR' : 'CUSTOMER';
 
@@ -37,6 +40,7 @@ export function RegisterScreen() {
         role,
         ...(countryCode ? { countryCode } : {}),
         acceptTerms: agreed, // recorded server-side w/ the legal version [D9-03]
+        ageConfirmed: adult, // [owner 15 Oct 2026] recorded in the consent ledger; required once sent
       }),
     onSuccess: (res) => {
       const data = res.data?.data;
@@ -55,7 +59,7 @@ export function RegisterScreen() {
     : register.isError
     ? `${(register.error as any)?.response?.data?.error?.message ?? 'Registration failed.'} Verify your phone again to retry.`
     : undefined;
-  const valid = !!registrationProof && !mustVerifyAgain && firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed;
+  const valid = !!registrationProof && !mustVerifyAgain && firstName.trim().length >= 2 && lastName.trim().length >= 2 && agreed && adult;
 
   return (
     <Screen style={{ backgroundColor: color.surface.base }}>
@@ -122,6 +126,20 @@ export function RegisterScreen() {
               <T variant="label" weight="semibold" tone="brand" onPress={() => openPayLink(`${API_URL}/legal/privacy`)}>
                 Privacy Policy
               </T>
+            </T>
+          </Pressable>
+
+          <Pressable
+            onPress={() => setAdult((a) => !a)}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: adult }}
+            accessibilityLabel={AGE_TICK_LABEL}
+            testID="register-age-tick"
+            style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}
+          >
+            <BrandCheckbox checked={adult} onToggle={() => setAdult((a) => !a)} />
+            <T variant="label" tone="muted" style={{ flex: 1 }}>
+              {AGE_TICK_LABEL}
             </T>
           </Pressable>
 
