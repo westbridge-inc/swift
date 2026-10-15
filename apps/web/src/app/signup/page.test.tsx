@@ -47,6 +47,9 @@ describe('web signup continuation recovery', () => {
 
     await user.type(await screen.findByLabelText('First name'), 'New');
     await user.type(screen.getByLabelText('Last name'), 'Customer');
+    // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+    await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+    await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
     await user.click(screen.getByRole('button', { name: 'Create account' }));
 
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Confirm your phone' })).toBeTruthy());
@@ -77,6 +80,9 @@ describe('[E27] a new customer is not sent to the camera', () => {
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.type(await screen.findByLabelText('First name'), 'New');
     await user.type(screen.getByLabelText('Last name'), 'Customer');
+    // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+    await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+    await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
     await user.click(screen.getByRole('button', { name: 'Create account' }));
     await waitFor(() => expect(mocked.replace).toHaveBeenCalledTimes(1));
     return String(mocked.replace.mock.calls[0]?.[0]);

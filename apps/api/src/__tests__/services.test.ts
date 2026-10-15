@@ -2,6 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -78,8 +82,18 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
     headers: {
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
     },
   });
+}
+
+async function commandState(jobId: string) {
+  const job = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: jobId } }));
+  return {
+    expectedUpdatedAt: job.updatedAt.toISOString(),
+    expectedScheduledFor: job.scheduledFor?.toISOString(),
+    expectedQuoteAmount: Number(job.quoteAmount),
+  };
 }
 
 async function purgeFixtures() {
@@ -583,7 +597,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(hired.tenantId).toBe(TENANT_B);
   });
 
-  it('runs request → quote → schedule → complete → both parties rate', async () => {
+  it('runs request → quote → schedule → confirm → start → complete → both parties rate', async () => {
     const provider = await makeVerifiedProvider('carpenter');
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
 
@@ -596,14 +610,33 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(created.json().data.status).toBe('REQUESTED');
     expect(created.json().data.chatRoomId).toBeTruthy(); // quote-via-chat room opened
 
-    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 15000 }, provider.token);
+    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, {
+      amount: 15000,
+      ...await commandState(jobId),
+    }, provider.token);
     expect(quoted.json().data.status).toBe('QUOTED');
     expect(Number(quoted.json().data.quoteAmount)).toBe(15000);
 
-    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+      scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(),
+      ...await commandState(jobId),
+    }, customer.token);
     expect(scheduled.json().data.status).toBe('SCHEDULED');
 
-    const completed = await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+    const confirmed = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token);
+    expect(confirmed.statusCode).toBe(200);
+    // Move only this synthetic fixture's agreed instant into the past. The
+    // production start route still proves that the exact command-bound slot is
+    // due; local product Postgres integration execution remains held.
+    await runWithoutTenant(() => app.prisma.serviceJob.update({
+      where: { id: jobId },
+      data: { scheduledFor: new Date(Date.now() - 60_000) },
+    }));
+    const started = await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token);
+    expect(started.statusCode).toBe(200);
+    expect(started.json().data.status).toBe('IN_PROGRESS');
+
+    const completed = await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, await commandState(jobId), provider.token);
     expect(completed.json().data.status).toBe('COMPLETED');
 
     // Two-way ratings.
@@ -617,30 +650,47 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(updated.averageRating).toBe(5);
   });
 
-  it('[owner #50 · coordinator ruling 14 Oct] the customer cancels free until the provider starts the job; once in progress the app refuses and names who to contact — never a fee', async () => {
+  it('[owner #50 · coordinator rulings 14 Oct · Terms §7] the customer cancels free while the job is a request; once it is booked or in progress the app refuses and names who to contact — never a fee', async () => {
     const provider = await makeVerifiedProvider('carpenter');
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const job = async () => {
       const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
       expect(created.statusCode, created.body).toBe(201);
       const jobId = created.json().data.id as string;
-      await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000 }, provider.token);
-      const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+      // (Merged with #1483: lifecycle commands carry the job's last-seen version.)
+      await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000, ...await commandState(jobId) }, provider.token);
+      const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(), ...await commandState(jobId) }, customer.token);
       expect(scheduled.json().data.status).toBe('SCHEDULED');
       return jobId;
     };
 
-    // Scheduled, not started: free.
-    const notStarted = await job();
-    const freed = await inject('POST', `/api/v1/services/jobs/${notStarted}/cancel`, {}, customer.token);
+    // A request (quoted, no slot agreed yet): free.
+    const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix a sagging kitchen cupboard door, photos attached.' }, customer.token);
+    const request = created.json().data.id as string;
+    await inject('POST', `/api/v1/services/jobs/${request}/quote`, { amount: 8000, ...await commandState(request) }, provider.token);
+    const freed = await inject('POST', `/api/v1/services/jobs/${request}/cancel`, await commandState(request), customer.token);
     expect(freed.statusCode, freed.body).toBe(200);
     expect(freed.json().data.status).toBe('CANCELLED');
     expect(freed.body).not.toMatch(/fee/i);
 
+    // [TRANSFORMED, coordinator ruling 14 Oct: the server matches the Terms] Booked, not
+    // started: this case used to cancel free. Once a slot is booked the app refuses and the
+    // customer contacts the provider; nothing is written.
+    const booked = await job();
+    const refusedBooked = await inject('POST', `/api/v1/services/jobs/${booked}/cancel`, await commandState(booked), customer.token);
+    expect(refusedBooked.statusCode, refusedBooked.body).toBe(409);
+    expect(refusedBooked.json().error).toMatchObject({
+      code: 'SERVICE_JOB_BOOKED',
+      message: 'This job is booked, so it can no longer be cancelled in the app. Contact your provider to change or cancel it.',
+    });
+    expect(refusedBooked.body).not.toMatch(/fee/i);
+    const bookedRow = await runWithoutTenant(() => app.prisma.serviceJob.findUniqueOrThrow({ where: { id: booked } }), 'services-test-fixture');
+    expect({ status: bookedRow.status, cancelledAt: bookedRow.cancelledAt }).toEqual({ status: 'SCHEDULED', cancelledAt: null });
+
     // Started: refused, nothing written.
     const started = await job();
     await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: started }, data: { status: 'IN_PROGRESS' } }), 'services-test-fixture');
-    const refused = await inject('POST', `/api/v1/services/jobs/${started}/cancel`, {}, customer.token);
+    const refused = await inject('POST', `/api/v1/services/jobs/${started}/cancel`, await commandState(started), customer.token);
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json().error).toMatchObject({
       code: 'SERVICE_JOB_STARTED',
@@ -660,7 +710,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     }, customer.token);
     expect(created.statusCode).toBe(201);
     const jobId = created.json().data.id;
-    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000 }, provider.token);
+    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000, ...await commandState(jobId) }, provider.token);
     expect(quoted.json().data.status).toBe('QUOTED');
 
     const askedToConfirm = async () => (await runWithoutTenant(() =>
@@ -672,7 +722,7 @@ describe('Services — job lifecycle + two-way rating', () => {
 
     // Three days ago, and one minute ago: neither is a time anyone can keep.
     for (const scheduledFor of [new Date(Date.now() - 3 * DAY), new Date(Date.now() - 60_000)]) {
-      const refused = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: scheduledFor.toISOString() }, customer.token);
+      const refused = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: scheduledFor.toISOString(), ...await commandState(jobId) }, customer.token);
       expect(refused.statusCode).toBe(400);
       expect(refused.json().error.code).toBe('SLOT_IN_PAST');
     }
@@ -682,7 +732,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(await askedToConfirm(), 'the provider must never be asked to confirm a time that has passed').toBe(0);
 
     // The refusal is not a dead end: a future time books normally.
-    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(), ...await commandState(jobId) }, customer.token);
     expect(scheduled.statusCode).toBe(200);
     expect(scheduled.json().data.status).toBe('SCHEDULED');
     expect(await askedToConfirm()).toBe(1);
@@ -719,7 +769,10 @@ describe('Services — job lifecycle + two-way rating', () => {
       data: { expiresAt: new Date(Date.now() - 60_000) },
     });
 
-    const quote = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 12000 }, provider.token);
+    const quote = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, {
+      amount: 12000,
+      ...await commandState(jobId),
+    }, provider.token);
     expect(quote.statusCode).toBe(409);
     expect(quote.json().error.code).toBe('PROVIDER_NOT_VERIFIED');
 
@@ -728,9 +781,15 @@ describe('Services — job lifecycle + two-way rating', () => {
       where: { userId: provider.userId },
       data: { expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000) },
     });
-    const quoteOk = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 12000 }, provider.token);
+    const quoteOk = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, {
+      amount: 12000,
+      ...await commandState(jobId),
+    }, provider.token);
     expect(quoteOk.statusCode).toBe(200);
-    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, {
+      scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(),
+      ...await commandState(jobId),
+    }, customer.token);
     expect(scheduled.statusCode).toBe(200);
 
     // Lapse again before slot confirmation — the last acceptance gate holds too.
@@ -738,7 +797,7 @@ describe('Services — job lifecycle + two-way rating', () => {
       where: { userId: provider.userId },
       data: { expiresAt: new Date(Date.now() - 60_000) },
     });
-    const confirm = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token);
+    const confirm = await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token);
     expect(confirm.statusCode).toBe(409);
     expect(confirm.json().error.code).toBe('PROVIDER_NOT_VERIFIED');
   });
