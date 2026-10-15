@@ -145,6 +145,166 @@ describe('[A-12] a waived fee carries the operator’s own words', () => {
 });
 
 // ---------------------------------------------------------------------------
+// [Owner ruling 2026-10-07 · Sol S1/S2 on #1527] The refund runs in order: set
+// the credit aside (a second admin approves), pay it outside Swift, then record
+// the payout. The console never tells anyone to pay before the credit is set
+// aside, and every answer is shown: a 202 queued for a second admin (with its
+// approval id), a refusal in the server's words, or done.
+// ---------------------------------------------------------------------------
+describe('fee credit refund: set aside, pay, record, and every answer is shown', () => {
+  const withCredit = { ...subscription, prepaidBalance: { balance: 5000, currencyCode: 'GYD' }, refundSetAside: 0 };
+  const setAsideRow = { ...subscription, prepaidBalance: { balance: 0, currencyCode: 'GYD' }, refundSetAside: 5000, refundSetAsideId: 'evt-aside-1' };
+  const REASON = 'Partner asked to close their account and get the credit back';
+  function refundServer(row: unknown, reply: (_r: ApiRequest) => { status?: number; body: unknown }) {
+    return mockApi((request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [row] } };
+      if (request.method === 'POST' && request.url.pathname.startsWith('/api/v1/admin/subscriptions/sub-1/refund-credit/')) return reply(request);
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+  }
+  const queued = { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens. It is in the approvals queue.', details: { approvalId: 'apr_9' } } } };
+
+  it('asking for a refund sets the credit aside first, says not to pay yet, and shows the approval it is waiting on', async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirm);
+    vi.stubGlobal('prompt', vi.fn(() => REASON));
+    const fetchMock = refundServer(withCredit, () => queued);
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Refund credit' }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Do not pay anything yet'));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/refund-credit/set-aside`);
+    expect(JSON.parse(String(init?.body))).toEqual({ amount: 5000 });
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toContain('Queued for a second admin');
+    expect(status.textContent).toContain('Do not pay anything yet');
+    expect(status.textContent).toContain('apr_9');
+    expect(screen.getByRole('link', { name: 'Open the approvals queue' }).getAttribute('href')).toBe('/approvals');
+  });
+
+  it('a refusal is shown in the server words', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn(() => REASON));
+    refundServer(withCredit, () => ({ status: 409, body: { success: false, error: { code: 'FEE_CREDIT_CHANGED', message: 'The unused credit is now 3000 GYD. Nothing was set aside: ask again for exactly that amount.' } } }));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Refund credit' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('The unused credit is now 3000 GYD. Nothing was set aside');
+  });
+
+  it('a set-aside row says to pay it, then records the payout with its method and reference, and shows the answer', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('Paid back by') ? 'MMG' : String(msg).includes('Reference of the refund') ? 'REFUND9001' : REASON)));
+    const fetchMock = refundServer(setAsideRow, () => ({ body: { success: true, replayed: false, data: { amount: 5000, currencyCode: 'GYD', balance: 0, refundSetAside: 0 } } }));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    expect(screen.getByText(/set aside: pay it outside Swift, then record the payout/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Refund credit' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/refund-credit/paid`);
+    // [Sol r2 S1] the payout record names the set-aside it pays
+    expect(JSON.parse(String(init?.body))).toEqual({ amount: 5000, method: 'MMG', reference: 'REFUND9001', setAsideId: 'evt-aside-1' });
+    expect((await screen.findByRole('status')).textContent).toContain('Payout recorded');
+  });
+
+  it('a replay of an earlier payout does not say a new set-aside is complete', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'EARLIER9001' : REASON)));
+    refundServer(setAsideRow, () => ({ body: { success: true, replayed: true, data: { amount: 5000, currencyCode: 'GYD', balance: 0, refundSetAside: 5000 } } }));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    const message = (await screen.findByRole('status')).textContent;
+    expect(message).toContain('earlier payout');
+    expect(message).toContain('still set aside');
+    expect(message).not.toContain('refund is complete');
+  });
+
+  it('a queued payout record says payment was reported and prevents another payment or release', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'SENT9001' : REASON)));
+    refundServer(setAsideRow, () => queued);
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    const message = (await screen.findByRole('status')).textContent;
+    expect(message).toContain('Payment reported');
+    expect(message).not.toContain('Nothing has moved');
+    expect(screen.queryByText(/set aside: pay it outside Swift/)).toBeNull();
+    expect((screen.getByRole('button', { name: 'Record payout' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('[DS1122 S3] the server says a payout was reported: after a reload neither payout nor release is offered', async () => {
+    refundServer({ ...setAsideRow, refundPayoutReported: true }, () => queued);
+    renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    expect(screen.getByText(/Payment reported; recording awaits approval/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Record payout' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('[DS1122 S3] a payout reported for one set-aside never blocks the next set-aside on the same account', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'SENT9002' : REASON)));
+    let row: unknown = setAsideRow;
+    mockApi((request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [row] } };
+      if (request.method === 'POST' && request.url.pathname.startsWith('/api/v1/admin/subscriptions/sub-1/refund-credit/')) return queued;
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const { user, queryClient } = renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true));
+    // That payout is recorded; credit is later set aside again (a new set-aside).
+    row = { ...setAsideRow, refundSetAsideId: 'evt-aside-2' };
+    await queryClient.invalidateQueries();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByRole('button', { name: 'Record payout' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/set aside: pay it outside Swift/)).toBeTruthy();
+  });
+
+  it('[review S2-1] after a refused, expired or failed payout record, Record payout is offered again and Release is not', async () => {
+    refundServer({ ...setAsideRow, refundPayoutReported: false, refundPayoutAsk: 'NOT_COMPLETED' }, () => queued);
+    renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    expect(screen.getByText(/last payout record was not completed/)).toBeTruthy();
+    expect(screen.queryByText(/recording awaits approval/)).toBeNull();
+    expect((screen.getByRole('button', { name: 'Record payout' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('a payout refusal (a bad reference) is shown, not swallowed', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('Paid back by') ? 'BANK' : String(msg).includes('Reference of the refund') ? 'x' : REASON)));
+    refundServer(setAsideRow, () => ({ status: 400, body: { success: false, error: { code: 'REFUND_REFERENCE_INVALID', message: 'That does not look like a transfer reference. Copy it from the MMG or bank record.' } } }));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('That does not look like a transfer reference');
+  });
+
+  it('a set-aside that could not be paid is released with the whole amount', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn(() => REASON));
+    const fetchMock = refundServer(setAsideRow, () => queued);
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Release' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/refund-credit/release`);
+    expect(JSON.parse(String(init?.body))).toEqual({ amount: 5000, setAsideId: 'evt-aside-1' });
+    expect((await screen.findByRole('status')).textContent).toContain('apr_9');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // [OWNER 8 Oct (4)] Production records no fee payment by hand (BILLING_TOPUP_HOLD):
 // partners pay through the MMG checkout page. The server says when the hold is on,
 // and the console then offers no "Record fee payment" button. When it is offered and

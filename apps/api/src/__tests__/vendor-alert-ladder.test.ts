@@ -109,7 +109,8 @@ const smsTo = (phone: string) => devChannelLog.filter((e) => e.channel === 'sms'
 const ownerAlertRow = (orderId: string) => app.prisma.notification.findFirstOrThrow({
   where: { userId: owner.userId, AND: [{ data: { path: ['kind'], equals: 'vendor_order_alert' } }, { data: { path: ['orderId'], equals: orderId } }] },
 });
-const receipt = (orderId: string) => app.prisma.alertDelivery.findFirstOrThrow({ where: { kind: 'VENDOR_ORDER', subjectId: orderId } });
+// [Owner ruling #15] The store team (owner + staff here) each get a receipt: read the owner one.
+const receipt = (orderId: string) => app.prisma.alertDelivery.findFirstOrThrow({ where: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: owner.userId } });
 
 function call(method: 'GET' | 'POST' | 'PUT', url: string, token: string, payload?: Record<string, unknown>) {
   return app.inject({

@@ -44,7 +44,8 @@ export function ConsoleShell({ children, home, title, description, navigation, s
     <Link href={home} className="flex items-center gap-2 px-2"><SwiftLogo /><span className="sw-caption">{title}</span></Link>
     {description && <p className="sw-caption mt-3 px-2">{description}</p>}
     {switcher && <div className="mt-5">{switcher}</div>}
-    <nav aria-label={`${title} navigation`} className="mt-6 flex-1 space-y-0.5">
+    {/* [Row 111 · W8] The sidebar and the phone menu are different landmarks: each has its own name. */}
+    <nav aria-label={mobile ? `${title} menu links` : `${title} navigation`} className="mt-6 flex-1 space-y-0.5">
       {navigation.map(item => <Link key={item.href} href={item.href} onClick={mobile ? close : undefined} aria-current={active(item) ? 'page' : undefined}
         className={`flex min-h-11 items-center gap-3 rounded-xl px-2.5 text-[15px] hover:bg-[var(--swift-sunken)] ${active(item) ? 'font-semibold text-[var(--swift-ink)]' : 'font-medium text-[var(--swift-muted)]'}`}>
         <item.icon size={24} className={active(item) ? 'text-[var(--swift-red)]' : ''} aria-hidden />{item.label}
@@ -56,7 +57,7 @@ export function ConsoleShell({ children, home, title, description, navigation, s
     </div>
   </>;
   return <div className="swift-console min-h-dvh min-w-0 bg-[var(--swift-canvas)] text-[var(--swift-ink)] wide:flex">
-    <aside className="hidden wide:sticky wide:top-0 wide:flex wide:h-dvh wide:w-[280px] wide:flex-none wide:flex-col wide:overflow-y-auto wide:border-r wide:border-[var(--swift-border)] wide:bg-[var(--swift-card)] wide:px-4 wide:py-6">{navigationContent(false)}</aside>
+    <aside aria-label={`${title} sidebar`} className="hidden wide:sticky wide:top-0 wide:flex wide:h-dvh wide:w-[280px] wide:flex-none wide:flex-col wide:overflow-y-auto wide:border-r wide:border-[var(--swift-border)] wide:bg-[var(--swift-card)] wide:px-4 wide:py-6">{navigationContent(false)}</aside>
     <div className="min-w-0 flex-1">
       <header className="flex min-h-16 items-center gap-3 px-6 pt-[env(safe-area-inset-top)] wide:px-10">
         <button ref={menuButton} type="button" aria-label="Open menu" aria-expanded={open} aria-controls="console-menu" onClick={() => setOpen(true)} className="sw-icon-btn wide:hidden"><Menu size={20} aria-hidden /></button>
@@ -66,12 +67,12 @@ export function ConsoleShell({ children, home, title, description, navigation, s
       </header>
       {open && <div id="console-menu" role="dialog" aria-modal="true" aria-label={`${title} menu`} onKeyDown={e => { if (e.key === 'Escape') close(); }} className="fixed inset-0 z-50 wide:hidden">
         <button type="button" tabIndex={-1} aria-label="Close menu" onClick={close} className="absolute inset-0 bg-[var(--swift-scrim)]" />
-        <aside className="absolute inset-y-0 left-0 flex w-[min(20rem,calc(100vw-3rem))] flex-col overflow-y-auto bg-[var(--swift-card)] p-4">
+        <div className="absolute inset-y-0 left-0 flex w-[min(20rem,calc(100vw-3rem))] flex-col overflow-y-auto bg-[var(--swift-card)] p-4">
           <button ref={closeButton} type="button" onClick={close} aria-label="Close" className="sw-icon-btn mb-4 self-end"><X size={20} aria-hidden /></button>
           {navigationContent(true)}
-        </aside>
+        </div>
       </div>}
-      <main key={contentKey} className="sw-page sw-partner pb-6">{children}</main>
+      <main key={contentKey} id="main" tabIndex={-1} className="sw-page sw-partner pb-6">{children}</main>
       <footer className="sw-caption px-6 pb-[calc(88px_+_env(safe-area-inset-bottom))] pt-6 wide:px-10 wide:pb-8">Prices in GYD</footer>
     </div>
     <nav aria-label={`${title} tabs`} className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--swift-border)] bg-[var(--swift-card)] pb-[env(safe-area-inset-bottom)] wide:hidden">
