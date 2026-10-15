@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { OrderService } from '../modules/order/order.service';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [L09 · M022 / M023 / row 70] What the customer reviewed is what is ordered.
@@ -287,7 +288,7 @@ describe('[reorder] a past order comes back with its choices, or names the line 
     const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
     expect(res.statusCode).toBe(200);
     const orderId = res.json().data.orders[0].id as string;
-    await app.prisma.order.update({ where: { id: orderId }, data: { status: 'DELIVERED' } });
+    await walkOrderStatus(app.prisma, orderId, 'DELIVERED');
     return orderId;
   }
 

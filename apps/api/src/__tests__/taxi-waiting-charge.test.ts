@@ -21,6 +21,7 @@ import { LEGACY_GY_TAXI_CARD, pinLegacyGuyanaTaxiCard } from './helpers/legacy-t
 import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { loginWithOtp } from './helpers/otp';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [TAXI waiting charge · owner ruling 1 Oct 2026] The charge through the real
@@ -479,10 +480,10 @@ describe('"Fare collected" freezes the charge once, into every money surface (CO
       const driver = await makeDriver();
       const t = Date.now();
       const id = res.json().data.ride.id as string;
-      await sys(() => app.prisma.order.update({ where: { id }, data: {
-        driverId: driver.driverId, status: 'RIDE_IN_PROGRESS', driverArrivedAt: new Date(t - 30 * MIN), pickedUpAt: new Date(t - 17 * MIN),
+      await sys(() => walkOrderStatus(app.prisma, id, 'RIDE_IN_PROGRESS', {
+        driverId: driver.driverId, driverArrivedAt: new Date(t - 30 * MIN), pickedUpAt: new Date(t - 17 * MIN),
         ridePinVerified: true, ridePinVerifiedAt: new Date(t - 17 * MIN),
-      } }));
+      }));
       await sys(() => app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: id } }));
       const done = await call('POST', `/api/v1/driver/rides/${id}/handover`, driver.token, { outcome: 'paid', gps: DEST });
       expect(done.statusCode, done.body).toBe(200);

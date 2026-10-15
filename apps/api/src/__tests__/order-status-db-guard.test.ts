@@ -38,7 +38,7 @@ const RUN = randomUUID().replace(/-/g, '').slice(0, 10);
 const PHONE = `+592264${String(Number.parseInt(RUN.slice(0, 6), 16) % 100000).padStart(5, '0')}`;
 const STATUSES = Object.values(OrderStatus) as OrderStatus[];
 const MIGRATIONS = path.resolve(__dirname, '../../prisma/migrations');
-const NAME = '20261015040000_order_status_transition_guard';
+const NAME = '20261015051000_order_status_transition_guard';
 /** The newest migration on main when this was written (15 Oct 04:30Z). */
 const NEWEST_ON_MAIN_AT_WRITE = '20261015010000_mmg_fee_reversals';
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
@@ -174,10 +174,10 @@ describe('the database holds the order machine (row 264)', () => {
     // Wait until writer 2 is queued behind writer 1's row lock, then let writer 1 commit.
     const deadline = Date.now() + 10_000;
     for (;;) {
-      const [{ waiting }] = await db.$queryRawUnsafe<Array<{ waiting: bigint }>>(
+      const rows = await db.$queryRawUnsafe<Array<{ waiting: bigint }>>(
         `SELECT count(*) AS waiting FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND position($1 in query) > 0`, marker,
       );
-      if (Number(waiting) > 0) break;
+      if (Number(rows[0]?.waiting ?? 0) > 0) break;
       if (Date.now() > deadline) throw new Error('writer 2 never queued behind the row lock');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -241,7 +241,8 @@ describe('the guard is generated from order-status.ts and shipped by one migrati
       return existsSync(file) && readFileSync(file, 'utf8').includes(`FUNCTION ${ORDER_STATUS_GUARD}()`);
     });
     expect(defining[0]).toBe(NAME);
-    const sql = normalise(readFileSync(path.join(MIGRATIONS, defining[defining.length - 1], 'migration.sql'), 'utf8'));
+    const newest = defining[defining.length - 1] ?? NAME;
+    const sql = normalise(readFileSync(path.join(MIGRATIONS, newest, 'migration.sql'), 'utf8'));
     for (const statement of orderStatusGuardDdl()) expect(sql).toContain(normalise(statement));
   });
 

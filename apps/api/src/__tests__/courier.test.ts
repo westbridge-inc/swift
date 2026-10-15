@@ -11,6 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
 import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // Courier (spec §4.3). Send a parcel person-to-person: pickup != dropoff,
@@ -249,19 +250,22 @@ describe('Courier — create, track, deliver', () => {
       data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
     });
 
-    // The rider uploaded a photo in custody (issued URL recorded), then the job went back pre-custody.
-    await app.prisma.order.update({
-      where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED' },
-    });
-    const issued = await issueProof(created.orderId, moverUser.userId);
-    await app.prisma.order.update({ where: { id: created.orderId }, data: { status: 'RIDER_ASSIGNED' } });
+    // [row 264] A job never goes back from custody (the database refuses PICKED_UP -> RIDER_ASSIGNED),
+    // so the pre-custody case comes first: assigned, never picked up, yet carrying the issued-URL record
+    // an upload in custody writes (courierProofIssuedUrl / courierProofIssuedRiderId).
+    await walkOrderStatus(app.prisma, created.orderId, 'RIDER_ASSIGNED', { riderId: rider.id, paymentStatus: 'CAPTURED' });
+    const recorded = `storage://synthetic/courier-proof/${created.orderId}/pre-custody.png`;
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { courierProofIssuedUrl: recorded, courierProofIssuedRiderId: rider.id } });
     // Pre-custody: assigned but never picked up — DELIVERED is unreachable even
-    // WITH a genuine issued photo. Custody is the gate.
+    // WITH the job's own issued photo. Custody is the gate.
     const preCustody = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
-      { proofPhotoUrl: issued }, moverUser.token);
+      { proofPhotoUrl: recorded }, moverUser.token);
     expect(preCustody.statusCode).toBe(409);
     expect(preCustody.json().error.code).toBe('PARCEL_NOT_IN_CUSTODY');
+
+    // The rider picks the parcel up and uploads a photo in custody (issued URL recorded).
+    await walkOrderStatus(app.prisma, created.orderId, 'PICKED_UP');
+    const issued = await issueProof(created.orderId, moverUser.userId);
 
     // Foreign object: a URL the server never ISSUED — even one embedding the
     // folder name — is refused (exact-match, not substring).

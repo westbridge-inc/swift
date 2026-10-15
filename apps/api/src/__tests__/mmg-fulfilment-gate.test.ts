@@ -18,6 +18,7 @@ import { OrderService, reconcileMissingEarnings } from '../modules/order/order.s
 import { registerErrorHandler } from '../middleware/error-handler';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { retireLiveOrders } from './helpers/order-status-walk';
 
 // [W-25] A store's attestation now carries the provider reference from its own
 // wallet message — a bare tap is refused (REFERENCE_REQUIRED), and one reference
@@ -443,15 +444,9 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     // [E02] A PAID MMG order can no longer be written CANCELLED without its
     // refund obligation (the migration's deferred guard), so the paid legs
     // earlier tests left with this rider close as FAILED; the rest as before.
-    const live = { riderId, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'] as OrderStatus[] } };
-    await app.prisma.order.updateMany({
-      where: { ...live, paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CLAIMED', 'CAPTURED'] } },
-      data: { status: 'FAILED', riderId: null },
-    });
-    await app.prisma.order.updateMany({
-      where: live,
-      data: { status: 'CANCELLED', riderId: null },
-    });
+    // [row 264] Along declared edges: an order in the rider's custody cannot be cancelled, so it ends the way it can.
+    await retireLiveOrders(app.prisma, { riderId, paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CLAIMED', 'CAPTURED'] } }, { riderId: null }, ['FAILED', 'RETURNED', 'DELIVERED', 'COMPLETED']);
+    await retireLiveOrders(app.prisma, { riderId }, { riderId: null });
     const session = await app.prisma.session.findFirst({ where: { userId: rider.userId } });
     await app.prisma.rider.update({
       where: { id: riderId },
