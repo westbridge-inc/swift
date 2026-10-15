@@ -11,7 +11,7 @@ const POSTAL_WORDS = /\b(letters?|documents?|docs|mail|mailing|envelopes?|corres
 /** The postal word a description names, or null. */
 export function postalItem(description: string | null | undefined): string | null {
   if (!description) return null;
-  const hit = POSTAL_WORDS.exec(description.normalize('NFKC').replace(/[​-‍﻿]/g, ''));
+  const hit = POSTAL_WORDS.exec(description.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, ''));
   return hit ? hit[1]!.toLowerCase() : null;
 }
 
