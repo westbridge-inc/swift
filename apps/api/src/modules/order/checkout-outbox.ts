@@ -67,7 +67,7 @@ export interface CheckoutQueueTiming {
 
 export interface CheckoutOutboxRuntime {
   prisma: PrismaClient;
-  queues: { orderQueue: Pick<Queue, 'add'>; notificationQueue: Pick<Queue, 'add'>
+  queues: { orderQueue?: Pick<Queue, 'add'>; notificationQueue?: Pick<Queue, 'add'>
     /** [S-13] the dispatch queue — a `dispatch` row publishes a dispatch-order job */
     dispatchQueue?: { add: (name: string, data: Record<string, unknown>, opts?: Record<string, unknown>) => Promise<unknown> };
   };
@@ -238,14 +238,22 @@ export async function persistReleaseAlertLadderInTransaction(
 export function dispatchCommandDedupeKey(orderId: string, reason: string): string {
   return `order:${orderId}:redispatch:${reason}`;
 }
+/** [Opus review 14 Oct S3-1] A dispatch command is due NOW, but its
+ *  `availableAt` is stamped with this process's clock while the claim compares
+ *  it with the database's CURRENT_TIMESTAMP. A database clock that trails the
+ *  API host would make the in-request drain skip the row until the sweep
+ *  (up to ORDER_OUTBOX_SWEEP_MS later). Back-dating an immediately-due command
+ *  by this tolerance keeps the fast path across ordinary clock differences;
+ *  it never delays anything, and rows are claimed in createdAt order. */
+export const DISPATCH_COMMAND_CLOCK_TOLERANCE_MS = 5_000;
 export async function persistDispatchCommandInTransaction(
   tx: Prisma.TransactionClient,
-  input: { orderId: string; tenantId: string; reason: string; now?: Date },
+  input: { orderId: string; tenantId: string; reason: string; priority?: number; now?: Date },
 ): Promise<{ id: string; dedupeKey: string }> {
   const dedupeKey = dispatchCommandDedupeKey(input.orderId, input.reason);
   const id = checkoutOutboxId(dedupeKey);
   await tx.orderOutbox.createMany({
-    data: [{ id, tenantId: input.tenantId, dedupeKey, orderId: input.orderId, kind: 'dispatch-order', queue: 'dispatch', payload: { version: CHECKOUT_OUTBOX_VERSION, orderId: input.orderId, reason: input.reason } as Prisma.InputJsonValue, delayMs: 0, availableAt: input.now ?? new Date() }],
+    data: [{ id, tenantId: input.tenantId, dedupeKey, orderId: input.orderId, kind: 'dispatch-order', queue: 'dispatch', payload: { version: CHECKOUT_OUTBOX_VERSION, orderId: input.orderId, reason: input.reason, ...(input.priority === undefined ? {} : { priority: input.priority }) } as Prisma.InputJsonValue, delayMs: 0, availableAt: new Date((input.now ?? new Date()).getTime() - DISPATCH_COMMAND_CLOCK_TOLERANCE_MS) }],
     skipDuplicates: true,
   });
   return { id, dedupeKey };
@@ -439,8 +447,11 @@ export async function drainCheckoutOutbox(
       if (!queue) throw new Error(`no ${row.queue} queue in this runtime`);
       const payload = { ...((row.payload ?? {}) as Record<string, unknown>) };
       delete payload['version'];
+      const priority = payload['priority'];
+      delete payload['priority'];
       await queue.add(row.kind, payload, {
         jobId: row.id,
+        ...(typeof priority === 'number' ? { priority } : {}),
         delay: Math.max(0, row.delayMs - Math.max(0, Date.now() - row.createdAt.getTime())),
         removeOnComplete: 100,
         removeOnFail: 50,
