@@ -115,6 +115,9 @@ async function holdLock(key: string, shared: boolean) {
 }
 
 beforeAll(async () => {
+  // One owner makes more than ten adds here to exercise invites; the daily
+  // add cap (STAFF_ADD_DAILY_CAP) has its own suite.
+  process.env['STAFF_ADD_DAILY_CAP'] = '1000';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -143,6 +146,7 @@ afterAll(async () => {
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
+  delete process.env['STAFF_ADD_DAILY_CAP'];
 });
 
 describe('[row 55] the owner withdraws every unanswered invite', () => {
