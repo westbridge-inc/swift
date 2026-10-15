@@ -196,6 +196,11 @@ afterAll(async () => {
 });
 
 const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } });
+/** The binding counter by label (the app's own module instance, loaded after the env above). */
+async function bindKinds(): Promise<Record<string, number | undefined>> {
+  const { tenantBindCounter } = await import('../plugins/observability');
+  return Object.fromEntries((await tenantBindCounter.get()).values.map((v) => [v.labels['kind'], v.value]));
+}
 /** Run `fn` as the worker runs a job: from NO ambient context (a BullMQ worker has none; an earlier
  *  inject would otherwise leave its request's tenant in this test's context), inside inJobContext
  *  (named system work, job:<queue>:<name>). */
@@ -328,33 +333,63 @@ describe('[W0] transactions: a model without a tenantId never leaves the transac
   });
 });
 
+describe('[W0] flows with no tenant are exactly as before: never moved to the system login, never out of their transaction', () => {
+  const ownerLink = () => prismaModule.scopedPrisma.vendorOwner.findUnique({
+    where: { userId: ids.vendorOwnerUser }, include: { vendors: { select: { id: true } } },
+  });
+
+  it('a pre-auth request (no tenant yet) and a flow with no context at all read on the walled login: no store, nothing bound', async () => {
+    const before = await bindKinds();
+    // `await` INSIDE the scope: a Prisma query is lazy and runs its extensions when awaited (tenant-context.ts).
+    const preAuth = await tenant.tenantContext.run({ tenantId: null, mode: 'request' }, async () => await ownerLink());
+    const noContext = await tenant.tenantContext.exit(async () => await ownerLink());
+    // The link row itself carries no tenant; its walled store stays invisible to an anonymous flow (no cross-tenant read).
+    expect(preAuth?.id).toBe(ids.vendorOwner);
+    expect(preAuth?.vendors).toEqual([]);
+    expect(noContext?.vendors).toEqual([]);
+    const after = await bindKinds();
+    expect(after['nontenant'] ?? 0).toBe(before['nontenant'] ?? 0);
+    expect(after['nontenant_system'] ?? 0).toBe(before['nontenant_system'] ?? 0);
+  });
+
+  it('a transaction that began with no tenant keeps a later tenant-bound write inside it: its rollback undoes it', async () => {
+    const token = `w0-unbound-tx-${RUN}`;
+    const before = await bindKinds();
+    await expect(tenant.tenantContext.exit(async () => await prismaModule.scopedPrisma.$transaction(async (tx) => {
+      await tenant.runWithTenant(PRODUCTION, () => (tx as unknown as PrismaClient).deviceToken.create({
+        data: { userId: ids.customerUser, token, platform: 'android' }, select: { id: true },
+      }));
+      throw new Error('W0_ROLLBACK');
+    }))).rejects.toThrow('W0_ROLLBACK');
+    expect(await owner.deviceToken.count({ where: { token } })).toBe(0);
+    const after = await bindKinds();
+    expect((after['nontenant_in_unbound_tx'] ?? 0) - (before['nontenant_in_unbound_tx'] ?? 0)).toBe(1);
+  });
+});
+
 describe('[W0] counted, and inert unless TENANT_RLS_BIND=1', () => {
-  const kinds = async () => {
-    const { tenantBindCounter } = await import('../plugins/observability');
-    return Object.fromEntries((await tenantBindCounter.get()).values.map((v) => [v.labels['kind'], v.value])) as Record<string, number | undefined>;
-  };
   const ownerLink = () => tenant.runWithTenant(PRODUCTION, () => prismaModule.scopedPrisma.vendorOwner.findUnique({
     where: { userId: ids.vendorOwnerUser }, include: { vendors: { select: { id: true } } },
   }));
 
   it('a tenant-bound read of a model without a tenantId is counted as nontenant; system work as nontenant_system', async () => {
-    const before = await kinds();
+    const before = await bindKinds();
     expect((await ownerLink())?.vendors.map((v) => v.id)).toEqual([ids.vendor]);
     await tenant.runAsSystem('test-w0-count', () => prismaModule.scopedPrisma.deviceToken.findMany({ where: { token: ids.reviewDevice }, select: { user: { select: { id: true } } } }));
-    const after = await kinds();
+    const after = await bindKinds();
     expect((after['nontenant'] ?? 0) - (before['nontenant'] ?? 0)).toBe(1);
     expect((after['nontenant_system'] ?? 0) - (before['nontenant_system'] ?? 0)).toBe(1);
   });
 
   it('with binding off nothing is bound (the walled login then sees no store: exactly the pre-W0 behaviour)', async () => {
-    const before = await kinds();
+    const before = await bindKinds();
     process.env['TENANT_RLS_BIND'] = '0';
     try {
       expect((await ownerLink())?.vendors).toEqual([]);
     } finally {
       process.env['TENANT_RLS_BIND'] = '1';
     }
-    const after = await kinds();
+    const after = await bindKinds();
     expect(after['nontenant'] ?? 0).toBe(before['nontenant'] ?? 0);
   });
 });
