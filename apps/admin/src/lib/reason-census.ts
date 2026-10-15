@@ -52,6 +52,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
   { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
     requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },
+  { route: 'POST /orders/:id/door-cash-return/resolve', helper: 'resolveHeldDoorCash', args: ['ord_1'], reply: { orderId: 'ord_1', doorCashReturn: { status: 'RESOLVED' } } },
 
   // ── Moderation ─────────────────────────────────────────────────────────
   { route: 'PUT /moderation/reports/:id', helper: 'resolveModerationReport', args: ['rep_1', { status: 'ACTIONED' }], requiredBodyKeys: ['status'] },
