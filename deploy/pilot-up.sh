@@ -89,6 +89,27 @@ case "$PILOT_ENV" in
 esac
 [ "$NO_PUBLIC" -eq 0 ] || [ "$PILOT_ENV" = production ] ||
   die "--no-public is for the production host (the first boot before its DNS moves); a staging host deploys the whole stack"
+# [TA-S0-003 · R3] TENANT_RLS_BIND=1 is the business wall's contract posture:
+# every Compose command below also reads deploy/docker-compose.wall.yml, so the
+# API and the worker run on the two least-privilege logins (deploy/rls-logins.sh)
+# and never see the database owner's password. Without the line, nothing here
+# changes. The overlay owns the database wiring, so deploy/.env names none of it.
+WALL=0
+case "$(env_setting TENANT_RLS_BIND)" in
+  1) WALL=1; COMPOSE+=(-f "$HERE/docker-compose.wall.yml") ;;
+  "" | 0) ;;
+  *) [ "$PILOT_ENV" != production ] || die "PILOT_ENV=production needs TENANT_RLS_BIND to be exactly 1 (the wall's contract posture) or unset" ;;
+esac
+if [ "$WALL" -eq 1 ]; then
+  [ "$(env_setting TENANT_UNSCOPED_ACCESS)" = deny ] ||
+    die "TENANT_RLS_BIND=1 needs TENANT_UNSCOPED_ACCESS=deny: a request that never bound its tenant is refused, never counted"
+  [ -z "$(env_setting TENANT_WALL_EXPAND_ATTESTED)" ] ||
+    die "TENANT_RLS_BIND=1 refuses TENANT_WALL_EXPAND_ATTESTED: the wall-less declaration never rides along with the contract posture; remove the line"
+  for wall_name in DATABASE_URL_FILE SYSTEM_DATABASE_URL_FILE POSTGRES_PASSWORD_FILE; do
+    [ -z "$(env_value "$wall_name")" ] ||
+      die "TENANT_RLS_BIND=1: deploy/.env must not set $wall_name; deploy/docker-compose.wall.yml wires the two runtime logins and keeps the owner's password away from the API and the worker"
+  done
+fi
 API_HOST="$(env_value API_HOST)"
 [[ "$API_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
   die "API_HOST must be a DNS hostname for $PILOT_ENV HTTPS"
@@ -435,10 +456,22 @@ STORE_BIN="$(command -v swift-secrets || true)"
 # default), so the list runs through sudo like the restart below; an unreadable
 # store fails loudly rather than reading as empty.
 STORED="$(sudo -n "$STORE_BIN" list)" || die "swift-secrets list failed (it reads the root-only credential store through sudo -n)"
+# [TA-S0-003 · owner ruling, 14 Oct] After Phase C the production host never
+# goes back to the database owner's login or the wall-less expand posture:
+# once deploy/rls-logins.sh has journaled or published the runtime logins, a
+# production deploy without TENANT_RLS_BIND=1 is refused. Staging is unchanged.
+if [ "${PILOT_ENV:-}" = production ] && [ "${WALL:-0}" -ne 1 ]; then
+  for wall_name in RLS_LOGIN_SWIFT_APP_LOGIN RLS_LOGIN_SWIFT_SYSTEM_LOGIN DATABASE_URL SYSTEM_DATABASE_URL; do
+    if grep -qx "$wall_name" <<< "$STORED"; then
+      die "PILOT_ENV=production: the encrypted store holds $wall_name, so Phase C (the least-privilege logins) has run on this host, and production never goes back to the database owner's login or the expand posture (owner ruling, 14 Oct). Set TENANT_RLS_BIND=1 and TENANT_UNSCOPED_ACCESS=deny and remove TENANT_WALL_EXPAND_ATTESTED (PILOT-RUNBOOK section 13)"
+    fi
+  done
+fi
 # Everything wired as NAME_FILE — hardwired in Compose or switched on in .env —
 # must be in the store, or the app refuses to boot after the old one is stopped.
 WIRED="$({
   grep -oE '^[[:space:]]+[A-Z][A-Z0-9_]*_FILE: /run/secrets/[A-Z][A-Z0-9_]*' "$HERE/docker-compose.yml" || true
+  [ "${WALL:-0}" -ne 1 ] || grep -oE '^[[:space:]]+[A-Z][A-Z0-9_]*_FILE: /run/secrets/[A-Z][A-Z0-9_]*' "$HERE/docker-compose.wall.yml" || true
   grep -oE '^[A-Z][A-Z0-9_]*_FILE=/run/secrets/[A-Z][A-Z0-9_]*' "$HERE/.env" || true
 } | sed -E 's#.*/run/secrets/##' | sort -u)"
 for name in $WIRED; do
@@ -567,6 +600,24 @@ else
   [ "$DB_IDENTITY_ENV" != production ] ||
     die "PILOT_ENV=$PILOT_ENV, but this database's deployment_identity says production: a staging host never deploys onto the production database. Nothing was stopped or migrated"
 fi
+# [TA-S0-003 · owner ruling, 14 Oct] The database's own word on Phase C: the
+# runtime logins exist in its cluster. A production deploy in the owner/expand
+# posture is refused once they do (even if the store were wiped), and the
+# contract posture needs both. Asked before anything is stopped or migrated.
+if [ "$PILOT_ENV" = production ] || [ "$WALL" -eq 1 ]; then
+  RUNTIME_LOGINS="$("${COMPOSE[@]}" exec -T postgres sh -c \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -tAc "$1"' \
+    sh "SELECT count(*) FROM pg_roles WHERE rolname IN ('swift_app_login', 'swift_system_login')" 2>/dev/null)" ||
+    die "could not ask the database whether the least-privilege logins exist; refusing to deploy without that answer. Nothing was stopped or migrated"
+  case "$RUNTIME_LOGINS" in
+    0 | 1 | 2) ;;
+    *) die "the database gave no count of the least-privilege logins; refusing to deploy without it. Nothing was stopped or migrated" ;;
+  esac
+  [ "$WALL" -eq 1 ] || [ "$RUNTIME_LOGINS" = 0 ] ||
+    die "PILOT_ENV=production: this database's cluster has the least-privilege logins, so Phase C has run, and production never goes back to the database owner's login or the expand posture (owner ruling, 14 Oct). Set TENANT_RLS_BIND=1 and TENANT_UNSCOPED_ACCESS=deny and remove TENANT_WALL_EXPAND_ATTESTED. Nothing was stopped or migrated"
+  [ "$WALL" -ne 1 ] || [ "$RUNTIME_LOGINS" = 2 ] ||
+    die "TENANT_RLS_BIND=1, but the two least-privilege logins do not both exist in this database's cluster: run deploy/rls-logins.sh plan, apply and verify first (PILOT-RUNBOOK section 13). Nothing was stopped or migrated"
+fi
 # [PROD-PATH] Photon only with PLACES_PROVIDER=osm on production; never
 # Nominatim (the geocoding profile's other, heavy member).
 if [ "$PLACES_PHOTON" -eq 1 ]; then
@@ -603,6 +654,17 @@ MIGRATE_ID="$("${COMPOSE[@]}" ps -a -q migrate)"
 [ -n "$MIGRATE_ID" ] || die "migration container was not created"
 . "$HERE/wait-for-migration.sh"
 wait_for_migration "$MIGRATE_ID" || die "migration did not complete successfully"
+# [TA-S0-003 · R3] On the migrated database, before the API or the worker can
+# start on it: the two runtime logins still hold their contract (attributes,
+# memberships, no ownership) and so does the catalogue around them (row
+# security forced, the private schema closed, the revocations in place). This
+# is the read-only check later deploys run; `verify` is pinned to the apply
+# window (PILOT-RUNBOOK section 13). One JSON line of reason codes, no value.
+if [ "${WALL:-0}" -eq 1 ]; then
+  WALL_ROLES="$("$HERE/rls-logins.sh" roles 2>/dev/null | tail -1)" ||
+    die "the least-privilege logins or the catalogue around them do not hold their contract on the migrated database ($WALL_ROLES); the API and worker were not started. Report it; never repair a role by hand"
+  echo "least-privilege logins hold their contract on the migrated database"
+fi
 if [ "${DATA_ONLY:-0}" -eq 1 ]; then
   echo "DATABASE READY at exact SHA $SHA ($PILOT_ENV; migrations applied; the API, worker and Caddy were not started)"
   exit 0

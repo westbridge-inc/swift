@@ -115,6 +115,68 @@ function assertProductionLaunchLocks(env: Record<string, string | undefined>): v
   }
 }
 
+/** [TA-S0-003 · R3] The two runtime logins deploy/rls-logins.sh creates. */
+export const WALL_REQUEST_LOGIN = 'swift_app_login';
+export const WALL_SYSTEM_LOGIN = 'swift_system_login';
+
+const isSet = (value: string | undefined): boolean => value !== undefined && value !== '';
+
+/** The login name and the database a postgres URL names; null when it is not one. Never echoed. */
+function loginOf(raw: string | undefined): { user: string; target: string } | null {
+  if (!isSet(raw)) return null;
+  try {
+    const url = new URL(raw as string);
+    if (url.protocol !== 'postgresql:' && url.protocol !== 'postgres:') return null;
+    return { user: decodeURIComponent(url.username), target: `${url.hostname}:${url.port || '5432'}${url.pathname}` };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * [TA-S0-003 · R3] TENANT_RLS_BIND=1 in production is the business wall's
+ * contract posture: the API and the worker run on the two least-privilege
+ * logins (deploy/rls-logins.sh), handed over as DATABASE_URL_FILE and
+ * SYSTEM_DATABASE_URL_FILE by deploy/docker-compose.wall.yml, and never on the
+ * database owner. Refused before anything connects: unscoped access that is
+ * not denied, the wall-less EXPAND declaration riding along, the owner's
+ * password anywhere in the process, a missing URL, a request URL that is not
+ * swift_app_login or a system URL that is not swift_system_login (so never
+ * the owner, postgres, or one login for both), or two URLs naming different
+ * databases. The database-side proof (that those logins really are walled and
+ * least-privilege) is the boot attestation (boot/tenant-wall.ts,
+ * boot/system-login.ts). Messages name settings and roles, never a value.
+ */
+export function assertWallLoginConfig(env: Record<string, string | undefined>): void {
+  if (runtimeMode(env) !== 'production' || env['TENANT_RLS_BIND'] !== '1') return;
+  const refuse = (why: string): never => {
+    throw new Error(`FATAL: TENANT_RLS_BIND=1 in production (the business wall's contract posture), but ${why}. Refusing to start.`);
+  };
+  if (env['TENANT_UNSCOPED_ACCESS'] !== 'deny') {
+    refuse('TENANT_UNSCOPED_ACCESS is not deny — a request that never bound its tenant must be refused, not counted');
+  }
+  if (isSet(env['TENANT_WALL_EXPAND_ATTESTED'])) {
+    refuse('TENANT_WALL_EXPAND_ATTESTED is set — the wall-less EXPAND declaration never rides along with the contract posture; remove it');
+  }
+  // (Read after the secret-file loader, which turns POSTGRES_PASSWORD_FILE into POSTGRES_PASSWORD.)
+  if (isSet(env['POSTGRES_PASSWORD'])) {
+    refuse('the database owner\'s password reached this process (POSTGRES_PASSWORD) — the API and the worker run on the least-privilege logins only (deploy/docker-compose.wall.yml)');
+  }
+  const request = loginOf(env['DATABASE_URL']);
+  const system = loginOf(env['SYSTEM_DATABASE_URL']);
+  if (!request) refuse('DATABASE_URL is missing or not a postgresql:// URL — the request login comes from DATABASE_URL_FILE');
+  if (!system) refuse('SYSTEM_DATABASE_URL is missing or not a postgresql:// URL — the system login comes from SYSTEM_DATABASE_URL_FILE');
+  if (request!.user !== WALL_REQUEST_LOGIN) {
+    refuse(`DATABASE_URL does not sign in as ${WALL_REQUEST_LOGIN} — the request pool never runs on the owner, postgres or the system login`);
+  }
+  if (system!.user !== WALL_SYSTEM_LOGIN) {
+    refuse(`SYSTEM_DATABASE_URL does not sign in as ${WALL_SYSTEM_LOGIN} — system work never runs on the owner, postgres or the request login`);
+  }
+  if (request!.target !== system!.target) {
+    refuse('DATABASE_URL and SYSTEM_DATABASE_URL name different databases — system work would read the wrong rows');
+  }
+}
+
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
   assertTestControlConfig(env);
@@ -353,6 +415,8 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: AGENT_CASH_WEBHOOK_SECRET is set in production — partners pay the weekly fee only on the MMG checkout page, never through an agent or a Swift Number. Remove it (and its _FILE line). Refusing to start.');
   }
   assertProductionLaunchLocks(env);
+  // [TA-S0-003 · R3] The contract posture runs on the two least-privilege logins only.
+  assertWallLoginConfig(env);
 
   // [PROD-PATH] Email: receipts, expiry warnings, data-export links. The dev
   // sender refuses only at the FIRST send in production (channels.ts), so a

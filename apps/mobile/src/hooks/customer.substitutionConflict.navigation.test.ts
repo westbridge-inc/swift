@@ -1,10 +1,10 @@
 /// <reference lib="dom" />
 import { AxiosError, type InternalAxiosRequestConfig } from 'axios';
-import { QueryClient, QueryObserver, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryObserver, QueryClientProvider, defaultScheduler, notifyManager } from '@tanstack/react-query';
 import { act, createElement } from 'react';
 // @ts-expect-error react-dom is deliberately not a mobile runtime dependency.
 import { createRoot } from 'react-dom/client';
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const env = vi.hoisted(() => {
   const previousApiUrl = process.env['EXPO_PUBLIC_API_URL'];
@@ -42,6 +42,11 @@ function Probe({ id }: { id: string }) {
   mutation = useDecideSubstitution();
   return null;
 }
+// React Query batches observer notifications on a setTimeout(0). One scheduled
+// by the last test's teardown could fire after the shared navigation setup has
+// removed the DOM globals, and react-dom then throws "window is not defined"
+// outside any test. Notifications run synchronously in this file instead.
+beforeAll(() => { notifyManager.setScheduler((callback) => callback()); });
 beforeEach(() => {
   seen = []; rejectRequest = undefined; resolveRequest = undefined; refusal = 409;
   client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity }, mutations: { retry: false, gcTime: Infinity } } });
@@ -65,6 +70,7 @@ beforeEach(() => {
 });
 afterEach(() => { observer.destroy(); client.clear(); api.defaults.adapter = originalAdapter; });
 afterAll(() => {
+  notifyManager.setScheduler(defaultScheduler);
   if (env.previousApiUrl === undefined) delete process.env['EXPO_PUBLIC_API_URL'];
   else process.env['EXPO_PUBLIC_API_URL'] = env.previousApiUrl;
 });

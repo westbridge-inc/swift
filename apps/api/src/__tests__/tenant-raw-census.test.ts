@@ -38,6 +38,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/billing/billing-confirmation-backfill.ts': { sites: 2, role: 'JOB_PENDING' },
   'modules/billing/billing-notice-delivery.ts': { sites: 5, role: 'JOB_PENDING' },
   'modules/billing/billing.service.ts': { sites: 2, role: 'SHARED' },
+  // Payment-confirmation review queue: one tenant-filtered read of matching credited MMG records,
+  // reached from the authenticated admin queue route; the file is also imported by billing jobs.
+  'modules/billing/confirmation-finance.ts': { sites: 1, role: 'SHARED' },
   'modules/billing/invariants.ts': { sites: 2, role: 'JOB_PENDING' },
   'modules/billing/provider-identity-backfill.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/billing/receipts.ts': { sites: 1, role: 'SHARED' },

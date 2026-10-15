@@ -136,7 +136,7 @@ describe('[5.1.1v] the verdict, without a database', () => {
     // Told one at a time, a person clears a blocker, tries again, and is
     // refused for a different reason they were never shown. That is the
     // "contact Support" dead end with extra steps.
-    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250, openClaimCount: 1, pendingFeePaymentCount: 1, feeCreditCount: 1 });
+    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, partialCashReturnCount: 1, earningsOwed: 250, openClaimCount: 1, pendingFeePaymentCount: 1, feeCreditCount: 1 });
     expect(all.blockers).toHaveLength(PARTNER_BLOCKERS.length);
     for (const b of PARTNER_BLOCKERS) expect(refusalMessage(all.blockers)).toContain(BLOCKER_MESSAGE[b]);
   });

@@ -9,7 +9,8 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
-import { stripImageMetadata } from '../../utils/images';
+import { inspectImage, sniffImageType, stripImageMetadataStrict } from '../../utils/images';
+import { AppError } from '../../utils/errors';
 import { storageSigningKeys } from '../../utils/signing-keys';
 import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from './storage-key';
 import { assertDurableStorageConfig } from './storage-config';
@@ -45,8 +46,21 @@ export interface StorageProvider {
  * Non-image mime types (PDF documents, encrypted envelopes) pass through
  * untouched, as does anything that will not parse.
  */
-function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
-  return { ...input, buffer: stripImageMetadata(input.buffer, input.mimeType) };
+async function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
+  // [Row 108 · fixes a privacy gap on main] What the bytes ARE decides how a photo is handled,
+  // sniffed ONCE here: the declared type never chooses the strip or the size check, so a
+  // mislabelled photo (a renamed file, a PNG sent as image/jpeg) loses its location like any
+  // other. A photo that cannot be cleaned or read is refused, never stored as it came (fail closed).
+  const sniffed = sniffImageType(input.buffer);
+  if (!sniffed) {
+    if (input.mimeType.startsWith('image/')) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
+    return input; // not a photo: a PDF, an encrypted envelope, a video
+  }
+  const buffer = stripImageMetadataStrict(input.buffer, sniffed);
+  if (!buffer) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
+  // The bytes that are stored, read by the real decoder: the type it finds, the size cap, a plausible size.
+  await inspectImage(buffer, sniffed);
+  return { ...input, buffer, mimeType: sniffed };
 }
 
 const DEFAULT_TTL_SECONDS = 300;
@@ -73,7 +87,7 @@ export class LocalStorageProvider implements StorageProvider {
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
     assertDurableStorageConfig({ ...process.env, STORAGE_PROVIDER: 'local' });
     if (localStorageBaseDir() !== this.baseDir) throw new Error('Storage root changed; restart with a validated storage configuration');
-    const safe = sanitizeForStorage(input);
+    const safe = await sanitizeForStorage(input);
     const name = createOpaqueStorageName(safe.filename);
     const dir = path.join(this.baseDir, safe.folder);
     await mkdir(dir, { recursive: true });
@@ -128,7 +142,7 @@ export class S3StorageProvider implements StorageProvider {
   }
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
-    const safe = sanitizeForStorage(input);
+    const safe = await sanitizeForStorage(input);
     const key = `${safe.folder}/${createOpaqueStorageName(safe.filename)}`;
     await this.client.send(
       new PutObjectCommand({

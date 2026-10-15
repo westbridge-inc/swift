@@ -2132,6 +2132,28 @@ model Order {
   refundSettledById String?
   refundSettledAt   DateTime?
 
+  /// [L02 · row 34] THE CASH TAKEN AT THE DOOR, as the mover stated it (whole
+  /// GYD). Null = not stated: an older app (the full amount was assumed, as
+  /// before) or an order that was never handed over against cash.
+  doorCashCollectedAmount Decimal?  @db.Decimal(12, 2)
+  /// [L02 · row 34] How far short of the total the goods were handed over.
+  /// Owner ruling (5 Oct 2026): the mover bears it; the platform deducts
+  /// nothing from anyone. Null unless a short handover was recorded.
+  doorCashShortfallAmount Decimal?  @db.Decimal(12, 2)
+  /// [L02 · row 34] The short handover is HELD for a person from this moment.
+  doorCashMismatchAt      DateTime?
+  /// Partial cash taken before a refused goods handover (7 Oct owner ruling).
+  /// RETURNED = rider attests handing it back; HELD = still with the rider for
+  /// operations. Separate from completed-delivery cash and rider shortfalls.
+  doorCashReturnAmount     Decimal? @db.Decimal(12, 2)
+  /// RETURNED | HELD | RESOLVED. RESOLVED = operations recorded that HELD
+  /// cash is settled (admin action, reason in the audit row); a record only.
+  doorCashReturnStatus     String?  @db.VarChar(16)
+  doorCashReturnRecordedAt DateTime?
+  /// When operations recorded HELD partial cash as resolved, and who did.
+  doorCashReturnResolvedAt   DateTime?
+  doorCashReturnResolvedById String?
+
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])
   /// [M-32] The redemption snapshot, when a promo discounted this order.
@@ -3430,6 +3452,10 @@ enum BillingEventType {
   CHARGE_SUCCESS
   CHARGE_FAILED
   PREPAID_TOPUP
+  /// [MMG REVERSAL · owner #11] A weekly-fee payment MMG returned to the
+  /// partner (a whole-payment reversal), debited from the fee wallet exactly
+  /// once, only after MMG's own lookup proved the reversal.
+  PREPAID_REVERSAL
   SUSPENDED
   REINSTATED
   REMINDER
@@ -3569,6 +3595,8 @@ model MmgCheckoutIntent {
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
   keys                  MmgCheckoutKey[]
+  /// [MMG REVERSAL] Attempts to return this payment to the partner (one live at a time).
+  reversals             MmgFeeReversal[]
   confirmationHold      PaymentConfirmationHold?
 
   @@index([tenantId])
@@ -3577,6 +3605,65 @@ model MmgCheckoutIntent {
   // [MMG support lookup] Support finds a checkout by a transaction a reply named (candidates @> {id}).
   @@index([candidates], type: Gin)
   @@map("mmg_checkout_intents")
+}
+
+/// [MMG REVERSAL · owner #11, 13 Oct 2026] Returning a WHOLE weekly-fee payment
+/// to the partner's MMG account (MMG reverses in full only): a duplicate, an
+/// over-the-cap or a mistaken payment. A money (C4) admin action, two people
+/// (or the owner in solo mode). The row is the durable claim written BEFORE
+/// MMG is asked; the fee wallet is debited exactly once, and only after MMG's
+/// own lookup proves the reversal. A lost or unclear answer is HELD for a
+/// person, visible and paged, never guessed. One live reversal per payment.
+model MmgFeeReversal {
+  id                String            @id @default(cuid())
+  tenantId          String
+  subscriptionId    String
+  checkoutId        String
+  checkout          MmgCheckoutIntent @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
+  /// The provider identity the checkout credited (provider_payments.id).
+  providerPaymentId String
+  /// The MMG transaction asked to be reversed: the checkout's confirmed one.
+  mmgTransactionId  String
+  amount            Decimal           @db.Decimal(12, 2)
+  currencyCode      String            @db.Char(3)
+  /// SENDING (claimed, MMG being asked) | SENT (MMG accepted, proof pending)
+  /// | REVERSED (proven; wallet debited) | FAILED (MMG refused; payment stands)
+  /// | HELD (unclear: a person must look). Forward only (database trigger).
+  state             String            @default("SENDING")
+  /// The stated reason (ADM-006): why the payment is being returned.
+  reason            String
+  requestedBy       String
+  approvalId        String?
+  /// MMG's answer to the reversal request, as Swift read it.
+  providerStatus    String?
+  providerReason    String?
+  /// The reference MMG's reversal answer named, when it named one.
+  providerReference String?
+  /// MMG's lookup status for the transaction, last read.
+  lookupStatus      String?
+  heldReason        String?
+  sentAt            DateTime
+  answeredAt        DateTime?
+  lastCheckedAt     DateTime?
+  reversedAt        DateTime?
+  walletDebitedAt   DateTime?
+  /// The PREPAID_REVERSAL event that debited the wallet (once).
+  billingEventId    String?           @unique
+  failedAt          DateTime?
+  /// [DS1112] A person's resolution of a HELD return (C4, two people or solo):
+  /// NOT_RETURNED (MMG's lookup showed the payment still standing) or
+  /// RETURNED_BY_REFERENCE (MMG's lookup proved the reversal they named).
+  resolution        String?
+  resolvedBy        String?
+  /// The MMG statement line or reversal reference the person gave.
+  resolutionNote    String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([tenantId])
+  @@index([subscriptionId, state])
+  @@index([checkoutId])
+  @@map("mmg_fee_reversals")
 }
 
 /// [MMG checkout F3] Every Idempotency-Key a checkout answered. Once a key has

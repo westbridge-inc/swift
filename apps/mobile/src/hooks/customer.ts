@@ -949,7 +949,9 @@ export function useDecideSubstitution() {
     },
     mutationFn: ({ orderId, lineId, approve }: SubstitutionDecision) =>
       customerApi.decideSubstitution(orderId, lineId, approve),
-    // The order screen reads customerKeys.order; a decision refreshes that key.
+    // [L09 · M028] The order screen reads customerKeys.order(id); refreshing
+    // any other key left it showing the old proposal after a decision. The
+    // order is the decision's own (#1707), never the render's.
     onSuccess: (_data: unknown, { orderId }: SubstitutionDecision) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
   });
 }

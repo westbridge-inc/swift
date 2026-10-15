@@ -150,8 +150,16 @@ const fileEnv: Record<string, string | undefined> = readEnvFile(envPath);
 // The store, wired the way Compose wires it: DIR/NAME → NAME_FILE for every
 // allowlisted name present in DIR. Then the real loader, with its real
 // refusals — a refusal here is the exact message the server would print.
+// [TA-S0-003 · R3] As the compose files do: with TENANT_RLS_BIND=1
+// (deploy/docker-compose.wall.yml) the API gets the two runtime URLs and never
+// the owner's password; otherwise it gets the owner's parts and never the URLs.
+// After Phase C the store holds all three, so reading every name would refuse
+// on "both set" what the server would boot.
+const wallOverlay = fileEnv['TENANT_RLS_BIND'] === '1';
+const notWiredByCompose = new Set<string>(wallOverlay ? ['POSTGRES_PASSWORD'] : ['DATABASE_URL', 'SYSTEM_DATABASE_URL']);
 if (secretsDir) {
   for (const name of SECRET_FILE_NAMES) {
+    if (notWiredByCompose.has(name)) continue;
     const candidate = path.join(secretsDir, name);
     if (fileEnv[`${name}_FILE`] === undefined && existsSync(candidate)) fileEnv[`${name}_FILE`] = candidate;
   }

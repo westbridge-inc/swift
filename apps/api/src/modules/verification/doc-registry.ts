@@ -13,6 +13,7 @@
  */
 import type { PrismaClient, DocBucket, ValidatorScope, GateEnforcement, DiscoveryCategoryKind, DocImagePolicy } from '@prisma/client';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
+import { isProduction } from '../../utils/runtime-mode';
 
 export const REGISTRY_TIER = 'STANDARD';
 /** Provisional. The onboarding spec these checklists were built to is dated 2026-06. */
@@ -323,6 +324,28 @@ export async function registryCompletenessGaps(
       if (!v.isBlocking || (v.docTypeCode !== null && v.docTypeCode !== t.code)) continue;
       if (!resolves(v.implRef)) gaps.push({ docTypeCode: t.code, gap: 'VALIDATOR_NOT_IMPLEMENTED', detail: v.code });
     }
+  }
+  return gaps;
+}
+
+/**
+ * [DOC-INV-2 · T2] The boot gate server.ts runs after seeding the registry and before it
+ * marks the boot contract complete. An ACTIVE document type the registry cannot validate
+ * is a lie about verification: in production this THROWS, naming the first gaps, so the
+ * boot contract stays incomplete (readiness 503); elsewhere it warns with every gap, so the
+ * seed that closes them can be written, and boot goes on. Returns the gaps.
+ */
+export async function enforceRegistryCompletenessAtBoot(
+  prisma: PrismaClient,
+  log: { warn: (obj: { gaps: RegistryGap[] }, msg: string) => void },
+  resolves: (implRef: string | null) => boolean,
+): Promise<RegistryGap[]> {
+  const gaps = await registryCompletenessGaps(prisma, resolves);
+  if (gaps.length > 0) {
+    if (isProduction()) {
+      throw new Error(`document registry incomplete for active types: ${gaps.slice(0, 8).map((g) => `${g.docTypeCode}:${g.gap}${g.detail ? `(${g.detail})` : ''}`).join(', ')}`);
+    }
+    log.warn({ gaps }, 'documents: registry incomplete for active types — production refuses to boot like this');
   }
   return gaps;
 }

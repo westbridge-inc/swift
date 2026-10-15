@@ -287,6 +287,8 @@ const CENSUS: Case[] = [
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
+  { k: 'ops_cash_door_short', d: { ...O, due: 3500, collected: 2800, shortfall: 700 }, to: DELIVERY('o1'), why: 'admins — [L02 row 34] a cash order was handed over for less than due; the mismatch is held for review' },
+  { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — partial cash could not be handed back and remains with the rider for operations' },
   { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
   { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },
 
@@ -352,6 +354,7 @@ const CENSUS: Case[] = [
   { k: 'low_stock', d: { itemId: 'i1', remaining: 2 }, to: null, why: 'GAP: store — the item editor exists and is unrouted' },
   { k: 'staff_added', d: { vendorId: 'v1' }, to: null, why: 'GAP: store team screen' },
   { k: 'staff_invite', d: { vendorId: 'v1', audience: 'customer' }, to: { screen: 'Storefront', params: { screen: 'Notifications' } }, why: '[row 55] the invite is answered on the inbox Accept card' },
+  { k: 'staff_joined', d: { vendorId: 'v1', audience: 'business' }, to: null, why: 'GAP: store team screen — [row 55] the owner told that someone accepted their invite (same gap as staff_added)' },
   { k: 'review_response', d: { ratingId: 'r1', vendorId: 'v1' }, to: null, why: 'GAP: store reviews' },
   { k: 'rating_removed', to: null, why: 'GAP: a rating was removed' },
   { k: 'category_request_resolved', to: null, why: 'GAP: store category request answered' },
