@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { UtensilsCrossed, ShoppingCart, Store, Car, Package, Wrench, BadgePercent, Wallet, ShieldCheck } from 'lucide-react';
 import { getVendors, type Vendor } from '@/lib/customer';
 import { VendorCard, VendorGridSkeleton, VENDOR_GRID } from '@/components/order-ui';
+import { PRICE_PROMISE_BODY, PRICE_PROMISE_TITLE } from '@/lib/price-promise';
 
 const VERTICALS = [
   { href: '/order/browse?type=RESTAURANT', label: 'Food', desc: 'Restaurants & takeaway', Icon: UtensilsCrossed },
@@ -15,7 +16,8 @@ const VERTICALS = [
   { href: '/order/browse?type=SERVICE', label: 'Services', desc: 'Electricians, cleaners & more', Icon: Wrench },
 ];
 const VALUES = [
-  { Icon: BadgePercent, title: '0% fees, no markups', body: 'Prices are the business’s own. Swift adds nothing to your order.' },
+  // [Legal research A12] the research's price promise; "0% fees" was not true next to a delivery fee.
+  { Icon: BadgePercent, title: PRICE_PROMISE_TITLE, body: PRICE_PROMISE_BODY },
   { Icon: Wallet, title: 'Pay cash or MMG', body: 'You pay the business or driver directly — Swift never holds your money.' },
   { Icon: ShieldCheck, title: 'Verified locals', body: 'Every business and driver is document-verified before they go live.' },
 ];

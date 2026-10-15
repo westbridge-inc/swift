@@ -77,6 +77,7 @@ export function useBackgroundLocationDisclosure() {
       </T>
 
       <View style={{ alignSelf: 'stretch', gap: space.sm, marginTop: space.lg }}>
+        {/* [Legal research B3, in-app ¶18] where it goes, said truly: Swift's servers are run by a hosting provider (the words: backgroundLocationCopy.ts) */}
         {BG_DISCLOSURE.lines.map((line) => <DisclosureLine key={line} text={line} />)}
       </View>
 
