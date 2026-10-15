@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -48,6 +48,7 @@ import {
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
+import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -2603,12 +2604,16 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true, ridePinAttempts: true },
     });
 
+    // [MMGCLOSE] Whether "Close — refund handled by the store" applies: the
+    // same rule the locked write re-checks (additive field).
+    const canCloseStoreRefund = mmgStoreCloseRefusal(order) === null;
+
     // [TAXI waiting charge] A ride whose waiting charge was frozen shows it,
     // itemised and read-only (route fare + waiting = total). Any other order
     // gains no key.
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), ...(fareBreakdown ? { fareBreakdown } : {}) } };
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}) } };
   });
 
   /**
@@ -3049,6 +3054,52 @@ export async function adminRoutes(app: FastifyInstance) {
         refundOwed: refund ? String(cancellation.order.refundOwedAmount) : null,
       },
     };
+  });
+
+  /**
+   * [MMGCLOSE · owner 8 Oct] POST /orders/:id/close-store-refund — close a
+   * store-claimed MMG order that cannot be fulfilled as "refund handled by the
+   * store". RECORD ONLY: the order becomes CANCELLED with the refund rail's
+   * CANCELLATION obligation (OWED — the store owes the customer, from its own
+   * MMG); Swift moves, credits and charges nothing. C4: a stated reason and a
+   * second admin (the approval gate above), bound to the order and to the claim
+   * revision the admin reviewed, which the locked write checks again.
+   */
+  app.post('/orders/:id/close-store-refund', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      expectedClaimRevision: z.number().int().min(0),
+      reason: z.string().optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const { order, amount } = await closeMmgOrderAsStoreRefund(orderService, {
+      orderId: id,
+      adminUserId: request.user.userId,
+      expectedClaimRevision: body.expectedClaimRevision,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
+    if (order.vendorId) await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
+    // Told after the commit, each on its own key (a retry of the notice cannot
+    // double it). Neither is told the refund happened — only who makes it.
+    const words = mmgStoreCloseNotices(order.orderNumber, amount ?? 0, order.fulfillment === 'APPOINTMENT');
+    const ownerUserId = order.vendorId
+      ? (await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { owner: { select: { userId: true } } } }))?.owner.userId
+      : undefined;
+    await notifications.send({
+      userId: order.customerId, type: 'ORDER_UPDATE', title: words.customer.title, body: words.customer.body,
+      audience: 'customer', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:customer:${id}`,
+    });
+    if (ownerUserId) {
+      await notifications.send({
+        userId: ownerUserId, type: 'ORDER_UPDATE', title: words.store.title, body: words.store.body,
+        audience: 'business', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:vendor:${id}`,
+      });
+    }
+    return { success: true, data: { orderId: id, status: 'CANCELLED', disposition: MMG_STORE_CLOSE_DISPOSITION } };
   });
 
   /**

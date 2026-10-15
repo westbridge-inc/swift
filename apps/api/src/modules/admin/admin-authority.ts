@@ -298,6 +298,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
+  // [MMGCLOSE] Record-only: closes a store-claimed MMG order as "refund handled
+  // by the store" (an OWED refund obligation, no money moves) — money class, two admins.
+  'POST /orders/:id/close-store-refund': c('C4', 'order.refund.settle', E.order),
   // [L02 · row 34 · review S2-1] Record-only: operations records partial cash a
   // rider could not hand back (HELD) as resolved. It claims settlement of a
   // customer's money (like refund-settled), so: money class, reason, two admins.
