@@ -380,7 +380,7 @@ describe('PUT /partner/vehicle: a driver changes car', () => {
 
     // A different car: the old car's papers are retired and its assignment closes. [VERIFY-DOCS · ruling 9 — a
     // DELIBERATE change] the different car is a car on a new plate now (it was a 15-seat bus; buses are hidden).
-    const other = await change(u.token, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Axio', year: 2016, color: 'White', licensePlate: `VC${NUM}D` } });
+    const other = await change(u.token, { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Axio', year: 2016, color: 'White', licensePlate: `HVC${NUM}D` } });
     expect(other.statusCode, other.body).toBe(200);
     expect(other.json().data).toMatchObject({ vehicleType: 'CAR', retiredDocuments: 1 });
     expect((await docState(insurance.id)).state).toBe('SUPERSEDED');

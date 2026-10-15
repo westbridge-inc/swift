@@ -293,7 +293,8 @@ describe('production prices a ride with stops only from the real road (DS981)', 
     vi.stubEnv('NODE_ENV', 'production');
     vi.stubGlobal('fetch', vi.fn(async () => new Response(realRoad, { status: 200, headers: { 'content-type': 'application/json' } })));
     const est = await price([STOP_1], new OsrmMapsProvider('http://osrm.test'));
-    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    // [VERIFY-DOCS · owner ruling 9 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
     expect(est).toMatchObject({ billableKm: 10.15, durationMin: 27, routeSource: 'osrm' });
   });
 

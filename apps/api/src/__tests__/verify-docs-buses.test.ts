@@ -70,7 +70,8 @@ function send(method: 'GET' | 'POST' | 'PUT', url: string, token?: string, paylo
 }
 const become = (token: string, body: Record<string, unknown>) => send('POST', '/api/v1/partner/become', token, { role: 'MOVER', acceptAgreement: true, ...body });
 const change = (token: string, body: Record<string, unknown>) => send('PUT', '/api/v1/partner/vehicle', token, body);
-const vehicle = (suffix: string, model = 'Hiace') => ({ make: 'Toyota', model, year: 2018, color: 'White', licensePlate: `BR${PLATE}${suffix}` });
+// A bus carries a B plate; a car needs a hire (H) plate since main's taxi plate rule.
+const vehicle = (suffix: string, model = 'Hiace', plateClass = 'BR') => ({ make: 'Toyota', model, year: 2018, color: 'White', licensePlate: `${plateClass}${PLATE}${suffix}` });
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -136,7 +137,7 @@ describe('[ruling 9] nobody signs up with, switches to, or works a bus', () => {
 
   it('a car driver cannot switch to a bus; the car stays exactly as it was', async () => {
     const u = await person();
-    const made = await become(u.token, { vehicleType: 'CAR', vehicle: vehicle('C', 'Premio') });
+    const made = await become(u.token, { vehicleType: 'CAR', vehicle: vehicle('C', 'Premio', 'HC') });
     expect(made.statusCode, made.body).toBe(201);
     const res = await change(u.token, { vehicleType: 'BUS_15', vehicle: vehicle('D') });
     expect(res.statusCode, res.body).toBe(422);
@@ -160,7 +161,7 @@ describe('[ruling 9] nobody signs up with, switches to, or works a bus', () => {
     expect(go.json().error.message).toBe('Swift is not taking buses, canters or box trucks yet. Change your vehicle to go online.');
     expect((await system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId: u.userId } }))).isOnline).toBe(false);
     // The way out the message names: change to a car.
-    const toCar = await change(u.token, { vehicleType: 'CAR', vehicle: vehicle('F', 'Axio') });
+    const toCar = await change(u.token, { vehicleType: 'CAR', vehicle: vehicle('F', 'Axio', 'HC') });
     expect(toCar.statusCode, toCar.body).toBe(200);
     expect(await system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId: u.userId }, select: { vehicleType: true, rideClass: true, vehicleCapacity: true } })))
       .toEqual({ vehicleType: 'CAR', rideClass: 'ECONOMY', vehicleCapacity: 4 });
