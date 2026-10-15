@@ -400,6 +400,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // Decorate so routes can enqueue jobs
     app.decorate('queues', queues);
     app.decorate('dispatchQueue', queues.dispatchQueue);
+    app.decorate('offerQueue', queues.offerQueue);
   } catch (err) {
     if (isProduction()) {
       app.log.fatal({ err }, 'Background jobs failed to initialize — refusing production boot');
