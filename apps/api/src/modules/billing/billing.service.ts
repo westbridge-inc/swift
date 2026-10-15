@@ -671,7 +671,9 @@ export class BillingService {
 
     // Waived subscriptions advance for free, with the audit trail intact
     if (sub.feeWaived || amount === 0) {
-      const applied = await this.applySuccessfulCharge(sub, 0, 'fee-waived', now, periodKey);
+      // [REVIEW-G #1769 S2-2] Booked with the price this week kept (as the checkout
+      // path books a waived week), so the next week measures a rise from it.
+      const applied = await this.applySuccessfulCharge(sub, 0, 'fee-waived', now, periodKey, undefined, priced.usdTrio);
       if (!applied) return 'skipped';
       // A waive covers ONE period — the admin notice promises "for this period".
       // Clear it so normal billing resumes next cycle instead of a permanent free
@@ -1731,7 +1733,15 @@ export class BillingService {
     // before it. A lower price applies from the next week (coordinator ruling 15 Oct).
     if (usd.rows) {
       const role = SUB_TYPE_TRIAL_ROLE[sub.type] ?? 'VENDOR';
-      const lastPaid = { amountUsd: last.amountUsd === null ? null : Number(last.amountUsd), createdAt: last.createdAt };
+      // The price last paid: the latest charge that recorded its USD price; else
+      // (a legacy GYD history) the latest charge of money. A zero, USD-less week
+      // (a waive booked without its price) never stands for the price in force
+      // then (REVIEW-G #1769 S2-2).
+      const paidRef = last.amountUsd !== null ? last
+        : await this.prisma.billingEvent.findFirst({ where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amountUsd: { not: null } }, orderBy: { createdAt: 'desc' }, select: { amountUsd: true, createdAt: true } })
+          ?? await this.prisma.billingEvent.findFirst({ where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: { gt: 0 } }, orderBy: { createdAt: 'desc' }, select: { amountUsd: true, createdAt: true } })
+          ?? last;
+      const lastPaid = { amountUsd: paidRef.amountUsd === null ? null : Number(paidRef.amountUsd), createdAt: paidRef.createdAt };
       const charge = await priceBookChargeFor(usd.rows, role, sub.type, sub.nextBillingDate, lastPaid, async (entryId) =>
         (await this.prisma.billingEvent.findUnique({ where: { idempotencyKey: priceBookNoticeKey(sub.id, entryId) }, select: { deliveredAt: true } }))?.deliveredAt);
       if (charge && charge.via !== 'IN_FORCE') {

@@ -158,6 +158,29 @@ describe('[F2] a week is priced by the book in force when it starts, and only af
     expect((await price({ ...sub, nextBillingDate: new Date(weekFour.getTime() + 7 * DAY) }, [old, next])).usdTrio?.amountUsd).toBe(30);
   });
 
+  // [REVIEW-G #1769 S2-2] A waived (amount 0) week was booked with no USD
+  // amount, so the week after read "paid the row in force then" and charged
+  // the untold rise.
+  it('[S2-2] a waived week (amount 0, no USD amount) after an untold rise does not count as paying the new price', async () => {
+    const weekOne = new Date(effective.getTime() + DAY);
+    const sub = await vendorSub(weekOne);
+    await chargedAt(sub.id, 25, new Date(weekOne.getTime() - 7 * DAY + 60_000));
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: 0, currencyCode: 'GYD', idempotencyKey: `book-test:waived:${sub.id}`, createdAt: new Date(weekOne.getTime() + 60_000) } });
+    expect(await price({ ...sub, nextBillingDate: new Date(weekOne.getTime() + 7 * DAY) }, [old, next])).toMatchObject({ amount: 5000, usdTrio: { amountUsd: 25 } });
+  });
+
+  it('[S2-2] a waived week is booked with the price it kept (its USD amount), as the checkout path books one', async () => {
+    const weekOne = new Date(effective.getTime() + DAY);
+    const sub = await vendorSub(weekOne);
+    await app.prisma.subscription.update({ where: { id: sub.id }, data: { feeWaived: true } });
+    await chargedAt(sub.id, 25, new Date(weekOne.getTime() - 7 * DAY + 60_000));
+    const loaded = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id }, include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } } });
+    expect(await billing.billSubscription(loaded as never, new Date(weekOne.getTime() + 60_000), ctx([old, next]))).toBe('succeeded');
+    const waived = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `success:${sub.id}:${weekOne.toISOString().slice(0, 10)}` } });
+    expect(Number(waived.amount)).toBe(0);
+    expect(Number(waived.amountUsd)).toBe(25);
+  });
+
   it('[S2-1 · ruling 15 Oct] a rise is measured against the price last paid: an untold 27 after an untold 30 keeps 25; a cut below it applies at once', async () => {
     const after = new Date(effective.getTime() + 10 * DAY);
     const toTwentySeven = row(27, after, 'rise-27');
