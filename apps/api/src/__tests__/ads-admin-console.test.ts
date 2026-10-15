@@ -15,6 +15,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { AdsRevenueService } from '../modules/ads/revenue.service';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { REAL_PNG } from './helpers/real-image';
 
 // Ads §15 operator console. The revenue MERGE GATE is the dashboards law /
 // acceptance #11: booked revenue must tie to paid invoices EXACTLY (delta 0)
@@ -40,7 +41,7 @@ const WEEK2 = new Date('2026-10-12T00:00:00Z');
 // Thursday of week 1: 3 full days of week 1 elapsed; week 2 not started.
 const NOW = new Date('2026-10-08T12:00:00Z');
 
-const REAL_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
 
 async function makeAdmin() {
   seq += 1;

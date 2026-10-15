@@ -20,6 +20,7 @@ import { FloatService } from '../modules/dispatch/float.service';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
 import { ownedVerificationFixture } from './helpers/verification-object';
+import { jpegSized } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID]
@@ -39,13 +40,10 @@ const clusters: string[] = [];
 const runBase = 592_043_000_000 + Math.floor(Math.random() * 8_000_000);
 let seq = 0;
 
-/** A JPEG whose frame header says width × height; `salt` makes every file's bytes (and hash) unique. */
+/** A real JPEG whose frame header says width × height; `salt` makes every file's bytes (and hash) unique.
+ *  [Row 108] Real, because the upload route reads every photo with the real decoder. */
 function jpeg(width: number, height: number, salt = nanoid(12)): Buffer {
-  const app0 = Buffer.from([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
-  const note = Buffer.from(`swift-customer-id-${salt}`);
-  const com = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, note.length + 2]), note]);
-  const sof0 = Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
-  return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, com, sof0, Buffer.from([0xff, 0xd9])]);
+  return jpegSized(width, height, `swift-customer-id-${salt}`);
 }
 const readable = () => jpeg(1600, 1000);
 /** A number sent with a customer ID's approval: never asked for and dropped unread (rule 11 Oct 2026: no ID-number duplicate check at launch). */

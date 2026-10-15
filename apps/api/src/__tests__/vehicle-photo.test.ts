@@ -15,6 +15,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
+import { REAL_PNG } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // Trust visibility on tracking (master plan §3.3 + §5): movers upload a PUBLIC
@@ -54,11 +55,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
   });
   return { userId: user.id, token };
 }
-
-const REAL_PNG = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  Buffer.alloc(64, 1),
-]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
 
 function multipartBody(filename: string, mime: string, content: Buffer) {
   const boundary = `----swift${nanoid(8)}`;

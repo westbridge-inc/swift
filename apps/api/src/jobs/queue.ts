@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../modules/order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../modules/order/order-room-emission.service';
 import { Queue, Worker, UnrecoverableError, type Job, type ConnectionOptions } from 'bullmq';
 import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
@@ -327,7 +327,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   }
 
   await emitToOrderRoom(ctx.prisma, ctx.io, orderId, 'order:status_changed', { orderId, status: 'CANCELLED' });
-  if (order.vendorId) ctx.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+  if (order.vendorId) await emitToStoreRoom(ctx.prisma, ctx.io, order.vendorId, 'order:status_changed', { orderId, status: 'CANCELLED' });
 
   const { NotificationService } = await import('../modules/notification/notification.service');
   const notifications = new NotificationService(ctx.prisma, ctx.io);
@@ -1349,6 +1349,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const cancellations = await drainRiderCancellationNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
           if (cancellations.pending > 0) ctx.log.warn(cancellations, 'rider cancellation pushes remain pending');
           else if (cancellations.expired > 0) ctx.log.warn(cancellations, 'rider cancellation pushes closed unconfirmed; the inbox notices remain');
+        });
+        await drain('handover-completed-notice', async () => {
+          // [L07] The customer's "handed over" notice commits with the
+          // completion under the order lock; whatever its post-commit attempt
+          // could not deliver is delivered here, in process.
+          const { drainHandoverNotices } = await import('../modules/handover/handover-notice');
+          const handovers = await drainHandoverNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
+          if (handovers.pending > 0) ctx.log.warn(handovers, 'handover notices remain pending');
+          else if (handovers.expired > 0) ctx.log.warn(handovers, 'handover pushes closed unconfirmed; the inbox notices remain');
         });
         if (drainFailure !== undefined) throw drainFailure;
         return;

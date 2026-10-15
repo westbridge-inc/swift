@@ -21,12 +21,19 @@
  *
  * A lookup that fails does not block delivery: a real person's safety text is
  * never lost to a database hiccup; the failure is logged loudly instead.
+ * [W0] EXCEPT under the tenant wall (TENANT_RLS_BIND=1), where the fiction
+ * lives beside real people and a lookup that fails cannot tell them apart: the
+ * send is then REFUSED with an error (fail closed) — never delivered, and never
+ * reported as delivered or suppressed, so a sender that retries (the SOS
+ * escalation outbox) retries it once the lookup answers.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { NotificationChannels, PushOptions, SmsProvider, PushProvider, EmailProvider } from './channels';
+import { SMS_REF_REVIEW_SUPPRESSED } from './sms-outcome';
 import { getTenantContext, runAsSystem } from '../../plugins/tenant-context';
 import { reviewSendSuppressedCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
+import { rlsBindEnabled } from '../../lib/rls-attestation';
 
 const KEY = Symbol.for('swift.reviewSendSubject');
 const globalRef = globalThis as unknown as { [KEY]?: AsyncLocalStorage<{ tenantId: string | null }> };
@@ -40,6 +47,15 @@ export async function sendOnBehalfOf<T>(tenantId: string | null | undefined, fn:
 
 type Channel = 'sms' | 'push' | 'email';
 export type SuppressReason = 'subject' | 'request' | 'destination';
+
+/** [W0] Under the tenant wall a send the seal could not judge is refused, not delivered. */
+export class ReviewSealUndecidedError extends Error {
+  readonly code = 'REVIEW_SEAL_UNDECIDED';
+  readonly statusCode = 503;
+  constructor(channel: Channel) {
+    super(`[REVIEW-PARTNER] the review send seal could not decide whether this ${channel} send belongs to the review fiction; under the tenant wall it is refused`);
+  }
+}
 
 const KIND_TTL_MS = 60_000;
 const kindCache = new Map<string, { kind: string | null; at: number }>();
@@ -73,7 +89,8 @@ async function destinationIsReview(channel: Channel, to: string[]): Promise<bool
   });
 }
 
-/** Why this send must not leave, or null when it may. */
+/** Why this send must not leave, or null when it may. [W0] Under the tenant wall,
+ *  a lookup that fails throws ReviewSealUndecidedError: the send is refused. */
 export async function reviewSendSuppression(channel: Channel, to: string[]): Promise<SuppressReason | null> {
   try {
     const declared = subjectContext.getStore();
@@ -83,6 +100,10 @@ export async function reviewSendSuppression(channel: Channel, to: string[]): Pro
     if (to.length > 0 && (await destinationIsReview(channel, to))) return 'destination';
     return null;
   } catch (err) {
+    if (rlsBindEnabled()) {
+      log().error({ err, channel }, '[REVIEW-PARTNER] review send seal could not decide — REFUSING the send (the tenant wall is on: fail closed)');
+      throw new ReviewSealUndecidedError(channel);
+    }
     log().error({ err, channel }, '[REVIEW-PARTNER] review send seal could not decide — delivering (a real person must never lose a message to a lookup failure)');
     return null;
   }
@@ -98,7 +119,7 @@ export function sealSms(inner: SmsProvider): SmsProvider {
   return {
     sendSms: async (to: string, body: string) => {
       const why = await reviewSendSuppression('sms', [to]);
-      if (why) { suppressed('sms', why); return { ref: 'review-suppressed' }; }
+      if (why) { suppressed('sms', why); return { ref: SMS_REF_REVIEW_SUPPRESSED }; }
       return inner.sendSms(to, body);
     },
   };

@@ -14,6 +14,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
+import { REAL_PNG } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // catalogue: CSV import with row-level errors, instant availability
@@ -356,10 +357,8 @@ describe('Image upload — validated, behind the StorageProvider', () => {
   });
 
   it('accepts a real PNG and stores a URL', async () => {
-    const png = Buffer.concat([
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      Buffer.alloc(64, 1),
-    ]);
+    // [Row 108] A real photo: the storage seam reads every photo with the real decoder.
+    const png = REAL_PNG;
     const { payload, contentType } = multipartBody('burger.png', 'image/png', png);
 
     const res = await app.inject({

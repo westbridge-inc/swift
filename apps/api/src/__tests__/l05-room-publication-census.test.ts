@@ -40,7 +40,9 @@ describe('sensitive room publication census', () => {
           if (n.expression.getText(ast) === 'emitToOrderRoom') orderPublishers++;
           // A helper that takes the room as an argument (e.g. roomEmit(`order:…`)) is the same bypass.
           const callee = ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : n.expression.getText(ast);
-          if (/emit/i.test(callee) && !['emit', 'emitToOrderRoom', 'emitToChatRoom'].includes(callee)
+          // emitToStoreRoom is the store-room gate (owner ruling #15): its room is
+          // vendor:<id>, and its order: arguments are EVENT names (order:new).
+          if (/emit/i.test(callee) && !['emit', 'emitToOrderRoom', 'emitToChatRoom', 'emitToStoreRoom'].includes(callee)
             && n.arguments.some((arg) => /^[`'"](?:order|chat):/.test(arg.getText(ast)))) {
             bypasses.push(file + ':' + (ast.getLineAndCharacterOfPosition(n.getStart(ast)).line + 1));
           }

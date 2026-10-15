@@ -1,4 +1,6 @@
-import { emitToOrderRoom } from './order-room-emission.service';
+import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
+import { authorizeHandover, preflightHandoverDoor, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
+import { emitToOrderRoom, emitToStoreRoom } from './order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
@@ -26,6 +28,8 @@ import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
+import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -568,6 +572,7 @@ type EarningNotice = {
 };
 
 export interface CanonicalOrderTransitionInput {
+  handover?: HandoverDecision;
   serializeIdentity?: boolean;
   orderId: string;
   target: OrderStatus;
@@ -634,6 +639,7 @@ export interface CanonicalOrderTransitionInput {
 }
 
 export interface CanonicalOrderTransitionResult {
+  replayed?: boolean;
   order: CanonicalTransitionOrder;
   sourceStatus: OrderStatus;
   cancelledSearches: number;
@@ -657,7 +663,7 @@ export class OrderService {
      *  SAME read dispatch uses, injected so this service stays dispatch-free.
      *  floatRequired mirrors dispatch's cash-float gate so the probe counts only
      *  riders that could actually take THIS order. */
-    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number) => Promise<{ level: string }>,
+    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number, packageSize?: string | null) => Promise<{ level: string }>,
     /** [DISPATCH 1/3 · B4] Where live offer cards are kept. A cancellation
      *  withdraws the card of the order it closes (withdrawLiveOffer). Every
      *  production construction passes it, which offer-withdrawal-census.test.ts
@@ -805,7 +811,7 @@ export class OrderService {
     try {
       await emitToOrderRoom(this.prisma, this.io, order.id, 'order:status_changed', statusEvent);
       if (order.vendorId) {
-        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', statusEvent);
       }
     } catch (err) {
       log().warn({ err, orderId: order.id }, 'rider assignment socket publication failed');
@@ -1063,6 +1069,29 @@ export class OrderService {
               'DELIVERY_NO_RIDERS',
               'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.',
             );
+          }
+          // [owner #20] Too big for a bike: the order is offered only to a
+          // vehicle that can carry it (a bulky line → a car or van), so the
+          // customer is told NOW, before anything is placed, when none such is
+          // near — never an order that silently finds nobody.
+          const requiredSize = requiredPackageSizeForOrder({
+            orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
+            courierPackageSize: null,
+            items: items.map((ci) => ({ quantity: ci.quantity, bulkUnits: ci.item.bulkUnits ?? null })),
+          }, DEFAULT_LOAD_BANDS);
+          // Only a size a bicycle cannot carry narrows the pool; anything smaller
+          // was already answered by the probe above.
+          if (supply && requiredSize && !vehicleTypesForPackageSize(requiredSize).includes('BICYCLE')) {
+            const fitting = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }, cashFloat, requiredSize).catch(() => null);
+            if (fitting?.level === 'NONE') {
+              throw new AppError(
+                409,
+                'DELIVERY_TOO_BIG',
+                requiredSize === 'EXTRA_LARGE'
+                  ? 'This order is too big for delivery by bike or motorbike, and no car or van is free nearby right now. Choose Pickup, or try delivery again later.'
+                  : 'This order is too big for delivery by bike, and no bigger vehicle is free nearby right now. Choose Pickup, or try delivery again later.',
+              );
+            }
           }
         }
       }
@@ -1835,10 +1864,8 @@ export class OrderService {
       // order, by its release [Q12].
       try {
         const held = isHeld(order);
-        if (!held) {
-          this.io
-            .to(`vendor:${order.vendorId}`)
-            .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        if (!held && order.vendorId) {
+          await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         }
         const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
         if (vendorOwner) {
@@ -2088,15 +2115,16 @@ export class OrderService {
   async stageCanonicalOrderTransition(
     tx: Prisma.TransactionClient,
     input: CanonicalOrderTransitionInput,
-  ): Promise<CanonicalOrderTransitionResult> {
+  ): Promise<CanonicalOrderTransitionResult | HandoverFailure> {
     await bindTenantTransaction(tx);
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const source = await tx.order.findUnique({ where: { id: input.orderId } });
     if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
-    if (!input.allowedFrom.includes(source.status)) {
+    if (!input.handover && !input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
+
     // A BOOKING is confirmed, completed or cancelled — never prepared, marked
     // ready, handed to a rider or delivered [order-status.ts BOOKING_LAW]. The
     // kitchen routes refuse it first, but this is the locked seam every caller
@@ -2126,6 +2154,18 @@ export class OrderService {
     }
     if (input.expectedFulfillmentMode !== undefined && source.fulfillmentMode !== input.expectedFulfillmentMode) {
       throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
+    }
+    if (input.handover) {
+      await authorizeHandover(tx, source, input.handover);
+      if (source.status === input.target) {
+        const order = await tx.order.findUniqueOrThrow({ where: { id: input.orderId }, omit: HANDOVER_SECRETS_OMIT, include: CANONICAL_TRANSITION_INCLUDE });
+        return { order, sourceStatus: source.status, cancelledSearches: 0, earningNotices: [], replayed: true };
+      }
+      preflightHandoverDoor(source, input.handover);
+    }
+    if (!input.allowedFrom.includes(source.status)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
     // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
@@ -2216,6 +2256,10 @@ export class OrderService {
     if (input.requireHoldExpired && source.holdExpiresAt && source.holdExpiresAt > now) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
+    }
+    if (input.handover) {
+      const failure = await verifyHandoverDecision(tx, source, input.handover);
+      if (failure) return failure;
     }
     const data: Prisma.OrderUncheckedUpdateInput = { status: input.target };
     const timestampField: Partial<Record<OrderStatus, keyof Prisma.OrderUncheckedUpdateInput>> = {
@@ -2408,6 +2452,7 @@ export class OrderService {
         );
       }
     }
+    if (input.handover) await persistHandoverNotice(tx, order);
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
 
@@ -2427,7 +2472,7 @@ export class OrderService {
   async transitionOrderAtomically(
     input: CanonicalOrderTransitionInput,
   ): Promise<CanonicalOrderTransitionResult> {
-    let committed: CanonicalOrderTransitionResult | undefined;
+    let committed: CanonicalOrderTransitionResult | HandoverFailure | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         committed = await this.prisma.$transaction(async (tx) => {
@@ -2444,6 +2489,14 @@ export class OrderService {
       }
     }
     if (!committed) throw new Error('Order transition transaction did not produce a result');
+    if ('handoverFailure' in committed) {
+      const refusal = committed.handoverFailure;
+      throw new AppError(refusal.statusCode, refusal.code, refusal.message);
+    }
+
+
+    if (input.handover) await drainHandoverNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId: input.orderId })
+      .catch((err) => log().warn({ err, orderId: input.orderId }, 'handover notice remains pending after commit'));
 
     // [DISPATCH 1/3 · B4] Every operational cancellation passes here (vendor
     // reject, courier sender cancel, admin cancel, the no-response
@@ -2670,7 +2723,7 @@ export class OrderService {
     // A held order was never shown to the vendor — telling them about a
     // cancellation of something they never saw would only confuse the board.
     if (order.vendorId && !heldNow) {
-      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+      await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', { orderId, status: 'CANCELLED' });
     }
     // [L07] The rider's notice committed with the cancel; this is only its
     // first delivery attempt, started after the emits and never awaited.
@@ -2752,6 +2805,7 @@ export class OrderService {
     changedBy: string,
     note?: string,
     opts?: {
+      handover?: HandoverDecision;
       serializeIdentity?: boolean;
       withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
       allowedFrom?: readonly OrderStatus[];
@@ -2770,13 +2824,14 @@ export class OrderService {
 
     // Status, timestamps, terminal mover/float release, stock, earnings, and
     // append-only evidence share one commit. Only sockets/push happen below.
-    const { order } = await this.transitionOrderAtomically({
+    const { order, replayed } = await this.transitionOrderAtomically({
       orderId,
       target,
       allowedFrom,
       changedBy,
       note,
       serializeIdentity: opts?.serializeIdentity,
+      handover: opts?.handover,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
       ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
       ...(opts?.expectedRiderAssignmentVersion !== undefined ? { expectedRiderAssignmentVersion: opts.expectedRiderAssignmentVersion } : {}),
@@ -2790,13 +2845,21 @@ export class OrderService {
       ),
     });
 
+    if (replayed) return order;
+
     log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
     const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
+    try {
     await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition
     // live without subscribing to each order individually.
     if (order.vendorId) {
-      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+      await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', statusEvent);
+    }
+
+    } catch (err) {
+      if (!opts?.handover) throw err;
+      log().warn({ err, orderId }, 'handover socket publication failed after commit');
     }
 
     // Send notifications
@@ -2831,7 +2894,7 @@ export class OrderService {
         break;
       }
       case 'DELIVERED':
-        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
+        if (!opts?.handover) await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
         break;
     }
 
@@ -2841,6 +2904,10 @@ export class OrderService {
       const account = await this.prisma.user.findUnique({
         where: { id: order.customerId },
         select: { countryCode: true },
+      }).catch((err) => {
+        if (!opts?.handover) throw err;
+        log().warn({ err, orderId }, 'trust promotion deferred after handover');
+        return null;
       });
       if (account) {
         await new CashRulesService(this.prisma, this.notifications, this)
@@ -2923,9 +2990,7 @@ export class OrderService {
       }
 
       if (order.vendorId && order.vendor) {
-        this.io
-          .to(`vendor:${order.vendorId}`)
-          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         try {
           const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
           if (vendorOwner) {
