@@ -20,6 +20,8 @@ export const LEDGER_ACCOUNTS: Record<string, { name: string; type: LedgerAccount
   CLEARING_MMG: { name: 'MMG clearing — confirmed, not yet bank-settled', type: 'ASSET' },
   CLEARING_CARD: { name: 'Card provider clearing', type: 'ASSET' },
   BANK_LOCAL: { name: 'Local bank deposits', type: 'ASSET' },
+  // [owner Q-1654-BOOKS A] MMG returned money that had already paid for a week: that week's fee is owed again.
+  FEE_RECEIVABLE: { name: 'Weekly fees a partner owes again (MMG returned the money that paid them; subledger = subscriptionId)', type: 'ASSET' },
   WALLET_LIABILITY: { name: 'Payer fee-wallet balances (subledger = subscriptionId)', type: 'LIABILITY' },
   DEFERRED_REVENUE: { name: 'Paid-through service not yet delivered', type: 'LIABILITY' },
   FEE_REVENUE: { name: 'Earned weekly fees', type: 'REVENUE' },
@@ -139,6 +141,26 @@ export function refundReleasePostings(subscriptionId: string, amount: number): L
   return [
     { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, debit: amount },
     { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** [MMG REVERSAL] MMG returned a weekly-fee payment to the payer: the exact
+ *  reverse of its MMG top-up — the wallet owes the payer less, and the MMG
+ *  clearing account holds less. */
+export function walletReversalPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, debit: amount },
+    { account: 'CLEARING_MMG', credit: amount },
+  ];
+}
+
+/** [owner Q-1654-BOOKS A] MMG returned a payment whose money had already paid
+ *  for a week ("returned, not booked"): the partner owes that week's fee again,
+ *  and the MMG clearing account holds less. */
+export function returnedNotBookedPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'FEE_RECEIVABLE', subledgerId: subscriptionId, debit: amount },
+    { account: 'CLEARING_MMG', credit: amount },
   ];
 }
 

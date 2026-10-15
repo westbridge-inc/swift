@@ -87,7 +87,8 @@ describe('scenario R — gapless sequential receipts', () => {
 
   it('the cash journal CSV carries receipt, SAN, account, amount', async () => {
     const csv = await cashJournalCsv(prisma, new Date(Date.now() - 3_600_000), new Date(Date.now() + 3_600_000));
-    expect(csv.split('\n')[0]).toBe('date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref');
+    // [owner Q-1654-BOOKS B] a status column marks a returned payment's receipt
+    expect(csv.split('\n')[0]).toBe('date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref,status');
     expect(csv).toContain('Receipt Vendor');
     expect(csv).toContain('2100.00');
   });

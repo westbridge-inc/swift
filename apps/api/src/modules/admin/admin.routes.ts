@@ -56,6 +56,8 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
+import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
 import {
   approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
   startSoloApproval,
@@ -5320,6 +5322,75 @@ export async function adminRoutes(app: FastifyInstance) {
       extra: { queryType: 'DETAIL', matchedIds: detail.id, matchedCount: 1, checkoutStatus: detail.status },
     });
     return { success: true, data: detail };
+  });
+
+  // ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ─────────
+  //
+  // A duplicate, over-the-cap or mistaken MMG weekly-fee payment, returned in
+  // full to the partner's MMG account (MMG reverses in full only). The ask is
+  // C4: a stated reason and a second person (or the owner in solo mode), over
+  // this payment and its whole amount. The claim and its audit row commit
+  // before MMG is asked; only MMG's lookup moves the fee balance
+  // (mmg-fee-reversal.ts). Off until MMG_FEE_REVERSAL=on.
+  const feeReversals = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications });
+  const reversalOut = (row: { amount: unknown } & Record<string, unknown>) => ({
+    id: row['id'], checkoutId: row['checkoutId'], state: row['state'], amount: Number(row.amount), currencyCode: row['currencyCode'],
+    providerStatus: row['providerStatus'], lookupStatus: row['lookupStatus'], heldReason: row['heldReason'],
+    sentAt: row['sentAt'], reversedAt: row['reversedAt'], failedAt: row['failedAt'], resolution: row['resolution'],
+  });
+
+  app.get('/billing/mmg-checkouts/:id/reversal', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    return { success: true, data: await feeReversals.view({ tenantId, checkoutId: id }) };
+  });
+
+  app.post('/billing/mmg-checkouts/:id/reverse', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      // MMG reverses in full only: the admin types the whole amount, and the
+      // approval's fingerprint binds it with the payment.
+      amountGyd: z.number().positive().max(MAJOR_AMOUNT_CEILING),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers as never) ?? body.reason ?? '';
+    const row = await feeReversals.requestReversal(
+      { tenantId, checkoutId: id, amountGyd: body.amountGyd, reason, actorId: request.user.userId,
+        approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // [DS1112] A person resolves a HELD return (C4: a reason and a second
+  // person, or solo): "MMG shows nothing was returned" (only while MMG's
+  // lookup shows the payment standing) or "returned, here is MMG's reference"
+  // (booked only if MMG's lookup proves it). Never a guess.
+  app.post('/billing/mmg-fee-reversals/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      outcome: z.enum(['NOT_RETURNED', 'RETURNED', 'RETURNED_NOT_BOOKED']),
+      // The MMG statement line or the MMG reversal reference the person read.
+      mmgReference: z.string().trim().min(3).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/#-]*$/, 'Use the reference exactly as MMG shows it'),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const row = await feeReversals.resolveHeld(
+      { tenantId, reversalId: id, outcome: body.outcome, mmgReference: body.mmgReference, actorId: request.user.userId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // "Check with MMG": MMG's lookup settles an open return (proof debits the
+  // balance once; a refusal with the payment standing closes it). It decides
+  // nothing itself, so it is C2 — the money decision was the approved C4 ask.
+  app.post('/billing/mmg-fee-reversals/:id/check', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const row = await feeReversals.check({ tenantId, reversalId: id });
+    return { success: true, data: reversalOut(row as never) };
   });
 
   // ── Collections workbench [san spec PART 21] — the founder's call list ────

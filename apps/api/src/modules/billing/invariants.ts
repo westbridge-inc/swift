@@ -37,12 +37,13 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
   };
 
   // 1. Balance provability: PrepaidBalance == Σ(PREPAID_TOPUP) − Σ(prepaid-settled charges)
-  //    − Σ(credit set aside for a refund) + Σ(set-asides released back unpaid).
+  //    − Σ(credit set aside for a refund) + Σ(set-asides released back unpaid)
+  //    − Σ(PREPAID_REVERSAL) [MMG REVERSAL: payments MMG returned to the payer].
   //    A set-aside that is PAID leaves REFUND_PAYABLE, not the wallet (check 7).
   const wallets = await prisma.prepaidBalance.findMany({ select: { subscriptionId: true, balance: true } });
   for (const w of wallets) {
     report.walletsChecked += 1;
-    const [topups, settles, setAside, released] = await Promise.all([
+    const [topups, settles, setAside, released, reversals] = await Promise.all([
       prisma.billingEvent.aggregate({
         where: { subscriptionId: w.subscriptionId, type: 'PREPAID_TOPUP' },
         _sum: { amount: true },
@@ -59,9 +60,13 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
         where: { subscriptionId: w.subscriptionId, type: 'PREPAID_REFUND_RELEASED' },
         _sum: { amount: true },
       }),
+      prisma.billingEvent.aggregate({
+        where: { subscriptionId: w.subscriptionId, type: 'PREPAID_REVERSAL' },
+        _sum: { amount: true },
+      }),
     ]);
     const ledger = Number(topups._sum.amount ?? 0) - Number(settles._sum.amount ?? 0)
-      - Number(setAside._sum.amount ?? 0) + Number(released._sum.amount ?? 0);
+      - Number(setAside._sum.amount ?? 0) + Number(released._sum.amount ?? 0) - Number(reversals._sum.amount ?? 0);
     if (Math.abs(ledger - Number(w.balance)) > 0.009) {
       report.walletMismatches.push({ subscriptionId: w.subscriptionId, ledger, balance: Number(w.balance) });
     }

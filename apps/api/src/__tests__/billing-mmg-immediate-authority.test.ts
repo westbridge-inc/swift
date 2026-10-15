@@ -299,6 +299,8 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     // [MMG checkout I5] the approval-hold gate also reads checkouts in flight; none here.
     mmgCheckoutIntent: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
     cardSession: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+    // [MMG REVERSAL] billing also pauses while a weekly-fee payment is being returned; none here.
+    mmgFeeReversal: { findFirst: vi.fn(async () => null), findUnique: vi.fn(async () => null), findMany: vi.fn(async () => []) },
     user: { findUnique: vi.fn(async () => ({ ...state.user })), findUniqueOrThrow: vi.fn(async () => ({ ...state.user })), findMany: vi.fn(async () => []) },
     moverFeeAuthority: authority,
     moverFeeSubscription: memory('member'),

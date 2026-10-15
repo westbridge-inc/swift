@@ -15,7 +15,8 @@ import {
   type MmgCheckoutProvider,
   type MmgCreationZone,
 } from '../../providers/mmg/mmg-checkout';
-import { getMmgLookupProvider, type MmgLookupClient, type MmgLookupDetail } from '../../providers/mmg/mmg-provider';
+import { getMmgLookupProvider, type MmgLookupClient, type MmgLookupDetail, type MmgReversalClient } from '../../providers/mmg/mmg-provider';
+import { MmgFeeReversalService } from './mmg-fee-reversal';
 import { mmgCheckoutEventsCounter, mmgCheckoutLookupsCounter } from '../../plugins/observability';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { isDuplicateOn } from '../money/evidence';
@@ -461,11 +462,14 @@ export class MmgCheckoutService {
     private readonly billing: BillingService,
     private readonly notifications: NotificationService,
     /** Injectable for tests; the defaults follow MMG_DRIVER. */
-    deps: { checkout?: () => MmgCheckoutProvider; lookup?: () => MmgLookupClient } = {},
+    deps: { checkout?: () => MmgCheckoutProvider; lookup?: () => MmgLookupClient; reversal?: () => MmgReversalClient } = {},
   ) {
     this.checkout = deps.checkout ?? (() => getMmgCheckoutProvider());
     this.lookup = deps.lookup ?? (() => getMmgLookupProvider());
+    this.reversal = deps.reversal;
   }
+
+  private readonly reversal: (() => MmgReversalClient) | undefined;
 
   /** THE rule (fee-pay-actions.ts), with this service's checkout provider. */
   async isLiveFor(sub: Pick<Subscription, 'status' | 'feeWaived' | 'currencyCode' | 'weeklyRate' | 'customRate'>, platform: ClientPlatform): Promise<boolean> {
@@ -786,6 +790,15 @@ export class MmgCheckoutService {
         await this.reconcileUnappliedPages(now);
       } catch (err) {
         log().error({ err }, '[MMG checkout] the unapplied-payment page reconcile failed; it is retried on the next poll');
+      }
+      // [MMG REVERSAL] Every open fee reversal is read again from MMG's lookup
+      // (bounded): a proof settles it, a refusal closes it, nothing is guessed.
+      // [review S2-1] Always run (two small bounded reads when idle): a return
+      // closed as "not returned" is watched for a week even when nothing is open.
+      try {
+        await new MmgFeeReversalService({ prisma: this.prisma, billing: this.billing, notifications: this.notifications, ...(this.reversal ? { client: this.reversal } : {}) }).sweep(now);
+      } catch (err) {
+        log().error({ err }, '[MMG checkout] the fee-reversal sweep failed; it is retried on the next poll');
       }
       return out;
     });

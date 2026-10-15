@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Receipt } from 'lucide-react';
 import type {
   MmgCheckoutCreditedPeriod,
@@ -12,7 +12,12 @@ import type {
   MmgCheckoutSupportStatus,
   MmgCheckoutTimelineEntry,
 } from '@swift/types';
-import { fetchMmgCheckout, fetchMmgCheckouts } from '@/lib/api';
+import {
+  checkMmgFeeReversal, fetchMmgCheckout, fetchMmgCheckouts, fetchMmgFeeReversal, resolveMmgFeeReversal, reverseMmgFeePayment,
+  type MmgFeeReversalRow, type MmgFeeReversalView,
+} from '@/lib/api';
+import { MutationError } from '@/components/MutationError';
+import { REASON_MIN } from '@/lib/reason-rules';
 
 /**
  * [MMG support lookup] Find a partner's MMG weekly-fee payment.
@@ -22,7 +27,8 @@ import { fetchMmgCheckout, fetchMmgCheckouts } from '@/lib/api';
  * partner's phone. The server matches it EXACTLY and records every search and
  * every opened payment. This page shows only what the server answered: no row
  * is drawn before it arrives, and an error is shown as an error, never as
- * "nothing found". Confirming or reversing a held payment is not here yet.
+ * "nothing found". Confirming a held payment is not here yet. A confirmed
+ * payment can be RETURNED in full through MMG [MMG REVERSAL · owner #11].
  */
 const SEARCH_HINT = 'Swift reference, MMG transaction ID, MMG reference or partner phone';
 
@@ -235,6 +241,7 @@ function Detail({ id }: { id: string }) {
             {d.reason ? <Field label="Reason (operators only)"><span className="font-mono text-xs">{d.reason}</span></Field> : null}
           </dl>
           {d.creditedPeriod ? <Credited period={d.creditedPeriod} /> : null}
+          {d.status === 'CONFIRMED' ? <ReturnPanel checkoutId={d.id} amount={d.amount} currencyCode={d.currencyCode} /> : null}
         </div>
         <Timeline entries={d.timeline} truncated={d.timelineTruncated} />
       </div>
@@ -292,5 +299,192 @@ function Timeline({ entries, truncated }: { entries: MmgCheckoutTimelineEntry[];
       )}
       {truncated ? <p className="text-xs text-[var(--muted)] mt-2">Showing the first records only.</p> : null}
     </div>
+  );
+}
+
+/** [MMG REVERSAL] Where a return of this payment stands, in plain words. */
+const RETURN_STATE_WORDS: Record<MmgFeeReversalRow['state'], string> = {
+  SENDING: 'Asking MMG to return it',
+  SENT: "MMG accepted; waiting for MMG's confirmation",
+  REVERSED: 'Returned through MMG to the account it was paid from',
+  FAILED: 'MMG refused; nothing changed',
+  HELD: 'Held for a person',
+};
+const HELD_WORDS: Record<string, string> = {
+  NO_ANSWER_FROM_MMG: 'MMG did not answer, and its records do not show a return yet',
+  MMG_SAYS_ALREADY_REVERSED: 'MMG says it was already returned, but its records still show the payment',
+  MMG_REFUSED_LOOKUP_UNCLEAR: "MMG refused, and its records could not be read clearly",
+  NOT_PROVEN_IN_TIME: 'MMG accepted, but has not confirmed the return within a day',
+  WALLET_NO_LONGER_HOLDS_IT: 'MMG returned it, but this payment has already paid for a week of the partner\'s fee',
+};
+
+/**
+ * [MMG REVERSAL · owner #11] Return a whole weekly-fee payment to the partner
+ * through MMG. MMG returns in full only, so the admin types the whole amount.
+ * The server asks for a second admin first (or the owner's solo approval);
+ * only MMG's own records then move the partner's fee balance. Anything unclear
+ * is held for a person, here, with "Check with MMG".
+ */
+function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string; amount: number; currencyCode: string }) {
+  const qc = useQueryClient();
+  const [reason, setReason] = useState('');
+  const [typed, setTyped] = useState('');
+  const view = useQuery({ queryKey: ['mmg-fee-reversal', checkoutId], queryFn: () => fetchMmgFeeReversal(checkoutId), refetchOnWindowFocus: false });
+  const refresh = () => qc.invalidateQueries({ queryKey: ['mmg-fee-reversal', checkoutId] });
+  const ask = useMutation({ mutationFn: () => reverseMmgFeePayment(checkoutId, Number(typed), reason.trim()), onSettled: refresh });
+  const check = useMutation({ mutationFn: (id: string) => checkMmgFeeReversal(id), onSettled: refresh });
+  const v = view.data?.data as MmgFeeReversalView | undefined;
+  // Only the server's own answer is shown: anything else is not this panel's.
+  if (!v || typeof v !== 'object' || typeof v.canReverse !== 'boolean' || !Array.isArray(v.reversals)) return null;
+  const amountOk = typed.trim() !== '' && Number(typed) === amount;
+  const reasonOk = reason.trim().length >= REASON_MIN;
+  const queued = (ask.error as { code?: string } | null)?.code === 'APPROVAL_REQUIRED';
+
+  return (
+    <section aria-label="Return this payment" className="rounded-lg border border-[var(--border)] p-4 space-y-3 text-sm">
+      <h3 className="font-semibold">Return this payment to the partner</h3>
+      {v.reversals.map((r) => (
+        <div key={r.id} className="rounded-md bg-[var(--bg)] p-3 space-y-1">
+          <p className="font-semibold">{RETURN_STATE_WORDS[r.state]}</p>
+          <p className="text-xs text-[var(--muted)]">{gyd(r.amount)} {r.currencyCode} · asked {when(r.sentAt)}{r.reversedAt ? ` · returned ${when(r.reversedAt)}` : ''}</p>
+          {r.heldReason ? <p className="text-xs text-amber-400">{HELD_WORDS[r.heldReason] ?? r.heldReason}. Check the MMG statement before anything else.</p> : null}
+          {r.resolution ? <p className="text-xs text-[var(--muted)]">{RESOLUTION_WORDS[r.resolution] ?? r.resolution}</p> : null}
+          {r.state === 'SENT' || r.state === 'HELD' || r.state === 'SENDING' ? (
+            <button
+              type="button"
+              disabled={check.isPending}
+              onClick={() => check.mutate(r.id)}
+              className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs disabled:opacity-40"
+            >
+              {check.isPending ? 'Checking…' : 'Check with MMG'}
+            </button>
+          ) : null}
+        </div>
+      ))}
+      {check.error ? <MutationError error={check.error} label="MMG could not be checked" /> : null}
+      {v.reversals.filter((r) => r.state === 'HELD').map((r) => <ResolveHeld key={`resolve-${r.id}`} reversalId={r.id} heldReason={r.heldReason} lookupStatus={r.lookupStatus} onDone={refresh} />)}
+      {!v.switchedOn ? (
+        <p className="text-xs text-[var(--muted)]">Returning payments is switched off on this server until MMG&apos;s answers are proven in testing.</p>
+      ) : !v.canReverse ? (
+        v.refusal && !v.reversals.some((r) => r.state === 'REVERSED' || r.state === 'SENT' || r.state === 'HELD' || r.state === 'SENDING')
+          ? <p className="text-xs text-[var(--muted)]">{v.refusal.message}</p>
+          : null
+      ) : (
+        <form
+          className="space-y-2"
+          onSubmit={(e) => { e.preventDefault(); if (amountOk && reasonOk) ask.mutate(); }}
+        >
+          <p className="text-xs text-[var(--muted)]">
+            MMG returns the whole payment ({gyd(amount)} {currencyCode}) to the partner&apos;s MMG account, and Swift deducts it from
+            what the partner has paid toward weekly fees once MMG confirms. A second admin must approve it first.
+          </p>
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            rows={2}
+            maxLength={500}
+            aria-label="Why it is being returned"
+            placeholder="Why it is being returned (for example: paid this week twice). Required."
+            className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+          />
+          <label className="block text-xs text-[var(--muted)]">
+            Type the whole amount to confirm
+            <input
+              value={typed}
+              onChange={(e) => setTyped(e.target.value.replace(/[^0-9]/g, ''))}
+              inputMode="numeric"
+              aria-label="Amount to return"
+              className="mt-1 block w-40 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={ask.isPending || !amountOk || !reasonOk}
+            className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-40"
+          >
+            {ask.isPending ? 'Sending…' : 'Return this payment'}
+          </button>
+          {queued ? (
+            <p role="status" className="text-xs text-[var(--muted)]">
+              Sent for a second admin&apos;s approval. Nothing has changed yet. Once approved, execute it from Approvals.
+            </p>
+          ) : ask.error ? <MutationError error={ask.error} label="The return did not start" /> : null}
+        </form>
+      )}
+    </section>
+  );
+}
+
+const RESOLUTION_WORDS: Record<string, string> = {
+  NOT_RETURNED: 'Closed by a person: MMG shows the payment was not returned.',
+  RETURNED_BY_REFERENCE: "Closed by a person: MMG's records showed the return they named.",
+  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after the money had already paid for a week. Nothing was deducted; that week\'s fee is owed again (on the books as fee owed) and finance collects it.',
+};
+
+/**
+ * [DS1112] A HELD return, closed by a person on MMG's evidence. A money action:
+ * the first answer is a second admin's approval. The server reads MMG's records
+ * again and refuses anything they do not show.
+ */
+function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversalId: string; heldReason: string | null; lookupStatus?: string | null; onDone: () => void }) {
+  const [outcome, setOutcome] = useState<'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED'>('NOT_RETURNED');
+  // [DS1115] Only where MMG returned money that had already paid for a week.
+  const moneyUsed = (heldReason ?? '').startsWith('WALLET_NO_LONGER_HOLDS_IT');
+  // [Opus delta S3-N1] MMG's records no longer find the payment: no return can be booked, and it
+  // cannot be "not returned" either; a person closes it on MMG's reversal reference.
+  const paymentNotFound = !moneyUsed && lookupStatus === 'PAYMENT_NOT_FOUND';
+  const [reference, setReference] = useState('');
+  const [reason, setReason] = useState('');
+  const resolve = useMutation({ mutationFn: () => resolveMmgFeeReversal(reversalId, outcome, reference.trim(), reason.trim()), onSettled: onDone });
+  const ok = reference.trim().length >= 3 && reason.trim().length >= REASON_MIN;
+  const queued = (resolve.error as { code?: string } | null)?.code === 'APPROVAL_REQUIRED';
+  return (
+    <form
+      aria-label="Resolve the held return"
+      className="space-y-2 rounded-md border border-[var(--border)] p-3"
+      onSubmit={(e) => { e.preventDefault(); if (ok) resolve.mutate(); }}
+    >
+      <p className="text-xs font-semibold">Resolve it from the MMG statement</p>
+      <label className="flex items-center gap-2 text-xs">
+        <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'NOT_RETURNED'} onChange={() => setOutcome('NOT_RETURNED')} />
+        MMG shows the payment was not returned
+      </label>
+      <label className="flex items-center gap-2 text-xs">
+        <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED'} onChange={() => setOutcome('RETURNED')} />
+        MMG shows it was returned (enter MMG&apos;s reversal reference)
+      </label>
+      {moneyUsed ? (
+        <label className="flex items-center gap-2 text-xs">
+          <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
+          MMG returned it, but the money had already paid for a week (close it; that week&apos;s fee is then owed again and finance collects it)
+        </label>
+      ) : paymentNotFound ? (
+        <label className="flex items-center gap-2 text-xs">
+          <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
+          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: while the partner&apos;s weekly-fee payments still hold the amount it is deducted once; otherwise nothing is deducted and that week&apos;s fee is owed again)
+        </label>
+      ) : null}
+      <input
+        value={reference}
+        onChange={(e) => setReference(e.target.value)}
+        aria-label="MMG reference"
+        placeholder={outcome === 'NOT_RETURNED' ? 'The MMG statement line or reference' : "MMG's reversal reference"}
+        className="block w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+      />
+      <textarea
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        rows={2}
+        aria-label="Why"
+        placeholder="What you checked. Required."
+        className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
+      />
+      <button type="submit" disabled={resolve.isPending || !ok} className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs disabled:opacity-40">
+        {resolve.isPending ? 'Sending…' : 'Send for approval'}
+      </button>
+      {queued ? (
+        <p role="status" className="text-xs text-[var(--muted)]">Sent for a second admin&apos;s approval. Nothing has changed yet.</p>
+      ) : resolve.error ? <MutationError error={resolve.error} label="The return was not resolved" /> : null}
+    </form>
   );
 }
