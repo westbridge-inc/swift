@@ -475,6 +475,9 @@ describe('R10 queue arming and exhaustion journal regressions', () => {
       for (const key of [...h.state.keys()]) if (/dispatch:(offer:|mover-offer:|offer-pending:|offer-publishing:)/.test(key)) h.state.delete(key);
       const jobs: any[] = [];
       app.dispatchQueue = { add: async (...args: any[]) => { jobs.push(args); return { id: 'unit-job' }; } };
+      // [row 266] Offer timeouts ride their own queue: same log, so the order of events stays visible.
+      const offerJobs: any[] = [];
+      app.offerQueue = { add: async (...args: any[]) => { jobs.push(args); offerJobs.push(args); return { id: 'unit-offer-job' }; } };
       if (commands) {
         const pending = [...commands];
         const prisma = { $queryRaw: async () => pending.length ? [pending.shift()] : [],
@@ -493,6 +496,7 @@ describe('R10 queue arming and exhaustion journal regressions', () => {
       h.subject.scheduleTimeout = context['exports'].makeDispatchService(app).scheduleTimeout;
       expect(await h.subject.dispatchOrder(h.order.id)).toEqual({ offered: 'rider' });
       expect(jobs[1][0]).toBe('offer-timeout');
+      expect(offerJobs.map((j) => j[0])).toEqual(['offer-timeout']);
       expect(jobs[1][1]).toMatchObject({ orderId: h.order.id, riderId: 'rider', attemptId: h.emitted[0].offerAttemptId });
       expect(h.emitted).toHaveLength(1);
       expect(h.state.has('dispatch:offer-recovery:order-unit')).toBe(false);
@@ -502,7 +506,8 @@ describe('R10 queue arming and exhaustion journal regressions', () => {
   it('does not publish through the factory until a real queue acknowledgement resolves', async () => {
     const h = publishingHarness(), entered = barrier(), resume = barrier();
     const app = { prisma: h.subject.prisma, redis: h.subject.redis, io: h.subject.io,
-      dispatchQueue: { add: async () => { entered.open(); await resume.promise; return { id: 'unit-job' }; } } };
+      // [row 266] The offer timeout is acknowledged by the offer queue.
+      offerQueue: { add: async () => { entered.open(); await resume.promise; return { id: 'unit-job' }; } } };
     h.subject.scheduleTimeout = context['exports'].makeDispatchService(app).scheduleTimeout;
     const publishing = h.subject.dispatchOrder(h.order.id); await entered.promise;
     expect(h.emitted).toEqual([]); expect(h.state.has('dispatch:offer-recovery:order-unit')).toBe(true);
