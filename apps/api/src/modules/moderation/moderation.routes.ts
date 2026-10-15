@@ -6,7 +6,7 @@ import { activateUserBlock, deactivateUserBlock } from './user-block.service';
 import { assertRoomAccess } from '../chat/chat-authority';
 import { NotFoundError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
-import { pageCsaeReport } from './csae-page';
+import { CSAE_PAGE_WINDOW_SECONDS, pageCsaeReport } from './csae-page';
 
 type AuthRequest = FastifyRequest & { user: { userId: string; role: string } };
 
@@ -86,7 +86,10 @@ export async function moderationRoutes(app: FastifyInstance) {
     // that fails to open is logged loudly and the moderation queue still floats CSAE to the top.
     if (body.reason === 'CSAE') {
       try {
-        await pageCsaeReport(app.prisma, new NotificationService(app.prisma, app.io), { tenantId: request.tenantId ?? getTenantId() ?? null, contentReportId: report.id, targetType: body.targetType });
+        // [REVIEW-F S3-1 on #1755] one page per reporter per 10 minutes: a person filing many CSAE reports cannot
+        // turn the on-call phones into a pager they control; every report still lands, at the top of the queue.
+        const firstInWindow = await app.redis.set(`csae:page:${reporterId}`, report.id, 'EX', CSAE_PAGE_WINDOW_SECONDS, 'NX');
+        if (firstInWindow === 'OK') await pageCsaeReport(app.prisma, new NotificationService(app.prisma, app.io), { tenantId: request.tenantId ?? getTenantId() ?? null, contentReportId: report.id, targetType: body.targetType });
       } catch (err) {
         app.log.error({ err, contentReportId: report.id }, '[R19] CSAE report saved but the ops page did not open — moderation queue only');
       }

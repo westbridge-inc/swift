@@ -9,6 +9,8 @@ import { openOpsAlert, type OpsAlertOpened } from '../safety/ops-alert';
  * sweep and texts the on-call list). The page names the report, never the people or the content: the text
  * goes to phones. The store-review fiction pages nobody (openOpsAlert's review-tenant rule, GUARDRAILS §3).
  */
+/** One page per reporter per window: every report is recorded, but one person cannot page on-call at will. */
+export const CSAE_PAGE_WINDOW_SECONDS = 600;
 export const CSAE_PAGE_TITLE = 'Child-safety (CSAE) report: review now';
 export const CSAE_PAGE_BODY = 'Someone reported content as child sexual abuse or exploitation. Open the moderation queue (reason: Child safety) and act on it before anything else.';
 

@@ -59,6 +59,7 @@ beforeAll(async () => {
   await app.register(moderationRoutes, { prefix: '/api/v1' });
   await app.ready();
   reporter = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
+  await app.redis.del(`csae:page:${reporter.id}`);
   adminId = (await mkUser(['ADMIN'] as UserRole[], 'ADMIN' as UserRole)).id;
 });
 
@@ -99,6 +100,13 @@ describe('a Child safety (CSAE) report pages operations at once', () => {
     await closeOurPages();
     expect(again.statusCode).toBe(200);
     expect(again.json().alreadyReported).toBe(true);
+    expect(await csaePages()).toHaveLength(1);
+  });
+
+  it('[REVIEW-F S3-1] a second CSAE report by the same person within 10 minutes is recorded but pages nobody new', async () => {
+    const res = await report({ targetType: 'USER', targetId: `user_${RUN}_b`, reason: 'CSAE' });
+    await closeOurPages();
+    expect(res.statusCode, res.body).toBe(201);
     expect(await csaePages()).toHaveLength(1);
   });
 
