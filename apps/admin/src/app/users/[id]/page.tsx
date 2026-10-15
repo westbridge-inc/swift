@@ -1,169 +1,215 @@
 'use client';
 
-import { use } from 'react';
+import { use, useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchUserDetail, suspendUser, unsuspendUser, banUser } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
-import { Section, Row, StatusPill, BackLink, ActionButton, gyd } from '@/components/detail';
-import { statusClass } from '@/lib/status';
-import { MutationError } from '@/components/MutationError';
+import { label } from '@/lib/labels';
+import type { Outcome } from '@/lib/outcome';
+import { ActionResult } from '@/components/mc/ActionResult';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { StatusBadge } from '@/components/mc/StatusBadge';
+import { Truncate } from '@/components/mc/Truncate';
+import { DataTable } from '@/components/mc/DataTable';
+
+// ---------------------------------------------------------------------------
+// [MISSION CONTROL · PR-3] One person.
+//
+// Suspend, unsuspend and ban go through the in-page reason panel and every
+// answer is shown (the old page showed only a suspension's failure; an
+// unsuspend or ban refused by the role hierarchy vanished). A failed load says
+// so with a Retry instead of "User not found". Roles and statuses are words.
+// ---------------------------------------------------------------------------
+
+const when = (iso?: string | null, withTime = false) =>
+  iso ? new Date(iso).toLocaleString('en-GB', withTime ? { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
+
+function Row({ label: name, children }: { label: string; children: React.ReactNode }) {
+  if (children == null || children === '') return null;
+  return (
+    <div className="mc-row">
+      <dt>{name}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+
+interface RecentOrder { id: string; orderNumber: string; orderType: string; status: string; totalAmount: number }
 
 export default function UserDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['user', id], queryFn: () => fetchUserDetail(id) });
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ['user', id] });
-    qc.invalidateQueries({ queryKey: ['users'] });
+  const dialog = useActionDialog();
+  const [result, setResult] = useState<Outcome | null>(null);
+  const person = useQuery({ queryKey: ['user', id], queryFn: () => fetchUserDetail(id) });
+
+  const show = (outcome: Outcome | null) => {
+    if (!outcome) return;
+    setResult(outcome);
+    void qc.invalidateQueries({ queryKey: ['user', id] });
+    void qc.invalidateQueries({ queryKey: ['users'] });
   };
-  // [ADM-006] The reason was the constant 'Suspended by admin'. It is the
-  // operator's own words now, and a cancelled prompt cancels the action.
-  const suspend = useMutation({ mutationFn: (reason: string) => suspendUser(id, reason), onSuccess: invalidate });
-  const unsuspend = useMutation({ mutationFn: (reason: string) => unsuspendUser(id, reason), onSuccess: invalidate });
-  const ban = useMutation({ mutationFn: (reason: string) => banUser(id, reason), onSuccess: invalidate });
 
-  const u: any = data?.data;
+  const back = (
+    <Link href="/users" className="mc-back">
+      <ArrowLeft size={16} aria-hidden="true" /> People
+    </Link>
+  );
 
-  if (isLoading) return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
-  if (!u) {
+  const u: any = person.data?.data;
+  if (person.isLoading) return <div className="mc-page">{back}<div className="mc-card" aria-busy="true">Loading this person…</div></div>;
+  if (person.isError || !u) {
     return (
-      <div>
-        <BackLink href="/users" label="Users" />
-        <p className="text-[var(--muted)]">User not found.</p>
+      <div className="mc-page">
+        {back}
+        <QueryFailed error={person.error ?? new Error('The server sent no record.')} what="this person" onRetry={() => void person.refetch()} retrying={person.isFetching} />
       </div>
     );
   }
 
   const name = [u.firstName, u.lastName].filter(Boolean).join(' ') || 'Unnamed';
-  const busy = suspend.isPending || unsuspend.isPending || ban.isPending;
+  const orders: RecentOrder[] = u.orders ?? [];
+
+  // [ADM-006] The operator states why, in their own words; a dismissed panel does nothing.
+  const suspend = async () => show(await dialog.run({
+    title: `Suspend ${name}?`,
+    body: <p>They are signed out and cannot transact until the account is unsuspended.</p>,
+    confirmLabel: 'Suspend account',
+    reason: { hint: 'Kept on the permanent record.' },
+    submit: ({ reason }) => suspendUser(id, reason),
+    success: () => `${name} is suspended.`,
+  }));
+  const unsuspend = async () => show(await dialog.run({
+    title: `Unsuspend ${name}?`,
+    body: <p>They can sign in and use Swift again.</p>,
+    confirmLabel: 'Unsuspend account',
+    reason: { hint: 'Kept on the permanent record.' },
+    submit: ({ reason }) => unsuspendUser(id, reason),
+    success: () => `${name} can use Swift again.`,
+  }));
+  const ban = async () => show(await dialog.run({
+    title: `Permanently ban ${name}?`,
+    body: <p>They lose access for good, and their documents are scheduled for deletion under the retention rules. Only a super admin can lift a ban.</p>,
+    confirmLabel: 'Ban account',
+    reason: { hint: 'Kept on the account and the permanent record.' },
+    submit: ({ reason }) => banUser(id, reason),
+    success: () => `${name} is banned.`,
+  }));
 
   return (
-    <div>
-      <BackLink href="/users" label="Users" />
+    <div className="mc-page">
+      {back}
 
-      <div className="flex flex-wrap items-center gap-3 mb-6">
-        <div className="w-12 h-12 rounded-full bg-[var(--accent)] flex items-center justify-center text-lg font-bold">
+      <header className="flex flex-wrap items-start gap-4 mb-5">
+        <div aria-hidden="true" className="mc-numbers grid place-items-center shrink-0 w-12 h-12 rounded-full text-white text-lg font-bold" style={{ background: 'var(--mc-accent)' }}>
           {name.charAt(0).toUpperCase()}
         </div>
-        <div>
-          <h1 className="text-2xl font-bold">{name}</h1>
-          <p className="text-sm text-[var(--muted)]">
-            {u.phone}
-            {u.email ? ` · ${u.email}` : ''}
-          </p>
+        <div className="min-w-0 flex-1 basis-56">
+          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+            <Truncate text={name} lines={2} focusable />
+          </h1>
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            <StatusBadge group="UserStatus" value={u.status} />
+            {(u.roles ?? []).map((r: string) => <span key={r} className="mc-badge">{label('UserRole', r)}</span>)}
+            {u.trustLevel ? <span className="mc-badge mc-tone-info">Trust {u.trustLevel}</span> : null}
+          </div>
+          <p className="mc-muted mt-1.5">{[u.phone, u.email].filter(Boolean).join(' · ')}</p>
         </div>
-        <StatusPill value={u.status} />
-        <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">
-          {(u.roles ?? []).join(' · ').toLowerCase()}
-        </span>
-        {u.trustLevel ? (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-sky-500/15 text-sky-400">trust {u.trustLevel}</span>
-        ) : null}
-        <div className="ml-auto flex gap-2">
+        <div className="flex flex-wrap gap-2 w-full sm:w-auto sm:ml-auto">
           {u.status === 'SUSPENDED' ? (
-            <ActionButton label="Unsuspend" confirm={`Unsuspend ${name}?`} onClick={() => { const reason = askReason({ action: 'unsuspend this account', subject: name }); if (reason) unsuspend.mutate(reason); }} disabled={busy} />
+            <button type="button" className="mc-btn" onClick={unsuspend}>Unsuspend…</button>
           ) : u.status !== 'BANNED' ? (
-            <ActionButton label="Suspend" confirm={`Suspend ${name}? They can't transact until unsuspended.`} onClick={() => { const reason = askReason({ action: 'suspend this account', subject: name }); if (reason) suspend.mutate(reason); }} disabled={busy} />
+            <button type="button" className="mc-btn" onClick={suspend}>Suspend…</button>
           ) : null}
-          {u.status !== 'BANNED' && (
-            <ActionButton label="Ban" danger confirm={`Permanently BAN ${name}? This is not reversible from the console.`} onClick={() => { const reason = askReason({ action: 'permanently ban this account', subject: name }); if (reason) ban.mutate(reason); }} disabled={busy} />
-          )}
+          {u.status !== 'BANNED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={ban}>Ban…</button> : null}
         </div>
-      </div>
+      </header>
 
-      {suspend.error && (
-        <div className="mb-4">
-          <MutationError error={suspend.error} label="Suspension failed" />
-        </div>
-      )}
+      <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-5" />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 space-y-4">
-          <Section title="Recent orders">
-            {(u.orders ?? []).length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">No orders.</p>
-            ) : (
-              <div className="space-y-2">
-                {u.orders.map((o: any) => (
-                  <Link key={o.id} href={`/orders/${o.id}`} className="flex items-center gap-3 p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors text-sm">
-                    <span className="font-mono">{o.orderNumber}</span>
-                    <span className="text-[var(--muted)] text-xs">{String(o.orderType).replaceAll('_', ' ').toLowerCase()}</span>
-                    <span className={`ml-auto px-2 py-0.5 rounded-full text-xs ${statusClass(o.status)}`}>{o.status}</span>
-                    <span className="font-medium">{gyd(o.totalAmount)}</span>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </Section>
+        <div className="lg:col-span-2 space-y-4 min-w-0">
+          <section aria-labelledby="recent-orders" className="space-y-2">
+            <h2 id="recent-orders" className="mc-label">Recent orders</h2>
+            <DataTable<RecentOrder>
+              label="Recent orders"
+              rows={orders}
+              rowKey={(o) => o.id}
+              empty="No orders."
+              columns={[
+                { key: 'order', header: 'Order', width: '30%', primary: true, cell: (o) => <Link href={`/orders/${o.id}`}><Truncate text={o.orderNumber} /></Link> },
+                { key: 'type', header: 'Type', width: '22%', cell: (o) => label('OrderType', o.orderType) },
+                { key: 'status', header: 'Status', width: '28%', cell: (o) => <StatusBadge group="OrderStatus" value={o.status} /> },
+                { key: 'total', header: 'Total', width: '20%', align: 'right', cell: (o) => <span className="mc-numbers">{gyd(o.totalAmount)}</span> },
+              ]}
+            />
+          </section>
 
-          <Section title="Strikes">
+          <section aria-labelledby="strikes" className="mc-card">
+            <h2 id="strikes" className="mc-label">Strikes</h2>
             {(u.strikes ?? []).length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">Clean record — no strikes.</p>
+              <p className="mc-muted">Clean record — no strikes.</p>
             ) : (
-              <div className="space-y-2">
-                {u.strikes.map((s: any) => (
-                  <div key={s.id} className="p-2.5 rounded-lg bg-red-500/5 border border-red-500/20 text-sm">
-                    <p className="text-red-400">{String(s.reason).replaceAll('_', ' ')}</p>
-                    <p className="text-xs text-[var(--muted)] mt-0.5">{new Date(s.createdAt).toLocaleString()}</p>
-                  </div>
+              <ul className="grid gap-2">
+                {u.strikes.map((s: { id: string; reason: string; createdAt: string }) => (
+                  <li key={s.id} className="mc-doc mc-doc-bad">
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-semibold">{String(s.reason).replaceAll('_', ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase())}</span>
+                      <span className="block mc-muted text-xs">{when(s.createdAt, true)}</span>
+                    </span>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
-          </Section>
+          </section>
         </div>
 
-        <div className="space-y-4">
-          <Section title="Profiles">
-            <div className="space-y-2 text-sm">
+        <div className="space-y-4 min-w-0">
+          <section aria-labelledby="profiles" className="mc-card">
+            <h2 id="profiles" className="mc-label">Profiles</h2>
+            <ul className="grid gap-1">
               {u.rider ? (
-                <Link href={`/riders/${u.rider.id}`} className="flex justify-between p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                  <span>Rider profile</span>
-                  <span className="text-[var(--muted)]">{u.rider.documentsVerified ? 'verified' : 'unverified'} →</span>
-                </Link>
+                <li><Link href={`/riders/${u.rider.id}`} className="mc-row min-h-11"><span>Rider profile</span><span className={`mc-badge${u.rider.documentsVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.rider.documentsVerified ? 'Verified' : 'Not verified'}</span></Link></li>
               ) : null}
               {u.driver ? (
-                <Link href={`/drivers/${u.driver.id}`} className="flex justify-between p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                  <span>Driver profile</span>
-                  <span className="text-[var(--muted)]">{u.driver.documentsVerified ? 'verified' : 'unverified'} →</span>
-                </Link>
+                <li><Link href={`/drivers/${u.driver.id}`} className="mc-row min-h-11"><span>Driver profile</span><span className={`mc-badge${u.driver.documentsVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.driver.documentsVerified ? 'Verified' : 'Not verified'}</span></Link></li>
               ) : null}
-              {(u.vendorOwner?.vendors ?? []).map((v: any) => (
-                <Link key={v.id} href={`/vendors/${v.id}`} className="flex justify-between p-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                  <span>{v.name}</span>
-                  <span className="text-[var(--muted)]">{String(v.status).toLowerCase().replaceAll('_', ' ')} →</span>
-                </Link>
+              {(u.vendorOwner?.vendors ?? []).map((v: { id: string; name: string; status: string }) => (
+                <li key={v.id}><Link href={`/vendors/${v.id}`} className="mc-row min-h-11"><Truncate text={v.name} /><StatusBadge group="VendorStatus" value={v.status} /></Link></li>
               ))}
-              {!u.rider && !u.driver && (u.vendorOwner?.vendors ?? []).length === 0 && (
-                <p className="text-[var(--muted)]">Customer only.</p>
-              )}
-            </div>
-          </Section>
+              {!u.rider && !u.driver && (u.vendorOwner?.vendors ?? []).length === 0 ? <li className="mc-muted">Customer only.</li> : null}
+            </ul>
+          </section>
 
-          <Section title="Account">
-            <div className="space-y-1.5">
-              <Row label="Joined" value={new Date(u.createdAt).toLocaleDateString()} />
-              <Row label="Phone verified" value={u.isPhoneVerified ? 'yes' : 'no'} />
-              <Row label="Total orders" value={u._count?.orders} />
-              <Row label="Strikes" value={u._count?.strikes} />
-              <Row label="Last active" value={u.lastActiveAt ? new Date(u.lastActiveAt).toLocaleString() : '—'} />
-            </div>
-          </Section>
+          <section aria-labelledby="account" className="mc-card">
+            <h2 id="account" className="mc-label">Account</h2>
+            <dl className="mc-rows">
+              <Row label="Joined">{when(u.createdAt)}</Row>
+              <Row label="Phone verified">{u.isPhoneVerified ? 'Yes' : 'No'}</Row>
+              <Row label="Total orders"><span className="mc-numbers">{u._count?.orders ?? 0}</span></Row>
+              <Row label="Strikes"><span className="mc-numbers">{u._count?.strikes ?? 0}</span></Row>
+              <Row label="Last active">{when(u.lastActiveAt, true)}</Row>
+            </dl>
+          </section>
 
-          <Section title="Addresses">
+          <section aria-labelledby="addresses" className="mc-card">
+            <h2 id="addresses" className="mc-label">Addresses</h2>
             {(u.addresses ?? []).length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">None saved.</p>
+              <p className="mc-muted">None saved.</p>
             ) : (
-              <div className="space-y-2 text-sm">
-                {u.addresses.map((a: any) => (
-                  <div key={a.id} className="p-2.5 rounded-lg bg-white/5">
-                    <p className="text-xs text-[var(--muted)]">{a.label}</p>
-                    <p>{[a.addressLine1, a.city].filter(Boolean).join(', ')}</p>
-                  </div>
+              <ul className="grid gap-2">
+                {u.addresses.map((a: { id: string; label?: string; addressLine1?: string; city?: string }) => (
+                  <li key={a.id}>
+                    <span className="block mc-muted text-xs">{a.label}</span>
+                    <span className="block">{[a.addressLine1, a.city].filter(Boolean).join(', ')}</span>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
-          </Section>
+          </section>
         </div>
       </div>
     </div>
