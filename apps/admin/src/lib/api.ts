@@ -1133,3 +1133,19 @@ export const resolvePaymentDispute = async (
   if (response?.success !== true || response.data?.orderId !== id || response.data?.resolution !== decision.resolution || response.data?.mismatch !== false) throw unreadableOrderAction();
   return response;
 };
+
+// ── [L02 · row 34] Partial cash a rider still holds after a refused handover ──
+/**
+ * C4 (money class): record that cash the rider HELD is resolved — handed back
+ * later, or otherwise settled, as the stated reason says. A record only: Swift
+ * moves, refunds and deducts nothing. The first call answers 202
+ * APPROVAL_REQUIRED; a second admin (or the owner's solo approval) decides it
+ * in Approvals, and the asking admin applies it from there.
+ */
+export const resolveHeldDoorCash = async (id: string, reason: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/door-cash-return/resolve`, {
+    method: 'POST', body: '{}', reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.doorCashReturn?.status !== 'RESOLVED') throw unreadableOrderAction();
+  return response;
+};
