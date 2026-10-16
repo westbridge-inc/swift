@@ -48,6 +48,8 @@ import { Photo } from '@/components/order-ui';
 import { StoreActions } from './store-actions';
 import styles from './storefront.module.css';
 import { SellerInfo } from './seller-info';
+import { AddPlusGlyph } from '@/components/add-plus';
+import { STORE_PICK } from '@/lib/store-pick';
 
 export type DisplayItem = MenuItem & {
   description?: string;
@@ -815,7 +817,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                           <h3 className={styles.itemName}>{item.name}</h3>
                           {item.description ? <p className={styles.itemDescription}>{item.description}</p> : null}
                           <div className={styles.itemMeta}>
-                            {item.isPopular ? <span className={styles.popular}>Popular</span> : null}
+                            {item.isPopular ? <span className={styles.popular}>{STORE_PICK}</span> : null}
                             {item.unit ? <span className={styles.unit}>per {item.unit}</span> : null}
                             {!item.isAvailable || choiceSoldOut ? <span className={styles.soldOut}>Sold out</span> : null}
                             {item.isAvailable && !priced ? (
@@ -892,7 +894,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                                       ? `${item.name} unavailable while the store is closed`
                                       : `${item.name} unavailable while the store has paused orders`}
                               >
-                                Add
+                                <AddPlusGlyph />
                               </button>
                             ) : null}
                           </div>
