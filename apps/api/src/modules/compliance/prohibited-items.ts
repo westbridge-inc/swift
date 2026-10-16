@@ -20,6 +20,11 @@
  * whatsoever"). Lottery and gambling products and adult material were already
  * the 18+ class.
  *
+ * Owner, 16 Oct 2026: sealed retail HOUSEHOLD insecticide is allowed — aerosol
+ * insect sprays, mosquito coils and the household brands on a shop shelf are
+ * listed without a person's check (HOUSEHOLD_INSECTICIDE_EXEMPTIONS).
+ * Agricultural and garden pesticides stay banned under the rule above.
+ *
  * TWO KINDS OF EVIDENCE, TWO ANSWERS (owner, 13 Oct; #55/#56, 14 Oct):
  *
  *   · CERTAIN — refused outright: "Swift doesn't allow this item: <what>."
@@ -270,12 +275,33 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
 };
 
 /**
+ * [owner 16 Oct 2026] Sealed retail HOUSEHOLD insecticide: aerosol insect sprays, mosquito coils and the household
+ * brands on a Guyanese shop shelf (Baygon, Mortein) are listed without a person's check, and carried in a parcel.
+ * Agricultural and garden pesticides stay banned (R4, Cap. 68:09): a generic insecticide ("Insecticide 1L"), the
+ * active ingredients, weed killers and poisons are judged exactly as before, and cutting these phrases never hides
+ * them ("Mosquito coils + weed killer 1L" is still refused). Any of the item's or store's own texts that says farm,
+ * garden or bulk use (NOT_HOUSEHOLD_USE) takes these exemptions away, so the household word is held for a person.
+ */
+const HOUSEHOLD_INSECTICIDE_EXEMPTIONS: readonly string[] = [
+  'baygon', 'mortein', 'baygon insecticide', 'mortein insecticide',
+  'insect spray', 'insect sprays', 'insect killer', 'insect killers', 'bug spray', 'bug sprays', 'bug killer', 'bug killers',
+  'fly spray', 'fly sprays', 'roach killer', 'roach killers', 'ant killer', 'ant killers', 'mosquito coil', 'mosquito coils',
+  'household insecticide', 'household insecticides', 'aerosol insecticide', 'aerosol insecticides', 'insecticide aerosol',
+  'insecticide aerosols', 'insecticide coil', 'insecticide coils', 'mosquito insecticide', 'mosquito insecticides',
+];
+/** [owner 16 Oct] Farm, garden, livestock, professional or bulk use: never a household insecticide. Read on the text as
+ *  written — a disguised word ("f@rm") would only hide what leaving the word out hides too. Grocery words ("rice",
+ *  "poultry") are not here: a shop's bundle or menu names them beside its bug spray. */
+const NOT_HOUSEHOLD_USE = /\b(?:agricultur\w*|agro\w*|farm\w*|crops?|gardens?|gardening|lawns?|fields?|plantations?|orchards?|paddy|sugar\s*cane|livestock|cattle|concentrates?|concentrated|emulsifiable|wettable|knapsack|hectares?|acres?|commercial|industrial|professional|termites?|gallons?|drums?|bulk)\b/i;
+
+/**
  * Phrases that contain a listed word but name something else entirely. They
  * are cut out before matching; whatever is left is still judged ("ginger beer
  * and rum punch" is still alcohol). Kept short on purpose: a hold is cheap,
  * and the owner's own examples ("beer batter fish", "gas stove") are holds.
  */
 export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
+  ...HOUSEHOLD_INSECTICIDE_EXEMPTIONS,
   'ginger beer', 'ginger beers', 'root beer', 'root beers', 'birch beer', 'ginger ale', 'ginger ales',
   'wine gum', 'wine gums', 'wine colour', 'wine color', 'wine coloured', 'wine colored',
   'rubbing alcohol', 'isopropyl alcohol', 'alcohol swab', 'alcohol swabs', 'alcohol wipe', 'alcohol wipes',
@@ -425,7 +451,7 @@ export const PROHIBITED_NEVER_APPROVABLE: readonly string[] = [
   'sex doll', 'sex dolls', 'pornography', 'porno', 'butt plug', 'butt plugs', 'cock ring', 'cock rings', 'fleshlight',
   // [R4] explosives that are nothing else
   'squib', 'squibs', 'detonator', 'detonators', 'blasting cap', 'blasting caps', 'blasting powder', 'm80',
-  // [R4] pesticides and poisons by name (a household insect spray or coil is held for a person — see PESTICIDES)
+  // [R4] pesticides and poisons by name ([owner 16 Oct] a household insect spray or coil is allowed — HOUSEHOLD_INSECTICIDE_EXEMPTIONS)
   'paraquat', 'gramoxone', 'glyphosate', 'diquat', 'atrazine', 'malathion', 'cypermethrin', 'deltamethrin', 'lambda cyhalothrin',
   'chlorpyrifos', 'diazinon', 'carbofuran', 'furadan', 'methomyl', 'lannate', 'mancozeb', 'dithane', 'ddt', 'fipronil',
   'imidacloprid', 'abamectin', 'aldicarb', 'temik', 'phostoxin', 'aluminium phosphide', 'aluminum phosphide', 'zinc phosphide',
@@ -604,6 +630,10 @@ const hasPhrase = (haystack: string, phrase: string): boolean => ` ${haystack} `
 const TERM_HEAD: ReadonlyMap<string, string> = new Map(CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).map((t) => [t, t.split(' ')[0]!]));
 const wordsOf = (texts: readonly string[]): ReadonlySet<string> => new Set(texts.flatMap((t) => t.split(' ')));
 const EXEMPT_LONGEST_FIRST = [...PROHIBITED_EXEMPT_PHRASES].sort((a, b) => b.length - a.length).map((p) => p.split(' '));
+/** [owner 16 Oct] Set when a household-insecticide phrase was cut from a text (see judgeItemWords: what it held is read). */
+export interface HouseholdCut { household: boolean }
+/** [owner 16 Oct] The household-insecticide phrases among them, by identity (no join per call). */
+const HOUSEHOLD_PHRASES: ReadonlySet<readonly string[]> = new Set(EXEMPT_LONGEST_FIRST.filter((p) => HOUSEHOLD_INSECTICIDE_EXEMPTIONS.includes(p.join(' '))));
 
 /**
  * A word in front of an exempt phrase that makes it the restricted thing after
@@ -673,6 +703,16 @@ function undisguise(text: string): string {
 }
 
 /** "r u m" → "rum": runs of single letters, joined. Judged beside the text, never instead of it. */
+/**
+ * [owner 16 Oct · disguise] Letters spelled out with ONE separator ("m-a-l-a-t-h-i-o-n", "R.U.M", "p a r a q u a t")
+ * are joined where they stand, so a single letter written beside them with another separator ("w/", "x", "&") is not
+ * glued on ("w/ m-a-l-a-t-h-i-o-n" reads "w/ malathion", where joinSingleLetters reads "wmalathion"). Before the
+ * household-insecticide exemption, a household word beside such a run held the item and the run was found by
+ * certainGoods; now the run itself is read.
+ */
+const SPELLED_RUN = /(?<![\p{L}\p{N}])\p{L}([^\p{L}\p{N}]+)\p{L}(?:\1\p{L})+(?![\p{L}\p{N}])/gu;
+const joinSpelledRuns = (text: string): string => text.replace(SPELLED_RUN, (run) => run.replace(/[^\p{L}\p{N}]+/gu, ''));
+
 function joinSingleLetters(normalized: string): string {
   const out: string[] = [];
   let run: string[] = [];
@@ -693,17 +733,22 @@ function qualifiesSoftDrinks(text: string): boolean {
   return [plain, ...leetSpellings(plain)].some((t) => STATES_A_STRENGTH.test(t) || normalize(t).split(' ').some((w) => EXEMPTION_BREAKERS.has(w)));
 }
 
-function stripExempt(normalized: string, noSoftDrinks: boolean): string {
+function stripExempt(normalized: string, noSoftDrinks: boolean, notHousehold = false, cut?: HouseholdCut): string {
   let words = normalized.split(' ').filter(Boolean);
   // [R4] Cutting only ever removes words, so a phrase whose first word the text never carried cannot be cut.
   const carried = new Set(words);
   for (const phrase of EXEMPT_LONGEST_FIRST) {
     if (!carried.has(phrase[0]!)) continue;
     if (noSoftDrinks && SOFT_DRINK_EXEMPTIONS.has(phrase.join(' '))) continue;
+    if (notHousehold && HOUSEHOLD_PHRASES.has(phrase)) continue;
     const kept: string[] = [];
     for (let i = 0; i < words.length;) {
       const here = phrase.every((w, k) => words[i + k] === w);
-      if (here && !(i > 0 && EXEMPTION_BREAKERS.has(words[i - 1]!))) { i += phrase.length; continue; }
+      if (here && !(i > 0 && EXEMPTION_BREAKERS.has(words[i - 1]!))) {
+        if (cut && HOUSEHOLD_PHRASES.has(phrase)) cut.household = true;
+        i += phrase.length;
+        continue;
+      }
       kept.push(words[i]!);
       i += 1;
     }
@@ -789,23 +834,24 @@ const digitsApart = (normalized: string): string => normalized.split(' ').map((w
 /** Every reading of a text that is judged: as written and in its l33t spellings, each label spelling, normalized,
  *  with spelled-out letters joined and plurals dropped, exemptions cut — and with joined words read apart. The text
  *  is undisguised once, here. */
-function readings(text: string, noSoftDrinks: boolean): string[] {
+function readings(text: string, noSoftDrinks: boolean, notHousehold = false, cut?: HouseholdCut): string[] {
   const out = new Set<string>();
   const plain = undisguise(text);
   // "R0sé" reads "Rosé" only once its l33t is read, so "rosé" is spelled out again after it. [DS1112 S3-1]
-  const spelled = [plain, ...leetSpellings(plain).map((t) => t.replace(ROSE, 'rosewine'))];
+  // [owner 16 Oct] …and each with its spelled-out runs joined where they stand ("w/ m-a-l-a-t-h-i-o-n").
+  const spelled = [plain, ...leetSpellings(plain).map((t) => t.replace(ROSE, 'rosewine'))].flatMap((t) => [t, joinSpelledRuns(t)]);
   // [joined spellings] Each, with its words apart where the case changes, is a base of its own ("H3nn3ssyVS").
   for (const base of new Set(spelled.flatMap((b) => [b, camelApart(b)]))) {
     for (const spelling of labelSpellings(base)) {
       const n = normalize(spelling);
       for (const variant of [n, joinSingleLetters(n), digitsApart(n)]) {
-        const judged = stripExempt(variant, noSoftDrinks);
+        const judged = stripExempt(variant, noSoftDrinks, notHousehold, cut);
         if (judged) out.add(judged);
       }
       // the plural dropped AFTER the exemptions are cut ("diesel jeans" stays exempt) — joined words apart too
       // ("Heinekens6pack")
       for (const variant of new Set([n, digitsApart(n)])) {
-        const dropped = singular(stripExempt(variant, noSoftDrinks));
+        const dropped = singular(stripExempt(variant, noSoftDrinks, notHousehold));
         if (dropped) out.add(dropped);
       }
     }
@@ -816,9 +862,9 @@ function readings(text: string, noSoftDrinks: boolean): string[] {
 /** "Hen nessy", "Vod ka": two adjacent words that join into a listed word of four letters or more. Read from the
  *  plain spelling only (the database pre-filter joins the same pairs), and only ever HOLDS. [evasion] */
 const SPLIT_TERMS_MIN = 4;
-function splitWordHit(text: string, noSoftDrinks = false): { prohibitedClass: ProhibitedClass; term: string } | null {
+function splitWordHit(text: string, noSoftDrinks = false, notHousehold = false): { prohibitedClass: ProhibitedClass; term: string } | null {
   // [R4 · REVIEW-F S3-1] judged after the exemptions, like every other reading ("Bank note counting machine")
-  const words = stripExempt(normalize(undisguise(text)), noSoftDrinks).split(' ').filter(Boolean);
+  const words = stripExempt(normalize(undisguise(text)), noSoftDrinks, notHousehold).split(' ').filter(Boolean);
   for (let i = 0; i + 1 < words.length; i += 1) {
     const joined = words[i]! + words[i + 1]!;
     if (joined.length >= SPLIT_TERMS_MIN && SINGLE_WORD_TERMS.has(joined)) return { prohibitedClass: CLASS_OF.get(joined)!, term: joined };
@@ -830,6 +876,12 @@ export interface ClassifyOptions {
   /** Take the soft-drink exemptions away whatever this text says: another of the item's own texts states a
    *  strength or a qualifier ("Ginger Beer" named, "8 proof" in its description). [DS1105 S3] */
   noSoftDrinks?: boolean;
+  /** [owner 16 Oct] Whether the household-insecticide exemptions are taken away: true when another of the item's own
+   *  texts says farm, garden or bulk use; false when the caller has decided they apply (a store's own words). Left out,
+   *  this text decides by itself. */
+  notHousehold?: boolean;
+  /** [owner 16 Oct] Told whether a household-insecticide phrase was cut from this text. */
+  householdCut?: HouseholdCut;
   /** Judge the brand-first words (default true: a name, an option, a line on an order). */
   brandFirst?: boolean;
   /** Judge words split in two ("Hen nessy") — default true; a hold only. */
@@ -843,10 +895,11 @@ export interface ClassifyOptions {
 export function classifyText(text: string | null | undefined, options: ClassifyOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
   const noSoftDrinks = options.noSoftDrinks === true || qualifiesSoftDrinks(text);
-  const judged = readings(text, noSoftDrinks);
+  const notHousehold = options.notHousehold ?? NOT_HOUSEHOLD_USE.test(text);
+  const judged = readings(text, noSoftDrinks, notHousehold, options.householdCut);
   if (judged.length === 0) return null;
   // The spelling as written names the term first ("rolling papers"); the other readings only when it names none.
-  const asWritten = new Set(labelSpellings(undisguise(text)).map((sp) => stripExempt(normalize(sp), noSoftDrinks)));
+  const asWritten = new Set(labelSpellings(undisguise(text)).map((sp) => stripExempt(normalize(sp), noSoftDrinks, notHousehold)));
   for (const pool of [judged.filter((j) => asWritten.has(j)), judged]) {
     const present = wordsOf(pool);
     for (const prohibitedClass of CLASS_ORDER) {
@@ -865,13 +918,13 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
     }
     // Anywhere else, with a measure of its kind in either order ("Pack of Camel 20s", "20s Camel"), it is held for a
     // person too. [DS1261 S2, DS1263 S3]
-    for (const reading of measureReadings(text, noSoftDrinks)) {
+    for (const reading of measureReadings(text, noSoftDrinks, notHousehold)) {
       const hit = brandWithMeasure(reading.split(' '));
       if (hit) return hit;
     }
   }
   if (options.splitWords === false) return null;
-  const split = splitWordHit(text, noSoftDrinks);
+  const split = splitWordHit(text, noSoftDrinks, notHousehold);
   return split && !options.skipTerms?.has(split.term) ? split : null;
 }
 
@@ -960,9 +1013,9 @@ function asciiDigits(text: string): string {
  *  letter o in a number as a zero, digits of any script as ASCII, a brand joined to its measure apart ("Camel20s", a
  *  zero-width space between), and a number with its unit written apart together ("20 ct" → "20ct"). [DS1263 S3,
  *  DS1264 S3] */
-function measureReadings(text: string, noSoftDrinks: boolean): string[] {
+function measureReadings(text: string, noSoftDrinks: boolean, notHousehold = false): string[] {
   const out = new Set<string>();
-  for (const reading of readings(asciiDigits(text).replace(/(\d)\$/g, '$1s'), noSoftDrinks)) {
+  for (const reading of readings(asciiDigits(text).replace(/(\d)\$/g, '$1s'), noSoftDrinks, notHousehold)) {
     const spaced = reading.replace(/([a-z])(\d)/g, '$1 $2').split(' ').map(numberLeet).join(' ');
     out.add(spaced);
     out.add(spaced.replace(/\b(\d+) (s|ct|pk|pc|pcs|pack|packs)\b/g, '$1$2'));
@@ -1060,7 +1113,9 @@ export interface GoodsOptions {
 export function certainGoods(text: string | null | undefined, options: GoodsOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
   const sameText = STATES_A_STRENGTH.test(text);
-  const parts = undisguise(text).split(SEGMENT_BREAK).map((part) => readings(part, sameText || STATES_A_STRENGTH.test(part)).map((r) => r.split(' ')));
+  // [owner 16 Oct] household insecticide is judged on this text alone too: farm use written here takes it away
+  const notHousehold = NOT_HOUSEHOLD_USE.test(text);
+  const parts = undisguise(text).split(SEGMENT_BREAK).map((part) => readings(part, sameText || STATES_A_STRENGTH.test(part), notHousehold).map((r) => r.split(' ')));
   // A brand or product phrase: certain — unless an ALCOHOL one names a dish ("Hennessy wings"). [DS1109 S2-3]
   const present = new Set(parts.flat(2));
   for (const prohibitedClass of CLASS_ORDER) {
@@ -1120,6 +1175,8 @@ const PARCEL_SKIPPED_HOLD_WORDS: ReadonlySet<string> = new Set([
   'replica', 'replicas', 'bootleg', 'bootlegs', 'first copy', 'master copy', 'mirror quality',
   'bug spray', 'insect spray', 'fly spray', 'mosquito coil', 'mosquito coils', 'insect killer', 'bug killer', 'ant killer',
   'roach killer',
+  // [owner 16 Oct] the household brands too: a household insecticide is allowed, wherever the parcel goes
+  'baygon', 'mortein',
   'crypto', 'cryptocurrency', 'gift card', 'gift cards',
   // Kept refusing in a parcel on purpose: 'gun', 'rifle' (a firearm is described that way and no person reads a parcel),
   // payment cards ('credit card', 'debit card') and currency ('us dollars'): carrying them is the risk itself.
@@ -1248,11 +1305,22 @@ export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedCl
   ];
   // A strength or a qualifier in ANY of the item's own texts takes the soft-drink exemptions away in all of them. [DS1105 S3]
   const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
+  // [owner 16 Oct] Farm, garden or bulk use in ANY of the item's own texts takes the household-insecticide exemptions away.
+  const notHousehold = fields.some(([, text]) => !!text && NOT_HOUSEHOLD_USE.test(text));
   let first: { prohibitedClass: ProhibitedClass; field: JudgedField; term: string } | null = null;
   for (const [field, text] of fields) {
     const product = field === 'name' || field === 'option';
-    const hit = classifyText(text, { noSoftDrinks, brandFirst: product });
-    if (!hit) continue;
+    const cut: HouseholdCut = { household: false };
+    const hit = classifyText(text, { noSoftDrinks, notHousehold, brandFirst: product, householdCut: cut });
+    if (!hit) {
+      // [owner 16 Oct] A household word used to hold this text for a person, who then saw what else it carried, and a
+      // name or option was searched for certain goods behind it ("Baygon w/ x-m"). It still is: a household word is
+      // allowed, never a cover — the certain goods refuse a name or an option and hold any other field.
+      const behind = cut.household ? certainGoods(text) : null;
+      if (behind && product) return { ...behind, field, certain: true };
+      if (behind) first ??= { ...behind, field };
+      continue;
+    }
     const certain = product ? certainGoods(text) : null;
     if (certain) return { ...certain, field, certain: true };
     first ??= { ...hit, field };
@@ -1261,7 +1329,7 @@ export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedCl
     // A phrase written across fields ("Captain" named, "Morgan" as the option): the item's own words read together
     // hold it for a person. Never certain, no brand-first word, no split word. [evasion]
     const together = fields.map(([, text]) => text).filter(Boolean).join(' . ');
-    const hit = classifyText(together, { noSoftDrinks, brandFirst: false, splitWords: false });
+    const hit = classifyText(together, { noSoftDrinks, notHousehold, brandFirst: false, splitWords: false });
     if (hit) first = { ...hit, field: 'name' };
   }
   return first ? { ...first, certain: false } : null;
@@ -1361,12 +1429,19 @@ export function judgeStoreWords(store: StoreWords): StoreWordHit | null {
     ...labels.map((label): [StoreField, string | null | undefined, boolean] => ['tags', label, false]),
   ];
   const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
+  // [owner 16 Oct] A store that sells Baygon beside garden or farm supplies sells an allowed good: its own words are not
+  // held for it (each of its items is judged on its own texts).
+  const notHousehold = false;
   for (const [field, text, brandFirst] of fields) {
-    const hit = classifyText(text, { noSoftDrinks, brandFirst, skipTerms: STORE_SKIPPED_PAYMENT_WORDS });
+    const cut: HouseholdCut = { household: false };
+    const hit = classifyText(text, { noSoftDrinks, notHousehold, brandFirst, skipTerms: STORE_SKIPPED_PAYMENT_WORDS, householdCut: cut });
     if (hit) return { ...hit, field };
+    // [owner 16 Oct] the certain goods behind an allowed household word still hold the store (as in judgeItemWords)
+    const behind = cut.household ? certainGoods(text, { skipTerms: STORE_SKIPPED_PAYMENT_WORDS }) : null;
+    if (behind) return { ...behind, field };
   }
   const together = fields.map(([, text]) => text).filter(Boolean).join(' . ');
-  const hit = classifyText(together, { noSoftDrinks, brandFirst: false, splitWords: false, skipTerms: STORE_SKIPPED_PAYMENT_WORDS });
+  const hit = classifyText(together, { noSoftDrinks, notHousehold, brandFirst: false, splitWords: false, skipTerms: STORE_SKIPPED_PAYMENT_WORDS });
   return hit ? { ...hit, field: 'name' } : null;
 }
 const storeWordsJudge = rememberedJudge(
