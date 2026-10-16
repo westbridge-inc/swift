@@ -91,6 +91,10 @@ async function start() {
         const { enforceRegistryCompletenessAtBoot } = await import('./modules/verification/doc-registry');
         const { resolvesImpl } = await import('./modules/verification/validators');
         await enforceRegistryCompletenessAtBoot(app.prisma, app.log, resolvesImpl);
+        // [Row 208 guard · GUARDRAILS §7] The rescue incentive is Swift's own money with no payout
+        // path and no deletion block yet: a stored non-zero value keeps production's readiness 503.
+        const { enforceRescueIncentiveOffAtBoot } = await import('./modules/dispatch/rescue-incentive-guard');
+        await enforceRescueIncentiveOffAtBoot(app.prisma, app.log);
         // [R048-006] The contract is COMPLETE only here. Readiness answers 503
         // until this line runs, so an orchestrator never routes to a process
         // whose category rail would be empty.
