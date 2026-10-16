@@ -15,7 +15,7 @@ import { inboundStopConfigured, isStopKeyword } from './marketing-message';
  *  - Only a request Twilio signed is read: X-Twilio-Signature = base64 HMAC-SHA1 of the exact
  *    URL Twilio called followed by every form field (name then value, names sorted), keyed by
  *    the account's auth token. Anything else is refused before the body is used.
- *  - Off until both settings exist (TWILIO_AUTH_TOKEN, entered by the owner at a hidden prompt,
+ *  - Off until both settings exist (TWILIO_WEBHOOK_AUTH_TOKEN, entered by the owner at a hidden prompt,
  *    and TWILIO_INBOUND_SMS_URL, the URL set in Twilio): until then it answers 503 and records
  *    nothing — and no marketing text can be sent (marketing-message.ts STOP_NOT_READY).
  *  - The number and the words are never logged. An unknown number, or words that are not an
@@ -81,12 +81,12 @@ export async function smsInboundRoutes(app: FastifyInstance): Promise<void> {
     config: { rateLimit: { ...SMS_INBOUND_RATE, keyGenerator: (request: FastifyRequest) => request.ip } },
   }, async (request, reply) => {
     if (!inboundStopConfigured()) {
-      log().error('[R22] inbound SMS arrived but STOP handling is not configured (TWILIO_AUTH_TOKEN / TWILIO_INBOUND_SMS_URL); nothing recorded');
+      log().error('[R22] inbound SMS arrived but STOP handling is not configured (TWILIO_WEBHOOK_AUTH_TOKEN / TWILIO_INBOUND_SMS_URL); nothing recorded');
       return reply.code(503).type('text/plain').send('not configured');
     }
     // Only the form this route parses is ever signed by the provider; any other body is refused.
     const fields = isFormFields(request.body) ? request.body : null;
-    const expected = fields && twilioSignature(process.env['TWILIO_AUTH_TOKEN']!.trim(), process.env['TWILIO_INBOUND_SMS_URL']!.trim(), fields);
+    const expected = fields && twilioSignature(process.env['TWILIO_WEBHOOK_AUTH_TOKEN']!.trim(), process.env['TWILIO_INBOUND_SMS_URL']!.trim(), fields);
     if (!fields || !expected || !signatureValid(request.headers['x-twilio-signature'], expected)) {
       log().warn('[R22] inbound SMS refused: missing or wrong Twilio signature');
       return reply.code(403).type('text/plain').send('forbidden');

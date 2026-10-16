@@ -366,7 +366,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
   // [R22] Texted STOP: the Twilio incoming-message webhook withdraws marketing
   // consent in the ledger. Signature-checked before the body is used; dark (503)
-  // until TWILIO_AUTH_TOKEN and TWILIO_INBOUND_SMS_URL are set.
+  // until TWILIO_WEBHOOK_AUTH_TOKEN and TWILIO_INBOUND_SMS_URL are set.
   const { smsInboundRoutes } = await import('./modules/notification/sms-inbound.routes');
   await app.register(smsInboundRoutes, { prefix: '/api/v1/sms' });
 

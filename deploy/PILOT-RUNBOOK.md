@@ -1271,6 +1271,21 @@ printed only when every step held. It needs passwordless `sudo -n` for
 `env … swift-secrets`, `test` and `rm`, and fails closed without it. Never
 layer `docker-compose.rehearsal.yml` by hand.
 
+Every provider secret the copy's processes are wired to read (as Compose
+renders their settings) gets a fresh throwaway stand-in in the shape the API's
+boot guards check (`deploy/wall/stand-in.sh`: PEM keys for MMG's checkout, one
+fictional number for the SMS allowlist, a GUID for the card gateway key, URLs
+on the `.invalid` domain); no real provider value is ever read. The names are
+read from migrate, api and worker: a service that later reads its own `*_FILE`
+secret gets no stand-in and refuses to boot, loudly. Once the copy's
+API and worker have been started, their logs (the last 400 lines each,
+redacted by `deploy/wall/redact-log.py`: secrets, tokens, passwords, keys,
+phone numbers and e-mail addresses removed) are kept in
+`$REHEARSAL_RESULTS_DIR`, else `~/swift-rehearsal/rehearsal-<UTC>/` (mode
+0700), however the run ends, and the first 20 `FATAL` lines are printed in the
+run's own output. On the production host these are boot logs of a copy of
+production's database: delete that directory when the copy goes.
+
 No journeys run on this copy: it holds production's personal data, and the
 journeys sign synthetic accounts in with the development code, which never
 touches a copy of production's data (coordinator ruling, 15 Oct). The
@@ -1303,8 +1318,10 @@ step-up the copy cannot do). Then the system jobs `compliance-sample` and
 `expiry-sweep`. The instance's own metrics must hold: the 95th-percentile
 request time within 1 s, no query waiting for a pool connection, tenant and
 non-tenant bindings ran, and `nontenant_system_in_tx` = 0. The copy is removed
-however the run ends, and `JOURNEYS PASSED` is printed only when every step
-held. The live staging API and database are only read. The copy has its own
+however the run ends, after its api, worker and api-journeys logs (the last
+400 lines each, redacted) are kept in the run's results directory
+(`~/swift-journeys-copy/copy-<UTC>/copy-logs/`) and the first `FATAL` lines are
+printed, and `JOURNEYS PASSED` is printed only when every step held. The live staging API and database are only read. The copy has its own
 freshly generated secrets, so staging rows encrypted under the live key do not
 read on it; the journeys make their own accounts. Any failure is a stop:
 Phase C does not go ahead, and the cause is fixed in code, never by loosening
