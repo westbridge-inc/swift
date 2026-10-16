@@ -28,7 +28,8 @@ export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | 
     { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
     { href: '/dashboard/inventory', label: manager ? catalogue : 'Availability', icon: Boxes, exact: false },
     ...(manager ? [{ href: '/dashboard/insights', label: 'Insights', icon: BarChart3, exact: false }] : []),
-    { href: '/dashboard/account', label: 'Account', icon: UserRound, exact: false },
+    // Account is the store's settings page until the app's Account screen lands (PR D).
+    { href: '/dashboard/settings', label: 'Account', icon: UserRound, exact: false },
   ];
 };
 

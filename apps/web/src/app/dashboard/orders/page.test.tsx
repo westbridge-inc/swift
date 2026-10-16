@@ -745,10 +745,13 @@ describe('disputed MMG orders pause the web dashboard', () => {
     expect(row.textContent).toContain('Payment under review — order paused');
     await user.click(row);
     await screen.findByText('Total (MMG)');
+    // The order window. (Its card on the board says the same and withholds the
+    // same buttons: the forward-button checks below cover the whole screen.)
+    const dialog = screen.getByRole('dialog', { name: 'Order details' });
     // The phone's own words (order-dispute.ts). A dispute can be a reference
     // mismatch where the customer says they DID pay, so the notice never says
     // the customer is disputing the payment (review S4-1).
-    expect(screen.getByText("The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.")).toBeTruthy();
+    expect(within(dialog).getByText("The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.")).toBeTruthy();
     expect(screen.queryByText(/customer disputes/i)).toBeNull();
     for (const name of ['Accept', 'Start preparing', 'Mark ready', 'Ready for pickup', 'Mark picked up', 'Confirm delivered', 'Search for a rider again', 'We’ll deliver', 'Get a Swift rider']) {
       expect(screen.queryByRole('button', { name }), name).toBeNull();
@@ -756,7 +759,7 @@ describe('disputed MMG orders pause the web dashboard', () => {
     expect(screen.queryByRole('checkbox')).toBeNull();
     expect(screen.queryByRole('button', { name: /received in my MMG/ })).toBeNull();
     // Declining stays where it was: the server allows it.
-    if (status === 'PENDING') expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
+    if (status === 'PENDING') expect(within(dialog).getByRole('button', { name: 'Reject' })).toBeTruthy();
   });
 
   it('control: the same order without a dispute keeps its forward buttons', async () => {
@@ -766,6 +769,7 @@ describe('disputed MMG orders pause the web dashboard', () => {
     const row = await rowFor('SW-1001');
     expect(row.textContent).not.toContain('order paused');
     await user.click(row);
-    expect(await screen.findByRole('button', { name: 'Start preparing' })).toBeTruthy();
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByRole('button', { name: 'Start preparing' })).toBeTruthy();
   });
 });

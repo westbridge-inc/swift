@@ -26,7 +26,7 @@ import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
-import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../mobile/src/modules/vendor/order-dispute';
+import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '@/lib/mmg-dispute';
 
 export type { HubStore };
 
@@ -307,8 +307,8 @@ export function ManageGrid({ store, owner, onOrderHistory }: { store: HubStore |
         <Tile icon={BarChart3} label="Insights" detail={revenueDetail} href="/dashboard/insights"
           badge={revenueKnown ? <DeltaBadge cur={revenueWindow.cur.revenue} prev={revenueWindow.prev?.revenue ?? null} /> : undefined}
           badgeLabel={revenueKnown ? financialDeltaLabel(revenueWindow.cur.revenue, revenueWindow.prev?.revenue ?? null) : undefined} />
-        <Tile icon={CalendarClock} label="Hours & schedule" detail={scheduleDetail} href="/dashboard/account#hours" />
-        <Tile icon={QrCode} label={owner ? 'My QR & number' : 'My QR'} detail={qrDetail} href={qrQ.data?.shortUrl ?? '/dashboard/account'} external={!!qrQ.data?.shortUrl}
+        <Tile icon={CalendarClock} label="Hours & schedule" detail={scheduleDetail} href="/dashboard/settings" />
+        <Tile icon={QrCode} label={owner ? 'My QR & number' : 'My QR'} detail={qrDetail} href={qrQ.data?.shortUrl ?? '/dashboard/settings'} external={!!qrQ.data?.shortUrl}
           badge={qrStatus ? <Pill tone={qrStatus === 'ACTIVE' ? 'success' : 'neutral'}>{qrStatus.replace(/_/g, ' ')}</Pill> : undefined}
           badgeLabel={qrStatus ? `QR ${qrStatus.replace(/_/g, ' ').toLowerCase()}` : undefined} />
         <Tile icon={History} label="Order history" detail={rollingOrders == null ? 'Past orders' : `${rollingOrders} recent orders`} href="#other-orders" onClick={onOrderHistory} />
@@ -317,7 +317,7 @@ export function ManageGrid({ store, owner, onOrderHistory }: { store: HubStore |
             badge={sub ? <Pill tone={subscriptionTone(sub)}>{String(sub.status ?? 'Subscription').replace(/_/g, ' ')}</Pill> : undefined}
             badgeLabel={sub ? `Subscription ${String(sub.status ?? '').replace(/_/g, ' ').toLowerCase()}` : undefined} />
         ) : (
-          <Tile icon={UserCog} label="Account" detail="Store settings & promos" href="/dashboard/account" />
+          <Tile icon={UserCog} label="Account" detail="Store settings & hours" href="/dashboard/settings" />
         )}
       </div>
     </section>
@@ -480,10 +480,10 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       {blockedReason && <p className="sw-caption">{blockedReason}</p>}
       {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Confirm MMG payment</button>}
       {attestable && !canConfirm && <p className="sw-caption">Only the owner or a manager can confirm MMG payments.</p>}
+      {/* The card's status chip already reads the notice's title (orders page statusChip). */}
       {paused && (
         <div role="alert" className="rounded-xl bg-[var(--swift-soft-warning)] p-3">
-          <p className="text-[13px] font-semibold">{MMG_DISPUTE_NOTICE.title}</p>
-          <p className="sw-caption mt-1">{MMG_DISPUTE_NOTICE.body}</p>
+          <p className="sw-caption">{MMG_DISPUTE_NOTICE.body}</p>
         </div>
       )}
       <MutationNotice errors={[act.error, reject.error]} />

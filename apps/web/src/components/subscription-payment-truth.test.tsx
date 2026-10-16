@@ -1,6 +1,6 @@
 import { screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import SettingsPage from '@/app/dashboard/account/page';
+import SettingsPage from '@/app/dashboard/settings/page';
 import PortalHome from '@/app/portal/page';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 
@@ -17,8 +17,6 @@ describe('subscription summaries do not infer payment from period dates', () => 
         } } };
         if (url.pathname === `/api/v1/${family}/profile`) return { body: { success: true, data: { id: 'test-profile' } } };
         if (url.pathname.endsWith('/hours')) return { body: { success: true, data: [] } };
-        // Billing is the owner's: the store card shows only for an owner login.
-        if (url.pathname === '/api/v1/vendor/stores') return { body: { success: true, data: { stores: [], selectedId: null, myRole: 'OWNER' } } };
         return { body: { success: true, data: null } };
       });
       const view = renderWithQuery(family === 'vendor' ? <SettingsPage /> : <PortalHome />);
