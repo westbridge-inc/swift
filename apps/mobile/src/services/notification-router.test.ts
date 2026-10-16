@@ -360,6 +360,7 @@ const CENSUS: Case[] = [
   { k: 'billing_card_action_required', d: { subscriptionId: 's1', audience: 'earner' }, to: FEE('mover'), why: 'partner — [PT-1] the bank wants the partner to confirm this week’s card payment (3-D Secure); the fee screen is where the week is paid. Its Confirm-your-card surface arrives with PT-3 (cards are off at launch)' },
   { k: 'trial_fee_education', d: { subscriptionId: 's1', stage: 'MID', audience: 'MOVER' }, to: FEE('mover'), why: 'partner — the trial ends soon; this sender spells the tag MOVER/VENDOR' },
   { k: 'fx_change_notice', d: { subscriptionId: 's1', fxRateId: 'f1' }, to: FEE('mover'), why: 'partner — untagged: the family follows the app that is open (a store owner in Business opens the store fee; table below). With no app context, a mover’s fee' },
+  { k: 'billing_rate_change', d: { subscriptionId: 's1', change: 'PRICE_BOOK', appliesFrom: '2026-11-02T04:00:00.000Z' }, to: null, why: 'GAP: same (owner 15 Oct: a weekly fee change, told before it applies)' },
   { k: 'usd_migration_notice', d: { subscriptionId: 's1', mode: 'A' }, to: FEE('mover'), why: 'partner — untagged, as fx_change_notice' },
   { k: 'claim', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — the guarantee claims screen (DOC-1 §31.4)' },
   { k: 'claim_update', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — same screen' },

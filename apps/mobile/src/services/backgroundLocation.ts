@@ -1,6 +1,6 @@
 import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
-import { riderApi, driverApi } from './api';
+import { riderApi, driverApi, partnerApi } from './api';
 import {
   requestUsableMoverBackgroundPermission,
   type MoverKind,
@@ -148,6 +148,8 @@ export async function requestMoverBackgroundPermission(
     getBackgroundPermission: Location.getBackgroundPermissionsAsync,
     requestBackgroundPermission: Location.requestBackgroundPermissionsAsync,
     disclose,
+    // [R18] The yes, in the consent ledger (anchored to the disclosure's words).
+    onConsentGranted: () => partnerApi.recordBackgroundLocationConsent(true),
   });
 }
 

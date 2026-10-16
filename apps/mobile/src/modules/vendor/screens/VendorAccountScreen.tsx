@@ -26,6 +26,7 @@ import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../s
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { RefundRuleCard } from '../../../components/RefundRuleCard';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import type { StorePin } from '../../../lib/storePin';
@@ -123,6 +124,20 @@ export function VendorAccountScreen() {
     ),
   });
 
+  // [R3 · CAA s.70(3)] The store's own refund rule (owner only); the server's refusal is shown in its words.
+  const [refundRuleError, setRefundRuleError] = useState<string | null>(null);
+  const saveRefundRule = useVendorMutation({
+    mutationFn: (refundRule: string | null) => vendorApi.updateProfile({ refundRule }),
+    onMutate: () => setRefundRuleError(null),
+    onSuccess: () => {
+      setRefundRuleError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setRefundRuleError(
+      e?.response?.data?.error?.message ?? 'That refund rule could not be saved. Check it and try again.',
+    ),
+  });
+
   const [days, setDays] = useState<DayHours[]>([]);
   useEffect(() => {
     // [WR-007] Seed the editor ONLY from a successful read. A failed fetch
@@ -208,6 +223,15 @@ export function VendorAccountScreen() {
             saving={saveCallNumber.isPending}
             error={callNumberError}
             onSave={(p) => saveCallNumber.mutate(p)}
+          />
+        ) : null}
+
+        {isOwner ? (
+          <RefundRuleCard
+            value={store?.refundRule}
+            saving={saveRefundRule.isPending}
+            error={refundRuleError}
+            onSave={(rule) => saveRefundRule.mutate(rule)}
           />
         ) : null}
 
