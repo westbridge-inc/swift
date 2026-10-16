@@ -46,18 +46,20 @@ describe('dashboard settings: the store card', () => {
     expect(screen.queryByText(/Verification pending|Verified ✓/)).toBeNull();
   });
 
-  it('a store not yet checked says it is waiting for Swift', async () => {
+  // [REVIEW-F S3-1] "Waiting for Swift" was false for a store that has not uploaded, or was asked for more.
+  it('a store not yet checked says so and points to its documents, never that Swift is already checking', async () => {
     stubReads();
     setSelectedStore('store-1');
     renderWithQuery(<SettingsPage />);
     expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
-    expect(screen.getByText(/Shop · Town A · Waiting for Swift to check your documents/)).toBeTruthy();
+    expect(screen.getByText(/Shop · Town A · Not checked by Swift yet: see your documents in the Swift app/)).toBeTruthy();
+    expect(screen.queryByText(/Waiting for Swift/)).toBeNull();
   });
 
   it('never says "checked" once a checked document has lapsed', () => {
     const now = new Date('2026-10-16T12:00:00.000Z');
     expect(storeCheckLabel({ isVerified: true, activationValidUntil: '2026-10-16T11:59:59.000Z' }, now)).toBe('A checked document has expired: renew it in the Swift app');
     expect(storeCheckLabel({ isVerified: true, activationValidUntil: null }, now)).toBe('Documents checked by Swift');
-    expect(storeCheckLabel({ isVerified: false, activationValidUntil: '2999-01-01T00:00:00.000Z' }, now)).toBe('Waiting for Swift to check your documents');
+    expect(storeCheckLabel({ isVerified: false, activationValidUntil: '2999-01-01T00:00:00.000Z' }, now)).toBe('Not checked by Swift yet: see your documents in the Swift app');
   });
 });
