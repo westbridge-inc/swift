@@ -257,6 +257,10 @@ export async function revokeAuthSession(refreshToken: string, pushToken: string 
 
 // Auth
 export const authApi = {
+  /** [R26 · research G2] Whether the signed-in person must accept the served legal texts again, and what changed. */
+  legalAcceptance: () => api.get('/auth/legal-acceptance'),
+  /** [R26] The fresh tick, for the version the person read. */
+  acceptLegal: (version: string) => api.post('/auth/legal-acceptance', { version, accept: true }),
   sendOtp: (phone: string) => api.post('/auth/send-otp', { phone }),
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
   // [ALG-34] Step-up for an existing session — a money surface answers 403
@@ -955,6 +959,10 @@ export const partnerApi = {
     vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
   }, session?: AuthSessionSnapshot) =>
     api.put('/partner/vehicle', data, capturedAuthConfig(session)),
+  /** [R18] The answer to the background-location disclosure, for the consent
+   *  ledger. Names the platform so the ledger records where it was given. */
+  recordBackgroundLocationConsent: (granted: boolean) =>
+    api.post('/partner/consent/background-location', { granted }, { headers: { 'x-client-platform': Platform.OS } }),
 };
 
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
@@ -1291,7 +1299,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),

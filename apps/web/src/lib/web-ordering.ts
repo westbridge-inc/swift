@@ -1,5 +1,5 @@
 import { SITE_DOMAIN } from '@/site.domain';
-import { launch, type LaunchState } from '@/site.config';
+import { launch, type LaunchState } from '@/site.launch';
 
 /**
  * [Item 7] Where the pre-launch switch applies.

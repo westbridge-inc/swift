@@ -16,6 +16,15 @@
 # read-only census. Every line printed is a step, a count, a digest or a
 # reason code: never a secret, never a row.
 #
+# Every provider secret the copy's processes are wired to read gets a fresh
+# throwaway stand-in in the shape the API's boot guards check
+# (deploy/wall/stand-in.sh), so the copy boots in its host's own posture. Once
+# the copy's API and worker have started, their logs (the last 400 lines each,
+# redacted by deploy/wall/redact-log.py) are kept in the results directory
+# ($REHEARSAL_RESULTS_DIR, else ~/swift-rehearsal/rehearsal-<UTC>) however the
+# run ends, and the first FATAL lines are printed, so a failed boot can be
+# diagnosed after the copy is gone.
+#
 # It FAILS (non-zero exit, "REHEARSAL FAILED at step: …") on any step that does
 # not hold, and prints "PASSED" only after every step held: the copy, the
 # logins, each process's boot attestation (running, never restarted) and the
@@ -32,6 +41,9 @@ RUN_DIR=/run/swift-rehearsal-secrets
 # (Not GROUPS: bash reserves that name and ignores assignments to it.)
 WALL_GROUPS="swift_app swift_bypass_rls swift_audit_purge_owner swift_audit_purge_executor"
 LOCK="${SWIFT_REHEARSAL_LOCK:-/run/lock/swift-rls-logins.lock}"
+RESULTS="${REHEARSAL_RESULTS_DIR:-$HOME/swift-rehearsal/rehearsal-$(date -u +%Y%m%dT%H%M%SZ)}"
+# Set once the copy's API and worker were asked to start: from then on their logs are kept.
+STARTED=0
 
 die() { echo "REHEARSAL HOLD: $*" >&2; exit 1; }
 say() { echo "rehearsal: $*"; }
@@ -70,6 +82,34 @@ u = urlsplit(sys.stdin.read().strip())
 if u.scheme in ("postgresql", "postgres") and unquote(u.username or "") == sys.argv[1] and u.password:
     esc = lambda v: v.replace("\\", "\\\\").replace(":", "\\:")
     print(":".join(["postgres", "5432", esc(unquote(u.path[1:])), esc(sys.argv[1]), esc(unquote(u.password))]))'
+# The rendered Compose configuration in, the store names the copy's migrate, api
+# and worker read as NAME_FILE=/run/secrets/<store name> out (one per line).
+WIRED='import json, re, sys
+services = json.load(sys.stdin)["services"]
+names = set()
+for service in ("migrate", "api", "worker"):
+    for key, value in ((services.get(service) or {}).get("environment") or {}).items():
+        m = re.fullmatch(r"/run/secrets/([A-Z][A-Z0-9_]*)", str(value or "").strip())
+        if key.endswith("_FILE") and m:
+            names.add(m.group(1))
+print("\n".join(sorted(names)))'
+# save_logs: the copy's API and worker logs, the last 400 lines each, redacted,
+# into the results directory (0700); then the first 20 FATAL lines, so the run's
+# own log says why a process refused. Best effort: it never changes the outcome.
+save_logs() {
+  local svc
+  [ "$STARTED" = 1 ] || return 0
+  ( umask 077; mkdir -p "$RESULTS" && chmod 700 "$RESULTS" ) 2>/dev/null || { echo "rehearsal: could not create $RESULTS for the copy's logs" >&2; return 0; }
+  for svc in api worker; do
+    ( umask 077; "${REH[@]}" logs --no-color --tail 400 "$svc" 2>/dev/null | python3 -I "$HERE/redact-log.py" >"$RESULTS/$svc.log" ) || true
+  done
+  echo "rehearsal: logs: the copy's api and worker logs (last 400 lines each, redacted) are in $RESULTS" >&2
+  if grep -q FATAL "$RESULTS/api.log" "$RESULTS/worker.log" 2>/dev/null; then
+    echo "rehearsal: the first FATAL lines (redacted):" >&2
+    { grep -h FATAL "$RESULTS/api.log" "$RESULTS/worker.log" 2>/dev/null || true; } | head -n 20 | cut -c1-400 | sed 's/^/  /' >&2
+  fi
+  return 0
+}
 
 cmd_down() {
   STEP=down
@@ -112,13 +152,16 @@ cmd_up() {
     gen_value "$name" >/dev/null || die "gen-secrets.sh generates $name, which this rehearsal does not know how to generate; teach gen_value"
     gen_value "$name" | store set "$name" >/dev/null || die "could not store the rehearsal's $name"
   done
-  # Provider secrets the settings wire as NAME_FILE: random stand-ins (nothing
-  # can leave the internal network, so no real one is ever needed or read).
-  wired="$(grep -oE '^[A-Z][A-Z0-9_]*_FILE=/run/secrets/[A-Z][A-Z0-9_]*' "$DEPLOY/.env" | sed -E 's#.*/run/secrets/##' | sort -u || true)"
+  # Provider secrets the copy's processes are wired to read, exactly as Compose
+  # renders their settings (deploy/.env in any spelling Compose accepts):
+  # fresh stand-ins of the shape each boot guard checks (stand-in.sh). Nothing
+  # can leave the internal network, so no real one is ever needed or read.
+  wired="$("${REH[@]}" config --format json 2>/dev/null | python3 -I -c "$WIRED")" ||
+    die "could not read which secret files the copy's processes are wired to read (docker compose config)"
   count=0
   for name in $wired; do
     case " $generated DATABASE_URL SYSTEM_DATABASE_URL " in *" $name "*) continue ;; esac
-    openssl rand -hex 24 | store set "$name" >/dev/null || die "could not store a stand-in for $name"
+    "$HERE/stand-in.sh" "$name" | store set "$name" >/dev/null || die "could not store a stand-in for $name"
     count=$((count + 1))
   done
   store materialize >/dev/null || die "could not materialize the rehearsal secrets"
@@ -165,6 +208,7 @@ PY
   # EACH process must attest the wall in its own log (and, in production
   # mode, its system login), be running and never have restarted.
   STEP=boot
+  STARTED=1
   "${REH[@]}" up -d migrate api worker >/dev/null || die "the rehearsal API and worker could not start"
   local svc state log ok=0
   attested() {
@@ -180,7 +224,7 @@ PY
   log="$("${REH[@]}" logs --no-color api worker 2>/dev/null || true)"
   say "attestation lines: enforced=$(grep -c 'tenant wall: enforced' <<<"$log" || true) system-login=$(grep -c 'tenant wall: system login is a bypass member' <<<"$log" || true) (mode ${HOST_MODE:-unset})"
   say "errors: TenantInUnboundTransactionError=$(grep -c TenantInUnboundTransactionError <<<"$log" || true) FATAL=$(grep -c FATAL <<<"$log" || true)"
-  [ "$ok" = 1 ] || die "the API and the worker did not both attest the wall in deny mode within 3 minutes, each in its own log (inspect: docker compose -p $PROJECT logs api worker)"
+  [ "$ok" = 1 ] || die "the API and the worker did not both attest the wall in deny mode within 3 minutes, each in its own log (their FATAL lines follow; logs kept in $RESULTS)"
   for svc in api worker; do
     state="$(docker inspect -f '{{.State.Status}} restarts={{.RestartCount}}' "$("${REH[@]}" ps -q "$svc")" 2>/dev/null || echo missing)"
     say "boot: $svc $state"
@@ -217,7 +261,7 @@ PY
 
 WORK="$(mktemp -d)"
 # Any step that does not hold ends the run non-zero, and says where.
-trap 'rc=$?; rm -rf "$WORK"; if [ "$rc" -ne 0 ]; then echo "REHEARSAL FAILED at step: $STEP (exit $rc). Nothing passed. Remove it with: ./deploy/wall/rehearsal.sh down" >&2; fi' EXIT
+trap 'rc=$?; rm -rf "$WORK"; save_logs; if [ "$rc" -ne 0 ]; then echo "REHEARSAL FAILED at step: $STEP (exit $rc). Nothing passed. Remove it with: ./deploy/wall/rehearsal.sh down" >&2; fi' EXIT
 case "${1:-}" in
   up) shift; [ $# -eq 1 ] || die "usage: rehearsal.sh up <sha>"; cmd_up "$1" ;;
   down) shift; [ $# -eq 0 ] || die "usage: rehearsal.sh down"; cmd_down ;;

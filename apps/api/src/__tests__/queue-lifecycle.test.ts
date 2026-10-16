@@ -249,7 +249,12 @@ describe('BullMQ lifecycle', () => {
     try {
       const worker = (bullState.workers as FakeWorker[]).find(w => w.name === QUEUE_NAMES.VERIFICATION)!;
       await expect(worker.processor({ name: 'retention-sweep', data: {} })).resolves.toBeUndefined();
-      expect(upsert).toHaveBeenCalledTimes(3);
+      // One idempotent seed per registry default, in order: the three original classes and
+      // [R23] the owner's retention table (chat, resolved support tickets, safety records).
+      expect(upsert.mock.calls.map(([arg]) => (arg as { where: { dataClass: string } }).where.dataClass)).toEqual([
+        'sessions.expired', 'signup_attempts', 'notifications.old',
+        'chat.order_messages', 'support_tickets.resolved', 'safety.records',
+      ]);
       expect(log.info).toHaveBeenCalledWith({
         enforced: [],
         skipped: [
