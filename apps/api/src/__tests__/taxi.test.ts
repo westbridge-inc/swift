@@ -23,6 +23,7 @@ import { grantSuiteCapability } from '../lib/test-target-lock';
 import { readDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // [R048-001] this suite quiets the WHOLE driver pool between cases (an unscoped Driver.updateMany) so no leftover driver takes a trip — a stated, reviewable capability.
 grantSuiteCapability('unscoped-mutation');
@@ -396,7 +397,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
 
     await dispatch.claimOrder(rideId, driver.driverId, 'DRIVER');
     // Fast-forward the ride to completion through the locked chain
-    await app.prisma.order.update({ where: { id: rideId }, data: { status: 'DELIVERED', deliveredAt: new Date() } });
+    await walkOrderStatus(app.prisma, rideId, 'DELIVERED', { deliveredAt: new Date() });
 
     const rate = await inject('POST', `/api/v1/driver/rides/${rideId}/rate-customer`, { score: 5, comment: 'Great passenger' }, driver.token);
     expect(rate.statusCode).toBe(200);
@@ -463,7 +464,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
     // Advance to en route — the driver is physically heading to the pickup, app
     // likely backgrounded. The socket room only reaches a foregrounded subscriber.
-    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_EN_ROUTE' } });
+    await walkOrderStatus(app.prisma, ride.id, 'DRIVER_EN_ROUTE');
 
     const orders = new OrderService(app.prisma, app.io);
     await orders.cancelOrder(ride.id, customer.userId, 'Changed my mind');
@@ -526,7 +527,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     }, customer.token);
     const ride = res.json().data.ride;
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
-    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'RIDE_IN_PROGRESS' } });
+    await walkOrderStatus(app.prisma, ride.id, 'RIDE_IN_PROGRESS');
     const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'changed mind' }, driver.token);
     expect(cancel.statusCode).toBe(400);
   });
@@ -541,10 +542,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     const ride = res.json().data.ride;
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
     const verifiedAt = new Date();
-    await app.prisma.order.update({
-      where: { id: ride.id },
-      data: { status: 'DRIVER_ARRIVED', ridePinVerified: true, ridePinVerifiedAt: verifiedAt },
-    });
+    await walkOrderStatus(app.prisma, ride.id, 'DRIVER_ARRIVED', { ridePinVerified: true, ridePinVerifiedAt: verifiedAt });
 
     const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'changed mind' }, driver.token);
     expect(cancel.statusCode).toBe(400);
@@ -568,7 +566,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     const ride = res.json().data.ride;
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
     // Driver is en route, then the phone goes dark: currentRideId still set, GPS silent.
-    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_EN_ROUTE' } });
+    await walkOrderStatus(app.prisma, ride.id, 'DRIVER_EN_ROUTE');
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: STALE } });
 
     const enqueued: string[] = [];
@@ -608,7 +606,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     // (still pre-custody — no passenger aboard).
     await inject('PUT', `/api/v1/driver/rides/${ride.id}/en-route`, {}, first.token).catch(() => {});
     await inject('PUT', `/api/v1/driver/rides/${ride.id}/arrived`, {}, first.token).catch(() => {});
-    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_ARRIVED', ridePinAttempts: 5 } });
+    await walkOrderStatus(app.prisma, ride.id, 'DRIVER_ARRIVED', { ridePinAttempts: 5 });
     const cancel = await inject('POST', `/api/v1/driver/rides/${ride.id}/cancel`, { reason: 'malicious budget burn' }, first.token);
     expect(cancel.statusCode).toBe(200);
 
@@ -640,7 +638,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     }, customer.token);
     const ride = res.json().data.ride;
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
-    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_ASSIGNED' } });
+    await walkOrderStatus(app.prisma, ride.id, 'DRIVER_ASSIGNED');
     // The driver NEVER sent a fix (or the sweep cleared it): lastLocationUpdate
     // is NULL, currentRideId is set. The old watchdog query (`lt cutoff` only)
     // skipped this shape, so the ride hung forever.
@@ -668,7 +666,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     const ride = res.json().data.ride;
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
     // Passenger is physically in the car when the driver's signal drops.
-    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'RIDE_IN_PROGRESS' } });
+    await walkOrderStatus(app.prisma, ride.id, 'RIDE_IN_PROGRESS');
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: STALE } });
     await app.redis.del(`ops_page:taxi_driver_dropped:${ride.id}`);
 
@@ -704,10 +702,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     }, customer.token);
     const ride = res.json().data.ride;
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
-    await app.prisma.order.update({
-      where: { id: ride.id },
-      data: { status: 'DRIVER_ARRIVED', ridePinVerified: true, ridePinVerifiedAt: new Date() },
-    });
+    await walkOrderStatus(app.prisma, ride.id, 'DRIVER_ARRIVED', { ridePinVerified: true, ridePinVerifiedAt: new Date() });
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: STALE } });
     await app.redis.del(`ops_page:taxi_driver_dropped:${ride.id}`);
 
@@ -738,7 +733,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
     }, customer.token);
     const ride = res.json().data.ride;
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
-    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_EN_ROUTE' } });
+    await walkOrderStatus(app.prisma, ride.id, 'DRIVER_EN_ROUTE');
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { lastLocationUpdate: new Date() } }); // fresh
 
     const out = await recoverStrandedTaxiRides(app.prisma, app.redis, app.io, async () => {});
@@ -1444,7 +1439,7 @@ describe('Driver cancellationRate accountability (was a dead 0.0 field)', () => 
     const ride = res.json().data.ride;
     await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
     // Fast-forward to a passenger aboard, then complete through the real route.
-    await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date() } });
+    await walkOrderStatus(app.prisma, ride.id, 'RIDE_IN_PROGRESS', { pickedUpAt: new Date() });
     // [M-29] A cash ride completes through its fare outcome, never a bare tap.
     expect((await inject('PUT', `/api/v1/driver/rides/${ride.id}/complete`, {}, driver.token)).statusCode).toBe(409);
     const done = await inject('POST', `/api/v1/driver/rides/${ride.id}/handover`, { outcome: 'paid', gps: SOUTH }, driver.token);
@@ -1466,10 +1461,7 @@ describe('Driver cancellationRate accountability (was a dead 0.0 field)', () => 
     }, customer.token);
     const rideId = requested.json().data.ride.id as string;
     expect((await inject('POST', `/api/v1/driver/rides/${rideId}/accept`, {}, driver.token)).statusCode).toBe(200);
-    await app.prisma.order.update({
-      where: { id: rideId },
-      data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date(Date.now() - 5 * 60_000) },
-    });
+    await walkOrderStatus(app.prisma, rideId, 'RIDE_IN_PROGRESS', { pickedUpAt: new Date(Date.now() - 5 * 60_000) });
     const before = await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } });
 
     const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
