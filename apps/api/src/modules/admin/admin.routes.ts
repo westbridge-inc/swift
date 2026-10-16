@@ -6864,7 +6864,8 @@ export async function adminRoutes(app: FastifyInstance) {
   // removed (SWIFT-023) — dropped here; 'search' was missing, so search's failed
   // jobs were invisible in the DLQ — added.
   // [row 266] 'offer' = the offer fast lane (offer timeouts only).
-  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'offer', 'search'] as const;
+  // [row 331] 'safety' = the safety lane (the SOS backstop + Trip Guardian ticks).
+  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'offer', 'safety', 'search'] as const;
 
   /** GET /alerts/health — ack rate + median time-to-ack per alert kind
    *  (alerts spec §A4): how silently-failing pushes get caught before churn.
