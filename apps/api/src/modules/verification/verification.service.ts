@@ -18,6 +18,7 @@ import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-rec
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
+import { configuredDays, DAY_MS, DEFAULT_REJECTED_DOCUMENT_DAYS, isPersonalDocType, PARTNER_DOCUMENT_WHERE, REJECTED_DOCUMENT_DAYS_KEY } from './retention-rules';
 import { assertNotRecused } from './recusal';
 import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
@@ -26,7 +27,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
-import { isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
@@ -349,7 +350,8 @@ const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
   WRONG_DOCUMENT: 'This is not the document we asked for.',
   FACE_MISMATCH: FRAUD_GENERIC_TEXT,
   NAME_MISMATCH: 'The name on this document does not match your account.',
-  INSURANCE_NOT_HIRE: 'This policy does not cover hire/passenger use — taxi work needs HIRE-class insurance.',
+  // [R13] Riders see why: the policy's "limitations as to use" must allow paid work.
+  INSURANCE_NOT_HIRE: 'This policy does not permit use for hire or reward. Taxi work needs cover for passengers carried for hire; deliveries need cover for commercial use. Ask your insurer for it and upload the new certificate.',
   WRONG_PLATE_CLASS: 'A taxi must carry an H registration mark — this vehicle is not registered as a hire car.',
   // [DOC-1 §24.1 · §8.5] The fraud class reads IDENTICALLY and never names the
   // signal: Swift does not tell a person its system believes their document is
@@ -1363,10 +1365,16 @@ export class VerificationService {
     if (taxi && plateClassOf(plate ?? '') !== 'H') {
       throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi needs an H-series registration mark on its registered vehicle. A missing or different plate cannot be approved.');
     }
-    if (doc.docType === 'vehicle_insurance' && vehicleType && isPassengerVehicle(vehicleType)
+    // [R13 · owner 15 Oct 2026, research D6] EVERY motor vehicle, not only a taxi, needs insurance whose
+    // "Limitations as to use" permit use for hire or reward (taxi: passengers carried for hire; delivery:
+    // commercial use). A person reads the wording and records the decision; a private-use policy is
+    // rejected as INSURANCE_NOT_HIRE. Only a vehicle known to have no motor (a bicycle) is exempt; an
+    // insurance certificate whose vehicle cannot be told is treated as a motor vehicle's.
+    if (doc.docType === 'vehicle_insurance' && !(vehicleType && !isMotorVehicle(vehicleType))
       && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
-      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT',
-        'A passenger vehicle needs HIRE-class insurance with the hire class confirmed by the reviewer. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
+      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT', taxi || (vehicleType && isPassengerVehicle(vehicleType))
+        ? 'A passenger vehicle needs HIRE-class insurance: cover for passengers carried for hire, confirmed by the reviewer from the policy’s limitations as to use. Confirm it, or reject the document as INSURANCE_NOT_HIRE.'
+        : 'A motor vehicle that delivers needs insurance that permits use for hire or reward (commercial use), and the reviewer must confirm it from the policy’s limitations as to use. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
     }
   }
 
@@ -2556,6 +2564,47 @@ export class VerificationService {
     const flagged = { ...result, collided: true };
     if (result.status !== 'approved') return flagged;
     return { ...flagged, status: 'pending_manual', reason: 'Duplicate of a document already on another account — second review required' };
+  }
+
+  /**
+   * [R24 · research C4] A partner's REJECTED document is not needed once the decision stands:
+   * a PERSONAL one is deleted the configured number of days after the rejection (30 unless the
+   * lawyer's number is set); a vehicle or business one after its registry window (90 days).
+   * This only sets the retention clock — never later than one it already has, never for an AML
+   * record (its own law keeps it), never under a legal hold — and the reaper below deletes it
+   * when the clock falls due. A revoked approval is not a rejection (its record is evidence
+   * history), and a customer's own ID follows the customer-ID rule, not this one (an individual
+   * service provider's documents, stored with role CUSTOMER, are partner documents: PARTNER_DOCUMENT_WHERE).
+   * Continues the VERIFY-DOCS PR-V2 work (fix/verify-docs-retention).
+   */
+  async scheduleRejectedDocumentRetention(batch = 500): Promise<number> {
+    const personalDays = await configuredDays(this.prisma, REJECTED_DOCUMENT_DAYS_KEY, DEFAULT_REJECTED_DOCUMENT_DAYS);
+    const rejected = await this.prisma.verificationDocument.findMany({
+      where: {
+        OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
+        AND: [PARTNER_DOCUMENT_WHERE], reviewedAt: { not: null }, purgedAt: null, legalHoldId: null,
+      },
+      select: { id: true, docType: true, role: true, reviewedAt: true, retentionExpiresAt: true, user: { select: { countryCode: true } } },
+      orderBy: { reviewedAt: 'asc' }, take: batch,
+    });
+    let scheduled = 0;
+    for (const doc of rejected) {
+      const config = await this.countryConfig.getByCode(doc.user.countryCode);
+      const ruling = await retentionDaysFor(this.prisma, { countryCode: doc.user.countryCode, docType: doc.docType, role: doc.role, countryDefaultDays: config.dataRetentionDays });
+      if (ruling.amlRecord) continue;
+      const days = isPersonalDocType(doc.docType) ? personalDays : ruling.days;
+      const due = new Date(doc.reviewedAt!.getTime() + days * DAY_MS);
+      if (doc.retentionExpiresAt && doc.retentionExpiresAt.getTime() <= due.getTime()) continue;
+      const set = await this.prisma.verificationDocument.updateMany({
+        where: {
+          id: doc.id, purgedAt: null, legalHoldId: null, OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
+          AND: [{ OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: due } }] }],
+        },
+        data: { retentionExpiresAt: due },
+      });
+      scheduled += set.count;
+    }
+    return scheduled;
   }
 
   /** Purge documents whose retention window elapsed: delete the stored object,

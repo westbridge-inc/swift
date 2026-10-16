@@ -12,6 +12,7 @@ import {
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
 import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
 // STORE-001 — the reviewer's side of moderation.
@@ -123,10 +124,11 @@ export default function ModerationPage() {
 
   const busy = decideReport.isPending || decideRatingReport.isPending || decideHeld.isPending;
 
-  const TABS: { key: Tab; label: string; count: number }[] = [
-    { key: 'content', label: 'Reported content', count: pendingTotal ?? contentRows.length },
-    { key: 'reviews', label: 'Reported reviews', count: ratingReports.length },
-    { key: 'held', label: 'Held reviews', count: heldReviews.length },
+  // A count is shown only once its read succeeded: a failed or pending read is '—', never 0.
+  const TABS: { key: Tab; label: string; count: number | '—' }[] = [
+    { key: 'content', label: 'Reported content', count: reports.isSuccess ? pendingTotal ?? contentRows.length : '—' },
+    { key: 'reviews', label: 'Reported reviews', count: ratings.isSuccess ? ratingReports.length : '—' },
+    { key: 'held', label: 'Held reviews', count: ratings.isSuccess ? heldReviews.length : '—' },
   ];
 
   return (
@@ -178,6 +180,8 @@ export default function ModerationPage() {
 
           {reports.isLoading ? (
             <p className="text-[var(--muted)] text-sm">Loading…</p>
+          ) : reports.isError ? (
+            <QueryFailed error={reports.error} what="the reported content" onRetry={() => void reports.refetch()} retrying={reports.isFetching} />
           ) : contentRows.length === 0 ? (
             <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-[var(--muted)] text-sm">
               Nothing {status.toLowerCase()}.
@@ -295,6 +299,8 @@ export default function ModerationPage() {
           </p>
           {ratings.isLoading ? (
             <p className="text-[var(--muted)] text-sm">Loading…</p>
+          ) : ratings.isError ? (
+            <QueryFailed error={ratings.error} what="the reported reviews" onRetry={() => void ratings.refetch()} retrying={ratings.isFetching} />
           ) : ratingReports.length === 0 ? (
             <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-[var(--muted)] text-sm">
               No reported reviews waiting.
@@ -345,6 +351,8 @@ export default function ModerationPage() {
           </p>
           {ratings.isLoading ? (
             <p className="text-[var(--muted)] text-sm">Loading…</p>
+          ) : ratings.isError ? (
+            <QueryFailed error={ratings.error} what="the held reviews" onRetry={() => void ratings.refetch()} retrying={ratings.isFetching} />
           ) : heldReviews.length === 0 ? (
             <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-[var(--muted)] text-sm">
               Nothing is being held.

@@ -40,7 +40,7 @@ function TimelineActor({ actor, applicant }: { actor: string | null; applicant: 
   const isApplicant = actor === applicant.id;
   const person = useQuery({ queryKey: ['review-actor', actor], queryFn: () => fetchUserDetail(actor!), enabled: !system && !isApplicant });
   const name = [person.data?.data?.firstName, person.data?.data?.lastName].filter(Boolean).join(' ');
-  return <small>{system ? 'System' : isApplicant ? applicant.name : name || (person.isLoading ? 'Loading reviewer…' : 'Reviewer name unavailable')}</small>;
+  return <small>{system ? 'System' : isApplicant ? applicant.name : name || (person.isLoading ? 'Loading reviewer…' : person.isError ? 'Couldn\u2019t load the reviewer\u2019s name' : 'Reviewer name unavailable')}</small>;
 }
 
 export default function VerificationPage() {
@@ -161,7 +161,9 @@ export default function VerificationPage() {
   const expiryOk = !needsExpiry || (!!expiresAt && Date.parse(expiresAt) > now);
   const isInsurance = selected?.docType === 'vehicle_insurance';
   const insuranceReady = insurance.insurerName.trim() && insurance.policyNumber.trim() &&
-    (insurance.coverageClass !== 'HIRE' || (insurance.hireClassConfirmed && insurance.plateCrossChecked));
+    // [R13 · research D6] Every motor vehicle's policy must permit use for hire or reward (taxi: passengers
+    // for hire; delivery: commercial use), read and confirmed by the reviewer; a private-use policy is rejected.
+    insurance.coverageClass === 'HIRE' && insurance.hireClassConfirmed && insurance.plateCrossChecked;
   const needsNumber = selected?.reviewerTypes?.includes('documentNumber') ?? false;
   const needsIssuedOn = selected?.reviewerTypes?.includes('issuedOn') ?? false;
   // [R16] A business registration: the reviewer says what it is; only a yearly business NAME needs its year.
@@ -321,9 +323,10 @@ export default function VerificationPage() {
               {isInsurance && <fieldset disabled={busy}><legend>Insurance 5-point check</legend>
                 <label>Insurer<input placeholder="Insurer" value={insurance.insurerName} onChange={(e) => setInsurance({ ...insurance, insurerName: e.target.value })} /></label>
                 <label>Policy number<input placeholder="Policy number" value={insurance.policyNumber} onChange={(e) => setInsurance({ ...insurance, policyNumber: e.target.value })} /></label>
-                <label>Coverage class<select value={insurance.coverageClass} onChange={(e) => setInsurance({ ...insurance, coverageClass: e.target.value as 'HIRE' | 'PRIVATE' })}><option value="HIRE">HIRE class</option><option value="PRIVATE">PRIVATE class</option></select></label>
-                <label className="rc-check"><input type="checkbox" checked={insurance.hireClassConfirmed} onChange={(e) => setInsurance({ ...insurance, hireClassConfirmed: e.target.checked })} />Hire class confirmed (required for live rides)</label>
-                <label className="rc-check"><input type="checkbox" checked={insurance.plateCrossChecked} onChange={(e) => setInsurance({ ...insurance, plateCrossChecked: e.target.checked })} />Cross-checked against the H-plate</label>
+                <label>Coverage class<select value={insurance.coverageClass} onChange={(e) => setInsurance({ ...insurance, coverageClass: e.target.value as 'HIRE' | 'PRIVATE' })}><option value="HIRE">Hire or reward (taxi: passengers for hire; delivery: commercial use)</option><option value="PRIVATE">Private use only</option></select></label>
+                {insurance.coverageClass === 'PRIVATE' && <p className="rc-error">A private-use policy cannot be approved for paid work. Reject it as “Insurance does not permit use for hire or reward”.</p>}
+                <label className="rc-check"><input type="checkbox" checked={insurance.hireClassConfirmed} onChange={(e) => setInsurance({ ...insurance, hireClassConfirmed: e.target.checked })} />Hire class confirmed: I read the policy’s limitations as to use, and they permit use for hire or reward</label>
+                <label className="rc-check"><input type="checkbox" checked={insurance.plateCrossChecked} onChange={(e) => setInsurance({ ...insurance, plateCrossChecked: e.target.checked })} />Cross-checked against the vehicle’s plate (an H-plate for a taxi)</label>
               </fieldset>}
             </div>}
             <section className="rc-history"><h3>History and audit timeline</h3>

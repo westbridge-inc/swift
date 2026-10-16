@@ -1119,6 +1119,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
+        // [R24] A partner's rejected document gets its clock first (30 days after the rejection
+        // for an ID-type document, the registry window otherwise), so the reaper below deletes
+        // the ones already due in the same run. A failure here never stops the reaper.
+        try {
+          await verification.scheduleRejectedDocumentRetention();
+        } catch (err) {
+          ctx.log.error({ err }, 'rejected-document retention scheduling failed; the reaper still runs');
+        }
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
         try {
@@ -1856,6 +1864,33 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'vat-threshold-watch') {
+        // [Owner legal plan 15 Oct · R10] Daily: how close each real tenant's
+        // weekly fees are to the VAT registration threshold. Pages platform
+        // admins once a month per state, naming the 15-day deadline.
+        const { vatTracker, vatAlert } = await import('../modules/billing/vat-tracker');
+        const tenants = await ctx.prisma.tenant.findMany({ where: { kind: 'PRODUCTION', isActive: true }, select: { id: true } });
+        for (const { id } of tenants) {
+          const tracker = await vatTracker(ctx.prisma, id);
+          const alert = vatAlert(tracker);
+          if (alert) {
+            const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+            const key = `vat-threshold:${id}:${tracker.status}:${tracker.months[tracker.months.length - 1]!.month}`;
+            await opsPageOnce(ctx, key, 32 * 86_400, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                // The company's VAT position, not one tenant's event [NOC-A F45].
+                tenantId: null,
+                ...alert,
+                data: { kind: 'vat_threshold', status: tracker.status, tenantId: id, last12Months: tracker.last12Months, expectedNext12Months: tracker.expectedNext12Months },
+                dedupeKey: key,
+              }),
+            );
+          }
+          ctx.log.info({ tenantId: id, status: tracker.status, last12Months: tracker.last12Months, expectedNext12Months: tracker.expectedNext12Months }, 'vat threshold watch');
+        }
+        return;
+      }
+
       if (job.name === 'agent-cash-sla') {
         // Suspense SLA [san spec 4.6]: an unmatched agent payment older than
         // 24h is a paid-but-suspended person — page the founder, deduped per
@@ -2431,7 +2466,8 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   });
 
   // [DOC-1 §1.3 · P1-3] The image-policy sweep: after the expiry sweep, purge the images of
-  // committed PERSONAL documents whose type is active and whose extraction succeeded.
+  // committed PERSONAL documents whose type is active and whose extraction succeeded, and
+  // [R24] every partner PERSONAL image 30 days after its decision.
   await queues.verificationQueue.add('image-policy-sweep', {}, {
     repeat: { pattern: '20 6 * * *' },
     removeOnComplete: 30,
@@ -2568,6 +2604,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Billing invariants: nightly 03:30 (after the 03:00 money jobs settle).
   await queues.dispatchQueue.add('billing-invariants', {}, {
     repeat: { pattern: '30 3 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
+  });
+  // [Owner legal plan 15 Oct · R10] VAT registration threshold watch, daily at
+  // 08:00 Guyana time (a working morning, so the page is read the same day).
+  await queues.dispatchQueue.add('vat-threshold-watch', {}, {
+    repeat: { pattern: '0 8 * * *', tz: GUYANA_TZ },
     removeOnComplete: 7,
     removeOnFail: 7,
   });

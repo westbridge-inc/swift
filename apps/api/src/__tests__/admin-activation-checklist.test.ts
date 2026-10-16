@@ -134,18 +134,20 @@ const approve = (vendorId: string) => app.inject({
 });
 const read = (url: string) => app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${adminToken}` } });
 
-/** Engage DOC-INV-27 for GY (a BUSINESS-bucket type goes active) and leave the operator block unconfigured, so a
- *  store whose documents are complete still has an INCOMPLETE disclosure ('operator' missing). Always restored. */
-async function withDisclosureGateEngagedAndIncomplete<T>(work: () => Promise<T>): Promise<T> {
+/** Engage DOC-INV-27 for GY (a BUSINESS-bucket type goes active) and take the store's typed address away, so a
+ *  store whose documents are complete still has an INCOMPLETE disclosure ('address' missing: no business record
+ *  reads one, and nothing is self-declared). Always restored. [R3] The operator block can no longer be the missing
+ *  element: it is the ONE OPERATOR constant, never configuration. */
+async function withDisclosureGateEngagedAndIncomplete<T>(storeId: string, work: () => Promise<T>): Promise<T> {
   const code = registryCode('GY', 'business_registration');
   await system(() => app.prisma.docType.update({ where: { code }, data: { isActive: true, legalFactsVerifiedAt: new Date() } }));
   activatedDocTypes.push(code);
-  const savedEmail = process.env['SUPPORT_EMAIL'];
-  delete process.env['SUPPORT_EMAIL'];
+  const saved = await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: storeId }, select: { addressLine1: true, addressLine2: true } }));
+  await system(() => app.prisma.vendor.update({ where: { id: storeId }, data: { addressLine1: '', addressLine2: null } }));
   try {
     return await work();
   } finally {
-    process.env['SUPPORT_EMAIL'] = savedEmail;
+    await system(() => app.prisma.vendor.update({ where: { id: storeId }, data: saved }));
     await system(() => app.prisma.docType.update({ where: { code }, data: { isActive: false, legalFactsVerifiedAt: null } }));
   }
 }
@@ -196,11 +198,11 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
     const owner = await makeUser('Disclose');
     const store = await makeStore(owner.id);
     for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
-    await withDisclosureGateEngagedAndIncomplete(async () => {
+    await withDisclosureGateEngagedAndIncomplete(store.id, async () => {
       const res = await approve(store.id);
       expect(res.statusCode).toBe(409);
       expect(res.json().error.code).toBe('DISCLOSURE_INCOMPLETE');
-      expect(res.json().error.message).toMatch(/operator details/);
+      expect(res.json().error.message).toMatch(/the business address/);
       expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: 'PENDING_APPROVAL', isVerified: false });
     });
   });
@@ -320,7 +322,7 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
     const owner = await makeUser('Reinstate');
     const store = await makeStore(owner.id, 'SUSPENDED', { suspensionSource: 'ADMIN', isVerified: true });
     for (const t of SUPERMARKET_DOCS) await doc(owner.id, t, 'APPROVED');
-    await withDisclosureGateEngagedAndIncomplete(async () => {
+    await withDisclosureGateEngagedAndIncomplete(store.id, async () => {
       const held = await approve(store.id);
       expect(held.statusCode).toBe(409);
       expect(held.json().error.code).toBe('DISCLOSURE_INCOMPLETE');
@@ -490,9 +492,9 @@ describe('[MC-PR2] GET /vendors/:id/activation-checklist — the per-document tr
     const ready = (await read(`/api/v1/admin/vendors/${store.id}/activation-checklist`)).json().data;
     expect(ready).toMatchObject({ next: 'CAN_ACTIVATE', ready: true });
     expect(ready.checklist.complete).toBe(true);
-    await withDisclosureGateEngagedAndIncomplete(async () => {
+    await withDisclosureGateEngagedAndIncomplete(store.id, async () => {
       const held = (await read(`/api/v1/admin/vendors/${store.id}/activation-checklist`)).json().data;
-      expect(held).toMatchObject({ next: 'NEEDS_DISCLOSURE', ready: false, disclosure: { engaged: true, complete: false, missing: ['operator'] } });
+      expect(held).toMatchObject({ next: 'NEEDS_DISCLOSURE', ready: false, disclosure: { engaged: true, complete: false, missing: ['address'] } });
     });
   });
 

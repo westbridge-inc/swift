@@ -340,6 +340,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
 
   // ── Finance ─────────────────────────────────────────────────────────────
   'GET /finance/revenue': c('C0', 'finance.read'),
+  'GET /finance/vat-tracker': c('C0', 'finance.read'),
   'GET /finance/settlements': c('C0', 'finance.read'),
   'GET /finance/cash-settlements': c('C0', 'finance.read'),
   'GET /finance/payment-mix': c('C0', 'finance.read'),

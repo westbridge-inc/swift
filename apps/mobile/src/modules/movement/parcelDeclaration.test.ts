@@ -23,7 +23,7 @@ describe('[owner #67] the words', () => {
 
   it('the list names every banned kind of goods, the server’s classes', () => {
     expect(PARCEL_BANNED_GOODS).toBe(
-      'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel, 18+ items, weapons, fireworks, or letters, documents and mail.',
+      'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel, 18+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, currency and payment cards, or letters, documents and mail.',
     );
   });
 

@@ -238,6 +238,12 @@ export function isPassengerVehicle(vehicleType: VehicleType): boolean {
   return VEHICLE_CLASSES[vehicleType]?.rideClass != null;
 }
 
+/** [R13] A vehicle with a motor: every class whose documents include the motor-vehicle set (licence,
+ *  registration, insurance). Only the bicycle has none. */
+export function isMotorVehicle(vehicleType: VehicleType): boolean {
+  return VEHICLE_CLASSES[vehicleType]?.docProfiles.includes('MOVER_MOTOR') ?? true;
+}
+
 /** Which operational entity a mover is: a taxi Driver or a delivery/courier Rider. */
 export type MoverRole = 'DRIVER' | 'RIDER';
 

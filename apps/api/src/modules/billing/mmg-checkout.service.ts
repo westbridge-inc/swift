@@ -30,6 +30,7 @@ import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityC
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
+import { FEE_SELLER, type FeeSeller } from './fee-seller';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout (MMG-CHECKOUT-API.md is the contract).
@@ -127,6 +128,8 @@ export interface CheckoutView {
   swiftReference: string;
   /** [MMG support lookup] MMG's transaction, only once CONFIRMED (partnerReceiptIds). */
   mmgTransactionId: string | null;
+  /** [Owner 15 Oct 2026 · ruling #63] Who sold the weekly fee: Swift's operator (legal/operator.ts), on every receipt. */
+  seller: FeeSeller;
 }
 
 export interface StartedCheckout {
@@ -1462,6 +1465,7 @@ export class MmgCheckoutService {
       confirmedAt: intent.confirmedAt ? intent.confirmedAt.toISOString() : null,
       subscriptionStatus,
       ...partnerReceiptIds(intent),
+      seller: FEE_SELLER,
     };
   }
 }
