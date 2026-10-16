@@ -20,12 +20,10 @@ import { nanoid } from 'nanoid';
 import type { PrismaClient } from '@prisma/client';
 import { issueHandoverPhoto } from '../../modules/cash/handover-evidence';
 import type { StorageProvider } from '../../providers/storage/storage-provider';
+import { REAL_PNG } from './real-image';
 
-/** A PNG signature followed by synthetic bytes: it passes the issuer's magic-byte and size checks. */
-export const SYNTHETIC_HANDOVER_PNG = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  Buffer.alloc(64, 1),
-]);
+/** A real 1×1 PNG ([Row 108] the storage seam reads every photo with the real decoder). */
+export const SYNTHETIC_HANDOVER_PNG = REAL_PNG;
 
 /** Synthetic storage: a unique object key per upload, nothing written anywhere. The issuer uses only `upload`. */
 export const syntheticProofStorage = {

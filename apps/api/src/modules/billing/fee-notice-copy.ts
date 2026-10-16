@@ -34,10 +34,10 @@ export function feeDueLine(amount: number, currencyCode: string, due: Date | nul
   return `${opts.first ? 'Your first weekly fee' : 'The weekly fee'} of ${formatMoney(amount, currencyCode)} is due ${due ? `on ${guyanaDay(due)}` : 'now'}.`;
 }
 
-/** Fee paid ahead that already covers the fee: nothing to pay, so no way to pay is named.
- *  [OWNER RULING 8 Oct, NO "WALLET"] never "balance", "wallet" or "top up". */
+/** The fee is already paid (money received before it was due): nothing to pay, so no way to pay is named.
+ *  [OWNER RULING 8 Oct, NO "WALLET"] never "balance", "wallet" or "top up"; [owner #62] never "paid ahead". */
 export function feeCoveredLine(amount: number, currencyCode: string, opts: { first?: boolean } = {}): string {
-  return `Your fee paid ahead already covers ${opts.first ? 'your first weekly fee' : 'the weekly fee'} of ${formatMoney(amount, currencyCode)}.`;
+  return `${opts.first ? 'Your first weekly fee' : 'The weekly fee'} of ${formatMoney(amount, currencyCode)} is already paid.`;
 }
 
 /** What happens after paying: true on every rail, promising no way to pay. */

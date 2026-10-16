@@ -7,13 +7,14 @@
  * stored only as a salted hash; rotation invalidates the old codes at once;
  * expiry forces DL-9; status names the content pack as ABSENT until a seed exists.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import crypto from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
-import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, reviewStatus, DEFAULT_REVIEW_TTL_DAYS, ReviewProvisionRefusedError } from '../modules/review/provision';
+import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, reviewStatus, DEFAULT_REVIEW_TTL_DAYS, DEFAULT_REVIEW_PHONE_PREFIX, REVIEW_IDENTIFIER_ATTEMPTS, ReviewProvisionRefusedError, reviewIdentifierDigits } from '../modules/review/provision';
 import { hashReviewCode } from '../modules/review/credentials';
 
 const RUN = nanoid(6).replace(/[^a-z0-9]/gi, '0').toLowerCase();
@@ -31,10 +32,13 @@ beforeAll(async () => {
 
 const REAL = `review-real-${RUN}`;
 const RACE = `review-race-${RUN}`;
+const CLASH = `review-clash-${RUN}`;
+const WIDE = `review-wide-${RUN}`;
+const FULL = `review-full-${RUN}`;
 
 afterAll(async () => {
   await system(async () => {
-    for (const t of [REAL, RACE]) {
+    for (const t of [REAL, RACE, CLASH, WIDE, FULL]) {
       await app.prisma.reviewCredential.deleteMany({ where: { tenantId: t } });
       await app.prisma.reviewSession.deleteMany({ where: { tenantId: t } });
       await app.prisma.user.deleteMany({ where: { tenantId: t } });
@@ -72,6 +76,98 @@ describe('[STA-1] review:provision and friends', () => {
     const t = await system(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: RACE } }));
     expect([t.kind, t.purgeProtected, t.isActive]).toEqual(['REVIEW', true, true]);
     expect(await system(() => app.prisma.reviewSession.count({ where: { tenantId: RACE } }))).toBe(2);
+    // Both runs drew from the same range: every login is its own, none was lost.
+    expect(new Set([...a.credentials, ...b.credentials].map((c) => c.identifier)).size).toBe(6);
+    expect(await system(() => app.prisma.reviewCredential.count({ where: { tenantId: RACE } }))).toBe(6);
+  });
+
+  it('a number taken between the look-up and the insert is not a failure: the login draws another number', async () => {
+    // Another account takes the drawn number just before our insert — what a
+    // second provisioning run on the same range does (the CI race, 14 Oct).
+    const prefix = '+59200096';
+    let taken = '';
+    for (let n = 0; n < 100 && !taken; n++) {
+      const candidate = `${prefix}${String(n).padStart(2, '0')}`;
+      if (!(await system(() => app.prisma.user.findUnique({ where: { phone: candidate }, select: { id: true } })))) taken = candidate;
+    }
+    expect(taken).not.toBe('');
+    const realRandomInt = crypto.randomInt.bind(crypto) as (min: number, max: number) => number;
+    let first = true;
+    const draws = vi.spyOn(crypto, 'randomInt').mockImplementation(((min: number, max: number) => {
+      if (max === 100 && first) { first = false; return Number(taken.slice(-2)); }
+      return realRandomInt(min, max);
+    }) as unknown as typeof crypto.randomInt);
+    let racerId = '';
+    const db = app.prisma;
+    const users = new Proxy(db.user, { get(target, prop) {
+      if (prop === 'create') {
+        return async (args: { data: { phone?: string } }) => {
+          if (args.data.phone === taken && !racerId) {
+            racerId = (await target.create({ data: { phone: taken, firstName: 'Racing', lastName: 'Provision', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: CLASH, isSynthetic: true } })).id;
+          }
+          return target.create(args as never);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const racing = new Proxy(db, { get(target, prop) {
+      if (prop === 'user') return users;
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }) as typeof db;
+    try {
+      const r = await system(() => provisionReviewTenant(racing, { slug: CLASH, phonePrefix: prefix }));
+      expect(racerId, 'the racer took the number first').not.toBe('');
+      const customer = r.credentials.find((c) => c.role === 'CUSTOMER')!;
+      expect(customer.identifier).not.toBe(taken);
+      expect(customer.identifier).toMatch(/^\+59200096\d{2}$/);
+      expect(r.credentials).toHaveLength(3);
+      // The racer keeps its number; ours is a different account.
+      const holder = await system(() => app.prisma.user.findUniqueOrThrow({ where: { phone: taken }, select: { id: true } }));
+      expect(holder.id).toBe(racerId);
+      expect(await system(() => app.prisma.reviewCredential.count({ where: { tenantId: CLASH } }))).toBe(3);
+    } finally {
+      draws.mockRestore();
+    }
+  });
+
+  it('a full range is reported, never retried forever: after REVIEW_IDENTIFIER_ATTEMPTS draws the run stops with a clear message and makes no login', async () => {
+    const prefix = '+59200096';
+    let held = '';
+    for (let n = 99; n >= 0 && !held; n--) {
+      const candidate = `${prefix}${String(n).padStart(2, '0')}`;
+      if (!(await system(() => app.prisma.user.findUnique({ where: { phone: candidate }, select: { id: true } })))) held = candidate;
+    }
+    expect(held).not.toBe('');
+    await system(() => app.prisma.tenant.create({ data: { id: FULL, slug: FULL, name: 'Full range', kind: 'REVIEW', purgeProtected: true, isActive: true } }));
+    await system(() => app.prisma.user.create({ data: { phone: held, firstName: 'Holder', lastName: 'Account', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: FULL, isSynthetic: true } }));
+    const realRandomInt = crypto.randomInt.bind(crypto) as (min: number, max: number) => number;
+    let identifierDraws = 0;
+    // Every draw lands on the one held number: the range is, in effect, full.
+    const draws = vi.spyOn(crypto, 'randomInt').mockImplementation(((min: number, max: number) => {
+      if (max === 100) { identifierDraws += 1; return Number(held.slice(-2)); }
+      return realRandomInt(min, max);
+    }) as unknown as typeof crypto.randomInt);
+    try {
+      await expect(system(() => provisionReviewTenant(app.prisma, { slug: FULL, phonePrefix: prefix })))
+        .rejects.toThrow(`no free number under ${prefix} in ${REVIEW_IDENTIFIER_ATTEMPTS} draws`);
+    } finally {
+      draws.mockRestore();
+    }
+    expect(identifierDraws).toBe(REVIEW_IDENTIFIER_ATTEMPTS);
+    expect(await system(() => app.prisma.reviewCredential.count({ where: { tenantId: FULL } }))).toBe(0);
+    expect(await system(() => app.prisma.user.count({ where: { tenantId: FULL } }))).toBe(1);
+  });
+
+  it('identifiers fill a full Guyana number (+592 and seven digits, the length the app accepts): the default range holds 10,000 numbers', async () => {
+    const r = await system(() => provisionReviewTenant(app.prisma, { slug: WIDE, phonePrefix: '+592006' }));
+    for (const c of r.credentials) expect(c.identifier).toMatch(/^\+592006\d{4}$/);
+    expect(reviewIdentifierDigits(DEFAULT_REVIEW_PHONE_PREFIX)).toBe(4);
+    expect(DEFAULT_REVIEW_PHONE_PREFIX.length + reviewIdentifierDigits(DEFAULT_REVIEW_PHONE_PREFIX)).toBe('+5926123456'.length);
+    // A longer prefix keeps its two digits, as before.
+    expect(reviewIdentifierDigits('+59200098')).toBe(2);
+    expect(reviewIdentifierDigits('+592000650')).toBe(2);
   });
 
   it('refuses a slug that does not name the fiction', async () => {

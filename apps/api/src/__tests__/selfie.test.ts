@@ -16,6 +16,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
+import { REAL_PNG } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // Profile selfie (master plan §3). Failure paths first: booking a ride and
@@ -87,11 +88,7 @@ function multipartBody(filename: string, mime: string, content: Buffer) {
     contentType: `multipart/form-data; boundary=${boundary}`,
   };
 }
-
-const REAL_PNG = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  Buffer.alloc(64, 1),
-]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
 
 function postSelfie(token: string, filename = 'selfie.png', mime = 'image/png', content = REAL_PNG) {
   const { payload, contentType } = multipartBody(filename, mime, content);

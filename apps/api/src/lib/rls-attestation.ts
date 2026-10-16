@@ -1,4 +1,5 @@
 import { runtimeMode } from '../utils/runtime-mode';
+import { TENANT_POLICY_NAME, TENANT_TABLES } from './tenant-rls';
 
 type EnvLike = Record<string, string | undefined>;
 
@@ -93,7 +94,18 @@ export type RlsBypass =
    * for an unattested production boot at any tenant count, so an `enforced`
    * that can be a lie is the whole gate.
    */
-  | 'BYPASS_ROLE_MEMBER';
+  | 'BYPASS_ROLE_MEMBER'
+  /**
+   * [TA-S0-003 · R3] Membership of a role that OWNS a walled schema (public,
+   * swift_qr) or a table, function or type in one — the owner itself included. FORCE ROW
+   * LEVEL SECURITY binds an owner's queries, but an owner (and every member
+   * that inherits from it) can ALTER the table back to NO FORCE, disable row
+   * security or drop the policy: a wall its own subject can take down is not
+   * a wall; a function owner can drop the append-only trigger it carries, and
+   * a schema owner any table in it. None of the role flags shows this, and
+   * `OWNER_NOT_FORCED` only counts tables owned by the connected role by name.
+   */
+  | 'OWNER_ROLE_MEMBER';
 
 export interface RlsFacts {
   /** The role the pool actually authenticated as — not the configured one. */
@@ -104,6 +116,8 @@ export interface RlsFacts {
   hasBypassRls: boolean;
   /** Member of `swift_bypass_rls` — the escape the tenant policy itself grants. */
   isBypassRoleMember: boolean;
+  /** Member of a role owning public/swift_qr or a table, function or type in one (owner included) — see OWNER_ROLE_MEMBER. */
+  isOwnerRoleMember: boolean;
   /** Tables in `public` carrying a `tenantId` column. */
   tenantTables: number;
   /** ...of those, with row security not enabled at all. */
@@ -131,6 +145,8 @@ export function explainBypass(bypass: RlsBypass, facts: RlsFacts): string {
       return `role "${facts.role}" holds the BYPASSRLS attribute`;
     case 'BYPASS_ROLE_MEMBER':
       return `role "${facts.role}" is a member of swift_bypass_rls — every tenant policy in this schema has an OR branch that this membership satisfies, so the wall is open to it whatever the table flags say`;
+    case 'OWNER_ROLE_MEMBER':
+      return `role "${facts.role}" is (or is a member of) a role that owns a walled schema or a table, function or type in one — it can switch row security off, drop the policies or an append-only trigger, so the wall does not bind it`;
     case 'RLS_DISABLED':
       return `${facts.rlsDisabledTables} tenant-bearing table(s) have no row security enabled at all`;
     case 'OWNER_NOT_FORCED':
@@ -151,6 +167,7 @@ export function attestationOf(facts: RlsFacts): RlsAttestation {
   if (facts.isSuperuser) bypasses.push('SUPERUSER');
   if (facts.hasBypassRls) bypasses.push('BYPASSRLS');
   if (facts.isBypassRoleMember) bypasses.push('BYPASS_ROLE_MEMBER');
+  if (facts.isOwnerRoleMember) bypasses.push('OWNER_ROLE_MEMBER');
   if (facts.rlsDisabledTables > 0) bypasses.push('RLS_DISABLED');
   if (facts.ownedUnforcedTables > 0) bypasses.push('OWNER_NOT_FORCED');
   return { facts, bypasses, enforced: bypasses.length === 0 && facts.tenantTables > 0 };
@@ -176,7 +193,7 @@ type RawDb = {
  * config, which is what made the gap invisible in the first place.
  */
 export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
-  const [role] = await db.$queryRaw<Array<{ role: string; superuser: boolean; bypassrls: boolean; bypass_member: boolean }>>`
+  const [role] = await db.$queryRaw<Array<{ role: string; superuser: boolean; bypassrls: boolean; bypass_member: boolean; owner_member?: boolean }>>`
     SELECT current_user::text AS role,
            COALESCE(r.rolsuper, false)     AS superuser,
            COALESCE(r.rolbypassrls, false) AS bypassrls,
@@ -184,7 +201,21 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
            -- Addressed by oid so a missing role yields no row (=> NULL => false)
            -- instead of the error the name,name,text form raises.
            COALESCE((SELECT pg_has_role(current_user, b.oid, 'MEMBER')
-                       FROM pg_roles b WHERE b.rolname = 'swift_bypass_rls'), false) AS bypass_member
+                       FROM pg_roles b WHERE b.rolname = 'swift_bypass_rls'), false) AS bypass_member,
+           -- [TA-S0-003 · R3] Owner, or a member of an owner, of a walled
+           -- schema or of anything in one: relations, functions, types (as
+           -- deploy/wall/operator.py's login probe; distinct owners first).
+           EXISTS (SELECT 1 FROM (SELECT c.relowner AS owner FROM pg_class c
+                                    JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname IN ('public', 'swift_qr')
+                                  UNION
+                                  SELECT p.proowner FROM pg_proc p
+                                    JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname IN ('public', 'swift_qr')
+                                  UNION
+                                  SELECT n.nspowner FROM pg_namespace n WHERE n.nspname IN ('public', 'swift_qr')
+                                  UNION
+                                  SELECT t.typowner FROM pg_type t
+                                    JOIN pg_namespace n ON n.oid = t.typnamespace AND n.nspname IN ('public', 'swift_qr')) o
+                    WHERE pg_has_role(current_user, o.owner, 'MEMBER')) AS owner_member
       FROM pg_roles r
      WHERE r.rolname = current_user`;
   const [tables] = await db.$queryRaw<Array<{ total: bigint; disabled: bigint; owned_unforced: bigint }>>`
@@ -205,10 +236,23 @@ export async function readRlsFacts(db: RawDb): Promise<RlsFacts> {
     isSuperuser: role?.superuser ?? false,
     hasBypassRls: role?.bypassrls ?? false,
     isBypassRoleMember: role?.bypass_member ?? false,
+    isOwnerRoleMember: role?.owner_member ?? false,
     tenantTables: Number(tables?.total ?? 0),
     rlsDisabledTables: Number(tables?.disabled ?? 0),
     ownedUnforcedTables: Number(tables?.owned_unforced ?? 0),
   };
+}
+
+/** Which database, on which running server, a connection reached. Roles are
+ *  server-wide, so a login that is a bypass member is one on EVERY database of
+ *  the server: comparing this is how the boot check knows two logins reach the
+ *  same data (see boot/system-login.ts). Catalog only — no tenant data. */
+export interface DatabaseIdentity { database: string; serverStartedAt: string }
+
+export async function readDatabaseIdentity(db: RawDb): Promise<DatabaseIdentity | null> {
+  const [row] = await db.$queryRaw<Array<{ database: string; started: string }>>`
+    SELECT current_database()::text AS database, pg_postmaster_start_time()::text AS started`;
+  return row ? { database: row.database, serverStartedAt: row.started } : null;
 }
 
 /** [REPORT-111 P0.3] Has this deployment DECLARED that it runs wall-less?
@@ -321,4 +365,163 @@ export function appSideWallGaps(env: EnvLike = process.env): string[] {
     gaps.push('TENANT_UNSCOPED_ACCESS is not "deny" — a request that never bound its tenant reads every tenant and is merely counted');
   }
   return gaps;
+}
+
+// ---------------------------------------------------------------------------
+// [DB-01] The policy CONTRACT: not just "RLS is on and some policy exists",
+// but that every tenant table the code expects is there, carries its tenantId
+// column, and is guarded by exactly the tenant policy this repository writes
+// (rlsDdlFor) — and by no other policy that could widen it.
+//
+// readRlsFacts measures the ROLE and the table FLAGS. Neither reads pg_policy:
+// a PUBLIC `USING (true)` policy added beside the tenant policy, or a tenant
+// policy whose USING / WITH CHECK was rewritten, left every flag and count
+// intact and the attestation said `enforced`. This reads the policies
+// themselves and compares them with a versioned, normalised contract.
+// ---------------------------------------------------------------------------
+
+/** Bump when the tenant policy predicate (tenant-rls.ts POLICY_PREDICATE) changes. */
+export const TENANT_POLICY_CONTRACT_VERSION = 1;
+
+/** The tenant predicate (tenant-rls.ts POLICY_PREDICATE) exactly as
+ *  PostgreSQL stores and renders it — the request's tenant, or membership of
+ *  swift_bypass_rls, and nothing else. */
+export const TENANT_POLICY_RENDERED = `(("tenantId" = current_setting('app.current_tenant'::text, true)) OR pg_has_role(CURRENT_USER, 'swift_bypass_rls'::name, 'MEMBER'::text))`;
+
+/** PostgreSQL re-renders a stored policy expression (casts such as `::text`,
+ *  extra parentheses, its own spacing and keyword case), so the stored text is
+ *  normalised before it is compared — casts, parentheses and whitespace
+ *  removed, the two keywords upper-cased. Identifiers and literals keep their
+ *  case, and every other token must match exactly: an added term, a different
+ *  column, role or setting name is a different predicate. */
+export function normalizePolicyExpression(expression: string | null | undefined): string | null {
+  if (expression === null || expression === undefined) return null;
+  return expression
+    .replace(/::(?:character varying|double precision|[A-Za-z_][A-Za-z0-9_]*)(?:\[\])?/g, '')
+    .replace(/\s+or\s+/gi, ' OR ')
+    .replace(/\bcurrent_user\b/gi, 'CURRENT_USER')
+    .replace(/[()\s]/g, '');
+}
+
+/** The contract a stored USING / WITH CHECK must normalise to. */
+export const TENANT_POLICY_CONTRACT: string = normalizePolicyExpression(TENANT_POLICY_RENDERED) as string;
+
+export interface TenantPolicyContractFacts {
+  version: number;
+  /** current_schema() of the connection: the schema unqualified names resolve to. */
+  schema: string;
+  /** Registered tenant tables (TENANT_TABLES) absent from `public`, or without their tenantId column. */
+  missingTables: string[];
+  /** Tenant-bearing tables without the canonical tenant policy (missing, restrictive,
+   *  not for ALL commands, not for PUBLIC, or a USING / WITH CHECK that is not the contract). */
+  nonCanonicalTables: string[];
+  /** Tenant-bearing tables that carry ANY other permissive policy — one that can widen the wall. */
+  extraPermissiveTables: string[];
+}
+
+/** The contract gaps, as the sentences the boot log prints. Empty = the contract holds. */
+export function tenantPolicyContractGaps(c: TenantPolicyContractFacts): string[] {
+  const list = (names: string[]) => names.slice(0, 10).join(', ') + (names.length > 10 ? ` and ${names.length - 10} more` : '');
+  const gaps: string[] = [];
+  if (c.schema !== 'public') gaps.push(`SCHEMA: unqualified names resolve to "${c.schema}", not "public" — the attested tables are not the ones queries reach`);
+  if (c.missingTables.length > 0) gaps.push(`TABLE_MISSING: ${c.missingTables.length} registered tenant table(s) absent or without "tenantId": ${list(c.missingTables)}`);
+  if (c.nonCanonicalTables.length > 0) gaps.push(`POLICY_NOT_CANONICAL: ${c.nonCanonicalTables.length} tenant table(s) lack the contract tenant policy (v${c.version}): ${list(c.nonCanonicalTables)}`);
+  if (c.extraPermissiveTables.length > 0) gaps.push(`EXTRA_PERMISSIVE_POLICY: ${c.extraPermissiveTables.length} tenant table(s) carry another permissive policy that can widen the wall: ${list(c.extraPermissiveTables)}`);
+  return gaps;
+}
+
+/** [DB-01] Additional PERMISSIVE policies a reviewed migration installed on a
+ *  tenant table on purpose, for a dedicated role that is never the request
+ *  login (20261004130000_audit_purge_authority: the audit-purge owner and
+ *  executor). Each must match exactly — table, name, command and roles — and
+ *  must not apply to the connected login; anything else beside the tenant
+ *  policy widens the wall and is a gap. */
+export const SANCTIONED_EXTRA_POLICIES: ReadonlyArray<{ table: string; name: string; cmd: string; roles: readonly string[] }> = [
+  { table: 'sensitive_read_logs', name: 'audit_purge_owner_select', cmd: 'r', roles: ['swift_audit_purge_executor', 'swift_audit_purge_owner'] },
+  { table: 'sensitive_read_logs', name: 'audit_purge_owner_delete', cmd: 'd', roles: ['swift_audit_purge_owner'] },
+];
+
+type PolicyRow = {
+  table: string;
+  has_tenant: boolean;
+  polname: string | null;
+  permissive: boolean | null;
+  cmd: string | null;
+  to_public: boolean | null;
+  /** The policy's roles by name, sorted (empty for PUBLIC). */
+  roles: string[] | null;
+  /** Whether the policy applies to the connected login through a role
+   *  membership (a superuser is reported by readRlsFacts, not here). */
+  applies_to_me: boolean | null;
+  qual: string | null;
+  with_check: string | null;
+};
+
+/** Read the policy contract from the live catalogue, as the connected role sees it. */
+export async function readTenantPolicyContract(db: RawDb): Promise<TenantPolicyContractFacts> {
+  const registered = [...TENANT_TABLES] as string[];
+  const [where] = await db.$queryRaw<Array<{ schema: string | null }>>`SELECT current_schema()::text AS schema`;
+  // Every tenant-bearing table in public (registered or not) and every
+  // registered table (present or not), with each policy on it.
+  const rows = await db.$queryRaw<PolicyRow[]>`
+    SELECT c.relname::text AS table,
+           EXISTS (SELECT 1 FROM pg_attribute a
+                    WHERE a.attrelid = c.oid AND a.attname = 'tenantId' AND NOT a.attisdropped) AS has_tenant,
+           p.polname::text                       AS polname,
+           p.polpermissive                       AS permissive,
+           p.polcmd::text                        AS cmd,
+           (p.polroles = '{0}'::oid[])           AS to_public,
+           ARRAY(SELECT r.rolname::text FROM pg_roles r WHERE r.oid = ANY(p.polroles) ORDER BY 1) AS roles,
+           (NOT COALESCE((SELECT me.rolsuper FROM pg_roles me WHERE me.rolname = current_user), false)
+             AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid = ANY(p.polroles) AND pg_has_role(current_user, r.oid, 'MEMBER'))) AS applies_to_me,
+           pg_get_expr(p.polqual, p.polrelid)      AS qual,
+           pg_get_expr(p.polwithcheck, p.polrelid) AS with_check
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+      LEFT JOIN pg_policy p ON p.polrelid = c.oid
+     WHERE c.relkind IN ('r', 'p')
+       AND (c.relname::text = ANY(${registered}::text[])
+            OR EXISTS (SELECT 1 FROM pg_attribute a
+                        WHERE a.attrelid = c.oid AND a.attname = 'tenantId' AND NOT a.attisdropped))`;
+  const byTable = new Map<string, PolicyRow[]>();
+  for (const row of rows ?? []) byTable.set(row.table, [...(byTable.get(row.table) ?? []), row]);
+
+  const missingTables = registered.filter((name) => !byTable.get(name)?.[0]?.has_tenant).sort();
+  const nonCanonicalTables: string[] = [];
+  const extraPermissiveTables: string[] = [];
+  for (const [table, policies] of byTable) {
+    if (!policies[0]?.has_tenant) continue; // already reported as missing (registered) or not tenant-bearing
+    const isCanonical = (p: PolicyRow) => p.polname === TENANT_POLICY_NAME && p.permissive === true && p.cmd === '*' && p.to_public === true
+      && normalizePolicyExpression(p.qual) === TENANT_POLICY_CONTRACT && normalizePolicyExpression(p.with_check) === TENANT_POLICY_CONTRACT;
+    if (!policies.some(isCanonical)) nonCanonicalTables.push(table);
+    // Another permissive policy (any name but the tenant policy's): permissive
+    // policies are OR-ed, so it widens the wall. (A rewritten tenant policy is
+    // reported above as not canonical, not again here.)
+    const isSanctioned = (p: PolicyRow) => p.applies_to_me === false && SANCTIONED_EXTRA_POLICIES.some((s) =>
+      s.table === table && s.name === p.polname && s.cmd === p.cmd && p.to_public === false
+      && [...(p.roles ?? [])].sort().join(',') === [...s.roles].sort().join(','));
+    if (policies.some((p) => p.polname !== null && p.polname !== TENANT_POLICY_NAME && p.permissive === true && !isSanctioned(p))) extraPermissiveTables.push(table);
+  }
+  return {
+    version: TENANT_POLICY_CONTRACT_VERSION,
+    // A schema that could not be read is not "public".
+    schema: where?.schema ?? 'unknown',
+    missingTables,
+    nonCanonicalTables: nonCanonicalTables.sort(),
+    extraPermissiveTables: extraPermissiveTables.sort(),
+  };
+}
+
+/** [DB-01] In production, a tenant-policy contract gap refuses the start, at
+ *  ANY posture and ANY tenant count — TENANT_WALL_EXPAND_ATTESTED does not
+ *  cover it: it declares a known wall-less posture, not an unknown policy. */
+export function assertTenantPolicyContract(contract: TenantPolicyContractFacts, env: EnvLike = process.env): void {
+  if (runtimeMode(env) !== 'production') return;
+  const gaps = tenantPolicyContractGaps(contract);
+  if (gaps.length === 0) return;
+  throw new Error(
+    `FATAL: the database tenant policies are not the ones this code was built for:\n${gaps.map((g) => `  - ${g}`).join('\n')}\n` +
+      'An unknown or widened tenant policy cannot be vouched for, whatever the role and table flags say. ' +
+      'Restore the policies with the migrations (rlsDdlFor in lib/tenant-rls.ts) and restart. Refusing to start.',
+  );
 }

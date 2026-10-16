@@ -46,10 +46,22 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: { id: string
   }
 }
 
-/** Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless. */
+/**
+ * Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless.
+ * [Row 78] /logout needs a live access cookie, which lasts minutes: a tab left open got a 401 from the gate, nothing was
+ * revoked, and the 30-day refresh cookie could sign the browser back in. When /logout does not answer success, the
+ * session ends by its refresh cookie instead (/logout/refresh revokes and clears without an access token).
+ */
 export async function logout(): Promise<void> {
+  const init: RequestInit = { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' };
   try {
-    await fetch(`${API_URL}/api/v1/auth/logout`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' });
+    const res = await fetch(`${API_URL}/api/v1/auth/logout`, init);
+    if (res.ok) return;
+  } catch {
+    // unreachable: try the refresh-cookie sign-out below
+  }
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout/refresh`, init);
   } catch {
     // the cookies are HttpOnly and path-scoped: with the server unreachable the shell still redirects to login
   }
@@ -272,12 +284,19 @@ export interface Promo {
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
-export const fetchUsers = (params?: string): Promise<Envelope<AdminUser[]>> =>
+/** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
+export interface ListEnvelope<T> {
+  success: boolean;
+  data: T[];
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+}
+// [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
+export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
   apiFetch(`/api/v1/admin/users?${params || ''}`);
-export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
+export const fetchVendors = (params?: string) => apiFetch(`/api/v1/admin/vendors?${params || ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
-export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
-export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
+export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?${params || ''}`);
+export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 
@@ -286,6 +305,55 @@ export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${i
 export const fetchVendorDetail = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}`);
 export const fetchRiderDetail = (id: string) => apiFetch(`/api/v1/admin/riders/${id}`);
 export const fetchDriverDetail = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}`);
+
+// ── [MC-PR2] Activation checklists: the per-document truth, in the gate's own terms ──
+export type ActivationItemState = 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | 'MISSING';
+export interface ActivationChecklistItem {
+  docType: string;
+  state: ActivationItemState;
+  documentId: string | null;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  /** The reviewer's note on a rejection — what the applicant was told. */
+  note: string | null;
+  /** Approved, and a newer submission of the same type is waiting for review. */
+  renewalPending: boolean;
+}
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'NEEDS_PHONE' | 'CAN_LIFT_TO_WAITING' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
+export interface VendorActivationChecklist {
+  vendorId: string;
+  /** The owner's user id: the Review Center's applicant. */
+  applicantId: string;
+  storeStatus: string;
+  suspensionSource: string | null;
+  ownerAccountStatus: string | null;
+  /** The store's weekly-fee subscription state (null before it has one). */
+  subscriptionStatus?: string | null;
+  /** May the store's subscription operate now (the vendor gate's rule)? A suspended store whose fee cannot operate reads FEE_UNPAID. */
+  feeOperable?: boolean;
+  isVerified: boolean;
+  activationValidUntil: string | null;
+  role: string;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
+  ready: boolean;
+  next: VendorActivationNext;
+}
+export type MoverActivationNext = 'VERIFIED' | 'CAN_VERIFY' | 'NEEDS_INSURANCE' | 'NEEDS_DOCUMENTS';
+export interface MoverActivationChecklist {
+  moverId: string;
+  kind: 'RIDER' | 'DRIVER';
+  applicantId: string;
+  vehicleType: string;
+  documentsVerified: boolean;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  live: { allowed: boolean; reason: 'ok' | 'docs' | 'insurance' };
+  next: MoverActivationNext;
+}
+export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<VendorActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
+export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const suspendVendor = (id: string, reason: string) =>
@@ -309,6 +377,31 @@ export const topUpSubscription = (id: string, amount: number, reference: string,
     method: 'POST',
     body: JSON.stringify({ amount, reference }),
     headers: { 'Idempotency-Key': idempotencyKey },
+    reason,
+  });
+// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded in order:
+// set it aside, pay it outside Swift, then record the payout with its transfer
+// reference. Each step is a money action a second admin approves (the server
+// answers 202 APPROVAL_REQUIRED until then). A set-aside that cannot be paid
+// is released back to the credit.
+export const setAsideSubscriptionCredit = (id: string, amount: number, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/set-aside`, {
+    method: 'POST',
+    body: JSON.stringify({ amount }),
+    reason,
+  });
+// [Sol r2 S1] A payout record and a release name the set-aside they are for
+// (refundSetAsideId from the list), so an approval acts only on that one.
+export const recordSubscriptionRefundPaid = (id: string, amount: number, method: 'MMG' | 'BANK_TRANSFER', reference: string, setAsideId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/paid`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, method, reference, setAsideId }),
+    reason,
+  });
+export const releaseSubscriptionRefund = (id: string, amount: number, setAsideId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/release`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, setAsideId }),
     reason,
   });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
@@ -503,7 +596,9 @@ export const updateZoneFare = (id: string, body: { fromZoneId: string; toZoneId:
 export const deleteZoneFare = (id: string, pair: { fromZoneId: string; toZoneId: string }, reason: string) =>
   apiFetch(`/api/v1/admin/zone-fares/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(pair), reason });
 
-export const fetchConfig = (): Promise<Envelope<ConfigRow[]>> => apiFetch('/api/v1/admin/config');
+/** Launch switches the API reads from its server environment (read-only). */
+export interface LaunchSwitches { staffInviteAccept?: boolean }
+export const fetchConfig = (): Promise<Envelope<ConfigRow[]> & { switches?: LaunchSwitches }> => apiFetch('/api/v1/admin/config');
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
 export const approveVendor = (id: string, reason: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT', reason });
@@ -569,6 +664,25 @@ export const resolveModerationReport = (
 // upholding a rating report REMOVES the review, while resolving a content
 // report only records the decision.
 export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/moderation');
+
+// [GUARDRAILS §8] THE CATALOGUE CHECK. A banned word in a partner's own text
+// (name, description, menu section, options) saves the item but holds it hidden
+// until a person looks. Approve shows it for the exact words seen — the
+// fingerprint the queue handed out goes back with the approval, and a partner
+// edit in between refuses it. Remove bans the item for good, with a reason the
+// partner reads. Neither can lift a certain ban (a banned category, or an
+// earlier removal).
+export const PROHIBITED_CLASSES = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'] as const;
+export type ProhibitedClass = (typeof PROHIBITED_CLASSES)[number];
+export const fetchCatalogueReview = () => apiFetch('/api/v1/admin/catalogue-review');
+export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
+export const removeCatalogueItem = (itemId: string, prohibitedClass: ProhibitedClass, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/${encodeURIComponent(itemId)}/remove`, { method: 'POST', body: JSON.stringify({ prohibitedClass }), reason });
+// [GUARDRAILS §8 · owner 14 Oct] A store whose own words (name, description, tags) mention banned goods is held with
+// its items; approve shows it for exactly the words seen. Needs the catalogue-approver grant, like an item.
+export const approveCatalogueStore = (vendorId: string, wordsHash: string, reason: string) =>
+  apiFetch(`/api/v1/admin/catalogue-review/stores/${encodeURIComponent(vendorId)}/approve`, { method: 'POST', body: JSON.stringify({ wordsHash }), reason });
 export const resolveRatingReport = (id: string, action: 'uphold' | 'dismiss', reason: string) =>
   apiFetch(`/api/v1/admin/rating-reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action }), reason });
 // [ADM-006] `category` says which rule was broken; `reason` is what the
@@ -609,13 +723,42 @@ export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verificatio
 export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck } | undefined, reason: string) =>
+export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
 // [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
 // reviewer's words and the server's reason code. The words also ride the
 // reason header [ADM-006].
 export const rejectDoc = (id: string, reason: string, reasonCode: RejectionReasonCode) =>
   apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason, reasonCode }), reason });
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] Withdraw a committed document (admin.routes revokeDocSchema).
+// For a customer ID the server takes the account back to L1 when no other customer ID stands, in
+// the same transaction, and answers the resulting accountTrustLevel (#1610).
+export const revokeDoc = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/verification/${id}/revoke`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+
+// [VERIFY-DOCS V3] The document reviewer grant. Opening, approving and
+// rejecting a document need it; `*` never implies it. A SUPER_ADMIN lists the
+// team and grants or removes it — to themselves too — with a stated reason.
+// The list answers 403 to anyone else, which is how the console knows to hide
+// the panel.
+export interface DocumentReviewerRow {
+  userId: string;
+  name: string;
+  role: 'ADMIN' | 'SUPER_ADMIN';
+  active: boolean;
+  documentReviewer: boolean;
+  /** [GUARDRAILS §8 · Opus S3-9] May show an item a banned word is holding (catalogue check). */
+  catalogueApprover?: boolean;
+  you: boolean;
+}
+export const fetchDocumentReviewers = (): Promise<{ data: DocumentReviewerRow[] }> =>
+  apiFetch('/api/v1/admin/staff/document-reviewers');
+export const setDocumentReviewer = (userId: string, grant: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/staff/${encodeURIComponent(userId)}/document-reviewer`, { method: 'PUT', body: JSON.stringify({ grant }), reason });
+// [GUARDRAILS §8 · Opus S3-9] The catalogue approver grant: showing a held item needs it; `*` never implies it.
+// The same team list and the same founder door, reason and record as the document reviewer grant.
+export const setCatalogueApprover = (userId: string, grant: boolean, reason: string) =>
+  apiFetch(`/api/v1/admin/staff/${encodeURIComponent(userId)}/catalogue-approver`, { method: 'PUT', body: JSON.stringify({ grant }), reason });
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been
@@ -787,6 +930,20 @@ export const decideApproval = (id: string, approve: boolean, note: string) =>
 // always what the approver read.
 export const applyApproval = (id: string) =>
   apiFetch(`/api/v1/admin/approvals/${id}/apply`, { method: 'POST', body: '{}' });
+// [OWNER #13] SOLO MODE — while the owner is the only admin who could approve
+// their own request. Starting the wait emails the owner; the decision itself is
+// `decideApproval` after the wait, with a fresh sign-in code (step-up below).
+export const startSoloApproval = (id: string) =>
+  apiFetch(`/api/v1/admin/approvals/${id}/solo`, { method: 'POST', body: '{}' });
+// The admin who asked withdraws their own pending request (stops a solo wait too).
+export const cancelApproval = (id: string) =>
+  apiFetch(`/api/v1/admin/approvals/${id}/cancel`, { method: 'POST', body: '{}' });
+// [ALG-34] The account's existing step-up: a code texted to the phone on the
+// admin account, good for one protected decision on THIS session.
+export const sendStepUpCode = () =>
+  apiFetch('/api/v1/auth/step-up', { method: 'POST', body: '{}' });
+export const verifyStepUpCode = (code: string) =>
+  apiFetch('/api/v1/auth/step-up/verify', { method: 'POST', body: JSON.stringify({ code }) });
 
 // ── The agent-cash rail [SAN spec Part 4] ────────────────────────────────────
 // Partners pay their weekly fee in CASH at an MMG agent, quoting their SAN.
@@ -869,3 +1026,151 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 };
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
+
+// ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ────────────
+// MMG reverses in full only. Asking is a money action: a reason and a second
+// admin (or the owner's solo approval) — the first call answers 202
+// APPROVAL_REQUIRED. Only MMG's own lookup then moves the partner's balance.
+export interface MmgFeeReversalRow {
+  id: string;
+  state: 'SENDING' | 'SENT' | 'REVERSED' | 'FAILED' | 'HELD';
+  amount: number;
+  currencyCode: string;
+  reason: string;
+  requestedBy: string;
+  providerStatus: string | null;
+  lookupStatus: string | null;
+  heldReason: string | null;
+  sentAt: string;
+  answeredAt: string | null;
+  lastCheckedAt: string | null;
+  reversedAt: string | null;
+  failedAt: string | null;
+  resolution?: string | null;
+  resolvedBy?: string | null;
+}
+export interface MmgFeeReversalView {
+  checkoutId: string;
+  amountGyd: number;
+  switchedOn: boolean;
+  canReverse: boolean;
+  refusal?: { code: string; message: string };
+  reversals: MmgFeeReversalRow[];
+}
+export const fetchMmgFeeReversal = (checkoutId: string): Promise<Envelope<MmgFeeReversalView>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reversal`);
+export const reverseMmgFeePayment = (checkoutId: string, amountGyd: number, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reverse`, {
+    method: 'POST',
+    body: JSON.stringify({ amountGyd, reason }),
+    reason,
+  });
+// [DS1112] Resolve a HELD return on MMG's evidence (money: a reason and a second admin).
+export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED', mmgReference: string, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ outcome, mmgReference, reason }),
+    reason,
+  });
+export const checkMmgFeeReversal = (reversalId: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/check`, { method: 'POST', body: '{}' });
+
+export interface PaymentConfirmation {
+  id: string; subscriptionId: string; source: string; sourceId: string | null;
+  epoch: number; clockVersion: number; status: string; reason: string;
+  beganAt: string; reviewDueAt: string; overdue: boolean; remainingGraceMs: number; resolvable: boolean;
+  swiftReference: string | null; partner: string | null;
+  settlementPayments: { providerPaymentId: string; mmgTransactionId: string }[];
+}
+export const fetchPaymentConfirmations = (): Promise<Envelope<PaymentConfirmation[]>> => apiFetch('/api/v1/admin/billing/confirmations');
+export interface ConfirmationDecision {
+  sourceId: string; epoch: number; clockVersion: number; decision: 'UNPAID' | 'PAID';
+  providerPaymentId?: string; evidenceReference: string; reason: string;
+}
+export const requestConfirmationResolution = (id: string, body: ConfirmationDecision) =>
+  apiFetch(`/api/v1/admin/billing/confirmations/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify(body), reason: body.reason });
+
+/** Both active statuses, every page: the first fifty approvals are not exhaustive. */
+export async function fetchConfirmationApprovals(): Promise<import('./approvals').ApprovalRow[]> {
+  const rows: import('./approvals').ApprovalRow[] = [];
+  for (const status of ['PENDING', 'APPROVED']) {
+    for (let page = 1; ; page += 1) {
+      const response = await apiFetch(`/api/v1/admin/approvals?status=${status}&limit=50&page=${page}`);
+      if (response?.success !== true || !Array.isArray(response.data) || !Number.isInteger(response.pagination?.pages)) {
+        throw new Error('Could not read the complete approvals queue. Reload before requesting another decision.');
+      }
+      rows.push(...response.data);
+      if (page >= response.pagination.pages) break;
+    }
+  }
+  return rows;
+}
+
+// ── [MC-AD4] Paid MMG orders held for review (ready too long) ─────────────
+export interface HeldOrder {
+  id: string;
+  orderNumber: string;
+  orderType: string;
+  status: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  totalAmount: number;
+  readyAt: string | null;
+  foodAgeHeldAt: string | null;
+  placedAt: string | null;
+  heldMinutes: number | null;
+  readyMinutes: number | null;
+  vendor: { id: string; name: string } | null;
+}
+/** An unreadable acknowledgement does not establish whether an action completed. */
+const unreadableOrderAction = () => Object.assign(new Error('Swift returned an unreadable answer. Refresh the order and check whether the action went through before retrying.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+/** [DS878 S4] A 200 that is not a list of held orders is a failed read — never "nothing held". */
+export const fetchHeldOrders = async (): Promise<Envelope<HeldOrder[]>> => {
+  const response = await apiFetch('/api/v1/admin/orders/held');
+  if (response?.success !== true || !Array.isArray(response.data)) {
+    throw Object.assign(new Error('Swift returned an unreadable list of held orders.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+  }
+  return response;
+};
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+export const retryOrderDispatch = async (id: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/retry-dispatch`, { method: 'POST', body: '{}' });
+  if (response?.success !== true || !isRecord(response.data)) throw unreadableOrderAction();
+  return response;
+};
+/** C2 (operational): the only release the server offers today is "deliver anyway". */
+export const releaseHeldOrder = async (id: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/food-age-hold/release`, { method: 'POST', body: JSON.stringify({ decision: 'DELIVER_ANYWAY' }) });
+  if (response?.success !== true || response.data?.released !== true || response.data?.decision !== 'DELIVER_ANYWAY' || !isRecord(response.data?.dispatch)) throw unreadableOrderAction();
+  return response;
+};
+
+// ── [MC-AD5] An MMG payment dispute on a store order ──────────────────────
+/** C3: decided against the claim revision the operator reviewed; the reason is the decision note too. */
+export const resolvePaymentDispute = async (
+  id: string,
+  decision: { resolution: 'CUSTOMER_PAID' | 'CUSTOMER_DID_NOT_PAY'; expectedClaimRevision: number },
+  reason: string,
+) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/payment-claim/resolve`, {
+    method: 'POST', body: JSON.stringify({ ...decision, note: reason }), reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.resolution !== decision.resolution || response.data?.mismatch !== false) throw unreadableOrderAction();
+  return response;
+};
+
+// ── [L02 · row 34] Partial cash a rider still holds after a refused handover ──
+/**
+ * C4 (money class): record that cash the rider HELD is resolved — handed back
+ * later, or otherwise settled, as the stated reason says. A record only: Swift
+ * moves, refunds and deducts nothing. The first call answers 202
+ * APPROVAL_REQUIRED; a second admin (or the owner's solo approval) decides it
+ * in Approvals, and the asking admin applies it from there.
+ */
+export const resolveHeldDoorCash = async (id: string, reason: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/door-cash-return/resolve`, {
+    method: 'POST', body: '{}', reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.doorCashReturn?.status !== 'RESOLVED') throw unreadableOrderAction();
+  return response;
+};

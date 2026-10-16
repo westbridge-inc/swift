@@ -16,12 +16,14 @@ import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
 import { OfflineNotice } from '@/components/offline-notice';
 import { useGuestBasket } from '@/lib/basket-state';
-import { showsOrderingContext } from '@/lib/ordering-paths';
+import { framesOrderingContext } from '@/lib/ordering-paths';
 import { InstallPrompt } from '@/components/install-prompt';
 
 // Upload code is needed only after sign-in with a browser basket.
 const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
 const GuestBasketSync = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestBasketSync })));
+// [R26 · perf-budget] The fresh-acceptance gate is its own chunk, fetched after the page: the pages stay inside their budgets.
+const LegalAcceptanceGate = lazy(() => import('@/components/legal-acceptance-gate').then(module => ({ default: module.LegalAcceptanceGate })));
 
 // The customer ordering app. Opening swiftgy.com lands here, on Home.
 //
@@ -39,6 +41,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <Providers>
       <CustomerShell>{children}</CustomerShell>
+      {/* [Legal research G2 · R26] a material change to the Terms is accepted with a fresh tick */}
+      <Suspense fallback={null}><LegalAcceptanceGate /></Suspense>
     </Providers>
   );
 }
@@ -228,9 +232,9 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
             returnPath={returnPath}
             onSwitchApp={openSwitchApp}
           />
-          <main className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
+          <main id="main" tabIndex={-1} className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
             <div className="sw-page">
-              {showsOrderingContext(pathname) ? <Suspense fallback={<div aria-hidden="true" className="py-3"><div className="min-h-11" /></div>}><OrderingContextBar /></Suspense> : null}
+              {framesOrderingContext(pathname) ? <Suspense fallback={<div aria-hidden="true" className="py-3"><div className="min-h-11" /></div>}><OrderingContextBar /></Suspense> : null}
               <OfflineNotice />
               {status === 'signed-in' && guestBasket.lines.length > 0 ? <Suspense fallback={null}><GuestBasketSync /></Suspense> : null}
               {showBack && backClaims === 0 ? <BackRow /> : null}

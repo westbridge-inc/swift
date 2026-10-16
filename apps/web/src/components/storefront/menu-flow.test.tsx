@@ -7,6 +7,7 @@ import { CustomerSessionProvider, type CustomerSession } from '@/components/cust
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 import type { StorefrontDetail } from '@/lib/api';
+import { axeViolations } from '@/test/axe';
 
 // ---------------------------------------------------------------------------
 // [W6] The one store page's menu: one tap for an item that needs no choice,
@@ -301,7 +302,8 @@ describe('[W6] a guest at Add', () => {
     expect(ensureSignedIn).not.toHaveBeenCalled(); expect(nav.push).not.toHaveBeenCalled();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/login?next=%2Fstore%2Fsample-kitchen'));
+    // [W4] The code brings the customer to the one checkout, where the basket is uploaded.
+    await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/login?next=%2Fcheckout'));
     expect(ensureSignedIn).toHaveBeenCalledOnce(); expect(customer.addToCart).not.toHaveBeenCalled();
   });
 
@@ -313,8 +315,19 @@ describe('[W6] a guest at Add', () => {
     expect(ensureSignedIn).not.toHaveBeenCalled();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
-    await waitFor(() => expect(customer.getCart).toHaveBeenCalled());
-    expect(nav.push).not.toHaveBeenCalled(); expect(customer.addToCart).not.toHaveBeenCalled();
+    // [W4] A renewed session goes straight to the one checkout; nothing is ordered or added here.
+    await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/checkout'));
+    expect(ensureSignedIn).toHaveBeenCalledOnce(); expect(customer.addToCart).not.toHaveBeenCalled();
     expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1')!).lines[0].itemId).toBe('soup');
+  });
+});
+
+// [Row 111 · W8] The item sheet (choices, quantity, Add) is a dialog a keyboard and a screen reader can use.
+describe('[W8] the item sheet is accessible', () => {
+  it('the open sheet has no accessibility violations axe can find', async () => {
+    await start();
+    fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
+    expect(await axeViolations(sheet)).toEqual([]);
   });
 });

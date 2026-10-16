@@ -497,10 +497,15 @@ describe('GOLD-6 · CUST-05 — counter completion with the right code', () => {
     expect(log[0]!.note).toBe('Order placed');
     expect(log[log.length - 1]!).toMatchObject({ changedBy: ownerA.userId, note: 'Picked up by customer' });
 
-    // A completed order cannot be completed twice.
+    // A completed order cannot be completed twice. [TRANSFORMED, continues #1582:
+    // a repeated completion (a lost response, a double tap) now answers the
+    // facts already written instead of an error, and writes nothing: no second
+    // COMPLETED, no attempt spent.]
     const again = await completePickup(id, code);
-    expect(again.statusCode).toBe(400);
-    expect(again.json().error.code).toBe('INVALID_STATUS');
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json().data.status).toBe('COMPLETED');
+    expect((await orderRow(id)).pickupCodeAttempts).toBe(2);
+    expect((await statusLog(id)).filter((l) => l.status === 'COMPLETED')).toHaveLength(1);
 
     // The customer's own surfaces agree: not cancellable, timeline ends at
     // COMPLETED, and the vendor still holds no copy of the code.

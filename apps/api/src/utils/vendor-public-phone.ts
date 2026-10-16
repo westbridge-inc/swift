@@ -105,6 +105,18 @@ export function safePublicPhone(raw: string | null | undefined): string | null {
 }
 
 /**
+ * The number a customer may see for a store: the one the store PUBLISHED,
+ * re-validated, and withheld while the platform has the store SUSPENDED or
+ * not yet approved (PENDING_APPROVAL) — Swift must not advertise a way to
+ * reach a store it has stopped or not yet allowed. A CLOSED store keeps its
+ * number. One rule for the storefront, the vendor card and the order screen.
+ */
+export function publishedStorePhone(vendor: { status: string; publicPhone: string | null | undefined }): string | null {
+  if (vendor.status === 'SUSPENDED' || vendor.status === 'PENDING_APPROVAL') return null;
+  return safePublicPhone(vendor.publicPhone);
+}
+
+/**
  * Write-boundary adapter for the vendor dashboard.
  *
  * Empty is an explicit opt-OUT (the store takes its call button down), which is

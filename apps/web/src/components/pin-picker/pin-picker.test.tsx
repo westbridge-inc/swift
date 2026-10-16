@@ -13,8 +13,11 @@ import { PinPicker, PIN_CITY_CENTRE, type ChosenPin } from './pin-picker';
 
 const ok = (data: unknown) => ({ body: { success: true, data } });
 /** Made-up Georgetown points — no real person's address. */
-const SEARCHED = { placeId: 'zone:z1', primary: 'Sample Market', secondary: 'Georgetown' };
-const SEARCHED_POINT = { placeId: 'zone:z1', label: 'Sample Market', lat: 6.8065, lng: -58.1602 };
+const SEARCHED = { placeId: 'osm:6.8065,-58.1602:U2FtcGxl', primary: 'Sample Market', secondary: 'Georgetown' };
+const SEARCHED_POINT = { placeId: 'osm:6.8065,-58.1602:U2FtcGxl', label: 'Sample Market', lat: 6.8065, lng: -58.1602 };
+/** A delivery zone: the local places provider answers with the zone polygon's centre. */
+const ZONE = { placeId: 'zone:z1', primary: 'Sample Ward', secondary: 'Delivery area' };
+const ZONE_POINT = { placeId: 'zone:z1', label: 'Sample Ward', lat: 6.8201, lng: -58.1433 };
 const SAVED = { id: 'a1', label: 'Work', addressLine1: '3 Example Avenue', latitude: 6.8122, longitude: -58.1489 };
 
 let fetchMock: ReturnType<typeof mockApi>;
@@ -83,6 +86,31 @@ describe('[WEB-PIN] the pin picker', () => {
     expect(last(onChange)).toBeNull();
   });
 
+  // [WEB-PIN · review S3] A zone is an area, not a door: its "point" is the
+  // polygon's centre. Like the town centre and a rough device fix, it starts
+  // the map but is never a pin until the customer moves it there themselves.
+  it('a delivery-zone result only moves the map: the customer must place the pin', async () => {
+    fetchMock = mockApi(({ url }) => {
+      if (url.pathname === '/api/v1/places/autocomplete') return ok([ZONE]);
+      if (url.pathname === '/api/v1/places/details') return ok(ZONE_POINT);
+      if (url.pathname === '/api/v1/places/reverse') return ok({ address: null });
+      return { status: 404, body: { success: false, error: { message: `unmocked ${url.pathname}` } } };
+    });
+    const onChange = vi.fn();
+    render(<PinPicker mapLabel="Test pin map" onChange={onChange} />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search for a street or place' }), { target: { value: 'Sample' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Find' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sample Ward, Delivery area' }));
+    await waitFor(() => expect(screen.getByText('Latitude 6.82010, Longitude -58.14330')).toBeTruthy());
+    loadMap();
+    expect(screen.getByText('Sample Ward is an area, not a door. Move the map so the pin is on your spot.')).toBeTruthy();
+    expect(last(onChange)).toBeNull();
+    fireEvent.keyDown(screen.getByRole('application', { name: 'Test pin map' }), { key: 'ArrowLeft' });
+    loadMap();
+    await waitFor(() => expect(last(onChange)).toMatchObject({ named: true }));
+    expect(last(onChange)!.longitude).toBeLessThan(ZONE_POINT.lng);
+  });
+
   it('offers saved addresses as starting points', async () => {
     const onChange = vi.fn();
     render(<PinPicker mapLabel="Test pin map" saved={[SAVED]} onChange={onChange} />);
@@ -115,6 +143,16 @@ describe('[WEB-PIN] the pin picker', () => {
     // Handed over at once (the coordinates are certain), and marked named once Swift's lookup answers.
     expect(last(onChange)).toMatchObject({ latitude: 6.8, longitude: -58.15, named: false });
     await waitFor(() => expect(last(onChange)).toMatchObject({ latitude: 6.8, longitude: -58.15, address: null, named: true }));
+  });
+
+  it('map tiles tell OpenStreetMap the site, never the page (its tile policy requires a Referer)', () => {
+    render(<PinPicker mapLabel="Test pin map" onChange={vi.fn()} />);
+    const tiles = [...screen.getByRole('application').querySelectorAll('img')];
+    expect(tiles.length).toBeGreaterThan(0);
+    for (const tile of tiles) {
+      expect(tile.getAttribute('src')).toMatch(/^https:\/\/tile\.openstreetmap\.org\/\d+\/\d+\/\d+\.png$/);
+      expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
+    }
   });
 
   it('a map that failed to load gives no pin until it is retried and seen', async () => {

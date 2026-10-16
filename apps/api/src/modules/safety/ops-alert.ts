@@ -3,6 +3,7 @@ import { NotificationService, adminAudienceFor, isReviewTenantId } from '../noti
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { opsAlertCounter, opsAlertGauge } from '../../plugins/observability';
+import { smsAccepted } from '../../providers/notifications/sms-outcome';
 
 /**
  * [S-19] War-room socket membership is not delivery acknowledgement.
@@ -79,43 +80,62 @@ async function defaultOpsSms(): Promise<OpsSms | null> {
 /** Text every on-call phone once, all at once (each send is bounded by the
  *  provider deadline, so the page delivery stays inside its worker lease
  *  however many phones are listed). A failed text is logged and counted,
- *  never thrown: the in-app page stands. */
+ *  never thrown: the in-app page stands.
+ *  [AUD-L8b-008] Returns the texts the PROVIDER ACCEPTED: a send that resolved
+ *  without leaving Swift (the non-production recipient list, the review seal,
+ *  a hand-off) is not a phone that was texted (sms-outcome.ts). */
 async function textOnCall(sms: OpsSms | null, phones: string[], opsAlertId: string, text: string): Promise<number> {
   if (!sms || phones.length === 0) return 0;
   const results = await Promise.allSettled(phones.map((phone) => sms.sendSms(phone, text.slice(0, 480))));
   let sent = 0;
   for (const r of results) {
-    if (r.status === 'fulfilled') { sent += 1; opsAlertCounter.labels('oncall_sms').inc(); }
+    if (r.status === 'fulfilled' && smsAccepted(r.value)) { sent += 1; opsAlertCounter.labels('oncall_sms').inc(); }
+    else if (r.status === 'fulfilled') { opsAlertCounter.labels('oncall_sms_not_sent').inc(); log().error({ opsAlertId }, '[AUD-L8b-008] an on-call text was not sent (held before the provider) — not counted as texted'); }
     else log().error({ err: r.reason, opsAlertId }, '[S-19] on-call SMS failed');
   }
   return sent;
 }
 
 /** Open the obligation and deliver it: one recipient row per admin, each
- *  with the persisted notification as its delivery proof, and a text to every
+ *  with the persisted notification as its inbox record, and a text to every
  *  on-call phone [144]. A page that resolves NOBODY to acknowledge it is due
  *  for escalation at once (its deadline is now), so the very next sweep
- *  re-resolves its recipients and escalates — never a quiet success [75]. */
+ *  re-resolves its recipients and escalates — never a quiet success [75].
+ *
+ *  [AUD-L8b-008 · AUD-G7-003] What the page REACHED is counted from what
+ *  actually went out, never from inbox rows: `pushed` = responders whose push
+ *  the provider accepted, `oncallTexted` = on-call texts the provider
+ *  accepted, `reached` = both. `inboxed` (rows written) is a record, not a
+ *  person told. A page that reached nobody — no push and no text accepted — is
+ *  due for escalation at once too: the next sweep re-pushes, texts on-call
+ *  again and pages the platform, until a human acknowledges it. */
 export async function openOpsAlert(
   prisma: PrismaClient,
   notifications: NotificationService,
   input: { kind: OpsAlertKind; tenantId: string | null; sosAlertId?: string | null; title: string; body: string; data: Record<string, unknown>; now?: Date; recipientIds?: string[]; sms?: OpsSms | null; oncallPhones?: string[] },
-): Promise<{ opsAlertId: string; recipients: number; delivered: number; oncallTexted: number }> {
+): Promise<OpsAlertOpened> {
   // The alert's tenant is the one named here (null = platform), never the
   // tenant of whatever request happens to open it [M009]: written unscoped.
   return runWithoutTenant(() => openOpsAlertUnscoped(prisma, notifications, input), 'ops-alert-open');
 }
 
+/** [AUD-L8b-008] What an opened page did: `recipients` = responders it was
+ *  addressed to; `inboxed` = inbox rows written; `pushed` = responders whose
+ *  push the provider accepted; `oncallTexted` = on-call texts the provider
+ *  accepted; `reached` = pushed + oncallTexted, the only count that says a
+ *  person was told. */
+export interface OpsAlertOpened { opsAlertId: string; recipients: number; inboxed: number; pushed: number; oncallTexted: number; reached: number }
+
 async function openOpsAlertUnscoped(
   prisma: PrismaClient,
   notifications: NotificationService,
   input: Parameters<typeof openOpsAlert>[2],
-): Promise<{ opsAlertId: string; recipients: number; delivered: number; oncallTexted: number }> {
+): Promise<OpsAlertOpened> {
   const now = input.now ?? new Date();
   // [REVIEW-PARTNER] The store-review fiction pages no real operator: no obligation, no recipients.
   if (input.tenantId && await isReviewTenantId(prisma, input.tenantId)) {
     log().info({ kind: input.kind }, 'review-tenant send suppressed: ops alert');
-    return { opsAlertId: '', recipients: 0, delivered: 0, oncallTexted: 0 };
+    return { opsAlertId: '', recipients: 0, inboxed: 0, pushed: 0, oncallTexted: 0, reached: 0 };
   }
   // [R048-006] the recipient set is resolvable by the caller (a test seam; production uses the admin resolver)
   const userIds = input.recipientIds ?? (await adminRecipientIds(prisma, input.tenantId));
@@ -128,11 +148,12 @@ async function openOpsAlertUnscoped(
     },
     include: { recipients: true },
   });
-  let delivered = 0;
+  let inboxed = 0; let pushed = 0;
   for (const r of alert.recipients) {
     try {
-      const id = await notifications.send({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title: input.title, body: input.body, data: { ...input.data, opsAlertId: alert.id } });
-      if (id) { delivered += 1; await prisma.opsAlertRecipient.update({ where: { id: r.id }, data: { notificationId: id, deliveredAt: now } }); }
+      const sent = await notifications.sendReach({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title: input.title, body: input.body, data: { ...input.data, opsAlertId: alert.id } });
+      if (sent.pushed) pushed += 1;
+      if (sent.id) { inboxed += 1; await prisma.opsAlertRecipient.update({ where: { id: r.id }, data: { notificationId: sent.id, deliveredAt: now } }); }
     } catch (err) {
       log().error({ err, opsAlertId: alert.id, userId: r.userId }, '[S-19] ops alert delivery failed for a recipient — escalation covers it');
     }
@@ -142,16 +163,21 @@ async function openOpsAlertUnscoped(
   const phones = input.oncallPhones ?? onCallPhones();
   const sms = input.sms !== undefined ? input.sms : phones.length > 0 ? await defaultOpsSms() : null;
   const oncallTexted = await textOnCall(sms, phones, alert.id, `Swift ops: ${input.title}. ${input.body}`);
+  const reached = pushed + oncallTexted;
   opsAlertCounter.labels('opened').inc();
   if (userIds.length === 0) {
     opsAlertCounter.labels('zero_recipients').inc();
     log().error({ opsAlertId: alert.id, tenantId: input.tenantId, oncallTexted }, '[S-19] ops alert has NO recipients — nobody can acknowledge it; due for escalation now (on-call texted, recipients re-resolved on the next sweep)');
-    if (oncallTexted === 0) {
-      opsAlertCounter.labels('unreachable').inc();
-      log().error({ opsAlertId: alert.id, tenantId: input.tenantId }, '[S-19] ops alert reached NOBODY: no SUPER_ADMIN and no on-call phone was texted');
-    }
   }
-  return { opsAlertId: alert.id, recipients: userIds.length, delivered, oncallTexted };
+  if (reached === 0) {
+    // [AUD-L8b-008] Inbox rows are not people told: nobody was reached, so the
+    // page escalates on the very next sweep instead of waiting out a deadline
+    // nobody knows about. (A page with no recipients is already due now.)
+    if (userIds.length > 0) await prisma.opsAlert.update({ where: { id: alert.id }, data: { ackDeadlineAt: now } });
+    opsAlertCounter.labels('unreachable').inc();
+    log().error({ opsAlertId: alert.id, tenantId: input.tenantId, recipients: userIds.length, inboxed }, '[S-19] ops alert reached NOBODY: no push and no on-call text was accepted — due for escalation now');
+  }
+  return { opsAlertId: alert.id, recipients: userIds.length, inboxed, pushed, oncallTexted, reached };
 }
 
 /** Test seam: runs inside the acknowledgement transaction, after the receipt

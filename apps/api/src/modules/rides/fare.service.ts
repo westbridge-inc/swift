@@ -1,6 +1,6 @@
 import type { PrismaClient, RideClass } from '@prisma/client';
 import { isRideClassServed } from '../../config/vehicle-classes';
-import { getMapsProvider, type MapsProvider, type RouteLegsEstimate, type RouteSource } from '../../providers/maps/maps-provider';
+import { assertRoadQuoteAvailable, getMapsProvider, isRoadQuote, type MapsProvider, type RouteLegsEstimate, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { AppError } from '../../utils/errors';
 import { type GeoPoint } from '../../utils/geo';
@@ -8,6 +8,7 @@ import { resolveFareZonePath, resolveFareZones, zonePricedPairs, zoneTaxiPerKm, 
 import { assertTaxiRouteInMarket, placeCode } from './taxi-itinerary';
 import { CountryConfigService } from '../country/country-config.service';
 import { readTaxiRates, readClassRates, assertSaneFare, type TaxiRates, type ClassRates } from '../country/pricing-config';
+import { waitingTermsFromRates, type TaxiWaitingTerms } from './taxi-waiting';
 
 // ---------------------------------------------------------------------------
 // Fare engine — deterministic, computed and shown BEFORE
@@ -124,15 +125,18 @@ export interface ItineraryEstimate extends TieredEstimate {
   legs: ItineraryLeg[];
 }
 
-/** [TAXI multi-stop] A route a fare may be priced from: not degraded, one leg
- *  per pair of points, every leg a finite distance of 0 m or more (one leg of
- *  0 m is real: two points across one road snap to one node), and a whole
- *  route longer than 0 km. A route of 0 km routed nothing, and is refused
- *  rather than priced at the minimum. [DS282 F2] */
+/** [TAXI multi-stop] A route a fare may be priced from: a road quote (the one
+ *  rule a single-leg quote obeys: in production, the real road and never the
+ *  straight-line estimate, whichever provider gave it [DS981]), not degraded,
+ *  one leg per pair of points, every leg a finite distance of 0 m or more (one
+ *  leg of 0 m is real: two points across one road snap to one node), and a
+ *  whole route longer than 0 km. A route of 0 km routed nothing, and is
+ *  refused rather than priced at the minimum. [DS282 F2] */
 function isPriceableRoute(route: RouteLegsEstimate, legCount: number): boolean {
   const distance = (v: number) => Number.isFinite(v) && v >= 0;
   const minutes = (v: number | null) => v == null || distance(v);
-  return !route.degraded
+  return isRoadQuote(route)
+    && !route.degraded
     && route.legs.length === legCount
     && route.legs.every((leg) => distance(leg.km) && minutes(leg.minutes))
     && distance(route.km) && route.km > 0
@@ -184,6 +188,7 @@ export class FareService {
     // Real road route when a routing engine (OSRM) is configured; the
     // deterministic estimate otherwise — identical to the historical numbers.
     const route = await this.maps.routeKm(pickup, dropoff);
+    assertRoadQuoteAvailable(route);
     // [ALG-18] Canonical BEFORE pricing: the fare and the frozen number are one number.
     const distanceKm = canonicalBillableKm(route.km);
     const durationMin = Math.ceil(route.minutes ?? (distanceKm / AVG_SPEED_KMH) * 60);
@@ -239,6 +244,18 @@ export class FareService {
   }
 
   /**
+   * [TAXI waiting charge] A market's waiting terms: its validated TAXI_RATES
+   * (the declared defaults where it names none), in the market's currency, and
+   * the pricing version they were read from (null = the declared defaults).
+   * What the estimate discloses and what a booking freezes on the ride.
+   */
+  async waitingTerms(countryCode: string): Promise<TaxiWaitingTerms & { version: number | null }> {
+    const config = await this.countryConfig.getByCode(countryCode);
+    const read = await readTaxiRates(this.prisma, countryCode);
+    return { ...waitingTermsFromRates(read.payload, config.currencyCode), version: read.version };
+  }
+
+  /**
    * Tiered fares (Economy/Comfort/XL) for the request screen — the base fare
    * once, then each tier = base × class multiplier (Economy unchanged). All
    * deterministic; shown before any driver sees the request.
@@ -270,8 +287,9 @@ export class FareService {
    *    direct pickup → destination pair (v1; FARE_ZONE_TABLE_KILL=1 bypasses
    *    the table here as everywhere);
    *  - 503 ROUTE_UNAVAILABLE when the configured routing engine could not
-   *    route it (ALG-11), or routed nothing (a route of 0 km): a single-leg
-   *    ride keeps its fallback, a ride with stops is never priced from a guess.
+   *    route it (ALG-11), routed nothing (a route of 0 km), or, in production,
+   *    answered with the straight-line estimate (isRoadQuote, the single-leg
+   *    rule): a ride with stops is never priced from a guess.
    */
   async estimateItineraryTiers(pickup: GeoPoint, stops: readonly GeoPoint[], dropoff: GeoPoint, countryCode: string, tenantId: string = DEFAULT_TENANT_ID): Promise<ItineraryEstimate> {
     if (stops.length === 0) {

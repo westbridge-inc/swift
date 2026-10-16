@@ -205,6 +205,18 @@ describe('[STA-1 Part 6] seeding a REVIEW tenant', () => {
     expect([Number(healed.basePrice), healed.isAvailable]).toEqual([firstItem!.item.price, true]);
   });
 
+  it('[Item 62] a pack listing or category a tester deleted (archived) is restored by re-running, not a CHECK failure', async () => {
+    const [firstItem] = plan().items;
+    await system(async () => {
+      await app.prisma.item.update({ where: { id: firstItem!.id }, data: { archivedAt: new Date(), isAvailable: false, autoHiddenAt: null } });
+      await app.prisma.category.update({ where: { id: firstItem!.categoryId }, data: { archivedAt: new Date() } });
+    });
+    expect((await system(() => seedReviewContentPack(app.prisma, { slug: REVIEW }))).state).toBe('PRESENT');
+    const healed = await system(() => app.prisma.item.findUniqueOrThrow({ where: { id: firstItem!.id }, include: { category: true } }));
+    expect({ archivedAt: healed.archivedAt, isAvailable: healed.isAvailable, categoryArchivedAt: healed.category.archivedAt })
+      .toEqual({ archivedAt: null, isAvailable: true, categoryArchivedAt: null });
+  });
+
   it('no row lands outside the REVIEW tenant, and production is untouched', async () => {
     const after = await census();
     const p = plan();

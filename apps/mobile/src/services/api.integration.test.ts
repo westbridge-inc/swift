@@ -6,6 +6,10 @@ import axios, {
 } from 'axios';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot, RotatedAuthTokens } from '../lib/authSession';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 
 const nativePlatform = vi.hoisted(() => ({ OS: 'ios' }));
 
@@ -520,6 +524,55 @@ describe('Axios auth interceptor integration', () => {
     expect(JSON.parse(seen[2]?.data ?? '{}')).toMatchObject({ type: 'CVQ', referenceNumber: 'CVQ-1' });
   });
 
+  it('marks every service-job lifecycle command with contract v2 and sends every authority fact explicitly', async () => {
+    const seen: Array<{ url: string; contract?: string; body: Record<string, unknown> }> = [];
+    setAdapter(async (config) => {
+      const raw = typeof config.data === 'string' ? JSON.parse(config.data) : config.data;
+      seen.push({
+        url: config.url ?? '',
+        contract: config.headers.get(SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER) as string | undefined,
+        body: (raw ?? {}) as Record<string, unknown>,
+      });
+      return response(config, 200, { data: { id: 'job-a' } });
+    });
+
+    const expectedUpdatedAt = '2026-09-20T12:00:00.000Z';
+    const expectedScheduledFor = '2026-09-21T13:00:00.000Z';
+    await servicesApi.scheduleJob('job-a', {
+      scheduledFor: expectedScheduledFor,
+      expectedUpdatedAt,
+      expectedQuoteAmount: 8_000,
+    });
+    await servicesApi.cancelJob('job-a', expectedUpdatedAt);
+    await servicesApi.quoteJob('job-a', 8_000, expectedUpdatedAt);
+    await servicesApi.confirmJob('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.declineSlot('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.startJob('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.completeJob('job-a', expectedUpdatedAt);
+
+    expect(seen.map(({ url }) => url)).toEqual([
+      '/services/jobs/job-a/schedule',
+      '/services/jobs/job-a/cancel',
+      '/services/jobs/job-a/quote',
+      '/services/jobs/job-a/confirm',
+      '/services/jobs/job-a/decline-slot',
+      '/services/jobs/job-a/start',
+      '/services/jobs/job-a/complete',
+    ]);
+    expect(seen.every(({ contract }) => contract === SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION)).toBe(true);
+    expect(seen[0]?.body).toEqual({
+      scheduledFor: expectedScheduledFor,
+      expectedUpdatedAt,
+      expectedQuoteAmount: 8_000,
+    });
+    expect(seen[1]?.body).toEqual({ expectedUpdatedAt });
+    expect(seen[2]?.body).toEqual({ amount: 8_000, expectedUpdatedAt });
+    for (const index of [3, 4, 5]) {
+      expect(seen[index]?.body).toEqual({ expectedUpdatedAt, expectedScheduledFor });
+    }
+    expect(seen[6]?.body).toEqual({ expectedUpdatedAt });
+  });
+
   it('pins every protected multi-step API method to A while B is current', async () => {
     auth.current = { ...accountB };
     const seen: Array<{ url: string; authorization?: string; keys: string[] }> = [];
@@ -732,6 +785,101 @@ describe('weekly fee MMG transport', () => {
   });
 });
 
+describe('weak-network driver acceptance', () => {
+  it('retries the exact offer once after a lost response', async () => {
+    const requests: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => {
+      requests.push(config);
+      if (requests.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { id: 'ride-a' } });
+    });
+    const result = await driverApi.acceptOffer('ride-a', 'attempt-a');
+    expect(result.data.data.id).toBe('ride-a');
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.url)).toEqual(['/driver/offers/accept', '/driver/offers/accept']);
+    expect(requests[0]?.data).toBe(requests[1]?.data);
+    expect(JSON.parse(requests[1]!.data)).toEqual({ orderId: 'ride-a', offerAttemptId: 'attempt-a' });
+  });
+  it('[OWNER RULING 8 Oct] never sends a fare on any accept, first try or retry', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    setAdapter(async (config) => {
+      if (config.method === 'post') {
+        bodies.push(JSON.parse(config.data ?? '{}'));
+        if (bodies.length % 2 === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+      }
+      return response(config, 200, { data: { id: 'other-ride' } });
+    });
+    await driverApi.acceptOffer('ride-a', 'attempt-a');
+    await driverApi.accept('ride-b');
+    expect(bodies).toHaveLength(4);
+    for (const body of bodies) expect(body).not.toHaveProperty('fare');
+  });
+  it('reconciles a lost board response against the already-held ride', async () => {
+    const urls: string[] = [];
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') throw new AxiosError('timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { id: 'ride-a' } });
+    });
+    expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it.each(['ALREADY_TAKEN', 'DRIVER_BUSY'])('reconciles a board retry refused %s because the first accept committed', async (code) => {
+    const urls: string[] = [];
+    let posts = 0;
+    let gets = 0;
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') {
+        posts++;
+        if (posts === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+        throw new AxiosError('conflict', 'ERR_BAD_REQUEST', config, undefined,
+          response(config, 409, { success: false, error: { code } }));
+      }
+      gets++;
+      // Before the retry the first accept has not committed; after it, it has.
+      return response(config, 200, { data: gets === 1 ? null : { id: 'ride-a' } });
+    });
+    expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active', '/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it('still fails a refused board retry when the server holds a different ride', async () => {
+    const urls: string[] = [];
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') {
+        if (urls.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+        throw new AxiosError('conflict', 'ERR_BAD_REQUEST', config, undefined,
+          response(config, 409, { success: false, error: { code: 'DRIVER_BUSY' } }));
+      }
+      return response(config, 200, { data: { id: 'ride-other' } });
+    });
+    await expect(driverApi.accept('ride-a')).rejects.toThrow();
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active', '/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it('does not borrow another account for a retry', async () => {
+    let calls = 0;
+    setAdapter(async (config) => { calls++; auth.current = accountB; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(driverApi.acceptOffer('ride-a', 'attempt-a')).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  it.each([400, 401, 403, 409, 500])('does not retry an authoritative rejection %i', async (status) => {
+    let calls = 0;
+    if (status === 401) auth.current = null;
+    setAdapter(async (config) => {
+      calls++;
+      throw new AxiosError('rejected', 'ERR_BAD_RESPONSE', config, undefined, response(config, status, {}));
+    });
+    await expect(driverApi.acceptOffer('ride-a')).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  it('never exceeds two accept attempts', async () => {
+    let calls = 0;
+    setAdapter(async (config) => { calls++; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(driverApi.acceptOffer('ride-a')).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
+});
 
 describe('weak-network read lifetime', () => {
   it('allows 20 seconds for reads while preserving write and explicit request timeouts', async () => {

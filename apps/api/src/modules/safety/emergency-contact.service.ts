@@ -4,6 +4,8 @@ import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
 import { checkSafetySmsBudget, smsDestinationAllowed, type SmsBudgetReason } from '../../utils/sms-budget';
 import { normalizePhone } from '../../utils/phone';
+import { gsm7Name } from '../../utils/sms-text';
+import { OPERATOR } from '../legal/operator';
 import type { NotificationChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
 
@@ -25,6 +27,20 @@ import { log } from '../../utils/logger';
 // never the login one, so no flood of login codes can stop a contact being
 // confirmed. And a contact's number must be one we can text: a launch-market
 // number, refused before it is saved.
+
+/**
+ * [R20 · research B10 · DPA s.21(3)(b)] The contact's number did not come from
+ * the contact, so the FIRST text they get must say who holds it (Swift and its
+ * operator, OPERATOR.name), why (their safety alerts only), and how to have it removed.
+ * These are the research's exact words. Only GSM-alphabet characters, and the
+ * owner's first name is cleaned and capped, so the text always goes as at most
+ * two parts (see utils/sms-text).
+ */
+export const EMERGENCY_CONTACT_NAME_MAX = 30;
+export function emergencyContactCodeText(ownerFirstName: string | null | undefined, code: string): string {
+  const owner = gsm7Name(ownerFirstName, EMERGENCY_CONTACT_NAME_MAX) || 'A Swift user';
+  return `${owner} added you as their emergency contact on Swift (${OPERATOR.name}). We use your number only for their safety alerts. Code ${code}. Not expected? Ignore this; to remove your number: ${OPERATOR.privacyEmail}.`;
+}
 
 const MAX_CONTACTS = Math.min(10, Math.max(1, Number(process.env['MAX_EMERGENCY_CONTACTS']) || 5));
 
@@ -158,14 +174,10 @@ export class EmergencyContactService {
     if (!budget.allowed) throw contactCodeRefused(budget.reason);
 
     const owner = await this.prisma.user.findUnique({ where: { id: ownerUserId }, select: { firstName: true } });
-    const ownerName = owner?.firstName?.trim() || 'A Swift user';
     const code = generateOtp();
     await storeOtp(this.redis, this.codeKey(contactId), code);
     try {
-      await this.channels.sms.sendSms(
-        phoneE164,
-        `${ownerName} added you as their Swift emergency contact — you'll be alerted if they trigger an SOS. Confirm with code ${code}. Didn't expect this? Ignore this message.`,
-      );
+      await this.channels.sms.sendSms(phoneE164, emergencyContactCodeText(owner?.firstName, code));
     } catch (err) {
       // A code that never left gives back the budget it counted.
       await budget.refund?.().catch(() => {});

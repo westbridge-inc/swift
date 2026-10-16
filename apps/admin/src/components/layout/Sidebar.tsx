@@ -2,136 +2,60 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import {
-  LayoutDashboard,
-  ShoppingCart,
-  Store,
-  Bike,
-  Car,
-  Users,
-  DollarSign,
-  Tag,
-  Map,
-  Settings,
-  FileText,
-  ShieldCheck,
-  ShieldAlert,
-  Stamp,
-  Banknote,
-  Flag,
-  Fingerprint,
-  Megaphone as AdsIcon,
-  RefreshCw,
-  LifeBuoy,
-  PackageOpen,
-  Megaphone,
-  Radar,
-  Globe,
-  Scale,
-  ListRestart, Compass, Receipt,
-} from 'lucide-react';
+import { NAV_GROUPS, navItemFor } from './nav';
+import { label } from '@/lib/labels';
 
-// Grouped by what the operator is doing, not by table name. Sections only list
-// pages that exist — a dead link is worse than a missing one.
-const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon: typeof LayoutDashboard }[] }[] = [
-  {
-    title: 'Operations',
-    items: [
-      { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-      { label: 'Live map', href: '/ops', icon: Radar },
-      { label: 'Orders', href: '/orders', icon: ShoppingCart },
-    ],
-  },
-  {
-    title: 'People',
-    items: [
-      { label: 'Users', href: '/users', icon: Users },
-      { label: 'Vendors', href: '/vendors', icon: Store },
-      { label: 'Riders', href: '/riders', icon: Bike },
-      { label: 'Drivers', href: '/drivers', icon: Car },
-      { label: 'Verification', href: '/verification', icon: ShieldCheck },
-      { label: 'Compliance', href: '/compliance', icon: Scale },
-    ],
-  },
-  {
-    title: 'Money',
-    items: [
-      // [ADM-005] First in Money on purpose: a pending row means a colleague
-      // asked for something and it has not happened yet.
-      { label: 'Approvals', href: '/approvals', icon: Stamp },
-      { label: 'Finance', href: '/finance', icon: DollarSign },
-      { label: 'Subscriptions', href: '/subscriptions', icon: RefreshCw },
-      { label: 'Cash rail', href: '/cash', icon: Banknote },
-      // Support finds a partner's MMG weekly-fee payment by either id or their phone.
-      { label: 'MMG payments', href: '/mmg-payments', icon: Receipt },
-      { label: 'Claims', href: '/claims', icon: ShieldAlert },
-      { label: 'Promos', href: '/promos', icon: Tag },
-    ],
-  },
-  {
-    title: 'Support',
-    items: [
-      { label: 'Tickets', href: '/support', icon: LifeBuoy },
-      { label: 'Moderation', href: '/moderation', icon: Flag },
-      { label: 'Integrity', href: '/integrity', icon: Fingerprint },
-      { label: 'Discovery', href: '/discovery', icon: Compass },
-      { label: 'Ads review', href: '/ads', icon: AdsIcon },
-      { label: 'Custody cases', href: '/custody', icon: LifeBuoy },
-      { label: 'Returns', href: '/returns', icon: PackageOpen },
-      { label: 'Broadcast', href: '/broadcast', icon: Megaphone },
-    ],
-  },
-  {
-    title: 'Platform',
-    items: [
-      { label: 'Markets', href: '/markets', icon: Globe },
-      { label: 'Zones', href: '/zones', icon: Map },
-      { label: 'Background jobs', href: '/jobs', icon: ListRestart },
-      { label: 'Config', href: '/config', icon: Settings },
-      { label: 'Audit Log', href: '/audit', icon: FileText },
-    ],
-  },
-];
+/** Initials for the signed-in role chip; the session carries roles, not a name. */
+function roleInitials(role: string | null | undefined): string {
+  return role === 'SUPER_ADMIN' ? 'SA' : role === 'ADMIN' ? 'AD' : '··';
+}
 
-export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
+/**
+ * [MISSION CONTROL · shell] The sidebar in the owner's design: six groups,
+ * the current screen marked (and announced with aria-current), and the
+ * signed-in role at the foot in plain words.
+ */
+export function Sidebar({ onNavigate, role }: { onNavigate?: () => void; role?: string | null }) {
   const pathname = usePathname();
+  const current = navItemFor(pathname);
 
   return (
-    <aside className="w-64 h-full shrink-0 bg-[var(--panel)] border-r border-[var(--border)] flex flex-col">
-      <div className="p-6 border-b border-[var(--border)]">
-        <h1 className="text-xl font-bold">
-          <span className="text-[var(--accent)]">Swift</span> Admin
-        </h1>
+    <aside className="mc-sidebar">
+      <div className="mc-sidebar-brand">
+        <span className="mc-numbers">Swift</span> Mission Control
       </div>
-      <nav className="flex-1 p-4 space-y-4 overflow-y-auto">
-        {NAV_SECTIONS.map((section) => (
-          <div key={section.title}>
-            <p className="px-3 pb-1 text-[10px] font-semibold tracking-widest text-[var(--muted)]/70">
-              {section.title.toUpperCase()}
-            </p>
-            <div className="space-y-1">
-              {section.items.map((item) => {
-                const isActive = pathname.startsWith(item.href);
+      <nav aria-label="Mission Control" className="mc-sidebar-nav">
+        {NAV_GROUPS.map((group) => (
+          <div key={group.title} className="mc-sidebar-group">
+            <p className="mc-sidebar-title" id={`nav-${group.title}`}>{group.title}</p>
+            <ul aria-labelledby={`nav-${group.title}`}>
+              {group.items.map((item) => {
+                const active = current?.href === item.href;
                 return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    onClick={onNavigate}
-                    className={`flex items-center gap-3 px-3 py-2 min-h-11 rounded-lg text-sm transition-colors ${
-                      isActive
-                        ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
-                        : 'text-[var(--muted)] hover:text-white hover:bg-white/5'
-                    }`}
-                  >
-                    <item.icon size={18} />
-                    {item.label}
-                  </Link>
+                  <li key={item.href}>
+                    <Link
+                      href={item.href}
+                      onClick={onNavigate}
+                      aria-current={active ? 'page' : undefined}
+                      className={`mc-sidebar-link${active ? ' is-active' : ''}`}
+                    >
+                      <item.icon size={16} aria-hidden="true" />
+                      <span className="mc-truncate">{item.label}</span>
+                    </Link>
+                  </li>
                 );
               })}
-            </div>
+            </ul>
           </div>
         ))}
       </nav>
+      <div className="mc-sidebar-foot">
+        <span className="mc-avatar mc-numbers" aria-hidden="true">{roleInitials(role)}</span>
+        <span className="min-w-0">
+          <span className="block font-semibold">Signed in</span>
+          <span className="block mc-muted text-xs">{role ? label('UserRole', role) : 'Checking your session…'}</span>
+        </span>
+      </div>
     </aside>
   );
 }

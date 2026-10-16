@@ -14,6 +14,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
+import { REAL_PNG } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // catalogue: CSV import with row-level errors, instant availability
@@ -85,7 +86,7 @@ async function makeVendor(owned: { userId: string }, opts: { verified: boolean }
   return vendor.id;
 }
 
-function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
+function inject(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown, token?: string) {
   return app.inject({
     method,
     url,
@@ -356,10 +357,8 @@ describe('Image upload — validated, behind the StorageProvider', () => {
   });
 
   it('accepts a real PNG and stores a URL', async () => {
-    const png = Buffer.concat([
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      Buffer.alloc(64, 1),
-    ]);
+    // [Row 108] A real photo: the storage seam reads every photo with the real decoder.
+    const png = REAL_PNG;
     const { payload, contentType } = multipartBody('burger.png', 'image/png', png);
 
     const res = await app.inject({
@@ -407,5 +406,224 @@ describe('One code path for all four vendor types', () => {
     const kinds = new Set(items.map((i) => i.fulfillment));
     expect(kinds.has('DELIVERY')).toBe(true);
     expect(kinds.has('APPOINTMENT')).toBe(true);
+  });
+});
+
+
+describe('deleting a menu item archives its order and booking references', () => {
+  // This block's orders and bookings reference the shared customer: remove
+  // them before the file's own cleanup deletes the people.
+  const fixtureOrderIds: string[] = [];
+  afterAll(async () => {
+    await app.prisma.booking.deleteMany({ where: { customerId } });
+    await app.prisma.cart.deleteMany({ where: { customerId } });
+    await app.prisma.order.deleteMany({ where: { id: { in: fixtureOrderIds } } });
+  });
+
+  async function archiveFixture(fulfillment: 'DELIVERY' | 'APPOINTMENT' = 'DELIVERY') {
+    const category = await app.prisma.category.create({ data: { vendorId, name: `Archive ${nanoid(8)}` } });
+    const item = await app.prisma.item.create({ data: {
+      vendorId, categoryId: category.id, name: 'Archive fixture', basePrice: 500, fulfillment,
+      stockQuantity: 0, isAvailable: false, autoHiddenAt: new Date(),
+      optionGroups: { create: { name: 'Size', options: { create: { name: 'Small', additionalPrice: 0 } } } },
+    } });
+    const order = await app.prisma.order.create({ data: {
+      orderNumber: `ARCHIVE-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment,
+      customerId, vendorId, status: 'PENDING', paymentMethod: 'CASH',
+      deliveryAddress: 'Fixture', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 500, subtotalMarkup: 0, subtotalCustomer: 500, deliveryFee: 0, totalAmount: 500,
+      items: { create: { itemId: item.id, name: item.name, quantity: 1, basePrice: 500, markedUpPrice: 500, markupAmount: 0, totalBase: 500, totalMarkup: 0, totalCustomer: 500 } },
+    } });
+    fixtureOrderIds.push(order.id);
+    const response = await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken);
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().data.deleted).toBe(true); // keep the shipped client contract
+    return { item, order, category };
+  }
+
+  it('retains the item and option history while hiding it from the editable menu', async () => {
+    const { item } = await archiveFixture();
+    const stored = await app.prisma.item.findUnique({ where: { id: item.id }, include: { optionGroups: { include: { options: true } } } });
+    expect(stored).toMatchObject({ isAvailable: false, autoHiddenAt: null, archivedAt: expect.any(Date) });
+    expect(stored?.optionGroups[0]?.options).toHaveLength(1);
+    const menu = await inject('GET', '/api/v1/vendor/items', undefined, vendorToken);
+    expect(menu.statusCode).toBe(200);
+    expect(menu.json().data.some((row: { id: string }) => row.id === item.id)).toBe(false);
+    const categories = await inject('GET', '/api/v1/vendor/categories', undefined, vendorToken);
+    expect(categories.json().data.some((row: { items: Array<{ id: string }> }) => row.items.some((entry) => entry.id === item.id))).toBe(false);
+  });
+
+  it('an open order still cancels and restocks once without making an archived item saleable', async () => {
+    const { item, order } = await archiveFixture();
+    const response = await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture cancellation' }, customerToken);
+    expect(response.statusCode, response.body).toBe(200);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('CANCELLED');
+    expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ stockQuantity: 1, isAvailable: false, autoHiddenAt: null });
+    expect(await app.prisma.stockMovement.count({ where: { orderId: order.id, itemId: item.id, reason: 'CANCEL_RESTOCK' } })).toBe(1);
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture retry' }, customerToken)).statusCode).toBe(400);
+  });
+
+  it('a stale menu editor cannot restore an archived item to availability', async () => {
+    const { item } = await archiveFixture();
+    for (const suffix of ['', '/availability']) {
+      const response = await inject('PUT', `/api/v1/vendor/items/${item.id}${suffix}`, { isAvailable: true }, vendorToken);
+      expect(response.statusCode, response.body).toBe(404);
+    }
+    expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ isAvailable: false, archivedAt: expect.any(Date) });
+  });
+
+  it('every editor of a listing treats an archived one as gone, and a second delete finds nothing', async () => {
+    const { item } = await archiveFixture();
+    const group = await app.prisma.optionGroup.findFirstOrThrow({ where: { itemId: item.id }, include: { options: true } });
+    const groupId = group.id;
+    const optionId = group.options[0]!.id;
+    const attempts: Array<[string, () => ReturnType<typeof inject>]> = [
+      ['adjust stock', () => inject('POST', `/api/v1/vendor/items/${item.id}/adjust`, { delta: 1, reason: 'RECEIVED' }, vendorToken)],
+      ['add an option group', () => inject('POST', `/api/v1/vendor/items/${item.id}/option-groups`, { name: 'Extra' }, vendorToken)],
+      ['read its category suggestions', () => inject('GET', `/api/v1/vendor/items/${item.id}/category-suggestions`, undefined, vendorToken)],
+      ['close a date for it', () => inject('POST', '/api/v1/vendor/bookings/exceptions', { itemId: item.id, date: '2031-01-06' }, vendorToken)],
+      ['delete it again', () => inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)],
+      ['rename its option group', () => inject('PUT', `/api/v1/vendor/option-groups/${groupId}`, { name: 'Renamed' }, vendorToken)],
+      ['delete its option group', () => inject('DELETE', `/api/v1/vendor/option-groups/${groupId}`, undefined, vendorToken)],
+      ['add an option', () => inject('POST', `/api/v1/vendor/option-groups/${groupId}/options`, { name: 'Large', additionalPrice: 100 }, vendorToken)],
+      ['rename its option', () => inject('PUT', `/api/v1/vendor/options/${optionId}`, { name: 'Tiny' }, vendorToken)],
+      ['delete its option', () => inject('DELETE', `/api/v1/vendor/options/${optionId}`, undefined, vendorToken)],
+    ];
+    for (const [what, attempt] of attempts) {
+      const response = await attempt();
+      expect(response.statusCode, `${what}: ${response.body}`).toBe(404);
+    }
+    expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ isAvailable: false, stockQuantity: 0, archivedAt: expect.any(Date) });
+    const kept = await app.prisma.optionGroup.findUniqueOrThrow({ where: { id: groupId }, include: { options: true } });
+    expect({ name: kept.name, options: kept.options.map((o) => o.name) }).toEqual({ name: 'Size', options: ['Small'] });
+  });
+
+  it('a pending category suggestion for an archived listing leaves the store-wide review list', async () => {
+    const { item } = await archiveFixture();
+    const tag = await app.prisma.discoveryCategory.findFirst({ select: { id: true } });
+    if (!tag) return; // no taxonomy seeded in this database
+    await app.prisma.discoveryCategorySuggestion.create({ data: { itemId: item.id, categoryId: tag.id, confidence: 0.9, stage: 'MATCHER', status: 'PENDING' } });
+    const res = await inject('GET', '/api/v1/vendor/category-suggestions', undefined, vendorToken);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(JSON.stringify(res.json().data)).not.toContain(item.id);
+    await app.prisma.discoveryCategorySuggestion.deleteMany({ where: { itemId: item.id } });
+  });
+
+  it('an archived listing is not on the storefront and cannot be added to a cart', async () => {
+    const { item } = await archiveFixture();
+    const store = await inject('GET', `/api/v1/customer/vendors/${vendorId}`, undefined, customerToken);
+    expect(store.statusCode, store.body).toBe(200);
+    expect(JSON.stringify(store.json().data)).not.toContain(item.id);
+    const add = await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: item.id, quantity: 1 }, customerToken);
+    expect(add.statusCode).toBe(404);
+  });
+
+  it('the database itself refuses to make an archived listing available again', async () => {
+    const { item } = await archiveFixture();
+    await expect(app.prisma.item.update({ where: { id: item.id }, data: { isAvailable: true } })).rejects.toThrow(/items_archived_unavailable/);
+    await expect(app.prisma.item.update({ where: { id: item.id }, data: { autoHiddenAt: new Date() } })).rejects.toThrow(/items_archived_unavailable/);
+    expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ isAvailable: false, autoHiddenAt: null });
+  });
+
+  it('does not erase an existing booking when the service listing is deleted', async () => {
+    const category = await app.prisma.category.create({ data: { vendorId, name: `Archive service ${nanoid(8)}` } });
+    const item = await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Booked fixture', basePrice: 500, fulfillment: 'APPOINTMENT' } });
+    const held = await app.prisma.booking.create({ data: { itemId: item.id, customerId, slotStart: new Date(Date.now() + DAY), slotEnd: new Date(Date.now() + DAY + 1800000) } });
+    expect((await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)).statusCode).toBe(200);
+    expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: item.id, status: 'RESERVED' });
+    await booking.cancelBooking(held.id, customerId);
+    expect((await app.prisma.booking.findUniqueOrThrow({ where: { id: held.id } })).status).toBe('CANCELLED');
+  });
+});
+
+describe('[owner 11 Oct] deleting a category archives it and its listings — history kept, bookings untouched', () => {
+  const fixtureOrderIds: string[] = [];
+  afterAll(async () => {
+    await app.prisma.booking.deleteMany({ where: { customerId } });
+    await app.prisma.order.deleteMany({ where: { id: { in: fixtureOrderIds } } });
+  });
+
+  /** A category holding a sold-out delivery listing with an open order, a
+   *  service listing with a booking, and an already-archived listing. */
+  async function categoryFixture() {
+    const name = `Gone ${nanoid(8)}`;
+    const category = await app.prisma.category.create({ data: { vendorId, name } });
+    const dish = await app.prisma.item.create({ data: {
+      vendorId, categoryId: category.id, name: 'Category fixture dish', basePrice: 500,
+      stockQuantity: 0, lowStockThreshold: 3, isAvailable: false, autoHiddenAt: new Date(),
+      optionGroups: { create: { name: 'Size', options: { create: { name: 'Small', additionalPrice: 0 } } } },
+    } });
+    const service = await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Category fixture service', basePrice: 500, fulfillment: 'APPOINTMENT' } });
+    const order = await app.prisma.order.create({ data: {
+      orderNumber: `CATARCH-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', customerId, vendorId, status: 'PENDING', paymentMethod: 'CASH',
+      deliveryAddress: 'Fixture', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 500, subtotalMarkup: 0, subtotalCustomer: 500, deliveryFee: 0, totalAmount: 500,
+      items: { create: { itemId: dish.id, name: dish.name, quantity: 1, basePrice: 500, markedUpPrice: 500, markupAmount: 0, totalBase: 500, totalMarkup: 0, totalCustomer: 500 } },
+    } });
+    fixtureOrderIds.push(order.id);
+    const held = await app.prisma.booking.create({ data: { itemId: service.id, customerId, slotStart: new Date(Date.now() + 2 * DAY), slotEnd: new Date(Date.now() + 2 * DAY + 1800000) } });
+    const response = await inject('DELETE', `/api/v1/vendor/categories/${category.id}`, undefined, vendorToken);
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().data).toMatchObject({ deleted: true, itemsRemoved: 2 }); // the shipped contract
+    return { category, name, dish, service, order, held };
+  }
+
+  it('keeps the category and its listings as archived history, and the booking stands', async () => {
+    const { category, dish, service, held } = await categoryFixture();
+    expect(await app.prisma.category.findUnique({ where: { id: category.id } })).toMatchObject({ archivedAt: expect.any(Date) });
+    for (const id of [dish.id, service.id]) {
+      expect(await app.prisma.item.findUnique({ where: { id } })).toMatchObject({ archivedAt: expect.any(Date), isAvailable: false, autoHiddenAt: null });
+    }
+    expect((await app.prisma.item.findUnique({ where: { id: dish.id }, include: { optionGroups: { include: { options: true } } } }))?.optionGroups[0]?.options).toHaveLength(1);
+    expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: service.id, status: 'RESERVED' });
+    await booking.cancelBooking(held.id, customerId);
+    expect((await app.prisma.booking.findUniqueOrThrow({ where: { id: held.id } })).status).toBe('CANCELLED');
+  });
+
+  it.each(['the customer cancels', 'the store rejects'])('an open order still closes when %s: restocked once, nothing back on sale', async (who) => {
+    const { dish, order } = await categoryFixture();
+    const response = who === 'the customer cancels'
+      ? await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture cancellation' }, customerToken)
+      : await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Out of stock' }, vendorToken);
+    expect(response.statusCode, response.body).toBe(200);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('CANCELLED');
+    expect(await app.prisma.item.findUnique({ where: { id: dish.id } })).toMatchObject({ stockQuantity: 1, isAvailable: false, archivedAt: expect.any(Date) });
+    expect(await app.prisma.stockMovement.count({ where: { orderId: order.id, itemId: dish.id, reason: 'CANCEL_RESTOCK' } })).toBe(1);
+  });
+
+  it('is gone from the menu, the item list, the low-stock list, the store profile and the storefront', async () => {
+    const { category, name, dish, service } = await categoryFixture();
+    const ids = [category.id, dish.id, service.id];
+    const surfaces = [
+      inject('GET', '/api/v1/vendor/categories', undefined, vendorToken),
+      inject('GET', '/api/v1/vendor/items', undefined, vendorToken),
+      inject('GET', '/api/v1/vendor/items/low-stock', undefined, vendorToken),
+      inject('GET', '/api/v1/vendor/profile', undefined, vendorToken),
+      inject('GET', `/api/v1/customer/vendors/${vendorId}`, undefined, customerToken),
+    ];
+    for (const res of await Promise.all(surfaces)) {
+      expect(res.statusCode, res.body).toBe(200);
+      const text = JSON.stringify(res.json().data);
+      for (const id of ids) expect(text, res.body.slice(0, 120)).not.toContain(id);
+      expect(text).not.toContain(name);
+    }
+  });
+
+  it('every editor treats the archived category as gone; a new listing or an import never lands in it', async () => {
+    const { category, name } = await categoryFixture();
+    expect((await inject('PUT', `/api/v1/vendor/categories/${category.id}`, { name: 'Back again' }, vendorToken)).statusCode).toBe(404);
+    expect((await inject('DELETE', `/api/v1/vendor/categories/${category.id}`, undefined, vendorToken)).statusCode).toBe(404);
+    expect((await inject('POST', '/api/v1/vendor/items', { categoryId: category.id, name: 'Into the archive', basePrice: 100 }, vendorToken)).statusCode).toBe(404);
+    const live = await app.prisma.category.create({ data: { vendorId, name: `Live ${nanoid(6)}` } });
+    const item = await app.prisma.item.create({ data: { vendorId, categoryId: live.id, name: 'Mover fixture', basePrice: 100 } });
+    expect((await inject('PUT', `/api/v1/vendor/items/${item.id}`, { categoryId: category.id }, vendorToken)).statusCode).toBe(404);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).categoryId).toBe(live.id);
+    // A CSV row naming the archived category files into a NEW live one.
+    const csv = ['category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl', `${name},Imported again,,700,,,,true,DELIVERY,`].join('\n');
+    const imported = await inject('POST', '/api/v1/vendor/items/import', { csv }, vendorToken);
+    expect(imported.statusCode, imported.body).toBe(200);
+    const row = await app.prisma.item.findFirstOrThrow({ where: { vendorId, name: 'Imported again' }, include: { category: true } });
+    expect(row.categoryId).not.toBe(category.id);
+    expect(row.category.archivedAt).toBeNull();
   });
 });
