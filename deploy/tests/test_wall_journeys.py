@@ -77,12 +77,25 @@ if argv[:1] == ['compose'] and 'stop' in argv:
     sys.exit(int(env('FAKE_STOP_RC', '0')))
 if argv[:1] == ['compose'] and 'exec' in argv and 'postgres' in argv and argv[-1].startswith('SELECT environment'):
     if copy:
-        print(env('FAKE_COPY_IDENTITY', 'staging')); sys.exit(0)
+        # FAKE_COPY_IDENTITY_LATER: what the copy says from its second read on (the fixture reset's re-check).
+        counter = os.environ['CALL_LOG'] + '.copy-identity'
+        n = int(open(counter).read() or 0) if os.path.exists(counter) else 0
+        open(counter, 'w').write(str(n + 1))
+        later = env('FAKE_COPY_IDENTITY_LATER')
+        print(later if n > 0 and later else env('FAKE_COPY_IDENTITY', 'staging')); sys.exit(0)
     if env('FAKE_LIVE_FAIL'): sys.exit(1)
     print(env('FAKE_LIVE_IDENTITY', 'staging')); sys.exit(0)
 if argv[:1] == ['compose'] and 'exec' in argv and 'postgres' in argv and argv[-1].startswith('SELECT pg_database_size'):
     if copy: sys.exit(5)
     print(env('FAKE_DB_BYTES', str(300 * 1048576))); sys.exit(0)
+if argv[:1] == ['compose'] and 'exec' in argv and 'postgres' in argv and argv[-1].startswith('SELECT system_identifier'):
+    # Each Postgres cluster's own id: the copy is a separate cluster from the live one.
+    if copy:
+        print(env('FAKE_COPY_CLUSTER', '7400000000000000002')); sys.exit(int(env('FAKE_COPY_CLUSTER_RC', '0')))
+    print(env('FAKE_LIVE_CLUSTER', '7400000000000000001')); sys.exit(0)
+if argv[:1] == ['compose'] and 'exec' in argv and 'postgres' in argv and argv[-1].startswith('-- deploy/wall/fixture-fees.sql'):
+    if not copy: sys.exit(7)
+    print(env('FAKE_FIXTURES', '12 4')); sys.exit(int(env('FAKE_FIXTURES_RC', '0')))
 if argv[:1] == ['compose'] and 'up' in argv and 'api-journeys' in argv:
     sys.exit(0)
 if argv[:1] == ['compose'] and 'logs' in argv:
@@ -144,7 +157,7 @@ class JourneysHost:
         (self.deploy / 'wall').mkdir(parents=True)
         for name in FILES:
             shutil.copy(DEPLOY / name, self.deploy / name)
-        for name in ('journeys-on-copy.sh', 'redact-log.py'):
+        for name in ('journeys-on-copy.sh', 'redact-log.py', 'fixture-fees.sql'):
             shutil.copy(DEPLOY / 'wall' / name, self.deploy / 'wall' / name)
         shim(self.deploy / 'wall', 'rehearsal.sh', FAKE_REHEARSAL, python=True)
         self.env_file = self.deploy / '.env'
@@ -169,6 +182,7 @@ class JourneysHost:
     def run(self, *args, extra_env=None):
         self.calls.write_text('')
         Path(str(self.calls) + '.metrics').unlink(missing_ok=True)
+        Path(str(self.calls) + '.copy-identity').unlink(missing_ok=True)
         env = {'PATH': f'{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(self.tmp), 'CALL_LOG': str(self.calls),
                'LIVETEST_ADMIN_PHONE': '+5920400000', 'JOURNEYS_RESULTS_BASE': str(self.results),
                'DEFAULT_METRICS': metrics()}
@@ -180,6 +194,34 @@ class JourneysHost:
 
 def index(calls, predicate):
     return next((i for i, c in enumerate(calls) if predicate(c)), -1)
+
+
+FIXTURE_SQL = DEPLOY / 'wall' / 'fixture-fees.sql'
+
+
+def is_fixture_reset(call):
+    # The statement exactly as the script reads it ($(cat …) drops the final newline).
+    return call['tool'] == 'docker' and call['argv'][-1:] == [FIXTURE_SQL.read_text().rstrip('\n')]
+
+
+def sql_without_comments(text):
+    return '\n'.join(line.split('--', 1)[0] for line in text.splitlines())
+
+
+def journey_partner_phones():
+    """The journey roster's partners, read from scripts/livetest/roster.ts: its
+    stores (VENDORS, but the SERVICE store JOURNEY_VENDORS leaves out) and its
+    movers (MOVERS plus the ones JOURNEY_MOVERS adds)."""
+    roster = (REPO / 'scripts' / 'livetest' / 'roster.ts').read_text()
+    assert "const JOURNEY_VENDORS = VENDORS.filter((v) => v.id !== 'SV1');" in roster, 'JOURNEY_VENDORS changed: update this reader'
+    phones = set()
+    for line in roster.splitlines():
+        m = re.search(r"\{ id: '([A-Z0-9]+)', phone: '(\+[0-9]+)'", line)
+        if not m or m.group(1) == 'SV1':
+            continue
+        if re.search(r"\btype: '", line) or re.search(r"\bkind: '(rider|driver)'", line):
+            phones.add(m.group(2))
+    return phones
 
 
 class JourneysOnCopy(unittest.TestCase):
@@ -201,12 +243,13 @@ class JourneysOnCopy(unittest.TestCase):
         self.assertIn('journeys-on-copy: binding: nontenant=12, nontenant_system=3, tenant=40', result.stdout)
         up = index(calls, lambda c: c['tool'] == 'rehearsal.sh' and c['argv'] == ['up', SHA])
         stop = index(calls, lambda c: c['tool'] == 'docker' and 'stop' in c['argv'])
+        fixtures = index(calls, is_fixture_reset)
         instance = index(calls, lambda c: c['tool'] == 'docker' and 'up' in c['argv'] and 'api-journeys' in c['argv'])
         runner = index(calls, lambda c: c['tool'] == 'docker' and 'run' in c['argv'])
         jobs = index(calls, lambda c: c['tool'] == 'docker' and 'node' in c['argv'] and 'compliance-sample' in c['argv'])
         reads = [i for i, c in enumerate(calls) if c['tool'] == 'docker' and 'node' in c['argv'] and '/metrics' in ' '.join(c['argv'])]
         down = index(calls, lambda c: c['tool'] == 'rehearsal.sh' and c['argv'] == ['down'])
-        self.assertTrue(-1 < up < stop < instance < runner < jobs < down, (up, stop, instance, runner, jobs, down))
+        self.assertTrue(-1 < up < stop < fixtures < instance < runner < jobs < down, (up, stop, fixtures, instance, runner, jobs, down))
         self.assertEqual(down, len(calls) - 1)
         # Sampled from before the journeys; the last read after the jobs; none after the copy goes.
         self.assertGreaterEqual(len(reads), 2)
@@ -215,11 +258,13 @@ class JourneysOnCopy(unittest.TestCase):
         self.assertIn(f'--only={JOURNEYS}', calls[runner]['argv'])
         self.assertEqual(calls[jobs]['argv'][-2:], ['compliance-sample', 'expiry-sweep'])
         self.assertIn('verification-jobs', ' '.join(calls[jobs]['argv']))
-        # The live staging stack is only READ: its identity and its size, nothing else.
+        # The live staging stack is only READ: its identity, its size and its cluster id
+        # (which proves the fixture reset's target is another cluster), nothing else.
         docker = [c['argv'] for c in calls if c['tool'] == 'docker' and c['argv'][:1] == ['compose']]
         live = [a for a in docker if a[:2] != ['compose', '-p']]
         self.assertEqual([a[-1] for a in live], ["SELECT environment FROM deployment_identity WHERE id = 'singleton'",
-                                                 'SELECT pg_database_size(current_database())'])
+                                                 'SELECT pg_database_size(current_database())',
+                                                 'SELECT system_identifier::text FROM pg_control_system()'])
         self.assertTrue(all('exec' in a and 'postgres' in a for a in live))
         self.assertIn('journeys-on-copy: headroom: 5000 MiB memory available, 30000 MiB disk free (database 300 MiB)', result.stdout)
         self.assertIn('before the hold on staging lifts: the live /health and the build-9 smoke', result.stderr)
@@ -292,6 +337,85 @@ class JourneysOnCopy(unittest.TestCase):
         self.assertIn('journeys-on-copy: CUST-02 PASS (all 14 executed steps passed; not runnable on a staging copy: '
                       'MMG checkout, dispute hold)', result.stdout)
         self.assertIn('JOURNEYS PASSED', result.stdout)
+
+    def test_the_roster_fixture_fees_are_reset_on_the_copy_only_before_the_instance_starts(self):
+        """16 Oct: the first copy that booted ran every journey into staging's own
+        fee history: the roster partners' trials ended on 8 Oct and billing had
+        suspended every one (riders/drivers refused at go-online, stores
+        SUSPENDED), 0/8 PASS. On the COPY only, after its worker stops and before
+        the journeys instance starts, the roster's fees get a fresh trial; the
+        count of rows touched is printed, no personal data."""
+        result, calls = self.host.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('journeys-on-copy: fixtures: 12 roster weekly fees set to a fresh 14-day trial on the copy, '
+                      '4 billing-suspended roster stores reopened (no payment, receipt or ledger row; nothing on live staging)',
+                      result.stdout)
+        resets = [i for i, c in enumerate(calls) if is_fixture_reset(c)]
+        self.assertEqual(len(resets), 1, 'one reset, one statement')
+        reset = calls[resets[0]]['argv']
+        self.assertEqual(reset[:3], ['compose', '-p', 'swift-rehearsal'])
+        self.assertIn(str(self.host.deploy / 'docker-compose.rehearsal.yml'), reset)
+        self.assertIn('ON_ERROR_STOP=1', ' '.join(reset))
+        # Proved the copy first: both clusters read, then the copy's identity again, then the reset.
+        cluster = [i for i, c in enumerate(calls) if c['tool'] == 'docker' and c['argv'][-1:] == ['SELECT system_identifier::text FROM pg_control_system()']]
+        self.assertEqual(len(cluster), 2)
+        self.assertEqual(sorted(calls[i]['argv'][:2] == ['compose', '-p'] for i in cluster), [False, True])
+        identity = [i for i, c in enumerate(calls) if c['tool'] == 'docker' and c['argv'][:2] == ['compose', '-p']
+                    and c['argv'][-1].startswith('SELECT environment')]
+        stop = index(calls, lambda c: c['tool'] == 'docker' and 'stop' in c['argv'])
+        instance = index(calls, lambda c: c['tool'] == 'docker' and 'up' in c['argv'] and 'api-journeys' in c['argv'])
+        self.assertTrue(stop < min(cluster) and max(cluster) < identity[-1] < resets[0] < instance, (stop, cluster, identity, resets, instance))
+
+    def test_the_fixture_reset_refuses_any_target_but_the_copy_and_any_doubtful_answer(self):
+        cases = [
+            ({'FAKE_COPY_CLUSTER': '7400000000000000001'}, 'the fixture reset would reach the live staging cluster, not the copy: nothing was changed'),
+            ({'FAKE_COPY_CLUSTER_RC': '1'}, "could not read the copy's and the live cluster ids (the fixture reset needs both)"),
+            ({'FAKE_COPY_CLUSTER': ''}, "could not read the copy's and the live cluster ids (the fixture reset needs both)"),
+            ({'FAKE_COPY_IDENTITY_LATER': 'production'}, "the fixture reset's target says 'production', not staging: nothing was changed"),
+            ({'FAKE_FIXTURES_RC': '3'}, 'the journey roster fixture fees could not be reset on the copy'),
+            ({'FAKE_FIXTURES': 'UPDATE 12'}, 'the fixture reset answered unexpectedly'),
+        ]
+        for env, message in cases:
+            with self.subTest(message=message):
+                result, calls = self.host.run(extra_env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f'JOURNEYS HOLD: {message}', result.stderr)
+                self.assertIn('JOURNEYS FAILED at step: fixtures', result.stderr)
+                self.assertNotIn('JOURNEYS PASSED', result.stdout)
+                refused_before = 'FAKE_FIXTURES' not in ' '.join(env)
+                self.assertEqual(bool([c for c in calls if is_fixture_reset(c)]), not refused_before, calls)
+                self.assertFalse([c for c in calls if c['tool'] == 'docker' and 'up' in c['argv'] and 'api-journeys' in c['argv']])
+                self.assertEqual(index(calls, lambda c: c['tool'] == 'rehearsal.sh' and c['argv'] == ['down']), len(calls) - 1)
+
+    def test_the_fixture_sql_touches_only_the_journey_roster_fees_and_billing_suspensions(self):
+        text = FIXTURE_SQL.read_text()
+        self.assertTrue(text.startswith('-- deploy/wall/fixture-fees.sql'))
+        sql = sql_without_comments(text)
+        # Exactly the journey roster's partners (scripts/livetest/roster.ts), all fictional +5920.
+        phones = set(re.findall(r"'(\+[0-9]+)'", sql))
+        self.assertEqual(phones, journey_partner_phones())
+        self.assertEqual(len(phones), 12)
+        self.assertTrue(all(p.startswith('+5920') for p in phones))
+        self.assertIn("u.phone LIKE '+5920%'", sql)
+        # Refuses by itself on any database that is not staging (a copy of staging says staging).
+        self.assertIn("(SELECT d.environment FROM deployment_identity d WHERE d.id = 'singleton') = 'staging'", sql)
+        # Writes two tables only, by UPDATE; never inserts, deletes or touches money, ledger or clock tables.
+        words = re.findall(r'[A-Za-z_]+', sql.upper())
+        for verb in ('INSERT', 'DELETE', 'TRUNCATE', 'ALTER', 'DROP', 'CREATE', 'COPY', 'GRANT', 'MERGE'):
+            self.assertNotIn(verb, words)
+        self.assertEqual(re.findall(r'\bUPDATE\s+([a-z_"]+)', sql), ['subscriptions', 'vendors'])
+        tables = set(re.findall(r'\b(?:FROM|JOIN)\s+([a-z_]+)', sql))
+        self.assertEqual(tables, {'users', 'deployment_identity', 'subscriptions', 'riders', 'drivers', 'vendors', 'vendor_owners', 'reset', 'roster', 'fees', 'stores'})
+        # A store gets back only what billing took (restoreBillingAccess): other suspensions stay.
+        stores = sql[sql.index('UPDATE vendors'):]
+        self.assertIn("AND \"suspensionSource\" = 'BILLING'", stores)
+        self.assertIn('"acceptingOrders" = ("acceptingOrders" OR "isVerified")', stores)
+        # A new partner's trial: TRIAL, 14 days (SubscriptionService activation, TRIAL_DAYS).
+        days = re.search(r'export const TRIAL_DAYS = (\d+);', (REPO / 'apps/api/src/modules/subscription/subscription.service.ts').read_text())
+        self.assertEqual(sql.count(f"now() + interval '{days.group(1)} days'"), 3)
+        self.assertIn("status = 'TRIAL'", sql)
+        # Counts only.
+        self.assertTrue(sql.rstrip().endswith("(SELECT count(*) FROM reset)::text || ' ' || (SELECT count(*) FROM stores)::text AS touched;"))
 
     def test_refusals_before_anything_changes(self):
         cases = [

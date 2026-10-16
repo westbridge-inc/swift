@@ -19,7 +19,13 @@
 #      generated secrets), the two logins on it, each process's walled boot and
 #      the wall checks. The copy's own identity must then say staging.
 #   3. ONE walled process for the whole measured window: the copy's own worker
-#      (whose walled boot the rehearsal just attested) is stopped, and a private
+#      (whose walled boot the rehearsal just attested) is stopped. Then, on the
+#      COPY only, the journey roster's fixture fees (deploy/wall/fixture-fees.sql):
+#      its +5920 partners live on staging for weeks, so their trials end and
+#      billing suspends them for an unpaid fee; on the copy each gets the fresh
+#      trial a new partner is born with, and a store billing suspended gets back
+#      what billing took. No payment, receipt or ledger row; the copy is proved
+#      first (another cluster than the live one, and it says staging). Then a private
 #      api-journeys instance in the contract posture
 #      (deploy/docker-compose.journeys-copy.yml) serves the requests AND
 #      consumes the queues, so its own /metrics covers every request and every
@@ -169,6 +175,32 @@ STEP=instance
 # The instance is the ONLY queue consumer: the copy's worker stops first.
 "${REH[@]}" stop worker >/dev/null || die "the copy's worker could not be stopped"
 [ -z "$("${REH[@]}" ps -q worker 2>/dev/null)" ] || die "the copy's worker is still running: the journeys instance must be the only queue consumer"
+
+STEP=fixtures
+# [16 Oct] The journey roster's synthetic partners (+5920…) carry staging's own
+# fee history: their 14-day trials ended and billing suspended every one for
+# an unpaid weekly fee, correctly, so no journey could take an order or put a
+# mover online (0/8 on the first copy that booted). On the COPY only, they get
+# the fresh trial a new partner is born with (deploy/wall/fixture-fees.sql: two
+# UPDATEs, no payment, receipt, ledger or clock row). The target must prove it
+# is the copy first: another Postgres cluster than the live one (the rehearsal
+# copied everything but the cluster id) and, by the same identity check as
+# above, a copy of staging. The statement itself also refuses on any database
+# that does not say staging. Counts only are printed.
+CLUSTER_SQL="SELECT system_identifier::text FROM pg_control_system()"
+copy_cluster="$(read_one "$CLUSTER_SQL" "${REH[@]}")" || copy_cluster=""
+live_cluster="$(read_one "$CLUSTER_SQL" "${LIVE[@]}")" || live_cluster=""
+[[ "$copy_cluster" =~ ^[0-9]+$ && "$live_cluster" =~ ^[0-9]+$ ]] ||
+  die "could not read the copy's and the live cluster ids (the fixture reset needs both)"
+[ "$copy_cluster" != "$live_cluster" ] || die "the fixture reset would reach the live staging cluster, not the copy: nothing was changed"
+TARGET_IDENTITY="$(identity_of "${REH[@]}")" || TARGET_IDENTITY=""
+[ "$TARGET_IDENTITY" = staging ] || die "the fixture reset's target says '$TARGET_IDENTITY', not staging: nothing was changed"
+FIXTURE_SQL="$(cat "$HERE/fixture-fees.sql")" || die "could not read deploy/wall/fixture-fees.sql"
+touched="$(read_one "$FIXTURE_SQL" "${REH[@]}")" || die "the journey roster fixture fees could not be reset on the copy"
+[[ "$touched" =~ ^([0-9]+)\ ([0-9]+)$ ]] || die "the fixture reset answered unexpectedly"
+say "fixtures: ${BASH_REMATCH[1]} roster weekly fees set to a fresh 14-day trial on the copy, ${BASH_REMATCH[2]} billing-suspended roster stores reopened (no payment, receipt or ledger row; nothing on live staging)"
+
+STEP=instance
 export SWIFT_TAG="$SHA" LIVETEST_ADMIN_PHONE
 "${JRN[@]}" up -d api-journeys >/dev/null || die "the private journeys instance could not start"
 ready=0
