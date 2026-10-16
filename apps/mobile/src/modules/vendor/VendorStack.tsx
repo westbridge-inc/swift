@@ -35,8 +35,8 @@ import { VendorScheduleScreen } from './screens/VendorScheduleScreen';
 
 const Stack = createNativeStackNavigator();
 
-function VendorLiveOrderLayer({ vendorId }: { vendorId: string }) {
-  const { takeover, dismissTakeover } = useVendorOrdersLive(vendorId);
+function VendorLiveOrderLayer({ vendorId, ownsStore }: { vendorId: string; ownsStore: boolean }) {
+  const { takeover, dismissTakeover } = useVendorOrdersLive(vendorId, ownsStore);
   return takeover.length > 0 ? <NewOrderTakeover queue={takeover} onDismiss={dismissTakeover} /> : null;
 }
 
@@ -141,7 +141,7 @@ function VendorRoot() {
       <VendorWentLiveLayer key={`went-live-${store.id}`} status={String(store.status ?? '')} />
       {/* Keying this layer by store also clears queued alerts during a store
           handoff; the old socket is disconnected before the cache reset. */}
-      {store.status === 'ACTIVE' ? <VendorLiveOrderLayer key={`live-orders-${store.id}`} vendorId={store.id} /> : null}
+      {store.status === 'ACTIVE' ? <VendorLiveOrderLayer key={`live-orders-${store.id}`} vendorId={store.id} ownsStore={myRole === 'OWNER'} /> : null}
     </>
   );
 }

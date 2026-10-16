@@ -2,6 +2,7 @@ import { billingEffectsReady } from './billing-cutover';
 import type { BillingFeeNotice, Prisma, PrismaClient } from '@prisma/client';
 import type { NotificationPayload } from '../notification/notification.service';
 import { currentDunningClock, lockBillingAuthority } from './dunning-clock';
+import { feePauseHoldsBilling } from './mmg-pause';
 
 const FEE_DEMAND_KINDS = new Set([
   'billing_failed', 'billing_final_warning', 'billing_suspended',
@@ -50,6 +51,9 @@ async function permitted(tx: Prisma.TransactionClient, noticeId: string) {
   if (!await billingEffectsReady(tx)) return null;
   const notice = await tx.billingFeeNotice.findUnique({ where: { id: noticeId } });
   if (!notice || notice.status === 'OBSOLETE') return null;
+  // Recheck at inbox persistence AND each transport handoff. Generation may
+  // have happened before the switch, and a future-due clock need not be paused.
+  if (await feePauseHoldsBilling(tx, notice.subscriptionId)) return null;
   const clock = await currentDunningClock(tx, notice.subscriptionId);
   if (clock.id !== notice.clockId) throw new Error('Fee notice clock identity changed');
   const { sub, userId, userStatus } = await lockBillingAuthority(tx, clock.subscriptionId);

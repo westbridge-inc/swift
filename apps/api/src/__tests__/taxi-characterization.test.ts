@@ -1,3 +1,4 @@
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -11,6 +12,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
+import { grantStepUp } from './helpers/step-up';
 
 // ---------------------------------------------------------------------------
 // RIDES CHARACTERIZATION [rides spec 17.1/17.4] — pins the CURRENT customer
@@ -39,6 +41,7 @@ const orderIds: string[] = [];
 let seq = 0;
 
 // Socket emission recorder: pins room + event names the client depends on.
+const socketCleanup: Array<() => void> = [];
 const emitted: { room: string; event: string; payload: unknown }[] = [];
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, extra: Record<string, unknown> = {}) {
@@ -105,7 +108,45 @@ async function requestRide(customerToken: string) {
   expect(res.statusCode).toBe(201);
   const ride = res.json().data.ride; // request answers {ride, message}
   orderIds.push(ride.id);
+  const order = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id }, select: { id: true, tenantId: true, customerId: true } });
+  socketCleanup.push(orderSocketFixture(app.io, order, (event, payload) => emitted.push({ room: `order:${order.id}`, event, payload })));
   return ride;
+}
+
+const GROUP_REQUEST = {
+  pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 },
+  pickupAddress: 'Stabroek Market', dropoffAddress: 'Camp Street',
+  rideClass: 'GROUP', passengerCount: 10,
+};
+
+/**
+ * [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] The request route no longer sells GROUP
+ * (both buses are hidden at launch): it answers 400 INVALID_RIDE_CLASS. A GROUP ride requested BEFORE the
+ * ruling can still be PENDING, though, so every accept path keeps its seat check. That ride is written here
+ * with the fields the request route wrote for it; the seat proofs below run on it unchanged.
+ */
+async function preRulingGroupRide(customerToken: string, customerId: string): Promise<string> {
+  const refused = await app.inject({
+    method: 'POST', url: '/api/v1/rides/request',
+    headers: { authorization: `Bearer ${customerToken}`, 'content-type': 'application/json' },
+    payload: GROUP_REQUEST,
+  });
+  expect(refused.statusCode, refused.body).toBe(400);
+  // [R9 · owner research 15 Oct 2026] TRANSFORMED: a party of 10 is refused before its class is read (a hire
+  // carries at most 7 passengers); before R9 this was the unavailable Group tier (INVALID_RIDE_CLASS).
+  expect(refused.json().error.code).toBe('TOO_MANY_PASSENGERS');
+  const ride = await app.prisma.order.create({ data: {
+    orderNumber: `SW-GRP-${nanoid(8)}`, orderType: 'TAXI', customerId, status: 'PENDING',
+    pickupAddress: GROUP_REQUEST.pickupAddress, pickupLat: GROUP_REQUEST.pickup.lat, pickupLng: GROUP_REQUEST.pickup.lng,
+    deliveryAddress: GROUP_REQUEST.dropoffAddress, deliveryLat: GROUP_REQUEST.dropoff.lat, deliveryLng: GROUP_REQUEST.dropoff.lng,
+    taxiPickupAddress: GROUP_REQUEST.pickupAddress, taxiDropoffAddress: GROUP_REQUEST.dropoffAddress,
+    taxiPassengerCount: GROUP_REQUEST.passengerCount, rideClass: 'GROUP',
+    taxiDistance: 1.9, billableKm: 1.92, billableKmSource: 'haversine', taxiDuration: 5, taxiFareTotal: 4800, currencyCode: 'GYD',
+    subtotalBase: 4800, subtotalMarkup: 0, subtotalCustomer: 4800, deliveryFee: 0, totalAmount: 4800,
+    paymentMethod: 'CASH', ridePin: '4827',
+  } });
+  orderIds.push(ride.id);
+  return ride.id;
 }
 
 const driverPut = (token: string, id: string, leg: string, body: Record<string, unknown> = {}) =>
@@ -132,17 +173,11 @@ beforeAll(async () => {
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
 
-  // Record every room emission — event names are the client's contract.
-  const realTo = app.io.to.bind(app.io);
-  (app.io as { to: (room: string) => unknown }).to = (room: string) => ({
-    emit: (event: string, payload: unknown) => {
-      emitted.push({ room, event, payload });
-      return realTo(room).emit(event, payload);
-    },
-  });
+
 });
 
 afterAll(async () => {
+  for (const dispose of socketCleanup) dispose();
   // [ALG-01] Drivers tied at one spot make the fairness band record decisions
   // about these rides; they outlive the rides unless they go with them.
   const rides = await app.prisma.order.findMany({ where: { OR: [{ id: { in: orderIds } }, { customerId: { in: userIds } }] }, select: { id: true } });
@@ -257,69 +292,76 @@ describe('the current taxi contract (characterization — must stay green all en
     expect(statuses).toContain('DRIVER_ARRIVED');
   });
 
-  it('physical capacity is authoritative: a 9-seat bus cannot serve a 10-passenger GROUP ride at any entrance [REPORT-014 F-014-01]', async () => {
+  // [R9 · owner research 15 Oct 2026] TRANSFORMED: no bus takes any ride now (a hire carries at most 7
+  // passengers, so a 9- or 15-seat bus is never a hire vehicle). Physical capacity is proven with the vehicles a
+  // hire may use instead: a 5-passenger Economy ride written as the request route wrote it before the limit, a
+  // 4-seat car refused at every entrance, a 5-seat wagon car serving it. The buses are refused outright.
+  it('physical capacity is authoritative: a 4-seat car cannot serve a 5-passenger ride at any entrance; a bus is refused outright; a 5-seat wagon car serves it [REPORT-014 F-014-01 · R9]', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const nine = await makeDriver('BUS_9');
-    await app.prisma.driver.update({
-      where: { id: nine.driverId },
-      data: { vehicleType: 'BUS_9', rideClass: 'GROUP', vehicleCapacity: 9 },
-    });
-    const res = await app.inject({
-      method: 'POST', url: '/api/v1/rides/request',
-      headers: { authorization: `Bearer ${customer.token}`, 'content-type': 'application/json' },
-      payload: {
-        pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 },
-        pickupAddress: 'Stabroek Market', dropoffAddress: 'Camp Street',
-        rideClass: 'GROUP', passengerCount: 10,
-      },
-    });
-    expect(res.statusCode).toBe(201);
-    const rideId = res.json().data.id ?? res.json().data.order?.id ?? res.json().data.ride?.id;
-
-    // The open board hides it from the 9-seater…
-    const board = await app.inject({
-      method: 'GET', url: '/api/v1/driver/rides/available',
-      headers: { authorization: `Bearer ${nine.token}` },
-    });
-    expect(board.statusCode).toBe(200);
-    expect(board.json().data.some((r: { id: string }) => r.id === rideId)).toBe(false);
-
-    // …the direct accept refuses…
-    const direct = await app.inject({
+    const four = await makeDriver('CAR');
+    await app.prisma.driver.update({ where: { id: four.driverId }, data: { vehicleType: 'CAR', rideClass: 'ECONOMY', vehicleCapacity: 4 } });
+    const ride = await app.prisma.order.create({ data: {
+      orderNumber: `SW-FIVE-${nanoid(8)}`, orderType: 'TAXI', customerId: customer.userId, status: 'PENDING',
+      pickupAddress: GROUP_REQUEST.pickupAddress, pickupLat: GROUP_REQUEST.pickup.lat, pickupLng: GROUP_REQUEST.pickup.lng,
+      deliveryAddress: GROUP_REQUEST.dropoffAddress, deliveryLat: GROUP_REQUEST.dropoff.lat, deliveryLng: GROUP_REQUEST.dropoff.lng,
+      taxiPickupAddress: GROUP_REQUEST.pickupAddress, taxiDropoffAddress: GROUP_REQUEST.dropoffAddress,
+      taxiPassengerCount: 5, rideClass: 'ECONOMY',
+      taxiDistance: 1.9, billableKm: 1.92, billableKmSource: 'haversine', taxiDuration: 5, taxiFareTotal: 1300, currencyCode: 'GYD',
+      subtotalBase: 1300, subtotalMarkup: 0, subtotalCustomer: 1300, deliveryFee: 0, totalAmount: 1300,
+      paymentMethod: 'CASH', ridePin: '4827',
+    } });
+    orderIds.push(ride.id);
+    const rideId = ride.id;
+    const board = (token: string) => app.inject({ method: 'GET', url: '/api/v1/driver/rides/available', headers: { authorization: `Bearer ${token}` } });
+    const direct = (token: string) => app.inject({
       method: 'POST', url: `/api/v1/driver/rides/${rideId}/accept`,
-      headers: { authorization: `Bearer ${nine.token}`, 'content-type': 'application/json' },
-      payload: {},
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, payload: {},
     });
-    expect(direct.statusCode).toBe(400);
-    expect(direct.json().error.code).toBe('CAPACITY_EXCEEDED');
+    const forged = async (driverId: string, token: string) => {
+      await app.redis.set(`dispatch:offer:${rideId}`, driverId, 'EX', 40);
+      try {
+        return await app.inject({
+          method: 'POST', url: '/api/v1/driver/offers/accept',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, payload: { orderId: rideId },
+        });
+      } finally {
+        await app.redis.del(`dispatch:offer:${rideId}`, `dispatch:mover-offer:${driverId}`, `dispatch:declined:${rideId}`);
+      }
+    };
 
+    // The open board hides it from the 4-seater…
+    const fourBoard = await board(four.token);
+    expect(fourBoard.statusCode).toBe(200);
+    expect(fourBoard.json().data.some((r: { id: string }) => r.id === rideId)).toBe(false);
+    // …the direct accept refuses…
+    const fourDirect = await direct(four.token);
+    expect(fourDirect.statusCode).toBe(400);
+    expect(fourDirect.json().error.code).toBe('CAPACITY_EXCEEDED');
     // …and the LOCKED claim is the belt: a forged offer-card accept (no
     // route pre-check on that path) still cannot commit the assignment.
-    await app.redis.set(`dispatch:offer:${rideId}`, nine.driverId, 'EX', 40);
-    const offerAccept = await app.inject({
-      method: 'POST', url: '/api/v1/driver/offers/accept',
-      headers: { authorization: `Bearer ${nine.token}`, 'content-type': 'application/json' },
-      payload: { orderId: rideId },
-    });
-    expect(offerAccept.statusCode).toBe(409);
-    expect(offerAccept.json().error.code).toBe('CAPACITY_EXCEEDED');
-    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: rideId } });
-    expect(fresh.driverId).toBeNull();
-    expect(fresh.status).toBe('PENDING');
-    await app.redis.del(`dispatch:offer:${rideId}`, `dispatch:mover-offer:${nine.driverId}`, `dispatch:declined:${rideId}`);
+    const fourForged = await forged(four.driverId, four.token);
+    expect(fourForged.statusCode).toBe(409);
+    expect(fourForged.json().error.code).toBe('CAPACITY_EXCEEDED');
+    expect(await app.prisma.order.findUniqueOrThrow({ where: { id: rideId } })).toMatchObject({ driverId: null, status: 'PENDING' });
 
-    // A 15-seater serves it fine.
-    const fifteen = await makeDriver('BUS_15');
-    await app.prisma.driver.update({
-      where: { id: fifteen.driverId },
-      data: { vehicleType: 'BUS_15', rideClass: 'GROUP', vehicleCapacity: 15 },
-    });
-    const accept15 = await app.inject({
-      method: 'POST', url: `/api/v1/driver/rides/${rideId}/accept`,
-      headers: { authorization: `Bearer ${fifteen.token}`, 'content-type': 'application/json' },
-      payload: {},
-    });
-    expect(accept15.statusCode).toBe(200);
+    // A 15-seat bus online from before buses were hidden: refused at every entrance, whatever its seats.
+    const bus = await makeDriver('BUS_15');
+    await app.prisma.driver.update({ where: { id: bus.driverId }, data: { vehicleType: 'BUS_15', rideClass: 'GROUP', vehicleCapacity: 15 } });
+    expect((await board(bus.token)).json().data.some((r: { id: string }) => r.id === rideId)).toBe(false);
+    const busDirect = await direct(bus.token);
+    expect([busDirect.statusCode, busDirect.json().error.code]).toEqual([403, 'VEHICLE_NOT_OFFERED']);
+    const busForged = await forged(bus.driverId, bus.token);
+    expect([busForged.statusCode, busForged.json().error.code]).toEqual([403, 'VEHICLE_NOT_OFFERED']);
+    expect(await app.prisma.order.findUniqueOrThrow({ where: { id: rideId } })).toMatchObject({ driverId: null, status: 'PENDING' });
+
+    // A 5-seat wagon car serves it fine — and sees it on its board, so the 4-seater's empty board is the seat rule.
+    const wagon = await makeDriver('WAGON_CAR');
+    await app.prisma.driver.update({ where: { id: wagon.driverId }, data: { vehicleType: 'WAGON_CAR', rideClass: 'COMFORT', vehicleCapacity: 5 } });
+    const wagonBoard = await board(wagon.token);
+    expect(wagonBoard.statusCode).toBe(200);
+    expect(wagonBoard.json().data.some((r: { id: string }) => r.id === rideId)).toBe(true);
+    const accepted = await direct(wagon.token);
+    expect(accepted.statusCode, accepted.body).toBe(200);
   });
 
   it('a FORGED vehicleCapacity column cannot buy a seat — the taxonomy governs the locked claim [REPORT-016 F-016-03]', async () => {
@@ -331,17 +373,8 @@ describe('the current taxi contract (characterization — must stay green all en
       where: { id: forger.driverId },
       data: { vehicleType: 'CAR', rideClass: 'GROUP', vehicleCapacity: 14 },
     });
-    const res = await app.inject({
-      method: 'POST', url: '/api/v1/rides/request',
-      headers: { authorization: `Bearer ${customer.token}`, 'content-type': 'application/json' },
-      payload: {
-        pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 },
-        pickupAddress: 'Stabroek Market', dropoffAddress: 'Camp Street',
-        rideClass: 'GROUP', passengerCount: 10,
-      },
-    });
-    expect(res.statusCode).toBe(201);
-    const rideId = res.json().data.id ?? res.json().data.order?.id ?? res.json().data.ride?.id;
+    // [VERIFY-DOCS · ruling 9] refused at the request route; a ride requested before the ruling (see preRulingGroupRide).
+    const rideId = await preRulingGroupRide(customer.token, customer.userId);
     // The locked claim derives seats from vehicleType=CAR (4) via the taxonomy,
     // not the forged column — a forged offer-card accept is refused.
     await app.redis.set(`dispatch:offer:${rideId}`, forger.driverId, 'EX', 40);
@@ -360,6 +393,9 @@ describe('the current taxi contract (characterization — must stay green all en
   it('self-serve profile writes cannot change class or capacity [REPORT-014 F-014-01]', async () => {
     const d = await makeDriver();
     const before = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
+    // Vehicle colour is identity: authenticate the change, while class and
+    // capacity remain outside self-serve taxonomy authority.
+    await grantStepUp(app, d.token);
     const res = await app.inject({
       method: 'PUT', url: '/api/v1/driver/profile',
       headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' },
@@ -369,7 +405,8 @@ describe('the current taxi contract (characterization — must stay green all en
     const after = await app.prisma.driver.findUniqueOrThrow({ where: { id: d.driverId } });
     expect(after.rideClass).toBe(before.rideClass); // taxonomy authority — ignored
     expect(after.vehicleCapacity).toBe(before.vehicleCapacity);
-    expect(after.vehicleColor).toBe('Black'); // ordinary fields still update
+    expect(after.vehicleColor).toBe('Black');
+    expect(after).toMatchObject({ documentsVerified: false, isOnline: false });
   });
 
   it('driver BOARD accept with fare 0 means NO price choice — the market fare applies, never the floor [REPORT-012 proof gap]', async () => {

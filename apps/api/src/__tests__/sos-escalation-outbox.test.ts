@@ -68,11 +68,15 @@ describe('the register’s red test: the process dies right after the ACTIVE com
     expect(done.every((r) => r.status === 'SENT' && r.attempts === 1 && r.deliveredAt !== null)).toBe(true);
     const paged = await opsPages(alert.id);
     expect(paged).toBeGreaterThanOrEqual(1);
-    expect((done.find((r) => r.channel === 'OPS_PAGE')!.receipt as { opsPaged: number }).opsPaged).toBe(paged);
+    // [AUD-L8b-008] The inbox rows are recorded apart (opsInbox); opsPaged counts only
+    // the pushes and on-call texts a provider accepted, never the rows.
+    const opsReceipt = done.find((r) => r.channel === 'OPS_PAGE')!.receipt as { opsPaged: number; opsInbox: number; opsPushed: number; oncallTexted: number };
+    expect(opsReceipt.opsInbox).toBe(paged);
+    expect(opsReceipt.opsPaged).toBe(opsReceipt.opsPushed + opsReceipt.oncallTexted);
     expect(smsTo(contactPhone)).toBe(1);
     expect(await prisma.evidenceBundle.findUnique({ where: { sosAlertId: alert.id } })).not.toBeNull();
     const receipts = (await prisma.sosAlert.findUniqueOrThrow({ where: { id: alert.id } })).deliveryReceipts as Record<string, unknown>;
-    expect(receipts).toMatchObject({ opsPaged: paged, socketListeners: 0 });
+    expect(receipts).toMatchObject({ opsPaged: opsReceipt.opsPaged, opsInbox: paged, socketListeners: 0 });
     expect(receipts['contacts']).toEqual([{ id: expect.any(String), ok: true }]);
     // exactly once
     const second = await drainSosEscalations(prisma, io, { alertIds: [alert.id] });

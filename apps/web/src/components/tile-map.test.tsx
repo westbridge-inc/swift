@@ -13,7 +13,13 @@ import { TripShareClient } from '@/app/trip/[token]/trip-share-client';
 // content-security policy has no frame source, so `default-src 'self'` blocks
 // it. The map is now drawn from map tiles, which are images (`img-src https:`).
 // What may leave for the tile host is unchanged or less: a ~1 km square, no
-// point, no referrer (W-47, M053).
+// point, and never the page's address (W-47, M053).
+//
+// [Tile policy] OpenStreetMap's tile usage policy requires browsers to send a
+// Referer and may block referer-stripped traffic without notice. So tiles
+// send the site's ORIGIN only (strict-origin-when-cross-origin) — never the
+// path, where the trip and parcel pages carry their token. Links still go
+// with no referrer at all.
 // ---------------------------------------------------------------------------
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -47,15 +53,40 @@ describe('[W7] the tile map', () => {
     expect(Math.max(...tiles.map((tile) => tile.top + TILE_SIZE))).toBeGreaterThanOrEqual(128);
   });
 
-  it('every tile and link goes with no referrer, and a failed tile says so and keeps the link', () => {
+  it('tiles tell the tile host the site but never the page, links go with no referrer, and a failed tile says so and keeps the link', () => {
     const { container } = render(<TileMap point={coarsen(PRECISE)} label="Courier location, approximate" linkHref={mapLinkUrl(PRECISE)} linkLabel="Open approximate map ↗" />);
     const map = screen.getByRole('img', { name: 'Courier location, approximate' });
     const tiles = map.querySelectorAll('img');
     expect(tiles.length).toBeGreaterThan(4);
-    for (const element of Array.from(container.querySelectorAll('img, a'))) expect(element.getAttribute('referrerpolicy')).toBe('no-referrer');
+    for (const tile of Array.from(tiles)) {
+      expect(tile.getAttribute('src')).toMatch(/^https:\/\/tile\.openstreetmap\.org\//);
+      expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
+    }
+    const links = Array.from(container.querySelectorAll('a'));
+    expect(links.length).toBe(2);
+    for (const link of links) expect(link.getAttribute('referrerpolicy')).toBe('no-referrer');
+    // [Row 108] A tile gets one retry; the map says it could not load only when the retry fails too.
+    const src = tiles[0]!.getAttribute('src');
     fireEvent.error(tiles[0]!);
+    const retried = Array.from(map.querySelectorAll('img')).find((tile) => tile.getAttribute('src') === src)!;
+    fireEvent.error(retried);
     expect(within(map).getByText(/The map couldn’t load/)).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open approximate map ↗' }).getAttribute('href')).toBe(mapLinkUrl(PRECISE));
+  });
+
+  it('[row 108] one failed tile is fetched again once, and the map stays up while it is retried', () => {
+    render(<TileMap point={coarsen(PRECISE)} label="Courier location, approximate" linkHref={mapLinkUrl(PRECISE)} linkLabel="Open approximate map ↗" />);
+    const map = screen.getByRole('img', { name: 'Courier location, approximate' });
+    const before = Array.from(map.querySelectorAll('img'));
+    const failing = before[0]!;
+    const src = failing.getAttribute('src');
+    fireEvent.error(failing);
+    expect(within(map).queryByText(/The map couldn’t load/)).toBeNull();
+    const after = Array.from(map.querySelectorAll('img'));
+    expect(after).toHaveLength(before.length);
+    const again = after.find((tile) => tile.getAttribute('src') === src)!;
+    expect(again).not.toBe(failing); // a fresh element: the browser requests the tile again
+    expect(after.filter((tile) => tile !== again).every((tile) => before.includes(tile))).toBe(true); // the others are untouched
   });
 });
 
@@ -69,6 +100,8 @@ describe('[W7] both shared pages draw it', () => {
     const { container } = render(<TrackClient token="synthetic-parcel" />);
     const map = await screen.findByRole('img', { name: 'Courier location, approximate' });
     expect(map.querySelectorAll('img[src^="https://tile.openstreetmap.org/15/"]').length).toBeGreaterThan(4);
+    // The page itself is served with Referrer-Policy: no-referrer; each tile overrides it to the origin only.
+    for (const tile of Array.from(map.querySelectorAll('img'))) expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
     expect(container.querySelector('iframe')).toBeNull();
   });
 
@@ -82,6 +115,7 @@ describe('[W7] both shared pages draw it', () => {
     const { container } = render(<TripShareClient token="synthetic-trip" />);
     const map = await screen.findByRole('img', { name: 'Trip location, approximate' });
     expect(map.querySelectorAll('img[src^="https://tile.openstreetmap.org/15/"]').length).toBeGreaterThan(4);
+    for (const tile of Array.from(map.querySelectorAll('img'))) expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
     expect(container.querySelector('iframe')).toBeNull();
   });
 });

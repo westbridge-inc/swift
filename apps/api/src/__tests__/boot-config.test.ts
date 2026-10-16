@@ -2,10 +2,10 @@ import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPair, type KeyObject } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { assertSafeBootConfig, assertProductionData, assertWallLoginConfig } from '../utils/boot-config';
 import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
 
@@ -17,6 +17,8 @@ const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
 const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
+  PLACES_PROVIDER: 'osm',
+  PHOTON_URL: 'http://photon.test',
   // [ledger E08] The settled production posture ships the hold ON in both env
   // examples, so the valid production base carries it explicitly.
   LIFECYCLE_V2: '1',
@@ -33,7 +35,12 @@ const good: Record<string, string | undefined> = {
   PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
   KYC_PROVIDER: 'manual',
-  PAYMENT_PROVIDER: 'stripe',
+  // [LAUNCH-LOCK] Production takes no card payment until an attorney signs
+  // off (owner ruling, 13 Oct): the valid production base has cards off. The
+  // live Stripe key stays so a case that switches the provider back on still
+  // passes the provider's own checks and reaches the lock.
+  PAYMENT_PROVIDER: 'disabled',
+  CARD_RAIL_KILL: '1',
   STRIPE_SECRET_KEY: 'sk_live_boot_config_test',
   MMG_DRIVER: 'live',
   MMG_API_URL: 'https://api.mmg.gy/olive/publisher/v1',
@@ -43,8 +50,19 @@ const good: Record<string, string | undefined> = {
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
   MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+  // [PROD-PATH] Production pages a human for every unacknowledged SOS and
+  // sends receipts and expiry notices by email: both are required to boot.
+  OPS_ONCALL_PHONES: '+5926000001,+15550000002',
+  EMAIL_PROVIDER: 'smtp',
+  SMTP_HOST: 'smtp.example.test',
+  SMTP_PORT: '465',
+  SMTP_USER: 'noreply@example.test',
+  SMTP_PASS: 'smtp-password-of-the-sending-mailbox',
+  EMAIL_FROM: 'Swift <noreply@example.test>',
   SCAN_IP_SALT: 'synthetic-scan-boot-salt',
   ATTRIB_SALT: 'synthetic-attribution-boot-salt',
+  // [PROD-PATH] Admin top-ups stay on hold in production (owner ruling, 8 Oct).
+  BILLING_TOPUP_HOLD: '1',
 };
 
 const cardOff = {
@@ -199,7 +217,7 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it('refuses sandbox/test subscription card processors in production', () => {
     expect(() => assertSafeBootConfig({ ...good, PAYMENT_PROVIDER: undefined })).toThrow(/PAYMENT_PROVIDER/);
     expect(() => assertSafeBootConfig({ ...good, PAYMENT_PROVIDER: 'sandbox' })).toThrow(/PAYMENT_PROVIDER/);
-    expect(() => assertSafeBootConfig({ ...good, STRIPE_SECRET_KEY: 'sk_test_not_money' })).toThrow(/live STRIPE_SECRET_KEY/);
+    expect(() => assertSafeBootConfig({ ...good, PAYMENT_PROVIDER: 'stripe', STRIPE_SECRET_KEY: 'sk_test_not_money' })).toThrow(/live STRIPE_SECRET_KEY/);
     expect(() => assertSafeBootConfig({
       ...good,
       PAYMENT_PROVIDER: 'powertranz',
@@ -770,7 +788,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
 // [PT-1 · C10] Card rail v2 in production. The card simulator is a test page
 // with no real money, and this build has no production-capable v2 provider:
 // production refuses both, loudly, at boot — never at a partner's first tap.
-describe('[PT-1] card rail v2 cannot be switched on in production yet, and the simulator never', () => {
+describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set up for live cards, and the simulator never', () => {
   it('refuses the card simulator in production, whatever the flag says', () => {
     for (const flag of [undefined, '0', '1']) {
       expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_V2: flag }), String(flag))
@@ -778,8 +796,45 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
     }
   });
 
-  it('refuses CARD_RAIL_V2=1 in production: no production v2 provider exists in this build', () => {
+  it('refuses CARD_RAIL_V2=1 in production without the real card provider', () => {
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '1' })).toThrow(/FATAL: CARD_RAIL_V2=1/);
+  });
+
+  // [PT-4] Production runs v2 only on the real provider, fully set up for LIVE cards.
+  const liveCards = {
+    CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', CARD_RAIL_ACCOUNT: 'swift-gy',
+    POWERTRANZ_API_URL: 'https://gateway.ptranz.com', POWERTRANZ_ID: 'LIVEID01', POWERTRANZ_PASSWORD: 'not-a-real-password',
+    POWERTRANZ_PAGE_SET: 'PTZ/Swift', POWERTRANZ_PAGE_NAME: 'Weekly', API_PUBLIC_URL: 'https://api.example.com',
+  };
+  // [LAUNCH-LOCK] Until an attorney signs off (owner ruling, 13 Oct) the
+  // launch lock refuses v2 in production AFTER every PT-4 check: its own
+  // message (never PT-4's "CARD_RAIL_V2=1 in production …") proves the live
+  // setup passed them all.
+  it('[PT-4] the real provider fully set up for live cards passes every card check (and drains on the same terms), and only the launch lock refuses it', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).toThrow(/^FATAL: CARD_RAIL_V2 must be unset or 0 in production/);
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards, CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1' })).toThrow(/^FATAL: CARD_RAIL_V2_DRAIN must be unset or 0 in production/);
+  });
+  it('[PT-4] refuses anything less: sandbox, a test URL, a missing credential or page, http — never echoing a value', () => {
+    const cases: Array<[Record<string, string | undefined>, RegExp]> = [
+      // A sandbox setup that is complete in itself (test root, test credentials) is still not for production.
+      [{ CARD_RAIL_ENVIRONMENT: 'sandbox', POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /real cards only: CARD_RAIL_ENVIRONMENT must be live/],
+      [{ POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /test system/],
+      [{ POWERTRANZ_API_URL: undefined }, /POWERTRANZ_API_URL/],
+      // [Review S4] The provider's API lives under ptranz.com (guide sec. 2.3): never another host.
+      [{ POWERTRANZ_API_URL: 'https://gateway.example.com' }, /ptranz\.com/],
+      [{ POWERTRANZ_ID: undefined }, /POWERTRANZ_ID/],
+      [{ POWERTRANZ_PASSWORD: undefined }, /POWERTRANZ_PASSWORD/],
+      [{ POWERTRANZ_PAGE_NAME: undefined }, /POWERTRANZ_PAGE_SET and POWERTRANZ_PAGE_NAME/],
+      [{ API_PUBLIC_URL: 'http://api.example.com' }, /API_PUBLIC_URL/],
+      [{ CARD_RAIL_PROVIDER: 'stripe' }, /CARD_RAIL_PROVIDER=powertranz/],
+    ];
+    for (const [patch, message] of cases) {
+      let thrown: Error | undefined;
+      try { assertSafeBootConfig({ ...good, ...liveCards, ...patch }); } catch (err) { thrown = err as Error; }
+      expect(thrown?.message, JSON.stringify(patch)).toMatch(/^FATAL: CARD_RAIL_V2=1/);
+      expect(thrown?.message).toMatch(message);
+      expect(thrown?.message).not.toContain('not-a-real-password');
+    }
   });
 
   it('the flag is 1 or 0 (or unset), never a guess', () => {
@@ -816,12 +871,36 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
       .not.toThrow();
   });
 
+  it('[review S2-1] in EVERY mode, the provider\'s TEST system (its sandbox) refuses to start on the public API host — a trailing dot is the same host', () => {
+    const sandbox = { CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox' };
+    for (const env of [
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_V2: '0', API_PUBLIC_URL: 'https://API.swiftgy.com/' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_ENVIRONMENT: undefined, API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com./' },
+      { NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://api.swiftgy.com.' },
+    ]) {
+      expect(() => assertSafeBootConfig(env), JSON.stringify(env)).toThrow(/public API host/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+  });
+
+  it('[review S3] in EVERY mode but production, live (real) cards refuse to start: a test server never charges real cards', () => {
+    for (const mode of ['development', 'test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', API_PUBLIC_URL: 'https://api-test.example.test' }), mode)
+        .toThrow(/live \(real cards\) outside production/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox', API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+    // Production is the only mode whose card checks accept live cards; the launch lock then refuses them.
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).toThrow(/^FATAL: CARD_RAIL_V2 must be unset or 0 in production/);
+  });
+
   it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
   });
 
   // [AX297 F5] Draining v2 after a switch-off is its own switch, held to the same rules.
-  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and never 1 in production: there is nothing there to drain', () => {
+  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and 1 in production only on the real provider', () => {
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '1' })).toThrow(/FATAL: CARD_RAIL_V2_DRAIN=1/);
     for (const value of ['true', 'yes', '2', ' 1']) {
       expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: value }), value).toThrow(/CARD_RAIL_V2_DRAIN must be 1 or 0/);
@@ -830,4 +909,327 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: undefined })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
   });
+});
+
+// ---------------------------------------------------------------------------
+// [PROD-PATH] Owner ruling, 4 Oct 2026: production may boot with MMG fully OFF
+// until the live merchant keys arrive (before trial day 14). OFF is an
+// explicit value, MMG_DRIVER=disabled, never an unset or misspelled one; the
+// hosted checkout must be off with it; and every MMG feature then refuses
+// explicitly (providers/mmg). The live path keeps every one of its gates.
+// The same ruling makes two silent production failures loud at boot: no
+// on-call phone for an unacknowledged SOS, and no email sender.
+// ---------------------------------------------------------------------------
+describe('[PROD-PATH] production with MMG fully off', () => {
+  const mmgOff: Record<string, string | undefined> = {
+    ...cardOff,
+    MMG_DRIVER: 'disabled',
+    MMG_API_URL: undefined,
+    MMG_API_KEY: undefined,
+    MMG_MERCHANT_ID: undefined,
+    MMG_PASSWORD: undefined,
+    MMG_MKEY: undefined,
+    MMG_MSECRET: undefined,
+    MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined,
+  };
+
+  it('boots with MMG_DRIVER=disabled, the checkout off and no MMG credential', () => {
+    expect(() => assertSafeBootConfig(mmgOff)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...mmgOff, MMG_CHECKOUT_ENABLED: '0' })).not.toThrow();
+  });
+
+  it('refuses MMG off with the hosted checkout switched on, and names both switches', () => {
+    expect(() => assertSafeBootConfig({ ...mmgOff, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_ENABLED=1.*MMG_DRIVER=disabled/);
+  });
+
+  it.each([undefined, '', 'off', 'Disabled', 'disabled ', 'none', '0'])('never reads MMG_DRIVER=%j as off', (driver) => {
+    expect(() => assertSafeBootConfig({ ...mmgOff, MMG_DRIVER: driver })).toThrow(/MMG_DRIVER/);
+  });
+
+  it('keeps every live gate: live is still refused without its credentials or round-trip proof', () => {
+    expect(() => assertSafeBootConfig({ ...mmgOff, MMG_DRIVER: 'live' })).toThrow(/MMG_/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
+  });
+
+  it('the value-free preflight accepts MMG off and still refuses it with the checkout on', () => {
+    const off = runPreflight(mmgOff);
+    expect(off.status, off.stdout + off.stderr).toBe(0);
+    const checkout = runPreflight({ ...mmgOff, MMG_CHECKOUT_ENABLED: '1' });
+    expect(checkout.status, checkout.stdout + checkout.stderr).toBe(1);
+    expect(checkout.stdout).toContain('MMG_DRIVER=disabled');
+  });
+
+  it('the billing provider factory hands back a refusing provider and never contacts MMG', async () => {
+    const { getMmgProvider, MmgDisabledError } = await import('../providers/mmg/mmg-provider');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('MMG off never contacts MMG'));
+    try {
+      for (const [name, value] of Object.entries(mmgOff)) vi.stubEnv(name, value);
+      const mmg = getMmgProvider();
+      await expect(mmg.initiatePayment({ payerId: '5926000001', amountMinor: 100, currencyCode: 'GYD', reference: 'r' })).rejects.toBeInstanceOf(MmgDisabledError);
+      await expect(mmg.authenticate()).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      await expect(mmg.transactionLookup({ transactionId: 't' })).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      await expect(mmg.transactionHistory({ from: new Date() })).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      await expect(mmg.reverseTransaction({ transactionId: 't' })).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      await expect(mmg.accountBalance()).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      const { getMmgLookupProvider } = await import('../providers/mmg/mmg-provider');
+      await expect(getMmgLookupProvider(mmgOff).transactionLookupDetail('t')).rejects.toMatchObject({ code: 'MMG_DISABLED', statusCode: 503 });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+// #1448 review (Opus S3-1): the owner's launch money rules held only in
+// pilot-up.sh, so production started any other way (a hand-run compose, an old
+// script) booted with admin top-ups live or the agent-cash webhook armed. The
+// boot guard holds them too, whatever starts the API.
+describe('[PROD-PATH] production keeps admin top-ups on hold and never arms the agent-cash webhook', () => {
+  it.each([undefined, '', '0', 'true', 'yes', ' 1'])('refuses BILLING_TOPUP_HOLD=%j: admin top-ups stay on hold in production', (hold) => {
+    expect(() => assertSafeBootConfig({ ...good, BILLING_TOPUP_HOLD: hold })).toThrow(/BILLING_TOPUP_HOLD=1/);
+  });
+
+  it('refuses an AGENT_CASH_WEBHOOK_SECRET in production, naming the setting, never its value', () => {
+    const secret = 'agent-cash-secret-'.padEnd(40, 'z');
+    let message = '';
+    try { assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: secret }); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/AGENT_CASH_WEBHOOK_SECRET/);
+    expect(message).not.toContain(secret);
+  });
+
+  it('accepts the hold with no agent-cash secret (and an empty one), and asks nothing outside production', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, AGENT_CASH_WEBHOOK_SECRET: '' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, BILLING_TOPUP_HOLD: undefined, NODE_ENV: 'test', AGENT_CASH_WEBHOOK_SECRET: 'x'.repeat(32) })).not.toThrow();
+  });
+});
+
+describe('[PROD-PATH] production needs an on-call phone and an email sender', () => {
+  it.each([undefined, '', ' , '])('refuses OPS_ONCALL_PHONES=%j: an unacknowledged SOS would page nobody', (phones) => {
+    expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: phones })).toThrow(/OPS_ONCALL_PHONES/);
+  });
+
+  it.each(['5926000001', '+5926000001,0592600', '+5926000001;+15550000002', '+59260 00001'])(
+    'refuses an entry that is not E.164 (it would be dropped silently): %j', (phones) => {
+      expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: phones })).toThrow(/OPS_ONCALL_PHONES/);
+    },
+  );
+
+  it('accepts one or more E.164 phones, with spaces around the commas', () => {
+    expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: '+5926000001' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: '+5926000001 , +15550000002' })).not.toThrow();
+  });
+
+  it('never echoes a configured phone in the refusal', () => {
+    let message = '';
+    try { assertSafeBootConfig({ ...good, OPS_ONCALL_PHONES: '+5926000001,59260012345' }); } catch (e) { message = String(e); }
+    expect(message).toMatch(/OPS_ONCALL_PHONES/);
+    expect(message).not.toContain('5926000001');
+    expect(message).not.toContain('59260012345');
+  });
+
+  it.each([undefined, '', 'dev', 'sendgrid'])('refuses EMAIL_PROVIDER=%j: receipts and notices would never leave', (provider) => {
+    expect(() => assertSafeBootConfig({ ...good, EMAIL_PROVIDER: provider })).toThrow(/EMAIL_PROVIDER/);
+  });
+
+  it.each(['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM'])('refuses smtp without %s, by name', (name) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: undefined })).toThrow(new RegExp(name));
+  });
+
+  it.each(['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM'])('refuses a blank %s (spaces only), by name', (name) => {
+    for (const blank of [' ', '   ', '\t']) {
+      expect(() => assertSafeBootConfig({ ...good, [name]: blank }), JSON.stringify(blank)).toThrow(new RegExp(name));
+    }
+  });
+
+  it('refuses a clear-text SMTP session in production and never echoes the password', () => {
+    let message = '';
+    try { assertSafeBootConfig({ ...good, SMTP_TLS: 'none' }); } catch (e) { message = String(e); }
+    expect(message).toMatch(/SMTP_TLS/);
+    expect(message).not.toContain(String(good['SMTP_PASS']));
+  });
+
+  it('outside production neither is required', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
+  });
+
+  it('the value-free preflight names both and walks past them', () => {
+    const result = runPreflight({ ...good, OPS_ONCALL_PHONES: undefined, EMAIL_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('OPS_ONCALL_PHONES');
+    expect(result.stdout).toContain('EMAIL_PROVIDER');
+  });
+});
+
+describe('production address lookup is an explicit deployment choice', () => {
+  it.each([undefined, 'local', '', 'unknown'])('refuses PLACES_PROVIDER=%s instead of silently limiting addresses', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: provider })).toThrow(/PLACES_PROVIDER/);
+  });
+  it('accepts an explicit configured Photon service, without making a network request', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: 'http://photon.test' })).not.toThrow();
+  });
+  it('refuses explicit OSM without its Photon endpoint in preflight too', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PLACES_PROVIDER: 'osm', PHOTON_URL: undefined })).toThrow(/PHOTON_URL/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [LAUNCH-LOCK] Owner ruling, 13 Oct 2026 (#34, GUARDRAILS §8): until an
+// attorney signs off, production takes no card payment and runs no ads. Both
+// were already off by default; production now REFUSES TO BOOT with either on,
+// so turning one on is a reviewed code change, never a deploy/.env edit.
+// pilot-up.sh refuses the same settings (deploy-prod-path.test.ts).
+// ---------------------------------------------------------------------------
+describe('[LAUNCH-LOCK] production refuses to boot with card payments or ads on', () => {
+  const liveStripe = { PAYMENT_PROVIDER: 'stripe', STRIPE_SECRET_KEY: 'sk_live_boot_config_test' };
+  const livePowerTranz = { PAYMENT_PROVIDER: 'powertranz', PAYMENT_GATEWAY_KEY: 'gateway-id', PAYMENT_GATEWAY_SECRET: 'gateway-secret', POWERTRANZ_API_URL: 'https://gateway.ptranz.com' };
+  const liveCardRail = {
+    CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', CARD_RAIL_ACCOUNT: 'swift-gy',
+    POWERTRANZ_API_URL: 'https://gateway.ptranz.com', POWERTRANZ_ID: 'LIVEID01', POWERTRANZ_PASSWORD: 'not-a-real-password',
+    POWERTRANZ_PAGE_SET: 'PTZ/Swift', POWERTRANZ_PAGE_NAME: 'Weekly', API_PUBLIC_URL: 'https://api.example.com',
+  };
+
+  it('boots with cards off and ads off: the locked switches unset, empty or 0', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    for (const off of [undefined, '', '0']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: off, CARD_RAIL_V2_DRAIN: off, CARD_RAIL_ENROLL: off, ADS_ENABLED: off }), String(off)).not.toThrow();
+    }
+  });
+
+  it.each([
+    ['a live Stripe key', liveStripe],
+    ['live PowerTranz', livePowerTranz],
+  ])('refuses the legacy card provider (%s) that production used to accept, by name', (_label, provider) => {
+    expect(() => assertSafeBootConfig({ ...good, ...provider })).toThrow(/^FATAL: PAYMENT_PROVIDER must be exactly disabled in production/);
+  });
+
+  it('refuses a provider without the kill switch: cards off means PAYMENT_PROVIDER=disabled AND CARD_RAIL_KILL=1', () => {
+    for (const kill of [undefined, '', '0', 'true']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_KILL: kill }), String(kill)).toThrow(/CARD_RAIL_KILL/);
+    }
+  });
+
+  it('refuses card rail v2, its drain and saving cards with the real provider fully set up for live cards (each passed every card check before)', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...liveCardRail, CARD_RAIL_V2: '1' })).toThrow(/^FATAL: CARD_RAIL_V2 must be unset or 0 in production/);
+    expect(() => assertSafeBootConfig({ ...good, ...liveCardRail, CARD_RAIL_V2_DRAIN: '1' })).toThrow(/^FATAL: CARD_RAIL_V2_DRAIN must be unset or 0 in production/);
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_ENROLL: '1' })).toThrow(/^FATAL: CARD_RAIL_ENROLL must be unset or 0 in production/);
+  });
+
+  it.each(['1', 'true', 'yes', 'on', ' 1', '01'])('refuses ADS_ENABLED=%j: no ads in production, and no near miss either', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, ADS_ENABLED: value })).toThrow(/^FATAL: ADS_ENABLED must be unset or 0 in production/);
+  });
+
+  it.each(['true', 'yes', 'on', ' 1'])('refuses CARD_RAIL_ENROLL=%j: no near miss is read as off', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_ENROLL: value })).toThrow(/^FATAL: CARD_RAIL_ENROLL must be unset or 0 in production/);
+  });
+
+  it('names the setting and the ruling, never a credential', () => {
+    let message = '';
+    try { assertSafeBootConfig({ ...good, ...liveCardRail, CARD_RAIL_V2: '1' }); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/attorney signs off/);
+    expect(message).toMatch(/reviewed code change/);
+    expect(message).not.toContain('not-a-real-password');
+  });
+
+  it('asks nothing outside production: staging and test servers keep their switches', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ADS_ENABLED: '1', CARD_RAIL_ENROLL: '1', PAYMENT_PROVIDER: 'sandbox' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'test', ADS_ENABLED: '1' })).not.toThrow();
+  });
+
+  it('the value-free preflight names each locked switch and walks past them', () => {
+    const result = runPreflight({ ...good, ...liveStripe, ADS_ENABLED: '1', CARD_RAIL_ENROLL: '1' });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('PAYMENT_PROVIDER must be exactly disabled');
+    expect(result.stdout).toContain('CARD_RAIL_ENROLL must be unset or 0');
+    expect(result.stdout).toContain('ADS_ENABLED must be unset or 0');
+  });
+});
+
+describe('[TA-S0-003 · R3] the contract posture runs on the two least-privilege logins only', () => {
+  const APP_URL = 'postgresql://swift_app_login:app-fixture-secret@postgres:5432/swift';
+  const SYSTEM_URL = 'postgresql://swift_system_login:system-fixture-secret@postgres:5432/swift';
+  const walled: Record<string, string | undefined> = {
+    ...good, TENANT_RLS_BIND: '1', TENANT_UNSCOPED_ACCESS: 'deny', DATABASE_URL: APP_URL, SYSTEM_DATABASE_URL: SYSTEM_URL,
+  };
+  const refusal = (env: Record<string, string | undefined>) => {
+    try {
+      assertSafeBootConfig(env);
+      return null;
+    } catch (error) {
+      return (error as Error).message;
+    }
+  };
+
+  it('boots on swift_app_login + swift_system_login with unscoped access denied', () => {
+    expect(refusal(walled)).toBeNull();
+  });
+
+  it.each([
+    ['unscoped access only counted', { TENANT_UNSCOPED_ACCESS: 'log' }, /TENANT_UNSCOPED_ACCESS is not deny/],
+    ['unscoped access unset', { TENANT_UNSCOPED_ACCESS: undefined }, /TENANT_UNSCOPED_ACCESS is not deny/],
+    ['the expand declaration riding along', { TENANT_WALL_EXPAND_ATTESTED: '1' }, /TENANT_WALL_EXPAND_ATTESTED is set/],
+    ["the owner's password in the process", { POSTGRES_PASSWORD: 'owner-fixture-secret' }, /owner's password/],
+    ['no request URL', { DATABASE_URL: undefined }, /DATABASE_URL is missing/],
+    ['a request URL that is not a postgres URL', { DATABASE_URL: 'mysql://swift_app_login:x@postgres/swift' }, /DATABASE_URL is missing or not/],
+    ['no system URL', { SYSTEM_DATABASE_URL: undefined }, /SYSTEM_DATABASE_URL is missing/],
+    ['the owner as the request login', { DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' }, /DATABASE_URL does not sign in as swift_app_login/],
+    ['postgres as the request login', { DATABASE_URL: 'postgresql://postgres:owner-fixture-secret@postgres:5432/swift' }, /does not sign in as swift_app_login/],
+    ['the system login as the request login', { DATABASE_URL: SYSTEM_URL }, /does not sign in as swift_app_login/],
+    ['the owner as the system login', { SYSTEM_DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' }, /SYSTEM_DATABASE_URL does not sign in as swift_system_login/],
+    ['one login for both', { SYSTEM_DATABASE_URL: APP_URL }, /does not sign in as swift_system_login/],
+    ['another database', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace(':5432/swift', ':5432/other') }, /different databases/],
+    ['another host', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace('@postgres:', '@elsewhere:') }, /different databases/],
+    ['another port', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace(':5432/', ':5433/') }, /different databases/],
+  ])('refuses %s, naming no value', (_label, change, pattern) => {
+    const message = refusal({ ...walled, ...change });
+    expect(message).toMatch(/^FATAL: TENANT_RLS_BIND=1 in production/);
+    expect(message).toMatch(pattern);
+    for (const value of ['fixture-secret', 'elsewhere', 'mysql://', '5433']) expect(message).not.toContain(value);
+  });
+
+  it('touches nothing without TENANT_RLS_BIND=1, and nothing outside production', () => {
+    // Today's expand posture (staging, production before Phase C) is unchanged.
+    expect(refusal({ ...good, TENANT_WALL_EXPAND_ATTESTED: '1', DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' })).toBeNull();
+    expect(refusal({ ...good, TENANT_RLS_BIND: '0', DATABASE_URL: 'postgresql://swift:o@postgres:5432/swift' })).toBeNull();
+    for (const NODE_ENV of ['development', 'test']) {
+      expect(() => assertWallLoginConfig({ NODE_ENV, TENANT_RLS_BIND: '1', DATABASE_URL: 'postgresql://swift:o@postgres:5432/swift' })).not.toThrow();
+    }
+  });
+
+  it('the deploy preflight mirrors the compose overlay when it reads the store', () => {
+    // The store after Phase C holds the owner's password (postgres and migrate
+    // still use it) AND the two runtime URLs. The overlay hands the API only the
+    // URLs; without it the API gets only the owner's parts.
+    const directory = mkdtempSync(join(tmpdir(), 'swift-wall-preflight-'));
+    try {
+      const secrets = join(directory, 'secrets');
+      mkdirSync(secrets);
+      writeFileSync(join(secrets, 'POSTGRES_PASSWORD'), 'owner-fixture-secret');
+      writeFileSync(join(secrets, 'DATABASE_URL'), APP_URL);
+      writeFileSync(join(secrets, 'SYSTEM_DATABASE_URL'), SYSTEM_URL);
+      const run = (candidate: Record<string, string | undefined>) => {
+        const file = join(directory, 'candidate.txt');
+        writeFileSync(file, Object.entries(candidate).filter((e): e is [string, string] => e[1] !== undefined)
+          .map(([name, value]) => `${name}=${value}`).join('\n'));
+        return spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), [join(process.cwd(), '../../deploy/preflight.ts'), file, '--secrets-dir', secrets],
+          { encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '' } });
+      };
+      // The overlay hands the two URLs over as files from the store, never as settings.
+      const walledSettings = Object.fromEntries(Object.entries(walled)
+        .filter(([name]) => name !== 'DATABASE_URL' && name !== 'SYSTEM_DATABASE_URL'));
+      const contract = run(walledSettings);
+      expect(contract.stdout + contract.stderr).not.toMatch(/both set/);
+      expect(contract.stdout).toMatch(/PASS/);
+      const expand = run({ ...good, TENANT_WALL_EXPAND_ATTESTED: '1', POSTGRES_HOST: 'postgres', POSTGRES_USER: 'swift', POSTGRES_DB: 'swift' });
+      expect(expand.stdout + expand.stderr).not.toMatch(/both set/);
+      expect(expand.stdout).toMatch(/PASS/);
+      for (const output of [contract, expand]) expect(output.stdout + output.stderr).not.toContain('fixture-secret');
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  }, 60_000);
 });

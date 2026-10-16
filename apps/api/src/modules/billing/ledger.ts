@@ -20,6 +20,8 @@ export const LEDGER_ACCOUNTS: Record<string, { name: string; type: LedgerAccount
   CLEARING_MMG: { name: 'MMG clearing — confirmed, not yet bank-settled', type: 'ASSET' },
   CLEARING_CARD: { name: 'Card provider clearing', type: 'ASSET' },
   BANK_LOCAL: { name: 'Local bank deposits', type: 'ASSET' },
+  // [owner Q-1654-BOOKS A] MMG returned money that had already paid for a week: that week's fee is owed again.
+  FEE_RECEIVABLE: { name: 'Weekly fees a partner owes again (MMG returned the money that paid them; subledger = subscriptionId)', type: 'ASSET' },
   WALLET_LIABILITY: { name: 'Payer fee-wallet balances (subledger = subscriptionId)', type: 'LIABILITY' },
   DEFERRED_REVENUE: { name: 'Paid-through service not yet delivered', type: 'LIABILITY' },
   FEE_REVENUE: { name: 'Earned weekly fees', type: 'REVENUE' },
@@ -28,6 +30,7 @@ export const LEDGER_ACCOUNTS: Record<string, { name: string; type: LedgerAccount
   CHARGEBACK_RESERVE: { name: 'Card dispute reserve', type: 'LIABILITY' },
   CHARGEBACK_LOSS: { name: 'Lost chargebacks', type: 'EXPENSE' },
   SUSPENSE_LIABILITY: { name: 'Unmatched money held — never rejected (SO-6)', type: 'LIABILITY' },
+  REFUND_PAYABLE: { name: 'Fee credit set aside for a refund, not yet paid back (subledger = subscriptionId)', type: 'LIABILITY' },
   FX_VARIANCE: { name: 'Settlement-vs-conversion FX differences', type: 'REVENUE' },
   OPENING_BALANCES: { name: 'Ledger-epoch opening balances', type: 'CONTRA' },
 };
@@ -111,6 +114,53 @@ export function topupPostings(subscriptionId: string, amount: number, rail: 'EXT
   return [
     { account: rail === 'CARD' ? 'CLEARING_CARD' : 'CLEARING_MMG', debit: amount },
     { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** Unused wallet credit set aside for a refund: it is no longer the payer's
+ *  to spend on fees, and is owed back to them until it is paid or released. */
+export function refundSetAsidePostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, debit: amount },
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** A set-aside refund paid back outside Swift. Swift never moves the money: an
+ *  admin pays it and records the reference, so it leaves the account it would
+ *  have come from (MMG clearing, or the bank). */
+export function refundPaidPostings(subscriptionId: string, amount: number, method: 'MMG' | 'BANK_TRANSFER'): LedgerPosting[] {
+  return [
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, debit: amount },
+    { account: method === 'BANK_TRANSFER' ? 'BANK_LOCAL' : 'CLEARING_MMG', credit: amount },
+  ];
+}
+
+/** A set-aside refund that could not be paid goes back to the payer's wallet. */
+export function refundReleasePostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, debit: amount },
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** [MMG REVERSAL] MMG returned a weekly-fee payment to the payer: the exact
+ *  reverse of its MMG top-up — the wallet owes the payer less, and the MMG
+ *  clearing account holds less. */
+export function walletReversalPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, debit: amount },
+    { account: 'CLEARING_MMG', credit: amount },
+  ];
+}
+
+/** [owner Q-1654-BOOKS A] MMG returned a payment whose money had already paid
+ *  for a week ("returned, not booked"): the partner owes that week's fee again,
+ *  and the MMG clearing account holds less. */
+export function returnedNotBookedPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'FEE_RECEIVABLE', subledgerId: subscriptionId, debit: amount },
+    { account: 'CLEARING_MMG', credit: amount },
   ];
 }
 
