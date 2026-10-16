@@ -198,10 +198,16 @@ export function tradeRiskTier(trade: string): 'HIGH' | 'LOW' {
   return canonical ? SERVICE_TRADE_CATALOG[canonical].riskTier : 'HIGH';
 }
 
+/**
+ * [R7 · GUARDRAILS §7(4) · owner 15 Oct 2026] The browse guidance says only what a person on our team checked: every
+ * listed provider's ID and current police clearance (isProviderVerified lists no one else), and a licence only where a
+ * person checked it (the provider row then carries `licenceCheckedOn`). Never "police-cleared" or "background-checked",
+ * never a promise of "licensed (Certified)" providers the platform cannot show.
+ */
 export function riskGuidance(trade: string): string {
   return tradeRiskTier(trade) === 'HIGH'
-    ? 'Higher-risk work — we strongly recommend choosing a licensed (Certified) provider. Certified providers are shown first.'
-    : 'Every provider is ID-verified and police-cleared — choose by ratings and reviews.';
+    ? 'Higher-risk work — every provider here has their ID and a current police clearance on file, checked by a person on our team. A licence shows on a provider only after a person on our team checked it, and those providers are listed first.'
+    : 'Every provider here has their ID and a current police clearance on file, checked by a person on our team — choose by ratings and reviews.';
 }
 
 /** A credential can only badge the exact trade selected when it was submitted.

@@ -288,7 +288,7 @@ export async function servicesRoutes(app: FastifyInstance) {
       include: {
         qualifications: {
           where: { status: 'VERIFIED', verifiedAt: { not: null }, trade },
-          select: { type: true, trade: true },
+          select: { type: true, trade: true, verifiedAt: true },
         },
       },
     });
@@ -329,6 +329,10 @@ export async function servicesRoutes(app: FastifyInstance) {
           selfSkilled: qualifications.length === 0,
           certified: qualifications.length > 0,
           badges: qualifications.map((qualification) => qualification.type),
+          // [R7] "Licence on file, checked on [date]": the latest day a person checked one of these (null = none).
+          licenceCheckedOn: qualifications.reduce<Date | null>(
+            (latest, q) => (q.verifiedAt && (!latest || q.verifiedAt > latest) ? q.verifiedAt : latest), null,
+          )?.toISOString() ?? null,
         };
       })
       // Surface licensed (certified) providers first — strongest signal for high-risk trades.
