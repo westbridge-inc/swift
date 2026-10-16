@@ -1304,6 +1304,19 @@ export function DeliveryScreen() {
             )
           ) : null}
 
+          {/* [R14 · legal research D12] The server's words, shown while the store delivers THIS order
+              with its own rider (null on every other order) — never decided here. */}
+          {typeof o.ownRiderNotice === 'string' && o.ownRiderNotice ? (
+            <View
+              accessible
+              accessibilityLabel={o.ownRiderNotice}
+              style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.xl, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.info }}
+            >
+              <Feather name="info" size={16} color={color.info} />
+              <T variant="caption" tone="info" style={{ flex: 1 }}>{o.ownRiderNotice}</T>
+            </View>
+          ) : null}
+
           {/* [MKT-F057] Delivery handover gate — the RIDER asks for THIS code at
               the door. Quiet until the goods leave the store; from pickup to the
               door the customer holds it and shows it to their rider. The rider

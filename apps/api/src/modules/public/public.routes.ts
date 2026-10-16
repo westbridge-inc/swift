@@ -10,6 +10,7 @@ import { emergencyPolicyCounter } from '../../plugins/observability';
 import { notProhibitedStore, PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visibility';
 import { adsEnabled } from '../ads/ads-enabled';
 import { hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
+import { publicStorefrontSeller } from '../verification/storefront-seller';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -270,10 +271,15 @@ export async function publicRoutes(app: FastifyInstance) {
     // [GUARDRAILS §8] The website's menu leaves prohibited items out (banned, or held for a check).
     const hidden = await hiddenAmong(app.prisma, vendor.categories.flatMap((c) => c.items.map((i) => i.id)));
 
+    // [R3 · CAA s.70] The same seller block the app's store screen shows: who sells, how payment
+    // works, the store's refund rule and the statutory-rights sentence.
+    const seller = await publicStorefrontSeller(app.prisma, vendor.id);
+
     return {
       success: true,
       data: {
         ...vendor,
+        seller,
         // Present when the request arrived on a retired slug, so the caller can correct its URL.
         ...(vendor.slug === request.params.slug ? {} : { canonicalSlug: vendor.slug }),
         ...(surface ?? { displayRating: null, ratingBucket: '(0)', ratingCount: 0, topRated: false }),

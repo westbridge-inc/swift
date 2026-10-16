@@ -17,6 +17,7 @@ import {
   type MmgFeeReversalRow, type MmgFeeReversalView,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 import { REASON_MIN } from '@/lib/reason-rules';
 
 /**
@@ -338,6 +339,15 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
   const ask = useMutation({ mutationFn: () => reverseMmgFeePayment(checkoutId, Number(typed), reason.trim()), onSettled: refresh });
   const check = useMutation({ mutationFn: (id: string) => checkMmgFeeReversal(id), onSettled: refresh });
   const v = view.data?.data as MmgFeeReversalView | undefined;
+  // A failed read is said out loud: hiding the panel would hide a return that is held for a person.
+  if (view.isError) {
+    return (
+      <section aria-label="Return this payment" className="rounded-lg border border-[var(--border)] p-4 space-y-3 text-sm">
+        <h3 className="font-semibold">Return this payment to the partner</h3>
+        <QueryFailed error={view.error} what="the return status of this payment" onRetry={() => void view.refetch()} retrying={view.isFetching} />
+      </section>
+    );
+  }
   // Only the server's own answer is shown: anything else is not this panel's.
   if (!v || typeof v !== 'object' || typeof v.canReverse !== 'boolean' || !Array.isArray(v.reversals)) return null;
   const amountOk = typed.trim() !== '' && Number(typed) === amount;

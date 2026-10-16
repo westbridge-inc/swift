@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchConfig, updateConfig } from '@/lib/api';
 import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // EVERY FIELD ON THIS PAGE MUST BE READ BY PRODUCTION CODE.
 //
@@ -76,7 +77,7 @@ const NOT_EDITABLE_HERE: { title: string; body: string }[] = [
 
 export default function ConfigPage() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['config'], queryFn: fetchConfig });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['config'], queryFn: fetchConfig });
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<string | null>(null);
 
@@ -105,6 +106,9 @@ export default function ConfigPage() {
         <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
           Loading configuration...
         </div>
+      ) : isError ? (
+        // No form over a failed read: blank boxes would look like unset values.
+        <QueryFailed error={error} what="the platform configuration" onRetry={() => void refetch()} retrying={isFetching} />
       ) : (
         <div className="space-y-6">
           {SECTIONS.map((section) => (

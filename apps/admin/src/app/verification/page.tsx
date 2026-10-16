@@ -35,7 +35,7 @@ function TimelineActor({ actor, applicant }: { actor: string | null; applicant: 
   const isApplicant = actor === applicant.id;
   const person = useQuery({ queryKey: ['review-actor', actor], queryFn: () => fetchUserDetail(actor!), enabled: !system && !isApplicant });
   const name = [person.data?.data?.firstName, person.data?.data?.lastName].filter(Boolean).join(' ');
-  return <small>{system ? 'System' : isApplicant ? applicant.name : name || (person.isLoading ? 'Loading reviewer…' : 'Reviewer name unavailable')}</small>;
+  return <small>{system ? 'System' : isApplicant ? applicant.name : name || (person.isLoading ? 'Loading reviewer…' : person.isError ? 'Couldn\u2019t load the reviewer\u2019s name' : 'Reviewer name unavailable')}</small>;
 }
 
 export default function VerificationPage() {
