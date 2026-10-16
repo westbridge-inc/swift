@@ -3087,10 +3087,11 @@ export async function adminRoutes(app: FastifyInstance) {
     if (order.vendorId) await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
     // Told after the commit, each on its own key (a retry of the notice cannot
     // double it). Neither is told the refund happened — only who makes it.
-    const words = mmgStoreCloseNotices(order.orderNumber, amount ?? 0, order.fulfillment === 'APPOINTMENT');
-    const ownerUserId = order.vendorId
-      ? (await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { owner: { select: { userId: true } } } }))?.owner.userId
-      : undefined;
+    const party = order.vendorId
+      ? await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { name: true, owner: { select: { userId: true } } } })
+      : null;
+    const words = mmgStoreCloseNotices(order.orderNumber, amount ?? 0, order.fulfillment === 'APPOINTMENT', party?.name);
+    const ownerUserId = party?.owner.userId;
     await notifications.send({
       userId: order.customerId, type: 'ORDER_UPDATE', title: words.customer.title, body: words.customer.body,
       audience: 'customer', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:customer:${id}`,
