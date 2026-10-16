@@ -69,7 +69,10 @@ export interface EmergencyPolicySigner {
 /** Derive the Ed25519 signer from the managed secret. Pure; never logs. */
 export function emergencyPolicySignerFromSecret(secret: string): EmergencyPolicySigner {
   const seed = createHash('sha256').update(SEED_DOMAIN).update('\0').update(secret, 'utf8').digest();
-  const privateKey = createPrivateKey({ key: Buffer.concat([PKCS8_ED25519_PREFIX, seed]), format: 'der', type: 'pkcs8' });
+  const der = Buffer.concat([PKCS8_ED25519_PREFIX, seed]);
+  const privateKey = createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+  // The KeyObject now holds the key; wipe the two transient copies of the seed.
+  der.fill(0);
   seed.fill(0);
   const spki = createPublicKey(privateKey).export({ format: 'der', type: 'spki' });
   const raw = spki.subarray(spki.length - 32);
