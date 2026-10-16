@@ -6,6 +6,7 @@ import { persistRiderCancellationNotice, drainRiderCancellationNotices } from '.
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
+import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -1538,9 +1539,8 @@ export class OrderService {
         // fresh accounts dies here). Unclustered → [userId] exactly.
         const { clusterMemberIds } = await import('../integrity/identity.service');
         const promoMemberIds = await clusterMemberIds(tx as PrismaClient, input.userId);
-        const userUses = await tx.order.count({
-          where: { customerId: { in: promoMemberIds }, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-        });
+        // [Row 29] The customer's own cancel uses the code (one predicate: promo/promo-uses.ts).
+        const userUses = await tx.order.count({ where: promoUsesByPersonWhere(promoMemberIds, promoCodeId) });
         if (userUses >= fresh.maxUsesPerUser) {
           throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
         }
@@ -3362,9 +3362,7 @@ export class OrderService {
     // enforcement point inside the checkout transaction (trial-integrity A5).
     const { clusterMemberIds } = await import('../integrity/identity.service');
     const promoMemberIds = await clusterMemberIds(this.prisma, userId);
-    const userUsage = await this.prisma.order.count({
-      where: { customerId: { in: promoMemberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-    });
+    const userUsage = await this.prisma.order.count({ where: promoUsesByPersonWhere(promoMemberIds, promo.id) });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
     }

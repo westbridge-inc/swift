@@ -7,6 +7,7 @@ import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
+import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { velocityGuard } from '../integrity/velocity';
@@ -1617,7 +1618,9 @@ export async function customerRoutes(app: FastifyInstance) {
     if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     // Live promotions the store is running (§4.2) — shown on the storefront.
-    const activePromos = await app.prisma.promoCode.findMany({
+    // [Row 272] A code that has reached its usage limit is not advertised: it
+    // could only be refused at checkout. The counters never leave the server.
+    const activePromos = (await app.prisma.promoCode.findMany({
       where: {
         vendorId: id,
         isActive: true,
@@ -1627,10 +1630,18 @@ export async function customerRoutes(app: FastifyInstance) {
       select: {
         code: true, description: true, discountType: true,
         discountValue: true, minOrderAmount: true, validUntil: true,
+        maxUses: true, currentUses: true,
       },
       orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
+      take: 20,
+    }))
+      .filter((p) => p.maxUses == null || p.currentUses < p.maxUses)
+      .slice(0, 5)
+      .map((p) => ({
+        code: p.code, description: p.description, discountType: p.discountType,
+        discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null,
+        validUntil: p.validUntil,
+      }));
 
     // Check if favorited (guests have none)
     const isFavorite = request.user?.userId
@@ -1727,7 +1738,10 @@ export async function customerRoutes(app: FastifyInstance) {
         distanceKm,
         deliveryFee,
         etaMin,
-        promos: activePromos.map((p) => ({ ...p, discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null })),
+        promos: activePromos,
+        // [Row 272] The field every phone build from 9 on reads (RestaurantScreen: the
+        // "N promos available" row). Same list as `promos`, kept for older readers.
+        activePromos,
       },
     };
   });
@@ -3628,9 +3642,8 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     // Check user-specific usage
-    const userUsage = await app.prisma.order.count({
-      where: { customerId: { in: authority.memberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-    });
+    // [Row 29] The customer's own cancel uses the code (one predicate: promo/promo-uses.ts).
+    const userUsage = await app.prisma.order.count({ where: promoUsesByPersonWhere(authority.memberIds, promo.id) });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'ALREADY_USED', 'You have already used this promo code the maximum number of times');
     }
