@@ -1679,7 +1679,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
         include: {
           items: VENDOR_ORDER_ITEMS,
-          customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
+          customer: { select: { id: true, firstName: true, lastName: true } },
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
           // Franchise roll-up: the board aggregates every store the owner has, so each

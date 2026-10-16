@@ -141,7 +141,7 @@ export async function driverRoutes(app: FastifyInstance) {
       where: { id: orderId, driverId, orderType: 'TAXI' },
       // [F-0011] The driver VERIFIES the ride PIN — never let them read it.
       omit: HANDOVER_SECRETS_OMIT,
-      include: { customer: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
+      include: { customer: { select: { id: true, firstName: true, lastName: true, phone: true } } },
     });
     if (!order) throw new NotFoundError('Ride', orderId);
     return order;
@@ -814,7 +814,7 @@ export async function driverRoutes(app: FastifyInstance) {
       // [F-0011] Polled continuously by the driver app — the PIN must never ride along.
       omit: HANDOVER_SECRETS_OMIT,
       include: {
-        customer: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } },
+        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
         statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 },
       },
     });
@@ -1492,7 +1492,7 @@ export async function driverRoutes(app: FastifyInstance) {
           tipAmount: true,
           totalAmount: true,
           ridePin: false,
-          customer: { select: { id: true, firstName: true, avatar: true } },
+          customer: { select: { id: true, firstName: true } },
           placedAt: true,
           deliveredAt: true,
           createdAt: true,
