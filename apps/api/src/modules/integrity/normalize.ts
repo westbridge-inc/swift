@@ -7,13 +7,26 @@ import { isProduction } from '../../utils/runtime-mode';
 // it never stores raw. IDENTITY_SALT is env-only under secret hygiene;
 // prod-required like ADS_EVENT_SECRET.
 
-export function identitySalt(): string {
-  const salt = process.env['IDENTITY_SALT'];
-  if (!salt) {
-    if (isProduction()) throw new Error('IDENTITY_SALT is required in production');
-    return 'dev-identity-salt';
+/** The development fallback. It is printed in this public repository, so a
+ *  production key equal to it would make every identity hash recomputable. */
+const DEV_IDENTITY_SALT = 'dev-identity-salt';
+
+/** [row 331 · CONFIG-GUARDS] One contract for the boot guard
+ *  (assertSafeBootConfig calls this in production, so a server without the key
+ *  refuses to START instead of failing the first identity capture mid-signup)
+ *  and for the hasher. Production: set, not blank, not the public development
+ *  default. Elsewhere: the fixed development salt when unset or blank. Never
+ *  echo the value. */
+export function identitySalt(env: Record<string, string | undefined> = process.env): string {
+  const salt = env['IDENTITY_SALT'];
+  // A real key needs no mode (scripts that hash with the key set keep working).
+  if (salt?.trim() && salt !== DEV_IDENTITY_SALT) return salt;
+  if (isProduction(env)) {
+    throw new Error(salt === DEV_IDENTITY_SALT
+      ? 'FATAL: IDENTITY_SALT is the development default printed in the public repository — identity hashes keyed with it can be recomputed by anyone. Set a generated secret (deploy/gen-secrets.sh). Refusing to start.'
+      : 'FATAL: IDENTITY_SALT is required and must not be blank in production — every identity-signal hash (phone, document number, plate, device) is keyed with it. Refusing to start.');
   }
-  return salt;
+  return DEV_IDENTITY_SALT;
 }
 
 export function hashSignal(normalized: string): string {
