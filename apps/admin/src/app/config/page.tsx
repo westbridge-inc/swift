@@ -38,6 +38,23 @@ const SECTIONS: { title: string; items: { key: string; label: string; hint?: str
       },
     ],
   },
+  {
+    // [Row 3 · force update] Read by apps/api/src/modules/ops/app-version.ts. Not part of the
+    // signed platform seed: saving here changes it at once, with no deploy and no re-seed.
+    title: 'App updates',
+    items: [
+      {
+        key: 'app_min_build_ios',
+        label: 'Oldest iPhone build allowed',
+        hint: 'An iPhone running an older build than this (from build 12 on) shows a full-screen "Update Swift" with an App Store link the next time it opens. 0 or empty = no minimum. Builds 9–11 cannot read this and keep working. It blocks people mid-ride or mid-delivery at their next open too: raise it only after that build is live in the App Store.',
+      },
+      {
+        key: 'app_min_build_android',
+        label: 'Oldest Android build allowed (version code)',
+        hint: 'The same for Android, by version code (Play Console): an older phone from the build-12 release on is asked to update from Google Play. 0 or empty = no minimum. Raise it only after that version is live on Google Play.',
+      },
+    ],
+  },
 ];
 
 // Rendered as information, not as inputs — so the page stays honest about

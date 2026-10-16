@@ -34,6 +34,7 @@ import { bindQueryCacheScope } from './lib/appQueryPolicy';
 import { initSecureStorage } from './lib/storage';
 import { track } from './lib/analytics';
 import { PermissionPrimeSheet } from './components/PermissionPrimeSheet';
+import { UpdateRequiredGate } from './components/UpdateRequiredGate';
 import { getAuthSessionSnapshot, useAuthStore } from './stores/authStore';
 import { refreshSessionAhead } from './services/api';
 import { keepSessionFresh } from './lib/sessionRefreshAhead';
@@ -309,6 +310,8 @@ export default function App() {
                 </ConnectivityBoundary>
                 <ToastHost />
                 <PermissionPrimeSheet />
+                {/* [Row 3] build 12 on: a build older than the API's minimum is asked to update */}
+                <UpdateRequiredGate />
               </QueryClientProvider>
             )}
           </AppSurface>
