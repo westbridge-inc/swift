@@ -9,7 +9,9 @@ import { mmgDisputePaused, MMG_DISPUTE_NOTICE } from '@/lib/mmg-dispute';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
-import { BusinessStatus } from '@/components/business-status';
+import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
+import { useStoreRole } from '@/lib/store-role';
+import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
@@ -308,7 +310,11 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
 
   const s = (o.status || '').toUpperCase();
   const paused = mmgDisputePaused(o);
-  const actions = actionsFor(o);
+  // Payment-first, the same rule as the card (lib/mmg-pay-words): an MMG order
+  // is accepted only once its money has moved (CAPTURED or CLAIMED). Until then
+  // the window offers the store's confirmation, or says why it cannot.
+  // (A disputed order keeps only Reject: actionsFor.)
+  const actions = actionsFor(o).filter((a) => !(a.kind === 'accept' && acceptHeldForPayment(o)));
   const pickable = !paused && ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   // [W-25] The old predicate was "not captured and not cancelled", so a
@@ -324,17 +330,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const showConfirmPay = attestablePay && o.canConfirmPayment === true;
   const confirmPayNeedsManager = attestablePay && o.canConfirmPayment !== true;
   // and when it is NOT attestable, the screen says why rather than going quiet
-  const payBlockedReason =
-    !paused && isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED'
-      ? {
-          REFUNDED: 'This payment was refunded — a new payment is a new transaction.',
-          PARTIALLY_REFUNDED: 'This payment was partly refunded — support settles the rest.',
-          FAILED: 'MMG reports this payment as failed. Contact support with the reference if money did reach you.',
-          EXPIRED: 'The payment window closed — ask the customer to pay again.',
-          UNKNOWN: 'This payment is unresolved with MMG. Support settles it; it cannot be marked received here.',
-          CANCELLED: 'This payment was superseded.',
-        }[String(o.paymentStatus ?? '')] ?? null
-      : null;
+  const payBlockedReason = !paused && isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED' ? mmgPayBlockedReason(o.paymentStatus) : null;
   const customer = [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
   const riderName = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : '';
   const riderAssigned = Boolean(o.riderId || o.rider);
@@ -392,6 +388,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
           <span>{money(o.totalAmount)}</span>
         </div>
       </div>
+      {isMmg && mmgMoneyMoved(o.paymentStatus) && <p className="mt-2 text-sm font-semibold text-[var(--swift-success)]">{mmgMovedLabel(o.paymentStatus)}</p>}
 
       {o.deliveryInstructions && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">Note: {o.deliveryInstructions}</p>}
       {riderAssigned && <p className="mt-3 text-sm text-[var(--swift-muted)]">Rider: <b className="text-[var(--swift-ink)]">{riderName || 'Swift rider'}</b> {o.rider?.user?.phone}</p>}
@@ -571,6 +568,8 @@ export default function OrdersPage() {
   const [bucket, setBucket] = useState<BucketKey>('new');
   const [selected, setSelected] = useState<string | null>(null);
   const dialog = useRef<HTMLDivElement | null>(null);
+  const store = useHubStore();
+  const { role, manager } = useStoreRole();
   useEffect(() => {
     if (!selected) return;
     const previousFocus = document.activeElement as HTMLElement | null;
@@ -623,19 +622,35 @@ export default function OrdersPage() {
     { key: 'handoff' as const, label: 'Ready / handoff', hint: 'Ready, or a rider is on the way' },
   ];
   const other = BUCKETS.filter(b => !board.some(c => c.key === b.key));
-  const row = (o: VendorOrder) => <button key={o.id} data-order-id={o.id} onClick={() => setSelected(o.id)} className="sw-order-card w-full text-left">
-    <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase(), mmgDisputePaused(o))}</div>
-    <p className="sw-caption mt-1">{timeAgo(o.placedAt)}</p>
-    <div className="my-3 space-y-1">{o.items.slice(0, 3).map(item => <p key={item.id} className="sw-label">{item.quantity}× {item.name}</p>)}{o.items.length > 3 && <p className="sw-caption">+{o.items.length - 3} more</p>}</div>
-    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--swift-border)] pt-3"><span className="sw-caption">{[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'}</span><span className="sw-title text-[17px]">{money(o.totalAmount)}</span></div>
-    {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot && <p className="sw-caption mt-2">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p>}
-    {o.vendor?.name && <p className="sw-caption mt-1">{o.vendor.name}</p>}
-    <span className="sw-btn sw-btn-md sw-btn-outline mt-3 w-full">View order</span>
-  </button>;
+  // A card is the order's summary (opens the order window) and, under it, the
+  // app's one-tap actions for its state (VendorOrderCard).
+  const row = (o: VendorOrder) => <article key={o.id} aria-label={`Order ${o.orderNumber}`} className="sw-order-card">
+    <button data-order-id={o.id} onClick={() => setSelected(o.id)} className="block w-full text-left">
+      <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase(), mmgDisputePaused(o))}</div>
+      <p className="sw-caption mt-1">{timeAgo(o.placedAt)}</p>
+      <div className="my-3 space-y-1">{o.items.slice(0, 3).map(item => <p key={item.id} className="sw-label">{item.quantity}× {item.name}</p>)}{o.items.length > 3 && <p className="sw-caption">+{o.items.length - 3} more</p>}</div>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--swift-border)] pt-3"><span className="sw-caption">{[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'}</span><span className="sw-title text-[17px]">{money(o.totalAmount)}</span></div>
+      {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot && <p className="sw-caption mt-2">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p>}
+      {o.vendor?.name && <p className="sw-caption mt-1">{o.vendor.name}</p>}
+      <span className="mt-2 block text-[13px] font-semibold text-[var(--swift-red)]">View order</span>
+    </button>
+    <OrderCardActions order={o} onOpen={() => setSelected(o.id)} />
+  </article>;
+  const newOrders = byBucket.get('new') ?? [];
+  const activeCount = (['new', 'kitchen', 'handoff', 'moving'] as const).reduce((n, key) => n + (byBucket.get(key)?.length ?? 0), 0);
+  // "All caught up" only when truly nothing is open: an order in a status this
+  // build does not know may still be open, so it keeps the board up.
+  const openOrUnknown = activeCount + (byBucket.get('unknown')?.length ?? 0);
+  const storeLive = store.data?.status == null || store.data.status === 'ACTIVE';
+  const lastOrderAt = all.map((o) => o.placedAt).filter(Boolean).sort().at(-1);
   return <div className="space-y-6">
-    <NewOrderTakeover orders={all} />
-    <div className="flex items-center justify-between gap-3"><h1 className="sw-title">Orders</h1><button onClick={() => orders.refetch()} className="sw-btn sw-btn-md sw-btn-outline"><RefreshCw size={16} className={orders.isFetching ? 'animate-spin' : ''} aria-hidden />Refresh</button></div>
-    <BusinessStatus />
+    <NewOrderTakeover orders={all} onOpenOrder={setSelected} />
+    <StoreHeader store={store.data} action={<button onClick={() => orders.refetch()} className="sw-btn sw-btn-md sw-btn-outline"><RefreshCw size={16} className={orders.isFetching ? 'animate-spin' : ''} aria-hidden />Refresh</button>} />
+    {manager ? <RevenuePulse newOrders={newOrders} /> : <LoadedBoard loading={orders.isLoading} unavailable={orders.isError && !orders.data} total={activeCount} newCount={newOrders.length} progressCount={activeCount - newOrders.length} />}
+    <div>
+      <p className="text-[11px] font-semibold tracking-[0.08em] text-[var(--swift-muted)]">LATEST QUEUE VIEW</p>
+      <h2 className="sw-heading mt-1">{orders.isLoading ? 'Loading active orders…' : orders.isError && !orders.data ? 'Queue status unavailable' : activeCount === 0 ? 'No active orders shown' : `${activeCount} shown · ${newOrders.length} waiting here`}</h2>
+    </div>
     {orders.isLoading && <div role="status" className="sw-empty"><span className="sw-skeleton h-24 w-full" />Loading your orders…</div>}
     {orders.isError && <DataUnavailable what="your orders" error={orders.error} onRetry={() => void orders.refetch()} />}
     {!orders.isError && !orders.isLoading && shown.missing > 0 && <p role="status" className="sw-note">Showing {shown.shown} of {shown.total} orders — {shown.missing} not shown on this page.</p>}
@@ -643,12 +658,16 @@ export default function OrdersPage() {
         the known orders on screen under the banner above (review S2-1). Only
         the calm "nothing here" texts need the last read to have succeeded. */}
     {orders.data && <>
-      <div className="sw-order-board">{board.map(c => <section key={c.key} aria-label={`${c.label} orders`} className="min-w-0 space-y-3">
+      {!orders.isError && openOrUnknown === 0 ? (
+        store.data?._count?.orders === 0
+          ? <FirstOrderGuide store={store.data} manager={manager} listening={!orders.isError} />
+          : <BoardQuiet lastOrderAt={lastOrderAt} />
+      ) : <div className="sw-order-board">{board.map(c => <section key={c.key} aria-label={`${c.label} orders`} className="min-w-0 space-y-3">
         <div className="flex items-baseline gap-2"><h2 className="sw-heading">{c.label}</h2><span className="sw-caption">{byBucket.get(c.key)?.length ?? 0}</span></div><p className="sw-caption">{c.hint}</p>
         {(byBucket.get(c.key) ?? []).map(row)}
         {!orders.isError && !byBucket.get(c.key)?.length && <p className="sw-board-empty">Nothing here right now</p>}
-      </section>)}</div>
-      <section aria-label="Other orders" className="space-y-4 border-t border-[var(--swift-border)] pt-6">
+      </section>)}</div>}
+      <section id="other-orders" aria-label="Other orders" className="scroll-mt-6 space-y-4 border-t border-[var(--swift-border)] pt-6">
         <div className="flex flex-wrap gap-2">{other.map(b => {
           const count = byBucket.get(b.key)?.length ?? 0;
           if ((b.key === 'attention' || b.key === 'unknown') && !count) return null;
@@ -657,6 +676,12 @@ export default function OrdersPage() {
         {other.some(b => b.key === bucket) && <div className="grid gap-4 wide:grid-cols-2">{(byBucket.get(bucket) ?? []).map(row)}{!orders.isError && !byBucket.get(bucket)?.length && <p className="sw-board-empty">Nothing in “{BUCKETS.find(b => b.key === bucket)?.label}”.</p>}</div>}
       </section>
     </>}
+    {manager ? <ManageGrid store={store.data} owner={role === 'OWNER'} onOrderHistory={() => setBucket('done')} /> : <StaffAvailability />}
+    {store.data && <div className="grid gap-4 wide:grid-cols-2">
+      <StoreStatusCard store={store.data} manager={manager} readFailed={store.isError} onRetryRead={() => void store.refetch()} />
+      {manager && storeLive && <SelfDeliveryCard store={store.data} readFailed={store.isError} onRetryRead={() => void store.refetch()} />}
+    </div>}
+    <p className="text-center text-[13px] text-[var(--swift-muted)]">You keep 100% of every order — Swift takes no commission.</p>
     {selected && <div ref={dialog} className="sw-scrim items-start overflow-y-auto p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] wide:items-center" role="dialog" aria-modal="true" aria-label="Order details" onKeyDown={e => { if (e.key === 'Escape') setSelected(null); else trapTab(e); }}>
       <div className="relative max-h-[90dvh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-[var(--swift-canvas)]"><OrderDetail id={selected} onClose={() => setSelected(null)} /></div>
     </div>}

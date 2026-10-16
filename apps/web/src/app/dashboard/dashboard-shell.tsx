@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LayoutDashboard, ClipboardList, Boxes, FileUp, Receipt, Settings, Store as StoreIcon, ChevronDown } from 'lucide-react';
+import { BarChart3, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import type { ShellPerson } from '@/components/customer-shell';
 import { ConsoleShell } from '@/components/console-shell';
@@ -12,17 +12,26 @@ import { ApiRequestError, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
 import { catalogueName, type CatalogueName } from '@/lib/catalogue-name';
+import { useStoreRole } from '@/lib/store-role';
+import type { VendorMemberRole } from '@/lib/vendor-hub';
 
-/** The business console's places. The items tab is named like the app, by the
- *  store's type: Menu, Inventory, Products or Services (lib/catalogue-name). */
-export const dashboardNav = (catalogue: CatalogueName) => [
-  { href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true, dock: false },
-  { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
-  { href: '/dashboard/inventory', label: catalogue, icon: Boxes, exact: true },
-  { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false, dock: false },
-  { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
-  { href: '/dashboard/settings', label: 'Settings', icon: Settings, exact: false },
-];
+/**
+ * The business console's places: the app's four sections
+ * (apps/mobile/src/modules/vendor/VendorStack.tsx), owner ruling 11 Oct 2026.
+ * The items tab is named for the store's type (lib/catalogue-name); staff see
+ * it as "Availability" and have no Insights, exactly as in the app. Weekly fee,
+ * bulk import and hours are reached from the Orders home and Account.
+ */
+export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | undefined) => {
+  const manager = role === 'OWNER' || role === 'MANAGER';
+  return [
+    { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
+    { href: '/dashboard/inventory', label: manager ? catalogue : 'Availability', icon: Boxes, exact: false },
+    ...(manager ? [{ href: '/dashboard/insights', label: 'Insights', icon: BarChart3, exact: false }] : []),
+    // Account is the store's settings page until the app's Account screen lands (PR D).
+    { href: '/dashboard/settings', label: 'Account', icon: UserRound, exact: false },
+  ];
+};
 
 /**
  * [W-04 / W-05] The store switcher is the tenant boundary of this console.
@@ -134,7 +143,8 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
   }, [storeId, list, stores.data?.selectedId, onSwitch]);
 
   const selected = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
-  const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType)), [selected?.vendorType]);
+  const { role } = useStoreRole();
+  const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType), role), [selected?.vendorType, role]);
 
   return (
     <ConsoleShell person={person} home="/dashboard" title="Business" navigation={navigation}

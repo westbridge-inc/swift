@@ -68,6 +68,14 @@ COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/ca
 # (src/lib/menu-options.ts imports it by path, never a second copy). It is a
 # pure module with no imports of its own, so exactly this file.
 COPY apps/api/src/modules/order/options.ts apps/api/src/modules/order/options.ts
+# The business console reuses the app's plain board files by path (PR A): the
+# role matrix, the accept clock, the MMG-dispute pause, the store-delivery rule
+# and the market-calendar helpers. None imports anything but @swift/types.
+COPY apps/mobile/src/lib/vendorRbac.ts apps/mobile/src/lib/vendorRbac.ts
+COPY apps/mobile/src/lib/appointmentTime.ts apps/mobile/src/lib/appointmentTime.ts
+COPY apps/mobile/src/modules/vendor/acceptClock.ts apps/mobile/src/modules/vendor/acceptClock.ts
+COPY apps/mobile/src/modules/vendor/order-dispute.ts apps/mobile/src/modules/vendor/order-dispute.ts
+COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/modules/vendor/screens/delivery-owner.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

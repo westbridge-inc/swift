@@ -8,6 +8,18 @@
     "/(app)/cart/page": 158,
     "/(app)/checkout/page": 158,
     "/login/page": 118,
-    "/signup/page": 126
+    "/signup/page": 126,
+    "/dashboard/orders/page": 164,
+    "/dashboard/inventory/page": 154,
+    "/dashboard/inventory/import/page": 150,
+    "/dashboard/insights/page": 145,
+    "/dashboard/weekly-fee/page": 154,
+    "/dashboard/notifications/page": 146,
+    "/portal/page": 142,
+    "/portal/history/page": 140,
+    "/portal/documents/page": 144,
+    "/portal/weekly-fee/page": 148,
+    "/portal/account/page": 142,
+    "/advertiser/page": 139
   }
 }
