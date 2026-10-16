@@ -58,9 +58,15 @@ def shim(bin_dir: Path, name: str, body: str, python=False) -> None:
 
 
 FAKE_DOCKER = r'''
-import json, os, sys
+import json, os, sys, time
 argv = sys.argv[1:]
 stdin = '' if sys.stdin.isatty() else sys.stdin.read()
+# FAKE_FIRST_SAMPLE_DELAY: the instance's first /metrics read is slow to start (a busy host).
+if os.environ.get('FAKE_FIRST_SAMPLE_DELAY') and 'node' in argv and '/metrics' in ' '.join(argv):
+    marker = os.environ['CALL_LOG'] + '.first-sample'
+    if not os.path.exists(marker):
+        open(marker, 'w').close()
+        time.sleep(float(os.environ['FAKE_FIRST_SAMPLE_DELAY']))
 with open(os.environ['CALL_LOG'], 'a') as log:
     log.write(json.dumps({'tool': 'docker', 'argv': argv}) + '\n')
 env = os.environ.get
@@ -183,6 +189,7 @@ class JourneysHost:
         self.calls.write_text('')
         Path(str(self.calls) + '.metrics').unlink(missing_ok=True)
         Path(str(self.calls) + '.copy-identity').unlink(missing_ok=True)
+        Path(str(self.calls) + '.first-sample').unlink(missing_ok=True)
         env = {'PATH': f'{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(self.tmp), 'CALL_LOG': str(self.calls),
                'LIVETEST_ADMIN_PHONE': '+5920400000', 'JOURNEYS_RESULTS_BASE': str(self.results),
                'DEFAULT_METRICS': metrics()}
@@ -276,6 +283,18 @@ class JourneysOnCopy(unittest.TestCase):
             self.assertIn(str(self.host.deploy / 'docker-compose.journeys-copy.yml'), argv)
             self.assertIn('journeys-copy', argv[argv.index('--profile') + 1])
 
+    def test_the_pool_is_measured_from_before_the_journeys_however_slow_the_first_sample(self):
+        """16 Oct CI: the first pool sample was read AFTER the runner had started
+        ([18, 19, 21, 22] vs runner 17): the sampler is a background loop, so its
+        first read raced the journeys. The window must open before the journeys,
+        so the first sample is taken in the foreground; a slow one still comes first."""
+        result, calls = self.host.run(extra_env={'FAKE_FIRST_SAMPLE_DELAY': '1.5'})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        instance = index(calls, lambda c: c['tool'] == 'docker' and 'up' in c['argv'] and 'api-journeys' in c['argv'])
+        runner = index(calls, lambda c: c['tool'] == 'docker' and 'run' in c['argv'])
+        reads = [i for i, c in enumerate(calls) if c['tool'] == 'docker' and 'node' in c['argv'] and '/metrics' in ' '.join(c['argv'])]
+        self.assertTrue(reads and instance < reads[0] < runner, (instance, reads, runner))
+
     def test_the_copys_logs_are_kept_redacted_before_the_copy_is_removed(self):
         """15 Oct: the copy failed at boot (FATAL=24) and its logs went with it.
         Now every end keeps the copy's api, worker and api-journeys logs (last
@@ -365,6 +384,26 @@ class JourneysOnCopy(unittest.TestCase):
         stop = index(calls, lambda c: c['tool'] == 'docker' and 'stop' in c['argv'])
         instance = index(calls, lambda c: c['tool'] == 'docker' and 'up' in c['argv'] and 'api-journeys' in c['argv'])
         self.assertTrue(stop < min(cluster) and max(cluster) < identity[-1] < resets[0] < instance, (stop, cluster, identity, resets, instance))
+
+    def test_every_database_read_is_read_only_and_the_one_write_is_on_the_copy(self):
+        """REVIEW-F S4 (16 Oct): the reads helper also carried the reset. Every read
+        (the live stack's identity, size and cluster id; the copy's identity and
+        cluster id) now runs in a READ ONLY session, so Postgres itself refuses a
+        write there; the reset is the one write, through a helper whose only
+        target is the copy's project."""
+        result, calls = self.host.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        execs = [c['argv'] for c in calls if c['tool'] == 'docker' and 'exec' in c['argv'] and 'postgres' in c['argv']]
+        reads = [a for a in execs if not is_fixture_reset({'tool': 'docker', 'argv': a})]
+        writes = [a for a in execs if is_fixture_reset({'tool': 'docker', 'argv': a})]
+        self.assertEqual(len(reads), 6)  # live identity, size, cluster; copy identity (twice), cluster
+        for argv in reads:
+            script = argv[argv.index('-c') + 1]
+            self.assertIn('-c "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY" -c "$1"', script, argv[-1])
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0][:3], ['compose', '-p', 'swift-rehearsal'])
+        self.assertNotIn('READ ONLY', writes[0][writes[0].index('-c') + 1])
+        self.assertIn('ON_ERROR_STOP=1', writes[0][writes[0].index('-c') + 1])
 
     def test_the_fixture_reset_refuses_any_target_but_the_copy_and_any_doubtful_answer(self):
         cases = [
