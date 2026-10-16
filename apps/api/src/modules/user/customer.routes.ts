@@ -80,6 +80,7 @@ import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { ownRiderNotice } from '../order/own-rider-notice';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2827,6 +2828,9 @@ export async function customerRoutes(app: FastifyInstance) {
           && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
           ? order.ridePin
           : null,
+        // [R14 · legal research D12] The store delivers this order with its own rider: the order screen says so,
+        // verbatim (null on every other order). The server's reading of this order's current fulfilment mode.
+        ownRiderNotice: ownRiderNotice(order),
         // [B9] The SENDER's copy of the public tracking token. Minted at
         // courier checkout since launch and returned once in the create
         // response — which the app discards on navigation — so "Share
