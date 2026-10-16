@@ -9,6 +9,8 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
 import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { consentSurfaceOf } from '../legal/consent-surface';
+import { acceptanceStatus, recordReacceptance } from '../legal/reaccept';
+import { LEGAL_VERSION } from '../legal/legal.routes';
 import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
@@ -145,6 +147,29 @@ export async function authRoutes(app: FastifyInstance) {
     const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true, tenant: { select: { kind: true } } } });
     if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
     return { success: true, data: { user, sessionId: request.authSessionId, client: browserClientOf(request) } };
+  });
+
+  /** [Legal research G2 · R26] GET /legal-acceptance — whether this person must accept the served legal texts
+   *  with a fresh tick (a material change since they last accepted, or never accepted), and what changed in short.
+   *  The website asks at sign-in; phone build 12 will too. Builds 9-11 never call it and are never blocked. */
+  app.get('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
+    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
+    if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
+    return { success: true, data: acceptanceStatus(user) };
+  });
+
+  /** [Legal research G2 · R26] POST /legal-acceptance { version, accept: true } — the fresh tick, recorded in the
+   *  consent ledger for the Terms, the Privacy Policy and the person's partner agreements at the served version. */
+  app.post('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
+    const body = z.object({ version: z.string().min(10).max(10), accept: z.literal(true) }).parse(request.body);
+    if (body.version !== LEGAL_VERSION) {
+      throw new AppError(409, 'LEGAL_VERSION_CHANGED', 'The Terms changed again while you were reading. Please read the new version.', { currentVersion: LEGAL_VERSION });
+    }
+    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
+    if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
+    await recordReacceptance(app.prisma, { userId: request.user.userId, roles: user.roles, hadAccepted: user.tosVersion !== null, surface: consentSurfaceOf(request), ip: request.ip });
+    const after = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
+    return { success: true, data: acceptanceStatus(after ?? user) };
   });
 
   app.post('/register', authRateLimit, async (request, reply) => {

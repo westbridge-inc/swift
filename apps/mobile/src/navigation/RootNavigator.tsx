@@ -3,6 +3,7 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
+import { LegalAcceptanceModal } from '../components/LegalAcceptanceModal';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
@@ -167,6 +168,8 @@ export function RootNavigator() {
         />
         <Stack.Screen name="QrOutcome" component={QrOutcomeScreen} />
       </Stack.Navigator>
+      {/* [R26 · research G2] a material change to the Terms is accepted with a fresh tick (build 12) */}
+      <LegalAcceptanceModal />
     </NavigationContainer>
   );
 }

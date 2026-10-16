@@ -1,0 +1,103 @@
+import { Prisma, type PrismaClient, type UserRole } from '@prisma/client';
+import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from './legal.routes';
+import { publishLegalDocumentOnce, recordConsent, type ConsentDocumentType, type ConsentSubjectType, type ConsentSurface } from './consent.service';
+
+/**
+ * [Legal research G2 · R26 · owner 15 Oct 2026] A material change to the legal texts is not accepted by "continued
+ * use": it is shown in short and accepted with a fresh tick at the next sign-in (website now, phone build 12).
+ * Phone builds 9, 10 and 11 have no such screen and are never blocked by the server.
+ *
+ * MATERIAL_CHANGES lists every version that needs a fresh tick, newest last, with the short summary shown above the
+ * tick. An entry only takes effect once that version is the served LEGAL_VERSION, so a summary can land before its
+ * words do. A version not listed here (wording polish) needs no fresh tick.
+ */
+export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonly string[] }> = [
+  {
+    version: '2026-10-16',
+    summary: [
+      'The Terms and the Privacy Policy now name the company behind Swift — Westbridge Inc., with its registration number, address and phone — and our data protection officer.',
+      'Swift never carries letters, documents or mail, and the Terms list everything Swift prohibits.',
+      'Safety: Swift’s safety team is not an emergency service. In an emergency call Police 911, Fire 912 or Ambulance 913 first.',
+      'Partners: Swift tells you in the app at least 14 days before a weekly-fee change, and refunds an unstarted week within 14 days when you close your account.',
+      'Privacy: who processes your data and where our servers are, how a breach is handled, and that we answer a request within one month.',
+    ],
+  },
+];
+
+/** The newest material version that is already being served, or null. */
+export function materialVersion(current: string = LEGAL_VERSION): string | null {
+  const live = MATERIAL_CHANGES.filter((c) => c.version <= current);
+  return live.length ? live[live.length - 1]!.version : null;
+}
+
+type Agreement = { documentType: ConsentDocumentType; subjectType: ConsentSubjectType; renderedText: string };
+
+/** The partner agreements a person re-accepts with the Terms, by the roles they hold. */
+function agreementsFor(roles: readonly UserRole[]): Agreement[] {
+  const out: Agreement[] = [];
+  // [REVIEW-F S3-1 on #1763] legacy RIDER / DRIVER accounts are movers too
+  if (roles.some((r) => r === 'MOVER' || r === 'RIDER' || r === 'DRIVER')) out.push({ documentType: 'driver_agreement', subjectType: 'driver', renderedText: DRIVER_AGREEMENT });
+  if (roles.includes('VENDOR_OWNER' as UserRole)) out.push({ documentType: 'vendor_agreement', subjectType: 'vendor_user', renderedText: VENDOR_AGREEMENT });
+  return out;
+}
+
+export interface AcceptanceStatus {
+  currentVersion: string;
+  acceptedVersion: string | null;
+  needsAcceptance: boolean;
+  /** What changed, in short — empty when the person never accepted any version (they accept the current one). */
+  summary: readonly string[];
+  /** The partner agreements accepted with the Terms and Privacy Policy. */
+  agreements: Array<'driver_agreement' | 'vendor_agreement'>;
+}
+
+export function acceptanceStatus(user: { tosVersion: string | null; roles: readonly UserRole[] }, current: string = LEGAL_VERSION): AcceptanceStatus {
+  const material = materialVersion(current);
+  const accepted = user.tosVersion;
+  const needsAcceptance = accepted === null || (material !== null && accepted < material);
+  const summary = accepted !== null && material !== null ? (MATERIAL_CHANGES.find((c) => c.version === material)?.summary ?? []) : [];
+  return {
+    currentVersion: current,
+    acceptedVersion: accepted,
+    needsAcceptance,
+    summary,
+    agreements: agreementsFor(user.roles).map((a) => a.documentType as 'driver_agreement' | 'vendor_agreement'),
+  };
+}
+
+/**
+ * Record the fresh tick: the Terms, the Privacy Policy and the person's partner agreements at the served version,
+ * anchored to the exact words, in one transaction with the account's own stamp. Idempotent at the same version.
+ */
+export async function recordReacceptance(
+  prisma: PrismaClient,
+  input: { userId: string; roles: readonly UserRole[]; hadAccepted: boolean; surface: ConsentSurface; ip?: string | null },
+): Promise<void> {
+  const docs: Agreement[] = [
+    { documentType: 'terms_of_service', subjectType: 'customer', renderedText: TERMS },
+    { documentType: 'privacy_policy', subjectType: 'customer', renderedText: PRIVACY },
+    ...agreementsFor(input.roles),
+  ];
+  for (const d of docs) {
+    await publishLegalDocumentOnce(prisma, { documentType: d.documentType, version: LEGAL_VERSION, renderedText: d.renderedText });
+  }
+  await prisma.$transaction(async (tx) => {
+    // One acceptance per person at a time; a double tap records once.
+    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`legal:reaccept:${input.userId}`}, 0))`);
+    const now = await tx.user.findUnique({ where: { id: input.userId }, select: { tosVersion: true } });
+    if (now?.tosVersion === LEGAL_VERSION) return;
+    for (const d of docs) {
+      await recordConsent(tx, {
+        subjectType: d.subjectType,
+        subjectId: input.userId,
+        documentType: d.documentType,
+        version: LEGAL_VERSION,
+        action: input.hadAccepted ? 're_granted' : 'granted',
+        surface: input.surface,
+        ip: input.ip ?? null,
+        evidence: { control: 'reaccept_checkbox', path: 'auth/legal-acceptance' },
+      });
+    }
+    await tx.user.update({ where: { id: input.userId }, data: { tosVersion: LEGAL_VERSION, acceptedTermsAt: new Date() } });
+  });
+}

@@ -39,8 +39,11 @@
 #      never ran inside a caller's transaction (nontenant_system_in_tx = 0).
 #   6. No TenantInUnboundTransactionError or FATAL line in any copy process.
 #
-# Always, pass or fail: ./deploy/wall/rehearsal.sh down (the copy, the
-# instance, their volumes, store and secrets). "JOURNEYS PASSED" is printed only
+# Always, pass or fail: the copy's own logs (api, worker, api-journeys; the last
+# 400 lines each, redacted by deploy/wall/redact-log.py) are kept in the run's
+# results directory (copy-logs/), and the first FATAL lines are printed; then
+# ./deploy/wall/rehearsal.sh down (the copy, the instance, their volumes, store
+# and secrets). "JOURNEYS PASSED" is printed only
 # when every step held; any other end is non-zero ("JOURNEYS FAILED at step").
 # The live staging API and database are only READ (the identity query, and the
 # copy step's dump): nothing here starts, stops or writes to them.
@@ -118,16 +121,38 @@ say "headroom: ${mem_mb} MiB memory available, ${disk_mb} MiB disk free (databas
 ! sudo -n test -e "$STORE_DIR" || die "a rehearsal store already exists; remove it first (./deploy/wall/rehearsal.sh down)"
 ! sudo -n test -e "$RUN_DIR" || die "rehearsal secrets already exist; remove them first (./deploy/wall/rehearsal.sh down)"
 
-# From here on the copy exists or is being built: remove it however this ends.
+# From here on the copy exists or is being built: remove it however this ends,
+# after keeping its logs in this run's results directory.
+RUN_ID="copy-$(date -u +%Y%m%dT%H%M%SZ)"
+export JOURNEYS_RESULTS_DIR="${JOURNEYS_RESULTS_BASE:-$HOME/swift-journeys-copy}/$RUN_ID"
+mkdir -p "$JOURNEYS_RESULTS_DIR" || die "could not create the results directory $JOURNEYS_RESULTS_DIR"
+LOGS_DIR="$JOURNEYS_RESULTS_DIR/copy-logs"
 WORK="$(mktemp -d)"
 SAMPLER=""
 stop_sampler() {
   [ -n "$SAMPLER" ] || return 0
   touch "$WORK/stop"; wait "$SAMPLER" 2>/dev/null || true; SAMPLER=""
 }
+# save_logs: the copy's processes' own logs, the last 400 lines each, redacted,
+# into copy-logs/ (0700), BEFORE the copy goes; then the first 20 FATAL lines
+# (the rehearsal already printed its own when the copy step failed).
+save_logs() {
+  local svc
+  ( umask 077; mkdir -p "$LOGS_DIR" && chmod 700 "$LOGS_DIR" ) 2>/dev/null || { echo "journeys-on-copy: could not create $LOGS_DIR for the copy's logs" >&2; return 0; }
+  for svc in api worker api-journeys; do
+    ( umask 077; "${JRN[@]}" logs --no-color --tail 400 "$svc" 2>/dev/null | python3 -I "$HERE/redact-log.py" >"$LOGS_DIR/$svc.log" ) || true
+  done
+  echo "journeys-on-copy: logs: the copy's api, worker and api-journeys logs (last 400 lines each, redacted) are in $LOGS_DIR" >&2
+  if [ "$STEP" != copy ] && grep -q FATAL "$LOGS_DIR"/*.log 2>/dev/null; then
+    echo "journeys-on-copy: the first FATAL lines (redacted):" >&2
+    { grep -h FATAL "$LOGS_DIR/api.log" "$LOGS_DIR/worker.log" "$LOGS_DIR/api-journeys.log" 2>/dev/null || true; } | head -n 20 | cut -c1-400 | sed 's/^/  /' >&2
+  fi
+  return 0
+}
 cleanup() {
   local rc=$?
   stop_sampler
+  save_logs
   rm -rf "$WORK"
   "$HERE/rehearsal.sh" down >/dev/null 2>&1 || echo "journeys-on-copy: the copy could not be removed; run ./deploy/wall/rehearsal.sh down" >&2
   if [ "$rc" -ne 0 ]; then echo "JOURNEYS FAILED at step: $STEP (exit $rc). The copy was removed." >&2; fi
@@ -136,7 +161,7 @@ cleanup() {
 trap cleanup EXIT
 
 STEP=copy
-"$HERE/rehearsal.sh" up "$SHA" || die "the walled copy of staging did not pass (above)"
+REHEARSAL_RESULTS_DIR="$LOGS_DIR" "$HERE/rehearsal.sh" up "$SHA" || die "the walled copy of staging did not pass (above)"
 COPY_IDENTITY="$(identity_of "${REH[@]}")" || die "could not read the copy's identity"
 [ "$COPY_IDENTITY" = staging ] || die "the copy says '$COPY_IDENTITY', not staging"
 
@@ -176,10 +201,7 @@ metrics() { "${JRN[@]}" exec -T api-journeys node -e "$METRICS_JS"; }
 SAMPLER=$!
 
 STEP=journeys
-RUN_ID="copy-$(date -u +%Y%m%dT%H%M%SZ)"
 export LIVETEST_RUN_ID="$RUN_ID" JOURNEYS_UID="$(id -u)" JOURNEYS_GID="$(id -g)"
-export JOURNEYS_RESULTS_DIR="${JOURNEYS_RESULTS_BASE:-$HOME/swift-journeys-copy}/$RUN_ID"
-mkdir -p "$JOURNEYS_RESULTS_DIR"
 runner=0
 "${JRN[@]}" run --rm --no-TTY journeys-copy "--only=$JOURNEYS" || runner=$?
 python3 -I - "$JOURNEYS_RESULTS_DIR/journeys-result.json" "$JOURNEYS" "$TARGET_SKIPS" <<'PY' || die "a journey did not PASS on the walled login (results: $JOURNEYS_RESULTS_DIR)"
