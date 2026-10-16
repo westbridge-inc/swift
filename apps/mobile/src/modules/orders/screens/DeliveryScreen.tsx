@@ -5,6 +5,7 @@ import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDime
 import MapView, { Marker } from 'react-native-maps';
 import { Image } from 'expo-image';
 import { openExternal } from '../../../lib/openExternal';
+import { openDirections } from '../../../lib/openDirections';
 // The emergency path for the person WAITING. The earner side got one; the
 // customer watching a stranger walk up their path did not.
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -1264,10 +1265,9 @@ export function DeliveryScreen() {
                 </T>
                 {o.pickupAddress ? (
                   <Pressable
-                    onPress={() => {
-                      const q = o.pickupLat != null && o.pickupLng != null ? `${o.pickupLat},${o.pickupLng}` : encodeURIComponent(o.pickupAddress);
-                      void openExternal(`https://maps.apple.com/?daddr=${q}`, "Couldn't open maps on this phone.");
-                    }}
+                    // [row 363] The phone's own maps: Apple Maps on iOS, Google
+                    // Maps on Android (it was maps.apple.com on every phone).
+                    onPress={() => { void openDirections({ lat: o.pickupLat, lng: o.pickupLng, address: o.pickupAddress }); }}
                     accessibilityRole="button"
                     accessibilityLabel={`Directions to ${o.vendor?.name ?? 'the store'}`}
                     accessibilityHint="Opens turn-by-turn directions"
