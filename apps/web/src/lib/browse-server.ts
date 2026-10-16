@@ -12,7 +12,7 @@ import { cache } from 'react';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 import { isHomeFeed, marketTabVisible } from '@/lib/app-rules';
 import type { HomeFeed, MarketCategory, MarketDepth, MarketItem, Vendor, VendorDetail } from '@/lib/customer';
-import { retailCategories, type GuestRead } from '@/lib/browse-keys';
+import { LIVE_MENU_MAX_AGE_MS, retailCategories, type GuestRead, type ServerStoreMenu } from '@/lib/browse-keys';
 
 export type { GuestRead };
 
@@ -20,7 +20,7 @@ const API_URL = process.env['API_URL'] ?? BROWSER_API_ORIGIN;
 
 /** How long the server keeps a browse answer before asking the API again. */
 export const BROWSE_REVALIDATE_SECONDS = 60;
-/** A store's menu: shorter. The page re-checks the live menu as soon as it opens anyway. */
+/** A store's menu: shorter. A store page orders only from a copy at most 30 s old (storeMenuForPage). */
 export const STORE_REVALIDATE_SECONDS = 30;
 
 /**
@@ -85,6 +85,29 @@ export const fetchGuestVendors = cache((type: string) =>
 const STORE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 export async function vendorSeed(id: string): Promise<GuestRead<VendorDetail> | null> {
   return STORE_ID.test(id) ? fetchGuestVendor(id) : null;
+}
+
+/**
+ * [PERF #2] A store page's live menu, drawn into the page so Add works the
+ * moment it shows. The page used to draw from the store copy, then read the
+ * store AND its menu again in the browser ("Checking this live menu's
+ * required choices…") before Add worked: two more trips from the phone. This
+ * is the same guest menu read as above (shared 30-second server copy, so the
+ * API sees no more reads than before), handed to the page only while it is
+ * at most LIVE_MENU_MAX_AGE_MS old by this server's clock. An older copy, no
+ * copy, or any failure is null: the page then reads it in the browser before
+ * Add works, exactly as before.
+ */
+export async function storeMenuForPage(id: string): Promise<ServerStoreMenu | null> {
+  try {
+    const read = await vendorSeed(id);
+    if (!read) return null;
+    const ageMs = Math.max(0, Date.now() - read.at);
+    if (ageMs > LIVE_MENU_MAX_AGE_MS) return null;
+    return { vendor: read.data, at: read.at, ageMs, renderId: crypto.randomUUID() };
+  } catch {
+    return null;
+  }
 }
 
 /** Only the kinds of store the browse page offers are read on the server, so a
