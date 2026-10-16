@@ -86,7 +86,8 @@ if argv[:1] == ['compose'] and 'exec' in argv and 'postgres' in argv and argv[-1
 if argv[:1] == ['compose'] and 'up' in argv and 'api-journeys' in argv:
     sys.exit(0)
 if argv[:1] == ['compose'] and 'logs' in argv:
-    services = [a for a in argv[argv.index('logs') + 1:] if not a.startswith('-')]
+    rest = argv[argv.index('logs') + 1:]
+    services = [a for i, a in enumerate(rest) if not a.startswith('-') and (i == 0 or rest[i - 1] != '--tail')]
     if services == ['api-journeys']:
         print(env('FAKE_INSTANCE_LOGS', 'tenant wall: enforced role=swift_app_login\nServer listening at http://0.0.0.0:3000'))
     else:
@@ -124,7 +125,10 @@ sys.exit(0)
 FAKE_REHEARSAL = r'''
 import json, os, sys
 with open(os.environ['CALL_LOG'], 'a') as log:
-    log.write(json.dumps({'tool': 'rehearsal.sh', 'argv': sys.argv[1:]}) + '\n')
+    row = {'tool': 'rehearsal.sh', 'argv': sys.argv[1:]}
+    if sys.argv[1:2] == ['up']:
+        row['results'] = os.environ.get('REHEARSAL_RESULTS_DIR')
+    log.write(json.dumps(row) + '\n')
 if sys.argv[1:2] == ['up']:
     print('rehearsal: PASSED at ' + sys.argv[2])
     sys.exit(int(os.environ.get('FAKE_REHEARSAL_UP_RC', '0')))
@@ -140,7 +144,8 @@ class JourneysHost:
         (self.deploy / 'wall').mkdir(parents=True)
         for name in FILES:
             shutil.copy(DEPLOY / name, self.deploy / name)
-        shutil.copy(DEPLOY / 'wall' / 'journeys-on-copy.sh', self.deploy / 'wall' / 'journeys-on-copy.sh')
+        for name in ('journeys-on-copy.sh', 'redact-log.py'):
+            shutil.copy(DEPLOY / 'wall' / name, self.deploy / 'wall' / name)
         shim(self.deploy / 'wall', 'rehearsal.sh', FAKE_REHEARSAL, python=True)
         self.env_file = self.deploy / '.env'
         self.env_file.write_text('PILOT_ENV=staging\nNODE_ENV=development\nAPI_HOST=api.example.org\n')
@@ -225,6 +230,57 @@ class JourneysOnCopy(unittest.TestCase):
         for argv in (calls[instance]['argv'], calls[runner]['argv']):
             self.assertIn(str(self.host.deploy / 'docker-compose.journeys-copy.yml'), argv)
             self.assertIn('journeys-copy', argv[argv.index('--profile') + 1])
+
+    def test_the_copys_logs_are_kept_redacted_before_the_copy_is_removed(self):
+        """15 Oct: the copy failed at boot (FATAL=24) and its logs went with it.
+        Now every end keeps the copy's api, worker and api-journeys logs (last
+        400 lines each, redacted) in the run's results, BEFORE rehearsal.sh down."""
+        instance = ('api-journeys-1  | Failed to start server: Error: FATAL: SMS_RECIPIENT_ALLOWLIST entry 1 is not an E.164 number. Refusing to start.\n'
+                    'api-journeys-1  | texting +5926123456 and +447700900123 owner.name@example.gy with token=abc123secretvalue')
+        result, calls = self.host.run(extra_env={'FAKE_INSTANCE_LOGS': instance,
+                                                 'FAKE_LOGS': 'api-1  | ready postgresql://swift_app_login:pw-fixture-9@postgres/swift'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('JOURNEYS FAILED at step: instance', result.stderr)
+        runs = list(self.host.results.glob('copy-*'))
+        self.assertEqual(len(runs), 1, runs)
+        logs = runs[0] / 'copy-logs'
+        self.assertEqual(oct(logs.stat().st_mode & 0o777), '0o700')
+        self.assertEqual(sorted(p.name for p in logs.iterdir()), ['api-journeys.log', 'api.log', 'worker.log'])
+        saved = ''.join((logs / n).read_text() for n in ('api.log', 'worker.log', 'api-journeys.log'))
+        self.assertIn('FATAL: SMS_RECIPIENT_ALLOWLIST entry 1 is not an E.164 number', (logs / 'api-journeys.log').read_text())
+        for leak in ('+5926123456', '447700900123', 'owner.name@example.gy', 'abc123secretvalue', 'pw-fixture-9'):
+            self.assertNotIn(leak, saved + result.stdout + result.stderr)
+        saves = [i for i, c in enumerate(calls) if c['tool'] == 'docker' and 'logs' in c['argv'] and '--tail' in c['argv']]
+        self.assertEqual(sorted(calls[i]['argv'][-1] for i in saves), ['api', 'api-journeys', 'worker'])
+        for i in saves:
+            self.assertEqual(calls[i]['argv'][calls[i]['argv'].index('--tail') + 1], '400')
+            self.assertIn(str(self.host.deploy / 'docker-compose.journeys-copy.yml'), calls[i]['argv'])
+        down = index(calls, lambda c: c['tool'] == 'rehearsal.sh' and c['argv'] == ['down'])
+        self.assertTrue(max(saves) < down, (saves, down))
+        err = result.stderr.splitlines()
+        at = err.index('journeys-on-copy: the first FATAL lines (redacted):')
+        self.assertTrue(err[at + 1].startswith('  api-journeys-1  | Failed to start server: Error: FATAL: SMS_RECIPIENT_ALLOWLIST'), err[at + 1])
+        self.assertIn(f"journeys-on-copy: logs: the copy's api, worker and api-journeys logs (last 400 lines each, redacted) are in {logs}", err)
+
+    def test_a_copy_that_does_not_boot_keeps_its_logs_where_the_rehearsal_was_told(self):
+        result, calls = self.host.run(extra_env={'FAKE_REHEARSAL_UP_RC': '1', 'FAKE_LOGS': 'api-1  | Error: FATAL: something'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('JOURNEYS FAILED at step: copy', result.stderr)
+        runs = list(self.host.results.glob('copy-*'))
+        self.assertEqual(len(runs), 1, runs)
+        up = next(c for c in calls if c['tool'] == 'rehearsal.sh' and c['argv'][:1] == ['up'])
+        self.assertEqual(up['results'], str(runs[0] / 'copy-logs'))
+        self.assertTrue((runs[0] / 'copy-logs' / 'api.log').is_file())
+        # The rehearsal printed its own FATAL lines for the copy step: not printed twice.
+        self.assertNotIn('journeys-on-copy: the first FATAL lines', result.stderr)
+
+    def test_a_passing_run_keeps_the_logs_beside_its_results(self):
+        result, _ = self.host.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        run = next(self.host.results.glob('copy-*'))
+        self.assertTrue((run / 'journeys-result.json').is_file())
+        self.assertEqual(sorted(p.name for p in (run / 'copy-logs').iterdir()), ['api-journeys.log', 'api.log', 'worker.log'])
+        self.assertNotIn('the first FATAL lines', result.stderr)
 
     def test_a_skip_passes_only_for_the_named_cases_no_staging_copy_can_run(self):
         both = {'CUST-01': skipped('CUST-01', ['multi-vendor delivery-fee agreement'], steps=9),
