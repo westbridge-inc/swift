@@ -1003,7 +1003,20 @@ export const riderApi = {
   // without it) — an empty body 400s.
   handover: (
     id: string,
-    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
+    body: {
+      outcome: 'paid' | 'no_show' | 'refused' | 'short_payment';
+      gps: { lat: number; lng: number };
+      photoUrl?: string;
+      ridePin?: string;
+      /** [L02 · row 56] The cash taken at the door, whole GYD (api cash/door-cash.ts decides what it means). */
+      collectedAmount?: number;
+      /** 'short_payment' with partial cash only: true = handed back; false = the rider still holds it (operations follow up). */
+      cashReturned?: boolean;
+      /** 'paid' only: the goods were already handed over for less than due. */
+      handedOverShort?: true;
+      /** The door authority version the screen rendered; a stale one is refused. */
+      handoverVersion?: string;
+    },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
