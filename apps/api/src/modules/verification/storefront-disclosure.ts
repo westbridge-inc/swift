@@ -7,7 +7,7 @@ import { readFeePause } from '../billing/mmg-pause';
  * submission's extracted fields), or from a fallback the spec names and LABELS
  * (PROPRIETOR = the verified proprietor's name "trading as …" for an unregistered
  * business; SELF_DECLARED = the address the vendor typed; ACCOUNT = the verified account
- * contact; PLATFORM = the operator block from configuration). A required element with no
+ * contact; PLATFORM = the operator block from the ONE OPERATOR constant). A required element with no
  * source leaves the block INCOMPLETE — it never falls back to self-reported text for a
  * legal fact. Nothing is stored: the block is derived on every read, so a lapsed licence
  * disappears from the storefront the moment its record leaves VALID.
@@ -25,6 +25,7 @@ import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { inoperableSubscriptionWhere } from '../subscription/operate-gate';
 import { getTenantId } from '../../plugins/tenant-context';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
+import { OPERATOR, OPERATOR_ADDRESS } from '../legal/operator';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
@@ -38,7 +39,7 @@ export interface DisclosureBlock {
   address: DisclosureElement | null;
   contact: DisclosureElement | null;
   licences: DisclosureElement[];
-  operator: { legalName: string; registeredAddress: string; supportEmail: string } | null;
+  operator: { legalName: string; registeredAddress: string; supportEmail: string };
   compiledAt: string;
 }
 
@@ -47,11 +48,10 @@ const NAME_FIELDS = ['business_name', 'company_name', 'legal_name'];
 const ADDRESS_FIELDS = ['principal_place', 'premises_address', 'registered_address'];
 // The document types this compiler reads are REGISTRY text (DOC-INV-2): IDENTITY_DOC_TYPES, LICENCE_DISCLOSURE_TYPES.
 
-export function platformOperator(env: Record<string, string | undefined> = process.env): DisclosureBlock['operator'] {
-  const legalName = env['PLATFORM_LEGAL_NAME']?.trim();
-  const registeredAddress = env['PLATFORM_REGISTERED_ADDRESS']?.trim();
-  const supportEmail = env['SUPPORT_EMAIL']?.trim();
-  return legalName && registeredAddress && supportEmail ? { legalName, registeredAddress, supportEmail } : null;
+/** [R3 · owner 15 Oct 2026 · ruling #63] Who operates the platform: the ONE OPERATOR constant (legal/operator.ts),
+ *  never configuration — a missing or stale environment variable can neither blank it nor name someone else. */
+export function platformOperator(): DisclosureBlock['operator'] {
+  return { legalName: OPERATOR.name, registeredAddress: OPERATOR_ADDRESS, supportEmail: OPERATOR.supportEmail };
 }
 
 type DisclosurePurpose = 'PUBLIC_STOREFRONT' | 'VENDOR_ACTIVATION';
@@ -219,15 +219,18 @@ async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: Disc
   // PERSONAL licences truthfully disclose only their on-file fact. Their
   // numbers are not required for completeness in either caller, so neither
   // caller needs a PERSONAL read or an associated privileged audit capability.
+  // [R3 · legal research D10] The PUBLIC storefront never shows a licence
+  // NUMBER, business or personal — only that one is on file — so the public
+  // read never opens a licence's fields at all.
   const licences: DisclosureElement[] = [];
   for (const r of records.filter((x) => LICENCE_DISCLOSURE_TYPES.includes(x.docType))) {
-    const f = await fieldsFor(r, ['licence_number', 'certificate_number', 'permit_number']);
-    const number = [...f.values()].find((x) => x && x.trim());
+    const number = purpose === 'VENDOR_ACTIVATION'
+      ? [...(await fieldsFor(r, ['licence_number', 'certificate_number', 'permit_number'])).values()].find((x) => x && x.trim())
+      : undefined;
     licences.push({ value: number ? number.trim() : 'on file', source: 'RECORD', ...provenance(r) });
   }
 
   const operator = platformOperator();
-  if (!operator) missing.push('operator');
 
   const block: DisclosureBlock = { complete: missing.length === 0, missing, legalName, address, contact, licences, operator, compiledAt: now.toISOString() };
   if (cacheKey) {

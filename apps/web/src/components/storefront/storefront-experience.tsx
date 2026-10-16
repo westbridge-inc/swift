@@ -47,6 +47,7 @@ import { useGuestBasket } from '@/lib/basket-state';
 import { Photo } from '@/components/order-ui';
 import { StoreActions } from './store-actions';
 import styles from './storefront.module.css';
+import { SellerInfo } from './seller-info';
 
 export type DisplayItem = MenuItem & {
   description?: string;
@@ -1004,6 +1005,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             </div>
           </aside>
         </div>
+
+        {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule, from the server render. */}
+        {store.seller ? <SellerInfo seller={store.seller} /> : null}
       </div>
 
       {itemCount > 0 && !modalItem && !checkoutVisible ? (
