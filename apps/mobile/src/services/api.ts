@@ -19,6 +19,7 @@ import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
 } from './apiOrigin';
+import { explainDemoEnded, isReviewSessionClosed } from '../lib/reviewSessionClosed';
 
 // Build-time override (set per EAS build profile, e.g. preview→staging,
 // production→prod). Development follows the current Expo/Metro bundle host so
@@ -207,6 +208,13 @@ api.interceptors.response.use(
     const captured = originalRequest
       ? requestAuthBindings.get(originalRequest)?.session
       : undefined;
+    // [Row 353 · DL-9] The store-review demo's session is over: sign that exact
+    // demo session out once and say why. Never a refresh, never a retry.
+    if (isReviewSessionClosed(error)) {
+      if (captured && useAuthStore.getState().logoutIfCurrent(captured)) explainDemoEnded();
+      return Promise.reject(error);
+    }
+
     if (
       error.response?.status === 401
       && originalRequest

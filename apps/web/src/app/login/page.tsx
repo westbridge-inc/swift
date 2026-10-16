@@ -8,6 +8,7 @@ import { verifyCustomerLogin } from '@/lib/customer';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { customerRoute } from '@/lib/customer-routes';
+import { DEMO_ENDED_NOTICE, takeDemoEndedNotice } from '@/lib/demo-ended';
 import { AuthError, AuthHeading, AuthPage, CodeBoxes, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/auth-ui';
 
 const CUSTOMER_ROUTES = ['/order', '/cart', '/checkout', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie', '/market'];
@@ -55,6 +56,10 @@ function LoginInner() {
     return () => { alive = false; };
   }, [requestedNext]);
   const isCustomer = isCustomerReturn(next);
+  // [Row 353] Sent here because the store-review demo ended: say so, once, above the form.
+  const ended = params.get('ended');
+  const [demoEnded, setDemoEnded] = useState(false);
+  useEffect(() => { if (takeDemoEndedNotice(ended)) setDemoEnded(true); }, [ended]);
 
   const [step, setStep] = useState<'phone' | 'code'>('phone');
   // [WEB-REDESIGN] The field holds the local number beside the +592 chip;
@@ -95,6 +100,7 @@ function LoginInner() {
   return (
     <AuthPage onBrandClick={clearStorefrontContinuation}>
       <section aria-labelledby="login-title" className="flex flex-col gap-6">
+        {demoEnded ? <p className="sw-note sw-note-info" role="status" data-testid="demo-ended">{DEMO_ENDED_NOTICE}</p> : null}
         {step === 'phone' ? (
           <>
             <AuthHeading id="login-title" eyebrow={isCustomer ? 'Sign in or create an account' : 'Swift for businesses and earners'} title="What’s your number?">

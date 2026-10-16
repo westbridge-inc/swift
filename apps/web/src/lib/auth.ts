@@ -2,6 +2,7 @@
 
 import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
+import { DEMO_ENDED_LOGIN, DEMO_ENDED_NOTICE, isClosedDemoAnswer, noteDemoEnded } from '@/lib/demo-ended';
 
 // ── The session ──────────────────────────────────────────────────────────────
 // [W-01] THIS APP HOLDS NO CREDENTIAL. It used to keep both tokens in
@@ -130,6 +131,12 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
   };
   try {
     const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', headers: { ...clientHeaders } });
+    if (res.status === 410 && isClosedDemoAnswer(410, await res.json().catch(() => null))) {
+      // [Row 353] A demo whose session is over is signed out here, without moving the page;
+      // the sign-in page says why when the person gets there.
+      await endClosedDemo({ redirect: false });
+      return forget();
+    }
     if (!res.ok) return forget();
     const json = await res.json().catch(() => null);
     const user = json?.data?.user as { id?: unknown } | undefined;
@@ -206,6 +213,26 @@ export async function logout(): Promise<void> {
     // and the local clear below still takes the person to /login.
   }
   clearSession();
+}
+
+/**
+ * [Row 353 · DL-9] The store-review demo's session is over. Its cookies are
+ * HttpOnly, so only the server can clear them: /auth/logout/refresh needs no
+ * live access session (the demo's every authenticated route answers 410) and
+ * clears both cookies whatever it finds. Then the local sign-out, and the
+ * sign-in page, which says why.
+ */
+async function endClosedDemo({ redirect }: { redirect: boolean }): Promise<void> {
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout/refresh`, {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}',
+    });
+  } catch {
+    // Offline: the local sign-out below still happens.
+  }
+  clearSession();
+  noteDemoEnded();
+  if (redirect && window.location.pathname !== '/login') window.location.href = DEMO_ENDED_LOGIN;
 }
 
 export function clearSession() {
@@ -318,6 +345,10 @@ export async function apiFetch(
   const json = await res.json().catch(() => ({}));
   if (!responseContextIsCurrent(requestSession, requestStore)) {
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
+  }
+  if (isClosedDemoAnswer(res.status, json)) {
+    await endClosedDemo({ redirect: policy.redirectOnExpired !== false });
+    throw new ApiRequestError(DEMO_ENDED_NOTICE, 410, 'REVIEW_SESSION_CLOSED');
   }
   if (!res.ok || json?.success === false) {
     throw new ApiRequestError(
