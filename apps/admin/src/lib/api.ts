@@ -672,7 +672,11 @@ export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/mode
 // edit in between refuses it. Remove bans the item for good, with a reason the
 // partner reads. Neither can lift a certain ban (a banned category, or an
 // earlier removal).
-export const PROHIBITED_CLASSES = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'] as const;
+export const PROHIBITED_CLASSES = [
+  'ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL',
+  // [R4 · owner 15 Oct] the expanded permanent list (the server's PROHIBITED_CLASSES, class for class)
+  'EXPLOSIVES', 'PESTICIDES', 'PRECIOUS_MINERALS', 'WEAPONS', 'WILDLIFE', 'COUNTERFEIT', 'CURRENCY', 'LEGAL_SERVICES',
+] as const;
 export type ProhibitedClass = (typeof PROHIBITED_CLASSES)[number];
 export const fetchCatalogueReview = () => apiFetch('/api/v1/admin/catalogue-review');
 export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: string) =>
