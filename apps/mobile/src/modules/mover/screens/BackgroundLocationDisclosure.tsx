@@ -2,6 +2,7 @@ import React, { useCallback, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { color, space } from '@swift/ui';
 import { IconChip, PillButton, PopupCard, PopupTitle, T } from '../../../kit';
+import { BG_DISCLOSURE } from './backgroundLocationCopy';
 
 /**
  * The prominent disclosure Google Play requires before ANY background-location
@@ -31,6 +32,9 @@ import { IconChip, PillButton, PopupCard, PopupTitle, T } from '../../../kit';
  * Declining resolves false and the OS prompt is never raised — no prompt
  * without consent, which is the half of the policy that actually protects
  * someone.
+ *
+ * [R18] The words live in backgroundLocationCopy.ts: a yes followed by the
+ * system grant is recorded in the consent ledger against exactly them.
  */
 export function useBackgroundLocationDisclosure() {
   const [visible, setVisible] = useState(false);
@@ -65,26 +69,22 @@ export function useBackgroundLocationDisclosure() {
     <PopupCard visible={visible} onClose={() => settle(false)}>
       <IconChip icon="map-pin" size={56} />
       <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-        Swift needs your location in the background
+        {BG_DISCLOSURE.title}
       </PopupTitle>
 
       <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-        While you are online, Swift collects your location even when the app is
-        closed or not in use — so jobs can reach you, and so the customer can
-        watch their delivery move.
+        {BG_DISCLOSURE.body}
       </T>
 
       <View style={{ alignSelf: 'stretch', gap: space.sm, marginTop: space.lg }}>
-        <DisclosureLine text="Where you are, while you are online" />
-        {/* [Legal research B3, in-app ¶18] where it goes, said truly: Swift's servers are run by a hosting provider */}
-        <DisclosureLine text="Sent only to Swift and kept with our hosting provider, as the Privacy Policy explains — never sold, never shared with advertisers" />
-        <DisclosureLine text="Stops the moment you go offline" />
+        {/* [Legal research B3, in-app ¶18] where it goes, said truly: Swift's servers are run by a hosting provider (the words: backgroundLocationCopy.ts) */}
+        {BG_DISCLOSURE.lines.map((line) => <DisclosureLine key={line} text={line} />)}
       </View>
 
       <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
-        <PillButton label="Allow background location" size="md" onPress={() => settle(true)} />
+        <PillButton label={BG_DISCLOSURE.allow} size="md" onPress={() => settle(true)} />
         <PillButton
-          label="Only while app is open"
+          label={BG_DISCLOSURE.decline}
           variant="soft"
           size="md"
           onPress={() => settle(false)}
@@ -92,8 +92,7 @@ export function useBackgroundLocationDisclosure() {
       </View>
 
       <T variant="caption" tone="muted" center style={{ marginTop: space.md }}>
-        You can go online either way. Without background access Swift tracks you
-        only while the app is on screen.
+        {BG_DISCLOSURE.caption}
       </T>
     </PopupCard>
   );

@@ -161,6 +161,23 @@ describe('matchOrderRoute — once, at completion, frozen on the order', () => {
     expect((await matchOrderRoute({ prisma: app.prisma, redis: app.redis }, order.id)).outcome).toBe('already');
   });
 
+  it('[R18] the distance is frozen but the matched path is never stored — Swift keeps no location history', async () => {
+    const { rider, order, acceptedAt } = await riderWithOrder(4, 'DELIVERED', new Date(Date.now() - 5 * 60_000));
+    const start = acceptedAt.getTime() + 60_000;
+    for (let i = 0; i < 10; i++) {
+      await pushTrace(app.redis, traceKey('RIDER', rider.id), { lat: GT.lat + i * 0.001, lng: GT.lng, at: new Date(start + i * 8_000) });
+    }
+    // A road matcher that returns the path it matched (OSRM does: production runs MAPS_PROVIDER=osrm).
+    const maps = {
+      matchTrace: async () => ({ km: 1.23, polyline: 'encoded_path_of_the_whole_job', matched: true, source: 'osrm' as const }),
+    } as unknown as Parameters<typeof matchOrderRoute>[0]['maps'];
+    expect((await matchOrderRoute({ prisma: app.prisma, redis: app.redis, maps }, order.id)).outcome).toBe('matched');
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { routeMatchedKm: true, routeMatchSource: true, routePolyline: true } });
+    expect(Number(row.routeMatchedKm)).toBe(1.23);
+    expect(row.routeMatchSource).toBe('osrm');
+    expect(row.routePolyline).toBeNull();
+  });
+
   it('no trace is no match — recorded as absence, never a straight line', async () => {
     const { order } = await riderWithOrder(2, 'DELIVERED', new Date(Date.now() - 60_000));
     expect((await matchOrderRoute({ prisma: app.prisma, redis: app.redis }, order.id)).outcome).toBe('no-trace');
