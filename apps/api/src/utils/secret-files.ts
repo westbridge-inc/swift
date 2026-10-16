@@ -39,6 +39,10 @@ export const SECRET_FILE_NAMES = [
   'MEILISEARCH_KEY',
   // Notifications.
   'TWILIO_API_KEY_SECRET',
+  // [R22] The account token Twilio signs inbound STOP requests with
+  // (sms-inbound.routes.ts). Verification only, under its own name: the
+  // outbound adapter never reads it (deploy/TWILIO.md).
+  'TWILIO_WEBHOOK_AUTH_TOKEN',
   'SMTP_PASS',
   // [L04] Non-production SMS recipient allowlist: phone numbers are personal
   // data, so they arrive by file from the store, never in a compose file.
