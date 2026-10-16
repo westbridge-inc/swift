@@ -29,6 +29,10 @@ type ReceiptOrder = {
   totalAmount: unknown;
   deliveryAddress: string | null;
   vendor: { name: string; addressLine1: string; city: string; phone: string } | null;
+  /** [Triage row 248 · R3 · CAA s.70] Who sold: the store's seller block (verification/storefront-seller.ts), the same
+   *  legal name, address and published phone its store page shows. Null = Swift holds none on file for it, and the
+   *  receipt names the store by its trading name and address only (never a guess). */
+  seller?: { legalName: string | null; address: string | null; phone: string | null } | null;
   customer: { firstName: string | null; lastName: string | null } | null;
   items: Array<{ name: string; quantity: number; totalCustomer: unknown }>;
   /** [M-36] The currency every amount on the order is in; stamped at checkout. */
@@ -43,6 +47,14 @@ type ReceiptOrder = {
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/** "Sold by" — the seller's legal name, address and phone when on file; otherwise the store's own name and address. */
+function soldBy(vendor: NonNullable<ReceiptOrder['vendor']>, seller: ReceiptOrder['seller'] | null): string {
+  const name = seller?.legalName ?? vendor.name;
+  const address = seller?.address ?? `${vendor.addressLine1}, ${vendor.city}`;
+  const phone = seller?.phone ? ` · ${esc(seller.phone)}` : '';
+  return `Sold by ${esc(name)} — ${esc(address)}${phone}`;
+}
 
 export function renderReceiptHtml(order: ReceiptOrder): string {
   // [M-36] The order names its currency; the receipt renders it through the
@@ -120,7 +132,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   <h1>Receipt · ${esc(order.orderNumber)}</h1>
   <div class="meta">
     ${customerName ? `${esc(customerName)}<br>` : ''}
-    ${order.vendor ? `${esc(order.vendor.name)} — ${esc(order.vendor.addressLine1)}, ${esc(order.vendor.city)}<br>` : ''}
+    ${order.vendor ? `${soldBy(order.vendor, order.seller ?? null)}<br>` : ''}
     ${new Date(order.placedAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })}<br>
     ${esc(paidHow)}
   </div>
