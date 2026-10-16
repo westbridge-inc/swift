@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { ed25519 } from '@noble/curves/ed25519';
 import {
   BUNDLED_EMERGENCY_POLICIES, bundledPolicyFor, emergencyCounters, locationAccuracyBand, parseServedPolicy, policyFor, recordEmergencyDial,
   recordSosLocation, recordSosTransition, resetEmergencyCountersForTests, resolveEmergencyDial, telUrl, type EmergencyPolicy,
@@ -11,6 +12,18 @@ import {
 // trustworthy is a manual sheet — and no screen hard-codes a number.
 // ---------------------------------------------------------------------------
 
+// [AUD-G7-023] A throwaway Ed25519 key drawn for this file, pinned only here.
+const hex = (b: Uint8Array): string => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+const SECRET = ed25519.utils.randomPrivateKey();
+const PINS = [{ kid: 'ep1-1111111111111111', ed25519: hex(ed25519.getPublicKey(SECRET)) }];
+const signedEnvelope = (payload: string): Record<string, unknown> => ({
+  version: 2, alg: 'Ed25519', kid: PINS[0]!.kid, payload,
+  signature: hex(ed25519.sign(new TextEncoder().encode(`swift.emergency-policy.v2\u0000Ed25519\u0000${PINS[0]!.kid}\u0000${payload}`), SECRET)),
+});
+const TT_PAYLOAD = (now: number) =>
+  `{"country":"TT","expiresAt":${now + 3_600_000},"issuedAt":${now},"numbers":{"ambulance":{"number":"811","verified":false},"police":{"number":"999","verified":true}},"v":2}`;
+
+/** What the API serves: the v1 body builds 9-11 read, plus the Ed25519 envelope build 12+ trusts. */
 const served = (over: Partial<Record<string, unknown>> = {}, now = 1_000_000): Record<string, unknown> => ({
   version: 1,
   country: 'TT',
@@ -18,6 +31,7 @@ const served = (over: Partial<Record<string, unknown>> = {}, now = 1_000_000): R
   issuedAt: new Date(now).toISOString(),
   expiresAt: new Date(now + 3_600_000).toISOString(),
   signature: { alg: 'HMAC-SHA256', kid: 'abcd1234', value: 'f'.repeat(64) },
+  envelope: signedEnvelope(TT_PAYLOAD(now)),
   ...over,
 });
 
@@ -46,31 +60,46 @@ describe('the bundled fallback', () => {
   });
 });
 
-describe('the served policy is validated, never trusted by shape alone', () => {
-  it('accepts the API payload and refuses every malformed or expired variant', () => {
-    const ok = parseServedPolicy(served(), 1_000_000);
+describe('[AUD-G7-023] the served policy is trusted only through its verified signature, never by shape', () => {
+  it('accepts the API payload by its Ed25519 envelope under a pinned key, for the market asked for', () => {
+    const ok = parseServedPolicy(served(), 'TT', 1_000_000, PINS);
     expect(ok).toMatchObject({ country: 'TT', source: 'server', numbers: { police: { number: '999', verified: true }, ambulance: { number: '811', verified: false } } });
-    const bad: Array<[string, unknown]> = [
+    expect(Date.parse(ok!.expiresAt!)).toBe(1_000_000 + 3_600_000);
+  });
+
+  it('a shape-only policy — exactly what builds 9-11 accept, with an HMAC-shaped signature nobody can check — is not a policy', () => {
+    const shapeOnly = served();
+    delete shapeOnly['envelope'];
+    expect(parseServedPolicy(shapeOnly, 'TT', 1_000_000, PINS)).toBeNull();
+    // The shipped pins never trust a key drawn in a test.
+    expect(parseServedPolicy(served(), 'TT', 1_000_000)).toBeNull();
+  });
+
+  it('the v1 numbers beside the envelope are never read; a change to the signed numbers is refused', () => {
+    const forgedV1 = served({ numbers: { police: { number: '112', verified: true } } });
+    expect(parseServedPolicy(forgedV1, 'TT', 1_000_000, PINS)?.numbers.police).toEqual({ number: '999', verified: true });
+    const env = served()['envelope'] as Record<string, string>;
+    const tampered = served({ envelope: { ...env, payload: (env['payload'] as string).replace('"999"', '"112"') } });
+    expect(parseServedPolicy(tampered, 'TT', 1_000_000, PINS)).toBeNull();
+  });
+
+  it('refuses every malformed, expired or foreign variant', () => {
+    const bad: Array<[string, unknown, string?, number?]> = [
       ['null', null], ['string', 'policy'], ['array', []],
-      ['version 2', served({ version: 2 })],
-      ['country lowercase', served({ country: 'tt' })],
-      ['no expiry', served({ expiresAt: undefined })],
-      ['expired', served({ expiresAt: new Date(999_000).toISOString() })],
-      ['no signature', served({ signature: undefined })],
-      ['signature without kid', served({ signature: { alg: 'HMAC-SHA256', value: 'x' } })],
-      ['numbers array', served({ numbers: [] })],
-      ['no service', served({ numbers: {} })],
-      ['letters in a number', served({ numbers: { police: { number: '9-1-1', verified: true } } })],
-      ['verified not boolean', served({ numbers: { police: { number: '911', verified: 'yes' } } })],
-      ['service not an object', served({ numbers: { police: '911' } })],
+      ['another market than the one asked for', served(), 'GY'],
+      ['no market asked for', served(), ''],
+      ['expired', served(), 'TT', 1_000_000 + 3_600_000],
+      ['envelope missing', served({ envelope: undefined })],
+      ['envelope with another algorithm', served({ envelope: { ...(served()['envelope'] as object), alg: 'HMAC-SHA256' } })],
+      ['envelope a string', served({ envelope: 'signed' })],
     ];
-    for (const [label, raw] of bad) expect(parseServedPolicy(raw, 1_000_000), label).toBeNull();
+    for (const [label, raw, country, now] of bad) expect(parseServedPolicy(raw, country ?? 'TT', now ?? 1_000_000, PINS), label).toBeNull();
   });
 });
 
 describe('precedence: the server’s policy for THIS market wins; then the bundle; then nothing', () => {
   it('uses the served policy only for its own market and only while unexpired', () => {
-    const tt = parseServedPolicy(served(), 1_000_000)!;
+    const tt = parseServedPolicy(served(), 'TT', 1_000_000, PINS)!;
     expect(policyFor('TT', tt, 1_000_000)?.source).toBe('server');
     expect(policyFor('GY', tt, 1_000_000)?.source).toBe('bundled'); // served is for TT, not GY
     expect(policyFor('TT', tt, 5_000_000)?.source).toBe('bundled'); // expired → the bundle's unverified TT candidates
@@ -88,7 +117,7 @@ describe('one resolution for every SOS surface', () => {
     expect(resolveEmergencyDial(null)).toEqual({ kind: 'manual', country: null });
     const noPolice: EmergencyPolicy = { country: 'ZZ', numbers: { fire: { number: '112', verified: true } }, source: 'server' };
     expect(resolveEmergencyDial(noPolice)).toEqual({ kind: 'manual', country: 'ZZ' });
-    const servedTT = parseServedPolicy(served(), 1_000_000)!;
+    const servedTT = parseServedPolicy(served(), 'TT', 1_000_000, PINS)!;
     expect(resolveEmergencyDial(servedTT)).toMatchObject({ kind: 'auto', number: '999', source: 'server' });
   });
   it('a tel: URL carries digits and a leading + only', () => {
