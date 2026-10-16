@@ -4,6 +4,7 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
+import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
 import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
 import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
@@ -19,6 +20,7 @@ import {
   fmtClock,
   fmtWhen,
   formatSlot,
+  MmgDisputeNotice,
   orderActions,
   prettyStatus,
 } from '../shared';
@@ -224,6 +226,8 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
             {fmtWhen(order.placedAt)}
           </T>
         </View>
+        {/* [NO-DEAD-ENDS · S1-6] A disputed MMG order is paused: say so and what happens next. */}
+        <MmgDisputeNotice order={order} />
 
         {/* [AF-MOB-006] A delivery that went wrong after pickup: the store sees
             the case, and confirms when returned goods are back with it. */}
@@ -340,6 +344,12 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                     <T variant="label" weight="semibold" style={closed ? { textDecorationLine: 'line-through' } : undefined}>
                       {it.name}
                     </T>
+                    {/* [L09 · M026] What the customer chose, so the right item is made. */}
+                    {orderLineOptionsText(it.options) ? (
+                      <T variant="caption" weight="semibold" style={{ marginTop: 2 }}>
+                        {orderLineOptionsText(it.options)}
+                      </T>
+                    ) : null}
                     {it.specialInstructions ? (
                       <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
                         “{it.specialInstructions}”

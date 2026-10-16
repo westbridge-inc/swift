@@ -121,7 +121,7 @@ export default function AboutPage() {
               site to state. All read from site.config, so no page can drift. */}
           <section
             aria-labelledby="company-facts"
-            className="mt-10 rounded-2xl border border-[var(--swift-border)] bg-white p-6"
+            className="mt-10 sw-card p-6"
           >
             <h2 id="company-facts" className="text-sm font-semibold uppercase tracking-[0.1em] text-[var(--swift-muted)]">
               Company facts
@@ -133,6 +133,8 @@ export default function AboutPage() {
               </dd>
               <dt className="font-semibold text-[var(--swift-ink)]">Operated by</dt>
               <dd>{site.legalEntityName}</dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Registration no.</dt>
+              <dd>{site.registrationNo}</dd>
               <dt className="font-semibold text-[var(--swift-ink)]">Registered and located in</dt>
               <dd>
                 {site.registeredCity}, {site.country}

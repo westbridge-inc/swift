@@ -20,9 +20,22 @@ import { devChannelLog, resetDevChannelLog } from '../providers/notifications/ch
 // arithmetic works against real-clock responses.
 
 let app: FastifyInstance;
-const emits: Array<{ room: string; event: string; payload: Record<string, unknown> }> = [];
+const emits: Array<{ room: string | string[]; event: string; payload: Record<string, unknown> }> = [];
+const toSocket = (room: string | string[], id: string) => (Array.isArray(room) ? room : [room]).includes(id);
+// Order-room publication goes through the current-audience gate, which reads
+// the sockets in the room and addresses the authorized ones by socket id.
+type FakeSocket = { id: string; data: Record<string, unknown>; leave: (room: string) => Promise<void> };
+const roomSockets = new Map<string, FakeSocket[]>();
+const joinRoom = (room: string, id: string, userId: string, tenantId: string) => {
+  const socket: FakeSocket = {
+    id, data: { userId, tenantId, authorizationExpiresAtMs: Date.now() + 3_600_000 },
+    leave: async (r: string) => { roomSockets.set(r, (roomSockets.get(r) ?? []).filter((x) => x.id !== id)); },
+  };
+  roomSockets.set(room, [...(roomSockets.get(room) ?? []), socket]);
+};
 const io = {
-  to: (room: string) => ({ emit: (event: string, payload: Record<string, unknown>) => { emits.push({ room, event, payload }) } }),
+  to: (room: string | string[]) => ({ emit: (event: string, payload: Record<string, unknown>) => { emits.push({ room, event, payload }) } }),
+  in: (room: string) => ({ fetchSockets: async () => [...(roomSockets.get(room) ?? [])] }),
 } as unknown as Server;
 const sweep = (now: Date) => new GuardianService(app.prisma, io).sweep(now);
 
@@ -119,7 +132,7 @@ beforeAll(async () => {
   await app.ready();
 });
 
-beforeEach(() => { resetDevChannelLog(); emits.length = 0; });
+beforeEach(() => { resetDevChannelLog(); emits.length = 0; roomSockets.clear(); });
 
 afterAll(async () => {
   delete process.env['GUARDIAN_AUTONOTIFY_CONTACTS'];
@@ -141,6 +154,10 @@ describe('the full ladder climb — deviation → L2 → L3 → L4 auto-SOS (§1
     const { driver } = await makeDriver();
     const t0 = Date.now() - 3_600_000; // scripted past — real-clock responses stay "after"
     const ride = await makeRide(driver.id, passenger.userId, new Date(t0));
+    // The passenger's app is in the order room; so is a socket of someone who
+    // is not on this ride (a stale subscription) — it must hear nothing.
+    joinRoom(`order:${ride.id}`, 'passenger-socket', passenger.userId, ride.tenantId);
+    joinRoom(`order:${ride.id}`, 'stranger-socket', `not-on-ride-${seq}`, ride.tenantId);
 
     // Scripted GPS: converge, then sustained divergence (same chemistry the
     // sweep suite proves) — the flag and the L2 ask land on the same tick.
@@ -158,7 +175,8 @@ describe('the full ladder climb — deviation → L2 → L3 → L4 auto-SOS (§1
     const softPush = await app.prisma.notification.findFirst({ where: { userId: passenger.userId, type: 'SAFETY' } });
     expect(softPush?.title).toBe('Safety check-in');
     expect(softPush?.body).not.toMatch(/emergency|danger|abduct/i); // push is not a secure channel
-    expect(emits.find((e) => e.event === 'guardian:checkin' && e.room === `order:${ride.id}`)?.payload['level']).toBe('SOFT');
+    expect(emits.find((e) => e.event === 'guardian:checkin' && toSocket(e.room, 'passenger-socket'))?.payload['level']).toBe('SOFT');
+    expect(emits.filter((e) => e.event === 'guardian:checkin' && toSocket(e.room, 'stranger-socket'))).toEqual([]);
 
     // L3 — soft ask unanswered past the wait → hard check-in with deadline.
     await sweep(new Date(t0 + 180_000 + 181_000));
@@ -167,7 +185,9 @@ describe('the full ladder climb — deviation → L2 → L3 → L4 auto-SOS (§1
     expect(s.checkinDeadlineAt).not.toBeNull();
     const driverPrompt = await app.prisma.notification.findFirst({ where: { userId: (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } })).userId, type: 'SAFETY' } });
     expect(driverPrompt?.title).toBe('Trip status check'); // low-key driver-side prompt
-    expect(emits.filter((e) => e.event === 'guardian:checkin').at(-1)?.payload['level']).toBe('HARD');
+    const hard = emits.filter((e) => e.event === 'guardian:checkin').at(-1);
+    expect(hard?.payload['level']).toBe('HARD');
+    expect(toSocket(hard!.room, 'passenger-socket') && !toSocket(hard!.room, 'stranger-socket')).toBe(true);
 
     // L4 — deadline passes, neither party responded → auto-SOS.
     resetDevChannelLog();

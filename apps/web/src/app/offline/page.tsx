@@ -61,7 +61,7 @@ const retry: CSSProperties = {
 
 export default function OfflinePage() {
   return (
-    <main style={page} data-swift-offline="true">
+    <main id="main" tabIndex={-1} style={page} data-swift-offline="true">
       <div style={panel}>
         <SwiftLogo />
         <WifiOff aria-hidden="true" size={28} color="var(--swift-muted)" />

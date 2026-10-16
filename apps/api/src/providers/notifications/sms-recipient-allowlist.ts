@@ -2,6 +2,7 @@ import { isProduction } from '../../utils/runtime-mode';
 import { log } from '../../utils/logger';
 import { smsRecipientNotAllowlistedCounter } from '../../plugins/observability';
 import type { SmsOptions, SmsProvider } from './channels';
+import { SMS_REF_NOT_ALLOWLISTED } from './sms-outcome';
 
 /**
  * [L04 · SMS allowlist] Outside production, a REAL SMS provider texts only the
@@ -50,7 +51,7 @@ class AllowlistedSmsProvider implements SmsProvider {
     if (this.allowed.has(to)) return this.inner.sendSms(to, body, options);
     smsRecipientNotAllowlistedCounter.inc();
     log().warn('[sms-allowlist] non-production text not sent: recipient is not on SMS_RECIPIENT_ALLOWLIST');
-    return { ref: 'not-allowlisted' };
+    return { ref: SMS_REF_NOT_ALLOWLISTED };
   }
 }
 

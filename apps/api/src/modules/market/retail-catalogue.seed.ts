@@ -131,17 +131,19 @@ const STORES: Shelf[] = [
     ],
   },
   {
-    slug: 'bourda-pharmacy',
-    name: 'Bourda Pharmacy & Beauty',
-    description: 'Everyday health, personal care and cosmetics near Bourda Market',
+    // [GUARDRAILS §8, owner 13 Oct 2026] Swift never sells medicines, over-the-counter
+    // included: this store sells first aid and personal care, and no medicine.
+    slug: 'bourda-health-beauty',
+    name: 'Bourda Health & Beauty',
+    description: 'First aid, personal care and cosmetics near Bourda Market',
     address: '7 Robb Street',
     lat: 6.8135, lng: -58.1552, phone: '+5926002104',
-    tags: ['Pharmacy'],
+    tags: ['Health', 'Beauty'],
     sections: [
-      { name: 'Health', discovery: 'pharmacy', items: [
-        ['Paracetamol 500mg (20 tabs)', 900, 'pack'], ['Antiseptic Liquid 250ml', 1600, 'bottle'],
+      { name: 'First aid & care', discovery: 'beauty', items: [
+        ['Face Masks (10-pack)', 900, 'pack'], ['Antiseptic Liquid 250ml', 1600, 'bottle'],
         ['Adhesive Plasters (20pc)', 800, 'pack'], ['Digital Thermometer', 3200, 'each'],
-        ['Vitamin C 1000mg (30 tabs)', 2400, 'pack'], ['Rehydration Salts (6 sachets)', 1100, 'pack'],
+        ['Cotton Buds (200)', 600, 'pack'], ['Hot Water Bottle', 1100, 'each'],
         ['Cotton Wool 100g', 700, 'pack'], ['Insect Repellent Spray', 2100, 'bottle'],
       ] },
       { name: 'Personal care', discovery: 'beauty', items: [

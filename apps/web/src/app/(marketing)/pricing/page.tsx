@@ -11,11 +11,18 @@ export const metadata: Metadata = { title: 'Pricing' };
 // function signup and the weekly re-tier bill through — so what a partner reads
 // here is what they are billed. A mover reads the rate of the role their
 // vehicle provisions: a taxi driver and a delivery rider never share a figure.
+// Only vehicles a mover can register today are shown (the server's `offered`
+// flag): heavy delivery — canters and box trucks — is off at launch (owner,
+// 13 Oct 2026), so its card appears only once the server offers them again.
 const MOVER_CLASSES: ReadonlyArray<{ tier: MoverPriceQuote['tier']; label: string; blurb: string }> = [
   { tier: 'courier', label: 'Delivery & courier riders', blurb: 'Deliveries and parcels — every delivery fee and tip is yours.' },
   { tier: 'taxi', label: 'Taxi drivers', blurb: 'One taxi rate, whatever you drive — every fare and tip is yours.' },
   { tier: 'courierHeavy', label: 'Heavy delivery', blurb: 'Canters and box trucks for large and bulky loads.' },
 ];
+
+/** A vehicle a mover can sign up with today. An older server that predates
+ *  the flag sends none, and its quotes stand. */
+const isOffered = (q: MoverPriceQuote) => q.offered !== false;
 
 const CATALOGUE_CLASSES: Record<CataloguePriceBand['tier'], { label: string; blurb: string }> = {
   small: { label: 'Businesses', blurb: 'Restaurants, groceries and shops.' },
@@ -56,7 +63,7 @@ function itemRange(catalogue: CataloguePriceBand[], i: number): string {
 
 function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number }) {
   return (
-    <div className="rounded-2xl bg-white p-7 shadow-sm">
+    <div className="rounded-2xl bg-[var(--swift-card)] p-7 shadow-[var(--swift-elevation-card)]">
       <h3 className="font-bold">{title}</h3>
       <p className="mt-3 text-3xl font-extrabold">
         {price}
@@ -91,7 +98,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
             </p>
             <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
               {MOVER_CLASSES.map((c) => {
-                const quotes = list.movers.filter((q) => q.tier === c.tier);
+                const quotes = list.movers.filter((q) => q.tier === c.tier && isOffered(q));
                 if (quotes.length === 0) return null;
                 const rates = quotes.map((q) => q.rate);
                 const low = Math.min(...rates);
@@ -119,25 +126,18 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
                 </PriceCard>
               ))}
             </div>
-            {list.pricing.franchise && (
-              <div className="mt-6 rounded-2xl bg-white p-7 shadow-sm">
-                <h3 className="font-bold">Franchises</h3>
-                <p className="mt-3 text-3xl font-extrabold">
-                  {list.pricing.franchise.discountPct}% off
-                  <span className="text-base font-medium text-[var(--swift-muted)]"> every location</span>
-                </p>
-                <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                  With {list.pricing.franchise.minLocations} or more stores under one owner, every location takes{' '}
-                  {list.pricing.franchise.discountPct}% off its own weekly rate — a store on the first step pays{' '}
-                  {amount(Math.round(list.catalogue[0]!.rate * (1 - list.pricing.franchise.discountPct / 100)))} a week.
-                  It applies to whichever tier a store is on, however large its catalogue.
-                </p>
-              </div>
-            )}
             <p className="mt-6 text-sm text-[var(--swift-muted)]">
               A taxi driver pays the taxi rate whatever the vehicle; a delivery rider&apos;s rate follows the
-              vehicle they register. A business moves between catalogue tiers automatically as its active items
-              change — nothing to apply for. A rate agreed with Swift stays as agreed.
+              vehicle they register.{' '}
+              {/* Said only when the server confirms it bills no multi-store
+                  discount (franchise: null, owner ruling of 13 Oct 2026). A
+                  server that still sends the old rule bills it, so the page
+                  must not claim otherwise; it shows no discount either way. */}
+              {list.pricing.franchise == null && (
+                <>Every store is its own account and pays the rate for its own catalogue, however many stores its owner runs. </>
+              )}
+              A business moves between catalogue tiers automatically as its active items change — nothing to apply
+              for. A rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (

@@ -143,7 +143,8 @@ describe('[DOC-1 P9-4] legal holds on document submissions', () => {
     const held = await doc(u, { role: 'CUSTOMER', docType: 'identity_l2', retentionExpiresAt: new Date(Date.now() + 400 * DAY) });
     const free = await doc(u, { role: 'CUSTOMER', docType: 'identity_l2', retentionExpiresAt: new Date(Date.now() + 400 * DAY) });
     await system(() => placeDocLegalHold(app.prisma, { subjectUserId: u, documentIds: [held.id], reason: REASON, ownerId: adminId, reviewBy: new Date(Date.now() + 5 * DAY), placedBy: adminId }));
-    await runWithTenant('swift-default', () => new AccountService(app).deleteAccount(u));
+    const receipt = await runWithTenant('swift-default', () => new AccountService(app).deleteAccount(u));
+    expect(receipt).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD', heldDocuments: 1 });
     const rows = await docsOf(u);
     const h = rows.find((d) => d.id === held.id)!;
     const f = rows.find((d) => d.id === free.id)!;

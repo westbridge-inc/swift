@@ -48,6 +48,7 @@ const fx = vi.hoisted(() => ({
   toasts: [] as string[],
 }));
 
+vi.mock('../modules/profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react-native', async () => {
   const R = await import('react');
   const kids = (children: unknown) =>
@@ -148,7 +149,7 @@ vi.mock('../lib/analytics', () => ({ track: () => undefined }));
 vi.mock('../lib/payLink', () => ({ openPayLink: async () => false }));
 vi.mock('../services/push', () => ({ registerIfGranted: async () => undefined, preparePushTokenForLogout: async () => null }));
 vi.mock('../services/attribution', () => ({ ensureFirstLaunchClaim: () => undefined, flushAttributedDestination: () => undefined }));
-vi.mock('../services/socket', () => ({ connectSocket: () => undefined, getSocket: () => null, disconnectSocket: () => undefined, reconnectSocketForStoreHandoff: () => undefined }));
+vi.mock('../services/socket', () => ({ connectSocket: () => undefined, getSocket: () => ({ connected: false }), disconnectSocket: () => undefined, reconnectSocketForStoreHandoff: () => undefined }));
 vi.mock('../services/backgroundLocation', () => ({ stopMoverLocation: async () => undefined }));
 vi.mock('../services/notification-priming', () => ({ maybePrimeNotifications: () => undefined }));
 vi.mock('../hooks/useCustomerCountry', () => ({ useCustomerCountry: () => undefined }));
@@ -746,9 +747,9 @@ describe('the next launch', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The face-match line. The server compares an identity document with the
-// profile selfie only while its biometric switch is on (FD-D5), and it is off.
-// The line may appear only where the server's own checklist says so.
+// The face-match line. Identity checks are made by people (face-matching is off,
+// FD-D5). Since the legal research (G4, in-app ¶17) no screen says a face was
+// matched, whatever the server sends.
 // ---------------------------------------------------------------------------
 const FACE_LINE = 'Face-matched against your profile selfie';
 /** The document card for one document, by its title. */
@@ -769,15 +770,16 @@ describe('the face-match line tells the truth', () => {
     expect(text()).not.toContain(FACE_LINE);
   });
 
-  it('only a document the server names carries the line', async () => {
+  it('[legal research G4, in-app ¶17] even a document the server names carries no face-match line; the checklist says a person checks', async () => {
     server.statusExtra = { faceMatchDocTypes: ['owner_national_id'] };
     await ownerWaitingForApproval();
 
-    expect(card('Owner National ID').textContent).toContain(FACE_LINE);
-    for (const other of ['Business Registration', 'TIN Certificate', 'Storefront Photo']) {
-      expect(card(other).textContent, other).not.toContain(FACE_LINE);
+    // [VERIFY-DOCS · ruling 4] the label names the Digital ID card it now accepts
+    for (const title of ['Owner National ID or Digital ID card', 'Business Registration', 'TIN Certificate', 'Storefront Photo']) {
+      expect(card(title).textContent, title).not.toContain(FACE_LINE);
     }
-    expect(text().split(FACE_LINE)).toHaveLength(2);
+    expect(text()).not.toContain(FACE_LINE);
+    expect(text()).toContain('A person on our team checks your documents and re-checks expiry dates daily.');
   });
 
   it.each<[string, unknown]>([
@@ -789,5 +791,32 @@ describe('the face-match line tells the truth', () => {
     server.statusExtra = { faceMatchDocTypes: flag };
     await ownerWaitingForApproval();
     expect(text()).not.toContain(FACE_LINE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [VERIFY-DOCS · owner rulings 6 Oct 2026] Documents a mover MAY add (police clearance; a licence
+// holder's national ID) come from the server's `optional` list: shown under "Optional", never in
+// the required count, and an older server that sends no `optional` shows exactly what it always did.
+// ---------------------------------------------------------------------------
+describe('optional documents are offered, never counted as required', () => {
+  const REQUIRED = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+
+  it('lists the optional documents after the required ones, with what they are for', async () => {
+    server.statusExtra = { checklist: REQUIRED, missing: REQUIRED, optional: ['national_id', 'police_clearance'] };
+    await riderApplying();
+    expect(text()).toContain('0 of 3 approved');
+    expect(text()).toContain('Optional');
+    expect(text()).toContain('You can add these any time. You do not need them to go live.');
+    expect(card('Police Clearance Certificate').textContent).toContain('your account is recorded as police-cleared');
+    expect(card('Police Clearance Certificate').textContent).not.toMatch(/badge/i);
+    // The national ID the rider already sent shows its review state in the optional list.
+    expect(card('National ID or Digital ID card').textContent).toContain('In review');
+    expect(text().indexOf('Optional')).toBeGreaterThan(text().indexOf('Vehicle Insurance'));
+  });
+
+  it('an older server with no optional list shows no Optional section', async () => {
+    await riderApplying();
+    expect(text()).not.toContain('You can add these any time');
   });
 });

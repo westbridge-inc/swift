@@ -2,13 +2,21 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
-import { prismaPlugin } from '../plugins/prisma';
+import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { CSAE_PAGE_TITLE } from '../modules/moderation/csae-page';
+
+/** [R19] A CSAE report now pages operations; close (never delete) this suite's pages at once, so a concurrent
+ *  escalation sweep in another suite never texts on-call for them. */
+const suiteStart = new Date();
+const closeCsaePages = () => runWithoutTenant(() => app.prisma.opsAlert.updateMany({
+  where: { title: CSAE_PAGE_TITLE, createdAt: { gte: suiteStart }, closedAt: null }, data: { closedAt: new Date(), closeReason: 'test-cleanup' },
+}), 'test-cleanup:content-moderation-csae');
 
 // ---------------------------------------------------------------------------
 // STORE-001: UGC reporting + moderation queue (store-compliance §5.4). Apple
@@ -22,6 +30,9 @@ let reporterId = '';
 let reporterToken = '';
 let adminToken = '';
 let adminId = '';
+let chatRoomId = '';
+let chatOrderId = '';
+let chatMessageId = '';
 
 async function mkUser(roles: UserRole[], activeRole: UserRole) {
   const u = await app.prisma.user.create({
@@ -58,10 +69,33 @@ beforeAll(async () => {
   reporterId = reporter.id; reporterToken = reporter.token;
   const admin = await mkUser(['ADMIN'] as UserRole[], 'ADMIN' as UserRole);
   adminToken = admin.token; adminId = admin.id;
+  const sender = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
+  const rider = await app.prisma.rider.create({ data: { userId: sender.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+  const order = await app.prisma.order.create({ data: {
+    orderNumber: 'MOD-' + nanoid(8), orderType: 'FOOD_DELIVERY', customerId: reporterId, riderId: rider.id,
+    status: 'EN_ROUTE_DELIVERY', deliveryAddress: 'test destination', deliveryLat: 6.82, deliveryLng: -58.17,
+    subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 0, totalAmount: 900, paymentMethod: 'CASH',
+  } });
+  chatOrderId = order.id;
+  const room = await app.prisma.chatRoom.create({ data: {
+    orderId: order.id, participants: { create: [{ userId: reporterId, role: 'CUSTOMER' }, { userId: sender.id, role: 'RIDER' }] },
+  } });
+  chatRoomId = room.id;
+  const message = await app.prisma.chatMessage.create({ data: {
+    chatRoomId: room.id, senderId: sender.id, message: 'reported test content', messageType: 'text',
+  } });
+  chatMessageId = message.id;
 });
 
 afterAll(async () => {
   await app.prisma.contentReport.deleteMany({ where: { reporterId: { in: userIds } } });
+  if (chatRoomId) {
+    await app.prisma.chatMessage.deleteMany({ where: { chatRoomId } });
+    await app.prisma.chatRoomParticipant.deleteMany({ where: { chatRoomId } });
+    await app.prisma.chatRoom.deleteMany({ where: { id: chatRoomId } });
+  }
+  if (chatOrderId) await app.prisma.order.deleteMany({ where: { id: chatOrderId } });
+  await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -94,9 +128,17 @@ describe('POST /reports — the in-app report action (STORE-001)', () => {
   });
 
   it('CSAE is a first-class reason (the store-mandated category)', async () => {
-    const res = await report(reporterToken, { targetType: 'CHAT_MESSAGE', targetId: `m-${nanoid(6)}`, reason: 'CSAE' });
+    const res = await report(reporterToken, { targetType: 'CHAT_MESSAGE', targetId: chatMessageId, reason: 'CSAE' });
+    await closeCsaePages();
     expect(res.statusCode).toBe(201);
     expect(res.json().data.status).toBe('PENDING');
+  });
+
+  it('a nonexistent chat message cannot create a moderation report', async () => {
+    const targetId = 'missing-' + nanoid(6);
+    const res = await report(reporterToken, { targetType: 'CHAT_MESSAGE', targetId, reason: 'HARASSMENT' });
+    expect(res.statusCode).toBe(404);
+    expect(await app.prisma.contentReport.count({ where: { targetType: 'CHAT_MESSAGE', targetId } })).toBe(0);
   });
 
   it('rejects an unauthenticated report and a bad target type', async () => {
@@ -167,6 +209,7 @@ describe('admin moderation queue (STORE-001)', () => {
 async function csaeReport() {
   const target = await mkUser(['CUSTOMER'] as UserRole[], 'CUSTOMER' as UserRole);
   const filed = await report(reporterToken, { targetType: 'USER', targetId: target.id, reason: 'CSAE', detail: 'child safety' });
+  await closeCsaePages();
   expect(filed.statusCode).toBe(201);
   return filed.json().data.id as string;
 }

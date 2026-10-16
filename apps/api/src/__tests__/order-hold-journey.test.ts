@@ -12,11 +12,13 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { holdReleaseObserver } from '../modules/order/order.service';
-import { LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
 import { escalateVendorAlert } from '../modules/notification/notification.service';
 import { autoCancelUnresponsiveOrder, enqueueVendorAlertFollowup, releaseHeldOrdersJob } from '../jobs/queue';
 import { drainCheckoutOutbox, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
+import { guyanaDayKey, startOfGuyanaDay } from '../utils/guyana-day';
+import { GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS, waitClearOfGuyanaMidnight } from './helpers/guyana-day-clock';
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 
 // ---------------------------------------------------------------------------
 // Q12 · THE FIVE-MINUTE WINDOW NEVER REACHES THE STORE. The owner, 2026-09-24:
@@ -58,7 +60,7 @@ const foreignUserIds: string[] = [];
 const foreignVendorIds: string[] = [];
 
 type Actor = { userId: string; token: string; phone: string };
-type Store = { owner: Actor; vendorId: string; itemId: string; device: string };
+type Store = { owner: Actor; vendorId: string; itemId: string; device: string; board: string };
 type Placed = { id: string; orderNumber: string; holdExpiresAt: string | null };
 
 // ── Harness: the queues the checkout publishes to, and the socket rooms ─────
@@ -145,7 +147,12 @@ async function makeStore(vendorType: 'RESTAURANT' | 'SUPERMARKET', opts: { stock
   });
   const device = `ExponentPushToken[q12${nanoid(16)}]`;
   await app.prisma.deviceToken.create({ data: { userId: owner.userId, token: device, platform: 'android' } });
-  return { owner, vendorId: vendor.id, itemId: item.id, device };
+  // [Owner ruling #15] The store board: the owner socket seated in the store
+  // room. Store-room events go through its team gate (emitToStoreRoom) and are
+  // addressed to the proven socket ids, so this is what the store hears there.
+  orderSocketFixture(app.io, { id: vendor.id, customerId: owner.userId, tenantId: vendor.tenantId }, () => {}, `vendor:${vendor.id}`);
+  const board = [...(app.io.of('/').adapter.rooms.get(`vendor:${vendor.id}`) ?? [])][0]!;
+  return { owner, vendorId: vendor.id, itemId: item.id, device, board };
 }
 
 function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
@@ -254,7 +261,7 @@ async function storeHeard(store: Store, order: Placed) {
   });
   return {
     sockets: sockets
-      .filter((s) => (s.room === `vendor:${store.vendorId}` || s.room === `user:${store.owner.userId}`) && mentions(s.payload, order.id))
+      .filter((s) => (s.room === store.board || s.room === `user:${store.owner.userId}`) && mentions(s.payload, order.id))
       .map((s) => s.event),
     inbox: inbox.map((n) => ({ title: n.title, kind: (n.data as Record<string, unknown> | null)?.['kind'] ?? null, isRead: n.isRead })),
     deliveries: await app.prisma.alertDelivery.count({ where: { kind: 'VENDOR_ORDER', subjectId: order.id } }),
@@ -305,6 +312,14 @@ async function storeDashboard(store: Store) {
     itemTotalOrdered: item?.totalOrdered ?? null, itemRecent: item?.recentOrders ?? null,
     busyHours: busy.json().data.total as number, tierToday: tier.json().data.usage.ordersToday as number,
   };
+}
+/** The store counts an order in the GUYANA day it was placed (#1491). The
+ *  journey moves placement minutes into the past, so a run in the first
+ *  minutes after Guyana midnight places the order in yesterday: today's
+ *  counters then read 0 for it, never 2. Week and month are rolling windows. */
+async function countedToday(orderId: string): Promise<0 | 1> {
+  const { placedAt } = await orderRow(orderId);
+  return placedAt >= startOfGuyanaDay(guyanaDayKey(new Date())) ? 1 : 0;
 }
 const DASHBOARD_EMPTY = { today: 0, week: 0, month: 0, pending: 0, totalOrders: 0, itemTotalOrdered: 0, itemRecent: 0, busyHours: 0, tierToday: 0 };
 
@@ -361,6 +376,10 @@ async function waitFor(what: string, predicate: () => boolean, ms = 5_000) {
 }
 
 const priorHoldMinutes = process.env['ORDER_HOLD_MINUTES'];
+
+// "Five minutes later" moves an order back, and the store's counters read the
+// Guyana day: never run across Guyana midnight (helpers/guyana-day-clock).
+beforeAll(waitClearOfGuyanaMidnight, GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -472,14 +491,16 @@ describe.each([
       dashboard: DASHBOARD_EMPTY,
     });
 
-    // The customer's own screen offers the cancel as free, counting down to
-    // the same server instant.
+    // The customer's own screen offers the cancel as free. [owner #46, 13 Oct]
+    // A store order stays free until the store accepts — past the hold too —
+    // so there is no countdown to promise; the hold itself is still shown.
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, buyer.token);
     expect(mine.statusCode, mine.body).toBe(200);
     expect(mine.json().data).toMatchObject({
       canCancel: true, freeCancellationWindow: true, cancellationFee: 0,
       holdExpiresAt: row.holdExpiresAt!.toISOString(),
-      freeCancellationExpiresAt: row.holdExpiresAt!.toISOString(),
+      freeCancellationExpiresAt: null,
+      cancellationMessage: 'You can cancel for free until the store accepts your order.',
     });
   });
 
@@ -577,7 +598,8 @@ describe.each([
     expect(row.releasedToVendorAt).not.toBeNull();
     expect(row.status).toBe('PENDING'); // release is visibility, not a transition
     // Counted by the store's own counters at the release — once.
-    const counted = { today: 1, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1, tierToday: 1 };
+    const today = await countedToday(order.id);
+    const counted = { today, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1, tierToday: today };
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, banner: true, dashboard: counted });
 
     // Exactly once: every later sweep is a no-op on every channel and counter.
@@ -645,9 +667,9 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
       delete holdReleaseObserver.afterRelease;
     }
     expect(cancelled?.statusCode, cancelled?.body).toBe(200);
-    // The release had committed, so the cancel took the ordinary post-window
-    // rules — the late-cancel marker the app previews.
-    expect(cancelled!.json().data).toEqual({ message: 'Order cancelled', cancellationFee: LATE_CANCEL_FEE });
+    // The release had committed, so the cancel took the ordinary post-hold
+    // rules — [owner #46, 13 Oct] free: the store had not accepted it.
+    expect(cancelled!.json().data).toEqual({ message: 'Order cancelled — no charge', cancellationFee: 0 });
     const row = await orderRow(order.id);
     expect(row.status).toBe('CANCELLED');
     expect(row.releasedToVendorAt).not.toBeNull();
@@ -677,14 +699,15 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     const alerted = await storeHeard(store, order);
     expect(alerted.pushes).toEqual(['New Order!']);
 
-    // The window has closed: the cancel is still honoured, with the recorded
-    // (never collected) late-cancel marker the app previews.
+    // The hold has closed: the cancel is still honoured — [owner #46, 13 Oct]
+    // free, because the store has not accepted it (it used to carry the
+    // never-collected G$500 marker here).
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, buyer.token);
-    expect(mine.json().data).toMatchObject({ canCancel: true, freeCancellationWindow: false, cancellationFee: LATE_CANCEL_FEE });
+    expect(mine.json().data).toMatchObject({ canCancel: true, freeCancellationWindow: true, cancellationFee: 0 });
     const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, buyer.token, { reason: 'Too slow' });
     expect(res.statusCode, res.body).toBe(200);
-    expect(res.json().data).toEqual({ message: 'Order cancelled', cancellationFee: LATE_CANCEL_FEE });
-    expect((await orderRow(order.id)).lateCancelFeeDue).toBe(LATE_CANCEL_FEE);
+    expect(res.json().data).toEqual({ message: 'Order cancelled — no charge', cancellationFee: 0 });
+    expect((await orderRow(order.id)).lateCancelFeeDue).toBe(0);
 
     // The store that saw it is told it died (its board refreshes)…
     const told = await storeHeard(store, order);
@@ -794,7 +817,7 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
 
     // The board shows it from the moment its hold lapsed; only the lifetime
     // counters wait for a release.
-    expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, dashboard: { today: 1, totalOrders: 0, itemTotalOrdered: 0 } });
+    expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, dashboard: { today: await countedToday(order.id), totalOrders: 0, itemTotalOrdered: 0 } });
     const res = await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, store.owner.token, {});
     expect(res.statusCode, res.body).toBe(200);
     const row = await orderRow(order.id);

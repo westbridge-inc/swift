@@ -173,6 +173,11 @@ describe('struggling-delivery options (spec §4.2)', () => {
     });
     expect(note.title).toContain('trouble finding a rider');
     expect((note.data as { orderId: string }).orderId).toBe(stale.id);
+    // [row 268] The app has no switch-to-pickup button (the conversion route is unused and flag-gated), and a
+    // cancel is the server's call (free only once no mover is found): the notice promises neither. It sends the
+    // customer to the order, which shows what they can do now and the store's contact.
+    expect(note.body).not.toMatch(/switch to pickup|cancel/i);
+    expect(note.body).toContain('Open the order to see what you can do now');
 
     // Second scan: dedupe holds — nothing new.
     expect(await scanStrugglingDeliveries(app.prisma, notifications)).toBe(0);

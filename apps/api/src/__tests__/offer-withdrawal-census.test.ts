@@ -46,12 +46,16 @@ const CANCELLING_WRITERS: Record<string, string> = {
 
 /** Order writes the scan cannot read a status from, each reviewed. */
 const REVIEWED_WRITERS: Record<string, string> = {
+  'modules/rides/driver-pickup.ts#advanceDriverPickup':
+    'Assignment-bound pickup advances only to DRIVER_EN_ROUTE or DRIVER_ARRIVED, with arrival time; its two typed route callers never cancel.',
   'modules/order/order.service.ts#stageCanonicalOrderTransition':
     'THE SEAM: status is input.target. Its caller transitionOrderAtomically withdraws after every operational cancellation (asserted below).',
   'modules/chat/chat-authority.ts#rotateLeakedRidePin': 'rotates the ride PIN (freshRidePinReset); never touches status.',
   'modules/order/mmg-claim.service.ts#recordCustomerMmgClaim': 'MMG claim facts and revision only; never the order status.',
   'modules/order/mmg-claim.service.ts#resolveMmgClaimDisagreement': 'MMG claim resolution and paymentStatus only; never the order status.',
   'modules/vendor/vendor.routes.ts#recordPrepProgress': 'kitchen milestone timestamps while a rider owns the status lane; never the status.',
+  'modules/handover/handover-decision.ts#verifyHandoverDecision':
+    'counts one handover-code comparison (pickupCodeAttempts or ridePinAttempts increment) under the order lock; never the status.',
   'modules/dispatch/delivery-watchdog.ts#reopenPreCustodyLeg':
     'reopens a released leg to its kitchen stage (releaseStageFor: ACCEPTED, PREPARING or READY_FOR_PICKUP); never CANCELLED.',
 };

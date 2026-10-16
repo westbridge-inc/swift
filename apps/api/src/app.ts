@@ -49,9 +49,11 @@ import { marketRoutes } from './modules/market/market.routes';
 import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 import { installProcessLifecycle } from './utils/process-lifecycle';
-import { resolveCorsOrigins } from './utils/cors-origin';
+import { corsPluginOptions, resolveCorsOrigins } from './utils/cors-origin';
 import { asFastifyTrustProxy } from './config/trust-proxy';
 import { isDevelopment, isProduction } from './utils/runtime-mode';
+import { getMapsProvider } from './providers/maps/maps-provider';
+import { createRoutingProbe } from './providers/maps/routing-probe';
 
 
 // Process start ≈ API boot. Grace-windows the scheduler "never booted" page so a
@@ -102,7 +104,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // tests that grade every public GET under TENANT_UNSCOPED_ACCESS=deny.
   if (options.onRoute) app.addHook('onRoute', options.onRoute);
   let bootContractsComplete = false;
+  const checkRouting = createRoutingProbe(getMapsProvider());
+  app.addHook('onListen', async () => {
+    const routing = await checkRouting();
+    app.log[routing.status === 'degraded' ? 'warn' : 'info']({ routing }, 'routing readiness');
+  });
   const runtimeReadiness: RuntimeReadinessState = {
+    checkRouting,
     checkQueues: () => false,
     checkConsumers: () => false,
     checkWorker: async () => {
@@ -127,10 +135,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   // Core plugins
   const corsOrigin = resolveCorsOrigins(process.env['CORS_ORIGIN'], process.env['NODE_ENV']);
-  await app.register(cors, {
-    origin: corsOrigin,
-    credentials: true,
-  });
+  // Same allowlist + credentials as before; the browser may now reuse a
+  // preflight answer for 2 h instead of 5 s (see corsPluginOptions).
+  await app.register(cors, corsPluginOptions(corsOrigin));
   await app.register(helmet, helmetOptions);
   // SWIFT-AUD-D6-02: back the limiter with Redis IN PRODUCTION so the ceiling is
   // shared across all API instances. An in-memory store gives each instance its
@@ -200,6 +207,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   registerRoutedWhileDegradedCounter(app);
   app.get('/health', async (request, reply) => {
     const checks: Record<string, string> = { api: 'ok' };
+    const routing = await checkRouting();
 
     try {
       await app.prisma.$queryRaw`SELECT 1`;
@@ -277,6 +285,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      routing,
       // [F-028-17] THIS process's effective dispatch tuning. The baselines
       // derive their wait math from these numbers, and a baseline shell can
       // carry different env than the server it drives — a cap-3 shell judged
@@ -321,6 +330,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
   await app.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
+  // [PT-2] Card rail v2 public doors: the provider's return (an observation
+  // that never credits by itself) and, off production, the simulator's test
+  // page. Rate-limited, body-capped, never logged; inert while CARD_RAIL_V2 is off.
+  {
+    const { cardRailPublicRoutes } = await import('./modules/billing/card-rail.routes');
+    await app.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card' });
+  }
   // Unauthenticated read-only storefront pages (web SEO) — see module header.
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
   // Printed-QR short links: /s/{code} at the ROOT path (the production web
@@ -383,6 +399,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // Decorate so routes can enqueue jobs
     app.decorate('queues', queues);
     app.decorate('dispatchQueue', queues.dispatchQueue);
+    app.decorate('offerQueue', queues.offerQueue);
   } catch (err) {
     if (isProduction()) {
       app.log.fatal({ err }, 'Background jobs failed to initialize — refusing production boot');

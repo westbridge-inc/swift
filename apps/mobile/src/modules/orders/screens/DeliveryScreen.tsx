@@ -30,6 +30,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { swapChangeText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
@@ -339,7 +340,6 @@ export function DeliveryScreen() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelChecking, setCancelChecking] = useState(false);
   const [cancelPreviewFresh, setCancelPreviewFresh] = useState(false);
-  const [cancelPreviewFee, setCancelPreviewFee] = useState<number | null>(null);
   const [cancelPreviewOrderId, setCancelPreviewOrderId] = useState<string | null>(null);
   const prevStatus = useRef<string | null>(null);
   const prevStatusRef = useRef<string | undefined>(undefined);
@@ -351,13 +351,13 @@ export function DeliveryScreen() {
   // A courier job cancels through its own endpoint so the assigned rider is
   // freed AND told they're back in the dispatch pool (the generic order-cancel
   // frees the rider row but doesn't notify them). Everything else uses the
-  // standard customer cancel with its free-window / fee logic.
+  // standard customer cancel with its free-or-refused rule.
   // [REPORT-011 F-02] The SERVER owns the clock: the cancel result carries the
-  // authoritative message (and any late-cancel fee it actually charged). Keep
-  // it and show it, instead of discarding it and rendering a stale generic
-  // banner — a client-clock/preview "free" promise must never be the last word.
+  // authoritative message. Keep it and show it, instead of discarding it and
+  // rendering a stale generic banner — a client-clock/preview "free" promise
+  // must never be the last word. [owner #46/#50] Cancelling never costs a fee:
+  // a cancel is free or refused, so no amount is ever shown.
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
-  const [cancelFee, setCancelFee] = useState<number | null>(null);
   const qc = useQueryClient();
   const cancelOrder = useMutation<any, any, { targetOrderId: string; orderType: string }>({
     mutationFn: ({ targetOrderId, orderType }: { targetOrderId: string; orderType: string }) =>
@@ -373,10 +373,9 @@ export function DeliveryScreen() {
       if (target.targetOrderId !== activeOrderIdRef.current) return;
       // customerApi.cancelOrder is unwrapped at the seam; the courier endpoint
       // still returns the raw envelope — accept both shapes, never lose the
-      // message OR the numeric fee the server actually charged.
+      // server's message.
       const payload = res?.data?.data ?? res?.data ?? res ?? {};
       if (typeof payload.message === 'string') setCancelMessage(payload.message);
-      setCancelFee(typeof payload.cancellationFee === 'number' ? payload.cancellationFee : null);
       setConfirmCancel(false);
       order.refetch();
     },
@@ -398,7 +397,7 @@ export function DeliveryScreen() {
       void order.refetch();
     },
   });
-  const decideSub = useDecideSubstitution(orderId);
+  const decideSub = useDecideSubstitution();
   // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
   // their only first-party door to "I didn't pay". That statement can pause
   // the order, so it is confirmed first; the order refetches either way.
@@ -425,7 +424,6 @@ export function DeliveryScreen() {
   const openCancelConfirmation = async () => {
     const targetOrderId = orderId;
     setCancelPreviewFresh(false);
-    setCancelPreviewFee(null);
     setCancelPreviewOrderId(null);
     setCancelChecking(true);
     try {
@@ -437,16 +435,8 @@ export function DeliveryScreen() {
         return;
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
-        toast.show('This order can no longer be cancelled', 'Check the latest status on the order timeline.');
+        toast.show('This order can no longer be cancelled', latest.cancelUnavailable?.message ?? 'Check the latest status on the order timeline.');
         return;
-      }
-      if (latest.orderType !== 'COURIER') {
-        const previewFee = latest.cancellationFee;
-        if (typeof previewFee !== 'number' || !Number.isFinite(previewFee)) {
-          toast.error('Couldn’t confirm cancellation cost', 'Try again before cancelling. Your order is unchanged.');
-          return;
-        }
-        setCancelPreviewFee(previewFee);
       }
       setCancelPreviewFresh(true);
       setCancelPreviewOrderId(targetOrderId);
@@ -473,21 +463,8 @@ export function DeliveryScreen() {
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
         setConfirmCancel(false);
-        toast.show('This order can no longer be cancelled', 'Check the latest status on the order timeline.');
+        toast.show('This order can no longer be cancelled', latest.cancelUnavailable?.message ?? 'Check the latest status on the order timeline.');
         return;
-      }
-      if (latest.orderType !== 'COURIER') {
-        const latestFee = latest.cancellationFee;
-        if (typeof latestFee !== 'number' || !Number.isFinite(latestFee)) {
-          toast.error('Couldn’t recheck cancellation cost', 'Nothing was cancelled. Try again.');
-          return;
-        }
-        if (cancelPreviewFee !== latestFee) {
-          setCancelPreviewFee(latestFee);
-          setCancelPreviewFresh(true);
-          toast.show('Cancellation fee changed', 'Check the new amount, then confirm again.');
-          return;
-        }
       }
       cancelOrder.mutate({ targetOrderId, orderType: latest.orderType });
     } finally {
@@ -625,10 +602,8 @@ export function DeliveryScreen() {
     setConfirmCancel(false);
     setCancelChecking(false);
     setCancelPreviewFresh(false);
-    setCancelPreviewFee(null);
     setCancelPreviewOrderId(null);
     setCancelMessage(null);
-    setCancelFee(null);
     setPendingMmgClaim(null);
     lastCourierServerFixAt.current = null;
     prevStatus.current = null;
@@ -787,7 +762,7 @@ export function DeliveryScreen() {
   const holdCancellationCaption = o.orderType === 'COURIER'
     ? 'Changed your mind? Cancel before a rider accepts. Swift does not collect or hold courier payment.'
     : o.fulfillment === 'APPOINTMENT'
-      ? 'Changed your mind? Cancel before the provider starts — the app shows any cost before you confirm.'
+      ? 'Changed your mind? You can cancel until the provider accepts your booking. Swift never charges for cancelling.'
       : holdRingCaption(mmgCancellationAmbiguous);
   const pendingSummary = o.orderType === 'COURIER'
     ? 'Waiting for an eligible rider to accept'
@@ -1054,24 +1029,37 @@ export function DeliveryScreen() {
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                   {o.vendor?.name ?? 'The store'} suggests {it.substituteName} ({money(Number(it.substitutePrice ?? 0))}
-                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead. Rejecting removes the item and lowers your total.
+                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead.{swapDecisionPermissions(it.substitution, o.paymentMethod).reject ? ' Rejecting removes the item and lowers your total.' : ''}
                 </T>
+                {/* [L09 · M028] What approving changes, from the server's own
+                    numbers: the total (paid options included), and the chosen
+                    options that do not come with the swap. */}
+                {swapChangeText(it.substitution, o.paymentMethod) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapChangeText(it.substitution, o.paymentMethod)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   <PillButton
                     label="Approve swap"
                     size="md"
                     style={{ flex: 1 }}
                     loading={decideSub.isPending}
-                    disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: true })}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
                   />
                   <PillButton
                     label="No thanks"
                     variant="soft"
                     size="md"
                     style={{ flex: 1 }}
-                    disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: false })}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).reject}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: false })}
                   />
                 </View>
               </View>
@@ -1171,25 +1159,18 @@ export function DeliveryScreen() {
             />
           ) : null}
 
-          {/* [B9] The recipient's half of Send. GET /courier/track/:token has
-              been public since launch and NOTHING generated the link — the
-              sender had no way to hand tracking to the person waiting for the
-              parcel. Web twin: /track/[token]. Sender-scoped token, in-flight
-              only (the token never expires, so a settled parcel stops
-              advertising it). */}
-          {!terminal && o?.orderType === 'COURIER' && o?.courierTrackingToken ? (
-            <PillButton
-              label="Share tracking with the recipient"
-              variant="soft"
-              icon="share-2"
-              style={{ marginTop: space.md }}
-              onPress={() => {
-                const who = o?.courierRecipientName ? `${o.courierRecipientName}, track` : 'Track';
-                void Share.share({
-                  message: `${who} your Swift parcel live: ${WEB_URL}/track/${o.courierTrackingToken}`,
-                }).catch(() => toast.show("Couldn't open the share sheet."));
-              }}
-            />
+          {!terminal && o?.orderType === 'COURIER' ? (
+            <View style={{ marginTop: space.md, gap: space.sm }}>
+              <PillButton label="Share a new tracking link" variant="soft" icon="share-2"
+                onPress={() => {
+                  void courierApi.rotateTracking(o.id).then((res) => Share.share({
+                    message: `Track your Swift parcel live: ${WEB_URL}/track/${res.data.data.trackingToken}`,
+                  })).catch(() => toast.show("Couldn't share tracking. Try again."));
+                }} />
+              <T variant="caption" tone="muted">A new link replaces the previous link. Tracking expires 12 hours after booking.</T>
+              <PillButton label="Stop tracking sharing" variant="outline"
+                onPress={() => { void courierApi.revokeTracking(o.id).then(() => toast.show('Tracking sharing stopped.')).catch(() => toast.show('Could not stop sharing. Try again.')); }} />
+            </View>
           ) : null}
 
           {cancelled || failed ? (
@@ -1216,18 +1197,6 @@ export function DeliveryScreen() {
                         ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
                         : `This ${cancelledNoun} was cancelled.`)}
                 </T>
-                {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
-                    rendered from the committed result, never a preview. */}
-                {!failed && cancelFee != null ? (
-                  <T variant="caption" tone="error" style={{ marginTop: space.xs }}>
-                    {/* [REPORT-013 F-013-03] The fee is a recorded deterrence
-                        marker on a cash platform — Swift never collects it;
-                        saying "charged" would be a false financial fact. */}
-                    {cancelFee > 0
-                      ? `Late-cancellation fee recorded: ${money(cancelFee)} (not collected by Swift).`
-                      : 'No cancellation fee.'}
-                  </T>
-                ) : null}
               </View>
             </View>
           ) : (
@@ -1472,6 +1441,26 @@ export function DeliveryScreen() {
             style={{ marginTop: space.md }}
           />
 
+          {/* [owner #46/#50] No Cancel once the store (or the driver, rider or
+              provider five minutes after accepting) has the order: the server's
+              reason, and the store's published number to call instead. */}
+          {!o.canCancel && !terminal && o.cancelUnavailable?.message ? (
+            <View
+              accessibilityRole="summary"
+              style={{ marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info, gap: space.sm }}
+            >
+              <T variant="label" tone="info">{o.cancelUnavailable.message}</T>
+              {o.cancelUnavailable.contactPhone ? (
+                <PillButton
+                  label={`Call ${o.cancelUnavailable.contactPhone}`}
+                  variant="soft"
+                  icon="phone"
+                  onPress={() => { void openExternal(`tel:${o.cancelUnavailable.contactPhone}`); }}
+                />
+              ) : null}
+            </View>
+          ) : null}
+
           {o.canCancel && !terminal && !holdActive && !holdTimingUnavailable && !releasePending ? (
             <PillButton
               label={`Cancel ${referenceNoun}`}
@@ -1500,26 +1489,17 @@ export function DeliveryScreen() {
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
               ? `Cancelling stops this ${cancelledNoun}. If you already sent the MMG payment, ${refundParty} refunds you directly.`
-              : `Cancelling stops this ${cancelledNoun}. Check the possible fee below. We’ll show the final result when cancellation is confirmed.`}
+              : `Cancelling stops this ${cancelledNoun}. We’ll show the final result when cancellation is confirmed.`}
         </T>
-        {cancelPreviewFresh && o.orderType === 'COURIER' ? (
+        {/* [owner #46/#50] The server's own words — never a fee, and never a
+            "free" the app authored itself (DS1141 S1). */}
+        {cancelPreviewFresh && o.cancellationMessage ? (
           <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
             <DecorativeIcon>
               <Feather name="info" size={18} color={color.info} />
             </DecorativeIcon>
             <T variant="label" tone="info" style={{ flex: 1 }}>
-              You can still cancel. Swift cannot show a cancellation fee for this courier request in the app. Swift does not collect courier payment.
-            </T>
-          </View>
-        ) : cancelPreviewFresh && cancelPreviewFee != null ? (
-          <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: cancelPreviewFee > 0 ? color.soft.warning : color.soft.info }}>
-            <DecorativeIcon>
-              <Feather name={cancelPreviewFee > 0 ? 'alert-triangle' : 'info'} size={18} color={cancelPreviewFee > 0 ? color.warning : color.info} />
-            </DecorativeIcon>
-            <T variant="label" tone={cancelPreviewFee > 0 ? 'warning' : 'info'} style={{ flex: 1 }}>
-              {cancelPreviewFee > 0
-                ? `If you cancel now, a ${money(cancelPreviewFee)} fee may be recorded. Swift does not collect it. We’ll check again when you confirm.`
-                : 'The last check showed no cancellation fee. We’ll check again when you confirm.'}
+              {o.cancellationMessage}
             </T>
           </View>
         ) : null}

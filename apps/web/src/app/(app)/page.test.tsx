@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
-import HomePage from './page';
+import { HomeScreen as HomePage } from './home-screen';
 
 const state = vi.hoisted(() => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn(), coords: vi.fn() }));
 vi.mock('next/navigation', () => ({ usePathname: () => '/', useRouter: () => ({ push: state.push, back: state.back, replace: state.replace }) }));
@@ -47,6 +47,7 @@ async function freshAuth() {
 
 beforeEach(async () => {
   await freshAuth();
+  sessionStorage.clear();
   state.coords.mockReset();
   api = ({ url }) => {
     if (url.pathname === '/api/v1/auth/me') return { status: 401, body: { success: false } };
@@ -72,7 +73,8 @@ function renderHome() {
 describe('[Q7b] / is the ordering home', () => {
   it('opens on ordering, not on the marketing page', async () => {
     renderHome();
-    expect(screen.getByRole('heading', { level: 1, name: 'Order food, groceries and more' })).toBeTruthy();
+    // [WEB-REDESIGN] The design greets by the time of day (and by name once signed in).
+    expect(screen.getByRole('heading', { level: 1, name: /^Good (morning|afternoon|evening)/ })).toBeTruthy();
     expect(screen.queryByText(/Everything your day needs/)).toBeNull();
     expect(screen.queryByText(/Six things, one app/)).toBeNull();
     // The services, every one a real page; taxi says where rides are booked.
@@ -80,7 +82,7 @@ describe('[Q7b] / is the ordering home', () => {
     expect(within(services).getByRole('link', { name: /^Food/ }).getAttribute('href')).toBe('/order/browse?type=RESTAURANT');
     expect(within(services).getByRole('link', { name: /^Groceries/ }).getAttribute('href')).toBe('/order/browse?type=SUPERMARKET');
     expect(within(services).getByRole('link', { name: /^Taxi/ }).textContent).toMatch(/Swift mobile app/);
-    expect(screen.getByRole('link', { name: /Search stores, dishes and groceries/ }).getAttribute('href')).toBe('/order/search');
+    expect(screen.getByRole('link', { name: /Restaurants, groceries, shops/ }).getAttribute('href')).toBe('/order/search');
   });
 
   it('shows what is popular and the stores open now, from the same feed the phone app reads', async () => {
@@ -89,9 +91,11 @@ describe('[Q7b] / is the ordering home', () => {
     const bowl = within(popular).getByRole('link', { name: /Pepperpot bowl/ });
     // An item opens at its own store, on that item.
     expect(bowl.getAttribute('href')).toBe('/order/vendor/v1?item=i1');
-    expect(bowl.textContent).toMatch(/GY\$1,800/);
+    expect(bowl.textContent).toMatch(/\$1,800/);
+    expect(bowl.textContent).not.toMatch(/GY\$/);
     const open = screen.getByRole('region', { name: 'Open now' });
-    expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/order/vendor/v1');
+    // [W6] A store card opens the store's one page, by its name.
+    expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/store/shanta-kitchen');
     expect(within(screen.getByRole('region', { name: 'Closed now' })).getByText('Late Night Roti')).toBeTruthy();
     expect(homeRequests()).toHaveLength(1);
   });
@@ -104,8 +108,13 @@ describe('[Q7b] / is the ordering home', () => {
     renderHome();
     await screen.findByRole('region', { name: 'Open now' });
     expect(screen.queryByRole('region', { name: /Sign in/ })).toBeNull();
-    fireEvent.click(await screen.findByRole('button', { name: 'Show stores near me' }));
-    const near = await screen.findByRole('region', { name: 'Stores near you' });
+    // [staging screenshot, 390 px] Sign in keeps its size beside the place pill: one line, never squeezed.
+    const homeSignIn = screen.getAllByRole('link', { name: 'Sign in' }).find((link) => link.className.split(/\s+/).includes('sw-btn-sm'));
+    expect(homeSignIn?.className.split(/\s+/)).toEqual(expect.arrayContaining(['flex-none', 'whitespace-nowrap']));
+    // [owner, staging] One place control on Home: the stores near me are found from its sheet.
+    fireEvent.click(await screen.findByRole('button', { name: /^Delivery, address at checkout/ }));
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delivery or pickup' })).getByRole('button', { name: 'Show stores near me' }));
+    const near = await screen.findByRole('region', { name: 'Nearby' });
     // Nearby first, then the rest, each store once.
     expect(within(near).getAllByRole('link').map((link) => link.textContent)).toEqual([
       expect.stringContaining('Pepperpot Corner'),
@@ -130,9 +139,17 @@ describe('[Q7b] / is the ordering home', () => {
       return base(request);
     })(api);
     renderHome();
-    const deliverTo = await screen.findByRole('link', { name: /Deliver to Home · 12 Main St/ });
-    expect(deliverTo.getAttribute('href')).toBe('/order/location');
-    expect((await screen.findByRole('link', { name: /Your live order · SW-1001/ })).getAttribute('href')).toBe('/orders/o1');
+    // [owner, staging] ONE place control at the top of Home: delivery and the address together,
+    // the address changed from its sheet. The app frame draws no second bar here.
+    const deliverTo = await screen.findByRole('button', { name: /^Delivery to 12 Main St, as soon as possible/ });
+    expect(screen.getAllByRole('button', { name: /Change delivery or pickup/ })).toEqual([deliverTo]);
+    expect(screen.getAllByText(/12 Main St/)).toHaveLength(1);
+    expect(screen.queryByText(/address at checkout/)).toBeNull();
+    fireEvent.click(deliverTo);
+    const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
+    expect(within(sheet).getByRole('link', { name: 'Change delivery address' }).getAttribute('href')).toBe('/order/location');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Done' }));
+    expect((await screen.findByRole('link', { name: /Track your live order SW-1001/ })).getAttribute('href')).toBe('/orders/o1');
     await waitFor(() => {
       const last = homeRequests().at(-1)!;
       expect([last.searchParams.get('lat'), last.searchParams.get('lng')]).toEqual(['6.81', '-58.16']);
@@ -155,18 +172,52 @@ describe('[Q7b] / is the ordering home', () => {
       return base(request);
     })(api);
     renderHome();
-    await screen.findByRole('link', { name: /Your live order · SW-1001/ });
+    await screen.findByRole('link', { name: /Track your live order SW-1001/ });
     await waitFor(() => expect(homeRequests().some((url) => url.searchParams.get('lat') === '6.81')).toBe(true));
-    await screen.findByRole('link', { name: /Deliver to Home/ });
+    await screen.findByRole('button', { name: /^Delivery to 12 Main St/ });
 
     session = false;
     const auth = await import('@/lib/auth');
     act(() => { auth.clearSession(); });
     // At once — not after the guest's answer arrives.
-    expect(screen.queryByRole('link', { name: /Your live order/ })).toBeNull();
+    expect(screen.queryByRole('link', { name: /Track your live order/ })).toBeNull();
     expect(screen.queryByText('Shanta Kitchen')).toBeNull();
-    expect(screen.getByLabelText('Loading stores')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Show stores near me' })).toBeTruthy();
+    expect(screen.getByLabelText('Loading home feed')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Delivery, address at checkout/ })).toBeTruthy();
+    expect(screen.queryByText(/12 Main St/)).toBeNull();
+  });
+
+  it('[owner, staging] in pickup mode Home shows no delivery address — one control, "Pickup from the store"', async () => {
+    sessionStorage.setItem('swift_ordering_mode', 'PICKUP');
+    api = ((base) => (request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/auth/me') return { body: { success: true, data: { user: { id: 'c1' } } } };
+      if (request.url.pathname === '/api/v1/customer/addresses') {
+        return { body: { success: true, data: [{ id: 'a1', label: 'Home', addressLine1: '12 Main St', isDefault: true, latitude: 6.81, longitude: -58.16 }] } };
+      }
+      return base(request);
+    })(api);
+    renderHome();
+    const control = await screen.findByRole('button', { name: /^Pickup from the store, as soon as possible/ });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => new URL(String(url)).pathname === '/api/v1/customer/addresses')).toBe(true));
+    await screen.findByRole('region', { name: 'Open now' });
+    expect(screen.getAllByRole('button', { name: /Change delivery or pickup/ })).toEqual([control]);
+    expect(screen.queryByText(/12 Main St/)).toBeNull();
+    expect(screen.queryByRole('link', { name: /delivery address/i })).toBeNull();
+    // The promise row is true for pickup [legal research A12]: no "0% fees", and no "pay cash when it arrives".
+    expect(screen.getByText('No commission and no markup on store prices.')).toBeTruthy();
+    expect(screen.getByText('The delivery fee is shown before you order; pickup is free.')).toBeTruthy();
+    expect(screen.queryByText(/0% fees/)).toBeNull();
+    expect(screen.queryByText(/when it arrives/)).toBeNull();
+  });
+
+  it('[owner, staging] the promise row never reads as "no fees at all" next to a delivery fee', async () => {
+    renderHome();
+    await screen.findByRole('region', { name: 'Open now' });
+    // [Legal research A12] the research's promise: no commission, no markup, the delivery fee shown first.
+    expect(screen.getByText('No commission and no markup on store prices.')).toBeTruthy();
+    expect(screen.getByText('The delivery fee is shown before you order; pickup is free.')).toBeTruthy();
+    expect(screen.queryByText(/0% fees/)).toBeNull();
+    expect(screen.queryByText(/when it arrives/)).toBeNull();
   });
 
   it('says it could not load the stores — never "no stores" — and tries again on request', async () => {

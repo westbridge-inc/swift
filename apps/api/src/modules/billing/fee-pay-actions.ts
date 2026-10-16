@@ -2,8 +2,10 @@ import type { PrismaClient, Subscription, SubscriptionStatus } from '@prisma/cli
 import { log } from '../../utils/logger';
 import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 import { payInfo } from './agent-cash.service';
+import { payAheadAllows } from './pay-ahead';
 import { weeklyFeeAmount } from './subscription-fee';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
+import type { CardPayAction } from './card-pay-action';
 
 // ---------------------------------------------------------------------------
 // The ways a partner can pay the weekly fee IN THE APP, decided in one place
@@ -13,8 +15,10 @@ import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 // MMG_CHECKOUT is 'live' only when the server's MMG checkout is configured
 // (MMG_CHECKOUT_ENABLED=1 with a complete configuration), the per-platform
 // switch allows the platform, and the subscription can be paid. Otherwise it
-// is 'off', and 'off' is hidden: never a disabled "coming soon". CARD stays
-// 'off' until the card rail exists (PT-4).
+// is 'off', and 'off' is hidden: never a disabled "coming soon". CARD is
+// decided by card-pay-action.ts (CARD-CHECKOUT-API.md section 3); here it is
+// 'off', and each family's subscription payload puts the card rail's own
+// answer in its place (card-rail.routes.ts withCardPayAction).
 // ---------------------------------------------------------------------------
 
 export type ClientPlatform = 'ios' | 'android' | 'web' | 'unknown';
@@ -22,7 +26,7 @@ export type ClientPlatform = 'ios' | 'android' | 'web' | 'unknown';
 export type PayAction =
   | { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' }
   | { id: 'MMG_CHECKOUT'; state: 'off' }
-  | { id: 'CARD'; state: 'off' };
+  | CardPayAction;
 
 /** The per-platform switch: {"ios": true, "android": true, "web": true}. */
 export const FEE_CHECKOUT_PLATFORMS_KEY = 'billing.feeCheckout.platforms';
@@ -125,8 +129,12 @@ export async function feePayActions(
   checkout?: () => MmgCheckoutProvider,
 ): Promise<PayAction[]> {
   const live = await mmgCheckoutLive(prisma, sub, platform, checkout);
-  const mmg: PayAction = live
-    ? { id: 'MMG_CHECKOUT', state: 'live', amountGyd: checkoutAmountGyd(await payInfo(prisma, sub)), currencyCode: 'GYD' }
+  const amountGyd = live ? checkoutAmountGyd(await payInfo(prisma, sub)) : 0;
+  // [owner #62 · DS1114 S3] One week at a time: once the coming week is paid the
+  // checkout could only refuse, so there is no button (the screen still says
+  // when the next fee is due).
+  const mmg: PayAction = live && await payAheadAllows(prisma, sub.id, amountGyd, new Date())
+    ? { id: 'MMG_CHECKOUT', state: 'live', amountGyd, currencyCode: 'GYD' }
     : { id: 'MMG_CHECKOUT', state: 'off' };
   return [mmg, { id: 'CARD', state: 'off' }];
 }

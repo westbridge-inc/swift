@@ -26,6 +26,7 @@ import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../s
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import type { StorePin } from '../../../lib/storePin';
 import { vendorApi } from '../../../services/api';
@@ -168,6 +169,7 @@ export function VendorAccountScreen() {
 
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
+          <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData' , { closureRequest: true })} />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
           {guestSample ? (
             <SettingsRow
@@ -722,6 +724,7 @@ function StaffSection() {
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
           Tap a role pill to switch Manager ↔ Staff.
         </T>
+        <WithdrawStaffInvites />
       </Card>
 
       {stepUp.sheet}

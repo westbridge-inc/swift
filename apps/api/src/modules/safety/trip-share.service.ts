@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import type Redis from 'ioredis';
 import type { NotificationChannels } from '../../providers/notifications/channels';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -8,6 +8,8 @@ import { checkSafetySmsBudget, smsDestinationAllowed, type SmsBudgetReason } fro
 import { log } from '../../utils/logger';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { tripShareCounter, tripShareGauge } from '../../plugins/observability';
+import { parseEmergencyPolicy } from '../country/emergency-policy';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import type { NotificationService } from '../notification/notification.service';
 
@@ -169,6 +171,30 @@ export class TripShareService {
     return { token, url, expiresAt: row.expiresAt };
   }
 
+  /** Owner controls use record metadata, never recovered bearer secrets. */
+  async listOwned(userId: string, orderId: string) {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, customerId: userId, orderType: 'TAXI' }, select: { tenantId: true } });
+    if (!order) throw new NotFoundError('Trip', orderId);
+    return this.prisma.tripShareToken.findMany({
+      where: { orderId, tenantId: order.tenantId, createdByUserId: userId, revokedAt: null, expiresAt: { gt: new Date() } },
+      select: { id: true, createdAt: true, expiresAt: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: 100,
+    });
+  }
+
+  /** Stop ALL links for this owned trip, including links forgotten by a client. */
+  async revokeAll(userId: string, orderId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.findFirst({ where: { id: orderId, customerId: userId, orderType: 'TAXI' }, select: { tenantId: true } });
+      if (!order) throw new NotFoundError('Trip', orderId);
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "orders" WHERE "id" = ${orderId} AND "customerId" = ${userId} AND "tenantId" = ${order.tenantId} FOR UPDATE`);
+      await tx.tripShareToken.updateMany({
+        where: { orderId, tenantId: order.tenantId, createdByUserId: userId, revokedAt: null }, data: { revokedAt: new Date() },
+      });
+      return { revoked: true };
+    });
+  }
+
   /** Revoke — sharer only. Idempotent. */
   async revoke(userId: string, token: string) {
     const row = await this.prisma.tripShareToken.findUnique({ where: { tokenDigest: tripShareDigest(token) }, select: { id: true, createdByUserId: true, revokedAt: true, tokenDigest: true } });
@@ -196,7 +222,7 @@ export class TripShareService {
         id: true, expiresAt: true, revokedAt: true, viewCount: true, tokenDigest: true,
         order: {
           select: {
-            status: true, updatedAt: true, deliveredAt: true,
+            status: true, updatedAt: true, deliveredAt: true, currencyCode: true,
             customer: { select: { firstName: true } },
             driver: {
               select: {
@@ -248,8 +274,24 @@ export class TripShareService {
       location: !ended && d?.currentLat != null && d?.currentLng != null
         ? { lat: d.currentLat, lng: d.currentLng, at: d.lastLocationUpdate }
         : null,
-      emergencyNote: 'If something is wrong, call 911 (Guyana: +592-225-8196).',
+      ...(await this.emergencyFor(order.currencyCode)),
     };
+  }
+
+  /**
+   * [L10 §2] The emergency line this public page shows comes from the ONE
+   * server setting the phone dials from: the market's CountryConfig emergency
+   * policy (MOB-018), which admins read on the markets screen. A number is
+   * offered only when ops verified it; otherwise the page says to call the
+   * local emergency number. It used to be a hard-coded pair of numbers that no
+   * setting held and nobody had verified.
+   */
+  private async emergencyFor(currencyCode: string): Promise<{ emergencyNote: string; emergencyDial: string | null }> {
+    const market = await this.prisma.countryConfig.findFirst({ where: { currencyCode }, orderBy: { code: 'asc' }, select: { code: true, emergency: true } }).catch(() => null);
+    const police = market ? parseEmergencyPolicy(market.code, market.emergency).policy?.numbers.police : undefined;
+    return police?.verified
+      ? { emergencyNote: `If something is wrong, call the police on ${police.number}.`, emergencyDial: police.number }
+      : { emergencyNote: 'If something is wrong, call your local emergency number.', emergencyDial: null };
   }
 
   /** Views per minute per token (and per caller when known). */
@@ -307,4 +349,89 @@ export async function rotateLegacyTripShareTokens(prisma: PrismaClient, notifica
   const remaining = await prisma.tripShareToken.count({ where: { token: { not: null } } });
   tripShareGauge.labels('legacy_plaintext_remaining').set(remaining);
   return { rotated, remaining };
+}
+
+/**
+ * [L10 §2 · coordinator ruling 5 Oct 2026] When the monitoring a rider gave
+ * someone ends, that person is told how — but only through Swift itself. A
+ * trip shared by text to the number of a signed-in Swift user (the "guardian")
+ * gets an in-app notice: the rider stopped sharing, the trip was completed or
+ * cancelled, or the link ran out before Swift saw the trip finish (contact
+ * lost). The public link stays deliberately silent: a revoked or expired link
+ * answers exactly like an unknown one (stalker safety), so nothing here
+ * changes what a link holder sees.
+ *
+ * A sweep, not a hook: one place sees every ending (a stop, stop-all, a trip
+ * finishing on any path, a link running out). Each link's notice is sent at
+ * most once (keyed per link); a legacy row Swift rotated is never reported as
+ * the rider's choice.
+ */
+export type GuardianOutcome = 'STOPPED_BY_RIDER' | 'COMPLETED' | 'CANCELLED' | 'LOST_CONTACT' | 'ENDED';
+const GUARDIAN_WINDOW_MS = 2 * 3_600_000;
+
+export function guardianOutcome(
+  row: { revokedAt: Date | null; expiresAt: Date; order: { status: string; deliveredAt: Date | null; updatedAt: Date } },
+  now: Date,
+): GuardianOutcome | null {
+  const ended = TERMINAL.includes(row.order.status);
+  const endedAt = ended ? row.order.deliveredAt ?? row.order.updatedAt : null;
+  if (row.revokedAt && (!endedAt || row.revokedAt < endedAt)) return 'STOPPED_BY_RIDER';
+  if (endedAt) {
+    if (row.order.status === 'DELIVERED' || row.order.status === 'COMPLETED') return 'COMPLETED';
+    if (row.order.status === 'CANCELLED' || row.order.status === 'REFUNDED') return 'CANCELLED';
+    return 'ENDED';
+  }
+  if (row.expiresAt <= now) return 'LOST_CONTACT';
+  return null;
+}
+
+function guardianNotice(outcome: GuardianOutcome, name: string): { title: string; body: string } {
+  switch (outcome) {
+    case 'STOPPED_BY_RIDER': return { title: `${name} stopped sharing their trip`, body: 'You can no longer follow this trip.' };
+    case 'COMPLETED': return { title: `${name}'s trip was completed`, body: 'The trip they shared with you has finished.' };
+    case 'CANCELLED': return { title: `${name}'s trip was cancelled`, body: 'The trip they shared with you was cancelled.' };
+    case 'LOST_CONTACT': return { title: `Sharing of ${name}'s trip ended before it finished`, body: `Swift did not see this trip finish before the link ran out. Contact ${name} directly to check they are OK.` };
+    default: return { title: `${name}'s trip has ended`, body: 'The trip they shared with you has ended.' };
+  }
+}
+
+export async function notifyTripShareGuardians(prisma: PrismaClient, notifications: NotificationService, now = new Date()): Promise<{ notified: number }> {
+  const since = new Date(now.getTime() - GUARDIAN_WINDOW_MS);
+  const rows = await runWithoutTenant(() => prisma.tripShareToken.findMany({
+    where: {
+      sharedToPhone: { not: null },
+      rotatedAt: null,
+      OR: [
+        { revokedAt: { gte: since } },
+        { expiresAt: { gte: since, lte: now } },
+        { order: { status: { in: TERMINAL as never }, updatedAt: { gte: since } } },
+      ],
+    },
+    select: {
+      id: true, createdByUserId: true, sharedToPhone: true, revokedAt: true, expiresAt: true,
+      order: { select: { status: true, deliveredAt: true, updatedAt: true, customer: { select: { firstName: true } } } },
+    },
+    take: 500,
+  }), 'trip-share-guardian-outcome');
+  let notified = 0;
+  for (const row of rows) {
+    const outcome = guardianOutcome(row, now);
+    if (!outcome) continue;
+    const guardian = await runWithoutTenant(() => prisma.user.findFirst({
+      where: { phone: row.sharedToPhone!, isPhoneVerified: true, status: 'ACTIVE', id: { not: row.createdByUserId } },
+      select: { id: true },
+    }), 'trip-share-guardian-outcome');
+    if (!guardian) continue; // not a Swift user: the text they got is all they have, and the link stays silent
+    const notice = guardianNotice(outcome, row.order.customer.firstName || 'Someone');
+    const id = await notifications.send({
+      userId: guardian.id,
+      type: 'SAFETY',
+      ...notice,
+      // No order id: the guardian follows a trip, they do not own one.
+      data: { kind: 'trip_share_ended', outcome },
+      dedupeKey: `trip-share-ended:${row.id}`,
+    }).catch((err: unknown) => { log().warn({ err, tripShareId: row.id }, '[L10 §2] guardian outcome notice failed — retried next sweep'); return null; });
+    if (id) { notified += 1; tripShareCounter.labels(`guardian_${outcome.toLowerCase()}`).inc(); }
+  }
+  return { notified };
 }

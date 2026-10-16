@@ -1,5 +1,6 @@
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -341,7 +342,7 @@ describe('Rider location authority', () => {
       headers: { authorization: `Bearer ${secondDevice.token}` },
     });
     expect(ownerSample.statusCode).toBe(200);
-    expect(ownerSample.json()).toEqual({ success: true });
+    expect(ownerSample.json()).toEqual({ success: true, data: { accepted: true } });
     const afterOwnerSample = await app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
     expect({ lat: afterOwnerSample.currentLat, lng: afterOwnerSample.currentLng })
       .toEqual({ lat: 6.803, lng: -58.153 });
@@ -629,6 +630,8 @@ describe('Rider location authority', () => {
       headers: { authorization: `Bearer ${active.token}` },
     });
     expect(activeRes.statusCode).toBe(200);
+    // An active-delivery fix is an explicit acceptance too: the app keeps tracking only on one.
+    expect(activeRes.json()).toEqual({ success: true, data: { accepted: true } });
     const after = await app.prisma.rider.findUniqueOrThrow({ where: { id: active.riderId } });
     expect({ lat: after.currentLat, lng: after.currentLng }).toEqual({ lat: 6.83, lng: -58.17 });
   });
@@ -681,8 +684,10 @@ describe('Scoring — pure and predictable', () => {
     expect(scoreCandidate({ ...base, hasActiveJob: false })).toBeLessThan(scoreCandidate({ ...base, hasActiveJob: true }));
   });
 
-  it('chronic decliners drift down', () => {
-    expect(scoreCandidate({ ...base, acceptanceRate: 95 })).toBeLessThan(scoreCandidate({ ...base, acceptanceRate: 20 }));
+  // [Owner ruling 15 Oct 2026 · R25, contractor status] TRANSFORMED: was 'chronic decliners drift down'. Declining or
+  // cancelling an offer never costs a partner anything: no strike, no lower place in the offer order.
+  it('declining costs no place in the offer order', () => {
+    expect(scoreCandidate({ ...base, acceptanceRate: 95 })).toBe(scoreCandidate({ ...base, acceptanceRate: 20 }));
   });
 
   it('rating does NOT break ties — RATING_AFFECTS_DISPATCH is false (founder, R-Law 4)', () => {
@@ -944,7 +949,7 @@ describe('The offer cascade', () => {
     await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false } });
   });
 
-  it('SWIFT-016: accepting via /offers/accept claims, applies the fare, and never a timeout penalty', async () => {
+  it('SWIFT-016: accepting via /offers/accept claims at the formula fee, and never a timeout penalty', async () => {
     await app.prisma.rider.updateMany({ data: { isOnline: false } });
     const rider = await makeRider({ lat: PICKUP.lat + 0.002, acceptance: 100 });
     const order = await makeDeliveryOrder();
@@ -953,8 +958,12 @@ describe('The offer cascade', () => {
     const offered = await dispatch.dispatchOrder(order.id);
     expect(offered.offered).toBe(rider.riderId);
 
-    // Accept through the OFFER path (what the offer card now calls), undercutting
-    // the 500 market fee to 300.
+    // Accept through the OFFER path (what the offer card calls). An older app's
+    // fare slider still sends 300 against the 500 formula fee.
+    // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the price:
+    // the server ignores any fare a mover sends (no error) and the formula fee
+    // stands. (Was: the rider-set 300 was applied.)
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     const res = await app.inject({
       method: 'POST', url: '/api/v1/rider/offers/accept',
       headers: { authorization: `Bearer ${rider.token}`, 'content-type': 'application/json' },
@@ -965,7 +974,8 @@ describe('The offer cascade', () => {
     const claimed = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(claimed.riderId).toBe(rider.riderId);
     expect(claimed.status).toBe('RIDER_ASSIGNED');
-    expect(Number(claimed.deliveryFee)).toBe(300); // rider-set fee applied
+    expect(Number(claimed.deliveryFee)).toBe(500); // the formula fee, not the mover's 300
+    expect(Number(claimed.totalAmount)).toBe(Number(before.totalAmount)); // the customer's total is untouched
 
     // The originally-scheduled offer timeout fires. Because acceptOffer cleared
     // the offer, it must NOT penalise the rider who accepted.
@@ -1014,14 +1024,14 @@ describe('The offer cascade', () => {
     await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool -> terminal exhaustion
     const order = await makeDeliveryOrder();
     const emits: Array<{ room: string; ev: string }> = [];
-    const spy = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => ({
-      emit: (ev: string) => { emits.push({ room, ev }); return true; },
-    })) as never);
+    // [L05] Order-room events reach the order's CURRENT people only: observe the
+    // packet an authorized participant socket in the room actually receives.
+    const detach = orderSocketFixture(app.io, order, (ev) => { emits.push({ room: `order:${order.id}`, ev }); });
     try {
       const r = await dispatch.dispatchOrder(order.id);
       expect(r).toMatchObject({ exhausted: true });
     } finally {
-      spy.mockRestore();
+      detach();
     }
     // The rider's open ActiveRide screen gets a terminal signal, not just a push.
     expect(emits).toContainEqual({ room: `order:${order.id}`, ev: 'dispatch:exhausted' });
@@ -1977,6 +1987,27 @@ describe('Atomic acceptance — the concurrency proof', () => {
     await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null, committedFloat: 0 } });
   });
 
+  // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A rider never sets the price:
+  // a lower fee an older app's slider sends to the open board is ignored (no
+  // error) and the formula fee and the customer's total stand.
+  it('[owner ruling 8 Oct] the BOARD accept ignores a rider-sent lower fee on CASH: the formula fee and the total stand', async () => {
+    const r = await makeRider({ lat: PICKUP.lat + 0.013 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { deliveryFee: true, totalAmount: true } });
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/rider/orders/${order.id}/accept`,
+      headers: { authorization: `Bearer ${r.token}`, 'content-type': 'application/json' },
+      payload: { fare: Math.ceil(Number(before.deliveryFee) * 0.6) },
+    });
+    expect(res.statusCode).toBe(200);
+    const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(fresh.riderId).toBe(r.riderId);
+    expect(Number(fresh.deliveryFee)).toBe(Number(before.deliveryFee));
+    expect(Number(fresh.totalAmount)).toBe(Number(before.totalAmount));
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+    await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null, committedFloat: 0 } });
+  });
+
   it('accepting with fare 0 means NO price choice — the market rate applies, never the 60% floor [REPORT-010 F-07]', async () => {
     const r = await makeRider({ lat: PICKUP.lat + 0.01 });
     const order = await makeDeliveryOrder('READY_FOR_PICKUP'); // CASH, market fee from fixture
@@ -2471,6 +2502,9 @@ describe('candidate selection at scale [SWIFT-142]', () => {
 
 describe('vehicle capability matching [SWIFT-062]', () => {
   it('an EXTRA_LARGE parcel is offered to a CAR, never to a bicycle', async () => {
+    // [Owner ruling 15 Oct 2026] TRANSFORMED: runs with CAR_DELIVERIES=1 (the re-enable path). With the switch
+    // off (default) no car is a goods candidate: taxi-cars-passengers-only.test.ts.
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     await app.prisma.rider.updateMany({ data: { isOnline: false } });
     const localUserIds: string[] = [];
     const phoneBase = 592_830_000_000 + Math.floor(Math.random() * 80_000_000);

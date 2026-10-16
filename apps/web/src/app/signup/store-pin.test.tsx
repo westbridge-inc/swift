@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
+import { axeViolations } from '@/test/axe';
 
 const fx = vi.hoisted(() => ({
   send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(),
@@ -42,11 +43,16 @@ async function business() {
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Test' } });
   fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Merchant' } });
+  // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+  await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+  await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
   fireEvent.change(await screen.findByLabelText('Business name'), { target: { value: 'Test shop' } });
   for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
     fireEvent.change(screen.getByLabelText(label!), { target: { value } });
   }
+  // The partner agreement (its own cases live in partner-agreement.test.tsx).
+  fireEvent.click(screen.getByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ }));
   return user;
 }
 
@@ -85,7 +91,7 @@ describe('Q8 website store pin', () => {
     await user.click(screen.getByRole('button', { name: 'Confirm store location' }));
     await user.click(screen.getByRole('button', { name: 'Create business' }));
     expect(fx.become).toHaveBeenCalledExactlyOnceWith({
-      role: 'VENDOR', business: {
+      role: 'VENDOR', acceptAgreement: true, business: {
         name: 'Test shop', vendorType: 'RESTAURANT', phone: '+5926001003',
         addressLine1: '12 Regent Street', city: 'Georgetown', region: 'Demerara-Mahaica',
         latitude: DOOR.lat, longitude: DOOR.lng,
@@ -322,5 +328,14 @@ describe('Q8 website store pin', () => {
     fireEvent.change(input, { target: { value: 'New address' } });
     expect(disabled('Find address')).toBe(false);
     expect(screen.queryByRole('button', { name: /12 Regent Street.*Georgetown/ })).toBeNull();
+  });
+});
+
+// [Row 111 · W8] Sign-up with the store map open, as a page.
+describe('[W8] sign-up is accessible', () => {
+  it('the business step with its store map open has no accessibility violations axe can find', async () => {
+    const user = await business();
+    await picker(user);
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
   });
 });

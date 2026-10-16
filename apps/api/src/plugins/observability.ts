@@ -696,6 +696,16 @@ export const mmgCheckoutLookupsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [MMG REVERSAL · owner #11] Returning a whole weekly-fee payment through MMG:
+ *  claimed, MMG's answer (answer_<status>), and the outcome the lookup decided
+ *  (reversed / failed / held). `held` should be rare and always has a person. */
+export const mmgFeeReversalsCounter = new client.Counter({
+  name: 'swift_mmg_fee_reversals_total',
+  help: 'MMG weekly-fee payment reversals: claims, MMG answers, and lookup-decided outcomes',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
 /** [M-18] Provider transactions that hold MORE than one credited observation —
  *  the historical double credits the backfill could not resolve. Set by the
  *  billing poll; reversed only after provider / human reconciliation. */
@@ -1083,10 +1093,14 @@ export const tenantUnscopedAccessCounter = new client.Counter({
 /** [TEN-03] Transaction-local bindings performed (tenant / system) and the
  *  in-transaction fallbacks that could not be batched. [MASTER-019] system_tx:
  *  a system transaction opened on the system connection; system_refused_in_tx:
- *  a system query refused rather than moved out of a caller's transaction. */
+ *  a system query refused rather than moved out of a caller's transaction.
+ *  [W0] nontenant*: a model without a tenantId bound so its walled relations
+ *  read in the tenant (nontenant), on the system login (nontenant_system), or
+ *  left where it was inside a transaction (nontenant_in_unbound_tx,
+ *  nontenant_system_in_tx, nontenant_fallback_in_tx). */
 export const tenantBindCounter = new client.Counter({
   name: 'swift_tenant_bind_total',
-  help: 'RLS bindings by kind (tenant, tenant_fallback_in_tx, system, system_no_client, system_tx, system_refused_in_tx)',
+  help: 'RLS bindings by kind (tenant, tenant_fallback_in_tx, tenant_tx, tenant_switch_refused, raw_system, raw_unbound, system, system_no_client, system_tx, system_refused_in_tx, nontenant, nontenant_fallback_in_tx, nontenant_in_unbound_tx, nontenant_system, nontenant_system_in_tx)',
   labelNames: ['kind'] as const,
   registers: [registry],
 });

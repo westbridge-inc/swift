@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { SosService, LIVE_SOS_STATUSES } from './sos.service';
 import { GuardianService } from './guardian.service';
 import { LivenessService } from './liveness.service';
-import { IncidentService, DECISION_CODES } from './incident.service';
+import { IncidentService, DECISION_CODES, intakeFingerprint } from './incident.service';
 import { EvidenceService } from './evidence.service';
 import { EmergencyContactService } from './emergency-contact.service';
 import { getChannels } from '../../providers/notifications/channels';
@@ -11,7 +11,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
-import { runWithoutTenant } from '../../plugins/tenant-context';
+import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
 
 // SOS endpoints (safety spec §4.5). The engine (state machine, grace, fan-out)
 // lives in SosService; these are thin, authed wrappers. Owner actions require
@@ -59,8 +59,15 @@ export async function safetyRoutes(app: FastifyInstance) {
   const isPlatformResponder = (role: string) => role === 'SUPER_ADMIN';
   const asResponder = <T>(role: string, fn: () => Promise<T>): Promise<T> => (isPlatformResponder(role) ? runWithoutTenant(fn) : fn());
 
-  async function ownedAlert(id: string, userId: string) {
-    const a = await app.prisma.sosAlert.findUnique({ where: { id } });
+  // [73] What the person who raised an alert may read back about it: its
+  // state, never coordinates, notes, contacts or responder internals.
+  const ownerSelect = { id: true, actorUserId: true, status: true, graceEndsAt: true, userSafeFlaggedAt: true, orderId: true, serviceJobId: true, triggeredAt: true } as const;
+  // Null-tenant emergencies remain visible to their actor. Explicit tenant
+  // predicates bound this named exception to ordinary tenant scoping.
+  const tenantOrPlatform = (tenantId?: string | null) => ({ OR: [{ tenantId: tenantId ?? null }, { tenantId: null }] });
+  const ownerWhere = (userId: string, tenantId?: string | null) => ({ actorUserId: userId, ...tenantOrPlatform(tenantId) });
+  async function ownedAlert(id: string, userId: string, tenantId?: string | null) {
+    const a = await runWithoutTenant(() => app.prisma.sosAlert.findFirst({ where: { id, ...tenantOrPlatform(tenantId) }, select: ownerSelect }), 'sos-owner-read');
     if (!a) throw new NotFoundError('SosAlert', id);
     if (a.actorUserId !== userId) throw new ForbiddenError('This is not your alert.');
     return a;
@@ -181,44 +188,84 @@ export async function safetyRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Params: { id: string } }>('/sos/:id/confirm', lifeSafety, async (request) => {
-    await ownedAlert(request.params.id, request.user.userId);
-    const a = await sos.confirm(request.params.id);
+    await ownedAlert(request.params.id, request.user.userId, request.tenantId);
+    const a = await runWithoutTenant(() => sos.confirm(request.params.id), 'sos-owner-confirm');
     return { success: true, data: { id: a.id, status: a.status } };
   });
 
   app.post<{ Params: { id: string } }>('/sos/:id/cancel', lifeSafety, async (request) => {
-    await ownedAlert(request.params.id, request.user.userId);
-    const a = await sos.cancel(request.params.id);
+    await ownedAlert(request.params.id, request.user.userId, request.tenantId);
+    const a = await runWithoutTenant(() => sos.cancel(request.params.id), 'sos-owner-cancel');
     return { success: true, data: { id: a.id, status: a.status } };
   });
 
   app.post<{ Params: { id: string } }>('/sos/:id/mark-safe', lifeSafety, async (request) => {
-    await ownedAlert(request.params.id, request.user.userId);
-    const a = await sos.markSafe(request.params.id);
+    await ownedAlert(request.params.id, request.user.userId, request.tenantId);
+    const a = await runWithoutTenant(() => sos.markSafe(request.params.id), 'sos-owner-mark-safe');
     return { success: true, data: { id: a.id, status: a.status, userSafeFlaggedAt: a.userSafeFlaggedAt } };
   });
 
+  app.get('/sos/owned-active', auth, async (request) => {
+    const query = z.object({ limit: z.coerce.number().int().min(1).max(50).default(20), cursor: z.string().min(1).max(256).optional() }).strict().parse(request.query);
+    const scope = ownerWhere(request.user.userId, request.tenantId);
+    // The cursor is an owned anchor, not an untrusted opaque Prisma cursor.
+    // Verify it against the same principal/tenant before constructing keyset
+    // bounds. Its live status may have changed between pages.
+    const anchor = query.cursor ? await runWithoutTenant(() => app.prisma.sosAlert.findFirst({ where: { id: query.cursor, ...scope }, select: { id: true, triggeredAt: true } }), 'sos-owner-cursor') : null;
+    if (query.cursor && !anchor) throw new AppError(400, 'INVALID_SOS_CURSOR', 'Refresh your alerts to continue.');
+    const rows = await runWithoutTenant(() => app.prisma.sosAlert.findMany({
+      where: { ...scope, status: { in: LIVE_SOS_STATUSES }, ...(anchor ? { AND: [{ OR: [{ triggeredAt: { lt: anchor.triggeredAt } }, { triggeredAt: anchor.triggeredAt, id: { lt: anchor.id } }] }] } : {}) },
+      select: ownerSelect, orderBy: [{ triggeredAt: 'desc' }, { id: 'desc' }], take: query.limit + 1,
+    }), 'sos-owner-list');
+    const data = rows.slice(0, query.limit);
+    return { success: true, data, nextCursor: rows.length > query.limit ? data[data.length - 1]!.id : null };
+  });
+
   app.get<{ Params: { id: string } }>('/sos/:id', auth, async (request) => {
+    if (!isOps(request.user.role)) {
+      const a = await ownedAlert(request.params.id, request.user.userId, request.tenantId);
+      return { success: true, data: a };
+    }
     const a = await asResponder(request.user.role, () => app.prisma.sosAlert.findUnique({ where: { id: request.params.id } }));
     if (!a) throw new NotFoundError('SosAlert', request.params.id);
-    if (a.actorUserId !== request.user.userId && !isOps(request.user.role)) throw new ForbiddenError('This is not your alert.');
     return { success: true, data: a };
   });
 
   // [S-19] Ops alerts: the durable page with per-recipient acknowledgement.
+  // [M009] Platform (null-tenant) alerts belong to platform operators: only a
+  // SUPER_ADMIN lists or acknowledges them (coordinator ruling, 5 Oct 2026). A
+  // tenant's ADMIN sees and acknowledges their own tenant's alerts, named
+  // explicitly by tenant, never by whatever scope the request happens to carry.
   const { acknowledgeOpsAlert, runOpsAlertDrillIfDue } = await import('./ops-alert');
+  const opsAlertInclude = { recipients: { select: { userId: true, deliveredAt: true, seenAt: true, ackedAt: true } } } as const;
   app.get('/ops-alerts', auth, async (request) => {
-    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can list alerts.');
-    const rows = await app.prisma.opsAlert.findMany({ where: { acknowledgedAt: null, closedAt: null }, orderBy: { createdAt: 'desc' }, take: 100, include: { recipients: { select: { userId: true, deliveredAt: true, seenAt: true, ackedAt: true } } } });
+    const role = request.user.role;
+    if (isPlatformResponder(role)) {
+      const rows = await runWithoutTenant(() => app.prisma.opsAlert.findMany({ where: { acknowledgedAt: null, closedAt: null }, orderBy: { createdAt: 'desc' }, take: 100, include: opsAlertInclude }));
+      return { success: true, data: rows };
+    }
+    if (role !== 'ADMIN') throw new ForbiddenError('Only ops can list alerts.');
+    const tenantId = request.tenantId;
+    if (!tenantId) throw new ForbiddenError('Platform alerts are for platform operators.');
+    const rows = await app.prisma.opsAlert.findMany({ where: { tenantId, acknowledgedAt: null, closedAt: null }, orderBy: { createdAt: 'desc' }, take: 100, include: opsAlertInclude });
     return { success: true, data: rows };
   });
   app.post<{ Params: { id: string } }>('/ops-alerts/:id/ack', auth, async (request) => {
-    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can acknowledge an alert.');
-    const res = await acknowledgeOpsAlert(app.prisma, { opsAlertId: request.params.id, userId: request.user.userId });
+    const role = request.user.role;
+    if (!isOps(role)) throw new ForbiddenError('Only ops can acknowledge an alert.');
+    const alert = await runWithoutTenant(() => app.prisma.opsAlert.findUnique({ where: { id: request.params.id }, select: { id: true, tenantId: true } }));
+    if (!alert) throw new NotFoundError('OpsAlert', request.params.id);
+    if (!isPlatformResponder(role)) {
+      if (alert.tenantId === null) throw new ForbiddenError('Platform alerts are acknowledged by platform operators.');
+      if (alert.tenantId !== request.tenantId) throw new NotFoundError('OpsAlert', request.params.id);
+    }
+    const res = await asResponder(role, () => acknowledgeOpsAlert(app.prisma, { opsAlertId: alert.id, userId: request.user.userId }));
+    if (res.refused.length > 0) throw new ForbiddenError('You are not a responder for this alert.');
     return { success: true, data: { acknowledged: res.acknowledged.length > 0 } };
   });
   app.post('/ops-alerts/drill', auth, async (request) => {
-    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can run a drill.');
+    // A drill is a PLATFORM page (no tenant): platform operators only [M009].
+    if (!isPlatformResponder(request.user.role)) throw new ForbiddenError('Only platform operators can run a drill.');
     process.env['OPS_ALERT_DRILL_INTERVAL_DAYS'] ??= '7';
     const { openOpsAlert } = await import('./ops-alert');
     const res = await openOpsAlert(app.prisma, new NotificationService(app.prisma, app.io), { kind: 'DRILL', tenantId: null, title: '🧪 Ops alert drill — acknowledge now', body: 'A manual drill of the SOS paging path. Acknowledge it before the deadline; unacknowledged, it escalates like a real SOS.', data: { kind: 'ops_alert_drill', manual: true, by: request.user.userId } });
@@ -307,6 +354,14 @@ export async function safetyRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     const share = await tripShare.mint(request.user.userId, request.params.id, body);
     return { success: true, data: share };
+  });
+
+  app.get<{ Params: { id: string } }>('/trips/:id/shares', auth, async (request) => {
+    return { success: true, data: await tripShare.listOwned(request.user.userId, request.params.id) };
+  });
+
+  app.delete<{ Params: { id: string } }>('/trips/:id/shares', auth, async (request) => {
+    return { success: true, data: await tripShare.revokeAll(request.user.userId, request.params.id) };
   });
 
   app.delete<{ Params: { token: string } }>('/share/:token', auth, async (request) => {
@@ -464,6 +519,37 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: { caseNumber: kase.caseNumber, status: kase.status } };
   });
 
+  /**
+   * [M069] The subject / order / SOS tuple of an ops-logged case, validated
+   * BEFORE any effect or replay: every id must exist; the subject must be in
+   * the caller's tenant (a SUPER_ADMIN may work any tenant's); the order and
+   * the alert must belong to the subject's tenant and name the subject as a
+   * party; and an alert that names an order must name this one. A refused
+   * tuple creates no case, suspends nobody, pages nobody and replays nothing.
+   */
+  async function opsIntakeTuple(role: string, callerTenant: string | null | undefined, input: { subjectUserId: string; orderId?: string; sosAlertId?: string }) {
+    const subject = await runWithoutTenant(() => app.prisma.user.findUnique({ where: { id: input.subjectUserId }, select: { id: true, tenantId: true } }));
+    if (!subject || (!isPlatformResponder(role) && subject.tenantId !== callerTenant)) throw new NotFoundError('User', input.subjectUserId);
+    if (input.orderId) {
+      const order = await runWithoutTenant(() => app.prisma.order.findUnique({ where: { id: input.orderId }, select: { tenantId: true, customerId: true, driver: { select: { userId: true } }, rider: { select: { userId: true } } } }));
+      if (!order || order.tenantId !== subject.tenantId) throw new NotFoundError('Order', input.orderId);
+      if (![order.customerId, order.driver?.userId, order.rider?.userId].includes(subject.id)) {
+        throw new AppError(409, 'SUBJECT_NOT_ON_ORDER', 'The subject is not a party to that order.');
+      }
+    }
+    if (input.sosAlertId) {
+      const alert = await runWithoutTenant(() => app.prisma.sosAlert.findUnique({ where: { id: input.sosAlertId }, select: { tenantId: true, actorUserId: true, counterpartyUserId: true, orderId: true } }));
+      if (!alert || alert.tenantId !== subject.tenantId) throw new NotFoundError('SosAlert', input.sosAlertId);
+      if (alert.actorUserId !== subject.id && alert.counterpartyUserId !== subject.id) {
+        throw new AppError(409, 'SUBJECT_NOT_ON_ALERT', 'The subject is not a party to that SOS.');
+      }
+      if (input.orderId && alert.orderId && alert.orderId !== input.orderId) {
+        throw new AppError(409, 'ORDER_NOT_ON_ALERT', 'That SOS was raised on a different order.');
+      }
+    }
+    return { tenantId: subject.tenantId };
+  }
+
   /** Ops intake — phone call / email / social report, logged by a human. */
   app.post('/incidents/ops', auth, async (request) => {
     if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can log a case directly.');
@@ -473,12 +559,23 @@ export async function safetyRoutes(app: FastifyInstance) {
       subjectUserId: z.string().min(1),
       category: z.string().trim().min(2).max(60),
       severity: z.enum(['S0', 'S1', 'S2', 'S3', 'S4']).optional(),
-      orderId: z.string().optional(),
-      sosAlertId: z.string().optional(),
+      // [M069 · DS757] An empty id would skip the tuple checks below and be stored: refused up front.
+      orderId: z.string().min(1).optional(),
+      sosAlertId: z.string().min(1).optional(),
       summary: z.string().trim().min(5).max(2000),
     }).parse(request.body ?? {});
     const { idempotencyKey, ...intakeBody } = body;
-    const kase = await incidents.intake({ ...intakeBody, intake: 'OPS_CREATED', reporterUserId: null, source: idempotencyKey ? { type: 'OPS', id: `${request.user.userId}:${idempotencyKey}` } : null });
+    const { tenantId } = await opsIntakeTuple(request.user.role, request.tenantId, intakeBody);
+    const source = idempotencyKey ? { type: 'OPS', id: `${request.user.userId}:${idempotencyKey}` } : null;
+    if (source) {
+      // [M069] A replayed key must carry the tuple it was first used with: never another case's.
+      const prior = await runWithoutTenant(() => app.prisma.incidentCase.findUnique({ where: { sourceFingerprint: intakeFingerprint(source) }, select: { subjectUserId: true, orderId: true, sosAlertId: true } }));
+      if (prior && (prior.subjectUserId !== intakeBody.subjectUserId || (prior.orderId ?? null) !== (intakeBody.orderId ?? null) || (prior.sosAlertId ?? null) !== (intakeBody.sosAlertId ?? null))) {
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'That key already logged a different case.');
+      }
+    }
+    // The case lives in the SUBJECT's tenant (a SUPER_ADMIN's own tenant may differ).
+    const kase = await runWithTenant(tenantId, () => incidents.intake({ ...intakeBody, intake: 'OPS_CREATED', reporterUserId: null, source }));
     return { success: true, data: kase };
   });
 

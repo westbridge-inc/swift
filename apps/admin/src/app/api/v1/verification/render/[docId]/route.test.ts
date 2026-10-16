@@ -54,6 +54,27 @@ describe('[DS110-15] verification render proxy', () => {
     expect(text).not.toContain('<script>');
   });
 
+  // [VERIFY-DOCS V3 · DS1028] A grant revoked after the link was minted: the page must be able to say so.
+  // Only the upstream error CODE travels (a header, from a fixed shape); the body still never does.
+  it('names an upstream document-reviewer refusal in a header, with no body', async () => {
+    upstream(JSON.stringify({ success: false, error: { code: 'DOCUMENT_REVIEWER_REQUIRED', message: 'You need the document-reviewer permission' } }), { status: 403, headers: { 'content-type': 'application/json' } });
+    const res = await call('doc_5');
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-swift-error-code')).toBe('DOCUMENT_REVIEWER_REQUIRED');
+    expect(await res.text()).toBe('');
+  });
+
+  it.each([
+    [JSON.stringify({ error: { code: '<script>alert(1)</script>' } }), 'application/json'],
+    [JSON.stringify({ error: { code: 'x'.repeat(200) } }), 'application/json'],
+    ['DOCUMENT_REVIEWER_REQUIRED', 'text/plain'],
+  ])('never relays a code that is not a plain known shape (%s)', async (body, type) => {
+    upstream(body, { status: 403, headers: { 'content-type': type } });
+    const res = await call('doc_6');
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-swift-error-code')).toBeNull();
+  });
+
   it.each([403, 410, 404])('keeps an upstream %i a refusal, without relaying its body', async (status) => {
     upstream(JSON.stringify({ success: false, error: { code: 'DOCUMENT_PURGED' } }), { status, headers: { 'content-type': 'application/json' } });
     const res = await call('doc_4');

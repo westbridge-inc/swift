@@ -83,16 +83,16 @@ export function SignOutButton({
       onKeyDown={(event) => {
         if (event.key === 'Escape') close();
       }}
-      className="rounded-xl border border-black/10 bg-white p-4 text-left"
+      className="rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-4 text-left shadow-[var(--swift-elevation-card)]"
     >
-      <p id={`${id}-title`} className="text-sm font-bold text-[var(--swift-ink)]">{title}</p>
-      <p id={`${id}-body`} className="mt-1 text-sm text-[var(--swift-muted)]">{body}</p>
+      <p id={`${id}-title`} className="text-[15px] font-semibold leading-5 text-[var(--swift-ink)]">{title}</p>
+      <p id={`${id}-body`} className="mt-1 text-[13px] leading-[18px] text-[var(--swift-muted)]">{body}</p>
       <div className="mt-3 flex flex-col gap-2">
         <button
           type="button"
           onClick={signOut}
           disabled={leaving}
-          className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--swift-red-600)] disabled:opacity-50"
+          className="sw-btn sw-btn-md sw-btn-block"
         >
           {leaving ? 'Signing out…' : 'Sign out'}
         </button>
@@ -101,7 +101,7 @@ export function SignOutButton({
           type="button"
           onClick={close}
           disabled={leaving}
-          className="rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold disabled:opacity-50"
+          className="sw-btn sw-btn-md sw-btn-block sw-btn-outline"
         >
           Stay signed in
         </button>
