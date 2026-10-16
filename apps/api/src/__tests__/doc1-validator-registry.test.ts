@@ -9,13 +9,13 @@
  * validator it depends on is a phantom, and no row names an implementation
  * that does not exist — production refuses to boot otherwise.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { prismaPlugin } from '../plugins/prisma';
 import { runWithoutTenant } from '../plugins/tenant-context';
-import { seedDocRegistry, registryCode, registryCompletenessGaps } from '../modules/verification/doc-registry';
+import { seedDocRegistry, registryCode, registryCompletenessGaps, enforceRegistryCompletenessAtBoot } from '../modules/verification/doc-registry';
 import { VALIDATOR_IMPLEMENTATIONS, resolvesImpl } from '../modules/verification/validators';
 import { planExtraction, type RegisteredValidator } from '../modules/verification/extraction-ledger';
 
@@ -23,7 +23,7 @@ import { planExtraction, type RegisteredValidator } from '../modules/verificatio
 const SPEC_VALIDATORS: ReadonlyArray<readonly [string, string, boolean]> = [
   ['V_MRZ_CHECKSUM', 'FIELD', true], ['V_DATE_ORDER', 'FIELD', true], ['V_NOT_EXPIRED', 'FIELD', true], ['V_EXPIRY_PLAUSIBLE', 'FIELD', true] /* ruling 2026-09-06: blocking = review, see the catalogue */,
   ['V_DOB_ADULT', 'FIELD', true], ['V_TIN_FORMAT', 'FIELD', true], ['V_PLATE_FORMAT', 'FIELD', true], ['V_PLATE_CLASS', 'FIELD', true],
-  ['V_VEHICLE_COLOUR', 'FIELD', false] /* owner ruling 2026-10-01: a taxi may be any colour — the row stays declared, blocks nothing, has no implementation */, ['V_LICENCE_CLASS', 'FIELD', true], ['V_INSURANCE_SCOPE', 'FIELD', true], ['V_FIELD_CONFIDENCE', 'FIELD', false],
+  ['V_VEHICLE_COLOUR', 'FIELD', false] /* owner ruling 2026-10-01: a taxi may be any colour — the row stays declared, blocks nothing, has no implementation */, ['V_LICENCE_CLASS', 'FIELD', false] /* [VERIFY-DOCS] owner ruling 2026-10-06 (ruling 8): no "H class" check — retired like the colour row */, ['V_INSURANCE_SCOPE', 'FIELD', true], ['V_FIELD_CONFIDENCE', 'FIELD', false],
   ['V_TYPE_MATCH', 'DOCUMENT', true], ['V_ALL_REQUIRED_PRESENT', 'DOCUMENT', true], ['V_PAGE_COMPLETE', 'DOCUMENT', true], ['V_TAMPER_HEURISTIC', 'DOCUMENT', false],
   ['V_NAME_CONSISTENCY', 'SUBJECT', false], ['V_PLATE_CROSS_MATCH', 'SUBJECT', true], ['V_SELF_REPORTED_MATCH', 'SUBJECT', false], ['V_REQUIREMENT_COMPLETE', 'SUBJECT', true],
   ['V_SHA_COLLISION', 'CROSS_SUBJECT', false], ['V_NUMBER_COLLISION', 'CROSS_SUBJECT', false], ['V_PHASH_NEAR', 'CROSS_SUBJECT', false], ['V_VELOCITY', 'CROSS_SUBJECT', false],
@@ -139,11 +139,38 @@ describe('[DOC-1 P7-1] the validator registry (test_registry_completeness)', () 
     expect(plan.blockingFail).toBe(true);
   });
 
-  it('production refuses to boot past an incomplete registry for active types (the seed block names the gaps and throws only in production)', () => {
+  // [T2 · row 300] The boot refusal as BEHAVIOUR: the gate server.ts runs at boot, driven with
+  // an incomplete registry under production mode. (It was a text match on server.ts.)
+  it('production refuses to boot past an incomplete registry for active types: the boot gate throws naming the gaps; elsewhere it warns and boot goes on', async () => {
+    await system(() => app.prisma.docType.update({ where: { code: PROBE }, data: { isActive: true, legalFactsVerifiedAt: new Date() } }));
+    const warn = vi.fn();
+    try {
+      vi.stubEnv('NODE_ENV', 'production');
+      await expect(system(() => enforceRegistryCompletenessAtBoot(app.prisma, { warn }, resolvesImpl)))
+        .rejects.toThrow(new RegExp(`document registry incomplete for active types: .*${PROBE}:UNPROFILED`));
+      expect(warn).not.toHaveBeenCalled();
+
+      vi.stubEnv('NODE_ENV', 'test');
+      const gaps = await system(() => enforceRegistryCompletenessAtBoot(app.prisma, { warn }, resolvesImpl));
+      expect(gaps.filter((g) => g.docTypeCode === PROBE).map((g) => g.gap)).toEqual(expect.arrayContaining(['UNPROFILED', 'NO_FIELDS']));
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ gaps: expect.arrayContaining([expect.objectContaining({ docTypeCode: PROBE })]) }),
+        expect.stringMatching(/production refuses to boot like this/),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await resetProbe();
+    }
+  });
+
+  it('server.ts runs that gate at boot, after the registry is seeded and before the boot contract is marked complete', () => {
     const server = readFileSync(join(__dirname, '..', 'server.ts'), 'utf8');
-    const seedAt = server.indexOf('seedDocRegistry(app.prisma)');
-    const block = server.slice(seedAt, server.indexOf('app.markBootContractsComplete();', seedAt));
-    expect(block).toContain('registryCompletenessGaps(app.prisma, resolvesImpl)');
-    expect(block).toMatch(/if \(isProduction\(\)\) \{\s*throw new Error/);
+    const afterListen = server.split('app.listen(')[1] ?? '';
+    const seedAt = afterListen.indexOf('await seedDocRegistry(');
+    const gateAt = afterListen.indexOf('await enforceRegistryCompletenessAtBoot(app.prisma, app.log, resolvesImpl)');
+    const markAt = afterListen.indexOf('app.markBootContractsComplete();');
+    expect(seedAt).toBeGreaterThan(0);
+    expect(gateAt).toBeGreaterThan(seedAt);
+    expect(markAt).toBeGreaterThan(gateAt);
   });
 });

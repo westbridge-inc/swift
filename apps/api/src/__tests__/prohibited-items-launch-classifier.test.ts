@@ -1,0 +1,601 @@
+/**
+ * [GUARDRAILS §8] The prohibited-items rule before production accepts partner listings.
+ *
+ * Opus second review of #1649 (14 Oct 2026) and owner decisions #54–#59:
+ *   · S1-LAUNCH-1 — the commonest Guyanese shelf names were CLEAR (XM without "rum",
+ *     Bristol, "cigs", wine varietals, medicine brands, cannabis words…);
+ *   · S1-LAUNCH-2 / #55 / #56 — anything SOLD as beer, wine or spirits (0.0 and
+ *     alcohol-free included), cooking wine, rum essence and bitters are never
+ *     approvable: the item itself is refused, not held for a reviewer;
+ *   · S3-10 — disguised spellings (zero-width characters, Cyrillic or fullwidth
+ *     look-alikes, dotted letters) read CLEAR;
+ *   · #57 energy drinks and #58 vitamins and first aid stay allowed; lozenges are held.
+ */
+import { describe, it, expect } from 'vitest';
+import {
+  checkItem,
+  classifyText,
+  isHidden,
+  judgedWordsHash,
+  notAllowedMessage,
+  parcelProhibited,
+  PROHIBITED_BRAND_FIRST_WORDS,
+  PROHIBITED_CAMEL_PATTERNS,
+  PROHIBITED_CONFUSABLES,
+  PROHIBITED_DIGITS_APART_PATTERN,
+  PROHIBITED_FORMAT_CHARS_PATTERN,
+  PROHIBITED_GOODS_NOUNS,
+  PROHIBITED_LEET_FROM,
+  PROHIBITED_MARKS_PATTERN,
+  PROHIBITED_NEVER_APPROVABLE,
+  PROHIBITED_PREFILTER_WORDS,
+  PROHIBITED_ROSE_PATTERN,
+  PROHIBITED_SINGLE_LETTER_RUN_PATTERN,
+  PROHIBITED_TERMS,
+  checkStore,
+  storeWordHit,
+  storeWordsHash,
+} from '../modules/compliance/prohibited-items';
+import { REVIEW_PACK_STORES } from '../modules/review/content-pack';
+
+const verdict = (name: string, more: Record<string, unknown> = {}) => checkItem({ name, ...more });
+
+describe('[§8 launch] the shelf names the list missed (Opus S1-LAUNCH-1)', () => {
+  it.each([
+    // rum and spirits
+    'XM 10 Year Old', 'XM Gold 750ml', 'XM Supreme', 'Rhum Barbancourt', 'Old Parr 12', 'Courvoisier VS', 'Remy Martin',
+    'Kahlua', 'Seagram\'s Gin', 'Black & White Scotch', 'Johnny Walker Black', 'Jose Cuervo Gold', 'Tanqueray', 'Campari 1L',
+    // beer
+    'Banks 6 pack', 'Stag 12oz', 'Bud', 'Corona', 'Modelo Especial', 'Tiger', 'Heineken 0.0',
+    // wine
+    'Chardonnay 750ml', 'Merlot', 'Cabernet Sauvignon', 'Rosé 750ml', 'Moscato', 'Pinot Grigio', 'Shiraz',
+    // tobacco
+    'Cigs 20 pack', 'Cig', 'Bristol 20s', 'B&H 20', 'Black & Mild', 'Swisher Sweets', 'Backwoods', 'Grabba leaf', 'Zyn pouches',
+    // vapes and hookah
+    'Lost Mary', 'Vaporizer pen', 'Hooka pipe', 'Sheesha', 'Al Fakher',
+    // gas and fuel
+    '20lb cylinder refill', 'LP refill', 'Kero oil 1L', 'Lighter fluid', 'Methylated spirits',
+    // medicines
+    'Benylin', 'Alka-Seltzer', 'Eno fruit salt', 'Tums', 'Pepto', 'Excedrin', 'Bayer 81mg', 'NyQuil', 'DayQuil', 'Sudafed',
+    'Theraflu', 'Voltaren gel', 'Buscopan', 'Headache tablets', 'Fever reducer', 'Cough & Cold', 'Halls Mentholyptus',
+    'Fishermans Friend', 'Cataflam 50mg',
+    // cannabis
+    'CBD gummies', 'Ganja', 'Weed brownies', 'Marijuana', 'Kush', 'THC vape', 'Cannabis oil',
+  ])('%s is hidden from customers', (name) => {
+    const check = verdict(name);
+    expect(check.state, name).not.toBe('CLEAR');
+    expect(isHidden(check), name).toBe(true);
+  });
+
+  it('cannabis is its own class, in plain words', () => {
+    expect(classifyText('Ganja')).toEqual({ prohibitedClass: 'DRUGS', term: 'ganja' });
+    expect(notAllowedMessage('DRUGS')).toBe('Swift doesn\'t allow this item: cannabis and illegal drugs.');
+  });
+
+  it('owner #58: lozenges are held for a person, never refused', () => {
+    for (const name of ['Halls Mentholyptus', 'Fishermans Friend', 'Strepsils honey & lemon', 'Throat lozenges', 'Cough drops (20)']) {
+      expect(verdict(name), name).toMatchObject({ state: 'WAITING', prohibitedClass: 'MEDICINE' });
+    }
+  });
+});
+
+describe('[§8 launch] never approvable: the item IS beer, wine, spirits, tobacco, a vape or a branded medicine (#55, #56, S1-LAUNCH-2)', () => {
+  it.each([
+    ['Legacy Rum', 'rum'], ['El Dorado 5 Year Rum', 'el dorado'], ['Red Wine 750ml', 'wine'], ['House wine', 'wine'],
+    ['Heineken 0.0', 'heineken'], ['Non-alcoholic beer', 'beer'], ['Alcohol-free wine', 'wine'], ['Beer 0.0%', 'beer'],
+    ['Beer, alcohol free (6 x 330ml)', 'beer'], ['Cooking wine', 'wine'], ['Rum essence 28ml', 'rum essence'],
+    ['Angostura Aromatic Bitters', 'angostura'], ['Bitters 200ml', 'bitters'], ['Rum - Bristol White', 'rum'],
+    ['Vodka, Russian Standard', 'vodka'], ['Carib Lager 6-pack', 'carib'], ['Hennessy VS', 'hennessy'], ['XM Gold', 'xm'],
+    ['Rosé 750ml', 'rosewine'], ['Rum Gold 750ml', 'rum'], ['Rum punch (bottle)', 'rum punch'], ['Chardonnay', 'chardonnay'],
+    ['Marlboro Red (20s)', 'marlboro'], ['Cigarettes 20s', 'cigarettes'], ['Disposable vape 5000 puffs', 'vape'],
+    ['Panadol Extra 24s', 'panadol'], ['Paracetamol 500mg', 'paracetamol'], ['Ganja', 'ganja'],
+  ] as const)('%s is refused outright (by "%s")', (name, term) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED', source: 'word', field: 'name', term });
+  });
+
+  it('an option that IS the drink makes the item one; a section or a description only holds it', () => {
+    expect(verdict('Fried chicken combo', { optionNames: ['Add a drink', 'Coke', 'Carib Lager'] }))
+      .toMatchObject({ state: 'BANNED', source: 'word', field: 'option', term: 'carib' });
+    expect(verdict('Wings platter', { optionNames: ['Pair it with', 'Red wine'] })).toMatchObject({ state: 'BANNED', field: 'option' });
+    expect(verdict('Bottle (750ml)', { sectionName: 'Beers & Wines' })).toMatchObject({ state: 'WAITING', field: 'section' });
+    expect(verdict('Gift basket', { description: 'with a bottle of Hennessy' })).toMatchObject({ state: 'WAITING', field: 'description' });
+  });
+
+  it.each([
+    'Rum cake', 'Beer batter fish', 'Beer-battered shrimp', 'Wine glass set (4)', 'Rum raisin ice cream', 'Champagne flutes (2)',
+    'Stout work boots', 'Cigarette lighter adapter', 'Bourbon biscuits', 'Brandy snaps', 'Banks Kola Champagne', 'Tobacco pipe',
+    'LPG regulator', 'Gas stove (4 burner)', 'Kerosene lamp',
+  ])('a word that is not the goods themselves is held for a person, never refused: %s', (name) => {
+    expect(verdict(name).state, name).toBe('WAITING');
+  });
+
+  it('a colour or a size called "Wine", "Champagne" or "Stout" is held, not refused', () => {
+    for (const option of ['Wine', 'Champagne', 'Stout', 'Cognac']) {
+      expect(verdict('Maxi dress', { optionNames: ['Colour', option, 'Black'] }).state, option).toBe('WAITING');
+    }
+    expect(verdict('Heels - Champagne').state).toBe('WAITING');
+  });
+
+  it('approval never makes a never-approvable item visible', () => {
+    const rum = { name: 'Legacy Rum' };
+    expect(checkItem({ ...rum, reviewApprovedHash: judgedWordsHash(rum) }).state).toBe('BANNED');
+    const cake = { name: 'Rum cake' };
+    expect(checkItem({ ...cake, reviewApprovedHash: judgedWordsHash(cake) }).state).toBe('APPROVED');
+  });
+
+  it('every never-approvable word and goods noun is on the word list, so the database pre-filter keeps it', () => {
+    const listed = new Set(Object.values(PROHIBITED_TERMS).flat());
+    for (const term of [...PROHIBITED_NEVER_APPROVABLE, ...PROHIBITED_GOODS_NOUNS]) expect(listed.has(term), term).toBe(true);
+  });
+});
+
+describe('[§8 launch] disguised spellings read as the word they hide (Opus S3-10)', () => {
+  it.each([
+    'R\u200Bum 750ml', 'Ru\u200Dm', 'R\uFEFFum', 'R\u00ADum', 'Rцm', 'Rum сake', 'Ｒｕｍ', 'ＲＵＭ\u3000７５０ｍｌ', 'R.U.M', 'R U M 750ml',
+    'V-O-D-K-A', 'G.I.N', 'Неineken', 'Ηennessy', 'Mаrlboro', 'ｖａｐｅ',
+  ])('%s is not CLEAR', (name) => {
+    expect(verdict(name).state, name).not.toBe('CLEAR');
+  });
+
+  it('ordinary single letters and ordinary non-Latin text stay clear', () => {
+    for (const name of ['Size: S M L', 'A B C blocks', 'B.B.Q. sauce', 'T-bone steak', 'Pack of 2 x 3', 'Café latte', 'Crème brûlée']) {
+      expect(verdict(name), name).toEqual({ state: 'CLEAR' });
+    }
+  });
+});
+
+describe('[§8 launch] what stays allowed (#57 energy drinks, #58 vitamins and first aid)', () => {
+  it.each([
+    'Red Bull 250ml', 'Monster Energy 473ml', 'Guru Energy', 'Vitamin C 1000mg', 'Multivitamin gummies', 'First aid kit',
+    'Band-Aid plasters (20)', 'Antiseptic liquid 250ml', 'Bristol board (white)', 'Weed eater line',
+    'Seaweed snacks', 'Kola Champagne 2L', 'Virgin mojito', 'Virgin pina colada', 'Rubbing alcohol 70%', 'Budget rice 10lb',
+    'Banking app voucher',
+  ])('%s is clear', (name) => {
+    expect(verdict(name), name).toEqual({ state: 'CLEAR' });
+  });
+});
+
+describe('[§8 launch] the database pre-filter still keeps every disguised spelling (Opus S3-10)', () => {
+  // The SQL, in JS: NFKC → format characters removed → look-alikes translated → "rosé" → NFD, marks
+  // removed, lowercased, split on non-letters; a row is kept when it shares a word with the pre-filter
+  // set, or carries two single letters in a row (the classifier joins "R.U.M" into "rum"). Each word list
+  // is the text as written AND its joined words apart: at a change of case before lowercasing, then a letter
+  // apart from the digit after it (after the l33t is read). [DS1265 S4, joined spellings]
+  const [FROM, TO] = [[...PROHIBITED_CONFUSABLES.from], [...PROHIBITED_CONFUSABLES.to]];
+  const translate = (s: string) => [...s].map((ch) => { const k = FROM.indexOf(ch); return k >= 0 ? TO[k]! : ch; }).join('');
+  const undisguised = (raw: string) => translate(raw.normalize('NFKC').replace(new RegExp(PROHIBITED_FORMAT_CHARS_PATTERN, 'gu'), ''))
+    .replace(new RegExp(PROHIBITED_ROSE_PATTERN, 'g'), 'rosewine');
+  const lowered = (s: string) => s.normalize('NFD').replace(new RegExp(PROHIBITED_MARKS_PATTERN, 'g'), '').toLowerCase();
+  const sqlString = (raw: string) => lowered(undisguised(raw));
+  const camelString = (raw: string) => lowered(PROHIBITED_CAMEL_PATTERNS.reduce((t, [pattern, to]) => t.replace(new RegExp(pattern, 'g'), to), undisguised(raw)));
+  const apart = (s: string) => s.replace(new RegExp(PROHIBITED_DIGITS_APART_PATTERN, 'g'), '$1 $2');
+  const prefilter = new Set(PROHIBITED_PREFILTER_WORDS);
+  const leet = (s: string, one: string) => [...s].map((ch) => { const k = (PROHIBITED_LEET_FROM + '1').indexOf(ch); return k >= 0 ? ('aaeiosstl' + one)[k]! : ch; }).join('');
+  const kept = (raw: string) => {
+    const s = sqlString(raw);
+    const c = camelString(raw);
+    const words = (as: (t: string) => string) => `${as(s)} ${apart(as(c))}`.split(/[^a-z0-9]+/);
+    const tokens = s.split(/[^a-z0-9]+/);
+    return words((t) => t).some((w) => prefilter.has(w))
+      || new RegExp(PROHIBITED_SINGLE_LETTER_RUN_PATTERN).test(s) || new RegExp(PROHIBITED_SINGLE_LETTER_RUN_PATTERN).test(c)
+      || ['i', 'l'].some((one) => words((t) => leet(t, one)).some((w) => prefilter.has(w)))
+      || tokens.some((w, k) => k + 1 < tokens.length && prefilter.has(w + tokens[k + 1]));
+  };
+
+  it('every listed word and brand-first word, disguised every way, is kept when the classifier catches it', () => {
+    const disguises: Array<(t: string) => string> = [
+      (t) => [...t].join('\u200B'),
+      (t) => [...t].map((ch) => (ch === ' ' ? ch : String.fromCodePoint(ch.codePointAt(0)! + 0xFEE0))).join(''),
+      (t) => t.replace(/o/g, 'о').replace(/a/g, 'а').replace(/e/g, 'е').replace(/c/g, 'с').replace(/p/g, 'р'),
+      (t) => (t.includes(' ') ? t : [...t].join('.')),
+      (t) => (t.includes(' ') ? t : [...t].join(' ').toUpperCase()),
+      (t) => `${t[0]!.toUpperCase()}\u00AD${t.slice(1)} 750ml`,
+      // [joined spellings] joined to a measure, to the next word, or after a measure, in either case
+      (t) => `${t.replace(/ /g, '')}750ml`,
+      (t) => `${t.split(' ').map((w) => w[0]!.toUpperCase() + w.slice(1)).join('')}Bottle`,
+      (t) => `20s${t.split(' ').map((w) => w[0]!.toUpperCase() + w.slice(1)).join('')}`,
+      (t) => `${t.toUpperCase().replace(/ /g, '')}Cake`,
+    ];
+    let checked = 0;
+    for (const term of [...Object.values(PROHIBITED_TERMS).flat(), ...PROHIBITED_BRAND_FIRST_WORDS]) {
+      for (const disguise of disguises) {
+        const raw = disguise(term);
+        if (checkItem({ name: raw }).state === 'CLEAR') continue;
+        checked += 1;
+        expect(kept(raw), `the pre-filter misses ${JSON.stringify(raw)} (${term})`).toBe(true);
+      }
+    }
+    expect(checked).toBeGreaterThan(2000);
+    for (const raw of ['Rosé 750ml', 'ROSÉ', 'Rose\u0301 wine', 'R\u200Bum', 'Rцm', 'Ｒｕｍ', 'R.U.M', 'R0sé 750ml', 'Ro$é 750ml', 'R0SÉ 750ml' /* DS1112 S3-1 */]) expect(kept(raw), raw).toBe(true);
+    // [evasion] l33t, plural and split spellings of every listed word and brand-first word are kept too.
+    const leetOf = (t: string) => t.replace(/a/g, '4').replace(/e/g, '3').replace(/i/g, '1').replace(/o/g, '0').replace(/s/g, '$');
+    let evasions = 0;
+    for (const term of [...Object.values(PROHIBITED_TERMS).flat(), ...PROHIBITED_BRAND_FIRST_WORDS]) {
+      const raws = [leetOf(term), `${term}s 6 pack`, term.length >= 5 && !term.includes(' ') ? `${term.slice(0, 3)} ${term.slice(3)}` : null].filter(Boolean) as string[];
+      for (const raw of raws) {
+        if (checkItem({ name: raw }).state === 'CLEAR') continue;
+        evasions += 1;
+        expect(kept(raw), `the pre-filter misses ${JSON.stringify(raw)} (${term})`).toBe(true);
+      }
+    }
+    expect(evasions).toBeGreaterThan(800);
+  });
+
+  it('the format characters it removes are exactly Unicode\'s, and the look-alike table is one-to-one', () => {
+    const pattern = new RegExp(`^${PROHIBITED_FORMAT_CHARS_PATTERN}$`, 'u');
+    const cf = /^\p{Cf}$/u;
+    const mismatched: string[] = [];
+    for (let cp = 0; cp <= 0x10FFFF; cp += 1) {
+      if (cp >= 0xD800 && cp <= 0xDFFF) continue;
+      const ch = String.fromCodePoint(cp);
+      if (pattern.test(ch) !== cf.test(ch)) mismatched.push(`U+${cp.toString(16)}`);
+    }
+    expect(mismatched).toEqual([]);
+    expect([...PROHIBITED_CONFUSABLES.from].length).toBe([...PROHIBITED_CONFUSABLES.to].length);
+    expect(new Set([...PROHIBITED_CONFUSABLES.from]).size).toBe([...PROHIBITED_CONFUSABLES.from].length);
+    for (const ch of PROHIBITED_CONFUSABLES.to) expect(ch, 'a look-alike maps to plain ASCII').toMatch(/^[A-Za-z]$/);
+  });
+});
+
+// [DS1109 S2/S3] What the first launch pass still let through, and what it refused that it should only hold.
+describe('[§8 launch · DS1109] sold-as-such is refused; a dish or a garment named after a drink is held', () => {
+  it.each([
+    'Stella 6 pack', 'Rosés 750ml', 'Madeira 750ml', 'Marsala 750ml', 'Amaretto 750ml', 'Limoncello 500ml', 'Pisco 750ml', 'Pisco sour',
+    'Dubonnet', 'Cinzano', 'Irish cream 750ml', 'Hard cider', 'Cider 750ml',
+    'Snus', 'Heets', 'IQOS', 'Captain Black', 'Golden Virginia', 'Amber Leaf',
+    'Banks 6 pack', 'Stag 12oz', 'Corona 12 pack', 'Tiger 24 pack', 'Bristol 20s', 'Camel 20 pack', 'B&H 20s', 'Velo 20 pouches',
+    'Tiger Balm', 'Insulin', 'Kero oil 1L', 'Lighter fluid 250ml', 'Methylated spirits 500ml', 'Propane 20lb', '20lb gas cylinder', 'Diesel 5L',
+    'Bong', 'CBD gummies', 'Ganja brownies', 'THC chocolate bar',
+    'Guinness Foreign Extra Stout', 'Baileys Irish Cream', 'Johnnie Walker Black Label', 'Jack Daniels Old No. 7',
+  ])('%s is refused outright', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED', source: 'word' });
+  });
+
+  it.each([
+    'Guinness cake', 'Baileys ice cream', 'Campari tomatoes', 'Jack Daniels BBQ sauce', 'Smirnoff vodka sauce', 'Vanilla rum extract cake',
+    'Hennessy wings', 'Chicken Marsala', 'Madeira cake', 'Amaretto biscotti', 'Irish cream coffee creamer', 'Wine 8', 'Stout 42',
+    'Cognac set', 'Champagne set', 'Banks', 'Banks birthday card', 'Tiger prawns 500g', 'Insulin cooler bag', 'Gas stove',
+  ])('%s is held for a person, never refused', (name) => {
+    expect(verdict(name).state, name).toBe('WAITING');
+  });
+
+  it('a non-alcoholic malt and an empty fuel can are ordinary goods', () => {
+    for (const name of ['Malta Guinness', 'Guinness Malta 330ml', 'Gas can 5 gallon', 'Fuel can', 'Jerry can 20L']) expect(verdict(name), name).toEqual({ state: 'CLEAR' });
+  });
+});
+
+// [DS1110] The second review's doors: more spirits, vapes and cigarettes sold as such; medicines with a form after
+// the noun; cannabis by the gram; ready-mixed drinks; 18+ goods; and the false refusals it found.
+describe('[§8 launch · DS1110] the second review', () => {
+  it.each([
+    'Mead 750ml', 'Mead bottle', 'Ricard 70cl', 'Grappa 750ml', 'Sambuca 700ml', 'Ouzo 750ml', 'Cachaça 700ml', 'Advocaat 750ml',
+    'Pastis 70cl', 'Vodka Cruisers 4 pack', 'Wine coolers 4 pack', 'Four Loko', 'Havana Club 3 Year', 'Sailor Jerry', 'Disaronno',
+    'Cointreau', 'Tsingtao 6 pack', 'Hairoun 6 pack',
+    'Vuse pods', 'Vuse Alto', 'Relx pods', 'Newport 20s', 'Kool 20s', 'Winston 20s', 'Djarum Black',
+    'Insulin 100 units', 'Insulin pen', 'Antibiotic cream 30g', 'Eye drops 10ml', 'Paracetamol syrup 100ml',
+    'Weed 3.5g', 'Lottery ticket', 'Sex toy', 'Vibrator',
+  ])('%s is refused outright', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED', source: 'word' });
+  });
+
+  it.each([
+    'Carib bean soup', 'Empty gas cylinder', 'Hard cider donuts', 'Mead notebook', 'Insulin cooler bag', 'Antibiotic-free chicken',
+    'Wine cooler (12 bottle)', 'Concrete vibrator', 'Lottery results board', 'Rum and raisin stew', 'Weed',
+  ])('%s is held for a person, never refused', (name) => {
+    expect(verdict(name).state, name).toBe('WAITING');
+  });
+
+  it('a notebook brand and an empty cylinder are not banned goods', () => {
+    expect(verdict('Mead five star notebook').state).not.toBe('BANNED');
+    expect(verdict('Empty gas cylinder').state).not.toBe('BANNED');
+  });
+});
+
+// [Coordinator, 14 Oct: commit security review "classifier evasion"] Each evasion class, probed and pinned. The text is
+// normalised once at the classifier's entry; these are the spellings that still slipped through.
+describe('[§8 launch · evasion] spellings that try to slip past the list', () => {
+  it.each([
+    ['Cherokee look-alike', 'Ꮃine 750ml'], ['small-capital look-alike', 'ᴠᴏᴅᴋᴀ 1L'],
+    ['l33t', 'v4pe'], ['l33t', 'c1garette'], ['l33t', 'w1ne 750ml'], ['l33t', 'b33r 6 pack'], ['l33t symbol', 'Hennes$y VS'], ['l33t', 'V0DK@ 1L'],
+    ['Spanish', 'Cerveza 6 pack'], ['Spanish', 'Ron 750ml'], ['French', 'Bière 330ml'], ['Spanish', 'Tabaco'], ['Spanish', 'Vino tinto 750ml'],
+    ['Portuguese', 'Cerveja 6 pack'], ['Spanish', 'Cigarrillos 20s'],
+    ['brand plural', 'Heinekens 6 pack'], ['brand plural', 'Coronas 6 pack'],
+  ] as const)('%s: %s is refused outright', (_kind, name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED' });
+  });
+
+  it.each([
+    ['l33t, a word only', { name: 'a1cohol free hand gel' }], ['split word', { name: 'Hen nessy VS' }], ['split word', { name: 'Vod ka 1L' }],
+    ['split across name and option', { name: 'Captain', optionNames: ['Morgan'] }], ['split across name and description', { name: 'Jack', description: 'Daniels' }],
+  ] as const)('%s is held for a person: %o', (_kind, item) => {
+    expect(checkItem(item).state).not.toBe('CLEAR');
+  });
+
+  it.each([
+    'Vitamin B12', 'A4 paper (500 sheets)', 'PS5 controller', '4x4 tyre', 'Size 10 shoes', '7up 2L', 'Pine apple chunks', 'Banking app',
+    'Galaxy Buds', 'MP3 player', 'G4 Plus phone case', 'Room 101 notebook', 'Cerulean blue paint',
+  ])('ordinary goods with digits, plurals or split words stay clear: %s', (name) => {
+    expect(verdict(name)).toEqual({ state: 'CLEAR' });
+  });
+});
+
+// [DS1111, same round] Cannabis measures spelled out; a stationery pack and a sportswear brand are not banned goods;
+// the high-volume shelf names the third review found.
+describe('[§8 launch · DS1111] the third review', () => {
+  it.each([
+    'Weed 3.5 grams', 'Weed 1 gram', 'Weed ounce', 'Weed quarter', 'Weed eighth',
+    'Fireball 750ml', 'Southern Comfort', 'Drambuie', 'Patrón 750ml', 'Beefeater 1L', 'Piton 6 pack', 'Kubuli 6 pack',
+    'Bounty 750ml', 'Lambert & Butler', 'Davidoff 20s', 'Uwell Caliburn', 'Voopoo pods', 'Augmentin', 'Coartem', 'Otrivin',
+  ])('%s is refused outright', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED' });
+  });
+
+  it.each(['Lotto', 'Lotto sneakers', 'Mead five star notebook', 'Fireball candy', 'Bounty chocolate bar', 'Bounty 2 pack', 'Davidoff Cool Water',
+    'Davidoff Cool Water 125ml', 'Halls 9 pack' /* #58: lozenges are held, never refused */])(
+    '%s is not refused', (name) => {
+      expect(verdict(name).state, name).not.toBe('BANNED');
+    },
+  );
+});
+
+// [Coordinator, 14 Oct: second commit security review "control regression" on af551644] What must stay REFUSED, as a
+// name and as an option: a banned brand with ANY measure (volume, count, pack, age statement), and cannabis by any
+// measure. (A lozenge pack is held by owner #58; a stationery or paper-towel pack named like a drink is held.)
+describe('[§8 launch · regression guard] sold-as-such stays refused, in a name or an option', () => {
+  const MUST_REFUSE = [
+    'Hennessy 750ml', 'Hennessy VS', 'Banks 6 pack', 'Banks beer 12oz', 'Marlboro 20s', 'Marlboro Gold', 'Bristol cigarettes',
+    'El Dorado 12 year', 'XM rum 5 yr', 'Smirnoff 1L', 'Guinness 6 pack', 'vape pen', 'juul pods', 'Panadol 24 tabs',
+    'cough syrup 100ml', 'gas cylinder 20lb', 'LPG refill',
+    'Weed 3.5g', 'Weed 1oz', 'Weed 3.5 grams', 'Weed ounce', 'Weed quarter', 'Ganja 1g', 'Kush 7g', 'Weed 2 joints', 'Weed pre-roll',
+    'Pre-rolls 5 pack', 'Bounty 12 year old', 'Mead 10 years', 'Ron 7 años', 'Mead 3 pack', 'Ricard 6 pack', 'Ron 6 pack',
+    'Camel 330ml', 'Newport 1L', 'Kool 12oz', 'Bayer 100ml', 'Velo 1L', 'Banks 330ml', 'Stag 6 pack', 'Corona 330ml', 'Bristol 20 pack',
+    // a medicine brand's count and dose are its measure
+    'Bayer 30 tabs', 'Bayer 100 tablets', 'Bayer 325mg', 'Bayer 81 mg', 'Bayer 20 caplets',
+  ];
+  it.each(MUST_REFUSE)('%s is refused as a name', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED' });
+  });
+  it.each(MUST_REFUSE)('%s is refused as an option', (name) => {
+    expect(verdict('Party combo', { optionNames: ['Add', name] })).toMatchObject({ state: 'BANNED', field: 'option' });
+  });
+  it.each(['Bayer Leverkusen jersey', 'Bayer caps', 'Bayer pool chlorine 20 tablets', 'Bayer crop spray 1L', 'Halls 20 tabs' /* #58 */])('%s is not refused', (name) => {
+    expect(verdict(name).state, name).not.toBe('BANNED');
+  });
+});
+
+// [DS1112, same round] l33t inside "rosé", a l33t qualifier in another field, the small capitals F and Q, "-ies"
+// dishes, a lozenge pack in a parcel (no reviewer stands behind it), and a lotto ticket.
+describe('[§8 launch · DS1112] the fourth review', () => {
+  it.each(['R0sé 750ml', 'Ro$é 750ml', 'R0SÉ 750ml', '\uA730\u1D0F\u1D1C\u0280 \u029F\u1D0F\u1D0B\u1D0F' /* small-capital Four Loko */,
+    '\uA730\u026A\u0280\u1D07\u0299\u1D00\u029F\u029F 750ml' /* small-capital Fireball 750ml */, 'Lotto ticket', 'Lotto tickets'])('%s is refused', (name) => {
+    expect(verdict(name)).toMatchObject({ state: 'BANNED' });
+    expect(verdict('Party combo', { optionNames: ['Add', name] })).toMatchObject({ state: 'BANNED', field: 'option' });
+  });
+
+  it.each([['str0ng', 'strong'], ['5 p3rc3nt', '5 percent'], ['\uFF15%', '5%']])(
+    'a ginger beer whose description says %s is judged as one that says %s', (disguised, plain) => {
+      const plainVerdict = verdict('Ginger Beer', { description: plain }).state;
+      expect(plainVerdict).not.toBe('CLEAR');
+      expect(verdict('Ginger Beer', { description: disguised }).state).toBe(plainVerdict);
+    },
+  );
+
+  it.each(['Hennessy curries', 'Captain Morgan curries', 'Jack Daniels curries', 'Campari curries'])('%s is held, not refused (a dish)', (name) => {
+    expect(verdict(name).state).toBe('WAITING');
+  });
+
+  it('a parcel of lozenges by the pack is refused; the catalogue still holds it for a person (#58)', () => {
+    for (const parcel of ['Halls 9 pack', 'Halls 20s', 'Halls 20 tabs', 'Bayer 30 tabs', 'Banks 6 pack']) expect(parcelProhibited(parcel), parcel).not.toBeNull();
+    for (const parcel of ['Halls', 'Banks birthday card', 'Bounty 2 pack', 'Davidoff Cool Water 125ml', 'Tiger brand shirt', null]) {
+      expect(parcelProhibited(parcel), String(parcel)).toBeNull();
+    }
+    expect(verdict('Halls 9 pack').state).toBe('WAITING');
+  });
+
+  // [DS1260 S2] A descriptor between the brand and its measure does not make a parcel something else.
+  it.each(['Halls Honey Lemon 9 pack', 'Halls Mentholyptus 9 pack', 'Camel Blue 20 pack', 'Newport Menthol 20s', 'Kool Milds 20s',
+    'Winston Blue 20 pack', 'Velo Citrus 20 pouches', 'Bayer One A Day 100 tablets', 'Tiger Crystal 6 pack'])('a parcel of %s is refused', (parcel) => {
+    expect(parcelProhibited(parcel)).not.toBeNull();
+  });
+  it.each(['Bounty paper towels 2 pack', 'Davidoff Cool Water 125ml', 'Tiger prawns 500g', 'Banks birthday card', 'Kool Aid packets'])(
+    'a parcel of %s is carried (no measure of its kind)', (parcel) => {
+      expect(parcelProhibited(parcel)).toBeNull();
+    },
+  );
+  it.each(['Camel Blue 20 pack', 'Kool Aid 2 pack', 'Tiger prawns 2 pack'])('%s in the catalogue is held for a person, never refused', (name) => {
+    expect(verdict(name).state).toBe('WAITING');
+  });
+
+  // [DS1261 S2] Words after the measure, or before the brand, do not make a parcel something else either: the brand
+  // anywhere in a part, with a measure of its kind anywhere after it, is the goods where no person reviews the text.
+  it.each(['Newport Menthol 20s king size', 'Camel Blue 20 pack king size', 'Camel Blue 20 pack sealed', 'Camel Blue 20 pack fresh',
+    'Winston Blue 20 pack box', 'Camel Blue 20 pack sleeve', 'Velo Citrus 20 pouches mint', 'Halls Honey Lemon 9 pack sugar free',
+    'Bayer One A Day 100 tablets chewable', 'Bayer 100 tablets box', 'Camel 20s for my uncle', 'Banks 6 pack and chips',
+    '1 Camel Blue 20 pack', 'Pack of Camel 20s', 'Two Newport 20s', 'Uncle s Camel 20s', 'Box of Banks 6 pack', 'Gift Halls 9 pack',
+    'My Bayer 30 tabs', 'Some Bayer One A Day 100 tablets', 'Gift of Bounty 12 year old', 'Empty Camel 20s', 'Gift Halls 12ct'])('a parcel of %s is refused', (parcel) => {
+    expect(parcelProhibited(parcel)).not.toBeNull();
+  });
+  it.each(['Bounty paper towels 2 pack white', 'Davidoff Cool Water 125ml gift', 'Tiger prawns 500g frozen', 'Banks birthday card',
+    'Shoes for Ron', 'Halls', 'A Bounty bar'])('a parcel of %s is carried (no measure of its kind)', (parcel) => {
+    expect(parcelProhibited(parcel)).toBeNull();
+  });
+  // A count before the brand is not a different product: "1 Camel 20s" is judged as "Camel 20s", as a name and an option.
+  it.each(['1 Camel 20s', 'Two Newport 20s', '1 Banks 6 pack', '2x Stag 12 pack', 'A Corona 330ml', '1 XM Gold', 'Twenty Camel 20s'])('%s is refused like the same words without the count', (name) => {
+    expect(verdict(name).state).toBe('BANNED');
+    expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('BANNED');
+  });
+  // The catalogue holds a brand that is not the first word when a measure of its kind follows it; it is never listed unseen.
+  it.each(['Pack of Camel 20s', 'Box of Banks 6 pack', 'Gift Halls 9 pack', 'Uncle s Camel 20s', 'Camel Blue 20 pack king size', '2 Tiger prawns 2 pack',
+    'Gift of Bounty 12 year old', 'Empty Camel 20s', '1 Camel', 'Two Banks', 'A Tiger'])(
+    '%s in the catalogue is held for a person', (name) => {
+      expect(verdict(name).state).toBe('WAITING');
+      expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('WAITING');
+    },
+  );
+  it.each(['Shoes for Ron', 'Cake for the Banks family', 'Paper towels for Ron'])('%s stays clear (a brand-first word that is not first, with no measure)', (name) => {
+    expect(verdict(name).state).toBe('CLEAR');
+  });
+
+  // [DS1263 S2/S3] A parcel is read whole: the brand and its measure in different parts ("Camel, 20s", "Newport (20s)"),
+  // in either order ("20s Camel"), a count right after a tobacco or medicine brand ("Camel 20"), or a measure written
+  // with a dollar sign or the letter o ("20$", "2o"). The catalogue holds the same shapes for a person.
+  it.each(['Camel - 20s', 'Camel, 20s', 'Newport (20s)', 'Bayer / 30 tabs', 'Velo|20 pouches', 'Camel 20$', 'Camel 2o', 'Camel 2os',
+    'Camel 20', 'Camel - 20', '20s Camel', '20s of Camel', '20$ Camel', '6 pack Banks', '30 tabs Bayer', 'Bayer 30',
+    // A brand in one part and a measure in another is the same shape, whatever the brand word means there. (S4: the
+    // sender is told to describe it in other words.)
+    'Gift for Ron, 2 bottles of pepper sauce'])('a parcel of %s is refused', (parcel) => {
+    expect(parcelProhibited(parcel)).not.toBeNull();
+  });
+  it.each(['Bounty paper towels 2 pack', 'Bounty 2', 'Davidoff Cool Water 125ml', 'Tiger prawns 500g', 'Banks birthday card', '2 Tiger shirts',
+    'Tiger shirt size 12', 'Shoes for Ron', 'Banks 2 birthday cards'])('a parcel of %s is carried', (parcel) => {
+    expect(parcelProhibited(parcel)).toBeNull();
+  });
+  it.each(['Pack of Camel 20$', '20s Camel', '20s of Camel', '6 pack Banks', '30 tabs Bayer', 'Pack of Camel 2o'])('%s in the catalogue is held for a person', (name) => {
+    expect(verdict(name).state).toBe('WAITING');
+    expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('WAITING');
+  });
+
+  // [DS1264 S3] A count spelled out or written before a tobacco or medicine brand ("Camel twenty", "twenty Camel",
+  // "20 ct Camel"), digits of another script (Arabic-Indic, Persian, Devanagari), and a brand joined to its measure
+  // ("Camel20s", or with a zero-width space between) are read as the same goods.
+  it.each(['Camel twenty', 'twenty Camel', 'thirty Bayer', '20 Camel', '20 ct Camel', '20 pc Camel', '20 s Camel',
+    'Camel \u0662\u0660', '\u0662\u0660 Camel', 'Camel \u06F2\u06F0', 'Camel \u0968\u0966', 'Camel20s', 'Camel\u200B20s', '12 s Stag'])(
+    'a parcel of %s is refused', (parcel) => {
+      expect(parcelProhibited(parcel)).not.toBeNull();
+    },
+  );
+  it.each(['twenty Camel', 'thirty Bayer', '20 ct Camel'])('%s in the catalogue is held for a person', (name) => {
+    expect(verdict(name).state).toBe('WAITING');
+    expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('WAITING');
+  });
+  // [joined spellings, 14 Oct] A brand joined to its pack is read apart, so it is the same goods as "Camel 20s":
+  // refused, no longer only held (stricter than before).
+  it.each(['Camel20s', 'Camel\u200B20s'])('%s in the catalogue is refused, like "Camel 20s"', (name) => {
+    expect(verdict(name).state).toBe('BANNED');
+    expect(verdict('Party combo', { optionNames: ['Add', name] }).state).toBe('BANNED');
+    expect(verdict('Camel 20s').state).toBe('BANNED');
+  });
+  it.each(['2 Tiger shirts', 'Tiger shirt size 12', 'Banks 2 birthday cards', 'Bounty 2', 'Twenty birthday cards for Ron'])(
+    'a parcel of %s is carried (an alcohol brand is not counted by a bare number)', (parcel) => {
+      expect(parcelProhibited(parcel)).toBeNull();
+    },
+  );
+});
+
+// ── Follow-ups, 14 Oct 2026 (after #1678) ─────────────────────────────────────
+
+// [DS1265 S4] A count spelled in the teens, or seventy to ninety, before a tobacco or medicine brand, is a count.
+describe('[§8 · DS1265 S4] every spelled count is a count', () => {
+  it.each(['Fifteen Camel', 'Thirteen Newport', 'Nineteen Bayer', 'Seventeen Kool', 'Sixteen Winston', 'Fourteen Halls', 'Camel fifteen'])(
+    '%s in the catalogue is held for a person, and refused as a parcel', (text) => {
+      expect(verdict(text).state).toBe('WAITING');
+      expect(verdict('Party combo', { optionNames: ['Add', text] }).state).toBe('WAITING');
+      expect(parcelProhibited(text)).not.toBeNull();
+    },
+  );
+  it.each(['Fifteen Camel 20s', 'Seventy Camel 20s', 'Ninety Newport 20s', 'Eighty Banks 6 pack', 'Eleven Camel 20s'])(
+    '%s is refused, like "Two Newport 20s"', (text) => {
+      expect(verdict(text).state).toBe('BANNED');
+      expect(verdict('Party combo', { optionNames: ['Add', text] }).state).toBe('BANNED');
+      expect(parcelProhibited(text)).not.toBeNull();
+    },
+  );
+  it.each(['Fifteen birthday cards', 'Seventy shirts', 'Nineteen roses'])('%s stays ordinary', (text) => {
+    expect(verdict(text).state).toBe('CLEAR');
+    expect(parcelProhibited(text)).toBeNull();
+  });
+});
+
+// [joined spellings] A word joined to its measure ("Rum750ml") or to the next word where the case changes
+// ("HennessyVS") read CLEAR: listed, shown, sold, and carried as a parcel. Each is read apart now too.
+describe('[§8 · joined spellings] words written together are read apart', () => {
+  it.each(['Rum750ml', 'Vodka1L', 'Hennessy700ml', 'Beer6pack', 'Heineken6pack', 'Heinekens6pack', 'Heineken330ml', 'Heineken0.0',
+    'Marlboro20s', 'Panadol500mg', 'Cigarettes20s', 'Gin1L', 'Wine750ml', 'Advil200mg', 'Vape5000puffs', 'El Dorado12yr',
+    'HennessyVS', 'XMRum', 'RumBottle', '750mlRum', '6packBeer', 'SmirnoffIce', 'H3nn3ssyVS', 'Marlb0r020s', 'RUMBottle'])(
+    '%s is refused as an item, an option and a parcel', (text) => {
+      expect(verdict(text).state).toBe('BANNED');
+      expect(verdict('Party combo', { optionNames: ['Add', text] }).state).toBe('BANNED');
+      expect(parcelProhibited(text)).not.toBeNull();
+    },
+  );
+  // Read apart only when every part is a word, an acronym or a measure: a code or a random reference is never carved
+  // into a banned fragment ("rX", "Rx4", "Xm"), which would hold ordinary listings by chance.
+  it.each(['Shop rXLsF64O', 'Test Vendor Rx4ypN', 'XmAGl70nFB Store', 'Item KD7WrmBhLqTabYAeXk-0B', 'bHDpWFjrNz Store', 'Item vOs2owXUoGAvsDPcRxD9N',
+    'Shop rXKs1MUM', 'rxRmgbmvpo Store'])('the code %s stays ordinary', (text) => {
+    expect(verdict(text).state).toBe('CLEAR');
+  });
+  it.each(['RumCake', 'VodkaShot', 'GasMask'])('%s is held for a person, and refused as a parcel', (text) => {
+    expect(verdict(text).state).toBe('WAITING');
+    expect(parcelProhibited(text)).not.toBeNull();
+  });
+  it.each(['7Up 2L', 'iPhone 15', 'PlayStation5', 'Coke2L', 'Pepsi1.5L', 'Sprite500ml', 'KitKat4pack', 'WD40', 'B12 vitamins', 'MacBook Air',
+    'PowerAde 500ml', 'Mp3 player', 'A1 sauce', 'V8 juice', 'BirthdayCard', 'Malta 330ml',
+    // the soft-drink and hardware exemptions still cut when the words are joined
+    'GingerBeer 2L', 'RootBeer', 'GingerAle', 'WineGums', 'FuelFilter'])('%s stays ordinary', (text) => {
+    expect(verdict(text).state).toBe('CLEAR');
+    expect(parcelProhibited(text)).toBeNull();
+  });
+});
+
+// [owner 14 Oct] Store names about banned goods ("X Liquor Store", "Rum Shop", a pharmacy name) are HELD for a person
+// automatically. A store is never BANNED by its words: a surname or a place is a brand as often as not.
+describe('[§8 · store names] a store\'s own words are judged like an item\'s, and only ever hold it', () => {
+  it.each([
+    [{ name: 'Ron\'s Liquor Store' }, 'ALCOHOL', 'name', 'liquor'],
+    [{ name: 'Rum Shop' }, 'ALCOHOL', 'name', 'rum'],
+    [{ name: 'Bourda Pharmacy & Beauty' }, 'MEDICINE', 'name', 'pharmacy'],
+    [{ name: 'Vape Lounge' }, 'VAPES', 'name', 'vape'],
+    [{ name: 'GasStation Express' }, 'LPG', 'name', 'gas'],
+    // a personal name, a surname or a place that is also a brand: held for a person, never banned
+    [{ name: 'Ron\'s Variety' }, 'ALCOHOL', 'name', 'ron'],
+    [{ name: 'Jameson\'s Hardware' }, 'ALCOHOL', 'name', 'jameson'],
+    [{ name: 'Carib Glassworks' }, 'ALCOHOL', 'name', 'carib'],
+    // the description, a tag or a cuisine label
+    [{ name: 'Corner Shop', description: 'Cold beer and snacks' }, 'ALCOHOL', 'description', 'beer'],
+    [{ name: 'Corner Shop', tags: ['Groceries', 'Liquor'] }, 'ALCOHOL', 'tags', 'liquor'],
+    [{ name: 'Corner Shop', cuisineTypes: ['Wines'] }, 'ALCOHOL', 'tags', 'wines'],
+    // disguised and joined, as an item's are
+    [{ name: 'R\u200Bum Shop' }, 'ALCOHOL', 'name', 'rum'],
+    [{ name: 'RumShop GY' }, 'ALCOHOL', 'name', 'rum'],
+  ] as const)('%o is held: %s, the word in its %s', (store, prohibitedClass, field, term) => {
+    expect(storeWordHit(store)).toEqual({ prohibitedClass, field, term });
+    expect(checkStore(store)).toMatchObject({ state: 'WAITING', prohibitedClass, field, term });
+  });
+
+  it('ordinary stores stay clear, and so does every store of the App Store review pack', () => {
+    for (const name of ['Sweet Corner Bakery', 'Georgetown Hardware and Lumber Supplies Ltd', 'Shanta\'s Roti Shop', 'Bar and Grill', 'Sports Bar']) {
+      expect(storeWordHit({ name }), name).toBeNull();
+    }
+    expect(REVIEW_PACK_STORES.length).toBeGreaterThan(0);
+    for (const s of REVIEW_PACK_STORES) {
+      expect(storeWordHit({ name: s.name, description: s.description, tags: s.tags, cuisineTypes: s.cuisineTypes }), s.name).toBeNull();
+    }
+  });
+
+  it('approval is bound to the exact words: a rename, a new description or a new tag brings the check back', () => {
+    const store = { name: 'Rum Shop', description: 'Cakes and pastries', tags: ['Bakery'] };
+    const hash = storeWordsHash(store);
+    expect(checkStore({ ...store, approvedHash: hash }).state).toBe('APPROVED');
+    expect(checkStore({ ...store, approvedHash: null }).state).toBe('WAITING');
+    for (const changed of [{ ...store, name: 'Rum Shop 2' }, { ...store, description: 'Cakes' }, { ...store, tags: ['Bakery', 'Drinks'] }]) {
+      expect(checkStore({ ...changed, approvedHash: hash }).state).toBe('WAITING');
+    }
+    // the item and store fingerprints never collide
+    expect(hash).not.toBe(judgedWordsHash({ name: store.name, description: store.description }));
+  });
+
+  it('a held store holds every item it sells; a certain ban stays a ban; approving an item never shows it while its store waits', () => {
+    const held = checkStore({ name: 'Rum Shop' });
+    expect(checkItem({ name: 'Coconut bread', store: held })).toEqual({ state: 'WAITING', prohibitedClass: 'ALCOHOL', field: 'store', term: 'rum' });
+    expect(checkItem({ name: 'Hennessy VS', store: held }).state).toBe('BANNED');
+    const cake = { name: 'Rum cake' };
+    expect(checkItem({ ...cake, reviewApprovedHash: judgedWordsHash(cake) }).state).toBe('APPROVED');
+    expect(checkItem({ ...cake, reviewApprovedHash: judgedWordsHash(cake), store: held })).toMatchObject({ state: 'WAITING', field: 'store' });
+    // once the store is approved, an item is judged by its own words again
+    const approved = checkStore({ name: 'Rum Shop', approvedHash: storeWordsHash({ name: 'Rum Shop' }) });
+    expect(checkItem({ name: 'Coconut bread', store: approved }).state).toBe('CLEAR');
+    expect(checkItem({ ...cake, store: approved }).state).toBe('WAITING');
+    expect(checkItem({ name: 'Coconut bread', store: { state: 'CLEAR' } }).state).toBe('CLEAR');
+    expect(isHidden(checkItem({ name: 'Coconut bread', store: held }))).toBe(true);
+  });
+});

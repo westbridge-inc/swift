@@ -218,3 +218,7 @@ export interface OrderProjection {
 export interface LegacyOrderProjection extends Omit<OrderProjection, 'vertical'> {
   vertical?: undefined;
 }
+
+/** Persisted order-line substitution states, shared by every client. */
+export const SUBSTITUTION_STATUSES = ['NONE', 'PENDING', 'APPROVED', 'REJECTED', 'REFUNDED'] as const;
+export type SubstitutionStatus = (typeof SUBSTITUTION_STATUSES)[number];

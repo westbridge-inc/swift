@@ -9,6 +9,7 @@ import { acceptClockLabel } from '../../../mobile/src/modules/vendor/acceptClock
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import { acceptHeldForPayment, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 import { canAttestPayment } from '@/lib/vendor-hub';
+import { mmgDisputePaused } from '@/lib/mmg-dispute';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1, web dashboard flavor): the moment
@@ -53,7 +54,8 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
   // Detect unseen PENDING orders between polls. The FIRST poll only baselines —
   // a dashboard opened onto an old queue must not scream about stale orders.
   useEffect(() => {
-    const pending = orders.filter((o) => (o.status || '').toUpperCase() === 'PENDING');
+    // [Item 10] A disputed MMG order is paused: nothing to accept, no chime.
+    const pending = orders.filter((o) => (o.status || '').toUpperCase() === 'PENDING' && !mmgDisputePaused(o));
     if (seen === null) {
       setSeen(new Set(pending.map((o) => o.id)));
       return;
@@ -69,7 +71,7 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
   // customer cancelled it, another device answered it, the no-response timer
   // reaped it — leaves the takeover: the chime is for an open decision.
   useEffect(() => {
-    const settled = new Set(orders.filter((o) => (o.status || '').toUpperCase() !== 'PENDING').map((o) => o.id));
+    const settled = new Set(orders.filter((o) => (o.status || '').toUpperCase() !== 'PENDING' || mmgDisputePaused(o)).map((o) => o.id));
     if (settled.size === 0) return;
     setQueue((q) => (q.some((o) => settled.has(o.id)) ? q.filter((o) => !settled.has(o.id)) : q));
   }, [orders]);

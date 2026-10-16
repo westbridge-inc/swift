@@ -1,5 +1,5 @@
 import { screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import NewOrderTakeover from './NewOrderTakeover';
 import { mockApi, renderWithQuery, stubAudioContext } from '@/test/test-utils';
 import { wireVendorOrder } from '@/test/vendor-wire-fixtures';
@@ -118,5 +118,33 @@ describe('new-order takeover', () => {
       expect(control.className).toContain('min-h-11');
     }
     expect(accept.parentElement?.className).toContain('flex-col');
+  });
+});
+
+// [Item 10] The takeover asks a store to accept: never for an order whose MMG
+// payment is disputed (the server refuses the accept).
+describe('MMG dispute during a new-order takeover', () => {
+  beforeEach(() => { stubAudioContext(); });
+  it('does not offer acceptance of a newly arrived disputed order', async () => {
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder({ paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-07T12:00:00.000Z' }))]} />);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull());
+  });
+  it('a newly arrived disputed order never starts the chime', async () => {
+    const created = vi.fn();
+    const Base = (globalThis as unknown as { AudioContext: new () => object }).AudioContext;
+    (globalThis as unknown as { AudioContext: unknown }).AudioContext = class extends Base { constructor() { super(); created(); } };
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder({ paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-07T12:00:00.000Z' }))]} />);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(created).not.toHaveBeenCalled();
+  });
+  it('withdraws a queued acceptance when the next poll reports a dispute', async () => {
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    const order = normalizeVendorOrder(wireVendorOrder({ paymentMethod: 'MOBILE_MONEY' }));
+    rerender(<NewOrderTakeover orders={[order]} />);
+    await screen.findByRole('button', { name: 'Accept' });
+    rerender(<NewOrderTakeover orders={[{ ...order, mmgClaimMismatchAt: '2026-10-07T12:00:00.000Z' } as typeof order]} />);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull());
   });
 });

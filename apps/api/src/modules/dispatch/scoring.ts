@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------------------
-// Dispatch candidate scoring — a pure function: proximity dominates, then track
-// record. Lower score = offered first. No I/O, no randomness, no AI —
+// Dispatch candidate scoring — a pure function: proximity dominates, then load.
+// Lower score = offered first. [R25] Neither a rating nor an acceptance record moves
+// rank (recorded decisions below). No I/O, no randomness, no AI —
 // unit-testable in isolation. The WEIGHT PROFILE is per-pool: a delivery rider a
 // little farther but reliable is fine, but a TAXI rider WATCHES the assigned car
 // move on the map — a farther car accepting while a nearer one idles reads as
@@ -48,11 +49,27 @@ const WEIGHTS_BY_PROFILE: Record<DispatchProfile, Weights> = {
  * weights above and nothing else — `dispatchWeights(profile, true)` IS those weights, which
  * is how the tests prove this switch is live rather than decorative.
  */
-export function dispatchWeights(profile: DispatchProfile, affectsDispatch: boolean = RATING_AFFECTS_DISPATCH): Weights {
+/**
+ * [Owner ruling 15 Oct 2026 ~05:40Z · R25, research D13: contractor status] Declining or cancelling an offer
+ * never costs a partner anything: no strike and no lower place in the offer order. So a mover's acceptance
+ * record (still recorded and shown to them) does not move dispatch rank: its share is redistributed across the
+ * remaining factors exactly as the rating's is. A recorded decision like RATING_AFFECTS_DISPATCH; flipping it
+ * needs a new owner ruling.
+ */
+export const ACCEPTANCE_AFFECTS_DISPATCH = false;
+
+export function dispatchWeights(
+  profile: DispatchProfile,
+  affectsDispatch: boolean = RATING_AFFECTS_DISPATCH,
+  acceptanceAffectsDispatch: boolean = ACCEPTANCE_AFFECTS_DISPATCH,
+): Weights {
   const w = WEIGHTS_BY_PROFILE[profile];
-  if (affectsDispatch) return w;
-  const rest = w.eta + w.acceptance + w.load;
-  return { eta: w.eta / rest, rating: 0, acceptance: w.acceptance / rest, load: w.load / rest };
+  const rating = affectsDispatch ? w.rating : 0;
+  const acceptance = acceptanceAffectsDispatch ? w.acceptance : 0;
+  // The terms left in still describe a whole (sum 1), so every score stays comparable; with both decisions
+  // on this is exactly the tuned table above.
+  const whole = w.eta + rating + acceptance + w.load;
+  return { eta: w.eta / whole, rating: rating / whole, acceptance: acceptance / whole, load: w.load / whole };
 }
 
 /** ETAs beyond this are treated as "max bad" so one outlier can't skew ranks */

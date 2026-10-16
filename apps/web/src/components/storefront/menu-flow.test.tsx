@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +7,7 @@ import { CustomerSessionProvider, type CustomerSession } from '@/components/cust
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 import type { StorefrontDetail } from '@/lib/api';
+import { axeViolations } from '@/test/axe';
 
 // ---------------------------------------------------------------------------
 // [W6] The one store page's menu: one tap for an item that needs no choice,
@@ -67,7 +68,7 @@ async function start(options: { item?: string; wrap?: (_node: ReactNode) => Reac
 beforeAll(() => loadItemSheet());
 
 beforeEach(() => {
-  sessionStorage.clear();
+  sessionStorage.clear(); localStorage.clear();
   nav.push.mockReset();
   signedIn = true;
   vi.restoreAllMocks();
@@ -97,7 +98,7 @@ describe('[W6] one tap or Choose', () => {
     expect(card.textContent).toContain('$1,400');
     expect(within(screen.getByRole('button', { name: 'Add Pumpkin soup' }).closest('article')!).queryByText('From')).toBeNull();
     fireEvent.click(choose);
-    expect(screen.getByRole('dialog', { name: 'Curry & roti' })).toBeTruthy();
+    expect(await screen.findByRole('dialog', { name: 'Curry & roti' })).toBeTruthy();
     expect(customer.addToCart).not.toHaveBeenCalled();
   });
 
@@ -111,7 +112,8 @@ describe('[W6] one tap or Choose', () => {
     const customise = screen.getByRole('button', { name: 'Choose options for Pumpkin soup' }) as HTMLButtonElement;
     await waitFor(() => expect(customise.disabled).toBe(false));
     fireEvent.click(customise);
-    expect(screen.getByRole('dialog', { name: 'Pumpkin soup' })).toBeTruthy();
+    // The item sheet's code loads on demand on this branch.
+    expect(await screen.findByRole('dialog', { name: 'Pumpkin soup' })).toBeTruthy();
   });
 
   it('opens the choices, already set to the store’s own pick, when an optional choice comes pre-selected — never adds it silently or drops it', async () => {
@@ -140,7 +142,7 @@ describe('[W6] the item sheet', () => {
   it('blocks the Add until every required choice is made — nothing is sent before the server’s validator accepts it', async () => {
     await start();
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
-    const sheet = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
     const add = within(sheet).getByRole('button', { name: /^Add to order/ });
     fireEvent.click(add);
     expect((await within(sheet).findByRole('alert')).textContent).toBe('Choose an option for Size.');
@@ -158,7 +160,7 @@ describe('[W6] the item sheet', () => {
   it('prices the item plus each chosen choice, times the labelled quantity, and sends that quantity', async () => {
     await start();
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
-    const sheet = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /Large/ }));
     fireEvent.click(within(sheet).getByRole('radio', { name: /Dhal puri/ }));
     expect(within(sheet).getByRole('button', { name: /^Add to order/ }).textContent).toContain('$1,800');
@@ -175,7 +177,7 @@ describe('[W6] the item sheet', () => {
     live([soup, { ...curry, optionGroups: [SIZE, EXTRAS] }]);
     await start();
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
-    const sheet = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /Regular/ }));
     fireEvent.click(within(sheet).getByRole('checkbox', { name: /Egg/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
@@ -193,7 +195,7 @@ describe('[W6] the item sheet', () => {
     live([soup, { ...curry, optionGroups: [SIZE, { ...ROTI, options: ROTI.options.map((choice) => ({ ...choice, isAvailable: false })) }] }]);
     await start();
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
-    const sheet = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
     expect(within(sheet).queryByRole('radio', { name: /Dhal puri/ })).toBeNull();
     fireEvent.click(within(sheet).getByRole('radio', { name: /Regular/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
@@ -228,13 +230,27 @@ describe('[W6] the item sheet', () => {
     expect(customer.addToCart).not.toHaveBeenCalled();
   });
 
+  it('[R3 · CAA s.70] the store page carries the seller block from the server render; an older API without one shows none', async () => {
+    const seller = { legalName: 'Fixture Trader trading as Sample Kitchen', address: 'Fixture street', phone: null,
+      payment: { cash: true as const, storeMmg: false }, refundRule: null,
+      statutoryRights: "This does not affect your rights under Guyana's Consumer Affairs Act 2011 to return goods or get a refund from the business." };
+    const view = render(<StorefrontExperience store={{ ...store(), seller }} returnPath="/store/sample-kitchen" />);
+    const block = screen.getByRole('region', { name: 'Seller information' });
+    expect(within(block).getByText('Fixture Trader trading as Sample Kitchen')).toBeTruthy();
+    expect(within(block).getAllByText('Ask the store')).toHaveLength(2);
+    expect(within(block).getByText(seller.statutoryRights)).toBeTruthy();
+    view.unmount();
+    render(<StorefrontExperience store={store()} returnPath="/store/sample-kitchen" />);
+    expect(screen.queryByRole('region', { name: 'Seller information' })).toBeNull();
+  });
+
   it('traps Tab, makes the page behind inert, closes on Escape and returns focus to the button that opened it', async () => {
     render(<main><StorefrontExperience store={store()} returnPath="/store/sample-kitchen" /></main>);
     const trigger = screen.getByRole('button', { name: 'Choose options for Curry & roti' });
     await waitFor(() => expect((trigger as HTMLButtonElement).disabled).toBe(false));
     trigger.focus();
     fireEvent.click(trigger);
-    const dialog = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const dialog = await screen.findByRole('dialog', { name: 'Curry & roti' });
     expect(document.querySelector('main')?.closest('[inert]')).toBeTruthy();
     const close = within(dialog).getByRole('button', { name: 'Close item options' });
     await waitFor(() => expect(document.activeElement).toBe(close));
@@ -284,33 +300,48 @@ describe('[W6] the menu around the sheet', () => {
 });
 
 describe('[W6] a guest at Add', () => {
-  it('is sent to sign in only after the app tried to renew the session, with the chosen item kept for the way back', async () => {
+  it('fills the basket as a guest and only renews the session at Place order', async () => {
     signedIn = false;
     const ensureSignedIn = vi.fn(async () => false);
     await start({ wrap: (node) => <CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}</CustomerSessionProvider> });
     fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
-    const sheet = screen.getByRole('dialog', { name: 'Curry & roti' });
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /Large/ }));
     fireEvent.click(within(sheet).getByRole('radio', { name: /Paratha/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: /^Add to order/ }));
-    await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/login?next=%2Fstore%2Fsample-kitchen'));
-    expect(ensureSignedIn).toHaveBeenCalledOnce();
-    expect(JSON.parse(sessionStorage.getItem('swift_storefront_add')!)).toMatchObject({
-      storeSlug: 'sample-kitchen', itemId: 'curry', selectedOptions: { size: ['large'], roti: ['paratha'] },
+    await waitFor(() => expect(localStorage.getItem('swift_guest_basket_v1')).not.toBeNull());
+    expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1')!).lines[0]).toMatchObject({
+      vendorId: 'menu-store', itemId: 'curry', unitPrice: 1900, selectedOptions: { size: 'large', roti: 'paratha' },
     });
-    expect(customer.addToCart).not.toHaveBeenCalled();
+    expect(ensureSignedIn).not.toHaveBeenCalled(); expect(nav.push).not.toHaveBeenCalled();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
+    // [W4] The code brings the customer to the one checkout, where the basket is uploaded.
+    await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/login?next=%2Fcheckout'));
+    expect(ensureSignedIn).toHaveBeenCalledOnce(); expect(customer.addToCart).not.toHaveBeenCalled();
   });
 
-  it('whose session the app renews stays here: the cart loads and the chosen item reopens, still not added', async () => {
+  it('tries the refresh cookie at Place order without silently placing an order', async () => {
     signedIn = false;
     const ensureSignedIn = vi.fn(async () => { signedIn = true; return true; });
     await start({ wrap: (node) => <CustomerSessionProvider value={shellSession(ensureSignedIn)}>{node}</CustomerSessionProvider> });
     fireEvent.click(screen.getByRole('button', { name: 'Add Pumpkin soup' }));
-    await waitFor(() => expect(customer.getCart).toHaveBeenCalled());
-    expect(await screen.findByRole('dialog', { name: 'Pumpkin soup' })).toBeTruthy();
-    expect(nav.push).not.toHaveBeenCalled();
-    expect(customer.addToCart).not.toHaveBeenCalled();
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Add to order/ })); });
-    await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: 'menu-store', itemId: 'soup', quantity: 1, selectedOptions: {} }));
+    expect(ensureSignedIn).not.toHaveBeenCalled();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Place order' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Place order' }));
+    // [W4] A renewed session goes straight to the one checkout; nothing is ordered or added here.
+    await waitFor(() => expect(nav.push).toHaveBeenCalledExactlyOnceWith('/checkout'));
+    expect(ensureSignedIn).toHaveBeenCalledOnce(); expect(customer.addToCart).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem('swift_guest_basket_v1')!).lines[0].itemId).toBe('soup');
+  });
+});
+
+// [Row 111 · W8] The item sheet (choices, quantity, Add) is a dialog a keyboard and a screen reader can use.
+describe('[W8] the item sheet is accessible', () => {
+  it('the open sheet has no accessibility violations axe can find', async () => {
+    await start();
+    fireEvent.click(screen.getByRole('button', { name: 'Choose options for Curry & roti' }));
+    const sheet = await screen.findByRole('dialog', { name: 'Curry & roti' });
+    expect(await axeViolations(sheet)).toEqual([]);
   });
 });

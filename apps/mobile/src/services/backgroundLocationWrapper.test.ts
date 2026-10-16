@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import { moverLocationAccepted } from '../../../api/src/contracts/mover-location';
 
 const mocks = vi.hoisted(() => {
   const session: AuthSessionSnapshot = {
@@ -29,8 +30,9 @@ const mocks = vi.hoisted(() => {
     }),
     hasStartedLocationUpdatesAsync: vi.fn().mockResolvedValue(false),
     stopLocationUpdatesAsync: vi.fn().mockResolvedValue(undefined),
-    driverLocation: vi.fn().mockResolvedValue({ data: { data: { accepted: true } } }),
-    riderLocation: vi.fn().mockResolvedValue({ data: { data: { accepted: true } } }),
+    // The API's real accepted reply (contracts/mover-location.ts), never an invented shape.
+    driverLocation: vi.fn().mockResolvedValue({ data: { success: true, data: { accepted: true } } }),
+    riderLocation: vi.fn().mockResolvedValue({ data: { success: true, data: { accepted: true } } }),
     invalidateQueries: vi.fn().mockResolvedValue(undefined),
   };
 });
@@ -84,7 +86,7 @@ beforeEach(() => {
     mocks.state.persisted = null;
   });
   mocks.hasStartedLocationUpdatesAsync.mockResolvedValue(false);
-  mocks.driverLocation.mockResolvedValue({ data: { data: { accepted: true } } });
+  mocks.driverLocation.mockResolvedValue({ data: moverLocationAccepted() });
 });
 
 describe('backgroundLocation Expo wrapper', () => {

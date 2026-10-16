@@ -158,7 +158,7 @@ describe('[W6] the item sheet is not in the store page’s first load', () => {
     const orderPanel = document.getElementById('checkout')!;
     await waitFor(() => expect(orderPanel.textContent).toContain('1× Curry & roti'));
     report(orderPanel, false);
-    const dock = await screen.findByRole('link', { name: /View your order/ });
+    const dock = await screen.findByRole('link', { name: /^Checkout · 1 item/ });
     // The render that opens the sheet takes the floating button away. The
     // sheet's code lands right then, before React runs that render's effects.
     const watcher = new MutationObserver(() => { if (!dock.isConnected) { watcher.disconnect(); gate.release(); } });

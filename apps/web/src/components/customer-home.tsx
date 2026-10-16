@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
-import { CircleCheck, ChevronDown, MapPin, Search, X } from 'lucide-react';
+import { CircleCheck, Search, X } from 'lucide-react';
 import { getAddresses, getHome, getPublicHome, type HomeFeed, type PopularItem, type Vendor } from '@/lib/customer';
 import { BROWSE_STALE_MS, fromPage, homeFeedKey, type GuestRead } from '@/lib/browse-keys';
 import { isHomeFeed } from '@/lib/app-rules';
@@ -17,6 +17,12 @@ import { Modal } from '@/components/modal';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
 import { EmptyNote, ItemCard, SectionHead, VendorCard, VendorHeroCard, VendorSquareCard, VENDOR_GRID } from '@/components/order-ui';
+import { PRICE_PROMISE_BODY, PRICE_PROMISE_TITLE } from '@/lib/price-promise';
+
+// [owner, staging] Home's one place control: delivery or pickup together with
+// where (the phone app's Home has one location pill). Its code loads with the
+// page's other split code, as the app frame's bar does on the other pages.
+const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
 
 /**
  * [Q7b · WEB-REDESIGN] HOME — what swiftgy.com opens on, in the owner's
@@ -35,7 +41,7 @@ import { EmptyNote, ItemCard, SectionHead, VendorCard, VendorHeroCard, VendorSqu
 // says how a store's Swift code opens on the web.
 const SERVICES: { key: string; label: string; href?: string; sub: string; pictogram: PictogramName }[] = [
   { key: 'food', label: 'Food', href: '/order/browse?type=RESTAURANT', sub: 'Restaurants & takeaway', pictogram: 'food' },
-  { key: 'groceries', label: 'Groceries', href: '/order/browse?type=SUPERMARKET', sub: 'Markets & pharmacies', pictogram: 'groceries' },
+  { key: 'groceries', label: 'Groceries', href: '/order/browse?type=SUPERMARKET', sub: 'Markets & corner shops', pictogram: 'groceries' },
   { key: 'taxi', label: 'Taxi', href: '/taxi', sub: 'Book in the Swift mobile app', pictogram: 'taxi' },
   { key: 'send', label: 'Send', href: '/courier', sub: 'A parcel across town', pictogram: 'send' },
   { key: 'services', label: 'Services', href: '/order/browse?type=SERVICE', sub: 'Book a local pro', pictogram: 'services' },
@@ -135,20 +141,19 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
   return (
     <div className="flex flex-col">
       <div className="flex items-center gap-3">
-        <DeliveryPoint
-          status={status}
-          saved={saved}
-          savedLoading={status === 'signed-in' && addresses.isPending}
-          nearMe={point !== null}
-          locating={locating}
-          onNearMe={() => void showNearMe()}
-        />
+        {status === 'checking' || (status === 'signed-in' && addresses.isPending) ? PLACE_LOADING : (
+          <Suspense fallback={PLACE_LOADING}>
+            {status === 'signed-in'
+              ? <OrderingContextBar inline deliverTo={saved ? [saved.addressLine1, saved.label].find(Boolean) ?? 'Your address' : null} addressHref="/order/location" />
+              : <OrderingContextBar inline nearMe={{ busy: locating, on: point !== null, find: () => void showNearMe() }} />}
+          </Suspense>
+        )}
         <div className="flex-1" />
         <span className="wide:hidden"><MoreButton open={more} onOpen={() => setMore(true)} /></span>
         {status === 'signed-in' ? (
           <Link href="/account" aria-label="Profile" className="rounded-full"><Avatar name={me.data?.name} /></Link>
         ) : status === 'guest' ? (
-          <Link href={signInPath('/')} className="sw-btn sw-btn-sm">Sign in</Link>
+          <Link href={signInPath('/')} className="sw-btn sw-btn-sm flex-none whitespace-nowrap">Sign in</Link>
         ) : null}
       </div>
       {locationError ? <p role="alert" className="mt-2 text-[13px] leading-[18px] text-[var(--swift-error)]">{locationError}</p> : null}
@@ -160,7 +165,6 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
         <p className="sr-only">Order food, groceries and more from businesses in {market} — you pay them directly, cash or MMG.</p>
         <Link
           href="/order/search"
-          prefetch={true}
           className={`mt-3 flex h-12 w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-[13px] font-medium leading-[18px] text-[var(--swift-muted-soft)] hover:border-[var(--swift-border-strong)] wide:max-w-[640px] ${PRESS}`}
         >
           <Search size={17} aria-hidden />
@@ -222,8 +226,10 @@ function HomeRails({ data }: { data: HomeFeed }) {
       <div className="sw-bleed sw-band mt-6 flex items-start gap-2 py-6">
         <CircleCheck size={16} className="mt-0.5 flex-none text-[var(--swift-success)]" aria-hidden />
         <div className="flex-1">
-          <p className="text-[15px] font-semibold leading-5">0% fees, always.</p>
-          <p className="mt-0.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">Swift never marks up your order — pay cash when it arrives.</p>
+          {/* The Explore page's promise, true in either mode: a delivery fee is never hidden by it. */}
+          {/* [Legal research A12] the research's price promise, true for delivery and pickup alike. */}
+          <p className="text-[15px] font-semibold leading-5">{PRICE_PROMISE_TITLE}</p>
+          <p className="mt-0.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">{PRICE_PROMISE_BODY}</p>
         </div>
       </div>
 
@@ -279,36 +285,7 @@ function withoutRepeats(first: Vendor[], rest: Vendor[]): Vendor[] {
   return [...first, ...rest].filter((vendor) => (seen.has(vendor.id) ? false : (seen.add(vendor.id), true)));
 }
 
-function DeliveryPoint({
-  status, saved, savedLoading, nearMe, locating, onNearMe,
-}: {
-  status: string;
-  saved: SavedAddress | null;
-  savedLoading: boolean;
-  nearMe: boolean;
-  locating: boolean;
-  onNearMe: () => void;
-}) {
-  const pill = `inline-flex min-h-8 max-w-full items-center gap-1 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-1 text-[13px] font-semibold leading-[18px] text-[var(--swift-ink)] hover:border-[var(--swift-border-strong)] ${PRESS}`;
-  if (status === 'checking' || savedLoading) {
-    return <span aria-hidden className="sw-skeleton inline-block h-8 w-48 rounded-full" />;
-  }
-  if (status === 'signed-in') {
-    return (
-      <Link href="/order/location" className={`${pill} min-w-0`}>
-        <MapPin size={14} className="flex-none" aria-hidden />
-        <span className="truncate">{saved ? [saved.addressLine1, saved.label].find(Boolean) ?? 'Your address' : 'Add a delivery address'}</span>
-        <ChevronDown size={15} className="flex-none text-[var(--swift-muted-soft)]" aria-hidden />
-      </Link>
-    );
-  }
-  return (
-    <button type="button" onClick={onNearMe} disabled={locating} className={`${pill} cursor-pointer disabled:opacity-60`}>
-      <MapPin size={14} className="flex-none" aria-hidden />
-      <span>{locating ? 'Finding you…' : nearMe ? 'Showing stores near you' : 'Show stores near me'}</span>
-    </button>
-  );
-}
+const PLACE_LOADING = <span aria-hidden className="sw-skeleton inline-block h-11 w-56 max-w-full rounded-full" />;
 
 function LiveOrder({ order }: { order: NonNullable<HomeFeed['activeOrder']> }) {
   const waiting = order.status === 'PENDING';

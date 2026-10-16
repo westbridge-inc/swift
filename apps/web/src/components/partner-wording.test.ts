@@ -3,17 +3,17 @@ import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // Owner ruling (8 Oct, legal): Swift holds no money for anyone, so no partner
-// screen may say "wallet", "top up" or speak of a money "balance". Prepaid
-// weekly-fee credit is "Fee paid ahead"; paying is "Pay weekly fee". This scans
+// screen may say "wallet", "top up" or speak of a money "balance". Money paid
+// before its week starts is named as the next weekly fee being paid (owner #62,
+// 14 Oct: never "paid ahead"); paying is "Pay weekly fee". This scans
 // what the partner consoles can put on screen (code comments are not screens).
 
 const SRC = join(__dirname, '..');
 const ROOTS = ['app/dashboard', 'app/portal', 'app/advertiser'];
 const FILES = ['components/console-shell.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx',
-  // The weekly-fee page every partner pays through, and its MMG words. (lib/card-fee.ts is
-  // byte-identical to the phone copy by census and still says "added to your balance" for a
-  // banked card payment: it has to be renamed in both apps together, so it is not scanned here.)
-  'components/weekly-fee.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts',
+  // The weekly-fee page every partner pays through, and its MMG and card words (lib/card-fee.ts
+  // is byte-identical to the phone copy by census; both now say "kept for your next weekly fee").
+  'components/weekly-fee.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts', 'lib/card-fee.ts',
   // Everything else a console draws: the new-order takeover, the Switch app
   // sheet, the error and notice blocks, and the API helpers whose messages
   // reach the screen.

@@ -3,9 +3,11 @@
 import { Fragment, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, fetchBillingEvents } from '@/lib/api';
+import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, setAsideSubscriptionCredit, recordSubscriptionRefundPaid, releaseSubscriptionRefund, fetchBillingEvents } from '@/lib/api';
+import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
 import { StatusPill, gyd } from '@/components/detail';
 import { askReason, reasonTooShort } from '@/lib/ask-reason';
+import { label } from '@/lib/labels';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -29,11 +31,39 @@ function BillingEvents({ id }: { id: string }) {
       {events.map((e: any) => (
         <div key={e.id} className="flex items-center gap-3 text-xs">
           <span className="text-[var(--muted)] w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
-          <span>{String(e.type ?? e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
+          <span>{e.type ? label('BillingEventType', e.type) : String(e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
           {e.amount != null && <span className="ml-auto font-medium">{gyd(e.amount)}</span>}
         </div>
       ))}
     </div>
+  );
+}
+
+const DONE_COPY = {
+  'set-aside': 'Set aside. Pay it now outside Swift, then record the payout here.',
+  paid: 'Payout recorded. The refund is complete.',
+  release: 'Returned to the credit. Nothing is set aside.',
+} as const;
+const QUEUED_COPY = {
+  'set-aside': 'Do not pay anything yet. Once a second admin approves, apply it from the approvals queue; the credit is then set aside and you pay it.',
+  paid: 'Payment reported. A second admin must approve its record in the approvals queue. Do not pay again or release this refund.',
+  release: 'Once a second admin approves, apply it from the approvals queue to return the money to the credit.',
+} as const;
+
+/** What happened to the last refund step on this row: done, queued for a
+ *  second admin (with the approval id), or refused with the server's words. */
+function RefundOutcome({ outcome }: { outcome: MoneyActionOutcome }) {
+  if (outcome.kind === 'error') return <p role="alert" className="text-xs text-red-500 mt-2">{outcome.message}</p>;
+  return (
+    <p role="status" className={`text-xs mt-2 ${outcome.kind === 'queued' ? 'text-amber-500' : 'text-[var(--muted)]'}`}>
+      {outcome.message}
+      {outcome.approvalId && (
+        <>
+          {' '}Approval {outcome.approvalId}.{' '}
+          <Link href="/approvals" className="underline">Open the approvals queue</Link>
+        </>
+      )}
+    </p>
   );
 }
 
@@ -74,7 +104,56 @@ export default function SubscriptionsPage() {
     onSuccess: invalidate,
   });
 
+  // [Owner ruling 2026-10-07] Refund the whole unused credit, in order: SET IT
+  // ASIDE (a second admin approves; nothing is paid before it is set aside),
+  // PAY it outside Swift, then RECORD THE PAYOUT with its reference (a second
+  // admin approves). RELEASE returns a set-aside that could not be paid.
+  // Every answer is shown: a money action answers 202 APPROVAL_REQUIRED, which
+  // apiFetch throws, so "queued" is read on the error path, never hidden.
+  const [refundOutcome, setRefundOutcome] = useState<Record<string, MoneyActionOutcome>>({});
+  const [reportedRefunds, setReportedRefunds] = useState<Record<string, boolean>>({});
+  const told = (id: string, outcome: MoneyActionOutcome) => setRefundOutcome((all) => ({ ...all, [id]: outcome }));
+  const refundStep = (step: 'set-aside' | 'paid' | 'release') => ({
+    onSuccess: (res: unknown, v: { id: string }) => {
+      const answer = res as { replayed?: boolean; data?: { refundSetAside?: number } };
+      const message = step === 'paid' && Number(answer.data?.refundSetAside ?? 0) > 0
+        ? answer.replayed
+          ? 'The earlier payout was already recorded. Credit is still set aside for another refund.'
+          : 'Payout recorded. Credit is still set aside for another refund.'
+        : DONE_COPY[step];
+      told(v.id, { kind: 'done', message });
+      invalidate();
+    },
+    onError: (e: unknown, v: { id: string; setAsideId?: string }) => {
+      const outcome = outcomeOfThrown(e);
+      // [DS1122 S3] Remembered per set-aside: a later set-aside starts clean.
+      if (outcome.kind === 'queued' && step === 'paid' && v.setAsideId) setReportedRefunds((all) => ({ ...all, [v.setAsideId!]: true }));
+      told(v.id, outcome.kind === 'queued' ? {
+        ...outcome, message: step === 'paid' ? QUEUED_COPY.paid : `${outcome.message} ${QUEUED_COPY[step]}`,
+      } : outcome);
+    },
+  });
+  const setAside = useMutation({
+    mutationFn: ({ id, amount, reason }: { id: string; amount: number; reason: string }) => setAsideSubscriptionCredit(id, amount, reason),
+    ...refundStep('set-aside'),
+  });
+  const recordPaid = useMutation({
+    mutationFn: ({ id, amount, method, reference, setAsideId, reason }: { id: string; amount: number; method: 'MMG' | 'BANK_TRANSFER'; reference: string; setAsideId: string; reason: string }) =>
+      recordSubscriptionRefundPaid(id, amount, method, reference, setAsideId, reason),
+    ...refundStep('paid'),
+  });
+  const release = useMutation({
+    mutationFn: ({ id, amount, setAsideId, reason }: { id: string; amount: number; setAsideId: string; reason: string }) => releaseSubscriptionRefund(id, amount, setAsideId, reason),
+    ...refundStep('release'),
+  });
+  const refundBusy = setAside.isPending || recordPaid.isPending || release.isPending;
+
   const rows: any[] = data?.data ?? [];
+  // [OWNER 8 Oct (4)] Partners pay the weekly fee only through the MMG checkout
+  // page; production holds recording a payment by hand (BILLING_TOPUP_HOLD),
+  // so the button is not offered while the server says the hold is on.
+  const recordingHeld = (data as any)?.manualFeeRecording === 'held';
+  const recordError = topup.error as { message?: string } | null;
 
   return (
     <div>
@@ -97,6 +176,14 @@ export default function SubscriptionsPage() {
       <p className="text-[var(--muted)] text-sm mb-6">
         The weekly flat fee is Swift&apos;s only revenue — this queue is the business.
       </p>
+      {recordingHeld ? (
+        <p className="text-[var(--muted)] text-xs -mt-4 mb-6">
+          Recording fee payments by hand is on hold: partners pay through the MMG checkout page. A payment that arrived another way is refunded.
+        </p>
+      ) : null}
+      {recordError?.message ? (
+        <p role="alert" className="text-red-400 text-xs -mt-4 mb-6">{recordError.message}</p>
+      ) : null}
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
@@ -118,6 +205,10 @@ export default function SubscriptionsPage() {
               rows.map((s: any) => {
                 const h = holder(s);
                 const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? new Date(s.nextBillingDate).toLocaleDateString() : '—';
+                const payoutReported = (s.refundSetAsideId ? reportedRefunds[s.refundSetAsideId] === true : false) || s.refundPayoutReported === true;
+                // [Review S2-1] Every payout record for this set-aside was refused, expired or failed:
+                // record it again; the release stays refused (a payout may have been sent, Q-1527).
+                const payoutNotCompleted = !payoutReported && s.refundPayoutAsk === 'NOT_COMPLETED';
                 return (
                   <Fragment key={s.id}>
                     <tr className="border-b border-[var(--border)] hover:bg-white/5">
@@ -145,9 +236,9 @@ export default function SubscriptionsPage() {
                           >
                             {openTrail === s.id ? 'Hide trail' : 'Billing trail'}
                           </button>
-                          <button
+                          {!recordingHeld && <button
                             onClick={() => {
-                              const amt = window.prompt(`Record a cash/bank top-up for ${h.name} (whole GYD):`);
+                              const amt = window.prompt(`Record a weekly-fee payment received by cash/bank for ${h.name} (whole GYD):`);
                               const n = Number(amt);
                               if (!amt || !Number.isInteger(n) || n <= 0) return;
                               const reference = window.prompt(
@@ -156,14 +247,60 @@ export default function SubscriptionsPage() {
                               if (!reference) return;
                               // The clause asks for a confirmation naming the TARGET and the DELTA.
                               if (!window.confirm(`Credit ${h.name} with GY$${n.toLocaleString()} against transfer ${reference}?`)) return;
-                              const reason = askReason({ action: 'record this top-up', subject: `${h.name} (${reference})` });
+                              const reason = askReason({ action: 'record this fee payment', subject: `${h.name} (${reference})` });
                               if (reason) topup.mutate({ id: s.id, amount: n, reference, reason });
                             }}
                             disabled={topup.isPending}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
-                            Top up
-                          </button>
+                            Record fee payment
+                          </button>}
+                          {Number(s.refundSetAside ?? 0) > 0 ? (
+                            <>
+                              <button
+                                onClick={() => {
+                                  const owed = Number(s.refundSetAside);
+                                  const how = window.prompt(`GY$${owed.toLocaleString()} is set aside to refund ${h.name}. Paid back by MMG or BANK?`, 'MMG');
+                                  const method = how?.trim().toUpperCase() === 'BANK' ? 'BANK_TRANSFER' : how?.trim().toUpperCase() === 'MMG' ? 'MMG' : null;
+                                  if (!method) return;
+                                  const reference = window.prompt('Reference of the refund you paid (MMG or bank). It is the proof the money went back:');
+                                  if (!reference) return;
+                                  if (!window.confirm(`Record that GY$${owed.toLocaleString()} was paid back to ${h.name} by ${method === 'MMG' ? 'MMG' : 'bank transfer'} (${reference})? A second admin approves it.`)) return;
+                                  const reason = askReason({ action: 'record this refund payout', subject: `${h.name} (${reference})` });
+                                  if (reason) recordPaid.mutate({ id: s.id, amount: owed, method, reference, setAsideId: String(s.refundSetAsideId ?? ''), reason });
+                                }}
+                                disabled={refundBusy || payoutReported}
+                                className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                              >
+                                Record payout
+                              </button>
+                              <button
+                                onClick={() => {
+                                  const owed = Number(s.refundSetAside);
+                                  if (!window.confirm(`Return the GY$${owed.toLocaleString()} set aside for ${h.name} to their credit? Only if the refund could not be paid.`)) return;
+                                  const reason = askReason({ action: 'return this refund set-aside to credit', subject: h.name });
+                                  if (reason) release.mutate({ id: s.id, amount: owed, setAsideId: String(s.refundSetAsideId ?? ''), reason });
+                                }}
+                                disabled={refundBusy || payoutReported || payoutNotCompleted}
+                                className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                              >
+                                Release
+                              </button>
+                            </>
+                          ) : Number(s.prepaidBalance?.balance ?? 0) > 0 && (
+                            <button
+                              onClick={() => {
+                                const credit = Number(s.prepaidBalance.balance);
+                                if (!window.confirm(`Set aside ${h.name}'s unused credit of GY$${credit.toLocaleString()} for a refund? A second admin approves it. Do not pay anything yet: pay only once it shows as set aside, then record the payout here.`)) return;
+                                const reason = askReason({ action: 'set this credit aside for a refund', subject: h.name });
+                                if (reason) setAside.mutate({ id: s.id, amount: credit, reason });
+                              }}
+                              disabled={refundBusy}
+                              className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                            >
+                              Refund credit
+                            </button>
+                          )}
                           {!s.feeWaived && (
                             <button
                               onClick={() => {
@@ -180,6 +317,14 @@ export default function SubscriptionsPage() {
                             </button>
                           )}
                         </div>
+                        {Number(s.refundSetAside ?? 0) > 0 && (
+                          <p className="text-xs text-amber-500 mt-2">{payoutReported
+                            ? 'Payment reported; recording awaits approval. Do not pay again or release this refund.'
+                            : payoutNotCompleted
+                              ? 'The last payout record was not completed (refused, expired or failed). Do not pay again: record it again with the correct reference. This refund cannot be released.'
+                            : `GY$${Number(s.refundSetAside).toLocaleString()} set aside: pay it outside Swift, then record the payout.`}</p>
+                        )}
+                        {refundOutcome[s.id] && <RefundOutcome outcome={refundOutcome[s.id]!} />}
                       </td>
                     </tr>
                     {openTrail === s.id && (

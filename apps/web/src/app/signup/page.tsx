@@ -13,10 +13,12 @@ import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 import { launchCity } from '@/lib/web-ordering';
 import { SwiftLogo } from '@/components/swift-logo';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
-import { MOVER_VEHICLES } from '@/lib/signup-roles';
+import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
 import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
+import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
+import { AGE_TICK_LABEL, AGE_TICK_REQUIRED } from '@/lib/age-tick';
 
 /** The server's rule for a taxi's year (partner.routes vehicle schema): 1980
  *  to next year. Checked here too, so a typo is caught before the round trip. */
@@ -87,10 +89,16 @@ export default function SignupPage() {
   }, [placingStore]);
   const closeStorePicker = () => { restorePinFocus.current = true; setPlacingStore(false); };
   const [veh, setVeh] = useState({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
+  // A Driver's vehicles are taxis (car / wagon car): their plate starts with H.
+  const taxiPlateWrong = !!veh.licensePlate.trim() && MOVER_VEHICLES.DRIVER.some((v) => v.value === veh.vehicleType) && !isHirePlate(veh.licensePlate);
   const mover = role === 'RIDER' || role === 'DRIVER' ? role : null;
   // The partner agreement: an explicit, unticked clickwrap. The API records the
   // consent and refuses a partner sign-up without it (AGREEMENT_REQUIRED).
   const [agree, setAgree] = useState(false);
+  // [Owner ruling 15 Oct 2026] the sign-up ticks: Terms + Privacy, and "I am 18 or older". Both start
+  // unticked and, like the agreement, are cleared whenever the role or the step changes.
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const [adult, setAdult] = useState(false);
   // A tick is given to the agreement on screen: it is cleared whenever the role
   // or the step changes, so it never carries from one agreement to the other,
   // nor survives leaving the step (reset during render, so no frame shows it).
@@ -99,6 +107,8 @@ export default function SignupPage() {
   if (agreeScope !== agreementScope) {
     setAgreeScope(agreementScope);
     setAgree(false);
+    setAcceptTerms(false);
+    setAdult(false);
   }
   // A signed-in business account whose store was never created comes back
   // here from the console (/signup?resume=business) straight to that step.
@@ -144,10 +154,12 @@ export default function SignupPage() {
     setStep('name');
   });
   const doRegister = () => wrap(async () => {
-    // Consent is explicit clickwrap: the agreement line sits directly above
-    // the button that triggers this. Recorded server-side [SWIFT-AUD-D9-03].
+    // Consent is explicit clickwrap: both ticks sit directly above the button
+    // that triggers this. Recorded server-side [SWIFT-AUD-D9-03 · owner 15 Oct 2026].
+    if (!acceptTerms) throw new Error('Tick the Terms of Service and Privacy Policy to continue');
+    if (!adult) throw new Error(AGE_TICK_REQUIRED);
     try {
-      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role: accountRole(role), acceptTerms: true });
+      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role: accountRole(role), acceptTerms, ageConfirmed: adult });
     } catch (cause) {
       // Registration consumes its HttpOnly continuation before account reads
       // and writes. A transport or server error is therefore ambiguous: never
@@ -199,7 +211,7 @@ export default function SignupPage() {
   };
 
   return (
-    <main className={styles.page}>
+    <main id="main" tabIndex={-1} className={styles.page}>
       <section className={styles.card} aria-labelledby="signup-title">
         {step !== 'role' ? (
           <button
@@ -275,13 +287,22 @@ export default function SignupPage() {
               <label htmlFor="signup-last" className={styles.label}>Last name</label>
               <input id="signup-last" autoComplete="family-name" value={last} onChange={(e) => setLast(e.target.value)} className={styles.input} />
             </div>
-            <p className={styles.legal}>
-              By creating an account you agree to the{' '}
-              <a href="/legal/terms" target="_blank" rel="noreferrer" className={styles.inlineLink}>Terms of Service</a>{' '}
-              and{' '}
-              <a href="/legal/privacy" target="_blank" rel="noreferrer" className={styles.inlineLink}>Privacy Policy</a>.
-            </p>
-            <button type="button" onClick={() => void doRegister()} disabled={busy || !first.trim() || !last.trim()} className={styles.primaryButton}>{busy ? 'Creating…' : 'Create account'}</button>
+            {/* Two explicit, unticked ticks (the Terms say acceptance is by "ticking the acceptance box at registration"):
+                the Terms and Privacy consent, and the owner's 15 Oct 18+ declaration. The API records both in the consent ledger. */}
+            <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+              <input type="checkbox" checked={acceptTerms} onChange={(e) => setAcceptTerms(e.target.checked)} />
+              <span>
+                I agree to the{' '}
+                <a href="/legal/terms" target="_blank" rel="noreferrer" className={styles.inlineLink}>Terms of Service</a>{' '}
+                and{' '}
+                <a href="/legal/privacy" target="_blank" rel="noreferrer" className={styles.inlineLink}>Privacy Policy</a>
+              </span>
+            </label>
+            <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+              <input type="checkbox" checked={adult} onChange={(e) => setAdult(e.target.checked)} />
+              <span>{AGE_TICK_LABEL}</span>
+            </label>
+            <button type="button" onClick={() => void doRegister()} disabled={busy || !first.trim() || !last.trim() || !acceptTerms || !adult} className={styles.primaryButton}>{busy ? 'Creating…' : 'Create account'}</button>
           </div>
         )}
         {step === 'business' && (
@@ -315,16 +336,20 @@ export default function SignupPage() {
             </select></div>
             {mover === 'DRIVER' ? (
               <>
+                {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
+                <p className={styles.smallCopy}>{TAXI_TWO_LICENCES}</p>
                 <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
                 <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
                 <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
                 <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} aria-describedby="vehicle-plate-rule" aria-invalid={taxiPlateWrong || undefined} />
+                  {/* [Owner ruling 11 Oct 2026 — H-PLATE] said where the plate is typed; the server refuses a non-H taxi plate too */}
+                  <p id="vehicle-plate-rule" className={taxiPlateWrong ? styles.error : styles.smallCopy} role={taxiPlateWrong ? 'alert' : undefined}>{taxiPlateWrong ? TAXI_PLATE_ERROR : TAXI_PLATE_HINT}</p></div>
               </>
             ) : null}
             <PartnerAgreement kind="Driver" doc="driver-agreement" agree={agree} onChange={setAgree} />
             {mover === 'DRIVER' ? (
-              <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
+              <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || taxiPlateWrong || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
             ) : (
               <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create rider account'}</button>
             )}

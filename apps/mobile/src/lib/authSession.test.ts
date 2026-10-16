@@ -163,3 +163,49 @@ describe('auth session identity', () => {
     expect(authSessionForPrincipal(null, owner)).toBeNull();
   });
 });
+
+describe('[NO-DEAD-ENDS] a refresh that ends the session can say why', () => {
+  function endedHarness(start: AuthSessionSnapshot) {
+    let current: AuthSessionSnapshot | null = { ...start };
+    const ended = vi.fn();
+    const pending = deferred<RotatedAuthTokens>();
+    const coordinator = new AuthRefreshCoordinator(
+      {
+        current: () => current,
+        rotateTokensIfCurrent: () => null,
+        logoutIfCurrent: (expected) => {
+          if (!sameAuthSession(current, expected)) return false;
+          current = null;
+          return true;
+        },
+      },
+      () => pending.promise,
+      () => true,
+      ended,
+    );
+    return { coordinator, ended, pending, setCurrent: (value: AuthSessionSnapshot | null) => { current = value; } };
+  }
+
+  it('hands the refusal to the explainer exactly once when it signed the current account out', async () => {
+    const h = endedHarness(a);
+    const refusal = { response: { status: 403, data: { error: { code: 'ACCOUNT_SUSPENDED' } } } };
+    const first = h.coordinator.resolve({ ...a });
+    const second = h.coordinator.resolve({ ...a });
+    h.pending.reject(refusal);
+
+    await expect(first).resolves.toBeNull();
+    await expect(second).resolves.toBeNull();
+    expect(h.ended).toHaveBeenCalledOnce();
+    expect(h.ended).toHaveBeenCalledWith(refusal);
+  });
+
+  it('says nothing when a stale failure ended no one (account B already signed in)', async () => {
+    const h = endedHarness(a);
+    const result = h.coordinator.resolve({ ...a });
+    h.setCurrent({ ...b });
+    h.pending.reject({ response: { status: 403, data: { error: { code: 'ACCOUNT_SUSPENDED' } } } });
+
+    await expect(result).resolves.toBeNull();
+    expect(h.ended).not.toHaveBeenCalled();
+  });
+});

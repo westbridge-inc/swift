@@ -5,7 +5,7 @@
  * fallbacks, never hand-written: an unregistered proprietor's name "trading as" the store
  * (from the verified identity record), the self-declared address labelled as such, the
  * verified account contact, every VALID licence record, and the platform operator block
- * from configuration. It is derived on every read: an expired licence leaves the block in
+ * from the ONE OPERATOR constant [R3]. It is derived on every read: an expired licence leaves the block in
  * the same sweep. Once the country's business document types are ACTIVE, a store with an
  * incomplete block cannot go live; before activation the block is shown but does not gate.
  */
@@ -29,6 +29,10 @@ import { docStateMachineDdl } from '../modules/verification/doc-state';
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { rlsDdlFor, tenantLineageDdl } from '../lib/tenant-rls';
+import crypto from 'node:crypto';
+import { encryptBuffer, generateDek, getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
+import { packCiphertext } from '../modules/verification/extraction-ledger';
+import { OPERATOR as OPERATOR_FACTS, OPERATOR_ADDRESS } from '../modules/legal/operator';
 
 grantSuiteCapability('ddl');
 
@@ -53,6 +57,8 @@ async function store(n: number) {
   const owner = await runWithTenant('swift-default', () => app.prisma.vendorOwner.create({ data: { userId: u.id, vendors: { create: {
     name: `Priya's Snackette ${RUN}${n}`, slug: `priyas-snackette-${RUN.toLowerCase()}-${n}`, vendorType: 'RESTAURANT', phone: `+59266${NUM}${n}`,
     addressLine1: `${n} Sheriff Street`, addressLine2: 'Georgetown', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.16, status: 'PENDING_APPROVAL',
+    // [owner #51, 14 Oct] A first go-live needs a published phone; set, so the disclosure block alone decides here.
+    publicPhone: '+5926001200',
   } } }, include: { vendors: true } }));
   return { userId: u.id, vendorId: owner.vendors[0]!.id };
 }
@@ -99,7 +105,8 @@ describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
     expect(bare.missing).toEqual(['legalName']);
     expect(bare.address).toMatchObject({ source: 'SELF_DECLARED', value: '1 Sheriff Street, Georgetown' });
     expect(bare.contact).toMatchObject({ source: 'ACCOUNT' });
-    expect(bare.operator).toEqual({ legalName: 'Westbridge Inc.', registeredAddress: '1 Main Street, Georgetown, Guyana', supportEmail: 'support@example.gy' });
+    // [R3] The operator is the ONE OPERATOR constant, not the configuration this suite sets.
+    expect(bare.operator).toEqual({ legalName: OPERATOR_FACTS.name, registeredAddress: OPERATOR_ADDRESS, supportEmail: OPERATOR_FACTS.supportEmail });
 
     await approved(userId, 'owner_national_id');
     const named = await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }));
@@ -114,7 +121,7 @@ describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
     expect((await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }))).licences).toEqual([]);
   });
 
-  it('the storefront read carries the block; without the operator configuration the block says so', async () => {
+  it('the storefront read carries the block; the operator is the one OPERATOR constant, configured or not [R3]', async () => {
     const { vendorId } = await store(2);
     const pending = await app.inject({ method: 'GET', url: `/api/v1/customer/vendors/${vendorId}` });
     expect(pending.statusCode).toBe(200);
@@ -123,8 +130,13 @@ describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
     const res = await app.inject({ method: 'GET', url: `/api/v1/customer/vendors/${vendorId}` });
     expect(res.statusCode).toBe(200);
     expect(res.json().data.disclosure).toMatchObject({ complete: false, missing: ['legalName'] });
-    expect(platformOperator({})).toBeNull();
-    expect(platformOperator({ PLATFORM_LEGAL_NAME: 'X', PLATFORM_REGISTERED_ADDRESS: 'Y' })).toBeNull();
+    const operator = { legalName: OPERATOR_FACTS.name, registeredAddress: OPERATOR_ADDRESS, supportEmail: OPERATOR_FACTS.supportEmail };
+    expect(res.json().data.disclosure.operator).toEqual(operator);
+    const saved = Object.fromEntries(Object.keys(OPERATOR).map((k) => [k, process.env[k]]));
+    for (const k of Object.keys(OPERATOR)) delete process.env[k];
+    try { expect(platformOperator()).toEqual(operator); } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
   });
 
   it('DOC-INV-27: once the business types are active, a store with an incomplete block cannot go live; complete it and it activates', async () => {
@@ -140,15 +152,46 @@ describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
     expect(await system(() => disclosureGateEngaged(app.prisma, 'GY'))).toBe(true);
     // the checklist still lacks the identity document → not verified, and the block is incomplete
     expect(await system(() => service.isRoleVerified(userId, 'RESTAURANT'))).toBe(false);
-    // give it every checklist type EXCEPT via a path that leaves the block incomplete: remove the operator config
+    // give it every checklist type EXCEPT via a path that leaves the block incomplete: take the typed address away
+    // ([R3] the operator block can no longer be the missing element — it is the ONE OPERATOR constant)
     await approved(userId, 'owner_national_id');
     expect(await system(() => service.isRoleVerified(userId, 'RESTAURANT'))).toBe(true);
-    const savedOp = process.env['SUPPORT_EMAIL']; delete process.env['SUPPORT_EMAIL'];
+    await system(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { addressLine1: '', addressLine2: null } }));
     const projection = service as unknown as { projectVendorActivation: (db: unknown, u: string) => Promise<void> };
     await system(() => projection.projectVendorActivation(app.prisma, userId));
     expect(await vendorOf(vendorId)).toMatchObject({ isVerified: false, status: 'PENDING_APPROVAL' });
-    process.env['SUPPORT_EMAIL'] = savedOp;
+    await system(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { addressLine1: '3 Sheriff Street', addressLine2: 'Georgetown' } }));
     await system(() => projection.projectVendorActivation(app.prisma, userId));
     expect(await vendorOf(vendorId)).toMatchObject({ isVerified: true, status: 'ACTIVE' });
+  });
+
+  it('[VERIFY-DOCS · ruling 5] a food handler’s permit shows "on file", never its number — it is a person’s permit; a business licence still shows its number', async () => {
+    const prevKek = process.env['MASTER_KEK'];
+    process.env['MASTER_KEK'] = crypto.randomBytes(32).toString('base64');
+    resetKeyProviderForTests();
+    try {
+      const { userId, vendorId } = await store(4);
+      /** The number a reviewer or processor read, stored as the ledger stores it (encrypted under a run key). */
+      const withNumber = async (submissionId: string, fieldCode: string, value: string) => {
+        const dek = generateDek();
+        const wrappedDek = await getKeyProvider()!.wrapDek(dek);
+        await system(() => app.prisma.extractionRun.create({ data: {
+          submissionId, profileCode: 'UNPROFILED', engineName: 'disclosure-test', engineVersion: '1', startedAt: new Date(), finishedAt: new Date(), outcome: 'OK',
+          wrappedDek: new Uint8Array(wrappedDek),
+          fields: { create: [{ submissionId, fieldCode, valueCt: new Uint8Array(packCiphertext(encryptBuffer(Buffer.from(value, 'utf8'), dek))), source: 'PROVIDER' }] },
+        } }));
+      };
+      const permit = await approved(userId, 'food_handler_cert');
+      const trade = await approved(userId, 'trade_licence');
+      await withNumber(permit.id, 'permit_number', `FH-${NUM}`);
+      await withNumber(trade.id, 'licence_number', `TL-${NUM}`);
+      const block = await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }));
+      expect(block.licences.find((l) => l.docType === 'trade_licence')?.value).toBe(`TL-${NUM}`);
+      expect(block.licences.find((l) => l.docType === 'food_handler_cert')?.value).toBe('on file');
+      expect(JSON.stringify(block)).not.toContain(`FH-${NUM}`);
+    } finally {
+      if (prevKek === undefined) delete process.env['MASTER_KEK']; else process.env['MASTER_KEK'] = prevKek;
+      resetKeyProviderForTests();
+    }
   });
 });

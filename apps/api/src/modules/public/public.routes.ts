@@ -6,8 +6,10 @@ import { NotFoundError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { serveEmergencyPolicy } from '../country/emergency-policy';
 import { emergencyPolicyCounter } from '../../plugins/observability';
-import { PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visibility';
+import { notProhibitedStore, PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visibility';
 import { adsEnabled } from '../ads/ads-enabled';
+import { hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
+import { publicStorefrontSeller } from '../verification/storefront-seller';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -148,9 +150,12 @@ export async function publicRoutes(app: FastifyInstance) {
   app.get('/storefronts', async (request) => {
     const query = listQuerySchema.parse(request.query);
     // Empty stores stay out of the public directory (a direct /storefronts/:slug link still resolves).
+    const tenantId = await bindPublicTenant();
     const where: Record<string, unknown> = {
       ...PUBLIC_WHERE,
-      tenantId: await bindPublicTenant(),
+      tenantId,
+      // [GUARDRAILS §8 · #54] A store filed under a banned category is not in the directory.
+      ...notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId)),
       items: { some: { isAvailable: true } },
     };
     if (query.type) where['vendorType'] = query.type;
@@ -186,6 +191,8 @@ export async function publicRoutes(app: FastifyInstance) {
   /** GET /storefronts/:slug — one store's public page: profile + hours + menu. */
   app.get<{ Params: { slug: string } }>('/storefronts/:slug', async (request) => {
     const tenantId = await bindPublicTenant();
+    // [GUARDRAILS §8 · #54] Nor has a public page, by its slug or an old one.
+    const prohibitedStores = notProhibitedStore(await prohibitedStoreIds(app.prisma, tenantId));
     // [09-07] A printed QR code outlives a rename. `SlugRedirect` was built for exactly
     // that — table, tenant scope, RLS policy, unique index — and then read by nothing, so
     // the promise in `qr/qr-codes.ts` was decorative. One lookup makes it real: an old slug
@@ -193,7 +200,7 @@ export async function publicRoutes(app: FastifyInstance) {
     // client can correct its URL. The write side arrives with the rename feature; until
     // then this costs one indexed miss on a 404 that was already a 404.
     const bySlug = (slug: string) => app.prisma.vendor.findFirst({
-      where: { slug, ...PUBLIC_WHERE, tenantId, ...PUBLIC_VENDOR_TENANT },
+      where: { slug, ...PUBLIC_WHERE, tenantId, ...PUBLIC_VENDOR_TENANT, ...prohibitedStores },
       select: {
         ...PUBLIC_VENDOR_SELECT,
         // The app already shows guests the street address (pickup needs it);
@@ -204,6 +211,7 @@ export async function publicRoutes(app: FastifyInstance) {
           select: { dayOfWeek: true, openTime: true, closeTime: true, isClosed: true },
         },
         categories: {
+          where: { archivedAt: null },
           orderBy: { sortOrder: 'asc' },
           select: {
             id: true,
@@ -242,15 +250,24 @@ export async function publicRoutes(app: FastifyInstance) {
       }
     }
     if (!vendor) throw new NotFoundError('Storefront');
+    // [GUARDRAILS §8 · #54 · store names] Judged exactly too: the list above may be a minute old.
+    if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Storefront');
 
     // [M-D6] Same mapper as the directory list, so a store's own page and its
     // card in the list can never show different stars.
     const surface = (await ratingSurfaces(app.prisma, 'VENDOR', [vendor.id])).get(vendor.id);
+    // [GUARDRAILS §8] The website's menu leaves prohibited items out (banned, or held for a check).
+    const hidden = await hiddenAmong(app.prisma, vendor.categories.flatMap((c) => c.items.map((i) => i.id)));
+
+    // [R3 · CAA s.70] The same seller block the app's store screen shows: who sells, how payment
+    // works, the store's refund rule and the statutory-rights sentence.
+    const seller = await publicStorefrontSeller(app.prisma, vendor.id);
 
     return {
       success: true,
       data: {
         ...vendor,
+        seller,
         // Present when the request arrived on a retired slug, so the caller can correct its URL.
         ...(vendor.slug === request.params.slug ? {} : { canonicalSlug: vendor.slug }),
         ...(surface ?? { displayRating: null, ratingBucket: '(0)', ratingCount: 0, topRated: false }),
@@ -258,7 +275,7 @@ export async function publicRoutes(app: FastifyInstance) {
         categories: vendor.categories
           .map((c) => ({
             ...c,
-            items: c.items.map((i) => ({ ...i, basePrice: Number(i.basePrice) })),
+            items: c.items.filter((i) => !hidden.has(i.id)).map((i) => ({ ...i, basePrice: Number(i.basePrice) })),
           }))
           // An empty category is vendor housekeeping, not a public menu section.
           .filter((c) => c.items.length > 0),

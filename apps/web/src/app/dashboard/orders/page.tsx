@@ -5,13 +5,13 @@ import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import NewOrderTakeover from '@/components/NewOrderTakeover';
+import { mmgDisputePaused, MMG_DISPUTE_NOTICE } from '@/lib/mmg-dispute';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
 import { useStoreRole } from '@/lib/store-role';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
-import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '../../../../../mobile/src/modules/vendor/order-dispute';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
@@ -34,16 +34,16 @@ function timeAgo(iso?: string) {
   return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
 }
 
-function statusChip(s: string) {
+function statusChip(s: string, paused = false) {
   const done = ['DELIVERED', 'COMPLETED'].includes(s);
   const dead = s === 'CANCELLED';
   return (
     <span
       className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold ${
-        done ? 'bg-green-100 text-green-700' : dead ? 'bg-black/5 text-[var(--swift-muted)]' : 'bg-[var(--swift-red)]/10 text-[var(--swift-red)]'
+        paused ? 'bg-amber-100 text-amber-800' : done ? 'bg-green-100 text-green-700' : dead ? 'bg-black/5 text-[var(--swift-muted)]' : 'bg-[var(--swift-red)]/10 text-[var(--swift-red)]'
       }`}
     >
-      {s.replaceAll('_', ' ')}
+      {paused ? MMG_DISPUTE_NOTICE.title : s.replaceAll('_', ' ')}
     </span>
   );
 }
@@ -76,7 +76,8 @@ function actionsFor(o: VendorOrder) {
   ) {
     out.push({ label: 'Confirm delivered', kind: 'delivered' });
   }
-  return out;
+  // [Item 10] A disputed MMG order: only the decline survives (the server allows it).
+  return mmgDisputePaused(o) ? out.filter((a) => a.kind === 'reject') : out;
 }
 
 function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
@@ -123,11 +124,13 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   const lineResolved = (l: OrderLine) => l.picked || l.subStatus === 'REFUNDED' || l.subStatus === 'REJECTED';
   const lineFulfilled = (l: OrderLine) => l.picked && l.subStatus !== 'REFUNDED' && l.subStatus !== 'REJECTED';
   const open = order.items.filter((l) => !lineResolved(l)).length;
+  const waiting = order.items.filter((l) => !l.picked && l.subStatus === 'PENDING').length;
+  const pickable = open - waiting;
   const fulfilled = order.items.filter(lineFulfilled).length;
   const removed = order.items.length - open - fulfilled;
   const pickingSummary =
     open > 0
-      ? `Shelf picking — ${open} to pick`
+      ? `Shelf picking — ${[pickable > 0 ? `${pickable} to pick` : '', waiting > 0 ? `${waiting} waiting on customer` : ''].filter(Boolean).join(', ')}`
       : fulfilled === 0
         ? 'Nothing left to hand over — cancel this order'
         : removed > 0
@@ -150,14 +153,14 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
               <input
                 type="checkbox"
                 checked={!!it.picked}
-                disabled={busy || it.subStatus === 'PROPOSED' || it.subStatus === 'REFUNDED'}
+                disabled={busy || it.subStatus === 'PENDING' || it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED'}
                 onChange={(e) => pickedMut.mutate({ lineId: it.id, picked: e.target.checked })}
                 className="h-4 w-4 accent-[var(--swift-red)]"
               />
               <span className="flex-1 text-sm">
                 <b>{it.quantity}×</b> {it.name}
               </span>
-              {it.subStatus === 'PROPOSED' && (
+              {it.subStatus === 'PENDING' && (
                 <span className="text-xs font-semibold text-amber-600">Waiting on customer: {it.substituteName}</span>
               )}
               {/* [W-27] "Refunded" said money came back. On a cash order none
@@ -166,7 +169,17 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                   there is no tender here on which a refund could be owed. */}
               {it.subStatus === 'REFUNDED' && <span className="text-xs font-semibold text-[var(--swift-muted)]">Removed — not charged</span>}
               {it.subStatus === 'REJECTED' && <span className="text-xs font-semibold text-[var(--swift-red)]">Sub declined</span>}
-              {!it.picked && !it.subStatus?.match(/PROPOSED|REFUNDED/) && (
+              {!it.picked && (it.subStatus === 'PENDING' || it.subStatus === 'APPROVED') && (
+                <button
+                  onClick={() => refundMut.mutate(it.id)}
+                  disabled={busy || mmgLocked}
+                  title={mmgLocked ? MMG_LINE_LOCK : undefined}
+                  className="text-xs font-semibold text-[var(--swift-red)] disabled:opacity-50"
+                >
+                  Remove unavailable line
+                </button>
+              )}
+              {!it.picked && it.subStatus === 'NONE' && (
                 <button
                   onClick={() => setSubFor(subFor === it.id ? null : it.id)}
                   disabled={busy}
@@ -176,7 +189,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                 </button>
               )}
             </div>
-            {subFor === it.id && (
+            {subFor === it.id && !it.picked && it.subStatus === 'NONE' && (
               <div className="mt-2 border-t border-[var(--swift-border)] pt-2">
                 <p className="text-xs font-semibold text-[var(--swift-muted)]">Offer a substitute:</p>
                 <div className="mt-1 flex flex-wrap gap-1.5">
@@ -235,6 +248,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const act = useMutation({
     mutationFn: async (kind: string) => {
       setError(null);
+      if (mmgDisputePaused(order.data)) throw new Error(MMG_DISPUTE_NOTICE.body);
       if (kind === 'accept') return acceptOrder(id, order.data?.fulfillment === 'APPOINTMENT' ? undefined : prepTime);
       if (kind === 'preparing') return markPreparing(id);
       if (kind === 'ready') return markReady(id);
@@ -295,14 +309,13 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   );
 
   const s = (o.status || '').toUpperCase();
-  // A disputed MMG order is paused: only Reject stays, as on the card and in the app (order-dispute.ts).
   const paused = mmgDisputePaused(o);
   // Payment-first, the same rule as the card (lib/mmg-pay-words): an MMG order
   // is accepted only once its money has moved (CAPTURED or CLAIMED). Until then
   // the window offers the store's confirmation, or says why it cannot.
-  const actions = (paused ? actionsFor(o).filter((a) => a.kind === 'reject') : actionsFor(o))
-    .filter((a) => !(a.kind === 'accept' && acceptHeldForPayment(o)));
-  const pickable = ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
+  // (A disputed order keeps only Reject: actionsFor.)
+  const actions = actionsFor(o).filter((a) => !(a.kind === 'accept' && acceptHeldForPayment(o)));
+  const pickable = !paused && ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   // [W-25] The old predicate was "not captured and not cancelled", so a
   // FAILED, REFUNDED or UNRESOLVED payment offered a one-tap "received" — a
@@ -311,20 +324,20 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // server enforces the same matrix and refuses the rest by name.
   const ATTESTABLE_PAYMENT = ['PENDING', 'AUTHORIZED'];
   const attestablePay =
-    isMmg && ATTESTABLE_PAYMENT.includes(String(o.paymentStatus ?? '')) && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
+    !paused && isMmg && ATTESTABLE_PAYMENT.includes(String(o.paymentStatus ?? '')) && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
   // Row 52: only the owner or a manager of THIS order's store may confirm; the
   // server says which per order (and refuses staff regardless).
   const showConfirmPay = attestablePay && o.canConfirmPayment === true;
   const confirmPayNeedsManager = attestablePay && o.canConfirmPayment !== true;
   // and when it is NOT attestable, the screen says why rather than going quiet
-  const payBlockedReason = isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED' ? mmgPayBlockedReason(o.paymentStatus) : null;
+  const payBlockedReason = !paused && isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED' ? mmgPayBlockedReason(o.paymentStatus) : null;
   const customer = [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
   const riderName = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : '';
   const riderAssigned = Boolean(o.riderId || o.rider);
   const isDelivery = o.fulfillment === 'DELIVERY';
   const selfDelivery = o.fulfillmentMode === 'VENDOR_DELIVERY';
   const activeDelivery = isDelivery && !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
-  const mayChangeDeliveryOwner = activeDelivery && !riderAssigned
+  const mayChangeDeliveryOwner = !paused && activeDelivery && !riderAssigned
     && ['ACCEPTED', 'CONFIRMED', 'PREPARING', 'READY', 'READY_FOR_PICKUP'].includes(s);
   const canChooseVendorDelivery = mayChangeDeliveryOwner && o.vendor?.selfDeliveryEnabled === true && !selfDelivery;
   // A store-wide preference changing later must not strand an existing
@@ -356,10 +369,12 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
           {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {statusChip(s)}
+          {statusChip(s, paused)}
           {closeButton}
         </div>
       </div>
+
+      {paused && <p role="status" className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{MMG_DISPUTE_NOTICE.body}</p>}
 
       <div className="mt-4 space-y-1.5">
         {o.items.map((it) => (
@@ -419,12 +434,6 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         <p className="mt-3 text-sm text-[var(--swift-muted)]">Customer collects with a pickup code.</p>
       )}
 
-      {paused && (
-        <div role="alert" className="mt-3 rounded-lg bg-[var(--swift-soft-warning)] p-3">
-          <p className="text-sm font-semibold">{MMG_DISPUTE_NOTICE.title}</p>
-          <p className="mt-1 text-sm text-[var(--swift-muted)]">{MMG_DISPUTE_NOTICE.body}</p>
-        </div>
-      )}
       {pickable && <PickList order={o} onBusy={act.isPending} />}
 
       <div className="mt-5 flex flex-wrap items-center gap-2">
@@ -465,7 +474,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             </button>
           </span>
         ))}
-        {confirmDelivered && (
+        {confirmDelivered && !paused && (
           <div role="dialog" aria-label="Confirm store delivery" className="w-full rounded-xl border border-amber-300 bg-amber-50 p-4">
             <p className="text-sm font-semibold text-amber-950">Did your store hand this order to the customer?</p>
             <p className="mt-1 text-sm text-amber-900">Only confirm after the handoff. This closes the order as delivered.</p>
@@ -539,7 +548,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             {money(o.totalAmount)} received in my MMG
           </button>
         )}
-        {s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !selfDelivery && !riderAssigned && (
+        {!paused && s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !selfDelivery && !riderAssigned && (
           <button
             onClick={() => act.mutate('retry-dispatch')}
             disabled={act.isPending}
@@ -617,7 +626,7 @@ export default function OrdersPage() {
   // app's one-tap actions for its state (VendorOrderCard).
   const row = (o: VendorOrder) => <article key={o.id} aria-label={`Order ${o.orderNumber}`} className="sw-order-card">
     <button data-order-id={o.id} onClick={() => setSelected(o.id)} className="block w-full text-left">
-      <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase())}</div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase(), mmgDisputePaused(o))}</div>
       <p className="sw-caption mt-1">{timeAgo(o.placedAt)}</p>
       <div className="my-3 space-y-1">{o.items.slice(0, 3).map(item => <p key={item.id} className="sw-label">{item.quantity}× {item.name}</p>)}{o.items.length > 3 && <p className="sw-caption">+{o.items.length - 3} more</p>}</div>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--swift-border)] pt-3"><span className="sw-caption">{[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'}</span><span className="sw-title text-[17px]">{money(o.totalAmount)}</span></div>

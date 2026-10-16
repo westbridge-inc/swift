@@ -1,0 +1,52 @@
+# ===========================================================================
+# [TA-S0-003 · R3] The business wall's contract posture, for the API and the
+# worker only. deploy/pilot-up.sh adds this file to every Compose command when
+# deploy/.env sets TENANT_RLS_BIND=1; without that line the stack is exactly
+# docker-compose.yml.
+#
+# The API and the worker stop running as the database owner. They sign in as
+# the two least-privilege logins deploy/rls-logins.sh created (PILOT-RUNBOOK
+# section 13), whose URLs it published to the encrypted store:
+#   DATABASE_URL         swift_app_login: the request pool, walled per tenant
+#   SYSTEM_DATABASE_URL  swift_system_login: audited system work only
+# The owner's parts and its password file are removed from both, and the
+# password file is masked inside their secrets mount, so neither process can
+# read it even by path. Postgres and the one-shot migrate keep the owner, which
+# migrations need. The API's boot guard refuses this posture with the owner
+# credential, the expand declaration, or any login but these two
+# (apps/api/src/utils/boot-config.ts assertWallLoginConfig), and the boot
+# attestation proves the logins really are walled.
+# ===========================================================================
+services:
+  api:
+    environment:
+      # Empty, not removed: an empty value also wins over the env_file, so no
+      # owner part can come back from deploy/.env either.
+      POSTGRES_HOST: ""
+      POSTGRES_PORT: ""
+      POSTGRES_USER: ""
+      POSTGRES_DB: ""
+      POSTGRES_PASSWORD_FILE: ""
+      DATABASE_URL_FILE: /run/secrets/DATABASE_URL
+      SYSTEM_DATABASE_URL_FILE: /run/secrets/SYSTEM_DATABASE_URL
+      TENANT_RLS_BIND: "1"
+      TENANT_UNSCOPED_ACCESS: deny
+      # The wall-less declaration never reaches a walled process.
+      TENANT_WALL_EXPAND_ATTESTED: ""
+    volumes:
+      - /dev/null:/run/secrets/POSTGRES_PASSWORD:ro
+  # The worker exactly like the API (written out: YAML aliases do not carry it).
+  worker:
+    environment:
+      POSTGRES_HOST: ""
+      POSTGRES_PORT: ""
+      POSTGRES_USER: ""
+      POSTGRES_DB: ""
+      POSTGRES_PASSWORD_FILE: ""
+      DATABASE_URL_FILE: /run/secrets/DATABASE_URL
+      SYSTEM_DATABASE_URL_FILE: /run/secrets/SYSTEM_DATABASE_URL
+      TENANT_RLS_BIND: "1"
+      TENANT_UNSCOPED_ACCESS: deny
+      TENANT_WALL_EXPAND_ATTESTED: ""
+    volumes:
+      - /dev/null:/run/secrets/POSTGRES_PASSWORD:ro

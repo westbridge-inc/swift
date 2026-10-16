@@ -118,7 +118,7 @@ export function TrackClient({ token }: { token: string }) {
   const freshnessLabel = age.kind === 'none' ? null : serverTimed ? age.label : age.label.replace('Updated', 'Received');
 
   return (
-    <main className="min-h-screen bg-[var(--swift-canvas)] text-[var(--swift-ink)]">
+    <main id="main" tabIndex={-1} className="min-h-screen bg-[var(--swift-canvas)] text-[var(--swift-ink)]">
       <header className="border-b border-[var(--swift-border)] bg-[var(--swift-card)] px-6 pb-4 pt-[calc(16px_+_env(safe-area-inset-top))]">
         <div className="mx-auto max-w-md">
         <SwiftLogo />

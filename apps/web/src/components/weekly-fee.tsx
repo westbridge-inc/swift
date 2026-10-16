@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutSeller, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 
@@ -88,6 +88,8 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
         <p>{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</p>
         {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
         {checkoutReferences(shown).map((r) => <p key={r.label} className="text-sm text-[var(--swift-muted)]">{r.label}: <span className="font-mono">{r.value}</span></p>)}
+        {/* [Owner 15 Oct 2026 · ruling #63] who sold the weekly fee, as the API states it */}
+        {checkoutSeller(shown) ? <p className="text-sm text-[var(--swift-muted)]" data-testid="fee-seller">{checkoutSeller(shown)}</p> : null}
       </div>;
     }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
   </section>;

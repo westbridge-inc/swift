@@ -1,4 +1,6 @@
-import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { vatTracker } from '../billing/vat-tracker';
+import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
@@ -8,8 +10,11 @@ import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
+import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
+import { withLiveDocuments } from './live-documents';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
@@ -25,11 +30,16 @@ import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { lockFeeCollectionAuthority, moverFeeSourceSummary, resolveMoverFeeAuthority, resolveMoverFeeHold, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { CashRulesService } from '../cash/cash-rules.service';
+import { resolveHeldDoorCash } from '../cash/door-cash-hold';
 import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { reviewerTypedFields } from '../verification/identity-signal-policy';
+import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
+import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
+import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
@@ -39,6 +49,7 @@ import {
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
+import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -48,28 +59,42 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
+import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
+import {
+  approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
+  startSoloApproval,
+} from './solo-approval';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
 } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
+import { readFareBreakdown } from '../rides/taxi-waiting';
 import { createHash } from 'node:crypto';
 import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
+import { openCreditRefunds, openSetAsideIds, PAID_REFUND_BODY, payoutAskStateFor, recordCreditRefundPaid, REFUND_AMOUNT, REFUND_SET_ASIDE_ID, refundReferenceOf, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
+import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
+import { readFeePause } from '../billing/mmg-pause';
+import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
+import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
+import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -280,7 +305,7 @@ const broadcastSchema = z.object({
 // no evidence of which payment it was, and the same payment could be credited
 // again tomorrow under a fresh idempotency key.
 const topUpSchema = z.object({
-  amount: zMoneyWhole.refine((n) => n > 0, 'A top-up must be more than zero'),
+  amount: zMoneyWhole.refine((n) => n > 0, 'A recorded fee payment must be more than zero'),
   reference: z.string(),
 });
 
@@ -333,6 +358,11 @@ const settleRefundSchema = z.object({
 const approveDocSchema = z.object({
   // Optional document expiry (e.g. licence end date entered during review)
   expiresAt: z.coerce.date().optional(),
+  // [VERIFY-DOCS · owner ruling 6 Oct 2026] What the reviewer TYPES, per type
+  // (the queue's `reviewerTypes` says which): the ID or licence number — kept
+  // only as a blind-index identity key — and a police clearance's issue date.
+  documentNumber: z.string().trim().min(1).max(40).optional(),
+  issuedOn: z.coerce.date().optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -407,6 +437,16 @@ function coerceMoney<T>(value: T): T {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = coerceMoney(v);
   return out as unknown as T;
+}
+
+/** [GUARDRAILS §8] How many held items the catalogue-check queue returns at once. */
+const CATALOGUE_REVIEW_PAGE = 200;
+
+/** [GUARDRAILS §8] One shape for "why is this item hidden", wherever an admin reads it. */
+function catalogueCheckSummary(check: Exclude<CatalogueCheck, { state: 'CLEAR' }>) {
+  return check.state === 'BANNED'
+    ? { state: check.state, prohibitedClass: check.prohibitedClass, label: PROHIBITED_CLASS_LABELS[check.prohibitedClass], source: check.source, term: check.term, reason: check.reason }
+    : { state: check.state, prohibitedClass: check.prohibitedClass, label: PROHIBITED_CLASS_LABELS[check.prohibitedClass], field: check.field, term: check.term };
 }
 
 export async function adminRoutes(app: FastifyInstance) {
@@ -504,16 +544,12 @@ export async function adminRoutes(app: FastifyInstance) {
       adCreative: childScope((tenantId) => ({ campaign: { tenantId } })),
       supportTicket: childScope((tenantId) => ({ user: { tenantId } })),
       item: childScope((tenantId) => ({ vendor: { tenantId } })),
-      // ContentReport keeps only a loose reporter id. Treat the reporter's
-      // tenant as the report boundary; target previews are independently
-      // scoped below so a bad cross-tenant target id cannot disclose content.
-      contentReport: childScope(async (tenantId) => {
-        const reporterIds = (await app.prisma.user.findMany({
-          where: { tenantId },
-          select: { id: true },
-        })).map((user) => user.id);
-        return { reporterId: { in: reporterIds } };
-      }),
+      // [DB-05] ContentReport carries its reporter's tenant on the row (held
+      // by a lineage trigger), so the boundary is the column itself — one
+      // bounded predicate, never a materialised list of every user id. Target
+      // previews are independently scoped below so a bad cross-tenant target
+      // id cannot disclose content.
+      contentReport: childScope((tenantId) => ({ tenantId })),
       // ChatMessage has no sender relation. Require both a local sender and a
       // local order-backed room; unattributable service chats fail closed.
       chatMessage: childScope(async (tenantId) => {
@@ -526,19 +562,11 @@ export async function adminRoutes(app: FastifyInstance) {
           chatRoom: { orderId: { in: orders.map((order) => order.id) } },
         };
       }),
-      // ReturnRequest has no relations or tenantId. Require both loose owner
-      // ids to resolve inside this tenant so a malformed cross-tenant row is
-      // hidden rather than being accepted through either side alone.
-      returnRequest: childScope(async (tenantId) => {
-        const [orders, customers] = await Promise.all([
-          app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
-          app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
-        ]);
-        return {
-          orderId: { in: orders.map((order) => order.id) },
-          customerId: { in: customers.map((customer) => customer.id) },
-        };
-      }),
+      // [DB-05] ReturnRequest carries its tenant on the row; the lineage
+      // trigger refuses a row whose order and customer disagree, and the
+      // backfill left such a legacy row NULL (quarantined, matching no tenant).
+      // One bounded predicate instead of every order and user id.
+      returnRequest: childScope((tenantId) => ({ tenantId })),
       // Rating's orderId is loose, while rater/ratee are User relations. All
       // populated ownership legs must agree with the request tenant; this also
       // prevents moderation side effects from reaching a foreign participant.
@@ -690,9 +718,18 @@ export async function adminRoutes(app: FastifyInstance) {
     const userId: string | undefined = request.user?.userId;
     if (!role || !userId) return; // adminGuard already refused; nothing to decide
     const grant = await app.prisma.admin.findUnique({ where: { userId }, select: { permissions: true } });
+    // [VERIFY-DOCS V3] Kept for this request's response: the legacy document
+    // pointers are withheld unless this same live read holds the grant.
+    request.adminPermissions = grant?.permissions ?? null;
     const decision = decideCapability({ role, permissions: grant?.permissions ?? null }, request.method, routeUrl);
     adminCapabilityCounter.labels(decision.allowed ? 'granted' : decision.reason, decision.cls ?? 'none').inc();
     if (decision.allowed) return;
+    // [VERIFY-DOCS V3] The document reviewer grant is refused in EVERY mode:
+    // shadow mode exists to watch capability decisions before enforcing them,
+    // never to open a person's identity documents to an operator without it.
+    if (decision.reason === 'missing-explicit-grant') {
+      throw decision.capability === CATALOGUE_APPROVER_CAPABILITY ? catalogueApproverRequired() : documentReviewerRequired();
+    }
     if (capabilityMode() === 'shadow') {
       adminCapabilityCounter.labels('shadow_denied', decision.cls ?? 'none').inc();
       app.log.warn({ userId, routeUrl, method: request.method, capability: decision.capability, reason: decision.reason },
@@ -707,6 +744,20 @@ export async function adminRoutes(app: FastifyInstance) {
         ? 'This admin action is not classified and cannot be performed'
         : `This admin action requires the ${decision.capability} capability`,
     );
+  });
+
+  // [VERIFY-DOCS V3] THE LEGACY DOCUMENT POINTERS LEAVE ONLY WITH THE GRANT.
+  //
+  // Rider and Driver rows still carry the client-written document fields of
+  // the pre-registry upload path (nationalIdUrl, driverLicenseUrl, ...). A
+  // dozen admin responses include a mover row — the rider and driver detail
+  // and lists, orders, custody cases — so any operator could read where a
+  // person's ID was stored. They are removed from EVERY admin response, at any
+  // depth, unless the caller's live grant (read by the capability hook above)
+  // holds the document reviewer permission. Default: withheld.
+  app.addHook('preSerialization', async (request: any, _reply: any, payload: unknown) => {
+    if (holdsDocumentReviewerGrant(request.adminPermissions)) return payload;
+    return withoutLegacyDocumentPointers(payload);
   });
 
   // [ADM-006] A CONSEQUENTIAL ACTION STATES WHY, before it happens.
@@ -762,7 +813,7 @@ export async function adminRoutes(app: FastifyInstance) {
         // never have it silently dropped when the approval is replayed.
         query: (request.query ?? {}) as Record<string, unknown>,
       },
-      { userId },
+      { userId, role: request.user?.role },
       typeof header === 'string' && header ? header : null,
       reasonOf(request.body, request.headers) ?? '',
     );
@@ -1066,8 +1117,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/users', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { role, status, search } = usersQuerySchema.parse(request.query);
+    // [MC-PR3] test data is left out unless asked for, in the query, so the total stays true
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(role && { activeRole: role }),
       ...(status && { status }),
       ...(search && {
@@ -1079,8 +1132,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_USER, excludeFixtures);
 
-    const [users, total] = await Promise.all([
+    const [users, total, hiddenTestRecords] = await Promise.all([
       app.prisma.user.findMany({
         where,
         select: {
@@ -1099,12 +1153,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.user.count({ where }),
+      hiddenWhere ? app.prisma.user.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(users, total, { page, limit, skip }) };
+    const result = paginatedResponse(users, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** [S1 response-shaping] The mover slice `GET /users/:id` needs: identity
@@ -1282,8 +1338,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/vendors', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = vendorsQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { vendorType: type }),
       ...(search && {
@@ -1293,8 +1350,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_VENDOR, excludeFixtures);
 
-    const [vendors, total] = await Promise.all([
+    const [vendors, total, hiddenTestRecords] = await Promise.all([
       app.prisma.vendor.findMany({
         where,
         include: {
@@ -1304,12 +1362,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.vendor.count({ where }),
+      hiddenWhere ? app.prisma.vendor.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(vendors, total, { page, limit, skip }) };
+    const result = paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
@@ -1320,7 +1380,7 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       orderBy: { createdAt: 'asc' },
     });
-    return { success: true, data: vendors };
+    return { success: true, data: vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })) };
   });
 
   /** One business, whole story: profile, owner, sibling stores, subscription,
@@ -1338,7 +1398,8 @@ export async function adminRoutes(app: FastifyInstance) {
           },
         },
         subscription: true,
-        _count: { select: { items: true, orders: true } },
+        // [Item 62] "Menu items" counts the live menu, not archived history.
+        _count: { select: { items: { where: { archivedAt: null } }, orders: true } },
       },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
@@ -1350,78 +1411,344 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { id: true, orderNumber: true, status: true, totalAmount: true, paymentMethod: true, placedAt: true },
     });
 
+    // [GUARDRAILS §8] Every item of this store the prohibited-items rule touches, and why:
+    // banned (a banned category, or removed by a person), waiting for a check, or approved.
+    const catalogue = await app.prisma.item.findMany({ where: { vendorId: id }, select: { id: true, name: true } });
+    const checks = await catalogueChecksFor(app.prisma, catalogue.map((i) => i.id));
+    const prohibitedItems = catalogue.flatMap((i) => {
+      const check = checks.get(i.id);
+      return check && check.state !== 'CLEAR' ? [{ id: i.id, name: i.name, ...catalogueCheckSummary(check) }] : [];
+    });
+
     return {
       success: true,
       data: {
         ...vendor,
+        vatRegistrationNumber: undefined,
         recentOrders: recentOrders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
+        prohibitedItems,
+        // [owner 14 Oct, store names] Whether the store's own words are held for a person (or were approved).
+        storeCheck: storeCheckOf(vendor),
       },
     };
   });
 
+  // =========================================================================
+  // [GUARDRAILS §8] THE CATALOGUE CHECK (owner, 13 Oct 2026)
+  //
+  // A banned WORD in a partner's own text (name, description, menu section,
+  // options) saves the item but holds it hidden until a person looks. This is
+  // that person's queue. Approve shows the item for the exact words seen — the
+  // request carries the fingerprint the reviewer read, and a partner edit in
+  // between refuses the approval. Remove bans the item for good, with a reason
+  // the partner reads. Nothing here can lift a certain ban (a banned category,
+  // or an earlier removal). Both actions are C3: reason owed, audit row written.
+  // =========================================================================
+
+  app.get('/catalogue-review', { preHandler: [adminGuard] }, async () => {
+    const tenantId = requireTenantId();
+    // An item held only because its STORE waits is checked through its store (below), not one by one.
+    const waiting = [...(await flaggedItemsInTenant(app.prisma, tenantId))].filter(([, check]) => check.state === 'WAITING' && check.field !== 'store');
+    // A bounded page: the first CATALOGUE_REVIEW_PAGE held items, and how many are held in all.
+    const flagged = waiting.slice(0, CATALOGUE_REVIEW_PAGE);
+    const words = await wordsFor(app.prisma, flagged.map(([id]) => id));
+    const items = flagged.flatMap(([id, check]) => {
+      const w = words.get(id);
+      if (!w || check.state !== 'WAITING') return [];
+      return [{
+        itemId: id,
+        vendor: { id: w.vendorId, name: w.vendorName },
+        name: w.name, description: w.description ?? null, sectionName: w.sectionName ?? null, optionNames: w.optionNames ?? [],
+        ...catalogueCheckSummary(check),
+        wordsHash: judgedWordsHash(w),
+      }];
+    });
+    // [owner 14 Oct, store names] Stores whose own words are held: approve shows the store (and lets its items be
+    // judged by their own words again) for exactly the words on screen.
+    const heldStores = [...(await storesHeldInTenant(app.prisma, tenantId))];
+    const storeRows = await app.prisma.vendor.findMany({
+      where: { id: { in: heldStores.slice(0, CATALOGUE_REVIEW_PAGE).map(([id]) => id) } },
+      select: { id: true, status: true, ...STORE_WORDS_SELECT },
+    });
+    const byId = new Map(storeRows.map((r) => [r.id, r]));
+    const stores = heldStores.slice(0, CATALOGUE_REVIEW_PAGE).flatMap(([id, check]) => {
+      const row = byId.get(id);
+      if (!row) return [];
+      return [{
+        vendorId: id, name: row.name, description: row.description ?? null, tags: [...row.tags, ...row.cuisineTypes], status: row.status,
+        state: check.state, prohibitedClass: check.prohibitedClass, label: PROHIBITED_CLASS_LABELS[check.prohibitedClass], field: check.field, term: check.term,
+        wordsHash: storeWordsHash(row),
+      }];
+    });
+    return { success: true, data: { items, total: waiting.length, stores, storesTotal: heldStores.length } };
+  });
+
+  const approveCatalogueItemSchema = z.object({ wordsHash: z.string().regex(/^[0-9a-f]{64}$/), reason: z.string().optional() });
+  app.post('/catalogue-review/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = approveCatalogueItemSchema.parse(request.body ?? {});
+    const tenantId = requireTenantId();
+    const item = await tenantPrisma.item.findUnique({ where: { id }, select: { id: true } });
+    if (!item) throw new NotFoundError('Item', id);
+    // The words are judged and the approval written under the item's row lock, and the
+    // approval stores the fingerprint the REVIEWER saw: words edited at any moment after
+    // that never match it, so they are never shown unseen.
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "items" WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE`;
+      const check = (await catalogueChecksFor(tx, [id])).get(id);
+      if (check?.state === 'BANNED') {
+        throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. ${notAllowedMessage(check.prohibitedClass)}`, { prohibitedClass: check.prohibitedClass });
+      }
+      if (!check || check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This item has nothing waiting for a check.');
+      // Its store's own words hold it: approving the item would show nothing, so the store is checked first.
+      if (check.state === 'WAITING' && check.field === 'store') {
+        throw new AppError(409, 'STORE_WAITING', 'This item\'s store is waiting for a check. Check the store first.');
+      }
+      const words = (await wordsFor(tx, [id])).get(id);
+      if (!words || judgedWordsHash(words) !== body.wordsHash) {
+        throw new AppError(409, 'ITEM_CHANGED', 'This item changed — review it again.');
+      }
+      await tx.item.update({ where: { id }, data: { reviewApprovedHash: body.wordsHash, reviewApprovedAt: new Date() } });
+      // [Opus S3-9] The record is written in the same transaction as the approval: no approval without its record.
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { approvedWordsHash: body.wordsHash } });
+    });
+    return { success: true, data: { itemId: id, state: 'APPROVED' } };
+  });
+
+  // [GUARDRAILS §8 · owner 14 Oct 2026: store names about banned goods are HELD for a person automatically]
+  // Approve shows the store for exactly the words the reviewer saw — the same explicit catalogue-approver grant,
+  // reason and record as an item. A store that sells banned goods is not approved: it is suspended (Stores) or filed
+  // under a banned category, which approval never lifts.
+  const approveCatalogueStoreSchema = z.object({ wordsHash: z.string().regex(/^[0-9a-f]{64}$/), reason: z.string().optional() });
+  app.post('/catalogue-review/stores/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = approveCatalogueStoreSchema.parse(request.body ?? {});
+    const tenantId = requireTenantId();
+    const store = await tenantPrisma.vendor.findUnique({ where: { id }, select: { id: true } });
+    if (!store) throw new NotFoundError('Vendor', id);
+    await app.prisma.$transaction(async (tx) => {
+      // Judged and written under the store's row lock: a rename after the reviewer read the words is never approved.
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE`;
+      const filed = await prohibitedStoreCategory(tx, id);
+      if (filed) {
+        throw new AppError(409, 'PROHIBITED_ITEM', `Approval never lifts a ban. Swift doesn't allow this category: ${PROHIBITED_CLASS_LABELS[filed.prohibitedClass]}.`, { prohibitedClass: filed.prohibitedClass });
+      }
+      const row = await tx.vendor.findUnique({ where: { id }, select: STORE_WORDS_SELECT });
+      if (!row) throw new NotFoundError('Vendor', id);
+      const check = storeCheckOf(row);
+      if (check.state === 'CLEAR') throw new AppError(409, 'NOTHING_TO_CHECK', 'This store has nothing waiting for a check.');
+      if (storeWordsHash(row) !== body.wordsHash) throw new AppError(409, 'STORE_CHANGED', 'This store changed — review it again.');
+      await tx.vendor.update({ where: { id }, data: { nameReviewApprovedHash: body.wordsHash, nameReviewApprovedAt: new Date() } });
+      // The record is written in the same transaction as the approval: no approval without its record.
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { approvedWordsHash: body.wordsHash } });
+    });
+    return { success: true, data: { vendorId: id, state: 'APPROVED' } };
+  });
+
+  const removeCatalogueItemSchema = z.object({ prohibitedClass: z.enum(PROHIBITED_CLASSES as [string, ...string[]]), reason: z.string().optional() });
+  app.post('/catalogue-review/:id/remove', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = removeCatalogueItemSchema.parse(request.body ?? {});
+    const header = request.headers['x-swift-reason'];
+    const reason = (typeof header === 'string' && header.trim() ? header : body.reason ?? '').trim();
+    const item = await tenantPrisma.item.findUnique({ where: { id }, select: { id: true } });
+    if (!item) throw new NotFoundError('Item', id);
+    // One way, once: the write only lands on a row not already removed.
+    const removed = await tenantPrisma.item.updateMany({
+      where: { id, prohibitedAt: null },
+      data: { prohibitedAt: new Date(), prohibitedClass: body.prohibitedClass, prohibitedReason: reason, isAvailable: false },
+    });
+    if (removed.count === 0) throw new AppError(409, 'ALREADY_REMOVED', 'This item was already removed.');
+    return { success: true, data: { itemId: id, state: 'BANNED', prohibitedClass: body.prohibitedClass } };
+  });
+
+  /**
+   * [MC-PR2] The store's activation checklist: every required document with its
+   * state in the gate's own terms, the storefront disclosure verdict (missing
+   * element names only, never values), and what the console may do next — the
+   * same verdict the approve route below enforces. Read-only; no file reference.
+   */
+  app.get('/vendors/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id },
+      select: { id: true, status: true, suspensionSource: true, isVerified: true, activationValidUntil: true, owner: { select: { userId: true, user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    const goLive = await verification.vendorGoLive(id);
+    if (!goLive) throw new NotFoundError('Vendor', id);
+    const subscription = vendor.subscription ?? null;
+    const feePause = await readFeePause(app.prisma, process.env, subscription?.id);
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription, feePause }, goLive);
+    return {
+      success: true,
+      data: {
+        vendorId: vendor.id,
+        applicantId: goLive.ownerUserId,
+        storeStatus: vendor.status,
+        suspensionSource: vendor.suspensionSource,
+        ownerAccountStatus: vendor.owner.user.status,
+        subscriptionStatus: subscription?.status ?? null,
+        feeOperable: feeOperable(subscription, feePause),
+        isVerified: vendor.isVerified,
+        activationValidUntil: vendor.activationValidUntil,
+        role: goLive.role,
+        checklist: { items: goLive.checklist.items, complete: goLive.checklist.complete },
+        disclosure: goLive.disclosure,
+        ready: goLive.ready,
+        next,
+      },
+    };
+  });
+
+  /**
+   * [ACTIVATION AUTHORITY / EV-ACT-11 · MC-PR2] Activate a store that is waiting
+   * for approval, or reinstate a suspended one — never past a gate the single
+   * activation projection enforces.
+   *
+   * This route used to be its own activation authority: it checked the document
+   * checklist and wrote ACTIVE, skipping the storefront-disclosure go-live gate
+   * (DOC-INV-27) and leaving no activation expiry, and it would reopen the store
+   * of a partner who had closed their account. Now one verdict
+   * (vendorActivationNext, shared with the checklist read) decides:
+   *  - waiting for approval with every rule met → the projection itself makes it
+   *    live (checklist, disclosure, pricing and trial, expiry, tier promotion);
+   *  - suspended with every rule met → reinstated by CAS, carrying the same
+   *    expiry the projection would write [Fable #1481 S4-2: the suspension
+   *    source is cleared, so no stale BILLING survives for a later heal];
+   *  - never live and no published phone [owner #51]: waiting → refused 409
+   *    PUBLISHED_PHONE_MISSING (it goes live by itself once the owner adds
+   *    one); suspended → lifted back to waiting, where the owner can add it
+   *    [DS1145 S3];
+   *  - suspended while its subscription cannot operate (the vendor gate's
+   *    rule: fee unpaid or billing stopped) → refused 409 FEE_UNPAID [MC-AD2]:
+   *    only a confirmed payment (or billing's own heal) lifts a fee hold, and
+   *    the owner is pushed nothing;
+   *  - the reinstate decides again inside its transaction, under the owner's
+   *    account lock and the store row lock [Opus S3-1], so a deletion or a
+   *    document decision racing it cannot be undone by it;
+   *  - otherwise refused with what is missing, and nothing changes.
+   */
   app.put('/vendors/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
-      include: { owner: true },
+      include: { owner: { include: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
     // [DELETION-INTEGRITY] A store wound down with its owner's closed account never reopens.
     if (vendor.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
 
-    // [ACTIVATION AUTHORITY / EV-ACT-11] This button is no longer a
-    // checklist-free ACTIVE writer. The founder invariant is: submit owner ID
-    // + required business documents → restricted per-document review →
-    // activation. Approval here CONFIRMS that evidence; it cannot substitute
-    // for it — a store whose checklist is incomplete, expired, or purged
-    // stays pending and the reviewer is pointed at the Verification queue.
-    const checklistComplete = await verification.isRoleVerified(
-      vendor.owner.userId,
-      vendor.vendorType as Parameters<typeof verification.isRoleVerified>[1],
-    );
-    if (!checklistComplete) {
-      throw new AppError(
-        409,
-        'CHECKLIST_INCOMPLETE',
-        `${vendor.name}'s required documents are not all approved and current — review them in the Verification queue first.`,
-      );
-    }
+    const goLive = await verification.vendorGoLive(id);
+    if (!goLive) throw new NotFoundError('Vendor', id);
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription: vendor.subscription ?? null, feePause: await readFeePause(app.prisma, process.env, vendor.subscription?.id) }, goLive);
+    const refused = vendorActivationRefusal(next, vendor.name, goLive);
+    if (refused) throw refused;
 
-    // [PR1270-S2-03] Price BEFORE the activation write. A market that cannot
-    // price this store refuses the approval here, with the config error, and
-    // the store stays pending — never ACTIVE and searchable with no
-    // subscription, which a failure after the CAS below used to leave behind.
-    const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
-      // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
-      // suspension source survives it for a later heal or payment to act on.
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' }, OR: [{ suspensionSource: null }, { suspensionSource: { not: 'WIND_DOWN' } }] }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
-      if (won.count === 0) {
-        // The store changed after the check above: say which way.
-        const now = await tx.vendor.findUnique({ where: { id }, select: { suspensionSource: true } });
-        if (now?.suspensionSource === 'WIND_DOWN') throw new AppError(409, 'ACCOUNT_CLOSED', 'This store belongs to a closed account and cannot be reopened.');
-        throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+    let updated;
+    if (next === 'CAN_ACTIVATE') {
+      // The one authority that makes a store live, on every path (review,
+      // auto-approval, the reconcile belt — and now this button), run for this
+      // store only [DS816 S3]. It prices the store and starts its trial in the
+      // same transaction, or refuses with the config error and leaves it pending.
+      await verification.activateStore(goLive.ownerUserId, id, (tx) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        extra: { previousStatus: vendor.status, previousSuspensionSource: vendor.suspensionSource, verdict: next },
+      }));
+      updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
+      if (updated.status !== 'ACTIVE') {
+        throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
-      return tx.vendor.findUniqueOrThrow({ where: { id } });
-    });
+    } else if (next === 'CAN_LIFT_TO_WAITING') {
+      // [owner #51 · DS1145 S3] Suspended before it was ever live, every other rule met, no published phone. It
+      // cannot go live without one, and a suspended store cannot add one in the app — so approving lifts the
+      // suspension back to waiting for approval: the owner adds the number there and the activation projection
+      // makes the store live by itself. No subscription is created (that is the activation's), so the store still
+      // reads as never live. Decided again under the same locks as a reinstatement.
+      updated = await app.prisma.$transaction(async (tx) => {
+        await bindTenantTransaction(tx);
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-lift-to-waiting-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-lift-to-waiting-store */`;
+        const fresh = await tx.vendor.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, suspensionSource: true, owner: { select: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+        });
+        const freshGoLive = await verification.vendorGoLive(id, tx);
+        if (!freshGoLive) throw new NotFoundError('Vendor', id);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null, feePause: await readFeePause(tx, process.env, fresh.subscription?.id) }, freshGoLive);
+        const refusedNow = again === 'CAN_LIFT_TO_WAITING' ? null
+          : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        if (refusedNow) throw refusedNow;
+        const won = await tx.vendor.updateMany({
+          where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
+          data: { status: 'PENDING_APPROVAL', suspensionSource: null },
+        });
+        if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while approving. Refresh and check its status.`);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+          extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },
+        });
+        return tx.vendor.findUniqueOrThrow({ where: { id } });
+      });
+    } else {
+      // CAN_REINSTATE. [PR1270-S2-03] Price BEFORE the activation write: a
+      // market that cannot price this store refuses here and it stays suspended.
+      updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
+        // [MC-PR2 · Opus S3-1] Decide again under the locks the competing writers take, so nothing that
+        // commits after the first read can be reopened: the owner's account row (account deletion and the
+        // partner wind-down take it; so do document decisions, revocations and expiry), then the store row.
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-reinstate-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-reinstate-store */`;
+        const fresh = await tx.vendor.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, suspensionSource: true, owner: { select: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+        });
+        const freshGoLive = await verification.vendorGoLive(id, tx);
+        if (!freshGoLive) throw new NotFoundError('Vendor', id);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null, feePause: await readFeePause(tx, process.env, fresh.subscription?.id) }, freshGoLive);
+        const refusedNow = again === 'CAN_REINSTATE' ? null
+          : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
+        if (refusedNow) throw refusedNow;
+        const activationValidUntil = await verification.checklistEvidenceValidUntil(freshGoLive.ownerUserId, freshGoLive.role, tx);
+        // [Fable #1481 S4-2] A reinstatement ends whatever suspension the store was under: no stale
+        // suspension source survives it for a later heal or payment to act on. The CAS names the exact
+        // suspension decided above, under the lock.
+        const won = await tx.vendor.updateMany({
+          where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
+          data: { status: 'ACTIVE', isVerified: true, suspensionSource: null, activationValidUntil },
+        });
+        if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+          extra: { previousStatus: fresh.status, previousSuspensionSource: fresh.suspensionSource, verdict: again },
+        });
+        return tx.vendor.findUniqueOrThrow({ where: { id } });
+      });
+    }
 
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
 
-    await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status }, request);
-
-    // A subscription is born as a 14-day trial the moment the vendor goes live.
-
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Vendor Approved!',
-      body: `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
-      data: { vendorId: id },
+      ...(next === 'CAN_LIFT_TO_WAITING'
+        ? {
+            title: 'Add the number customers can call',
+            body: `${vendor.name} is no longer suspended. Add the phone number customers can call in Account, and your store goes live.`,
+          }
+        : {
+            title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
+            body: next === 'CAN_REINSTATE'
+              ? `${vendor.name} has been reinstated and can take orders again once you open it.`
+              : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
+          }),
+      // [DS1321 S4] The lift's notice IS the one "add the number" notice: its tap opens the waiting store's screen,
+      // and the activation projection, which asks once per store, does not ask again.
+      data: next === 'CAN_LIFT_TO_WAITING' ? { kind: 'vendor_needs_public_phone', vendorId: id } : { vendorId: id },
     });
 
-    return { success: true, data: updated };
+    // [VERIFY-DOCS V5] The owner's VAT billing number never rides an admin store reply.
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   app.put('/vendors/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
@@ -1451,7 +1778,7 @@ export async function adminRoutes(app: FastifyInstance) {
       data: { vendorId: id },
     });
 
-    return { success: true, data: updated };
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   app.put('/vendors/:id/feature', { preHandler: [adminGuard] }, async (request) => {
@@ -1472,7 +1799,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
     await audit(request.user.userId, 'TOGGLE_FEATURED_VENDOR', 'Vendor', id, { isFeatured }, request);
 
-    return { success: true, data: updated };
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
   });
 
   // ─── Riders ────────────────────────────────────────────────────────────
@@ -1482,8 +1809,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1500,8 +1828,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [riders, total] = await Promise.all([
+    const [riders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.rider.findMany({
         where,
         include: {
@@ -1510,12 +1839,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.rider.count({ where }),
+      hiddenWhere ? app.prisma.rider.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(riders, total, { page, limit, skip }) };
+    // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
+    const withLive = await withLiveDocuments(app.prisma, riders, 'RIDER');
+    const result = paginatedResponse(withLive, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1535,6 +1868,50 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!rider) throw new NotFoundError('Rider', id);
 
     return { success: true, data: rider };
+  });
+
+  /**
+   * [MC-PR2] A mover's activation checklist: every required document for their
+   * PERSISTED vehicle class with its state, and the live-operation gate the
+   * Verify button obeys (the same call the verify routes make). The per-item
+   * states are the document picture; `live` is the verdict — a vehicle
+   * document can be approved yet belong to a previous vehicle, and only the
+   * gate decides. Read-only; no file reference.
+   */
+  const moverActivationChecklist = async (
+    kind: 'RIDER' | 'DRIVER',
+    profile: { id: string; userId: string; vehicleType: Parameters<typeof verification.getLiveOperationStatus>[1]['vehicleType']; documentsVerified: boolean },
+  ) => {
+    const checklist = await verification.activationChecklist(profile.userId, 'MOVER', { vehicleType: profile.vehicleType });
+    const live = await verification.getLiveOperationStatus(
+      profile.userId,
+      kind === 'RIDER' ? { vehicleType: profile.vehicleType, kind: 'RIDER' } : { vehicleType: profile.vehicleType },
+    );
+    const next = profile.documentsVerified ? 'VERIFIED'
+      : live.allowed ? 'CAN_VERIFY'
+        : live.reason === 'insurance' ? 'NEEDS_INSURANCE' : 'NEEDS_DOCUMENTS';
+    return {
+      moverId: profile.id,
+      kind,
+      applicantId: profile.userId,
+      vehicleType: profile.vehicleType,
+      documentsVerified: profile.documentsVerified,
+      checklist: { items: checklist.items, complete: checklist.complete },
+      live,
+      next,
+    };
+  };
+
+  app.get('/riders/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const rider = await app.prisma.rider.findFirst({
+      where: { id, user: { tenantId } },
+      select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+    });
+    if (!rider) throw new NotFoundError('Rider', id);
+    return { success: true, data: await moverActivationChecklist('RIDER', rider) };
   });
 
   app.put('/riders/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
@@ -1620,8 +1997,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1637,8 +2015,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [drivers, total] = await Promise.all([
+    const [drivers, total, hiddenTestRecords] = await Promise.all([
       app.prisma.driver.findMany({
         where,
         include: {
@@ -1647,12 +2026,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.driver.count({ where }),
+      hiddenWhere ? app.prisma.driver.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(drivers, total, { page, limit, skip }) };
+    // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
+    const withLive = await withLiveDocuments(app.prisma, drivers, 'DRIVER');
+    const result = paginatedResponse(withLive, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1672,6 +2055,18 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!driver) throw new NotFoundError('Driver', id);
 
     return { success: true, data: driver };
+  });
+
+  app.get('/drivers/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const driver = await app.prisma.driver.findFirst({
+      where: { id, user: { tenantId } },
+      select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+    });
+    if (!driver) throw new NotFoundError('Driver', id);
+    return { success: true, data: await moverActivationChecklist('DRIVER', driver) };
   });
 
   app.put('/drivers/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
@@ -1801,8 +2196,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/orders', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, dateFrom, dateTo, search } = adminOrdersQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { orderType: type }),
       ...(dateFrom || dateTo
@@ -1820,8 +2216,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_ORDER, excludeFixtures);
 
-    const [orders, total] = await Promise.all([
+    const [orders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.order.findMany({
         where,
         // [A-15] The handover secrets never enter the admin DTO. `include`
@@ -1837,14 +2234,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.order.count({ where }),
+      hiddenWhere ? app.prisma.order.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // 13 Decimal columns on the order + 7 more on every included OrderItem,
     // all of which the admin client types as `number`. Coerce at the seam.
-    return { success: true, ...paginatedResponse(coerceMoney(orders), total, { page, limit, skip }) };
+    const result = paginatedResponse(coerceMoney(orders), total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** Live ops snapshot for the command map: every online mover's position +
@@ -1995,7 +2394,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
   /** [hold v3 · N-01] The held-for-review queue: paid MMG orders the food-age
    *  cutoff would have cancelled, held for a person instead. Tenant-scoped by
-   *  the request like every admin read. */
+   *  the request like every admin read.
+   *  [REVIEW-B #1699 S3-1] Classed C0 (writes no access record), so it carries
+   *  no customer identity and no store phone: the Orders page polls it every
+   *  minute and shows only the store's name. Who the customer is lives on
+   *  GET /orders/:id, which is C1 and records the read. */
   app.get('/orders/held', { preHandler: [adminGuard] }, async () => {
     const rows = await app.prisma.order.findMany({
       where: { foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...FOOD_AGE_WAITING] } },
@@ -2004,8 +2407,7 @@ export async function adminRoutes(app: FastifyInstance) {
       select: {
         id: true, orderNumber: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true,
         totalAmount: true, readyAt: true, foodAgeHeldAt: true, placedAt: true,
-        vendor: { select: { id: true, name: true, phone: true } },
-        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        vendor: { select: { id: true, name: true } },
       },
     });
     const now = Date.now();
@@ -2204,7 +2606,16 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true, ridePinAttempts: true },
     });
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}) } };
+    // [MMGCLOSE] Whether "Close — refund handled by the store" applies: the
+    // same rule the locked write re-checks (additive field).
+    const canCloseStoreRefund = mmgStoreCloseRefusal(order) === null;
+
+    // [TAXI waiting charge] A ride whose waiting charge was frozen shows it,
+    // itemised and read-only (route fare + waiting = total). Any other order
+    // gains no key.
+    const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}) } };
   });
 
   /**
@@ -2604,7 +3015,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // log + customer notification below. (Wallet credit is a Part C / fintech-phase
     // concern — see the dormant walletBalance/Transaction schema notes.)
 
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: newStatus });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: newStatus });
 
     // [REPORT-010 F-03] Unattested MMG gets the direct-refund guidance — the
     // customer may have already paid the store's link before this cancel.
@@ -2644,6 +3055,78 @@ export async function adminRoutes(app: FastifyInstance) {
         // [M066] Echo the obligation exactly as it was committed.
         refundOwed: refund ? String(cancellation.order.refundOwedAmount) : null,
       },
+    };
+  });
+
+  /**
+   * [MMGCLOSE · owner 8 Oct] POST /orders/:id/close-store-refund — close a
+   * store-claimed MMG order that cannot be fulfilled as "refund handled by the
+   * store". RECORD ONLY: the order becomes CANCELLED with the refund rail's
+   * CANCELLATION obligation (OWED — the store owes the customer, from its own
+   * MMG); Swift moves, credits and charges nothing. C4: a stated reason and a
+   * second admin (the approval gate above), bound to the order and to the claim
+   * revision the admin reviewed, which the locked write checks again.
+   */
+  app.post('/orders/:id/close-store-refund', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      expectedClaimRevision: z.number().int().min(0),
+      reason: z.string().optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const { order, amount } = await closeMmgOrderAsStoreRefund(orderService, {
+      orderId: id,
+      adminUserId: request.user.userId,
+      expectedClaimRevision: body.expectedClaimRevision,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
+    if (order.vendorId) await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
+    // Told after the commit, each on its own key (a retry of the notice cannot
+    // double it). Neither is told the refund happened — only who makes it.
+    const party = order.vendorId
+      ? await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { name: true, owner: { select: { userId: true } } } })
+      : null;
+    const words = mmgStoreCloseNotices(order.orderNumber, amount ?? 0, order.fulfillment === 'APPOINTMENT', party?.name);
+    const ownerUserId = party?.owner.userId;
+    await notifications.send({
+      userId: order.customerId, type: 'ORDER_UPDATE', title: words.customer.title, body: words.customer.body,
+      audience: 'customer', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:customer:${id}`,
+    });
+    if (ownerUserId) {
+      await notifications.send({
+        userId: ownerUserId, type: 'ORDER_UPDATE', title: words.store.title, body: words.store.body,
+        audience: 'business', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:vendor:${id}`,
+      });
+    }
+    return { success: true, data: { orderId: id, status: 'CANCELLED', disposition: MMG_STORE_CLOSE_DISPOSITION } };
+  });
+
+  /**
+   * [L02 · row 34 · review S2-1] POST /orders/:id/door-cash-return/resolve —
+   * operations records partial cash a rider could not hand back at the door
+   * (HELD) as resolved: handed back later, or otherwise settled, as the stated
+   * reason says. RECORD ONLY: Swift moves, refunds and deducts nothing; the
+   * amount and the rider's original report stay as they were. C4 (a reason and
+   * a second admin, the approval gate above). Until this existed nothing could
+   * ever move HELD, so the rider holding the cash could never close their account.
+   */
+  app.post('/orders/:id/door-cash-return/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const resolved = await resolveHeldDoorCash(tenantPrisma as unknown as PrismaClient, {
+      orderId: id,
+      adminUserId: request.user.userId,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+    return {
+      success: true,
+      data: { orderId: resolved.orderId, doorCashReturn: { amount: resolved.amount, status: 'RESOLVED', resolvedAt: resolved.resolvedAt } },
     };
   });
 
@@ -2745,11 +3228,21 @@ export async function adminRoutes(app: FastifyInstance) {
       return tx.order.findUniqueOrThrow({ where: { id } });
     });
     orderRefundCounter.labels('settled').inc();
-    app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'REFUNDED' });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'REFUNDED' });
     return { success: true, data: updated };
   });
 
   // ─── Finance ───────────────────────────────────────────────────────────
+
+  // [Owner legal plan 15 Oct · R10, research T1] The VAT registration tracker
+  // for this tenant: weekly fees due and received per month, the year ahead
+  // from today's partners, and how close both are to the GYD 15,000,000
+  // threshold (billing/vat-tracker.ts). Read only.
+  app.get('/finance/vat-tracker', { preHandler: [adminGuard] }, async () => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    return { success: true, data: await vatTracker(app.prisma, tenantId) };
+  });
 
   app.get('/finance/revenue', { preHandler: [adminGuard] }, async () => {
     // Admin authority is tenant-local. Raw SQL does not pass through Prisma's
@@ -3041,7 +3534,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const configs = await app.prisma.platformConfig.findMany({
       orderBy: { key: 'asc' },
     });
-    return { success: true, data: configs };
+    // Launch switches set in the server environment (read-only here), so the
+    // console shows what this API is actually running with.
+    return { success: true, data: configs, switches: { staffInviteAccept: staffInviteAcceptEnabled() } };
   });
 
   app.put('/config/:key', { preHandler: [platformControlGuard] }, async (request) => {
@@ -3526,6 +4021,8 @@ export async function adminRoutes(app: FastifyInstance) {
           rider: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           driver: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           vendor: { select: { id: true, name: true } },
+          // The unused credit a refund would pay back (the console shows the action only then).
+          prepaidBalance: { select: { balance: true, currencyCode: true } },
         },
         skip,
         take: limit,
@@ -3536,12 +4033,18 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // Subscription.weeklyRate / customRate are Decimal(10,2) — this IS Swift's
     // revenue line (flat weekly fee, no commission). Coerce at the seam.
+    // A refund set aside and not yet paid or released: the console shows its
+    // next step (record the payout, or release it) instead of a new refund.
+    const setAside = await openCreditRefunds(app.prisma, subscriptions.map((sub) => sub.id));
+    const setAsideIds = await openSetAsideIds(app.prisma, [...setAside.keys()]);
+    const payoutAsks = await payoutAskStateFor(app.prisma, setAsideIds);
     const current = await Promise.all(subscriptions.map(async (sub) => {
       const payer = sub.rider?.user.id ?? sub.driver?.user.id;
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
-      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority };
+      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null, refundPayoutReported: payoutAsks.get(sub.id) === 'ACTIVE', refundPayoutAsk: payoutAsks.get(sub.id) ?? null };
     }));
-    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }) };
+    // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
+    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
   });
 
   app.put('/subscriptions/:id/waive-fee', { preHandler: [adminGuard] }, async (request) => {
@@ -3625,13 +4128,15 @@ export async function adminRoutes(app: FastifyInstance) {
     // ledger posting, the audit row and the durable notice / re-bill tail are
     // written together. Rollback is hold-only (BILLING_TOPUP_HOLD=1 refuses
     // every top-up); there is no way back to an unkeyed mutation.
-    if (process.env['BILLING_TOPUP_HOLD'] === '1') {
-      throw new AppError(503, 'TOPUP_ON_HOLD', 'Top-ups are on hold by operations — nothing was recorded. Try again once the hold is lifted.');
+    // [OWNER 8 Oct 22:20 + 23:58 (4)] Production holds it (fails closed when
+    // unset there); only BILLING_TOPUP_HOLD=0 opens it on a test server.
+    if (manualFeeCreditHeld()) {
+      throw new AppError(503, 'TOPUP_ON_HOLD', MANUAL_FEE_CREDIT_HELD_MESSAGE);
     }
     const clientKey = request.headers['idempotency-key'];
     if (!isUsableTopUpKey(clientKey)) {
       billingTopupMissingKeyCounter.inc();
-      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A top-up needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', `A recorded fee payment needs an Idempotency-Key header of ${TOPUP_KEY_MIN}–${TOPUP_KEY_MAX} characters — the same key on a retry returns the same result instead of crediting twice.`);
     }
     // [A-12] Normalised the same way every other manual-rail reference is, so
     // the same transfer typed two ways cannot occupy two rows and defeat the
@@ -3658,6 +4163,66 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, replayed, data: { balance: result.balance, currencyCode: result.currencyCode } };
+  });
+
+  /**
+   * [Owner ruling 2026-10-07] Refund unused prepaid fee credit, then the
+   * account can be deleted. Swift never moves the money. Three steps, each a
+   * money action a second admin approves (credit-refund.ts):
+   *   1. set-aside: the whole credit leaves the wallet; nothing is paid before;
+   *   2. paid: after paying it outside Swift, the set-aside amount and the
+   *      transfer reference (one reference, one refund, across every account);
+   *   3. release: a set-aside that could not be paid goes back to the wallet.
+   * Every answer carries the LIVE wallet and the open set-aside.
+   */
+  // One schema with the approval gate's ask check (credit-refund.ts): a wallet is Decimal(12,2),
+  // so any balance it can hold can be refunded whole.
+  const refundAmount = REFUND_AMOUNT;
+  const refundSetAsideId = REFUND_SET_ASIDE_ID;
+  const refundSubject = async (request: { params: unknown }) => {
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const subscription = await app.prisma.subscription.findFirst({ where: { id, ...subscriptionTenantScope(tenantId) }, select: { id: true } });
+    if (!subscription) throw new NotFoundError('Subscription', id);
+    return id;
+  };
+  const approvalOf = (request: unknown) => (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? '';
+  const refundAnswer = (r: Awaited<ReturnType<typeof setAsideCreditRefund>>) => ({
+    success: true,
+    replayed: r.replayed,
+    data: { amount: r.amount, currencyCode: r.currencyCode, balance: r.balance, refundSetAside: r.refundSetAside, billingEventId: r.billingEventId },
+  });
+
+  app.post('/subscriptions/:id/refund-credit/set-aside', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    const body = z.object({ amount: refundAmount }).parse(request.body);
+    return refundAnswer(await setAsideCreditRefund(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id, amount: body.amount,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
+  });
+
+  app.post('/subscriptions/:id/refund-credit/paid', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    // [Sol r2 S1] The set-aside this payout pays is part of what the second admin approves.
+    const body = PAID_REFUND_BODY.parse(request.body);
+    const reference = refundReferenceOf(body.reference);
+    return refundAnswer(await recordCreditRefundPaid(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id,
+      amount: body.amount, method: body.method, reference, setAsideId: body.setAsideId,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
+  });
+
+  app.post('/subscriptions/:id/refund-credit/release', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    const body = z.object({ amount: refundAmount, setAsideId: refundSetAsideId }).parse(request.body);
+    return refundAnswer(await releaseCreditRefund(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id, amount: body.amount, setAsideId: body.setAsideId,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
   });
 
   /** Billing audit trail for one subscription. */
@@ -4216,21 +4781,36 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: entries.map((e) => ({ ...e, amountUsd: Number(e.amountUsd) })) };
   });
 
-  /** Set a plan price (append semantics: deactivate + create keeps history;
-   *  the book is USD-only by law). */
+  /** Schedule a plan price (append semantics: every row is kept; the book is
+   *  USD-only by law). [Owner legal plan · F2 · GUARDRAILS §7] A HIGHER price
+   *  (or a first price for a plan) takes effect no sooner than 14 days from
+   *  now (an earlier effectiveFrom is refused); a LOWER one may take effect
+   *  from now, the next billing week (coordinator ruling 15 Oct). The price in
+   *  force stays in force until then, a week is priced by the book in force
+   *  when it starts, and every partner it changes is told now
+   *  (billing/price-book.ts, fx-notices.ts). */
   app.put('/billing/price-book', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       role: z.enum(['VENDOR', 'RIDER', 'DRIVER', 'SERVICE']),
       tier: z.string().trim().max(40).optional(),
       amountUsd: z.number().positive().max(10_000),
+      effectiveFrom: z.string().datetime(),
     }).parse(request.body ?? {});
+    const { activePriceBook, earliestPriceChange, PRICE_BOOK_NOTICE_DAYS, priceBookKey, bookRowsAt } = await import('../billing/price-book');
+    const now = new Date();
+    const effectiveFrom = new Date(body.effectiveFrom);
+    if (effectiveFrom.getTime() < now.getTime() - 60_000) throw new AppError(400, 'PRICE_CHANGE_IN_PAST', 'A price never takes effect in the past. Nothing changed.');
+    // Compared with the price that would otherwise be in force on that date.
+    const before = bookRowsAt(await activePriceBook(app.prisma), effectiveFrom).get(priceBookKey(body.role, body.tier ?? null));
+    const lower = !!before && body.amountUsd < before.amountUsd;
+    const earliest = earliestPriceChange(now);
+    if (!lower && effectiveFrom.getTime() < earliest.getTime()) {
+      throw new AppError(400, 'PRICE_CHANGE_TOO_SOON', `A higher weekly price (or a first price for a plan) changes no sooner than ${PRICE_BOOK_NOTICE_DAYS} days after it is set, so every partner it changes is told first. Set effectiveFrom to ${earliest.toISOString()} or later. Nothing changed.`, { earliestEffectiveFrom: earliest.toISOString() });
+    }
     const updated = await app.prisma.$transaction(async (tx) => {
-      await tx.priceBookEntry.updateMany({
-        where: { role: body.role, tier: body.tier ?? null, active: true },
-        data: { active: false },
-      });
+      // The price in force stays in force until effectiveFrom: nothing is deactivated here.
       const created = await tx.priceBookEntry.create({
-        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd },
+        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd, effectiveFrom },
       });
       // [ADM-002] The route already owned this transaction — the audit row
       // simply joins it, and names the entry it made (a create declares no
@@ -4238,7 +4818,10 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: created.id });
       return created;
     });
-    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd) } };
+    // Tell every partner it changes, now (the daily notice job retries any undelivered).
+    const { announcePriceBookEntry } = await import('../billing/fx-notices');
+    const told = await announcePriceBookEntry(app.prisma, app.io, updated.id, new Date());
+    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd), noticesQueued: told.notified } };
   });
 
   /** Part 13 reporting — one truth, two columns: USD (management view) and
@@ -4334,7 +4917,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const tenant = await app.prisma.tenantBillingCurrency.findFirst({ where: { settlementCurrency: q.quote } });
     const inc = tenant ? Number(tenant.roundingIncrement) : 1;
     const previous = await app.prisma.fxRate.findFirst({ where: { quote: q.quote }, orderBy: { effectiveFrom: 'desc' } });
-    const entries = await app.prisma.priceBookEntry.findMany({ where: { active: true }, orderBy: { role: 'asc' } });
+    // The plans in force today (a scheduled price shows once it is in force).
+    const { activePriceBook, bookRowsAt } = await import('../billing/price-book');
+    const entries = [...bookRowsAt(await activePriceBook(app.prisma), new Date()).values()].sort((a, b) => a.role.localeCompare(b.role));
     return {
       success: true,
       data: {
@@ -4717,20 +5302,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/billing/agent-payments/:id/refund-flag', { preHandler: [adminGuard] }, async (request) => {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ note: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const row = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
-    if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
-    if (row.status !== 'UNMATCHED') throw new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
+    // [REVIEW S3-2] One refund per MMG payment: the service closes the
+    // provider transaction and reconciles its other held observations.
     // [ADM-002] Flagging a payment for refund is a money decision. Its
     // subject is in the params, so the row needs no id override.
-    const updated = await tenantPrisma.$transaction(async (tx) => {
-      const row = await tx.mmgAgentPayment.update({
-        where: { id },
-        data: { status: 'REFUND_FLAGGED', note: body.note, resolvedBy: request.user.userId, resolvedAt: new Date() },
-      });
-      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
-      return row;
-    });
-    return { success: true, data: updated };
+    const { AgentCashService } = await import('../billing/agent-cash.service');
+    const svc = new AgentCashService(tenantPrisma, billing);
+    const result = await svc.flagRefund(id, request.user.userId, body.note,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+    const updated = await tenantPrisma.mmgAgentPayment.findUnique({ where: { id } });
+    return { success: true, data: { ...updated, refund: result } };
   });
 
   /** Leave with note (stays in the queue). */
@@ -4798,6 +5379,15 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ingestionMode: row.value } };
   });
 
+  // [PROD-PATH] The fee pause (billing/fee-pause.ts): whether partners'
+  // weekly fees are paused because no way to pay is live, since when, whether
+  // a resume is still being recorded, and how many of this tenant's fees the
+  // pause holds. Read-only; the pause itself follows the server's switches.
+  app.get('/billing/fee-pause', { preHandler: [adminGuard] }, async () => {
+    const { feePauseStatus } = await import('../billing/mmg-pause');
+    return { success: true, data: await feePauseStatus(app.prisma, subscriptionTenantScope(requireTenantId())) };
+  });
+
   app.get('/billing/confirmations', { preHandler: [adminGuard] }, async () => {
     const { confirmationReviewQueue } = await import('../billing/confirmation-finance');
     return { success: true, data: await confirmationReviewQueue(app.prisma, requireTenantId()) };
@@ -4863,6 +5453,75 @@ export async function adminRoutes(app: FastifyInstance) {
       extra: { queryType: 'DETAIL', matchedIds: detail.id, matchedCount: 1, checkoutStatus: detail.status },
     });
     return { success: true, data: detail };
+  });
+
+  // ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ─────────
+  //
+  // A duplicate, over-the-cap or mistaken MMG weekly-fee payment, returned in
+  // full to the partner's MMG account (MMG reverses in full only). The ask is
+  // C4: a stated reason and a second person (or the owner in solo mode), over
+  // this payment and its whole amount. The claim and its audit row commit
+  // before MMG is asked; only MMG's lookup moves the fee balance
+  // (mmg-fee-reversal.ts). Off until MMG_FEE_REVERSAL=on.
+  const feeReversals = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications });
+  const reversalOut = (row: { amount: unknown } & Record<string, unknown>) => ({
+    id: row['id'], checkoutId: row['checkoutId'], state: row['state'], amount: Number(row.amount), currencyCode: row['currencyCode'],
+    providerStatus: row['providerStatus'], lookupStatus: row['lookupStatus'], heldReason: row['heldReason'],
+    sentAt: row['sentAt'], reversedAt: row['reversedAt'], failedAt: row['failedAt'], resolution: row['resolution'],
+  });
+
+  app.get('/billing/mmg-checkouts/:id/reversal', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    return { success: true, data: await feeReversals.view({ tenantId, checkoutId: id }) };
+  });
+
+  app.post('/billing/mmg-checkouts/:id/reverse', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      // MMG reverses in full only: the admin types the whole amount, and the
+      // approval's fingerprint binds it with the payment.
+      amountGyd: z.number().positive().max(MAJOR_AMOUNT_CEILING),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers as never) ?? body.reason ?? '';
+    const row = await feeReversals.requestReversal(
+      { tenantId, checkoutId: id, amountGyd: body.amountGyd, reason, actorId: request.user.userId,
+        approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // [DS1112] A person resolves a HELD return (C4: a reason and a second
+  // person, or solo): "MMG shows nothing was returned" (only while MMG's
+  // lookup shows the payment standing) or "returned, here is MMG's reference"
+  // (booked only if MMG's lookup proves it). Never a guess.
+  app.post('/billing/mmg-fee-reversals/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      outcome: z.enum(['NOT_RETURNED', 'RETURNED', 'RETURNED_NOT_BOOKED']),
+      // The MMG statement line or the MMG reversal reference the person read.
+      mmgReference: z.string().trim().min(3).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/#-]*$/, 'Use the reference exactly as MMG shows it'),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const row = await feeReversals.resolveHeld(
+      { tenantId, reversalId: id, outcome: body.outcome, mmgReference: body.mmgReference, actorId: request.user.userId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // "Check with MMG": MMG's lookup settles an open return (proof debits the
+  // balance once; a refusal with the payment standing closes it). It decides
+  // nothing itself, so it is C2 — the money decision was the approved C4 ask.
+  app.post('/billing/mmg-fee-reversals/:id/check', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const row = await feeReversals.check({ tenantId, reversalId: id });
+    return { success: true, data: reversalOut(row as never) };
   });
 
   // ── Collections workbench [san spec PART 21] — the founder's call list ────
@@ -5301,14 +5960,16 @@ export async function adminRoutes(app: FastifyInstance) {
     // the queue row (verification/previous-decision.ts). Only applicants on
     // this page are read, through the same tenant-scoped client; a failed
     // lookup degrades to null and never fails the queue.
-    const rows = await withPreviousDecisions(
+    const withEarlier = await withPreviousDecisions(
       documents,
       (earlierWhere) => tenantPrisma.verificationDocument.findMany({
         where: earlierWhere,
-        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+        select: { id: true, userId: true, role: true, subjectId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
       }),
       (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
     );
+    // [VERIFY-DOCS] Each row says what the reviewer must type to approve it.
+    const rows = withEarlier.map((document) => ({ ...document, reviewerTypes: reviewerTypedFields(document.docType) }));
 
     return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });
@@ -5317,7 +5978,12 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = approveDocSchema.parse(request.body ?? {});
 
-    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt, body.insurance);
+    // [VERIFY-DOCS] A reviewer approving here must type what the type needs (`required`).
+    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt, body.insurance, {
+      required: true,
+      ...(body.documentNumber !== undefined ? { documentNumber: body.documentNumber } : {}),
+      ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
+    });
     await audit(
       request.user.userId,
       'APPROVE_VERIFICATION_DOC',
@@ -5385,7 +6051,7 @@ export async function adminRoutes(app: FastifyInstance) {
       });
       markReplayAudited(request as unknown as AuditRequestLike, decisionRow?.id);
     } else {
-      app.io.to(`order:${id}`).emit('order:status_changed', {
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', {
         orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
         mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });
@@ -5413,8 +6079,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const doc = await verification.revokeDocument(id, request.user.userId, body.reason);
     await audit(request.user.userId, 'REVOKE_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, reason: body.reason }, request);
-
-    return { success: true, data: doc };
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] Additive: the account level after the withdrawal, so
+    // the console says "back to L1" only when it is (another customer ID may still stand).
+    const after = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { trustLevel: true } });
+    return { success: true, data: { ...doc, accountTrustLevel: after?.trustLevel ?? null } };
   });
 
   // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────
@@ -5521,13 +6189,122 @@ export async function adminRoutes(app: FastifyInstance) {
     const ttlSeconds = 300;
 
     await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
-    const minted = mintRenderPath(id, ttlSeconds);
-    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
+    // [VERIFY-DOCS V3] The link is minted FOR this reviewer: the render route
+    // re-checks their grant on every load.
+    const minted = mintRenderPath(id, request.user.userId, ttlSeconds);
+    // [Item 98] Face-matching is off (row 54): an identity document comes with the
+    // applicant's own signup selfie for the reviewer to compare by eye. Recorded
+    // in the same view audit.
+    const owner = await tenantPrisma.user.findUnique({ where: { id: doc.userId }, select: { id: true, avatar: true, selfieCapturedAt: true } });
+    const signupSelfie = await signupSelfieFor(doc.docType, owner);
+    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true, signupSelfieShown: !!signupSelfie }, request);
     // [DS110-15] A path RELATIVE to the API origin, on purpose. The console
     // resolves it against its configured API origin and loads it through its
     // own same-origin proxy; an origin built here from the Host header would
     // be client-supplied input, and the console discards it anyway.
-    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
+    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds, signupSelfie } };
+  });
+
+  // ─── [VERIFY-DOCS V3] Staff: the document reviewer grant ─────────────────
+  //
+  // A SUPER_ADMIN grants and revokes it — to themselves too (owner ruling,
+  // 6 Oct 2026: "a super-admin may grant it to themselves with a recorded
+  // reason") — with a reason (C3), and the record keeps the Admin row before
+  // and after (ADM-004, inline) plus a named row saying who, whom and why.
+  // The target must be an ACTIVE admin of the caller's own tenant.
+  const staffName = (u: { firstName: string | null; lastName: string | null }) =>
+    [u.firstName, u.lastName].filter((part) => part && part.trim()).join(' ') || 'Unnamed admin';
+
+  app.get('/staff/document-reviewers', { preHandler: [founderGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const staff = await app.prisma.user.findMany({
+      where: { tenantId, roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] } },
+      select: { id: true, firstName: true, lastName: true, activeRole: true, roles: true, status: true, admin: { select: { permissions: true } } },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+    });
+    return {
+      success: true,
+      data: staff.map((u) => ({
+        userId: u.id,
+        name: staffName(u),
+        role: u.roles.includes('SUPER_ADMIN') ? 'SUPER_ADMIN' : 'ADMIN',
+        active: u.status === 'ACTIVE',
+        documentReviewer: holdsDocumentReviewerGrant(u.admin?.permissions),
+        catalogueApprover: holdsCatalogueApproverGrant(u.admin?.permissions),
+        you: u.id === request.user.userId,
+      })),
+    };
+  });
+
+  app.put('/staff/:userId/document-reviewer', { preHandler: [founderGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { userId } = request.params as { userId: string };
+    const body = z.object({ grant: z.boolean() }).passthrough().parse(request.body ?? {});
+    const target = await app.prisma.user.findFirst({
+      where: { id: userId, tenantId },
+      select: { id: true, roles: true, status: true },
+    });
+    // Another tenant's admin is indistinguishable from an unknown id.
+    if (!target) throw new NotFoundError('Admin', userId);
+    if (!target.roles.some((r) => r === 'ADMIN' || r === 'SUPER_ADMIN') || target.status !== 'ACTIVE') {
+      throw new AppError(409, 'NOT_ACTIVE_STAFF', 'Only an active admin of this team can hold the document-reviewer permission.');
+    }
+    const reason = reasonOf(request.body, request.headers as never);
+    const self = target.id === request.user.userId;
+    const result = await app.prisma.$transaction(async (tx) => {
+      const change = await setDocumentReviewerGrant(tx, target.id, body.grant);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        extra: { documentReviewer: change.documentReviewer, grantChanged: change.changed, self },
+      });
+      if (change.changed) {
+        await tx.auditLog.create({ data: {
+          userId: request.user.userId,
+          action: body.grant ? 'DOCUMENT_REVIEWER_GRANTED' : 'DOCUMENT_REVIEWER_REVOKED',
+          entity: 'Admin',
+          entityId: target.id,
+          changes: { targetUserId: target.id, self, reason },
+          ipAddress: request.ip,
+          userAgent: request.headers['user-agent'] ?? null,
+        } });
+      }
+      return change;
+    });
+    return { success: true, data: result };
+  });
+
+  // [GUARDRAILS §8 · Opus S3-9] The catalogue approver grant: who may SHOW an item a banned word is holding.
+  // The same founder door as the document reviewer, a reason (C3), the Admin row before and after, and a named row.
+  app.put('/staff/:userId/catalogue-approver', { preHandler: [founderGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { userId } = request.params as { userId: string };
+    const body = z.object({ grant: z.boolean() }).passthrough().parse(request.body ?? {});
+    const target = await app.prisma.user.findFirst({ where: { id: userId, tenantId }, select: { id: true, roles: true, status: true } });
+    if (!target) throw new NotFoundError('Admin', userId);
+    if (!target.roles.some((r) => r === 'ADMIN' || r === 'SUPER_ADMIN') || target.status !== 'ACTIVE') {
+      throw new AppError(409, 'NOT_ACTIVE_STAFF', 'Only an active admin of this team can hold the catalogue-approver permission.');
+    }
+    const reason = reasonOf(request.body, request.headers as never);
+    const self = target.id === request.user.userId;
+    const result = await app.prisma.$transaction(async (tx) => {
+      const change = await setCatalogueApproverGrant(tx, target.id, body.grant);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        extra: { catalogueApprover: change.catalogueApprover, grantChanged: change.changed, self },
+      });
+      if (change.changed) {
+        await tx.auditLog.create({ data: {
+          userId: request.user.userId,
+          action: body.grant ? 'CATALOGUE_APPROVER_GRANTED' : 'CATALOGUE_APPROVER_REVOKED',
+          entity: 'Admin',
+          entityId: target.id,
+          changes: { targetUserId: target.id, self, reason },
+          ipAddress: request.ip,
+          userAgent: request.headers['user-agent'] ?? null,
+        } });
+      }
+      return change;
+    });
+    return { success: true, data: result };
   });
 
   // ─── Retail returns ──────────────────────────────────────────
@@ -5753,7 +6530,7 @@ export async function adminRoutes(app: FastifyInstance) {
     requireTenantId();
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status } = z.object({
-      status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED']).optional(),
+      status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED', 'CANCELLED']).optional(),
     }).parse(request.query);
     const where = status ? { status } : { status: 'PENDING' };
     const [rows, total] = await Promise.all([
@@ -5763,11 +6540,54 @@ export async function adminRoutes(app: FastifyInstance) {
     // An approver must be able to tell their own asks apart at a glance: they
     // cannot decide those, and a queue that hides the fact wastes their time.
     const mine = request.user.userId;
+    // [OWNER #13] Solo mode, per own request: waiting, ready, available, or
+    // why not — the same facts the server checks, read live, so the screen
+    // never offers a button the server will refuse.
+    const ownPending = rows.some((row) => row.requestedBy === mine && row.status === 'PENDING');
+    const me = ownPending ? await app.prisma.user.findUnique({ where: { id: mine }, select: { email: true, emailChangedAt: true } }) : null;
+    const soloContext = ownPending ? {
+      userId: mine,
+      role: request.user.role,
+      roster: await approverRoster(app.prisma),
+      hasEmail: !!me?.email?.trim(),
+      emailChangedAt: me?.emailChangedAt ?? null,
+      emailReady: emailChannelConfigured(),
+      coolOffHours: await soloCoolOffHours(app.prisma),
+      now: new Date(),
+    } : null;
     return {
       success: true,
-      data: rows.map((row) => ({ ...row, isOwnRequest: row.requestedBy === mine })),
+      data: rows.map((row) => ({
+        ...row,
+        isOwnRequest: row.requestedBy === mine,
+        solo: soloContext && row.requestedBy === mine ? soloRowState(row as never, soloContext) : null,
+      })),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
+  });
+
+  // [OWNER #13] SOLO MODE: the owner, as the only admin who could approve
+  // their own request, starts the cancellable wait. Refused unless every
+  // condition holds now (solo-approval.ts); the wait, its audit row and the
+  // owner's email commit together.
+  app.post<{ Params: { id: string } }>('/approvals/:id/solo', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
+    const started = await startSoloApproval(app.prisma, request.params.id,
+      { userId: request.user.userId, role: request.user.role },
+      { onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }) });
+    adminApprovalCounter.labels('solo_requested', 'C4').inc();
+    return { success: true, data: started };
+  });
+
+  // [OWNER #13] The admin who asked withdraws their own request — during a
+  // solo wait (the owner's brake) or any time it is still pending.
+  app.post<{ Params: { id: string } }>('/approvals/:id/cancel', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
+    const cancelled = await cancelOwnApproval(app.prisma, request.params.id,
+      { userId: request.user.userId, role: request.user.role },
+      { onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }) });
+    adminApprovalCounter.labels('cancelled', 'C4').inc();
+    return { success: true, data: cancelled };
   });
 
   app.post<{ Params: { id: string } }>('/approvals/:id/decide', { preHandler: [adminGuard] }, async (request) => {
@@ -5781,6 +6601,32 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const grant = await app.prisma.admin.findUnique({ where: { userId: request.user.userId }, select: { permissions: true } });
     const held = capabilitiesOf({ role: request.user.role, permissions: grant?.permissions ?? null });
+
+    // [OWNER #13] The requester deciding a request whose solo wait was
+    // started: solo mode. Every other self-decision falls through to the
+    // two-person rule below, which refuses it.
+    const own = (await app.prisma.privilegedApproval.findUnique({
+      where: { id: request.params.id }, select: { requestedBy: true, soloRequestedAt: true } as never,
+    })) as { requestedBy: string; soloRequestedAt: Date | null } | null;
+    if (own && own.requestedBy === request.user.userId && own.soloRequestedAt) {
+      try {
+        const solo = await decideSoloApproval(app.prisma, request.params.id,
+          { userId: request.user.userId, role: request.user.role, holds: (capability) => holdsCapability(held, capability) },
+          { approve: body.approve, note: body.note },
+          {
+            // [ALG-34] A fresh sign-in code, spent by this decision: one code, one decision.
+            consumeStepUp: () => requireStepUp(app, request as never, { consume: true }),
+            onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+          });
+        adminApprovalCounter.labels('solo_approved', 'C4').inc();
+        return { success: true, data: solo };
+      } catch (err) {
+        const code = (err as { code?: unknown }).code;
+        adminApprovalCounter.labels(`solo_refused_${typeof code === 'string' ? code.toLowerCase() : 'error'}`, 'C4').inc();
+        throw err;
+      }
+    }
+
     const decision = await decideApproval(
       app.prisma, request.params.id,
       { userId: request.user.userId, holds: (capability) => holdsCapability(held, capability) },
@@ -6037,7 +6883,8 @@ export async function adminRoutes(app: FastifyInstance) {
   // SWIFT-121: one entry per LIVE queue (createQueues). 'riderAssignment' was
   // removed (SWIFT-023) — dropped here; 'search' was missing, so search's failed
   // jobs were invisible in the DLQ — added.
-  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'search'] as const;
+  // [row 266] 'offer' = the offer fast lane (offer timeouts only).
+  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'offer', 'search'] as const;
 
   /** GET /alerts/health — ack rate + median time-to-ack per alert kind
    *  (alerts spec §A4): how silently-failing pushes get caught before churn.
@@ -6217,7 +7064,14 @@ export async function adminRoutes(app: FastifyInstance) {
     if (refusal) throw new AppError(409, 'REPLAY_NOT_CERTIFIED', refusal, { jobName: job.name, ...recoveryFor(job.name) });
     await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { jobName: job.name }, async () => {
       try {
-        await job.retry();
+        // [Item 63] The operator authorizes ONE fresh execution: reset the
+        // started-run counter the automatic-replay guard reads. A certified
+        // class keeps its attempt history (attemptsMade) visible; an
+        // uncertified one (RECONCILE_FIRST) starts both counters again, so a
+        // worker dying during THIS run is a prior start the guard refuses —
+        // the one replay can never become two.
+        const certified = recoveryFor(job.name).policy === 'SAFE_REPLAY';
+        await job.retry('failed', { resetAttemptsStarted: true, ...(certified ? {} : { resetAttemptsMade: true }) });
       } catch (err) {
         // BullMQ's reprocess refused: the job is no longer in the failed set
         // (a Discard claimed it, or another Retry already moved it).
@@ -6530,5 +7384,12 @@ export async function adminRoutes(app: FastifyInstance) {
   }));
   app.get<{ Params: { subscriptionId: string } }>('/billing/subscriptions/:subscriptionId/cards', { preHandler: [adminGuard] }, async (request) => ({
     success: true, data: await adminSubscriptionCards(app.prisma, request.params.subscriptionId),
+  }));
+  // [PT-4 · review S2-2] Finance resolves a HELD card payment (C4: two people).
+  // [ADM-002] Its audit row commits with the decision's claim or closure.
+  app.post<{ Params: { id: string } }>('/billing/card-sessions/:id/resolve', { preHandler: [adminGuard] }, async (request) => ({
+    success: true,
+    data: await adminResolveCardSession(app, request.params.id, request.body, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts })),
   }));
 }
