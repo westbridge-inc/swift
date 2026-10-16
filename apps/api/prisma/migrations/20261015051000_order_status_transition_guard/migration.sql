@@ -14,7 +14,7 @@
 --
 -- No backfill: no existing row is judged, only future changes. Rollback: rollback.sql beside
 -- this file (drops exactly the two triggers and two functions, and this ledger row).
--- lock_timeout: DROP/CREATE TRIGGER lock "orders" and "order_status_logs"; behind a long
+-- lock_timeout: the trigger DDL locks "orders" and "order_status_logs"; behind a long
 -- transaction the deploy gives up after 10 s (nothing applied) instead of holding every order
 -- read and write in line behind it.
 SET lock_timeout = '10s';
