@@ -31,9 +31,8 @@ import { log } from '../../utils/logger';
 /**
  * [R20 · research B10 · DPA s.21(3)(b)] The contact's number did not come from
  * the contact, so the FIRST text they get must say who holds it (Swift and its
- * operator, legal/operator.ts), why (their safety alerts only), and how to have it
- * removed. These are the research's exact words; the operator's name and the privacy
- * address come from the one operator constant. Only GSM-alphabet characters, and the
+ * operator, OPERATOR.name), why (their safety alerts only), and how to have it removed.
+ * These are the research's exact words. Only GSM-alphabet characters, and the
  * owner's first name is cleaned and capped, so the text always goes as at most
  * two parts (see utils/sms-text).
  */

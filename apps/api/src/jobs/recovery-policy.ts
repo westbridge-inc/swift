@@ -77,6 +77,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'batching-shadow-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-fx-notices': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-invariants': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'vat-threshold-watch': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'booking-reminders': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'checkout-outbox': { policy: 'SAFE_REPLAY', why: 'Lease-claimed outbox drain: claimNextRow takes a due row under FOR UPDATE SKIP LOCKED with a claim lease, publishes under jobId = row id, and stamps processedAt on success. A replay finds only unprocessed rows; a crash between the add and the processedAt mark re-claims after the lease lapses and re-adds the same jobId, which BullMQ collapses while the job still exists.' },
   'collusion-affinity-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -141,6 +142,7 @@ export type JobName =
   | 'batching-shadow-scan'
   | 'billing-fx-notices'
   | 'billing-invariants'
+  | 'vat-threshold-watch'
   | 'booking-reminders'
   | 'checkout-outbox'
   | 'collusion-affinity-scan'

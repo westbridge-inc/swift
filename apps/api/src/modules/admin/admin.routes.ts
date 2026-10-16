@@ -1,4 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -3231,6 +3232,16 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // ─── Finance ───────────────────────────────────────────────────────────
+
+  // [Owner legal plan 15 Oct · R10, research T1] The VAT registration tracker
+  // for this tenant: weekly fees due and received per month, the year ahead
+  // from today's partners, and how close both are to the GYD 15,000,000
+  // threshold (billing/vat-tracker.ts). Read only.
+  app.get('/finance/vat-tracker', { preHandler: [adminGuard] }, async () => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    return { success: true, data: await vatTracker(app.prisma, tenantId) };
+  });
 
   app.get('/finance/revenue', { preHandler: [adminGuard] }, async () => {
     // Admin authority is tenant-local. Raw SQL does not pass through Prisma's

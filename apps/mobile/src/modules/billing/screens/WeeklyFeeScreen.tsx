@@ -10,7 +10,7 @@ import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '.
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutSeller, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 import { liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
@@ -111,6 +111,8 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
               <T variant="body">{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</T>
               {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
               {checkoutReferences(shown).map((r) => <T key={r.label} variant="caption" tone="muted" selectable>{r.label}: {r.value}</T>)}
+              {/* [Owner 15 Oct 2026 · ruling #63] who sold the weekly fee, as the API states it */}
+              {checkoutSeller(shown) ? <T variant="caption" tone="muted" selectable testID="fee-seller">{checkoutSeller(shown)}</T> : null}
             </Card>;
           }) : <T variant="caption" tone="muted" style={{ marginTop: space.md }}>No recent checkouts.</T>}
         </View>
