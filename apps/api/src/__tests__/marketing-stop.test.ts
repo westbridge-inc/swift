@@ -18,14 +18,14 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { currentConsentDetailed } from '../modules/legal/consent.service';
 import { setMarketingConsent } from '../modules/legal/marketing-consent';
 import {
-  marketingSmsText, marketingEmailContent, sendMarketingSms, sendMarketingEmail, isStopKeyword,
+  marketingSmsText, marketingEmailContent, sendMarketingSms, sendMarketingEmail, isStopKeyword, inboundStopConfigured,
 } from '../modules/notification/marketing-message';
 import { smsInboundRoutes, twilioSignature, STOP_CONFIRMATION } from '../modules/notification/sms-inbound.routes';
 import type { EmailProvider, SmsProvider } from '../providers/notifications/channels';
 
 const TOKEN = `tok-${nanoid(12)}`;
 const URL = 'https://api.example.test/api/v1/sms/inbound';
-const READY = { TWILIO_AUTH_TOKEN: TOKEN, TWILIO_INBOUND_SMS_URL: URL };
+const READY = { TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN, TWILIO_INBOUND_SMS_URL: URL };
 const NUM = String(Date.now()).slice(-6);
 let app: FastifyInstance;
 const users: string[] = [];
@@ -90,7 +90,7 @@ beforeAll(async () => {
   await app.ready();
 });
 
-afterEach(() => setEnv({ TWILIO_AUTH_TOKEN: undefined, TWILIO_INBOUND_SMS_URL: undefined }));
+afterEach(() => setEnv({ TWILIO_WEBHOOK_AUTH_TOKEN: undefined, TWILIO_INBOUND_SMS_URL: undefined }));
 
 afterAll(async () => {
   // consent_records are append-only evidence: the rows stay, keyed to this run's people.
@@ -127,6 +127,13 @@ describe('[R22] a marketing text and e-mail name Swift and say how to stop', () 
 });
 
 describe('[R22] a marketing send goes only to a yes, and a text only while STOP works', () => {
+  it('the STOP door reads its own webhook token, never the master-token name the outbound adapter refuses (deploy/TWILIO.md)', () => {
+    expect(inboundStopConfigured({ TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN, TWILIO_INBOUND_SMS_URL: URL })).toBe(true);
+    expect(inboundStopConfigured({ TWILIO_AUTH_TOKEN: TOKEN, TWILIO_INBOUND_SMS_URL: URL })).toBe(false);
+    expect(inboundStopConfigured({ TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN })).toBe(false);
+    expect(inboundStopConfigured({ TWILIO_WEBHOOK_AUTH_TOKEN: '  ', TWILIO_INBOUND_SMS_URL: URL })).toBe(false);
+  });
+
   it('no text while the STOP door is not configured, even to a yes', async () => {
     const { userId } = await person();
     await consentTo(userId, true);

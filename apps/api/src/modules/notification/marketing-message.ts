@@ -36,7 +36,7 @@ export function isStopKeyword(body: string | null | undefined): boolean {
 
 /** Inbound STOP is live only with the account token Twilio signs with and the exact URL it calls. */
 export function inboundStopConfigured(env: Record<string, string | undefined> = process.env): boolean {
-  return !!env['TWILIO_AUTH_TOKEN']?.trim() && !!env['TWILIO_INBOUND_SMS_URL']?.trim();
+  return !!env['TWILIO_WEBHOOK_AUTH_TOKEN']?.trim() && !!env['TWILIO_INBOUND_SMS_URL']?.trim();
 }
 
 /** The marketing text as sent: "Swift: <offer> Reply STOP to opt out." — GSM-7 only, at most two parts. */
