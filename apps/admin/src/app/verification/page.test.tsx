@@ -325,6 +325,25 @@ describe('[A-19] a decision requires the evidence', () => {
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  // [R13 · owner 15 Oct 2026, research D6] Every motor vehicle's policy must permit use for hire or reward.
+  it('a private-use policy cannot be approved: Approve stays locked and the reviewer is told to reject it', async () => {
+    const insuranceDocument = { ...baseDocument, docType: 'vehicle_insurance' };
+    mockApi(verificationHandler(() => { throw new Error('no mutation expected'); }, [insuranceDocument]));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await reviewEvidence(user, { expires: true });
+    expect(screen.getByText(/Read 'Limitations as to use': it must permit use for hire or reward/)).toBeTruthy();
+    await user.type(screen.getByPlaceholderText(/Insurer/), 'Test Insurer');
+    await user.type(screen.getByPlaceholderText('Policy number'), 'POLICY-TEST-1');
+    await user.click(screen.getByRole('checkbox', { name: /Hire class confirmed: I read the policy’s limitations as to use/ }));
+    await user.click(screen.getByRole('checkbox', { name: /Cross-checked/ }));
+    const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(false);
+    await user.selectOptions(screen.getByLabelText('Coverage class'), 'PRIVATE');
+    expect(approve.disabled).toBe(true);
+    expect(screen.getByText(/A private-use policy cannot be approved for paid work/)).toBeTruthy();
+  });
+
   it('an expiring document cannot be approved without its printed date', async () => {
     const insuranceDocument = { ...baseDocument, docType: 'vehicle_insurance' };
     mockApi(verificationHandler(() => { throw new Error('no mutation expected'); }, [insuranceDocument]));
