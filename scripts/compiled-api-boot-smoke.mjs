@@ -299,6 +299,8 @@ async function main() {
     process.exit(1);
   }
   console.log('\nOK: the compiled API and worker load, boot, serve, become ready and stop cleanly.');
+  // The bounds' timers (still pending after the races they lost) must not hold the job open.
+  process.exit(0);
 }
 
 if (arg('--phase', '') === 'modules') {
