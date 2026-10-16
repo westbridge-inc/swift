@@ -8,9 +8,10 @@ import { LEGAL_URL } from '@/lib/api';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 import { site } from '@/site.config';
 import {
-  STATE_LABEL, currentDocument, documentLabel, documentState, getDocumentStatus, helpHref, submitDocument, uploadDocumentFile, uploadLabel,
+  currentDocument, documentLabel, documentState, getDocumentStatus, helpHref, stateLabel, submitDocument, uploadDocumentFile, uploadLabel,
   type ChecklistRole, type DocumentState,
 } from '@/lib/partner-documents';
+import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 
 /**
  * [DOCS-1 · owner case] One partner's verification documents — a store owner's
@@ -18,7 +19,9 @@ import {
  * was turned down shows the reviewer's reason and an upload for that document
  * alone, so fixing one document never means starting the application again.
  * The upload is offered exactly when the server will accept one (see
- * lib/partner-documents uploadLabel).
+ * lib/partner-documents uploadLabel), including replacing a copy that is still
+ * waiting for review. A taxi checklist says plainly that it takes two licences
+ * (owner ruling 11 Oct, lib/taxi-documents).
  */
 
 const TONE: Record<DocumentState, string> = {
@@ -71,8 +74,12 @@ export function PartnerDocuments({
   });
 
   const data = status.data;
+  const checklist = data?.checklist ?? [];
   return (
     <div className="space-y-3">
+      {data && isTaxiChecklist(checklist) ? (
+        <p className="rounded-2xl bg-[var(--swift-subtle)] p-4 text-sm">{TAXI_TWO_LICENCES}</p>
+      ) : null}
       {data ? (
         <div role="status" className={`flex items-center gap-3 rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-4 ${data.roleVerified ? 'text-[var(--swift-success)]' : 'text-[var(--swift-ink)]'}`}>
           {data.roleVerified ? <ShieldCheck className="h-5 w-5 flex-none" aria-hidden /> : <AlertTriangle className="h-5 w-5 flex-none text-[var(--swift-warning)]" aria-hidden />}
@@ -90,17 +97,18 @@ export function PartnerDocuments({
       ) : null}
 
       <ul className="space-y-3">
-        {(data?.checklist ?? []).map((docType) => {
+        {checklist.map((docType) => {
           const doc = currentDocument(data!.documents, docType);
           const state = documentState(doc);
           const action = uploadLabel(state);
           const name = documentLabel(docType);
+          const hint = taxiDocumentHint(docType, checklist);
           const open = uploadFor === docType;
           return (
-            <li key={docType} aria-label={name} className="rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-5">
+            <li key={docType} aria-label={name} className="sw-card p-5">
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="font-semibold">{name}</h2>
-                <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${TONE[state]}`}>{STATE_LABEL[state]}</span>
+                <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${TONE[state]}`}>{stateLabel(state, doc)}</span>
                 {doc?.expiresAt && state !== 'REJECTED' ? (
                   <span className="text-xs text-[var(--swift-muted)]">{state === 'EXPIRED' ? 'expired' : 'expires'} {new Date(doc.expiresAt).toLocaleDateString('en-GY', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
                 ) : null}
@@ -116,6 +124,7 @@ export function PartnerDocuments({
                   </button>
                 ) : null}
               </div>
+              {hint ? <p className="mt-1 text-xs text-[var(--swift-muted)]">{hint}</p> : null}
 
               {state === 'REJECTED' ? (
                 <div className="mt-3 space-y-1 text-sm">
@@ -133,12 +142,15 @@ export function PartnerDocuments({
 
               {open ? (
                 <div className="mt-3 space-y-3 border-t border-[var(--swift-border)] pt-3">
+                  {state === 'IN_REVIEW' ? (
+                    <p className="text-sm">Your new upload replaces the one waiting for review. We keep the old one on record, and the reviewer sees only the new one.</p>
+                  ) : null}
                   <label className="flex items-start gap-2 text-xs text-[var(--swift-muted)]">
                     <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--swift-red)]" />
                     <span>
                       I consent to Swift processing this document for verification, per the{' '}
                       <a href={LEGAL_URL('privacy')} target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">privacy notice</a>.
-                      It is stored encrypted and never shared.
+                      It is stored encrypted and shared only as the Privacy Policy explains.
                     </span>
                   </label>
                   <button

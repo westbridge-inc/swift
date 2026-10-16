@@ -5,8 +5,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, renderWithQuery, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import { setSelectedStore } from '@/lib/auth';
 import {
-  DOC_LABELS, currentDocument, documentState, uploadLabel, type PartnerDocument,
+  DOC_LABELS, currentDocument, documentLabel, documentState, stateLabel, uploadLabel, type PartnerDocument,
 } from '@/lib/partner-documents';
+import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 import StoreDocumentsPage from '@/app/dashboard/documents/page';
 import MoverDocumentsPage from '@/app/portal/documents/page';
 import HelpPage from '@/app/(app)/account/help/page';
@@ -52,14 +53,28 @@ describe('[DOCS-1] what each document row says and allows', () => {
   it('offers an upload exactly when the server takes one', () => {
     expect(uploadLabel(documentState(undefined))).toBe('Upload');
     expect(uploadLabel(documentState(doc({ status: 'REJECTED' })))).toBe('Upload a new copy');
-    expect(uploadLabel(documentState(doc({ status: 'EXPIRED' })))).toBe('Upload a renewal');
-    expect(uploadLabel(documentState(doc({ status: 'APPROVED', expiresAt: iso(-1) })))).toBe('Upload a renewal');
-    // The server accepts a renewal from 30 days before expiry, and refuses one earlier.
-    expect(uploadLabel(documentState(doc({ status: 'APPROVED', expiresAt: iso(29) })))).toBe('Upload a renewal');
+    expect(uploadLabel(documentState(doc({ status: 'EXPIRED' })))).toBe('Upload renewal');
+    expect(uploadLabel(documentState(doc({ status: 'APPROVED', expiresAt: iso(-1) })))).toBe('Upload renewal');
+    // The server accepts a renewal from 30 days before expiry, and refuses one earlier (ALREADY_APPROVED).
+    expect(uploadLabel(documentState(doc({ status: 'APPROVED', expiresAt: iso(29) })))).toBe('Upload renewal');
     expect(uploadLabel(documentState(doc({ status: 'APPROVED', expiresAt: iso(31) })))).toBeNull();
     expect(uploadLabel(documentState(doc({ status: 'APPROVED', expiresAt: null })))).toBeNull();
-    // Nothing while it is being checked.
-    expect(uploadLabel(documentState(doc({ status: 'PENDING' })))).toBeNull();
+    // [REPLACE-PENDING] A copy waiting for review can be replaced (the server keeps the old one on record).
+    expect(uploadLabel(documentState(doc({ status: 'PENDING' })))).toBe('Replace this document');
+  });
+
+  it('a copy that replaced an earlier waiting one says so; any other waiting copy is “In review”', () => {
+    expect(stateLabel('IN_REVIEW', doc({ status: 'PENDING', replaced: true }))).toBe('Replaced — waiting for review');
+    expect(stateLabel('IN_REVIEW', doc({ status: 'PENDING' }))).toBe('In review');
+    expect(stateLabel('REJECTED', doc({ status: 'REJECTED', replaced: true }))).toBe('Turned down');
+  });
+
+  it('a mover’s documents keep the web’s plain names; a store’s take the app’s', () => {
+    expect(documentLabel('drivers_licence')).toBe("Driver's licence");
+    expect(documentLabel('vehicle_registration')).toBe('Certificate of Registration');
+    expect(documentLabel('business_registration')).toBe('Business Registration');
+    expect(documentLabel('gra_restaurant_licence')).toBe('GRA Restaurant Licence');
+    expect(documentLabel('some_new_type')).toBe('Some New Type');
   });
 
   it('names every document exactly as the phone app does', () => {
@@ -127,7 +142,7 @@ describe('[DOCS-1] a store owner’s Documents page', () => {
 
     const handler = screen.getByRole('listitem', { name: "Food Handler's Certificate" });
     expect(within(handler).getByText('In review')).toBeTruthy();
-    expect(within(handler).queryByRole('button')).toBeNull();
+    expect(within(handler).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual(["Replace this document: Food Handler's Certificate"]);
 
     const photo = screen.getByRole('listitem', { name: 'Storefront Photo' });
     expect(within(photo).getByRole('button', { name: 'Upload: Storefront Photo' })).toBeTruthy();
@@ -138,6 +153,10 @@ describe('[DOCS-1] a store owner’s Documents page', () => {
     const view = renderWithQuery(<StoreDocumentsPage />);
     const business = await screen.findByRole('listitem', { name: 'Business Registration' });
     await view.user.click(within(business).getByRole('button', { name: /Upload a new copy/ }));
+    // The consent says what the Privacy Policy says (documents ARE shared with the processors it names), never "never shared".
+    const consentText = within(business).getByRole('checkbox').closest('label')!.textContent ?? '';
+    expect(consentText).toContain('It is stored encrypted and shared only as the Privacy Policy explains.');
+    expect(consentText).not.toMatch(/never shared/);
     const choose = within(business).getByRole('button', { name: /Choose file/ });
     expect((choose as HTMLButtonElement).disabled).toBe(true);
     await view.user.click(within(business).getByRole('checkbox'));
@@ -200,17 +219,59 @@ describe('[DOCS-1] a mover’s Documents page', () => {
     };
   });
 
-  it('a turned-down document says why and offers a new copy (not a “renewal”); in review and long-valid documents offer nothing; one near expiry offers a renewal', async () => {
+  it('a turned-down document says why and offers a new copy (not a “renewal”); a long-valid one offers nothing; one near expiry offers a renewal; one in review can be replaced', async () => {
     renderWithQuery(<MoverDocumentsPage />);
-    const licence = await screen.findByRole('listitem', { name: "Driver's Licence" });
+    const licence = await screen.findByRole('listitem', { name: "Driver's licence" });
     expect(within(licence).getByText('Expired licence uploaded.')).toBeTruthy();
-    expect(within(licence).getByRole('button', { name: "Upload a new copy: Driver's Licence" })).toBeTruthy();
+    expect(within(licence).getByRole('button', { name: "Upload a new copy: Driver's licence" })).toBeTruthy();
     expect(within(licence).getByRole('link', { name: /Think this is wrong/ }).getAttribute('href')).toBe('/account/help?topic=MOVER&document=drivers_licence');
-    expect(within(screen.getByRole('listitem', { name: 'Vehicle Insurance' })).getByRole('button', { name: /Upload a renewal/ })).toBeTruthy();
-    expect(within(screen.getByRole('listitem', { name: 'National ID' })).queryByRole('button')).toBeNull();
-    expect(within(screen.getByRole('listitem', { name: 'Police Clearance Certificate' })).queryByRole('button')).toBeNull();
+    expect(within(screen.getByRole('listitem', { name: 'Vehicle Insurance' })).getByRole('button', { name: /^Upload renewal: / })).toBeTruthy();
+    expect(within(screen.getByRole('listitem', { name: 'National ID or Digital ID card' })).queryByRole('button')).toBeNull();
+    expect(within(screen.getByRole('listitem', { name: 'Police Clearance Certificate' })).getByRole('button', { name: 'Replace this document: Police Clearance Certificate' })).toBeTruthy();
+    // Not a taxi checklist: no two-licences note.
+    expect(screen.queryByText(TAXI_TWO_LICENCES)).toBeNull();
     const statusRead = calls.mock.calls.map(([url]) => new URL(String(url))).find((url) => url.pathname === '/api/v1/verification/status')!;
     expect([statusRead.searchParams.get('role'), statusRead.searchParams.get('vehicleType')]).toEqual(['MOVER', 'MOTORCYCLE']);
+  });
+
+  it('[REPLACE-PENDING] replacing a copy in review says what happens (the app’s words) and files that document only', async () => {
+    const view = renderWithQuery(<MoverDocumentsPage />);
+    const police = await screen.findByRole('listitem', { name: 'Police Clearance Certificate' });
+    await view.user.click(within(police).getByRole('button', { name: /^Replace this document/ }));
+    expect(within(police).getByText('Your new upload replaces the one waiting for review. We keep the old one on record, and the reviewer sees only the new one.')).toBeTruthy();
+    await view.user.click(within(police).getByRole('checkbox'));
+    api = ((base) => (request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/verification/upload') return { body: { success: true, data: { url: 'private/verification/police.jpg' } } };
+      if (request.url.pathname === '/api/v1/verification/documents') return { body: { success: true, data: { id: 'p2', status: 'PENDING' } } };
+      return base(request);
+    })(api);
+    fireEvent.change(within(police).getByLabelText('File for Police Clearance Certificate'), { target: { files: [new File(['jpg'], 'police.jpg', { type: 'image/jpeg' })] } });
+    expect(await within(police).findByText('Sent. It is in review now.')).toBeTruthy();
+    expect(posts('/api/v1/verification/documents').map((body) => JSON.parse(String(body)))).toEqual([
+      { role: 'MOVER', docType: 'police_clearance', fileUrl: 'private/verification/police.jpg', consent: true, privacyNoticeVersion: 'web-v1' },
+    ]);
+  });
+
+  it('a taxi checklist says it takes two licences and what each document is (owner ruling 11 Oct)', async () => {
+    api = ({ url }) => {
+      if (url.pathname === '/api/v1/rider/profile') return { body: { success: true, data: { vehicleType: 'CAR' } } };
+      if (url.pathname === '/api/v1/verification/status') {
+        return { body: { success: true, data: {
+          checklist: ['drivers_licence', 'hire_car_driver_licence', 'vehicle_registration'],
+          documents: [doc({ id: 'h1', docType: 'hire_car_driver_licence', status: 'REJECTED', reviewNote: 'Not readable.' })],
+          missing: ['drivers_licence', 'hire_car_driver_licence', 'vehicle_registration'], roleVerified: false,
+        } } };
+      }
+      return { status: 404, body: { success: false } };
+    };
+    renderWithQuery(<MoverDocumentsPage />);
+    expect(await screen.findByText(TAXI_TWO_LICENCES)).toBeTruthy();
+    const licence = screen.getByRole('listitem', { name: "Driver's licence" });
+    expect(within(licence).getByText(/It does not need to show a hire class/)).toBeTruthy();
+    const hire = screen.getByRole('listitem', { name: "Hire Car Driver's Licence" });
+    expect(within(hire).getByText(/a separate licence, not a class on your normal licence/)).toBeTruthy();
+    expect(within(hire).getByRole('button', { name: "Upload a new copy: Hire Car Driver's Licence" })).toBeTruthy();
+    expect(within(screen.getByRole('listitem', { name: 'Certificate of Registration' })).getByText(/Taxi plates start with H/)).toBeTruthy();
   });
 });
 

@@ -21,7 +21,7 @@ export default function StoreDocumentsPage() {
   return (
     <div className="max-w-3xl space-y-5">
       <div>
-        <h1 className="text-2xl font-extrabold">Documents</h1>
+        <h1 className="sw-title">Documents</h1>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           What Swift checks before your store goes live, and where each document stands. If one is turned down, you
           see why and send a new copy of that one only. Reviews usually finish within 24 hours.

@@ -24,7 +24,10 @@ describe('taxi documents on the website', () => {
   it('sign-up, the documents page and the FAQ use it; the FAQ no longer asks a business for a TIN', () => {
     const read = (p: string) => readFileSync(join(__dirname, '..', 'app', p), 'utf8');
     expect(read('signup/page.tsx')).toMatch(/TAXI_TWO_LICENCES/);
-    expect(read('portal/documents/page.tsx')).toMatch(/taxiDocumentHint\(docType/);
+    // [DOCS-1] The documents page draws the shared partner-documents component, which carries the hint
+    // (partner-documents.test.tsx shows the note and the hints on screen).
+    expect(read('portal/documents/page.tsx')).toMatch(/<PartnerDocuments role="MOVER"/);
+    expect(readFileSync(join(__dirname, '..', 'components', 'partner-documents.tsx'), 'utf8')).toMatch(/taxiDocumentHint\(docType/);
     const faq = read('(marketing)/faq/page.tsx');
     expect(faq).toMatch(/Hire Car Driver&apos;s Licence/);
     expect(faq).not.toMatch(/business registration, TIN/);

@@ -7,6 +7,7 @@
 // down, and an upload for THAT document alone: a rejected document never means
 // starting the application again.
 import { apiFetch } from './auth';
+import { plainDocumentName } from './taxi-documents';
 
 /** The checklist roles the API knows: a mover, or a store by its kind. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
@@ -18,6 +19,8 @@ export interface PartnerDocument {
   expiresAt: string | null;
   reviewNote: string | null;
   createdAt: string;
+  /** [REPLACE-PENDING] This copy replaced an earlier one that was still waiting for review. */
+  replaced?: boolean;
 }
 
 export interface DocumentStatus {
@@ -95,17 +98,25 @@ export const STATE_LABEL: Record<DocumentState, string> = {
   REJECTED: 'Turned down',
 };
 
+/** [REPLACE-PENDING] A copy that replaced an earlier waiting one says so (the app's words). */
+export function stateLabel(state: DocumentState, doc: PartnerDocument | undefined): string {
+  return state === 'IN_REVIEW' && doc?.replaced === true ? 'Replaced — waiting for review' : STATE_LABEL[state];
+}
+
 /**
  * The upload this document allows right now — exactly the ones the server
- * accepts. Nothing while it is in review or approved and not yet due for
- * renewal (the server refuses those).
+ * accepts. A copy waiting for review can be replaced (owner request 8 Oct: "I
+ * sent the wrong one"; the server keeps the old copy on record). Nothing while
+ * it is approved and not yet due for renewal (the server refuses that,
+ * ALREADY_APPROVED).
  */
 export function uploadLabel(state: DocumentState): string | null {
   switch (state) {
     case 'MISSING': return 'Upload';
     case 'REJECTED': return 'Upload a new copy';
+    case 'IN_REVIEW': return 'Replace this document';
     case 'EXPIRED':
-    case 'EXPIRING': return 'Upload a renewal';
+    case 'EXPIRING': return 'Upload renewal';
     default: return null;
   }
 }
@@ -113,20 +124,21 @@ export function uploadLabel(state: DocumentState): string | null {
 // ── Names ───────────────────────────────────────────────────────────────────
 
 /** The phone app's names for the checklist documents (DocumentUploadCard
- *  DOC_LABELS); a test keeps the two lists identical. Unknown types read as
- *  their words. */
+ *  DOC_LABELS); a test keeps the two lists identical. */
 export const DOC_LABELS: Record<string, string> = {
-  national_id: 'National ID',
+  national_id: 'National ID or Digital ID card',
   drivers_licence: "Driver's Licence",
   vehicle_registration: 'Vehicle Registration',
   vehicle_insurance: 'Vehicle Insurance',
   hire_car_permit: 'Hire-Car Permit',
+  hire_car_driver_licence: "Hire Car Driver's Licence",
+  hire_car_vehicle_licence: "Car's Hire Licence (yearly, shown on the car)",
   road_service_licence: 'Road Service Licence',
   vehicle_plate_photo: 'Vehicle Plate Photo',
   police_clearance: 'Police Clearance Certificate',
   fitness_cert: 'Fitness Certificate',
-  vehicle_exterior_photo: 'Car exterior photo (H plate visible)',
-  owner_national_id: 'Owner National ID',
+  vehicle_exterior_photo: 'Car photo (plate clearly visible)',
+  owner_national_id: 'Owner National ID or Digital ID card',
   business_registration: 'Business Registration',
   tin_certificate: 'TIN Certificate',
   gra_restaurant_licence: 'GRA Restaurant Licence',
@@ -135,8 +147,13 @@ export const DOC_LABELS: Record<string, string> = {
   selfie: 'Selfie',
 };
 
+/**
+ * A document's name on the web: the plain names the web already uses for a
+ * mover's documents (lib/taxi-documents, owner ruling 11 Oct), else the app's
+ * name (a store's documents), else the type in words.
+ */
 export function documentLabel(docType: string): string {
-  return DOC_LABELS[docType] ?? docType.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  return plainDocumentName(docType) ?? DOC_LABELS[docType] ?? docType.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /**

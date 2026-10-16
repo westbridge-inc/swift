@@ -17,7 +17,7 @@ export default function DocumentsPage() {
   return (
     <div className="max-w-3xl space-y-5">
       <div>
-        <h1 className="text-2xl font-extrabold">Documents</h1>
+        <h1 className="sw-title">Documents</h1>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           Upload renewals on a big screen — reviews usually finish within 24 hours. An expired document takes you
           offline until it is renewed.
