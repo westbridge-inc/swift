@@ -50,8 +50,8 @@ export function PricingCard(props: PricingCardProps) {
       .map((step, i) => `${step.minItems.toLocaleString()}+${i === 0 ? ' active items' : ''} ${fee(step.rate)}/week`);
     detail =
       quote.tier === 'service'
-        ? 'Service provider rate · Keep 100% of every booking — no commission, ever.'
-        : `Keep 100% of every sale — no commission, ever.${steps.length ? ` Your rate moves automatically as your catalogue grows: ${steps.join(' · ')}.` : ''}`;
+        ? 'Service provider rate · Keep 100% of every booking — no commission on orders.'
+        : `Keep 100% of every sale — no commission on orders.${steps.length ? ` Your rate moves automatically as your catalogue grows: ${steps.join(' · ')}.` : ''}`;
   }
 
   return (
