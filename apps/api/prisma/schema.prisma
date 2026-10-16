@@ -598,8 +598,9 @@ model CountryConfig {
 
   /// DPA §3.5 — region documents are stored in (cross-border transfer rule)
   storageRegion     String?
-  /// Days to retain verification documents after a participant leaves
-  dataRetentionDays Int     @default(365)
+  /// Days to retain verification documents after a participant leaves.
+  /// [R24 · research C4] "while active + 90 days" (was 365).
+  dataRetentionDays Int     @default(90)
 
   /// Region-specific labels/sources (spec §2.2) — never hardcode in features.
   /// Guyana: "Hire Car Licence" / "Hire"; Trinidad: "H-Taxi Badge" / "H".

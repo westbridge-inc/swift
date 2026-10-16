@@ -18,8 +18,12 @@ import { isProduction } from '../../utils/runtime-mode';
 export const REGISTRY_TIER = 'STANDARD';
 /** Provisional. The onboarding spec these checklists were built to is dated 2026-06. */
 export const REGISTRY_EFFECTIVE_FROM = new Date('2026-06-01T00:00:00.000Z');
-/** Provisional (FD-DOC-4: 7 years from relationship end, recorded for BUSINESS; applied to all pending a PERSONAL ruling). */
-export const PROVISIONAL_RETENTION_DAYS = 2555;
+/** [R24 · research C4] A persisted (vehicle / business) image is kept while the relationship is
+ *  active and 90 days after it ends: "7 years has no basis I found". Was 2555 (FD-DOC-4, provisional).
+ *  An AML-classed type still gets its seven years (retention-policy). */
+export const PROVISIONAL_RETENTION_DAYS = 90;
+/** The window provisional rows were seeded with before R24; reconcileImagePolicy moves them. */
+export const LEGACY_PROVISIONAL_RETENTION_DAYS = 2555;
 
 /**
  * [DOC-1 §1.3 · P1-3] The bucket decides what happens to the image: PERSONAL images are
@@ -35,14 +39,23 @@ export const IMAGE_POLICY_OF_BUCKET: Readonly<Record<DocBucket, DocImagePolicy>>
 };
 export const retentionFor = (policy: DocImagePolicy): number | null => (policy === 'PURGE_AFTER_REVIEW' ? null : PROVISIONAL_RETENTION_DAYS);
 
-/** Reconcile provisional rows to the bucket doctrine — never a row whose legal facts were verified. */
+/** Reconcile provisional rows to the bucket doctrine — never a row whose legal facts were verified.
+ *  [R24] A provisional row still on the pre-R24 window (2555 days) takes the current one at the
+ *  next boot (the seed's update never touches the days). Any other value was set on purpose. */
 export async function reconcileImagePolicy(prisma: PrismaClient, countryCode?: string): Promise<number> {
   let changed = 0;
   for (const bucket of Object.keys(IMAGE_POLICY_OF_BUCKET) as DocBucket[]) {
     const imagePolicy = IMAGE_POLICY_OF_BUCKET[bucket];
+    const persistRetentionDays = retentionFor(imagePolicy);
     const r = await prisma.docType.updateMany({
-      where: { ...(countryCode ? { countryCode } : {}), bucket, legalFactsVerifiedAt: null, imagePolicy: { not: imagePolicy } },
-      data: { imagePolicy, persistRetentionDays: retentionFor(imagePolicy) },
+      where: {
+        ...(countryCode ? { countryCode } : {}), bucket, legalFactsVerifiedAt: null,
+        OR: [
+          { imagePolicy: { not: imagePolicy } },
+          ...(persistRetentionDays === null ? [] : [{ imagePolicy, persistRetentionDays: LEGACY_PROVISIONAL_RETENTION_DAYS }]),
+        ],
+      },
+      data: { imagePolicy, persistRetentionDays },
     });
     changed += r.count;
   }
